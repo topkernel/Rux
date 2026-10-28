@@ -1,0 +1,441 @@
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+msgctl12.c:44: [1;32mTPASS: [0mmsgctl() test IPC_INFO succeeded
+msgctl12.c:44: [1;32mTPASS: [0mmsgctl() test MSG_INFO succeeded
+msgctl12.c:44: [1;32mTPASS: [0mmsgctl() test MSG_STAT succeeded
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|667|msgctl12|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 04m 00s
+tst_pid.c:84: [1;34mTINFO: [0mCannot read session user limits from '/sys/fs/cgroup/user.slice/user-0.slice/pids.max'
+tst_pid.c:84: [1;34mTINFO: [0mCannot read session user limits from '/sys/fs/cgroup/pids/user.slice/user-0.slice/pids.max'
+msgstress01.c:271: [1;34mTINFO: [0mAvailable messages slots: 256
+STALE-CLAIM-RESET by_cpu=1 pid=632 from_claim=0
+
+PARKED-WILDWRITE pid=0000000000000278 pc=0000000000000001
+
+PARKED-LEAK pid=0000000000000278 pc=0000000000000001 state=0000000000000000 tcpu=0000000000000000
+WAKE-STRANDED pid=632 cpu=0 strand=1136ms policy=0 h0=(765/p0/3ms/pc=1) h1=(727/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=787 cpu=1 strand=1036ms policy=0 h0=(825/p0/0ms/pc=65537) h1=(805/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1069ms policy=0 h0=(823/p0/0ms/pc=0) h1=(682/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=782 cpu=0 strand=1068ms policy=0 h0=(709/p0/0ms/pc=1) h1=(790/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1002ms policy=0 h0=(784/p0/0ms/pc=2) h1=(761/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=833 cpu=1 strand=1154ms policy=0 h0=(634/p0/4ms/pc=65537) h1=(651/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=652 cpu=0 strand=1267ms policy=0 h0=(666/p0/4ms/pc=1) h1=(802/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1012ms policy=0 h0=(669/p0/2ms/pc=1) h1=(845/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=0 strand=1017ms policy=0 h0=(850/p0/1ms/pc=1) h1=(698/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=675 cpu=1 strand=1096ms policy=0 h0=(863/p0/0ms/pc=0) h1=(717/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=801 cpu=1 strand=1189ms policy=0 h0=(776/p0/0ms/pc=65537) h1=(666/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1061ms policy=0 h0=(716/p0/0ms/pc=0) h1=(750/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1001ms policy=0 h0=(801/p0/0ms/pc=0) h1=(665/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=785 cpu=1 strand=1034ms policy=0 h0=(699/p0/0ms/pc=2) h1=(824/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=652 cpu=0 strand=1269ms policy=0 h0=(728/p0/4ms/pc=1) h1=(786/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=0 strand=1010ms policy=0 h0=(727/p0/4ms/pc=1) h1=(751/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+SIGKILL-SEND from pid=1 comm='sweep' -> target pid=631
+KILLTRACE: pid=1(sweep) -> pid=631(msgstress01) tgid=631 ppid=1 sig=9 origin=0x0
+SIGDEATH: pid=631 tgid=631 comm=Ok("msgstress01") sig=9 ppid=1 si_pid=1 si_code=0x0
+WAKE-STRANDED pid=779 cpu=1 strand=1161ms policy=0 h0=(855/p0/0ms/pc=65537) h1=(749/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=711 cpu=1 strand=1001ms policy=0 h0=(772/p0/0ms/pc=0) h1=(646/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=845 cpu=0 strand=1042ms policy=0 h0=(690/p0/5ms/pc=1) h1=(732/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=1 strand=1155ms policy=0 h0=(866/p0/0ms/pc=0) h1=(769/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=1 strand=1036ms policy=0 h0=(675/p0/0ms/pc=65537) h1=(839/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=856 cpu=0 strand=1257ms policy=0 h0=(734/p0/2ms/pc=1) h1=(691/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=1 strand=1022ms policy=0 h0=(761/p0/0ms/pc=0) h1=(748/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=777 cpu=0 strand=1098ms policy=0 h0=(700/p0/6ms/pc=1) h1=(779/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=682 cpu=1 strand=1027ms policy=0 h0=(761/p0/0ms/pc=1) h1=(671/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=785 cpu=0 strand=1131ms policy=0 h0=(799/p0/4ms/pc=1) h1=(654/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=861 cpu=1 strand=1224ms policy=0 h0=(834/p0/0ms/pc=0) h1=(746/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=716 cpu=0 strand=1188ms policy=0 h0=(865/p0/3ms/pc=1) h1=(869/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=720 cpu=0 strand=1062ms policy=0 h0=(662/p0/1ms/pc=1) h1=(804/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=890 cpu=1 strand=1073ms policy=0 h0=(767/p0/0ms/pc=2) h1=(861/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=1316ms policy=0 h0=(693/p0/0ms/pc=1) h1=(787/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=780 cpu=1 strand=1030ms policy=0 h0=(678/p0/0ms/pc=0) h1=(715/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=753 cpu=1 strand=1033ms policy=0 h0=(824/p0/0ms/pc=0) h1=(835/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=837 cpu=1 strand=1388ms policy=0 h0=(667/p0/0ms/pc=2) h1=(702/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1059ms policy=0 h0=(753/p0/0ms/pc=1) h1=(861/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=698 cpu=1 strand=1534ms policy=0 h0=(882/p0/0ms/pc=1) h1=(743/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=649 cpu=0 strand=1454ms policy=0 h0=(802/p0/4ms/pc=1) h1=(760/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=727 cpu=1 strand=1003ms policy=0 h0=(746/p0/0ms/pc=65537) h1=(685/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=744 cpu=0 strand=1097ms policy=0 h0=(762/p0/4ms/pc=1) h1=(834/p0/4ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=777 cpu=0 strand=1358ms policy=0 h0=(656/p0/1ms/pc=1) h1=(642/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=710 cpu=1 strand=1036ms policy=0 h0=(635/p0/0ms/pc=1) h1=(700/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=889 cpu=1 strand=1096ms policy=0 h0=(638/p0/0ms/pc=0) h1=(667/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=716 cpu=0 strand=1197ms policy=0 h0=(677/p0/6ms/pc=1) h1=(879/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=890 cpu=0 strand=1021ms policy=0 h0=(861/p0/3ms/pc=1) h1=(724/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=0 strand=1044ms policy=0 h0=(645/p0/1ms/pc=1) h1=(756/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=744 cpu=1 strand=1021ms policy=0 h0=(863/p0/0ms/pc=0) h1=(721/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=786 cpu=0 strand=1151ms policy=0 h0=(795/p0/1ms/pc=1) h1=(820/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=708 cpu=0 strand=1080ms policy=0 h0=(653/p0/8ms/pc=1) h1=(833/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=0 strand=1367ms policy=0 h0=(645/p0/2ms/pc=1) h1=(909/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=670 cpu=0 strand=1010ms policy=0 h0=(801/p0/4ms/pc=1) h1=(860/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=727 cpu=1 strand=1033ms policy=0 h0=(763/p0/0ms/pc=1) h1=(752/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=716 cpu=1 strand=1085ms policy=0 h0=(782/p0/0ms/pc=1) h1=(815/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=0 strand=1393ms policy=0 h0=(884/p0/3ms/pc=1) h1=(841/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=679 cpu=1 strand=1027ms policy=0 h0=(656/p0/0ms/pc=0) h1=(887/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=637 cpu=1 strand=1003ms policy=0 h0=(731/p0/1ms/pc=1) h1=(840/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=793 cpu=0 strand=1000ms policy=0 h0=(726/p0/7ms/pc=1) h1=(818/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=682 cpu=1 strand=1252ms policy=0 h0=(741/p0/0ms/pc=2) h1=(915/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=785 cpu=1 strand=1389ms policy=0 h0=(812/p0/2ms/pc=1) h1=(763/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=867 cpu=0 strand=1037ms policy=0 h0=(792/p0/4ms/pc=1) h1=(787/p0/3ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=1 strand=1168ms policy=0 h0=(658/p0/0ms/pc=0) h1=(919/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=698 cpu=1 strand=1020ms policy=0 h0=(876/p0/6ms/pc=65537) h1=(724/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=788 cpu=1 strand=1105ms policy=0 h0=(799/p0/0ms/pc=0) h1=(873/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=910 cpu=0 strand=1112ms policy=0 h0=(731/p0/0ms/pc=1) h1=(775/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=785 cpu=0 strand=1268ms policy=0 h0=(916/p0/4ms/pc=1) h1=(889/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=856 cpu=1 strand=1138ms policy=0 h0=(690/p0/0ms/pc=0) h1=(661/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=744 cpu=0 strand=1385ms policy=0 h0=(739/p0/0ms/pc=1) h1=(756/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=0 strand=1087ms policy=0 h0=(833/p0/4ms/pc=1) h1=(735/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=921 cpu=0 strand=1042ms policy=0 h0=(839/p0/3ms/pc=1) h1=(864/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=691 cpu=1 strand=1137ms policy=0 h0=(709/p0/0ms/pc=0) h1=(863/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=0 strand=1009ms policy=0 h0=(802/p0/4ms/pc=1) h1=(673/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=637 cpu=1 strand=1018ms policy=0 h0=(684/p0/0ms/pc=1) h1=(742/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=752 cpu=1 strand=1074ms policy=0 h0=(768/p0/0ms/pc=0) h1=(713/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=900 cpu=1 strand=1051ms policy=0 h0=(648/p0/0ms/pc=65537) h1=(786/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=687 cpu=1 strand=1032ms policy=0 h0=(868/p0/0ms/pc=65537) h1=(767/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=0 strand=1020ms policy=0 h0=(814/p0/5ms/pc=1) h1=(769/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=1 strand=1328ms policy=0 h0=(635/p0/0ms/pc=0) h1=(780/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=0 strand=1118ms policy=0 h0=(712/p0/6ms/pc=1) h1=(646/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=835 cpu=1 strand=1012ms policy=0 h0=(696/p0/0ms/pc=1) h1=(893/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=823 cpu=0 strand=1054ms policy=0 h0=(771/p0/0ms/pc=1) h1=(883/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=1131ms policy=0 h0=(824/p0/0ms/pc=0) h1=(758/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=793 cpu=1 strand=1003ms policy=0 h0=(829/p0/0ms/pc=1) h1=(731/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=832 cpu=0 strand=1058ms policy=0 h0=(692/p0/5ms/pc=1) h1=(753/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=670 cpu=1 strand=1096ms policy=0 h0=(799/p0/0ms/pc=0) h1=(743/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=916 cpu=1 strand=1129ms policy=0 h0=(663/p0/0ms/pc=0) h1=(822/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=921 cpu=1 strand=1003ms policy=0 h0=(684/p0/1ms/pc=1) h1=(814/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=825 cpu=0 strand=1052ms policy=0 h0=(778/p0/2ms/pc=1) h1=(676/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=1 strand=1028ms policy=0 h0=(880/p0/0ms/pc=65536) h1=(799/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=1 strand=1006ms policy=0 h0=(910/p0/5ms/pc=1) h1=(705/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=927 cpu=0 strand=1020ms policy=0 h0=(688/p0/6ms/pc=1) h1=(700/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=0 strand=1074ms policy=0 h0=(794/p0/2ms/pc=1) h1=(685/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=690 cpu=1 strand=1043ms policy=0 h0=(835/p0/0ms/pc=1) h1=(765/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=892 cpu=1 strand=1048ms policy=0 h0=(636/p0/0ms/pc=0) h1=(909/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=840 cpu=1 strand=1003ms policy=0 h0=(746/p0/0ms/pc=65537) h1=(701/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1029ms policy=0 h0=(857/p0/0ms/pc=1) h1=(815/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=1 strand=1398ms policy=0 h0=(686/p0/0ms/pc=0) h1=(883/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=731 cpu=0 strand=1160ms policy=0 h0=(919/p0/6ms/pc=1) h1=(706/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=766 cpu=1 strand=1322ms policy=0 h0=(687/p0/0ms/pc=0) h1=(825/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=649 cpu=1 strand=1063ms policy=0 h0=(803/p0/0ms/pc=0) h1=(899/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=711 cpu=1 strand=1013ms policy=0 h0=(674/p0/0ms/pc=0) h1=(732/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=892 cpu=1 strand=1171ms policy=0 h0=(669/p0/7ms/pc=65537) h1=(930/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=805 cpu=1 strand=1037ms policy=0 h0=(872/p0/4ms/pc=65537) h1=(929/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1073ms policy=0 h0=(855/p0/1ms/pc=1) h1=(640/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=927 cpu=1 strand=1054ms policy=0 h0=(769/p0/0ms/pc=0) h1=(746/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=0 strand=1080ms policy=0 h0=(890/p0/2ms/pc=1) h1=(876/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=892 cpu=1 strand=1071ms policy=0 h0=(762/p0/0ms/pc=0) h1=(861/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=752 cpu=0 strand=1046ms policy=0 h0=(679/p0/3ms/pc=1) h1=(726/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=932 cpu=1 strand=1028ms policy=0 h0=(895/p0/0ms/pc=0) h1=(683/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=654 cpu=0 strand=1008ms policy=0 h0=(697/p0/5ms/pc=1) h1=(824/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=840 cpu=1 strand=1101ms policy=0 h0=(757/p0/0ms/pc=0) h1=(797/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=1 strand=1182ms policy=0 h0=(645/p0/0ms/pc=0) h1=(761/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=823 cpu=1 strand=1019ms policy=0 h0=(782/p0/0ms/pc=0) h1=(652/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=818 cpu=0 strand=1148ms policy=0 h0=(657/p0/6ms/pc=1) h1=(819/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=896 cpu=1 strand=1185ms policy=0 h0=(645/p0/0ms/pc=0) h1=(757/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=832 cpu=1 strand=1149ms policy=0 h0=(917/p0/0ms/pc=1) h1=(765/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=932 cpu=0 strand=1161ms policy=0 h0=(814/p0/4ms/pc=1) h1=(919/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=1 strand=1101ms policy=0 h0=(885/p0/0ms/pc=2) h1=(905/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=802 cpu=1 strand=1023ms policy=0 h0=(765/p0/0ms/pc=0) h1=(842/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=896 cpu=0 strand=1031ms policy=0 h0=(870/p0/3ms/pc=1) h1=(768/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=1 strand=1048ms policy=0 h0=(646/p0/0ms/pc=0) h1=(792/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=1 strand=1013ms policy=0 h0=(893/p0/0ms/pc=65537) h1=(762/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=1 strand=1729ms policy=0 h0=(781/p0/1ms/pc=1) h1=(719/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=803 cpu=0 strand=1067ms policy=0 h0=(886/p0/4ms/pc=1) h1=(721/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=1 strand=1162ms policy=0 h0=(929/p0/0ms/pc=0) h1=(800/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=0 strand=1223ms policy=0 h0=(638/p0/3ms/pc=1) h1=(644/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=877 cpu=0 strand=1077ms policy=0 h0=(881/p0/4ms/pc=1) h1=(856/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=818 cpu=1 strand=1259ms policy=0 h0=(872/p0/0ms/pc=1) h1=(786/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=710 cpu=0 strand=1063ms policy=0 h0=(660/p0/3ms/pc=1) h1=(835/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=840 cpu=1 strand=1172ms policy=0 h0=(707/p0/0ms/pc=0) h1=(875/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=0 strand=1109ms policy=0 h0=(870/p0/1ms/pc=1) h1=(642/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=929 cpu=0 strand=1080ms policy=0 h0=(776/p0/7ms/pc=1) h1=(638/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=907 cpu=0 strand=1073ms policy=0 h0=(840/p0/4ms/pc=1) h1=(778/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=1 strand=1129ms policy=0 h0=(801/p0/0ms/pc=65537) h1=(721/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=795 cpu=0 strand=1140ms policy=0 h0=(687/p0/3ms/pc=1) h1=(872/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=0 strand=1134ms policy=0 h0=(923/p0/5ms/pc=1) h1=(729/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=0 strand=1147ms policy=0 h0=(837/p0/0ms/pc=1) h1=(905/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=801 cpu=1 strand=1056ms policy=0 h0=(678/p0/0ms/pc=0) h1=(792/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=743 cpu=0 strand=1062ms policy=0 h0=(849/p0/4ms/pc=1) h1=(894/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=760 cpu=1 strand=2017ms policy=0 h0=(739/p0/0ms/pc=0) h1=(833/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=856 cpu=0 strand=1043ms policy=0 h0=(830/p0/3ms/pc=1) h1=(681/p0/0ms/pc=65536) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=908 cpu=0 strand=1302ms policy=0 h0=(655/p0/5ms/pc=1) h1=(839/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=691 cpu=0 strand=1033ms policy=0 h0=(822/p0/4ms/pc=1) h1=(659/p0/0ms/pc=65539) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=793 cpu=0 strand=1069ms policy=0 h0=(872/p0/2ms/pc=1) h1=(646/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1050ms policy=0 h0=(769/p0/0ms/pc=0) h1=(833/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=0 strand=1207ms policy=0 h0=(933/p0/0ms/pc=1) h1=(725/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=785 cpu=1 strand=1222ms policy=0 h0=(662/p0/3ms/pc=1) h1=(951/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=805 cpu=1 strand=1110ms policy=0 h0=(746/p0/0ms/pc=65537) h1=(919/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=1 strand=1136ms policy=0 h0=(741/p0/0ms/pc=0) h1=(926/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1279ms policy=0 h0=(773/p0/6ms/pc=65537) h1=(777/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=1 strand=1225ms policy=0 h0=(904/p0/0ms/pc=0) h1=(907/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=654 cpu=0 strand=1172ms policy=0 h0=(738/p0/0ms/pc=1) h1=(926/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=0 strand=1143ms policy=0 h0=(842/p0/1ms/pc=1) h1=(757/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=780 cpu=1 strand=1202ms policy=0 h0=(852/p0/1ms/pc=1) h1=(859/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=948 cpu=0 strand=1289ms policy=0 h0=(716/p0/7ms/pc=1) h1=(703/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=709 cpu=0 strand=1037ms policy=0 h0=(871/p0/3ms/pc=1) h1=(677/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=0 strand=1172ms policy=0 h0=(785/p0/2ms/pc=1) h1=(813/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=691 cpu=0 strand=1203ms policy=0 h0=(741/p0/1ms/pc=1) h1=(936/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=687 cpu=0 strand=1022ms policy=0 h0=(835/p0/2ms/pc=1) h1=(894/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=679 cpu=1 strand=1083ms policy=0 h0=(780/p0/0ms/pc=0) h1=(876/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1033ms policy=0 h0=(939/p0/4ms/pc=1) h1=(643/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=753 cpu=0 strand=1033ms policy=0 h0=(879/p0/1ms/pc=1) h1=(690/p0/9ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=767 cpu=0 strand=1011ms policy=0 h0=(639/p0/1ms/pc=1) h1=(728/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=1 strand=1081ms policy=0 h0=(653/p0/0ms/pc=1) h1=(895/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=1 strand=1465ms policy=0 h0=(931/p0/0ms/pc=0) h1=(753/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=823 cpu=0 strand=1232ms policy=0 h0=(956/p0/1ms/pc=1) h1=(661/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=831 cpu=1 strand=1470ms policy=0 h0=(681/p0/0ms/pc=0) h1=(949/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=810 cpu=0 strand=1043ms policy=0 h0=(895/p0/8ms/pc=1) h1=(722/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1421ms policy=0 h0=(652/p0/0ms/pc=0) h1=(655/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=904 cpu=0 strand=1091ms policy=0 h0=(817/p0/1ms/pc=1) h1=(906/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1002ms policy=0 h0=(927/p0/0ms/pc=1) h1=(758/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=908 cpu=1 strand=1292ms policy=0 h0=(852/p0/2ms/pc=1) h1=(664/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=917 cpu=0 strand=1092ms policy=0 h0=(760/p0/2ms/pc=1) h1=(947/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=916 cpu=0 strand=1167ms policy=0 h0=(835/p0/3ms/pc=1) h1=(657/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=690 cpu=1 strand=1056ms policy=0 h0=(667/p0/0ms/pc=2) h1=(768/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1119ms policy=0 h0=(938/p0/0ms/pc=0) h1=(677/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=932 cpu=0 strand=1435ms policy=0 h0=(922/p0/5ms/pc=1) h1=(881/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=767 cpu=1 strand=1515ms policy=0 h0=(867/p0/0ms/pc=0) h1=(857/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=698 cpu=1 strand=1024ms policy=0 h0=(770/p0/0ms/pc=0) h1=(831/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=1 strand=1013ms policy=0 h0=(838/p0/0ms/pc=0) h1=(842/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=948 cpu=1 strand=1157ms policy=0 h0=(906/p0/0ms/pc=0) h1=(833/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1053ms policy=0 h0=(957/p0/0ms/pc=0) h1=(802/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=679 cpu=0 strand=1027ms policy=0 h0=(875/p0/4ms/pc=1) h1=(798/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1192ms policy=0 h0=(786/p0/1ms/pc=1) h1=(701/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=0 strand=1034ms policy=0 h0=(881/p0/1ms/pc=1) h1=(677/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=706 cpu=1 strand=1167ms policy=0 h0=(662/p0/0ms/pc=0) h1=(885/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=651 cpu=1 strand=1031ms policy=0 h0=(918/p0/0ms/pc=65537) h1=(765/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=802 cpu=1 strand=1222ms policy=0 h0=(635/p0/0ms/pc=0) h1=(719/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=670 cpu=1 strand=1122ms policy=0 h0=(688/p0/4ms/pc=1) h1=(784/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=803 cpu=1 strand=1078ms policy=0 h0=(875/p0/0ms/pc=0) h1=(947/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1277ms policy=0 h0=(702/p0/4ms/pc=1) h1=(882/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=965 cpu=1 strand=1724ms policy=0 h0=(665/p0/0ms/pc=0) h1=(966/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=687 cpu=0 strand=1179ms policy=0 h0=(774/p0/6ms/pc=1) h1=(662/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1305ms policy=0 h0=(637/p0/0ms/pc=1) h1=(928/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=960 cpu=1 strand=1130ms policy=0 h0=(667/p0/0ms/pc=0) h1=(923/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=954 cpu=0 strand=1312ms policy=0 h0=(914/p0/4ms/pc=1) h1=(657/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=752 cpu=1 strand=1170ms policy=0 h0=(722/p0/0ms/pc=0) h1=(778/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=856 cpu=0 strand=1277ms policy=0 h0=(850/p0/5ms/pc=1) h1=(647/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=0 strand=1462ms policy=0 h0=(827/p0/1ms/pc=1) h1=(871/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=649 cpu=1 strand=1141ms policy=0 h0=(936/p0/0ms/pc=0) h1=(825/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=760 cpu=1 strand=1182ms policy=0 h0=(687/p0/0ms/pc=0) h1=(912/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=802 cpu=1 strand=1083ms policy=0 h0=(816/p0/0ms/pc=0) h1=(675/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=917 cpu=1 strand=1068ms policy=0 h0=(656/p0/0ms/pc=0) h1=(890/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=1 strand=1221ms policy=0 h0=(787/p0/0ms/pc=2) h1=(700/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=731 cpu=0 strand=1083ms policy=0 h0=(860/p0/3ms/pc=1) h1=(916/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=803 cpu=1 strand=1005ms policy=0 h0=(916/p0/3ms/pc=1) h1=(646/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=710 cpu=0 strand=1003ms policy=0 h0=(912/p0/0ms/pc=1) h1=(866/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1011ms policy=0 h0=(834/p0/7ms/pc=1) h1=(972/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1054ms policy=0 h0=(838/p0/5ms/pc=1) h1=(698/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=795 cpu=1 strand=1471ms policy=0 h0=(779/p0/2ms/pc=1) h1=(846/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=0 strand=1208ms policy=0 h0=(641/p0/5ms/pc=1) h1=(964/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=0 strand=1038ms policy=0 h0=(891/p0/5ms/pc=1) h1=(973/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=751 cpu=1 strand=1202ms policy=0 h0=(869/p0/0ms/pc=0) h1=(780/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=1 strand=1229ms policy=0 h0=(931/p0/0ms/pc=0) h1=(651/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=0 strand=1620ms policy=0 h0=(729/p0/4ms/pc=1) h1=(825/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=916 cpu=1 strand=1179ms policy=0 h0=(882/p0/0ms/pc=0) h1=(767/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=1 strand=1170ms policy=0 h0=(909/p0/0ms/pc=65537) h1=(894/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=910 cpu=1 strand=1141ms policy=0 h0=(714/p0/0ms/pc=65537) h1=(845/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=651 cpu=0 strand=1162ms policy=0 h0=(682/p0/2ms/pc=1) h1=(890/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=1 strand=1122ms policy=0 h0=(913/p0/0ms/pc=0) h1=(838/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=710 cpu=1 strand=1084ms policy=0 h0=(722/p0/0ms/pc=0) h1=(853/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=0 strand=1067ms policy=0 h0=(729/p0/4ms/pc=1) h1=(779/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=0 strand=1169ms policy=0 h0=(723/p0/0ms/pc=1) h1=(775/p0/0ms/pc=65538) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=970 cpu=0 strand=1202ms policy=0 h0=(837/p0/0ms/pc=1) h1=(952/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=0 strand=1158ms policy=0 h0=(814/p0/4ms/pc=1) h1=(721/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=1 strand=1035ms policy=0 h0=(828/p0/0ms/pc=0) h1=(810/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1098ms policy=0 h0=(768/p0/3ms/pc=1) h1=(730/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=831 cpu=0 strand=1033ms policy=0 h0=(766/p0/1ms/pc=1) h1=(939/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=1 strand=1088ms policy=0 h0=(848/p0/0ms/pc=2) h1=(948/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=0 strand=1289ms policy=0 h0=(884/p0/7ms/pc=1) h1=(874/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=927 cpu=1 strand=1182ms policy=0 h0=(913/p0/5ms/pc=65537) h1=(839/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=971 cpu=1 strand=1104ms policy=0 h0=(908/p0/0ms/pc=65538) h1=(691/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=803 cpu=0 strand=1143ms policy=0 h0=(640/p0/2ms/pc=1) h1=(897/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=0 strand=1228ms policy=0 h0=(808/p0/2ms/pc=1) h1=(923/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=1 strand=1174ms policy=0 h0=(698/p0/0ms/pc=1) h1=(978/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=837 cpu=1 strand=1181ms policy=0 h0=(686/p0/0ms/pc=0) h1=(925/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=679 cpu=0 strand=1023ms policy=0 h0=(803/p0/4ms/pc=1) h1=(853/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=670 cpu=0 strand=1026ms policy=0 h0=(832/p0/3ms/pc=1) h1=(752/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=1 strand=1337ms policy=0 h0=(734/p0/0ms/pc=1) h1=(772/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=1 strand=1044ms policy=0 h0=(832/p0/3ms/pc=1) h1=(803/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=642 cpu=1 strand=1372ms policy=0 h0=(921/p0/1ms/pc=1) h1=(694/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+SWEEP RES|668|msgstress01|TIMEOUT|0|9
+WAKE-STRANDED pid=664 cpu=1 strand=1295ms policy=0 h0=(985/p0/13ms/pc=65536) h1=(921/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=1 strand=1391ms policy=0 h0=(930/p0/0ms/pc=0) h1=(900/p0/9ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=780 cpu=0 strand=1427ms policy=0 h0=(902/p0/5ms/pc=1) h1=(809/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=649 cpu=0 strand=1390ms policy=0 h0=(674/p0/7ms/pc=1) h1=(913/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=810 cpu=1 strand=1021ms policy=0 h0=(749/p0/0ms/pc=2) h1=(934/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1343ms policy=0 h0=(742/p0/4ms/pc=1) h1=(894/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=825 cpu=0 strand=1141ms policy=0 h0=(770/p0/7ms/pc=1) h1=(782/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=901 cpu=1 strand=1498ms policy=0 h0=(949/p0/0ms/pc=65537) h1=(876/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=916 cpu=0 strand=1707ms policy=0 h0=(833/p0/6ms/pc=1) h1=(824/p0/5ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=1 strand=1866ms policy=0 h0=(647/p0/0ms/pc=0) h1=(721/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=0 strand=1557ms policy=0 h0=(917/p0/6ms/pc=1) h1=(853/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=780 cpu=0 strand=1133ms policy=0 h0=(778/p0/2ms/pc=1) h1=(801/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=861 cpu=1 strand=1181ms policy=0 h0=(988/p0/0ms/pc=2) h1=(763/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=675 cpu=0 strand=1198ms policy=0 h0=(856/p0/4ms/pc=1) h1=(966/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1362ms policy=0 h0=(690/p0/4ms/pc=1) h1=(942/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=877 cpu=0 strand=1174ms policy=0 h0=(979/p0/0ms/pc=1) h1=(665/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=805 cpu=1 strand=1180ms policy=0 h0=(963/p0/0ms/pc=1) h1=(844/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=837 cpu=0 strand=1322ms policy=0 h0=(940/p0/8ms/pc=1) h1=(811/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=670 cpu=0 strand=1082ms policy=0 h0=(917/p0/4ms/pc=1) h1=(690/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=801 cpu=1 strand=1208ms policy=0 h0=(726/p0/4ms/pc=1) h1=(958/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=1 strand=1383ms policy=0 h0=(962/p0/4ms/pc=1) h1=(880/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=970 cpu=1 strand=1342ms policy=0 h0=(816/p0/2ms/pc=1) h1=(841/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=837 cpu=1 strand=1166ms policy=0 h0=(850/p0/0ms/pc=0) h1=(798/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=694 cpu=0 strand=1226ms policy=0 h0=(817/p0/4ms/pc=1) h1=(892/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1242ms policy=0 h0=(930/p0/7ms/pc=1) h1=(763/p0/0ms/pc=65539) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=762 cpu=0 strand=1282ms policy=0 h0=(738/p0/2ms/pc=1) h1=(992/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=0 strand=1087ms policy=0 h0=(645/p0/3ms/pc=1) h1=(673/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=644 cpu=1 strand=1063ms policy=0 h0=(975/p0/0ms/pc=1) h1=(878/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=0 strand=1183ms policy=0 h0=(851/p0/4ms/pc=1) h1=(653/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=988 cpu=1 strand=1190ms policy=0 h0=(702/p0/1ms/pc=1) h1=(866/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=966 cpu=0 strand=1316ms policy=0 h0=(707/p0/4ms/pc=1) h1=(841/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=828 cpu=0 strand=1446ms policy=0 h0=(911/p0/3ms/pc=1) h1=(635/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=1 strand=1025ms policy=0 h0=(887/p0/0ms/pc=1) h1=(682/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=709 cpu=1 strand=1092ms policy=0 h0=(896/p0/0ms/pc=1) h1=(755/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=930 cpu=1 strand=1028ms policy=0 h0=(987/p0/0ms/pc=0) h1=(826/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=971 cpu=1 strand=1177ms policy=0 h0=(726/p0/0ms/pc=0) h1=(853/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=951 cpu=1 strand=1295ms policy=0 h0=(867/p0/0ms/pc=1) h1=(776/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=1 strand=1303ms policy=0 h0=(914/p0/0ms/pc=0) h1=(928/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=990 cpu=1 strand=1711ms policy=0 h0=(852/p0/0ms/pc=1) h1=(923/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=840 cpu=0 strand=1313ms policy=0 h0=(983/p0/0ms/pc=1) h1=(989/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=637 cpu=0 strand=1014ms policy=0 h0=(864/p0/3ms/pc=1) h1=(897/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=991 cpu=1 strand=1457ms policy=0 h0=(643/p0/4ms/pc=1) h1=(704/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=958 cpu=0 strand=1152ms policy=0 h0=(910/p0/0ms/pc=1) h1=(719/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=661 cpu=1 strand=1732ms policy=0 h0=(678/p0/0ms/pc=0) h1=(907/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=1113ms policy=0 h0=(866/p0/0ms/pc=0) h1=(701/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=878 cpu=1 strand=1040ms policy=0 h0=(875/p0/0ms/pc=0) h1=(782/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=971 cpu=0 strand=1123ms policy=0 h0=(920/p0/2ms/pc=1) h1=(790/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=802 cpu=0 strand=1205ms policy=0 h0=(869/p0/3ms/pc=1) h1=(904/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=632 cpu=1 strand=1072ms policy=0 h0=(854/p0/0ms/pc=65537) h1=(655/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=0 strand=1256ms policy=0 h0=(871/p0/4ms/pc=1) h1=(646/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=728 cpu=0 strand=1031ms policy=0 h0=(927/p0/4ms/pc=1) h1=(842/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=990 cpu=0 strand=1064ms policy=0 h0=(902/p0/4ms/pc=1) h1=(675/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=802 cpu=0 strand=1167ms policy=0 h0=(691/p0/1ms/pc=1) h1=(712/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=689 cpu=0 strand=1313ms policy=0 h0=(946/p0/1ms/pc=1) h1=(697/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=954 cpu=1 strand=1426ms policy=0 h0=(972/p0/0ms/pc=0) h1=(1/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1228ms policy=0 h0=(1/p0/0ms/pc=1) h1=(709/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=810 cpu=1 strand=1210ms policy=0 h0=(951/p0/0ms/pc=0) h1=(881/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=929 cpu=0 strand=1350ms policy=0 h0=(730/p0/2ms/pc=1) h1=(908/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=933 cpu=1 strand=1270ms policy=0 h0=(891/p0/3ms/pc=65537) h1=(832/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=867 cpu=1 strand=1143ms policy=0 h0=(811/p0/0ms/pc=0) h1=(794/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=874 cpu=1 strand=1302ms policy=0 h0=(690/p0/0ms/pc=0) h1=(778/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=698 cpu=1 strand=1033ms policy=0 h0=(639/p0/3ms/pc=1) h1=(638/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=932 cpu=0 strand=1657ms policy=0 h0=(697/p0/3ms/pc=1) h1=(669/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=687 cpu=0 strand=1028ms policy=0 h0=(828/p0/4ms/pc=1) h1=(936/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=1 strand=1094ms policy=0 h0=(887/p0/0ms/pc=0) h1=(738/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=1 strand=1014ms policy=0 h0=(725/p0/0ms/pc=0) h1=(984/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=650 cpu=0 strand=1372ms policy=0 h0=(975/p0/0ms/pc=1) h1=(901/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=666 cpu=1 strand=1034ms policy=0 h0=(800/p0/0ms/pc=0) h1=(897/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=753 cpu=1 strand=1090ms policy=0 h0=(709/p0/4ms/pc=1) h1=(964/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=708 cpu=1 strand=1551ms policy=0 h0=(816/p0/0ms/pc=65537) h1=(698/p0/9ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=892 cpu=0 strand=1241ms policy=0 h0=(769/p0/7ms/pc=1) h1=(798/p0/6ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=746 cpu=1 strand=1223ms policy=0 h0=(655/p0/8ms/pc=1) h1=(822/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=696 cpu=1 strand=1102ms policy=0 h0=(782/p0/7ms/pc=65537) h1=(637/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=0 strand=1257ms policy=0 h0=(851/p0/4ms/pc=1) h1=(765/p0/4ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=900 cpu=1 strand=1151ms policy=0 h0=(645/p0/0ms/pc=0) h1=(731/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=679 cpu=0 strand=1255ms policy=0 h0=(743/p0/1ms/pc=1) h1=(883/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=683 cpu=0 strand=1158ms policy=0 h0=(850/p0/4ms/pc=1) h1=(853/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=0 strand=1382ms policy=0 h0=(743/p0/0ms/pc=1) h1=(842/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WAKE-STRANDED pid=831 cpu=0 strand=1527ms policy=0 h0=(902/p0/4ms/pc=1) h1=(737/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+msgget01.c:46: [1;32mTPASS: [0mmessage received = message sent
+WAKE-STRANDED pid=960 cpu=0 strand=1221ms policy=0 h0=(874/p0/7ms/pc=1) h1=(994/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=801 cpu=1 strand=1869ms policy=0 h0=(958/p0/1ms/pc=1) h1=(905/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=929 cpu=1 strand=1370ms policy=0 h0=(649/p0/0ms/pc=1) h1=(884/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=1 strand=1001ms policy=0 h0=(820/p0/0ms/pc=0) h1=(682/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=810 cpu=1 strand=1181ms policy=0 h0=(885/p0/0ms/pc=1) h1=(770/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=654 cpu=0 strand=1656ms policy=0 h0=(949/p0/1ms/pc=1) h1=(710/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=874 cpu=1 strand=1269ms policy=0 h0=(858/p0/0ms/pc=0) h1=(935/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+WAKE-STRANDED pid=696 cpu=1 strand=1317ms policy=0 h0=(993/p0/5ms/pc=1) h1=(742/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=833 cpu=1 strand=1820ms policy=0 h0=(762/p0/0ms/pc=1) h1=(812/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=840 cpu=0 strand=1322ms policy=0 h0=(861/p0/2ms/pc=1) h1=(637/p0/0ms/pc=65536) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WW: TIMER-LATE-FIRE pid=1 late=21ms (timer fired late; softirq starvation?)
+WAKE-STRANDED pid=994 cpu=1 strand=1213ms policy=0 h0=(946/p0/0ms/pc=2) h1=(907/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=896 cpu=0 strand=1306ms policy=0 h0=(761/p0/3ms/pc=1) h1=(951/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=900 cpu=0 strand=1230ms policy=0 h0=(969/p0/2ms/pc=1) h1=(803/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=953 cpu=0 strand=1002ms policy=0 h0=(708/p0/4ms/pc=1) h1=(887/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=1 strand=1404ms policy=0 h0=(783/p0/0ms/pc=0) h1=(921/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=988 cpu=1 strand=1163ms policy=0 h0=(728/p0/4ms/pc=1) h1=(1002/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=651 cpu=0 strand=1270ms policy=0 h0=(948/p0/4ms/pc=1) h1=(633/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=752 cpu=1 strand=1325ms policy=0 h0=(686/p0/0ms/pc=0) h1=(983/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=1278ms policy=0 h0=(799/p0/5ms/pc=1) h1=(750/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=856 cpu=0 strand=1292ms policy=0 h0=(714/p0/2ms/pc=1) h1=(842/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=988 cpu=1 strand=1131ms policy=0 h0=(759/p0/0ms/pc=1) h1=(980/p0/7ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=952 cpu=1 strand=1123ms policy=0 h0=(843/p0/0ms/pc=0) h1=(777/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=825 cpu=0 strand=1025ms policy=0 h0=(938/p0/1ms/pc=1) h1=(847/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=780 cpu=1 strand=1052ms policy=0 h0=(860/p0/0ms/pc=2) h1=(712/p0/5ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=893 cpu=0 strand=1238ms policy=0 h0=(853/p0/4ms/pc=1) h1=(786/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=934 cpu=1 strand=1263ms policy=0 h0=(657/p0/0ms/pc=0) h1=(1006/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=832 cpu=0 strand=1011ms policy=0 h0=(665/p0/1ms/pc=1) h1=(837/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=731 cpu=0 strand=1241ms policy=0 h0=(996/p0/6ms/pc=1) h1=(889/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=966 cpu=0 strand=1183ms policy=0 h0=(735/p0/2ms/pc=1) h1=(929/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=1592ms policy=0 h0=(742/p0/0ms/pc=0) h1=(994/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=934 cpu=0 strand=1172ms policy=0 h0=(910/p0/4ms/pc=1) h1=(987/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=989 cpu=1 strand=1193ms policy=0 h0=(978/p0/0ms/pc=0) h1=(808/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=763 cpu=0 strand=1017ms policy=0 h0=(950/p0/6ms/pc=1) h1=(940/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=0 strand=1219ms policy=0 h0=(658/p0/5ms/pc=1) h1=(777/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=694 cpu=0 strand=1099ms policy=0 h0=(804/p0/4ms/pc=1) h1=(805/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=765 cpu=0 strand=1081ms policy=0 h0=(927/p0/6ms/pc=1) h1=(823/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=818 cpu=1 strand=1022ms policy=0 h0=(827/p0/0ms/pc=0) h1=(645/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=727 cpu=0 strand=1108ms policy=0 h0=(704/p0/4ms/pc=1) h1=(874/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=896 cpu=0 strand=1378ms policy=0 h0=(741/p0/5ms/pc=1) h1=(906/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=756 cpu=0 strand=1270ms policy=0 h0=(866/p0/2ms/pc=1) h1=(995/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1243ms policy=0 h0=(829/p0/0ms/pc=1) h1=(777/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=655 cpu=1 strand=1422ms policy=0 h0=(778/p0/0ms/pc=0) h1=(764/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=971 cpu=0 strand=1426ms policy=0 h0=(634/p0/4ms/pc=1) h1=(732/p0/0ms/pc=2) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=831 cpu=0 strand=1025ms policy=0 h0=(1/p0/0ms/pc=1) h1=(907/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=832 cpu=0 strand=1009ms policy=0 h0=(964/p0/4ms/pc=1) h1=(917/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=995 cpu=0 strand=1428ms policy=0 h0=(745/p0/8ms/pc=1) h1=(735/p0/7ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=909 cpu=1 strand=1408ms policy=0 h0=(823/p0/0ms/pc=1) h1=(803/p0/4ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+SWEEP RES|669|msgget01|PASS|0|0
+WAKE-STRANDED pid=856 cpu=1 strand=1489ms policy=0 h0=(1016/p0/0ms/pc=0) h1=(779/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1282ms policy=0 h0=(651/p0/3ms/pc=1) h1=(945/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=661 cpu=0 strand=1667ms policy=0 h0=(802/p0/4ms/pc=1) h1=(649/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=952 cpu=1 strand=1781ms policy=0 h0=(863/p0/0ms/pc=0) h1=(672/p0/9ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=703 cpu=1 strand=1190ms policy=0 h0=(874/p0/0ms/pc=0) h1=(840/p0/2ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=674 cpu=0 strand=1449ms policy=0 h0=(949/p0/3ms/pc=1) h1=(709/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=993 cpu=0 strand=1705ms policy=0 h0=(921/p0/4ms/pc=1) h1=(657/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=884 cpu=0 strand=1710ms policy=0 h0=(865/p0/1ms/pc=1) h1=(801/p0/1ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=632 cpu=0 strand=1078ms policy=0 h0=(679/p0/3ms/pc=1) h1=(957/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=837 cpu=0 strand=1369ms policy=0 h0=(969/p0/1ms/pc=1) h1=(964/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1760ms policy=0 h0=(692/p0/3ms/pc=1) h1=(850/p0/9ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=952 cpu=0 strand=1778ms policy=0 h0=(790/p0/7ms/pc=1) h1=(921/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=994 cpu=0 strand=1107ms policy=0 h0=(670/p0/3ms/pc=1) h1=(906/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=901 cpu=0 strand=1450ms policy=0 h0=(713/p0/0ms/pc=1) h1=(822/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=883 cpu=0 strand=1504ms policy=0 h0=(988/p0/2ms/pc=1) h1=(887/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=839 cpu=0 strand=1226ms policy=0 h0=(667/p0/0ms/pc=1) h1=(748/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=792 cpu=0 strand=1223ms policy=0 h0=(801/p0/1ms/pc=1) h1=(865/p0/0ms/pc=65537) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=664 cpu=0 strand=1389ms policy=0 h0=(687/p0/3ms/pc=1) h1=(871/p0/3ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+msgstress01.c:217: [1;35mTWARN: [0mOut of runtime during forking...
+WAKE-STRANDED pid=964 cpu=0 strand=1927ms policy=0 h0=(1/p0/0ms/pc=1) h1=(829/p0/5ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=794 cpu=1 strand=2052ms policy=0 h0=(667/p0/0ms/pc=1) h1=(801/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=909 cpu=0 strand=1120ms policy=0 h0=(918/p0/10ms/pc=1) h1=(929/p0/0ms/pc=0) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=689 cpu=1 strand=1265ms policy=0 h0=(925/p0/0ms/pc=1) h1=(812/p0/8ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=880 cpu=1 strand=1143ms policy=0 h0=(678/p0/0ms/pc=0) h1=(770/p0/6ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=737 cpu=0 strand=1665ms policy=0 h0=(761/p0/9ms/pc=1) h1=(811/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+WAKE-STRANDED pid=915 cpu=0 strand=1827ms policy=0 h0=(735/p0/5ms/pc=1) h1=(790/p0/0ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1627392222, 1536) : EEXIST (17)
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1644169438, 0) : ENOENT (2)
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1644169438, 1024) : ENOENT (2)
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1627392222, 256) : EACCES (13)
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1627392222, 128) : EACCES (13)
+msgget02.c:52: [1;32mTPASS: [0mmsgget(1627392222, 384) : EACCES (13)
+
+Summary:
+passed   6
+failed   0

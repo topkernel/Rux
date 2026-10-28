@@ -591,7 +591,19 @@ impl MmStruct {
     /// (review ARCH-M3 / SYSA-H1: previously a sub-VMA munmap returned
     /// EINVAL and a cross-VMA range only removed the first VMA).
     pub fn munmap(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        // s15 catch (ltp-a r22, madvise02 sweep): the page-round add
+        // `(size + PAGE_SIZE - 1)` OVERFLOWS for user lengths within one
+        // page of usize::MAX — munmap(0, 0xfffffffffffff000) panicked the
+        // DEBUG kernel right at this line (release wrapped, then the R7-1
+        // bound caught the garbage by accident). Linux returns EINVAL via
+        // its len > TASK_SIZE - addr check; the same semantics here: the
+        // wrap class is unreachable user ranges, reject as Invalid. The
+        // s12 fix covered seven round-ups in syscall/memory.rs; munmap
+        // rounds here, one layer deeper.
+        let aligned_size = match size.checked_add(PAGE_SIZE_USIZE - 1) {
+            Some(rounded) => rounded & !(PAGE_SIZE_USIZE - 1),
+            None => return Err(MapError::Invalid),
+        };
 
         if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
             return Err(MapError::Invalid);

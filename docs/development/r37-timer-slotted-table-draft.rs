@@ -4,6 +4,52 @@
 //!
 //! Kernel Timer Wheel
 //!
+//! ===========================================================================
+//! LEG-49 LANDING DECISION (track-1 lever pick, 2026-10-28) — written
+//! BEFORE the code lands, per the dual-track discipline.
+//!
+//! Lever: rust-design-headroom.md §7 first slice ("timer wheel as typed
+//! slot ranges"); this draft is the design note. The draft was written
+//! against the R36 tree; the live kernel/src/timer.rs has since gained
+//! (and keeps) the following, which the landing must reconcile rather
+//! than overwrite:
+//!   - R34's per-CPU static EXPIRED_BUF scratch (replaces the draft's
+//!     `Vec::with_capacity` outside the lock — the live form is kept),
+//!   - high-resolution entries (`expires_time`, HRES_NEXT, the hres-due
+//!     bypass of the LAST_TICK dedupe, hres-only expiry decision),
+//!   - the R37-periodic-delivery fix (periodic timers queue a COPY for
+//!     the outside-lock delivery pass; the draft has this),
+//!   - one-shot action TAKE (the GNOME-oom leak fix),
+//!   - the wakewatch instrument family (WW_* counters, stall watchdog,
+//!     1 Hz heartbeat, wheel census, timerfd_expire_notify delivery),
+//!   - TIMER_EVER_ARMED / mark_timer_armed, get_timer_state,
+//!     snapshot_timers, recompute_hres_next.
+//! What the landing swaps (the draft's core, still true at tip):
+//!   1. TIMERS+ACTIONS BTreeMap pair -> fixed-slot table (1024 × ~56 B
+//!      + 128 B bitmap ≈ 57 KB .bss) behind ONE lock — deletes the
+//!      TIMERS→ACTIONS nesting edge;
+//!   2. every add/del path becomes plain stores — the last under-lock
+//!      allocations in the subsystem (BTreeMap node insert under
+//!      TIMERS→ACTIONS, the R36 OOM-deadlock family: alloc_error_handler
+//!      panics with the lock held, the panicking CPU parks in wfi, the
+//!      other CPUs spin forever);
+//!   3. id lookup/dedup by monotonic id (a freed slot's id can never be
+//!      falsely re-matched).
+//! Perf expectation: nanosleep-class callers arm one timer per sleep
+//! (pbench p7_sleep1ms is the handle, 932 µs strong median class); the
+//! BTreeMap alloc/dealloc pair per arm goes away. Timer domain is a
+//! guarded domain — gate is Tier-1 census + Tier-2 pbench rows vs the
+//! baseline, plus the standing correctness gates.
+//! Verification: dual-arch build rc=0; make test green; riscv64
+//! minimal-rootfs smoke zero panics; one quiet syscost boot (census in
+//! band, ticks ≥99.5/s); one pbench boot (P1-P7 medians in band or
+//! improved; p7_sleep1ms is the target row). Storage-order note: the
+//! /proc/timer_list snapshot order changes from id-ascending (BTreeMap)
+//! to slot order — the file has no ordering contract and its consumer
+//! is the wakewatch census (counts, not order).
+//! ===========================================================================
+//!
+//!
 //! Provides a simple timer mechanism for software timers.
 //! Timers live in a FIXED-SLOT table (static .bss storage, no heap), and
 //! the Hrtimer softirq handler scans occupied slots on each tick.

@@ -692,7 +692,14 @@ impl MmStruct {
     /// munmap system call implementation — supports partial VMA removal:
     /// split VMAs at the unmapped boundaries, remove the overlapping parts.
     pub fn munmap(&self, addr: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        // s15 catch (see the riscv64 twin): the page-round add overflows
+        // for user lengths within one page of usize::MAX — Linux returns
+        // EINVAL for such ranges; reject as Invalid instead of panicking
+        // (debug) or wrapping (release).
+        let aligned_size = match size.checked_add(PAGE_SIZE_USIZE - 1) {
+            Some(rounded) => rounded & !(PAGE_SIZE_USIZE - 1),
+            None => return Err(MapError::Invalid),
+        };
 
         if addr.as_usize() % PAGE_SIZE_USIZE != 0 {
             return Err(MapError::Invalid);
