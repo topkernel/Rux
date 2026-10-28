@@ -554,7 +554,7 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `condvar.rs` | 260 | ⬜ |  |
 | `futex.rs` | 4007 | 🔶🔁 | wait/wake/wake_op; 主线已改动，需重读 |
-| `lockkey.rs` | 213 | ⬜ |  |
+| `lockkey.rs` | 213 | ⬜ | typed lock keys (D-11, refactor lane 2026-10-28) |
 | `mod.rs` | 33 | ⬜ |  |
 | `percpu.rs` | 214 | ⬜ |  |
 | `rcu.rs` | 287 | ⬜ |  |

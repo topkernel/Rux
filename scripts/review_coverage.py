@@ -205,6 +205,7 @@ STATUS = {
     "kernel/src/sched/wakewatch.rs": ("done", "DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place"),
     "kernel/src/security/*": ("todo", ""),
     "kernel/src/sync/condvar.rs": ("todo", ""),
+    "kernel/src/sync/lockkey.rs": ("todo", "typed lock keys (D-11, refactor lane 2026-10-28)"),
     "kernel/src/sync/futex.rs": ("part", "wait/wake/wake_op"),
     "kernel/src/sync/rcu.rs": ("todo", ""),
     "kernel/src/sync/rwlock.rs": ("todo", ""),
