@@ -1002,6 +1002,22 @@ fn ww_heartbeat(now_time: u64) {
         LAST_IRQ[c].store(cur, Ordering::Relaxed);
     }
 
+    // s15 (A2 idle-mark/WFI hunt): idle-loop phase stamps + tp-vs-slot
+    // mismatch deltas. phase codes: 0=not-idle-loop 1=entering-schedule
+    // 2=marked+recheck 3=pre-WFI 4=inside-WFI 5=post-WFI-accounting;
+    // slotmm = per-second delta of tick-entry samples where the hardware
+    // tp register disagreed with cpu_state.current (lying slot).
+    static LAST_MM: [AtomicU64; crate::config::MAX_CPUS] =
+        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+    let mm = crate::sched::sched::ww_slot_mismatch_counters();
+    let mut mm_d = [0u64; 2];
+    for c in 0..2 {
+        mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
+        LAST_MM[c].store(mm[c], Ordering::Relaxed);
+    }
+    let phase0 = crate::sched::sched::WW_IDLE_PHASE[0].load(Ordering::Acquire);
+    let phase1 = crate::sched::sched::WW_IDLE_PHASE[1].load(Ordering::Acquire);
+
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
     // locks at this point).
     let (wheel_len, overdue) = {
@@ -1017,6 +1033,39 @@ fn ww_heartbeat(now_time: u64) {
     };
 
     let sched = crate::sched::sched::ww_sched_snapshot();
+
+    // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
+    // sub-gate strand counts — the counter-based adjudication of the
+    // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:
+    // the WW..WW4 block above is already ~250 bytes and printk truncates
+    // at RECORD_TEXT_SIZE (256) — appending here silently cut the tail.
+    static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
+    static LAST_OH: AtomicU64 = AtomicU64::new(0);
+    static LAST_CH: AtomicU64 = AtomicU64::new(0);
+    let walks_total = crate::sched::fair::ww_pick_walks();
+    let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
+    LAST_WALKS.store(walks_total, Ordering::Relaxed);
+    let (oh, ch) = crate::sched::fair::ww_heals();
+    let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
+    let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
+    LAST_OH.store(oh, Ordering::Relaxed);
+    LAST_CH.store(ch, Ordering::Relaxed);
+    let (s250, s500, s750) = crate::sched::wakewatch::ww_subgate_counts();
+    crate::pr_info!(
+        "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
+        walks_d, oh_d, ch_d, s250, s500, s750
+    );
+    // s16: WW4 (phase/slotmm) in its own pr_info too — as the TAIL of
+    // the big block it was the part most often garbled by the per-CPU
+    // wakewatch heartbeat racing the UART, and slotmm is the family-B
+    // standing watch (it must stay parseable).
+    crate::pr_info!(
+        "WW4: phase=[{},{}] slotmm=[{},{}]",
+        phase0,
+        phase1,
+        mm_d[0],
+        mm_d[1]
+    );
 
     crate::pr_info!(
         "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",

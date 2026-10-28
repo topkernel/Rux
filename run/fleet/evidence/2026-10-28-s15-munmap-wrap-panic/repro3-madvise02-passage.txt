@@ -1,0 +1,18 @@
+SWEEP RES|735|madvise01|FAIL|2|0
+tst_tmpdir.c:276: [1;31mTBROK: [0mtst_tmpdir: mkdtemp(/tmp/LTP_madXXXXXX) failed: ENOSPC (28)
+
+Summary:
+passed   0
+failed   0
+broken   1
+skipped  0
+warnings 0
+SWEEP RES|736|madvise02|FAIL|2|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+madvise03.c:42: [1;32mTPASS: [0mThere are zero-fill-on-demand pages for anonymous private mappings
+
+Summary:
+passed   1
+failed   0
+broken   0

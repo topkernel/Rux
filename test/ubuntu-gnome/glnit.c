@@ -110,13 +110,23 @@ static void dump_maps(void)
 static int run_ladder(void)
 {
     printf("[GLNIT] === S1 dlopen swrast ===\n");
-    void *sw = dlopen("/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so",
-                      RTLD_LAZY | RTLD_GLOBAL);
+    const char *sw_paths[] = {
+        "/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so",
+        "/usr/lib/x86_64-linux-gnu/dri/swrast_dri.so",
+    };
+    void *sw = NULL;
+    for (unsigned i = 0; i < sizeof sw_paths / sizeof sw_paths[0]; i++) {
+        sw = dlopen(sw_paths[i], RTLD_LAZY | RTLD_GLOBAL);
+        if (sw) {
+            printf("[GLNIT] dlopen %s OK\n", sw_paths[i]);
+            break;
+        }
+        printf("[GLNIT] dlopen %s: %s\n", sw_paths[i], dlerror());
+    }
     if (!sw) {
-        printf("[GLNIT] dlopen FAILED: %s\n", dlerror());
+        printf("[GLNIT] dlopen swrast FAILED (all paths)\n");
         return 1;
     }
-    printf("[GLNIT] dlopen swrast OK\n");
 
     printf("\n[GLNIT] === S2 walk extensions ===\n");
     printf("[GLNIT] rung: dlsym getExtensions\n");
@@ -216,8 +226,15 @@ int main(void)
 
     /* The whole ladder runs in a forked child: a segfault anywhere
      * leaves PID 1 alive to report the wait status (the last printed
-     * rung names the crash site). */
+     * rung names the crash site). GLNIT_NOFORK=1 runs it inline for
+     * gdb sessions (qemu-user's gdbstub cannot follow forked guests). */
     fflush(NULL);
+    if (getenv("GLNIT_NOFORK")) {
+        int rc = run_ladder();
+        printf("\nGLNIT RESULT: ladder rc=%d (nofork)\n", rc);
+        fflush(stdout);
+        for (;;) pause();
+    }
     pid_t c = fork();
     if (c == 0) {
         attach_console();

@@ -32,6 +32,174 @@ use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 use crate::process::task::{Task, SchedPolicy};
 use super::class::{SchedClass, RunQueueRef};
 
+// ============================================================================
+// s14 pick-skip history (dfx=schedtrace) — the strand-victim discriminator.
+//
+// PICK-SKIP-ALL reports only the total-failure shape (a pick that found
+// NOTHING pickable). The msg-region WAKE-STRANDED family shows the other
+// shape: a victim refused by every pick AMID pickable candidates —
+// invisible to the report, yet it is the ~1s-grid strand producer
+// (fleet ltp-b r2: 100/100 strands in the msg* region with zero
+// skip-alls). This side table accumulates, per task, the refusal
+// reasons the pick walk issued while it sat queued; wakewatch's strand
+// report prints and clears the history at pick time, so every strand
+// line names WHY the victim was skipped for the whole window.
+// ============================================================================
+
+struct SkipHistSlot {
+    task: AtomicU64,
+    /// Refusal counts by reason (1=ownership/on_cpu/claim-this-cpu,
+    /// 2=foreign claim, 3=affinity, 4=throttled, 5=healed reset).
+    why: [AtomicU64; 5],
+    /// Total refusals recorded.
+    n: AtomicU64,
+    /// jiffies at the FIRST recorded refusal of this episode.
+    first_jif: AtomicU64,
+}
+
+const SKIP_HIST_SLOTS: usize = 256;
+static SKIP_HIST: [SkipHistSlot; SKIP_HIST_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: SkipHistSlot = SkipHistSlot {
+        task: AtomicU64::new(0),
+        why: [const { AtomicU64::new(0) }; 5],
+        n: AtomicU64::new(0),
+        first_jif: AtomicU64::new(0),
+    };
+    [ZERO; SKIP_HIST_SLOTS]
+};
+
+// ============================================================================
+// s16 (A2 census, WW5) — counter-based adjudication of the msg-region
+// strand family. The r6/r7 canary rounds printed ZERO STALE-ONCPU-RESET
+// lines through 753 WAKE-STRANDED events while STALE-CLAIM prints got
+// through the same 2-jiffy rate gate — strong evidence the R85 on_cpu
+// heal never fires during the strands, but prints are budget-gated and
+// a print-null is not a count-null. These counters are exact and
+// unconditional (same class as wakewatch's WAKE_N/PICK_N: one relaxed
+// inc on the pick-walk entry and two on cold heal paths); the WW5
+// heartbeat line reports them under dfx=wwcensus.
+// ============================================================================
+static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
+static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
+static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);
+
+/// Total pick-walk entries since boot (WW5 heartbeat; wake-side
+/// snapshot for the strand line's visits= field).
+pub fn ww_pick_walks() -> u64 {
+    WW_PICK_WALKS.load(Ordering::Relaxed)
+}
+
+/// (on_cpu-mark heals, stale-claim heals) since boot — the two R85
+/// heal legs. Reported per-second by WW5; ~0 with hundreds of strands
+/// convicts "the heal never fires" where the rate-gated prints could
+/// only suggest it.
+pub fn ww_heals() -> (u64, u64) {
+    (
+        WW_ONCPU_HEALS.load(Ordering::Relaxed),
+        WW_CLAIM_HEALS.load(Ordering::Relaxed),
+    )
+}
+
+#[inline]
+fn skip_hist_of(task: *mut Task) -> &'static SkipHistSlot {
+    let a = task as usize;
+    &SKIP_HIST[(a >> 6 ^ a >> 12) & (SKIP_HIST_SLOTS - 1)]
+}
+
+/// Record one pick-walk refusal of `task` (called under the GRQ; only
+/// when dfx=schedtrace is armed).
+pub fn note_pick_skip(task: *mut Task, reason: u8) {
+    let s = skip_hist_of(task);
+    if s.task.load(Ordering::Relaxed) != task as usize as u64 {
+        // New episode for this slot: reset the counters.
+        s.task.store(task as usize as u64, Ordering::Release);
+        for w in &s.why {
+            w.store(0, Ordering::Relaxed);
+        }
+        s.n.store(0, Ordering::Relaxed);
+        s.first_jif.store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+    }
+    if let Some(w) = s.why.get(reason as usize) {
+        w.fetch_add(1, Ordering::Relaxed);
+    }
+    s.n.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Print (direct console, GRQ-held discipline) and clear the recorded
+/// skip history of `task`. Called from wakewatch's strand report.
+pub fn print_skip_history(task: *mut Task) {
+    use crate::console::putchar_no_lock as putchar;
+    let s = skip_hist_of(task);
+    if s.task.load(Ordering::Acquire) != task as usize as u64 {
+        // s16: the 256-slot table is keyed by Task address and msgstress
+        // churn steals slots mid-strand, so "no SKIPHIST line" was
+        // ambiguous between "never refused" and "history clobbered by a
+        // colliding task". Name the collision explicitly — the census
+        // needs the distinction (a stolen slot cannot exonerate the
+        // walk).
+        for &c in b"\nSKIPHIST coll=1" {
+            putchar(c);
+        }
+        putchar(b'\n');
+        return;
+    }
+    let n = s.n.swap(0, Ordering::AcqRel);
+    // s16: print the line even when n == 0. "SKIPHIST stays empty" was
+    // previously an inference from no-line-at-all (ambiguous against
+    // probe-off and slot-reuse); an explicit skips=0 on every strand
+    // line makes the never-refused verdict census-readable.
+    let now = crate::drivers::timer::get_jiffies();
+    let first = s.first_jif.swap(0, Ordering::AcqRel);
+    let mut whys = [0u64; 5];
+    for (i, w) in s.why.iter().enumerate() {
+        whys[i] = w.swap(0, Ordering::AcqRel);
+    }
+    s.task.store(0, Ordering::Release);
+    fn pu(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut k = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && k < buf.len() {
+            buf[k] = b'0' + (v % 10) as u8;
+            v /= 10;
+            k += 1;
+        }
+        while k > 0 {
+            k -= 1;
+            putchar(buf[k]);
+        }
+    }
+    for &c in b"\nSKIPHIST skips=" {
+        putchar(c);
+    }
+    pu(n);
+    for (i, cnt) in whys.iter().enumerate() {
+        if *cnt == 0 {
+            continue;
+        }
+        for &c in b" why" {
+            putchar(c);
+        }
+        pu((i + 1) as u64);
+        putchar(b'=');
+        pu(*cnt);
+    }
+    // s16: span only meaningful with at least one recorded refusal
+    // (first_jif is never set on a refusal-free episode).
+    if n > 0 {
+        for &c in b" span_ms=" {
+            putchar(c);
+        }
+        pu(now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64);
+    }
+    putchar(b'\n');
+}
+
 /// Clock frequency (HZ) - from config
 const HZ: u64 = KERNEL_HZ as u64;
 
@@ -454,6 +622,28 @@ impl CfsRunQueue {
         self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime)
     }
 
+    /// s16 (A2 census): how many timeline entries sort at or before
+    /// `vr` — the tie-mass standing ahead of a strand victim in
+    /// service order. The r6/r7 strand lines all read vr=0ms
+    /// lead-lag=0ms (victim at min_vruntime AND at the leftmost key),
+    /// which is only possible as a TIE: a strictly-leftmost
+    /// never-refused candidate is taken by the very next walk. tie=
+    /// quantifies the mass the victim waits behind (the fair-queue
+    /// hypothesis predicts tie ~ nr_running; a small tie with a big
+    /// visits= would instead convict the walk itself). O(n) scan, but
+    /// called only from the rate-gated strand print path (GRQ held).
+    pub fn ww_tie_mass(&self, vr: u64) -> u64 {
+        let mut n = 0u64;
+        for (&k, _) in self.tasks_timeline.iter() {
+            if k.vruntime <= vr {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
     /// Update minimum vruntime
     ///
     /// Linux update_min_vruntime semantics (review batch 8): the value is the
@@ -631,6 +821,8 @@ impl CfsRunQueue {
     /// Shared heal-report rate gate: at most one heal line per 2 jiffies
     /// system-wide (the picking CPUs can pass a healing candidate hot while
     /// a queue unwedges). R34 discipline: callers hold the GRQ lock.
+    /// s16 (WW5): the counters below are exact and unconditional — only
+    /// the PRINT rides this budget.
     fn heal_report_budget_ok() -> bool {
         static LAST_REPORT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
@@ -681,6 +873,7 @@ impl CfsRunQueue {
     /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu
     /// (R34: GRQ-held callers, direct console writes only).
     fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
+        WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
         if !Self::heal_report_budget_ok() {
             return;
         }
@@ -697,6 +890,7 @@ impl CfsRunQueue {
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
     fn stale_oncpu_healed(cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
+        WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         if !Self::heal_report_budget_ok() {
             return;
         }
@@ -879,6 +1073,9 @@ impl CfsRunQueue {
     /// then re-inserts them. CFS task counts are typically reasonable so this
     /// works fine without allocating.
     pub fn pick_next_cpu(&mut self, cpu_id: usize, prev: *mut crate::process::Task) -> Option<*mut crate::process::Task> {
+        // s16 (WW5): one exact count per walk entry — the visits= field
+        // on the strand line divides this by the strand window.
+        WW_PICK_WALKS.fetch_add(1, Ordering::Relaxed);
         // R7-G1 (GDB capture): this was Vec::with_capacity(256) — a 6KB
         // HEAP allocation on every pick, made while the caller holds the
         // GRQ irqsave lock (alloc failure there panics the scheduler;

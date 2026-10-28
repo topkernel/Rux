@@ -38,7 +38,7 @@ WT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 p = argparse.ArgumentParser()
 p.add_argument("--tag", default="run")
 p.add_argument("--seconds", type=int, default=2400)
-p.add_argument("--img", default=os.path.join(WT, "work/gnome-riscv64.img"))
+p.add_argument("--img", default=os.path.join(WT, "work/gnome-r13.img"))
 p.add_argument("--kernel", default=os.path.join(
     WT, "target/riscv64gc-unknown-none-elf/debug/rux"))
 p.add_argument("--init", default="/sbin/runit")
@@ -48,6 +48,26 @@ p.add_argument("--thread", default="multi", choices=["multi", "single"])
 p.add_argument("--dfx", default="")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=30)
+p.add_argument("--keyprobe", default="",
+               help="comma list of elapsed seconds for a single QMP 'a' keypress; "
+                    "an entry may be time:KEY with KEY a QMP qcode name "
+                    "(e.g. 1520:a,1530:ret) so a click-then-type set can "
+                    "include Enter — a shell cannot execute a line without it")
+p.add_argument("--mousemove", default="",
+               help="comma list of elapsed seconds for QMP abs pointer moves")
+p.add_argument("--clickprobe", default="",
+               help="comma list of elapsed seconds for a QMP left-button "
+                    "press+release at the current pointer position "
+                    "(focuses the window under it; pairs with "
+                    "--mousemove then --keyprobe for click-then-type)")
+p.add_argument("--qtrace", default="",
+               help="comma list of QEMU trace events (simple backend, file in run dir)")
+p.add_argument("--jiggle", default="",
+               help="FROM,EVERY,UNTIL: alternate the pointer between two "
+                    "corner positions every EVERY s from FROM to UNTIL — "
+                    "defeats the gsd-power idle blank (~120-150 s after "
+                    "the last input the session blanks to wallpaper), the "
+                    "same thing a human wiggling the mouse does")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -78,6 +98,16 @@ qemu_cmd = [
     "-kernel", args.kernel,
     "-append", append,
 ]
+# --qtrace ev1,ev2: enable QEMU simple-trace backend events (e.g.
+# virtio_input_queue_full,virtqueue_pop) and log them to the run dir —
+# used for the virtio-input eventq delivery hunt (leg-7): the device
+# drops input events SILENTLY when it cannot pop an avail buffer, and
+# these events name that exact condition.
+if args.qtrace:
+    for ev in args.qtrace.split(","):
+        if ev.strip():
+            qemu_cmd += ["-trace", f"enable={ev.strip()}"]
+    qemu_cmd += ["-trace", f"file={os.path.join(OUT, 'qemu.trace')}"]
 with open(os.path.join(OUT, "cmdline.txt"), "w") as f:
     f.write(" ".join(qemu_cmd) + "\n")
 print("[fire] qemu:", " ".join(qemu_cmd), flush=True)
@@ -85,6 +115,11 @@ logf = open(os.path.join(OUT, "serial.log"), "wb")
 vm = subprocess.Popen(qemu_cmd, stdout=logf, stderr=subprocess.STDOUT)
 
 stop = threading.Event()
+# set by the serial reader when runit prints NOTIFY-SENT (a
+# notification banner is on screen right now, expire 45s); the main
+# loop responds with a burst of timed screendumps so the banner check
+# does not depend on the 30s idle shot cadence
+notify_burst = threading.Event()
 t0 = time.time()
 milestones = {}   # name -> (t_seconds, detail)
 markers = []      # (t, text) raw events of interest
@@ -198,9 +233,19 @@ PATTERNS = [
     (re.compile(rb"\[runit\] falling back to minimal path"), "fallback_gs"),
     (re.compile(rb"comm=gnome-shell pid=(\d+) state=(\w+)"), "gnome_shell"),
     (re.compile(rb"pid=\d+ tgid=\d+ state=(\w+)[^\n]*comm=gnome-shell "), "gnome_shell"),
+    # merged main's taskdump emits ftrace-style trace events; the comm
+    # names appear as sched_switch prev_/next_ pairs (r13walk2: M3 sat
+    # "not-reached" while the shell provably ran — pattern staleness)
+    (re.compile(rb"next_comm=gnome-shell "), "gnome_shell_trace"),
+    (re.compile(rb"prev_comm=gnome-shell "), "gnome_shell_trace"),
     (re.compile(rb"comm=(gsd-[\w-]+) pid=(\d+)"), "gsd"),
     (re.compile(rb"pid=\d+ tgid=\d+ state=\w+[^\n]*comm=(gsd-[\w-]+) "), "gsd"),
+    (re.compile(rb"next_comm=(gsd-[\w-]+) "), "gsd_trace"),
     (re.compile(rb"comm=mutter"), "mutter_wm"),
+    (re.compile(rb"GNOME Shell started at"), "shell_started"),
+    (re.compile(rb"comm=xterm"), "xterm_probe"),
+    (re.compile(rb"comm=(gnome-session-failed)"), "session_failed"),
+    (re.compile(rb"\[runit\] NOTIFY-SENT gdbus st=(\d+)"), "notify_sent"),
     (re.compile(rb"KERNPANIC|Kernel panic"), "kernpanic"),
     (re.compile(rb"SIGDEATH: (\S+) sig=(\d+)"), "sigdeath"),
     (re.compile(rb"alloc_pages.*[Oo][Mm]|Out of memory|oom-kill"), "oom"),
@@ -236,8 +281,14 @@ def serial_reader():
                     note(f"SIGDEATH {g[0] if g else '?'} sig={g[1] if len(g)>1 else '?'}")
                 elif name in ("gnome_shell", "gsd", "mutter_wm", "xorg_banner",
                               "session_bus", "start_gnome", "kernpanic", "oom",
-                              "gnome_session_died", "fallback_gs"):
+                              "gnome_session_died", "fallback_gs",
+                              "shell_started", "xterm_probe", "session_failed",
+                              "notify_sent"):
                     note(f"{name} {detail}".rstrip())
+                elif name.endswith("_trace"):
+                    # trace-event comm names fire on every sched_switch;
+                    # mark the milestone once, do not flood the markers
+                    pass
                     if name == "gnome_shell":
                         mark("M3_gnome_shell", detail)
                     elif name == "gsd":
@@ -246,6 +297,12 @@ def serial_reader():
                         mark("KERNEL_PANIC", detail)
                     elif name == "oom":
                         mark("OOM_LINE", detail)
+                    elif name == "notify_sent":
+                        # banner-burst trigger: runit just fired a
+                        # notification (expire 45s); take timed shots so
+                        # the banner check does not depend on the idle
+                        # 30s cadence.
+                        notify_burst.set()
         # consume scanned window to avoid re-matching every poll
         serial_buf = serial_buf[-4000:] if len(serial_buf) > 160_000 else serial_buf
 
@@ -268,6 +325,29 @@ threading.Thread(target=serial_reader, daemon=True).start()
 
 best_nonblack = 0.0
 dump_i = 0
+burst_until = -1     # banner-shot burst window (see notify_burst)
+last_burst = -100
+keyprobe = []
+for x in args.keyprobe.split(","):
+    x = x.strip()
+    if not x:
+        continue
+    if ":" in x:
+        t, k = x.split(":", 1)
+        keyprobe.append((int(t), k))
+    else:
+        keyprobe.append((int(x), "a"))
+keyprobe.sort(key=lambda e: e[0])
+# --jiggle FROM,EVERY,UNTIL parsed into a tuple + mutable loop state
+jiggle = ()
+if args.jiggle:
+    parts = [int(x) for x in args.jiggle.split(",") if x.strip()]
+    if len(parts) != 3:
+        p.error("--jiggle needs FROM,EVERY,UNTIL")
+    jiggle = tuple(parts)
+jiggle_state = [jiggle[0] if jiggle else 1 << 30, False]
+mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
+clickprobe = [int(x) for x in args.clickprobe.split(",") if x.strip()]
 qmp = None
 exit_reason = "timeout"
 try:
@@ -285,6 +365,125 @@ try:
                 print("[fire] qmp connected", flush=True)
             except Exception as e:
                 print(f"[fire] qmp connect: {e}", flush=True)
+        # --keyprobe 300,900[,1500:ret]: one keypress (press+release) via
+        # QMP send-key at each listed elapsed second (default key 'a',
+        # time:KEY overrides — 'ret' is the QAPI qcode for Enter).
+        # Deterministic positive control for dfx=inputtrace: the kernel
+        # INPTRC lines MUST show exactly these events (kbd code 30 for
+        # 'a', code 28 for 'ret') at these times; any other INPTRC line
+        # in a hands-off window is a phantom event.
+        while keyprobe and el >= keyprobe[0][0]:
+            kt, kk = keyprobe.pop(0)
+            if qmp:
+                try:
+                    # QAPI shape: KeyValue-qcode is {type:"qcode", data:"a"}
+                    # — data is a PLAIN STRING. The original probe sent
+                    # data:{"name":"a"} and QEMU rejected every send with
+                    # "Invalid parameter type for 'keys[0].data', expected:
+                    # string" — while fire.py still printed "sent" (the
+                    # error rode the response dict, not an exception), so
+                    # EVERY keyprobe since leg-6 was a no-op (leg-7 finding,
+                    # /tmp host A/B). Response errors are checked now.
+                    r = qmp.cmd("send-key",
+                                **{"keys": [{"type": "qcode", "data": kk}],
+                                   "hold-time": 50})
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s keyprobe QMP error: "
+                              f"{r['error'].get('desc')}", flush=True)
+                    else:
+                        print(f"[fire] t={el}s keyprobe '{kk}' sent", flush=True)
+                except Exception as e:
+                    print(f"[fire] t={el}s keyprobe error: {e}", flush=True)
+        # --mousemove 600: absolute pointer positioning via QMP
+        # input-send-event at the listed second. The virtio-tablet is an
+        # ABS device (kernel advertises 0..32767 per set_absinfo), so
+        # axis values are device coords: 16384 = center -> screen
+        # center ~ (640,400); the second pair jumps right-down to
+        # 26214/21299 -> ~ (1024,520). With the leg-7 static Xorg input
+        # sections the on-screen cursor sprite MUST appear near those
+        # spots in the following screendumps and INPTRC must show the
+        # ptr ABS_X/ABS_Y pushes — the end-to-end input positive
+        # control (the pre-input cursor idled at (1154,728), far from
+        # both targets).
+        while mousemove and el >= mousemove[0]:
+            mt = mousemove.pop(0)
+            if qmp:
+                try:
+                    r = qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 16384}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 16384}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s mousemove QMP error(1): "
+                              f"{r['error'].get('desc')}", flush=True)
+                    time.sleep(2)
+                    r = qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 26214}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 21299}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s mousemove QMP error(2): "
+                              f"{r['error'].get('desc')}", flush=True)
+                    print(f"[fire] t={el}s mousemove abs center+rightdown sent",
+                          flush=True)
+                except Exception as e:
+                    print(f"[fire] t={el}s mousemove error: {e}", flush=True)
+        # --clickprobe 900: abs-move to a point inside the probe xterm's
+        # body (480,380 screen -> device coords 12288/15564), then a
+        # left-button press + release, all in one input-send-event (QEMU
+        # applies the event list in order, so the click lands exactly
+        # there). Pairs with --keyprobe (type after): a click inside a
+        # window is what GNOME's click-to-focus needs, so the follow-up
+        # keystrokes land in the window's text field (r14live proved
+        # pointer+key kernel delivery but the unfocused xterm ate no
+        # glyph).
+        while clickprobe and el >= clickprobe[0]:
+            ct = clickprobe.pop(0)
+            if qmp:
+                try:
+                    r = qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 12288}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 15564}},
+                        {"type": "btn",
+                         "data": {"down": True, "button": "left"}},
+                        {"type": "btn",
+                         "data": {"down": False, "button": "left"}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={ct}s click QMP error: "
+                              f"{r['error'].get('desc')}", flush=True)
+                    else:
+                        print(f"[fire] t={ct}s click abs(480,380)+left "
+                              f"press+release sent", flush=True)
+                except Exception as e:
+                    print(f"[fire] t={ct}s click error: {e}", flush=True)
+        # --jiggle FROM,EVERY,UNTIL: alternate the pointer between two
+        # bottom-right corner positions (clear of the probe xterm at
+        # (150,172)-(1054,708)) — keeps gsd-power's idle monitor fed so
+        # the session does not blank to wallpaper mid-probe. Observed
+        # blanking: ~120-150 s after the last input (r14live ~1620s,
+        # r15stab ~1350s), and a later keystroke did not visibly unblank
+        # it — an interactive user wiggles the mouse instead; this does.
+        if qmp and jiggle and jiggle[0] <= el <= jiggle[2] \
+                and el >= jiggle_state[0]:
+            jiggle_state[0] = el + jiggle[1]
+            jx = 28157 if jiggle_state[1] else 28669
+            jiggle_state[1] = not jiggle_state[1]
+            try:
+                r = qmp.cmd("input-send-event", events=[
+                    {"type": "abs", "data": {"axis": "x", "value": jx}},
+                    {"type": "abs", "data": {"axis": "y", "value": 31948}}])
+                if isinstance(r, dict) and "error" in r:
+                    print(f"[fire] t={el}s jiggle QMP error: "
+                          f"{r['error'].get('desc')}", flush=True)
+                else:
+                    print(f"[fire] t={el}s jiggle abs "
+                          f"(~{jx * 1280 // 32767},{780}) sent", flush=True)
+            except Exception as e:
+                print(f"[fire] t={el}s jiggle error: {e}", flush=True)
         if qmp and el >= (dump_i + 1) * args.dump_every:
             dump_i += 1
             shot = os.path.join(OUT, f"shot-{el:04d}s.ppm")
@@ -309,6 +508,34 @@ try:
                     print(f"[fire] t={el}s screendump never materialized", flush=True)
             except Exception as e:
                 print(f"[fire] t={el}s screendump error: {e}", flush=True)
+        # notification-banner burst: NOTIFY-SENT just crossed the serial
+        # stream; the banner is up for 45s (expire-time). Take extra
+        # shots every 5s for the next 40s, kept under a banner- prefix
+        # so they are distinguishable from cadence shots even when
+        # fully black (a banner diff vs the neighboring cadence shots
+        # is the deterministic check; run/panelcheck.py).
+        if notify_burst.is_set():
+            notify_burst.clear()
+            burst_until = el + 40
+            print(f"[fire] t={el}s notify burst armed until +{burst_until}s",
+                  flush=True)
+        if qmp and el <= burst_until and el - last_burst >= 5:
+            last_burst = el
+            bshot = os.path.join(OUT, f"banner-{el:04d}s.ppm")
+            try:
+                if qmp.screendump(bshot):
+                    st = ppm_stats(bshot)
+                    if st:
+                        w, h, nb, tot, top, sig = st
+                        print(f"[fire] t={el}s banner {w}x{h} nonblack={nb}/{tot} "
+                              f"({100*nb//tot}%) sigcolors={sig} top={top}", flush=True)
+                        if nb == 0:
+                            os.unlink(bshot)
+                else:
+                    print(f"[fire] t={el}s banner screendump never materialized",
+                          flush=True)
+            except Exception as e:
+                print(f"[fire] t={el}s banner screendump error: {e}", flush=True)
 finally:
     print("[fire] stopping", flush=True)
     stop.set()

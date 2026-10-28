@@ -1,0 +1,55 @@
+pa73c leak-origin extract (488528dc + dfx=leakhunt,wwcensus, sweepstart=1290, 2026-10-28)
+full serial: run/pa73-underflow/serial-pa73c.log (gitignored, kept in worktree)
+
+-- LEAK-ORIGIN lines (pid 593 = 0x251, the waitid08 parent):
+      9 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=30
+      6 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=3
+      4 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=21
+      4 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:361 cnt_after=1 age_jif=2
+      3 LEAK-ORIGIN running pid=593 pc=65537 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=2
+      3 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=4
+      3 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=26
+      3 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=23
+      3 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:3176 cnt_after=257 age_jif=1
+      3 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=2
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=29
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=20
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=19
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=17
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:361 cnt_after=1 age_jif=1
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=1
+      2 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=0
+      1 LEAK-ORIGIN running pid=593 pc=65537 site=kernel/src/timer.rs:82 cnt_after=258 age_jif=0
+      1 LEAK-ORIGIN running pid=593 pc=65537 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=18
+      1 LEAK-ORIGIN running pid=593 pc=65537 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=1
+      1 LEAK-ORIGIN running pid=593 pc=65537 site=kernel/src/sched/sched.rs:4908 cnt_after=65538 age_jif=10
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=5
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=2
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sync/spinlock.rs:292 cnt_after=1 age_jif=1
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4908 cnt_after=65537 age_jif=30
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4908 cnt_after=65537 age_jif=20
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=9
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=7
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=6
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=27
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=24
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=22
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=2
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=18
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/sched/sched.rs:4124 cnt_after=1 age_jif=10
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:361 cnt_after=1 age_jif=3
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=3
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=20
+      1 LEAK-ORIGIN running pid=593 pc=65536 site=kernel/src/process/wait.rs:325 cnt_after=1 age_jif=12
+
+-- real-leak PREEMPT-LEAK samples (pctick=1):
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=0000000000000259jiffies rip=ffffffff800d2f22 pctick=0000000000000001
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=0000000000000372jiffies rip=ffffffff80307ebc pctick=0000000000000001
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=00000000000001c1jiffies rip=ffffffff80307e70 pctick=0000000000000001
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=00000000000002bbjiffies rip=ffffffff80307f1a pctick=0000000000000001
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=00000000000002e3jiffies rip=ffffffff8030802c pctick=0000000000000001
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000251 pc=0000000000010001 held_nonzero_for=00000000000002f7jiffies rip=ffffffff80104e98 pctick=0000000000000001
+
+-- heal/underflow pairing:
+64
+64
