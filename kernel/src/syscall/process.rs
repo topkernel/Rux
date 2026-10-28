@@ -491,39 +491,62 @@ const MAX_BINPRM_RECURSION: u32 = 4;
 
 /// Parse shebang (#!) line from file data.
 /// Returns (interpreter_path, optional_argument) if present.
-fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
+///
+/// Mirrors the reference kernel's fs/binfmt_script.c load_script():
+/// - the interpreter line is the first BINPRM_BUF_SIZE bytes, terminated
+///   at the first '\n' or at the buffer end (a 255-byte line with no
+///   newline is still a valid interpreter line, not an error);
+/// - trailing ' '/'\t' of the line are trimmed;
+/// - the interpreter name is the first word; the OPTIONAL ARGUMENT is
+///   the ENTIRE rest of the line after the separating whitespace run —
+///   including embedded spaces (`#!/usr/bin/env -S python3 -u` must
+///   hand env the single argument "-S python3 -u"; env -S then splits
+///   it). Truncating at the next whitespace dropped every word after
+///   the first, breaking the `env -S` script convention.
+/// - the whitespace class is ' ' and '\t' only (binfmt_script's checks
+///   are exactly these two bytes; a broader trim also diverges on
+///   exotic-but-legal interpreter paths).
+pub(crate) fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
     if data.len() < 2 || data[0] != b'#' || data[1] != b'!' {
         return None;
     }
 
-    let line = if let Some(pos) = data[2..BINPRM_BUF_SIZE.min(data.len())].iter().position(|&c| c == b'\n') {
-        core::str::from_utf8(&data[2..2 + pos]).ok()?
-    } else if data.len() >= BINPRM_BUF_SIZE {
-        return None; // line too long
+    let window = BINPRM_BUF_SIZE.min(data.len());
+    let raw = if let Some(rel) = data[2..window].iter().position(|&c| c == b'\n') {
+        &data[2..2 + rel]
     } else {
-        core::str::from_utf8(&data[2..]).ok()?
+        // No newline in the window: the line runs to the buffer end —
+        // same as binfmt_script (cp = buf + BINPRM_BUF_SIZE - 1).
+        &data[2..window]
     };
 
-    // Skip leading spaces after #!
-    let line = line.trim_start();
+    // binfmt_script first trims trailing spaces/tabs of the whole line.
+    let mut line_end = raw.len();
+    while line_end > 0 && (raw[line_end - 1] == b' ' || raw[line_end - 1] == b'\t') {
+        line_end -= 1;
+    }
+    let line = core::str::from_utf8(&raw[..line_end]).ok()?;
 
-    // Split into interpreter and optional single argument
-    if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
-        let interp = &line[..space_pos];
-        let rest = line[space_pos..].trim_start();
-        let arg = if rest.is_empty() { None } else {
-            Some(if let Some(end) = rest.find(|c: char| c == ' ' || c == '\t') {
-                &rest[..end]
+    // Skip leading spaces/tabs after "#!".
+    let line = line.trim_start_matches([' ', '\t']);
+
+    // Interpreter name = first word; optional argument = the WHOLE rest.
+    match line.find([' ', '\t']) {
+        Some(space_pos) => {
+            let interp = &line[..space_pos];
+            let rest = line[space_pos..].trim_start_matches([' ', '\t']);
+            if interp.is_empty() {
+                return None;
+            }
+            Some((interp, if rest.is_empty() { None } else { Some(rest) }))
+        }
+        None => {
+            if line.is_empty() {
+                None
             } else {
-                rest
-            })
-        };
-        if interp.is_empty() { return None; }
-        Some((interp, arg))
-    } else if line.is_empty() {
-        None
-    } else {
-        Some((line, None))
+                Some((line, None))
+            }
+        }
     }
 }
 
@@ -669,12 +692,38 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     Ok(envs)
 }
 
+/// EXECCOST (dfx=execcost, abi-review lane): per-stage execve cost
+/// breakdown in raw read_time() ticks. Two lines per exec — the ladder
+/// stages here, the image stages in do_execve_elf (EXECCOST2). Prints
+/// only when the switch is armed, and only for recursion depth 0
+/// (user-visible execs), rate-limited to the first 64 plus every 512th
+/// afterwards. Purpose: decompose the p4_fork_exec reference gap
+/// (~1.1 ms exec vs ~11 us reference median).
+fn execcost_armed(n: u64) -> bool {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost) {
+        return false;
+    }
+    n < 64 || n % 512 == 0
+}
+
 /// Core execve implementation: load and execute an ELF binary.
 /// Handles shebang (#!) scripts by recursing with the interpreter.
 fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::string::String], recursion_depth: u32) -> u64 {
     use crate::fs::elf::{ElfLoader, Elf64Ehdr};
     use alloc::string::String;
     use alloc::vec::Vec;
+
+    // EXECCOST: single rate-limit counter, armed check once.
+    static EXECCOST_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let ec_n = if recursion_depth == 0 {
+        EXECCOST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        u64::MAX
+    };
+    let ec = execcost_armed(ec_n);
+    let ec_t0: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    let (mut ec_path, mut ec_lookup, mut ec_read, mut ec_parse, mut ec_interp, mut ec_cred, mut ec_pre) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
 
     // EXECTRACE (dbus-activation hunt): activation children have been
     // observed dying with their FORK comm (never exec'd). Trace execs of
@@ -744,6 +793,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // target must carry at least one execute bit for the caller (EACCES —
     // even root needs one x bit). Reading the file raw from ext4 skipped
     // all of this and reported ENOENT/ENOEXEC instead (LTP execve03).
+    if ec { ec_path = crate::arch::cpu::read_time(); }
     match crate::fs::vfs::path_lookup(full_path.as_ref(), 0) {
         Ok(vp) => {
             let inode = vp
@@ -767,6 +817,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         }
         Err(e) => return (e as i64) as u64,
     }
+    if ec { ec_lookup = crate::arch::cpu::read_time(); }
 
     // Read file from file system. The read can fail TRANSIENTLY under
     // concurrent block I/O (same family as the PT_INTERP read below —
@@ -791,6 +842,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         Some(d) => d,
         None => return -errno::ENOENT as u64,
     };
+    if ec { ec_read = crate::arch::cpu::read_time(); }
 
     // Check for shebang (#!) script — binfmt_script behavior
     if let Some((interp, opt_arg)) = parse_shebang(&program_data) {
@@ -832,6 +884,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         Some(e) => e,
         None => return -errno::ENOEXEC as u64,
     };
+    if ec { ec_parse = crate::arch::cpu::read_time(); }
 
     // Check for PT_INTERP (dynamic executable)
     let mut interp_path_str: Option<&str> = None;
@@ -870,6 +923,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     } else {
         None
     };
+    if ec { ec_interp = crate::arch::cpu::read_time(); }
 
     // Build final argv (use provided argv, fallback to full_path if empty)
     let final_argv: Vec<String> = if argv.is_empty() {
@@ -1006,6 +1060,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             !name.starts_with("LD_")
         });
     }
+    if ec { ec_cred = crate::arch::cpu::read_time(); }
 
     // Execute ELF loading
     let phdr_count_usize = if phdr_count > 1024 {
@@ -1029,13 +1084,34 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // the /proc/<pid>/maps path column, never the exec.
     let exe_file_arc = open_file_arc(full_path.as_ref());
     let interp_file_arc = interp_path_str.and_then(open_file_arc);
+    if ec { ec_pre = crate::arch::cpu::read_time(); }
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
         crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
             crate::process::current_pid(),
             exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
     }
 
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
+    let elf_result = do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref());
+    let ec_t1: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    if ec {
+        crate::pr_info!(
+            "EXECCOST n={} pid={} path={} pstr={} lk={} rd={} parse={} it={} cred={} pre={} elf={} tot={} sz={}",
+            ec_n,
+            crate::process::current_pid(),
+            full_path.as_ref(),
+            ec_path - ec_t0,
+            ec_lookup - ec_path,
+            ec_read - ec_lookup,
+            ec_parse - ec_read,
+            ec_interp - ec_parse,
+            ec_cred - ec_interp,
+            ec_pre - ec_cred,
+            ec_t1 - ec_pre,
+            ec_t1 - ec_t0,
+            program_data.len() + interp_data.as_ref().map(|d| d.len()).unwrap_or(0)
+        );
+    }
+    match elf_result {
         Ok(()) => {
             // The image changed: the parent may no longer setpgid us
             // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
