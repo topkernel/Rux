@@ -381,15 +381,13 @@ fn ashmem_file_close(file: &crate::fs::file::File) -> i32 {
     0
 }
 
-/// /dev/ashmem file operations.
-pub static ASHMEM_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(ashmem_file_read),
-    write: None, // the Linux driver has no .write_iter either
-    lseek: Some(ashmem_file_lseek),
-    close: Some(ashmem_file_close),
-    poll: None,
-    read_at: None,
-};
+/// /dev/ashmem file operations. Write is a declared absence (the
+/// Linux driver has no .write_iter either).
+pub static ASHMEM_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(ashmem_file_read)
+    .lseek(ashmem_file_lseek)
+    .close(ashmem_file_close)
+    .build();
 
 /// True when `file` is an open /dev/ashmem description.
 pub fn is_ashmem_file(file: &crate::fs::file::File) -> bool {

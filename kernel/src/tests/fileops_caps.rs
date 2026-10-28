@@ -311,5 +311,57 @@ pub fn test_fileops_caps() {
         Expect { read: true, write: false, lseek: false, close: true, poll: false, read_at: false },
     );
 
+    // D-6 refactor-lane slice 5: the socket family and the ipc/device
+    // stragglers. Every socket flavor (inet/unix/raw/netlink) carries
+    // the stream set; the ioctl-only devices (access_token, io_uring,
+    // binder) carry ONLY close+poll — the epoll-family shape (read on
+    // them must take the central EINVAL path); ashmem is positional
+    // without write; tokenid is a plain write-control pair.
+    check(
+        "socket caps",
+        &crate::net::socket::SOCKET_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "unix socket caps",
+        &crate::net::unix::UNIX_SOCKET_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "raw socket caps",
+        &crate::net::raw::RAW_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "netlink socket caps",
+        &crate::net::netlink::NETLINK_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "access_token caps",
+        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "tokenid caps",
+        &crate::drivers::access_tokenid::TOKENID_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "ashmem caps",
+        &crate::drivers::ashmem::ASHMEM_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "io_uring caps",
+        &crate::io_uring::IO_URING_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "binder caps",
+        &crate::ipc::binder::BINDER_OPS,
+        Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
     check_errno_matrix();
 }

@@ -165,17 +165,17 @@ behavior-preserving fallbacks (both old fallback shapes reduce to the
 same event bits). First conversions: the §1 incident family
 (epoll/eventfd/timerfd/signalfd/pipe/inotify).
 
-**Known cost.** Opportunistic migration — ~21 struct-literal tables
-remain and still compile (D-4 procfile precedent); they convert as
-their areas are touched. The refactor lane's slice 3 converted the
-pseudo-filesystem cluster (devfs x7 incl. the null/zero/full/random
-char devices, pty x2, procfs, sysfs, debugfs, selinuxfs, rootfs,
-memfd, fifo, char_dev uart, cgroup, vfs mem-file — 19 tables) and
-slice 4 the streams/devices tail (kmsg x2, watchdog, evdev, fbdev,
-nsfile — 6 tables), each pinned in `fileops-caps`. What remains sits
-in guarded or lane-owned areas (net x4, binder, ashmem, access_token
-x2, io_uring, drm x2) and converts with their domain checks. The
-builder does not yet catch a FIRST
+**Known cost.** Opportunistic migration — the only struct-literal
+tables left are drm x2 (GNOME-lane files, convert when that lane
+rests); everything else builds (D-4 procfile precedent). The refactor
+lane converted: slice 3, the pseudo-filesystem cluster (devfs x7 incl.
+the null/zero/full/random char devices, pty x2, procfs, sysfs,
+debugfs, selinuxfs, rootfs, memfd, fifo, char_dev uart, cgroup, vfs
+mem-file — 19 tables); slice 4, the streams/devices tail (kmsg x2,
+watchdog, evdev, fbdev, nsfile — 6); slice 5, the socket family and
+ipc/device stragglers (inet/unix/raw/netlink sockets, access_token,
+tokenid, ashmem, io_uring, binder — 9), all pinned in `fileops-caps`.
+The builder does not yet catch a FIRST
 install of a capability a type should not have — that guard is the
 shape test, per converted type.
 

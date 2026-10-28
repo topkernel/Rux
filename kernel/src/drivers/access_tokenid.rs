@@ -48,14 +48,10 @@ fn tokenid_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
 }
 
 /// /dev/access_token_id file operations.
-pub static TOKENID_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(tokenid_read),
-    write: Some(tokenid_write),
-    lseek: None,
-    close: None,
-    poll: None,
-    read_at: None,
-};
+pub static TOKENID_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(tokenid_read)
+    .write(tokenid_write)
+    .build();
 
 /// True when `file` is an open /dev/access_token_id description.
 pub fn is_tokenid_file(file: &crate::fs::file::File) -> bool {
