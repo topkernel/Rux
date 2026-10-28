@@ -1363,6 +1363,80 @@ pub fn ext4_sync_file(
         let res = super::journal::ext4_journal_stop(&mut handle);
         let _ = journal; // Journal Arc retained for clarity
         res?;
+    } else {
+        // Route-1 (leg 52, item 3): with the null-journal handle armed in
+        // the write path, a journal-less fs defers the allocation
+        // metadata (block bitmaps, group descriptors, indirect/extent
+        // tree blocks) the old "synced eagerly at its write" text above
+        // assumed. fsync(F) must persist the metadata needed to
+        // RETRIEVE F's data — that set is: F's data blocks (synced
+        // above), F's inode slot (synced above), and, for
+        // INDIRECT-mapped files, the indirect-chain blocks that map
+        // them (synced below). Depth-0 extent files keep their mapping
+        // in the inode itself — nothing extra. Allocation bitmaps and
+        // group descriptors are NOT part of F's reachability: they are
+        // recomputable by e2fsck (the documented F4-R2 stance; Linux's
+        // own no-journal mounts leave them to writeback) and ride
+        // sync(2) / buffer-cache eviction.
+        //
+        // (The first cut of this arm flushed the whole device's dirty
+        // set under EXT4_BIG_LOCK — WRONG twice: O(world-dirty) per
+        // fsync is the sc310 anti-pattern, and the cache walk faulted
+        // on a concurrently-released BufferHead (pa92nj crash chain
+        // sync_all_excluding -> is_dirty -> state lock at null+0x30).
+        // The per-file set below walks no shared cache.)
+        if !inode.has_extent() {
+            // SAFETY: bio::bread returns valid BufferHeads; the indirect
+            // blocks are plain metadata blocks of this inode.
+            unsafe {
+                let mut chain = [0u64; 2];
+                if inode.block[12] != 0 {
+                    chain[0] = inode.block[12] as u64;
+                }
+                if inode.block[13] != 0 {
+                    chain[1] = inode.block[13] as u64;
+                }
+                for top in chain.iter() {
+                    if *top == 0 {
+                        continue;
+                    }
+                    let bh = match bio::bread(fs.device, *top) {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    // Sync the top-level indirect block itself.
+                    if (*bh).is_dirty() {
+                        let _ = bio::sync_dirty_buffer(bh);
+                    }
+                    // Double-indirect: sync each pointed single-indirect
+                    // block (they hold the data pointers).
+                    if *top == inode.block[13] as u64 {
+                        let ppc = (fs.block_size / 4) as usize;
+                        for i in 0..ppc {
+                            let v = {
+                                let src = &(*bh).b_data;
+                                let mut b4 = [0u8; 4];
+                                let end = (i * 4 + 4).min(src.len());
+                                if i * 4 < end {
+                                    b4[..end - i * 4]
+                                        .copy_from_slice(&src[i * 4..end]);
+                                }
+                                u32::from_le_bytes(b4) as u64
+                            };
+                            if v != 0 {
+                                if let Some(sb) = bio::bread(fs.device, v) {
+                                    if (*sb).is_dirty() {
+                                        let _ = bio::sync_dirty_buffer(sb);
+                                    }
+                                    bio::brelse(sb);
+                                }
+                            }
+                        }
+                    }
+                    bio::brelse(bh);
+                }
+            }
+        }
     }
 
     // NO whole-cache flush here (the old bio::sync_buffers() tail). It
@@ -1654,8 +1728,24 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             }
         }
 
+        // Route-1: defer the write on journal-less images unless the
+        // description demands write-return durability.
+        let defer_unjournaled = file.flags().bits()
+            & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC)
+            == 0;
         // SAFETY: fs/inode resolution above; buf is the caller's slice.
-        let written = unsafe { ext4_write_at_core(fs, ext4_ino, Some(inode), offset, buf, 0) };
+        let written = unsafe {
+            ext4_write_at_core(
+                fs,
+                ext4_ino,
+                Some(inode),
+                offset,
+                defer_unjournaled,
+                buf,
+                0,
+            )
+        };
         if written > 0 {
             let end = if offset == u64::MAX {
                 inode.size.load(core::sync::atomic::Ordering::Acquire)
@@ -1691,7 +1781,21 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
     };
     let data = core::slice::from_raw_parts(buf, count);
     // SAFETY: fs/inode resolution above; data is the caller's buffer.
-    unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, Some(inode), offset, data, 0) }
+    let defer_unjournaled = file.flags().bits()
+            & (crate::fs::file::FileFlags::O_SYNC
+                | crate::fs::file::FileFlags::O_DSYNC)
+            == 0;
+    unsafe {
+        ext4_write_at_core(
+            &*fs_ptr,
+            inode.ino as u32,
+            Some(inode),
+            offset,
+            defer_unjournaled,
+            data,
+            0,
+        )
+    }
 }
 
 /// Kernel-side positional write for callers with no VFS file description
@@ -1706,7 +1810,7 @@ pub fn ext4_kernel_write_at(
 ) -> isize {
     // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
     // locking and operates on (fs, ino) exactly like the fd paths.
-    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, buf, 0) }
+    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, 0) }
 }
 
 /// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
@@ -1752,6 +1856,12 @@ unsafe fn ext4_write_at_core(
     ext4_ino: u32,
     inode: Option<&crate::fs::inode::Inode>,
     offset: u64,
+    // Route-1 (leg 52, item 3): allow the write to run DEFERRED on a
+    // journal-less filesystem (see the handle arm below). The fd callers
+    // pass false for O_SYNC/O_DSYNC files; kernel-side writers and the
+    // page-cache flush path pass true (J-image parity — the journaled
+    // flush already defers under its handle today).
+    defer_unjournaled: bool,
     buf: &[u8],
     skip_update_pfn: u64,
 ) -> isize {
@@ -1764,8 +1874,20 @@ unsafe fn ext4_write_at_core(
     // Start a journal transaction for data=ordered semantics:
     // data blocks are synced during write, then the inode metadata is
     // committed to the journal with all data already on disk.
+    // Route-1 (leg 52, item 3, perf-report 8.10.20/8.10.22 + route map
+    // §5(a)): on a journal-less fs, arming the NULL-JOURNAL handle here
+    // turns every inline sync_dirty_buffer in this write (bitmap, group
+    // desc, extent tree, inode table) into a deferral — persistence
+    // moves to the standing durability points (fsync/sync_buffers/
+    // eviction), the J arm's proven ~88us append class instead of the
+    // measured ~1.95ms inline-sync class (pa85: NJ append 23.1x). The
+    // null handle's stop() commits nothing, so defer_unjournaled is
+    // FALSE for O_SYNC/O_DSYNC files — their write-return durability on
+    // NJ is today's inline sync and must not be deferred. Crash class:
+    // same write-back stance the NJ create/mkdir path already documents
+    // (journal.rs route-1 comment; recovery is e2fsck).
     let use_journal = fs.journal.is_some();
-    let mut journal_handle = match if use_journal {
+    let mut journal_handle = match if use_journal || defer_unjournaled {
         super::journal::ext4_journal_start(fs, 4)
     } else {
         Err(0)
@@ -1953,7 +2075,15 @@ pub fn ext4_flush_dirty_inode(
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
             // SAFETY: same inode/fs resolution discipline as write_vfs.
             let written = unsafe {
-                ext4_write_at_core(&*fs_ptr, inode.ino as u32, Some(inode), off, src, pfn)
+                ext4_write_at_core(
+                    &*fs_ptr,
+                    inode.ino as u32,
+                    Some(inode),
+                    off,
+                    true,
+                    src,
+                    pfn,
+                )
             };
             done[i] = (idx, pfn, written == n_bytes as isize);
         }
