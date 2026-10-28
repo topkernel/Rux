@@ -973,21 +973,26 @@ fn ext4_mkdir_no_journal(
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
-    // Best-effort publication of THIS mkdir's own deferred entry record
-    // (per-cookie scoped flush: the new inode's table/bitmap blocks,
-    // then the directory entry block). NOT fatal to the syscall. The old
-    // whole-cache sync_buffers here made every mkdir pay the WORLD's
-    // dirty buffers plus the global publication backlog — the
-    // storage-daemon D-state family under provisioning churn (leg-29A
-    // adjudication). Foreign records and unrelated dirty blocks ride the
-    // buffer-cache write-back as on any write-back mount; the per-block
-    // guards keep their ordering whenever they do reach disk. Foreign
-    // devices are never touched, so the r8 mkdtemp ENXIO storm shape
-    // (mkdir inheriting a dead loop device's writeback error) cannot
+    // Leg 53 (perf-report 8.10.23, the route map's fs lever): the
+    // post-mkdir scoped flush is DELETED. It drained THIS mkdir's own
+    // publication record (pre blocks, then the entry block) with
+    // synchronous round trips at every mkdir return — the 15.4-16.4ms
+    // p6_mkdrmdir median on BOTH journal arms. What it bought was EAGER
+    // DURABILITY at mkdir-return, which POSIX does not promise (entry
+    // durability belongs to fsync(dirfd) — see ext4_sync_file). Crash
+    // ORDERING (ghost-file, H1/H2) was never the inline drain's job: the
+    // per-block guards enforce it at every out-of-band write
+    // (sync_dirty_buffer, evict_one Phase 4, the journal commit's
+    // write-through), holding under ANY write order; the 2048-record
+    // high-water creator drain bounds the queue, and fsync/sync(2)/
+    // eviction remain the durability points (the J arm's lazy commit
+    // batches at 1024 buffers or h_sync). mkdir is now write-back-shaped
+    // exactly like the reference kernel; a crash mid-batch loses recent
+    // entries to the same degree a reference write-back mount does
+    // (e2fsck recovery, the documented F4-R2 stance). Foreign devices
+    // are never touched, so the r8 mkdtemp ENXIO storm shape cannot
     // recur here either.
-    if let Err(e) = bio::flush_publications_scoped() {
-        crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
-    }
+    crate::dfx::fsw::note_pub_lazy();
 
     Ok(new_ino)
 }
