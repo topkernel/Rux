@@ -98,6 +98,80 @@ extern "C" fn kswapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 // Reset counter and trigger OOM
                 KSWAPD_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
 
+                // DEEP PASS AT THE ESCALATION POINT (stress-fleet s18,
+                // leg 51 — the kswapd leg of the 8.10.19 deep-drain
+                // design). The 16 failed passes above each drained at
+                // most ~32 pages against a referenced wall; the s18
+                // evidence (OOM-FORENSIC #33) shows kills firing from
+                // here while 172 MB of clean file cache sat one list
+                // away, with ZERO OOM-DEEP-PASS lines — the page_alloc
+                // slowpath's deep drain (39a515a5) never ran because
+                // this escalation outran it (or the victim was the
+                // task inside the slowpath itself). Before killing, run
+                // the SAME deep drain the slowpath runs before its
+                // `return 0`: chunked shrink past the wall + bulk
+                // active-list demotion. Same context class as kswapd's
+                // own balance_pgdat → shrink_reclaim (task context, no
+                // spinlocks, no PteLock; the IN_DIRECT_RECLAIM gate
+                // serializes DIRECT reclaimers only and must NOT be
+                // waited on here — kswapd draining concurrently with a
+                // direct reclaimer is the pre-existing balance_pgdat
+                // concurrency shape).
+                //
+                // Escalation-gated by construction: this branch runs
+                // only after 16 consecutive zero-reclaim passes, which
+                // standard boots never produce — the DEEP_PASS counters
+                // stay zero on the Tier-1 census (drct=0 discipline).
+                let mut deep_freed = 0usize;
+                if let Some(node) = unsafe { first_online_node_mut() } {
+                    for zt in [
+                        super::zone::ZoneType::ZoneNormal,
+                        super::zone::ZoneType::ZoneDma32,
+                        super::zone::ZoneType::ZoneDma,
+                    ] {
+                        if let Some(zone) = node.zone(zt) {
+                            if !zone.is_initialized() {
+                                continue;
+                            }
+                            // Same sizing contract as the page_alloc leg:
+                            // the zone's WMARK_LOW shortfall (plus the
+                            // request), clamped to the drain's bounds.
+                            let wmark_low =
+                                zone.watermark(super::zone::WMARK_LOW);
+                            let shortfall = wmark_low
+                                .saturating_add(1usize << order.max(0))
+                                .saturating_sub(zone.nr_free());
+                            let deep_target = shortfall.clamp(32, 8192);
+                            deep_freed +=
+                                super::vmscan::drain_file_cache_before_oom(
+                                    deep_target,
+                                );
+                            break; // one zone's shortfall sizes the drain
+                        }
+                    }
+                }
+                if deep_freed > 0 {
+                    // The escalation was premature: real pages were
+                    // one wall away and the drain just freed them. The
+                    // failure counter is already reset above; skip the
+                    // kill on this wake and let the loop re-check
+                    // watermarks against the freed pages. A genuinely
+                    // dry pool returns 0 here (verified by the drain's
+                    // own break-on-no-progress) and falls through to
+                    // the OOM below.
+                    if let Some(current) = crate::sched::current() {
+                        unsafe {
+                            (*current).set_state(
+                                crate::process::task::TaskState::new(
+                                    crate::process::task::TaskState::INTERRUPTIBLE,
+                                ),
+                            );
+                        }
+                    }
+                    crate::sched::schedule();
+                    continue;
+                }
+
                 // SAFETY: kswapd is the only reclaim thread; exclusive node access.
                 if let Some(node) = unsafe { first_online_node_mut() } {
                     // Find total pages from any initialized zone
