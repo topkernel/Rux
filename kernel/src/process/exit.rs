@@ -648,7 +648,12 @@ pub fn do_exit(exit_code: i32) -> ! {
             }
             static NW: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            // leg-40C: 80 -> 400 — the whole budget was consumed by
+            // service-thread exits before the launcher spawned (sc344:
+            // 80/80 by serial line 29581, spawn at 64594), so the
+            // hicollie watchdog worker exit of the launcher/honydata
+            // mains was never captured.
+            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
                 let nc = core::str::from_utf8((*current).comm())
                     .unwrap_or("")
                     .trim_end_matches('\0');
