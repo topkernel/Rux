@@ -91,9 +91,9 @@ STATUS = {
     "kernel/src/fs/dentry.rs": ("part", "per-directory locking"),
     "kernel/src/fs/devfs/mod.rs": ("todo", ""),
     "kernel/src/fs/ext4/dir.rs": ("part", "directory ops"),
-    "kernel/src/fs/ext4/extent.rs": ("todo", ""),
-    "kernel/src/fs/ext4/file.rs": ("part", "read/write/fsync paths"),
-    "kernel/src/fs/ext4/inode.rs": ("part", "inode table"),
+    "kernel/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
+    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); write body/alloc/lseek/fsync from earlier sessions"),
+    "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
     "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount"),
     "kernel/src/fs/ext4/namei.rs": ("todo", ""),
@@ -324,7 +324,7 @@ STATUS = {
     "kernel/src/fs/dev_t.rs": ("todo", ""),
     "kernel/src/fs/devfs/registry.rs": ("todo", ""),
     "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1): Ehdr/Phdr parsing, validate/load/load_dynamic_to; interp BSS double-zero removed"),
-    "kernel/src/fs/ext4/allocator.rs": ("todo", ""),
+    "kernel/src/fs/ext4/allocator.rs": ("part", "geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending"),
     "kernel/src/fs/ext4/csum.rs": ("todo", ""),
     "kernel/src/fs/ext4/indirect.rs": ("todo", ""),
     "kernel/src/fs/ext4/superblock.rs": ("todo", ""),
@@ -459,6 +459,28 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("b70a5deb", "kernel/src/fs/ext4/extent.rs",
+     "Three defects in the extent engine. (1) ext4_ext_insert_written's external-leaf merge had "
+     "NEITHER the unwritten-state check NOR the u15 headroom check append_node has: a written "
+     "insert landing right after a trailing UNWRITTEN extent (physically contiguous) cleared bit "
+     "15 of ee_len, marking the whole never-materialized fallocate preallocation WRITTEN — reads "
+     "then served disk garbage instead of zeros (Linux ext4_can_extents_be_merged rejects mixed "
+     "states); the same site's '(len + len) & 0x7FFF' silently TRUNCATED an overflowing length "
+     "instead of refusing the merge. (2) insert_written_inline's 'ee_len += len' without the "
+     "headroom check wraps a max-length (0x7FFF) written extent into a ZERO-length unwritten "
+     "one. (3) find_covering_leaf_blk indexed idxs[0] of an EMPTY index root (eh_entries=0, "
+     "depth>=1, corrupt/stale tree) — kernel panic; now Ok(0) (hole)."),
+    ("070770d6", "kernel/src/fs/ext4/file.rs, kernel/src/fs/ext4/mod.rs, kernel/src/fs/ext4/allocator.rs",
+     "Three line-review fixes in the read/fill region. (1) ext4_file_read_cached_dst's sync "
+     "fallback folded get_data_block's Err into the hole arm via unwrap_or(0): a failing "
+     "extent/bitmap read served ZEROES for real data — Err is now EIO (Linux propagates "
+     "ext4_map_blocks errors). (2) Ext4FileSystem::read_inode addressed the inode table with "
+     "bg_inode_table_lo only — every inode of a >2^32-block (64BIT) filesystem resolved to the "
+     "wrong disk location; now lo|hi<<32 like the four inode.rs twins. (3) allocator.rs's six "
+     "bitmap-addressing sites (bg_block_bitmap_lo x4, bg_inode_bitmap_lo x2) same class, now "
+     "lo|hi<<32 (the mount parse already populates the hi halves). Note: no write path "
+     "recomputes metadata_csum checksums — fenced, not a live defect: KNOWN_RO_COMPAT refuses "
+     "metadata_csum rw mounts; the OH policy path mounts such fs read-only."),
     ("92377595", "kernel/src/arch/riscv64/mm/page_fault.rs",
      "R-SC-RV64: the riscv64 file-fault path re-derived (vma_start, file, effective_size) in FOUR "
      "separately locked lookups (SIGBUS gate, shared-alias resolution, private cache pin, fill arm); "
