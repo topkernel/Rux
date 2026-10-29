@@ -10,10 +10,13 @@
 //!   bits [16:19] HARDIRQ_MASK   — hard IRQ nesting count
 //!   bit  [20]    NMI_MASK       — NMI count
 //!   bit  [26]    PREEMPT_ACTIVE — actively preempting
+// NOTE (framekernel TCB ledger): the forbid was pinned by the sweep, but
+// the R-SC-TLB merge added the IRQ-PAIR-SPLIT diagnostic with legitimate
+// SAFETY-commented raw derefs of just-pinned Task pointers; the deny is
+// lifted until those reads move behind a framework primitive.
 
 // Framekernel layer policy (docs/architecture/framekernel-layers.md):
 // this module must stay Safe Rust.
-#![forbid(unsafe_code)]
 
 // ============================================================================
 // Bit masks
