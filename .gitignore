@@ -145,3 +145,7 @@ oh-boot-tmp.sh
 run/suite/
 kernel/src/config.rs
 run/**/*.started
+
+# fleet evidence logs are lane-local scratch (untracked 2026-10-29)
+run/fleet/logs/*.wedge
+run/fleet/sweep-latest.txt
