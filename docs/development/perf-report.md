@@ -3606,3 +3606,25 @@ fix before the whole-table refresh; the OH re-sample kernel is
 run/pa98-release-strong-bzImage (md5 5890d74d1f0d, carries GRQ + namei
 A + everything except the two bisection reverts, which are themselves
 reverted).
+
+**Line-review's four pcache-B gaps folded into the stage-1 design
+(their audit = the independent correctness check 8.10.27 asked for;
+all four accepted, the design note is amended by reference):**
+(1) insert-eviction nesting — insert's eviction loop holding inode-A's
+lock must not evict inode-B's entries under it: collect-under-lock /
+act-after-unlock, or try_lock-only under insert (skip the eviction
+when the victim's lock is held — the high-water drain catches up);
+(2) CORRECTION accepted: put/put_by_key/flush_done remove the empty
+inode entry from the GLOBAL map on EVERY last unmap — the per-inode →
+global ordering is HOT-PATH, not "rare" as 8.10.27 sketched. The order
+is now explicit and total: PER-INODE LOCK BEFORE GLOBAL LOCK, ALWAYS,
+both directions of the put/invalidate pair; no path takes global then
+per-inode; (3) concurrent-evictor serialization — the global lock
+accidentally serialized kswapd shrink vs insert-evictions; under B the
+LRU walk + stale-frame free get a dedicated single evict mutex (one
+evictor at a time, try_lock on the insert side so faults never block
+behind a reclaim walk); (4) prerequisite on main: the coherent
+(fs_id, ino, index) VMA snapshot is 92377595 (R-SC-RV64), merged — my
+081a01d3 sync carries it. Stage-1 implementation order updated:
+snapshot verification (already merged) → the three locking rules →
+the P3d before-row.
