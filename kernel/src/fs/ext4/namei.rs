@@ -578,35 +578,6 @@ static ENTRY_MUTEX: crate::sync::semaphore::Mutex =
 ///
 /// Checks both free space within existing entries and deleted entries
 /// (inode==0) that can be reused.
-/// Leg-56B Option A: inline u64-chunk equality for short names — no
-/// memcmp call. Full-width chunk equality is endian-independent (both
-/// sides are read as raw little-endian u64s and compared for EQUALITY,
-/// which is order-independent); only the sub-8-byte tail is per-byte.
-/// Both slices must have equal len (callers length-check first).
-#[inline]
-fn name_chunks_eq(a: &[u8], b: &[u8]) -> bool {
-    debug_assert_eq!(a.len(), b.len());
-    let len = a.len();
-    let mut i = 0usize;
-    // Full 8-byte chunks.
-    while i + 8 <= len {
-        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
-        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        if x != y {
-            return false;
-        }
-        i += 8;
-    }
-    // Tail (0-7 bytes).
-    while i < len {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Option<usize> {
     let mut offset = 0;
     let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
@@ -1559,17 +1530,10 @@ fn find_dir_entry(
 
             let entry_name_len = block_data[offset + 6] as usize;
 
-            // Compare name. Leg-56B Option A (perf-report 8.10.27): the
-            // entry loop's per-candidate cost was a memcmp CALL per entry
-            // (the grind's memcmp/bcmp page share) — most entries mismatch
-            // in the first 8 bytes, so compare full u64 chunks inline
-            // first (equality of full-width chunks is endian-independent:
-            // both sides read the same order) and only byte-compare the
-            // 0-7 byte tail. Names are 8-20 bytes in the load-phase shape;
-            // the call+prologue was a third of the compare cost.
+            // Compare name
             if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
                 let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
-                if name_chunks_eq(entry_name, name) {
+                if entry_name == name {
                     return Ok((block_nr, offset, ino));
                 }
             }
