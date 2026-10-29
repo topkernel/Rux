@@ -82,6 +82,20 @@ _start:
 
 .Lat_el1:
     EARLY_PUTC 'B'
+    // Publish the embedded DTB's address (QEMU's ELF -kernel boot zeroes
+    // x0, so there is no firmware pointer to save — see the blob embed).
+    adrp    x19, aarch64_virt_dtb
+    add     x19, x19, :lo12:aarch64_virt_dtb
+    adrp    x1, dtb_pointer
+    add     x1, x1, :lo12:dtb_pointer
+    str     x19, [x1]
+    // Enable FP/SIMD at EL1/EL0 (CPACR_EL1.FPEN = 0b11): core::mem::zeroed
+    // and friends emit NEON stores (movi/str q0); without this every such
+    // instruction traps with EC=7 and the boot dies in its first memset.
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(0b11 << 20)
+    msr     cpacr_el1, x0
+    isb
     // Park the vector base early so any early fault lands somewhere
     // visible instead of VA 0x200 (physical address; valid pre-MMU and
     // via the identity map afterwards)
