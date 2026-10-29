@@ -505,7 +505,12 @@ impl Ext4FileSystem {
         // Calculate inode block number. Bounds-check the offset against
         // the block: reading a 172-byte on-disk inode at the last slot of
         // a block must stay inside the buffer (review EXT4-M1).
-        let inode_table_start = gd.bg_inode_table_lo as u64;
+        // lo|hi<<32 like the inode.rs twins (review EXT4-64BIT): the
+        // inode-table block number is a 64-bit value on a 64BIT fs — the
+        // lo-only read sent every inode of a >2^32-block filesystem to the
+        // wrong disk location.
+        let inode_table_start =
+            (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32);
         let inodes_per_block = self.block_size / (self.inode_size as u32);
         if inodes_per_block == 0 {
             return Err(errno::Errno::IOError.as_neg_i32());

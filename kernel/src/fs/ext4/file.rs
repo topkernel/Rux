@@ -371,7 +371,16 @@ fn ext4_file_read_cached_dst(
         // an ALLOCATED-but-uncached page gets a synchronous single-block
         // read here; only true holes (block 0) zero-fill.
         if cache.get(fs_id, ino, page_index).is_none() {
-            let block_nr = inode.get_data_block(fs, page_index).unwrap_or(0);
+            // Distinguish a HOLE (Ok(0) — zero-fill, the sparse contract)
+            // from a metadata ERROR (Err — the extent/bitmap read failed):
+            // the old unwrap_or(0) folded both into the hole arm and served
+            // ZEROS for real data on a failing extent read (Linux returns
+            // the ext4_map_blocks error as EIO — ext4_file_read_iter's
+            // error-is-error discipline).
+            let block_nr = match inode.get_data_block(fs, page_index) {
+                Ok(b) => b,
+                Err(_) => return Err(errno::Errno::IOError.as_neg_i32()),
+            };
             if block_nr != 0 {
                 // SAFETY: bio::bread returns a valid pinned BufferHead on
                 // success; b_data points to a block-sized buffer.
