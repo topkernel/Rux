@@ -394,10 +394,13 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
         " esr={:#x} far={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}\n",
         regs.esr, regs.far, regs.regs[0], regs.regs[1], regs.regs[2], regs.regs[3]
     );
-    for i in (4..30).step_by(4) {
+    for i in (4..31).step_by(4) {
         let _ = write!(w, " ");
         for j in 0..4 {
-            let _ = write!(w, "x{}={:#x} ", i + j, regs.regs[i + j]);
+            let idx = i + j;
+            if idx < 31 {
+                let _ = write!(w, "x{}={:#x} ", idx, regs.regs[idx]);
+            }
         }
         let _ = write!(w, "\n");
     }
