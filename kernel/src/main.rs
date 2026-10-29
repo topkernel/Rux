@@ -1180,8 +1180,8 @@ extern "C" fn boot_stack_continuation() -> ! {
 #[cfg(feature = "aarch64")]
 use core::arch::global_asm;
 
-#[cfg(feature = "aarch64")]
-// boot/boot.S is assembled by build.rs and linked as the first object (duplicate _start otherwise).
+// boot/boot.S is assembled by build.rs and linked as the first object
+// (duplicate _start otherwise).
 
 // aarch64/trap.S is included from arch/aarch64/trap.rs via global_asm!
 // (it needs the PtRegs frame offsets interpolated from Rust constants).
@@ -1223,6 +1223,8 @@ use core::arch::global_asm;
 const KERNEL_RESERVE_SIZE: usize = 0x160_0000; // 22MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+#[cfg(feature = "aarch64")]
+const KERNEL_RESERVE_SIZE: usize = 0x1800_000; // 24MB static window (the aarch64 reserve arm below uses its own top)
 /// Effective (RAM-clamped) static-region sizes computed by the early
 /// boot block from the discovered memory map (layout.rs
 /// effective_static_regions). HEAP_SIZE_EFF feeds the heap buddy's
@@ -1413,6 +1415,7 @@ pub extern "C" fn rust_main() -> ! {
             mm::memblock_add(region.base, region.size).ok();
         }
 
+
         // OH Phase 1 prereq: discover the boot initrd (QEMU `-initrd` puts
         // linux,initrd-start/end into /chosen) and reserve its pages BEFORE
         // the zone allocator exists — init_zone_system hands every
@@ -1486,6 +1489,14 @@ pub extern "C" fn rust_main() -> ! {
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
         #[cfg(feature = "x86_64")]
         mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
+        // aarch64: image window + bring-up heap + slab — without this
+        // memblock_find_in_range hands out the RAM base and vmemmap's
+        // zeroing wipes the running kernel (the silent-boot hang).
+        #[cfg(feature = "aarch64")]
+        {
+            const AARCH64_STATIC_TOP: usize = 0x4280_0000 + (128 << 20) + (4 << 20);
+            mm::memblock_reserve(0x4000_0000, AARCH64_STATIC_TOP - 0x4000_0000).ok();
+        }
         if heap_size > 0 {
             mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
         }
