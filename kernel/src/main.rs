@@ -750,15 +750,23 @@ pub fn rust_main_tail() -> ! {
                 print_status("fs", "debugfs mounted /sys/kernel/debug", ok);
             }
 
-            // cgroup v2 unified hierarchy (U1b) — systemd's hard
-            // dependency: mount cgroup2 at /sys/fs/cgroup after the
-            // sysfs/procfS boot mounts. The hierarchy root exposes
-            // cgroup.controllers ("cpu memory pids") and a writable
-            // cgroup.procs, which systemd's boot probe requires.
+            // cgroup v2 unified hierarchy (U1b). init ALWAYS registers
+            // the filesystem type (`mount -t cgroup2` from userspace —
+            // what real systemd does for itself). The BOOT pre-mount is
+            // OPT-IN via `cgroup2pre` (gdm bring-up r17b): reference
+            // kernels never mount cgroupfs — a kernel-pre-mounted
+            // /sys/fs/cgroup whose root node lists EVERY task, plus an
+            // always-populated /proc/[pid]/cgroup, made udevd (spawned
+            // by pid 1 with sd_booted()>0) record the ROOT cgroup as
+            // its own; its on_post() idle cleanup then cg_kill()ed the
+            // entire daemon set. With the pre-mount off and no
+            // userspace mount, /proc/self/cgroup reads empty and
+            // cg_pid_get_path() answers -ENOMEDIUM — udevd records no
+            // cgroup and never sweeps.
             {
                 let cg_init = fs::cgroup::init_cgroupfs();
                 print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
-                if cg_init.is_ok() {
+                if cg_init.is_ok() && crate::cmdline::has_param("cgroup2pre") {
                     // The mount point chain must already exist in the
                     // dentry tree WITH inodes (the debugfs precedent
                     // above): vfs_mount walks the path and creates
@@ -1677,11 +1685,15 @@ fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
     }
 
     // Re-link cgroup2 after ext4 overlay (U1b, same defensive re-mount
-    // as procfs above). Pre-lookup first: the boot-time mount already
-    // populated the chain, but this re-mount must not fabricate bare
-    // dentries if the overlay reset it.
-    let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-    let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+    // as procfs above) — only when the boot pre-mount ran (`cgroup2pre`;
+    // gdm bring-up r17b: reference kernels never mount cgroupfs, see the
+    // boot-mount site above). Pre-lookup first: the boot-time mount
+    // already populated the chain, but this re-mount must not fabricate
+    // bare dentries if the overlay reset it.
+    if crate::cmdline::has_param("cgroup2pre") {
+        let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
+        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+    }
 }
 
 // Panic handler — uses dfx::backtrace for all output

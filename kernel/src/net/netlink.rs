@@ -1106,20 +1106,42 @@ pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, boo
     Some((socket, nonblock))
 }
 
-/// Write a sockaddr_nl { AF_NETLINK, pid=0(kernel), groups=0 } to user.
+/// Write a sockaddr_nl { AF_NETLINK, pid=0(kernel), groups } to user —
+/// the recvmsg/recvfrom SOURCE address of a kernel-originated message.
+///
+/// For NETLINK_KOBJECT_UEVENT every message IS a kernel multicast to
+/// group 1, and receivers gate on exactly that: sd-device-monitor
+/// treats nl_groups == 0 as unicast and DISCARDS the message
+/// ("Unicast netlink message ignored" — udevd dropped the whole
+/// coldplug: empty udev db, no master-of-seat tags, no seat0; gdm
+/// bring-up gdmr19). Linux's netlink_recvmsg hands multicast receivers
+/// the destination group in the source sockaddr; groups=0 stays
+/// correct for rtnetlink replies (unicast kernel answers).
 /// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
-pub unsafe fn put_sockaddr_nl(addr_ptr: *mut u8, addrlen_ptr: *mut u32) {
-    put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, 0);
+pub unsafe fn put_sockaddr_nl(addr_ptr: *mut u8, addrlen_ptr: *mut u32, groups: u32) {
+    put_sockaddr_nl_bound_groups(addr_ptr, addrlen_ptr, 0, groups);
 }
 
 /// Write a sockaddr_nl { AF_NETLINK, pid=portid, groups=0 } to user
 /// (getsockname on a bound netlink socket).
 /// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
 pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, portid: u32) {
+    put_sockaddr_nl_bound_groups(addr_ptr, addrlen_ptr, portid, 0);
+}
+
+/// Write a full sockaddr_nl { AF_NETLINK, pid=portid, groups=groups }.
+/// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
+pub unsafe fn put_sockaddr_nl_bound_groups(
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    portid: u32,
+    groups: u32,
+) {
     use crate::arch::uaccess::{copy_to_user, put_user};
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
+    buf[8..12].copy_from_slice(&groups.to_le_bytes());
     let _ = copy_to_user(addr_ptr, buf.as_ptr(), SOCKADDR_NL_LEN);
     let _ = put_user(addrlen_ptr, SOCKADDR_NL_LEN as u32);
 }
