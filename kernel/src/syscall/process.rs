@@ -644,6 +644,19 @@ pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
     // the fd-free kernel open (same as open_file_arc_nofd).
     let file = unsafe { crate::fs::vfs::open_file_arc_from_vpath(&vpath) }
         .ok_or(-(errno::EACCES as i32))?;
+    // ETXTBSY (Linux deny_write_access after may_open; LTP execve04): a
+    // regular file some open description still holds for writing must
+    // not be executed — the new text would alias a concurrent writer's
+    // bytes. The lease layer's per-inode writer counts are the
+    // i_writecount analogue; our own read-only open above is not a
+    // writer, so the check cannot self-trigger. Regular files only:
+    // non-regular targets fail exec earlier (directory EACCES above,
+    // devices ENOEXEC at validate) and a busy device is not ETXTBSY.
+    if inode.mode.is_regular_file()
+        && crate::fs::locks::inode_write_open_count(&inode) > 0
+    {
+        return Err(-(errno::ETXTBSY as i32));
+    }
     use core::sync::atomic::Ordering::Relaxed;
     Ok(ExecFile {
         file,
