@@ -453,12 +453,19 @@ pub fn rust_main_tail() -> ! {
             // Re-read memory regions (riscv64 re-parses the FDT via the
             // linear mapping; the x86_64 multiboot copy in BSS is always
             // valid, so just rebuild the list)
-            #[cfg(any(feature = "riscv64", feature = "aarch64"))]
+            #[cfg(feature = "riscv64")]
             let memory_regions = {
                 let dtb_phys = arch::boot::get_dtb_pointer();
                 let dtb_virt = arch::mm::phys_to_virt(
                     arch::mm::PhysAddr::new(dtb_phys)
                 ).bits();
+                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+            };
+            // aarch64: dtb_pointer holds the embedded blob's LINKED VA —
+            // walk it directly; phys_to_virt would mistranslate.
+            #[cfg(feature = "aarch64")]
+            let memory_regions = {
+                let dtb_virt = arch::boot::get_dtb_pointer();
                 unsafe { cmdline::parse_memory_regions(dtb_virt) }
             };
             #[cfg(feature = "x86_64")]
@@ -1539,6 +1546,17 @@ pub extern "C" fn rust_main() -> ! {
 
         // Setup linear mapping (PAGE_OFFSET region)
         arch::mm::setup_linear_mapping(&memory_regions);
+
+        // aarch64 bring-up (port plan stage 2): the heap window is now
+        // covered by the linear map; initialize the buddy with a
+        // conservative window that is real RAM on every -m we boot. The
+        // precise clamp below re-derives layout numbers, but init_sized is
+        // idempotent-guarded, so this stands as the definitive init.
+        #[cfg(feature = "aarch64")]
+        {
+            const BRINGUP_HEAP: usize = 128 * 1024 * 1024;
+            mm::init_heap_sized(BRINGUP_HEAP);
+        }
 
         // Now switch to fixmap stage (linear mapping is available)
         arch::mm::pt_ops_set_fixmap();
