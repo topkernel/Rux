@@ -481,8 +481,18 @@ fn read_u32(data: &[u8]) -> Option<u32> {
 pub struct NetlinkSocket {
     /// NETLINK_ROUTE
     pub protocol: i32,
-    /// Assigned port id (the creating pid)
+    /// Assigned port id (the creating pid, or the bind-time nl_pid)
     pub portid: u32,
+    /// Multicast subscription mask (bit N-1 set = group N joined).
+    /// Linux keeps this in nlk->groups and netlink_broadcast delivers
+    /// only to sockets whose mask covers the destination group
+    /// (netlink_lookup's subscription test). uevent monitors subscribe
+    /// at bind() — sd-device-monitor binds sockaddr_nl.nl_groups =
+    /// MONITOR_GROUP_KERNEL(1) for raw kernel events or
+    /// MONITOR_GROUP_UDEV(2) for processed ones. Without the mask the
+    /// udev-group forward would also land on udevd's kernel-group
+    /// socket (a "libudev"-framed message on the raw-event path).
+    pub groups: core::sync::atomic::AtomicU32,
     /// Receive queue of complete response messages (one per recv).
     recv_queue: Spinlock<VecDeque<Vec<u8>>>,
     /// Closed flag (EOF for blocked receivers).
@@ -501,11 +511,22 @@ impl NetlinkSocket {
         Self {
             protocol,
             portid: crate::sched::get_current_pid(),
+            groups: core::sync::atomic::AtomicU32::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             closed: Spinlock::new(false),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
         }
+    }
+
+    /// bind(2): adopt the sockaddr_nl multicast subscription mask
+    /// (nlk->groups). The nl_pid is NOT adopted: kernel-side portid
+    /// tracking is implicit (no portid-routed unicast table exists —
+    /// sends route by protocol), and callers here always bind pid=0
+    /// (kernel-assigned), which must not overwrite the creating pid.
+    pub fn bind_groups(&self, groups: u32) {
+        self.groups
+            .store(groups, core::sync::atomic::Ordering::Release);
     }
 
     /// W3: SO_RCVTIMEO as an absolute jiffies deadline.
@@ -917,6 +938,41 @@ pub fn uevent_broadcast(payload: &[u8]) {
         }
         None => false, // socket closed — drop the listener
     });
+}
+
+/// Userspace MULTICAST send — the monitor protocol's transmit half.
+///
+/// A sender addressing a nonzero nl_groups destination (systemd's
+/// device_monitor_send_device(): iov = "libudev" monitor header +
+/// property NULstr, destination sockaddr_nl{nl_pid=0,
+/// nl_groups=MONITOR_GROUP_UDEV}) re-broadcasts a PROCESSED device to
+/// every socket SUBSCRIBED to that group (Linux netlink_broadcast →
+/// netlink_lookup filters on nlk->groups; the bind-time mask is stored
+/// in NetlinkSocket::groups). The payload carries no nlmsghdr — it is
+/// pushed verbatim like uevent_broadcast, and must never reach
+/// netlink_send's rtnetlink request parser (the "libu" prefix reads as
+/// a huge bogus nlmsg_len → EINVAL — gdmr22: udevd's "Failed to send
+/// device to netlink monitor: Invalid argument", so logind's monitor
+/// never saw a tagged card0). Linux's netlink_broadcast does not
+/// deliver a multicast back to the sending socket — Arc identity skips
+/// it here.
+pub fn netlink_multicast_send(sender: &Arc<NetlinkSocket>, payload: &[u8], groups: u32) -> usize {
+    let mut listeners = UEVENT_LISTENERS.lock();
+    let mut delivered = 0usize;
+    listeners.retain(|weak| match weak.upgrade() {
+        Some(sock) => {
+            if !Arc::ptr_eq(&sock, sender)
+                && sock.groups.load(core::sync::atomic::Ordering::Acquire) & groups != 0
+            {
+                sock.recv_queue.lock().push_back(payload.to_vec());
+                sock.wait_queue.wake_up_all();
+                delivered += 1;
+            }
+            true
+        }
+        None => false, // socket closed — drop the listener
+    });
+    delivered
 }
 
 // ============================================================================

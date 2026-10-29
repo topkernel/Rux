@@ -41,6 +41,13 @@ pub enum DevEntryType {
     /// creates real files in it — OH's parameter service keeps its
     /// shared workspace under /dev/__parameters__).
     RegularFile,
+    /// Symbolic link (devtmpfs semantics: udev maintains alias links
+    /// like /dev/char/226:0 -> ../dri/card0 and /dev/dri/by-path/... ->
+    /// ../card0; event processing ABORTS when the link cannot be
+    /// created — gdmr22: "Failed to process device, ignoring: Read-only
+    /// file system", so card0 never landed in the udev db and seat0
+    /// never got master-of-seat). Target bytes live in `data`.
+    Symlink,
 }
 
 /// devfs directory entry
@@ -144,6 +151,26 @@ impl DevfsEntry {
         }
     }
 
+    /// Create symbolic link (devtmpfs semantics). The target bytes are
+    /// stored in `data` (same store regular files use); size is the
+    /// target length, as stat(2) reports for symlinks. Linux creates
+    /// symlinks with mode 0777 (permission checks happen on traversal,
+    /// not on the link node).
+    pub fn new_symlink(name: &str, target: &[u8]) -> Self {
+        Self {
+            name: String::from(name),
+            entry_type: DevEntryType::Symlink,
+            children: Spinlock::new(BTreeMap::new()),
+            devno: DevNo::default(),
+            mode: AtomicU32::new(0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            data: Spinlock::new(target.to_vec()),
+            size: core::sync::atomic::AtomicU64::new(target.len() as u64),
+            shared_pages: Spinlock::new(None),
+        }
+    }
+
     /// Create character device
     pub fn new_char_device(name: &str, devno: DevNo) -> Self {
         Self {
@@ -213,6 +240,11 @@ impl DevfsEntry {
     pub fn is_regular_file(&self) -> bool {
         self.entry_type == DevEntryType::RegularFile
     }
+
+    /// Is symbolic link
+    pub fn is_symlink(&self) -> bool {
+        self.entry_type == DevEntryType::Symlink
+    }
 }
 
 // ============================================================================
@@ -261,7 +293,7 @@ static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder
 /// read goes through the shared console TtyDevice (canonical-mode line
 /// discipline, termios settings shared with the pty layer); write does
 /// OPOST/ONLCR translation then hits the UART atomically per chunk.
-fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+pub(crate) fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
     // Feed the tty queue from the UART RX ring first (see
     // console::uart_rx_bridge_to_tty): the IRQ only fills the ring that
@@ -270,7 +302,7 @@ fn condev_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     crate::fs::tty::console().read_input(buf, nonblock)
 }
 
-fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
+pub(crate) fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     let onlcr = crate::fs::tty::console().output_translates_nl();
     // Translate \n -> \r\n (OPOST|ONLCR) in 256-byte chunks so a single
     // console write stays atomic per chunk (R20-4 discipline).
@@ -316,7 +348,7 @@ fn condev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
     buf.len() as isize
 }
 
-fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
+pub(crate) fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
     let mut ready = 0u16;
     if events & POLLIN != 0 && crate::fs::tty::console().input_poll_ready() {
@@ -461,12 +493,23 @@ fn root_disk_present() -> bool {
 ///
 /// Network interfaces correctly have NO /dev node (socket-only).
 fn devtmpfs_populate() {
-    use crate::fs::dev_t::{DevNo, MEM_MAJOR, TTY_MAJOR};
+    use crate::fs::dev_t::{DevNo, MEM_MAJOR, TTYAUX_MAJOR, TTY_MAJOR};
 
-    // --- terminal devices (UART-backed) ---
-    let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 1), &CONDEV_OPS); // console
-    let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 0), &CONDEV_OPS); // tty
+    // --- terminal devices ---
+    // Linux dev_t layout: /dev/tty0../dev/ttyN are (4, 0..N) — tty0 is
+    // the VT master view of the ACTIVE console, tty1.. are the VTs the
+    // gdm/Xorg/logind switch protocol drives (fs/vt.rs). /dev/tty (5,0)
+    // and /dev/console (5,1) ride TTYAUX_MAJOR like devtmpfs; ttyS0 is
+    // the UART serial console (4, 64).
+    let _ = registry::register_char_device(DevNo::new(TTYAUX_MAJOR, 1), &CONDEV_OPS); // console
+    let _ = registry::register_char_device(DevNo::new(TTYAUX_MAJOR, 0), &CONDEV_OPS); // tty
     let _ = registry::register_char_device(DevNo::new(TTY_MAJOR, 64), &CONDEV_OPS); // ttyS0
+    for minor in 0..=crate::fs::vt::NR_VT {
+        let _ = registry::register_char_device(
+            DevNo::new(TTY_MAJOR, minor),
+            &crate::fs::vt::VTDEV_OPS,
+        );
+    }
 
     // --- mem devices ---
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_ZERO, &ZERODEV_OPS);
@@ -506,8 +549,8 @@ fn devtmpfs_populate() {
     let mut children = root_entry.children.lock_irqsave();
     // S_IFCHR = 0o020000.
     let char_nodes: &[(&str, DevNo, u32)] = &[
-        ("console", DevNo::new(TTY_MAJOR, 1), 0o600),
-        ("tty", DevNo::new(TTY_MAJOR, 0), 0o666),
+        ("console", DevNo::new(TTYAUX_MAJOR, 1), 0o600),
+        ("tty", DevNo::new(TTYAUX_MAJOR, 0), 0o666),
         ("ttyS0", DevNo::new(TTY_MAJOR, 64), 0o600),
         ("zero", crate::fs::dev_t::DEV_ZERO, 0o666),
         ("full", DevNo::new(MEM_MAJOR, 7), 0o666),
@@ -526,6 +569,20 @@ fn devtmpfs_populate() {
         // see docs/development/oh-linux-vs-rux-boot.md on
         // feature/oh-linux-ref).
     ];
+    // VT console nodes /dev/tty0../dev/ttyN (4, 0..N): tty0 is the
+    // master view; gdm-session-worker opens tty1 (GDM_INITIAL_VT) for
+    // VT_OPENQRY and the returned VT for the session/Xorg display.
+    for minor in 0..=crate::fs::vt::NR_VT {
+        let name = alloc::format!("tty{}", minor);
+        children.insert(
+            name.clone(),
+            Arc::new(DevfsEntry::new_char_device_with_mode(
+                &name,
+                DevNo::new(TTY_MAJOR, minor),
+                0o620, // crw--w--- (Linux devtmpfs VT modes)
+            )),
+        );
+    }
     // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
     // majors) — LTP tst_acquire_device and losetup need both (the loop
     // driver's ioctls are dispatched on the devfs entry identity).
@@ -1170,6 +1227,10 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
 
     let mode = if child.is_dir() {
         InodeMode::new(InodeMode::S_IFDIR | child.mode.load(Ordering::Acquire))
+    } else if child.is_symlink() {
+        // Linux symlink nodes report 0777; size is the target length
+        // (stat/readlink contract).
+        InodeMode::new(InodeMode::S_IFLNK | child.mode.load(Ordering::Acquire))
     } else if child.is_regular_file() {
         InodeMode::new(InodeMode::S_IFREG | child.mode.load(Ordering::Acquire))
     } else if child.is_char_device() {
@@ -1226,6 +1287,10 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // userspace stat report major 0).
     stat.st_rdev = entry.devno.to_user_dev();
     let fsize = if entry.is_regular_file() {
+        entry.data.lock().len()
+    } else if entry.is_symlink() {
+        // stat on a symlink reports the TARGET length (stat(2)); the
+        // target bytes live in `data` (see new_symlink).
         entry.data.lock().len()
     } else {
         0
@@ -1326,6 +1391,14 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         let b = alloc::boxed::Box::new(entry.devno);
         file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
     }
+    // VT nodes (4, 0..=NR_VT): stash the DevNo (the ioctl layer reads
+    // the VT number from it) and mark the VT in use — VT_OPENQRY skips
+    // it (gdm opens tty1 precisely to keep the initial VT reserved).
+    if crate::fs::vt::is_vt_devno(&entry.devno) {
+        let b = alloc::boxed::Box::new(entry.devno);
+        file.set_private_data(alloc::boxed::Box::into_raw(b) as *mut u8);
+        crate::fs::vt::vt_opened(&entry.devno);
+    }
     0
 }
 
@@ -1387,6 +1460,8 @@ unsafe fn devfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::inod
             file_type::DT_BLK
         } else if child.is_regular_file() {
             file_type::DT_REG
+        } else if child.is_symlink() {
+            file_type::DT_LNK
         } else {
             file_type::DT_UNKNOWN
         };
@@ -1511,6 +1586,201 @@ unsafe fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(file_entry) as *mut u8);
     Ok(Arc::new(inode))
+}
+
+/// symlink on devfs (devtmpfs semantics): udev maintains device alias
+/// links (/dev/char/226:0 -> ../dri/card0, /dev/dri/by-path/... ->
+/// ../card0). gdmr22: the None op surfaced as EROFS, udevd logged
+/// "Failed to create symlink ... Read-only file system" and ABORTED the
+/// whole card0 event ("Failed to process device, ignoring") — no udev
+/// db entry, no master-of-seat tag, CanGraphical never flipped.
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, errno::Errno> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_dir() {
+        return Err(errno::Errno::NotADirectory);
+    }
+    let name = core::str::from_utf8(name)
+        .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
+    // Target length is bounded by the syscall layer (read_user_path into
+    // a PATH_MAX buffer); empty targets are rejected here (Linux
+    // do_symlinkat accepts "" only for AT_EMPTY_PATH-style ops, not
+    // symlink(2) — udev never sends one).
+
+    let mut children = entry.children.lock_irqsave();
+    if children.contains_key(name) {
+        return Err(errno::Errno::FileExists);
+    }
+    let link_entry = Arc::new(DevfsEntry::new_symlink(name, target));
+    children.insert(String::from(name), link_entry.clone());
+    drop(children);
+
+    let ino = devfs_ino_hash(name);
+    let mut inode = Inode::new(
+        ino,
+        // Linux symlink nodes: S_IFLNK|0777 (see new_symlink).
+        InodeMode::new(InodeMode::S_IFLNK | link_entry.mode.load(Ordering::Acquire)),
+    );
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
+    inode.ops = Some(&DEVFS_INODE_OPS);
+    inode.set_size(link_entry.size.load(Ordering::Acquire));
+    inode.private_data = Some(Arc::into_raw(link_entry) as *mut u8);
+    Ok(Arc::new(inode))
+}
+
+/// readlink on devfs: copy the stored target bytes (new_symlink keeps
+/// them in `data`). Returns the byte count, no NUL (readlink(2)).
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
+    let entry_ptr = match inode.private_data {
+        Some(ptr) => ptr,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32() as isize,
+    };
+    let entry = &*(entry_ptr as *const DevfsEntry);
+    if !entry.is_symlink() {
+        // readlink on a non-symlink: EINVAL (readlink(2)).
+        return errno::Errno::InvalidArgument.as_neg_i32() as isize;
+    }
+    let target = entry.data.lock();
+    let len = target.len().min(buf.len());
+    buf[..len].copy_from_slice(&target[..len]);
+    len as isize
+}
+
+/// link on devfs (devtmpfs semantics): insert the SAME entry Arc under
+/// the new name — the Arc refcount makes this a true hardlink (the
+/// entry outlives either name; unlink through one name leaves the other
+/// working). udev-node uses link() to add equal-priority symlink aliases
+/// and falls back to symlink() on failure.
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_link(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
+    let entry_ptr = match dir.private_data {
+        Some(p) => p,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let parent_entry = &*(entry_ptr as *const DevfsEntry);
+    if !parent_entry.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+    let name = match core::str::from_utf8(name) {
+        Ok(n) => n,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+
+    // The target entry Arc is recovered from the target inode's
+    // private_data WITHOUT dropping it: clone the Arc (refcount +1 for
+    // the new children-map slot), then re-leak the original raw pointer.
+    let target_ptr = match target.private_data {
+        Some(p) => p,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    // SAFETY: private_data holds a leaked Arc<DevfsEntry> (iget/create
+    // discipline); from_raw + clone + into_raw preserves the inode's
+    // own reference.
+    let target_arc = unsafe {
+        let arc = Arc::from_raw(target_ptr as *const DevfsEntry);
+        let cloned = Arc::clone(&arc);
+        let _ = Arc::into_raw(arc);
+        cloned
+    };
+    if target_arc.is_dir() {
+        // link(2): directories cannot be hardlinked (EPERM).
+        return errno::Errno::OperationNotPermitted.as_neg_i32();
+    }
+
+    let mut children = parent_entry.children.lock_irqsave();
+    if children.contains_key(name) {
+        return errno::Errno::FileExists.as_neg_i32();
+    }
+    children.insert(String::from(name), target_arc);
+    drop(children);
+
+    // Keep the dentry cache from serving a stale negative entry.
+    if let Some(rel) = devfs_rel_path(parent_entry) {
+        evict_dev_dentry(&alloc::format!("{}/{}", rel, name));
+    }
+    0
+}
+
+/// rename on devfs (devtmpfs semantics): udev publishes alias links by
+/// creating `<name>.tmp-<devno>` and renaming it over the final name —
+/// without this op the publish dies at the rename step (gdmr22 saw the
+/// symlink half fail first). Map-key rename inside the children
+/// BTreeMaps; the entry Arc moves with its subtree (directories
+/// included). POSIX replace semantics for an existing destination; the
+/// VFS wrapper has already validated types/stickiness/cycles.
+/// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
+unsafe fn devfs_rename(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
+    let old_ptr = match old_dir.private_data {
+        Some(p) => p,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let new_ptr = match new_dir.private_data {
+        Some(p) => p,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    let old_parent = &*(old_ptr as *const DevfsEntry);
+    let new_parent = &*(new_ptr as *const DevfsEntry);
+    if !old_parent.is_dir() || !new_parent.is_dir() {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+    let old_name = match core::str::from_utf8(old_name) {
+        Ok(n) => n,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let new_name = match core::str::from_utf8(new_name) {
+        Ok(n) => n,
+        Err(_) => return errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+
+    // Same-directory rename: ONE lock acquisition (the children Spinlock
+    // is not reentrant). This is udev's case (.tmp-<devno> -> final).
+    if core::ptr::eq(old_parent as *const DevfsEntry, new_parent as *const DevfsEntry) {
+        let mut children = old_parent.children.lock_irqsave();
+        if !children.contains_key(old_name) {
+            return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
+        }
+        if old_name != new_name {
+            // POSIX: replace an existing destination (the VFS wrapper
+            // has already rejected type clashes).
+            children.remove(new_name);
+            let child = children.remove(old_name).unwrap();
+            children.insert(String::from(new_name), child);
+        }
+        drop(children);
+    } else {
+        // Cross-directory move. Mutation order: take from the old parent,
+        // then insert into the new one. VFS_MUTATION_LOCK serializes all
+        // mutations (vfs_rename holds it across this call), and readers
+        // only ever hold ONE children lock, so lock order cannot cycle.
+        let child = {
+            let mut old_children = old_parent.children.lock_irqsave();
+            let child = match old_children.remove(old_name) {
+                Some(c) => c,
+                None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+            };
+            child
+        };
+        let mut new_children = new_parent.children.lock_irqsave();
+        new_children.remove(new_name); // POSIX replace (types pre-checked)
+        new_children.insert(String::from(new_name), child);
+        drop(new_children);
+    }
+
+    // Dentry-cache hygiene: evict both names' cached dentries (the VFS
+    // wrapper moves the cached old-name dentry to the new name for the
+    // caller's mount tree; evicting here covers OTHER mounts' caches —
+    // devfs is single-mounted today, this mirrors devfs_unlink's belt).
+    if let Some(rel) = devfs_rel_path(old_parent) {
+        evict_dev_dentry(&alloc::format!("{}/{}", rel, old_name));
+    }
+    if !core::ptr::eq(old_parent as *const DevfsEntry, new_parent as *const DevfsEntry) {
+        if let Some(rel) = devfs_rel_path(new_parent) {
+            evict_dev_dentry(&alloc::format!("{}/{}", rel, new_name));
+        }
+    }
+    0
 }
 
 /// Regular-file ops on devfs (devtmpfs file storage).
@@ -2091,14 +2361,14 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
 pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(devfs_lookup),
     create: Some(devfs_create),
-    link: None,
+    link: Some(devfs_link),
     unlink: Some(devfs_unlink),
-    symlink: None,
+    symlink: Some(devfs_symlink),
     mkdir: Some(devfs_mkdir),
     rmdir: Some(devfs_rmdir),
     mknod: None,
-    rename: None,
-    readlink: None,
+    rename: Some(devfs_rename),
+    readlink: Some(devfs_readlink),
     get_file_ops: Some(devfs_get_file_ops),
     readdir: Some(devfs_readdir),
     readdir_cacheable: false,

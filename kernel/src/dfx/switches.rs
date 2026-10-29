@@ -58,6 +58,7 @@ macro_rules! dfx_switch_table {
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
             InputTrace => "inputtrace",
+            DbFileTrace => "dbtrace",
             EpollTrace => "epolltrace",
             EpollScan => "epollscan",
             ClaimInject => "claiminject",
@@ -136,6 +137,11 @@ pub enum DfxSwitch {
     /// count. Used to hunt phantom input streams; printing happens on the
     /// event path so it is OFF in production boots.
     InputTrace,
+    /// TEST-ONLY udev-db tracer (gdmr24 hunt; remove before merge):
+    /// tmpfs reads/writes whose payload is shaped like a udev db line
+    /// (I:/G:/Q:/S:/E:/V: prefix) print offset+content, catching the
+    /// "G:\n" splice that breaks sd-device tag loading.
+    DbFileTrace,
     /// epoll delivery trace: every (rate-limited) epoll_wait return prints
     /// pid/comm plus each ready fd's number and event bits — hunts
     /// permanently ready fds that spin epoll_pwait/ppoll callers.
@@ -405,7 +411,7 @@ pub enum DfxSwitch {
     ExecCost,
 }
 
-const SWITCH_COUNT: usize = 44;
+const SWITCH_COUNT: usize = 45;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -490,6 +496,7 @@ impl DfxSwitch {
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
             DfxSwitch::ExecCost => 43,
+            DfxSwitch::DbFileTrace => 44,
         }
     }
 
