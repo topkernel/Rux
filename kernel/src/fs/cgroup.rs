@@ -435,6 +435,25 @@ fn register_cgroup2_mount(target: &str) {
     crate::fs::mount::register_mount("cgroup2", target, "cgroup2", "rw");
 }
 
+/// Whether a cgroup2 hierarchy is currently MOUNTED.
+///
+/// Reference semantics (gdm bring-up r17b storm): /proc/[pid]/cgroup
+/// lists only MOUNTED hierarchies — with no cgroup2 mount the file is
+/// EMPTY and systemd's cg_pid_get_path() answers -ENOMEDIUM. An
+/// always-on "0::/" line makes every process look like a member of a
+/// live unified-hierarchy root; combined with a kernel pre-mounted
+/// /sys/fs/cgroup whose root node lists every task, udevd's on_post()
+/// idle cleanup (cg_kill of its recorded cgroup path) enumerated the
+/// ROOT cgroup.procs and SIGKILLed the whole daemon set — the silent
+/// gdm-chain mass-kill storm, sender pid = the udevd daemon itself.
+static CGROUP2_MOUNTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Is a cgroup2 hierarchy mounted? (Guards /proc/[pid]/cgroup content.)
+pub fn cgroup2_mounted() -> bool {
+    CGROUP2_MOUNTED.load(core::sync::atomic::Ordering::Acquire)
+}
+
 /// Mount cgroup2 at `target` (boot path: "/sys/fs/cgroup").
 pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
     // The hierarchy must exist.
@@ -458,6 +477,9 @@ pub fn mount_cgroupfs(target: &str) -> Result<(), i32> {
         crate::fs::mount::MntFlags::new(0),
     );
     register_cgroup2_mount(target);
+    // Mount-state visibility: /proc/[pid]/cgroup now reports the
+    // hierarchy (reference lists mounted hierarchies only).
+    CGROUP2_MOUNTED.store(true, core::sync::atomic::Ordering::Release);
     Ok(())
 }
 
