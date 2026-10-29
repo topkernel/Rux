@@ -569,9 +569,21 @@ fn devtmpfs_populate() {
         // see docs/development/oh-linux-vs-rux-boot.md on
         // feature/oh-linux-ref).
     ];
-    // VT console nodes /dev/tty0../dev/ttyN (4, 0..N): tty0 is the
-    // master view; gdm-session-worker opens tty1 (GDM_INITIAL_VT) for
-    // VT_OPENQRY and the returned VT for the session/Xorg display.
+    // VT console nodes /dev/tty0../dev/ttyN (4, 0..N): tty1 is
+    // GDM_INITIAL_VT — gdm-session-worker opens it for VT_OPENQRY and
+    // the returned VT for the session/Xorg display.
+    //
+    // /dev/tty0 (the master view) is REQUIRED by gdm-session-worker's
+    // jump_to_vt (gdm 42 daemon/gdm-session-worker.c): it opens
+    // "/dev/tty0" and, without checking the fd, passes it to
+    // VT_GETMODE in fix_terminal_vt_mode — a missing node leaves fd -1,
+    // the ioctl fails EBADF, and fix_terminal_vt_mode g_error()s out
+    // ("couldn't set up terminal, aborting..."), whose fatal path runs
+    // G_BREAKPOINT() — raise(SIGTRAP) on riscv64 GLib — killing the
+    // worker before the greeter execs (gdmr27/gdmr29: TKSIG5 ->
+    // EXITGRP code=-5). logind's VT-controller startup that this node
+    // also gates is disabled via the missing
+    // /sys/class/tty/tty0/active attribute instead (see sysfs).
     for minor in 0..=crate::fs::vt::NR_VT {
         let name = alloc::format!("tty{}", minor);
         children.insert(

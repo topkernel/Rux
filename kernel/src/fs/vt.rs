@@ -127,6 +127,11 @@ pub fn vt_closed(devno: &crate::fs::dev_t::DevNo) {
     VT_REFS[devno.minor as usize].fetch_sub(1, Ordering::Relaxed);
 }
 
+/// The active VT number (sysfs /sys/class/tty/tty0/active content).
+pub fn active_vt() -> u32 {
+    ACTIVE_VT.load(Ordering::Acquire)
+}
+
 /// Wake every VT_WAITACTIVE sleeper (an ACTIVATE happened).
 fn wake_switch_waiters() {
     SWITCH_WAITQ.wake_up_all();
@@ -300,8 +305,14 @@ pub fn vt_file_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -> 
             for n in 1..=NR_VT {
                 mask |= 1 << (n - 1);
             }
+            // struct vt_stat fields are unsigned short (u16) — v_active
+            // must be narrowed before to_le_bytes or copy_from_slice
+            // panics (gdmr31: the worker's jump_to_vt VT_GETSTATE hit
+            // "source slice length (4) does not match destination slice
+            // length (2)" and took the box down).
+            let active16 = active as u16;
             let mut buf = [0u8; 6];
-            buf[0..2].copy_from_slice(&active.to_le_bytes());
+            buf[0..2].copy_from_slice(&active16.to_le_bytes());
             buf[2..4].copy_from_slice(&0u16.to_le_bytes()); // v_signal
             buf[4..6].copy_from_slice(&mask.to_le_bytes());
             // SAFETY: arg validated with access_ok(6) above.
