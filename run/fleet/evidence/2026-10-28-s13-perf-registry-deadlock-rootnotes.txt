@@ -1,0 +1,50 @@
+s13 perf REGISTRY deadlock catch (kernel main 0f806d8b, fleet kernel 527656b2)
+===============================================================================
+
+Member: fsfuzz r268 (first full round of the perf_event_open fuzz arm,
+probe v3). Wedge at ~beat 43776 (~12 min in), right after FSFUZZ-PERF
+ok=4608. 134 DEADLOCK prints until round timeout; serial "growth" was
+only the watchdog printer (beat stream stopped cold).
+
+Rows:
+  DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff808808b8 ra=RawSpinlock::lock  (x67)
+  DEADLOCK: spinlock stuck cpu=0 lock=0xffffffd603f15218 ra=RawSpinlock::lock  (x67)
+
+Symbols:
+  0xffffffff808808b8 = rux::perf::REGISTRY (static, .data)
+  0xffffffd603f15218 = heap-range dynamic lock (an event's inner or an
+  allocator class lock; not resolvable from the dump)
+
+Taskdump at the wedge (dfx=taskdump):
+  pid 1 (fsfuzz): RUNNING, preempt=259 (0x103 = SOFTIRQ|PREEMPT)
+  idle @0xffffffff80caebd0 (ti_cpu=1): preempt=257 (0x101)
+  -> BOTH CPUs were inside timer-softirq processing (softirq_tick runs
+     on whatever task the tick interrupted; here pid1 and the idle task).
+
+Code defect (kernel/src/perf/mod.rs):
+  1. softirq_tick(): holds REGISTRY.lock_irqsave() across the whole
+     event iteration; INSIDE that section it (a) takes ev.inner.lock()
+     and (b) calls to_wake.push() -- A VEC ALLOCATION UNDER REGISTRY.
+  2. Inside ev.inner.lock(), push_sample() grows the ring VecDeque --
+     ANOTHER ALLOCATION UNDER A SPINLOCK (inner).
+  3. register(): reg.push() -- allocation under REGISTRY (open path).
+  Under the fuzzer's constant heap pressure (the standing ENOMEM/EMFILE
+  storm class; the 128MB kernel heap crawls), each under-lock
+  allocation enters the allocator slowpath while the OTHER CPU spins
+  on REGISTRY (softirq) or inner -- a watchdog-tripping multi-CPU spin
+  stall. The 67/67 alternation is the two CPUs trading these roles.
+
+Fix direction (perf owner):
+  - to_wake: fixed-size array (events are few) or collect ids without
+    allocation; NEVER allocate under REGISTRY.
+  - ring: reserve capacity at open time and CAP growth there (RING_CAP
+    bound already exists as a byte budget; make it a preallocated
+    capacity), so push_sample never allocates under inner.
+  - register(): pre-reserve the registry Vec once at init (ids are
+    bounded by fd count) or use a fixed table.
+  Rule of thumb: no allocation inside any spinlock section reached
+  from softirq/irq context (lock-ordering doc territory).
+
+Repro: the fsfuzz member reproduces it under the standing stream
+(r268 wedged in round 1 of the arm; keep watching WATCHDOG= with
+lock=0xffffffff808808b8).

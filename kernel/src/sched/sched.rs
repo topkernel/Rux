@@ -4690,6 +4690,24 @@ pub fn scheduler_tick() {
                             break;
                         }
                     }
+                    // s14 (canary r1 msgstress01 capture): a task being
+                    // switched OUT is slotless from the pick's slot
+                    // publish until context_switch finishes saving it —
+                    // and it LEGITIMATELY holds the GRQ guard (count >= 1)
+                    // in the sub-window before the lock release. The
+                    // walk classified that shape as "parked with a
+                    // nonzero count" and PARKED-WILDWRITE fired on a
+                    // state=RUNNING task (legal preemption switch-out),
+                    // burning the print's "no in-tree path can do this"
+                    // evidentiary value. R63's SWITCHING_OUT marker
+                    // names exactly this window — treat it as running,
+                    // for the wildwrite test AND the 4 s PARKED-HEAL
+                    // (healing a mid-switch-out task's count to zero
+                    // would re-open preemption inside its spinlock
+                    // section and underflow the guard drop).
+                    if !running && task_is_mid_switch_out(task) {
+                        running = true;
+                    }
                     // Sample up to 128 tasks per walk, biased to the
                     // interesting ones (nonzero count) so the table sees
                     // leak transitions even under heavy task churn.

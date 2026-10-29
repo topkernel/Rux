@@ -25,7 +25,7 @@ ROOT="$(cd "$FLEET/../.." && pwd)"
 IMG="$FLEET/images"
 LOGS="$FLEET/logs"
 MEMBER="${1:?member name}"
-KIND="${2:?kind: ltp|memstorm|fsfuzz|monkey}"
+KIND="${2:?kind: ltp|memstorm|fsfuzz|monkey|dirtyscan|dirstorm|modchurn|execsig|ltpm}"
 RUNS="${3:-10000}"
 i="${4:-1}"
 LAST=$((i + RUNS - 1))
@@ -55,9 +55,14 @@ rv_common() { # serial — the shared riscv64 front-matter
     # (b) kernel-mode: read_counter's write-flavored csrrw time (now
     # fixed in the kernel — read-only CSR write attempt). zcb was never
     # the fault; it was withdrawn for ~1h on a misread and is restored.
+    # zicond REQUIRED (sf2/session-10): Ubuntu libgcc soft-fp members
+    # (__extenddftf2 etc., pulled by musl printf's long-double paths)
+    # contain czero.nez/czero.eqz — dirstorm SIGILL'd at one on its
+    # first boot until the string carried zicond. Same toolchain-
+    # emission class as zcb: making instructions legal is the fix.
     CMD+=(nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s"
           qemu-system-riscv64 -M virt -accel tcg,thread=multi
-          -cpu "rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true"
+          -cpu "rv64,zbb=true,zba=true,zbs=true,zcb=true,zicond=true,v=true"
           -m "${MEM:-2G}" -smp 2 -display none -monitor none
           -serial "file:$1")
 }
@@ -70,11 +75,16 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         # KIMG override lets a session roll a candidate kernel to a
         # subset of members before fleet-wide adoption (session-3
         # refresh protocol: merged-tree kernel goes to one member first).
-        local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
+        # START override (s14): aim a round at a known wedge-prone sweep
+        # region instead of the random draw (default stays random).
+        # DFX override (s14): arm extra probes on a canary member
+        # (default unchanged: watchdog,taskdump).
+        local start
+        if [ -n "${START:-}" ]; then start="$START"; else start=$(( (RANDOM * 32768 + RANDOM) % 1080 )); fi
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
         CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
-              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=${DFX:-watchdog,taskdump} roundtag=$MEMBER-r$round")
         ;;
     ltpm)
         # current-main kernel member: same LTP sweep surface, kernel
@@ -126,6 +136,18 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         rv_drive "$IMG/fleet-dirtyscan-rootfs.img" rootfs
         CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
               -append "root=/dev/vda rw init=/test/dirtyscan console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
+    dirstorm)
+        # Concurrent directory-entry mutation storm (session 10; the
+        # ext4 ENTRY_MUTEX + split-boundary retest): 4 workers churn a
+        # shared tree (mkdir/rmdir/rename/unlink/creat/link/symlink),
+        # long-name split-grow phases, paced dir fsync, per-file
+        # pattern verification. DIRSTORM-CORRUPT = CRITICAL;
+        # DIRSTORM-ODD beyond errno-race noise = WARN. 1G guest.
+        MEM=1G rv_common "$serial"
+        rv_drive "$IMG/fleet-dirstorm-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/dirstorm console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     modchurn)
         # Module-load/unload churn hunter (session 9; OH leg-22

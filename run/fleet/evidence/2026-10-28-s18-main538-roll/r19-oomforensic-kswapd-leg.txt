@@ -1,0 +1,51 @@
+oom-killer: Killed process 4000 (oom01) score 422365
+thead-exit: tid 4003 comm='oom01' leader='oom01' code=-9 calls: 222 64 135 fails:
+SIGDEATH: pid=4003 tgid=4000 comm=Ok("oom01") sig=9 ppid=3996 (thread) si_pid=0 si_code=0x0
+WW5: walks=1838 oncpu_heal=0 claim_heal=0 s250=29956 s500=16390 s750=7647
+WW4: phase=[1,1] slotmm=[0,0]
+WW: fires=97433 late_max=911ms pidmiss=0 rearm=4 wheel=2/5 hres_next=0ms
+WW2: si_runs=516 si_busy=29ms ticks=[67,75] vec=[0,142,0,0,374,0,0,0,142,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=0 cpu0=(pid=4002 st=0x0 pc=0) cpu1=(pid=4000 st=0x0 pc=256)
+WW: wakes=3209931 picks=3098124 avg_run=6ms stranded=2155 strand_max=121945ms
+WW: TIMER-LATE-FIRE pid=4000 late=336ms (timer fired late; softirq starvation?)
+SIGDEATH: pid=4000 tgid=4000 comm=Ok("oom01") sig=9 ppid=3996 si_pid=0 si_code=0x0
+MEMLEDGER census scan=524288 descs
+MEMLEDGER   free=0L+0M=0 (0 MB) reserved=55873 (218 MB) page_tables=888 exact=888
+MEMLEDGER   anon=421817 (1647 MB) cow=1253 mapped_file=63 lru_file=43980 other_used=414
+MEMLEDGER   refcounts(rc>0): ==1:524161 2..8:127 >8:0
+MEMLEDGER   other_used phys ranges (512MiB buckets 0..6G): [0, 0, 0, 0, 0, 0, 0, 414, 0, 0, 0, 0]
+MEMLEDGER sum=524288 vs descs=524288
+MEMLEDGER free_census=0 vs zone_free_cnt=0 drift=0
+MEMLEDGER zone_managed=468415 vs descs-reserved=468415 (heap/image/slab live outside the zone span)
+DRIFTWATCH zero_put[0] teardown-rv=260326
+DRIFTWATCH zero_put[8] vmscan-swap=565
+DRIFTWATCH free_ok=418961
+==== MEMLEDGER end ====
+MEMLEDGER-BUCKETS freeL=0 freeM=0 reserved=55873 pt=888 anon=421817 cow=1253 mapped_file=63 lru_file=43980 other_used=414 rc1=524161 rc2_8=127 rc>8=0
+MEMLEDGER-OWRS r7=414
+==== OOM-FORENSIC #2 @ pagefault OOM ====
+OOM-FORENSIC: in_direct_reclaim=1
+OOM-FORENSIC: zone Normal free_cnt=16 managed=468415 wmark min/low/high=1368/1836/2304
+OOM-FORENSIC:   order  0: declared=4 walked=4 head_pfn=581326
+OOM-FORENSIC:   order  1: declared=2 walked=2 head_pfn=581324
+OOM-FORENSIC:   order  2: declared=2 walked=2 head_pfn=581320
+OOM-FORENSIC:   walkable pages total=16 vs free_cnt=16
+OOM-FORENSIC: lru[0] size=421801
+OOM-FORENSIC: lru[2] size=36048
+OOM-FORENSIC: lru[3] size=7933
+OOM-FORENSIC: file-lru[2] walked=36048 dirty=0 writeback=0 referenced=28298 unevictable=0 locked=0
+OOM-FORENSIC: file-lru[3] walked=7933 dirty=0 writeback=0 referenced=0 unevictable=0 locked=0
+WW5: walks=38807 oncpu_heal=0 claim_heal=0 s250=29956 s500=16390 s750=7647
+WW4: phase=[1,1] slotmm=[0,0]
+WW: fires=97444 late_max=911ms pidmiss=0 rearm=4 wheel=0/4 hres_next=14ms
+WW2: si_runs=120 si_busy=14ms ticks=[0,120] vec=[0,120,0,0,0,0,0,0,120,0]
+WW3: grq=0 cfs=0 idle=0x0 nr=3 cpu0=(pid=4002 st=0x0 pc=0) cpu1=(pid=4000 st=0x0 pc=256)
+WW: wakes=3248737 picks=3136931 avg_run=6ms stranded=2155 strand_max=121945ms
+OOM-FORENSIC: desc used=524272 free=16 reserved=55873 anon=421801 mapped=421922
+OOM-FORENSIC: swap active=true
+OOM-FORENSIC: seed_alarms=0 double_free_tripwires=0
+OOM-FORENSIC: orphan(unlinked,ref0)=8 first=[581321, 581322, 581323, 581325, 581583, 581585, 581586, 581587]
+OOM-FORENSIC: inverse(linked,ref>0)=0 first=[0, 0, 0, 0, 0, 0, 0, 0]
+OOMFX-RAW zone_free=16 zone_walkable=16 zone_managed=468415 orphan=8 inverse=0 seed_alarms=0 dblfree=0
+==== OOM-FORENSIC end ====
+oom: out of memory (order=0, gfp=0x0)

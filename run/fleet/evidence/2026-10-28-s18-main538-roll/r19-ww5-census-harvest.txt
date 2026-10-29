@@ -1,0 +1,30 @@
+== strand count ==
+387
+== heal counters (last WW5) ==
+WW5: walks=39246 oncpu_heal=0 claim_heal=0 s250=29956 s500=16390 s750=7647
+== heal counters (max oncpu_heal seen) ==
+== heal counters (max claim_heal seen) ==
+== sub-gate cumulative (last) ==
+s=39246 s250=29956 s500=16390 s750=7647 
+== wtie histogram (50 bins) ==
+      1 50-100
+      3 100-150
+     36 200-250
+     59 250-300
+    130 300-350
+    158 350-400
+== visits stats ==
+n=387 min=114 avg=617 max=4545
+== strand ms stats ==
+n=387 min=1000 avg=1202 max=7621
+== SKIPHIST census ==
+    387 SKIPHIST coll=1
+== slotmm census ==
+   1083 slotmm=[0,0]
+      1 slotmm=[0,8]
+== why= census ==
+    171 why=1
+     44 why=2
+      1 why=3
+== panics ==
+3

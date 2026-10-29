@@ -1386,6 +1386,17 @@ impl CfsRunQueue {
 
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
+            // s14 (msg-region strand family): PICK-SKIP-ALL names only
+            // the total-failure shape (nothing pickable). A victim
+            // refused AMID other candidates is invisible — yet that is
+            // the msg* WAKE-STRANDED shape (100/100 strands with zero
+            // skip-alls in ltp-b r2's msg region). Stamp every refusal
+            // into a per-task history so the strand report (wakewatch
+            // check_picked) can name WHY the victim sat unpicked for
+            // the whole strand window. Armed only under dfx=schedtrace.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                note_pick_skip(task, skip_reason as u8);
+            }
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;

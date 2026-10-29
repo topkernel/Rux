@@ -1,0 +1,13 @@
+== fsfuzz WATCHDOG family on 2a960538 (s18) ==
+r277 (cb314f43): CRITICAL WATCHDOG=91 (adjudicated s17)
+r281 (cb314f43): CRITICAL WATCHDOG=258
+r282 (96f67cbd, FIRST full round on 2a960538): WARN, ZERO DEADLOCK
+   prints, beats=2636 (record for this home), lines=45858
+r283 (96f67cbd): CRITICAL WATCHDOG=118, same 59/59 two-lock
+   alternation, same ra=0xffffffff80256100, static lock at the new
+   binary's bss address 0xffffffff808789d8 + heap-range dynamic lock
+   0xffffffd603e50118 — the exact known r268-class family.
+
+Adjudication: the family PERSISTS on 2a960538 (fix c5640ccc is NOT
+on main); r282 was one quiet round of the transient class. Closure
+criterion unchanged: one clean round on the kernel carrying the fix.

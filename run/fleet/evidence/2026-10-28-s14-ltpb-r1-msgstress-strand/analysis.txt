@@ -1,0 +1,60 @@
+s14 canary harvest — ltp-b r1 (kernel e80e92f0 canary build, main 0f806d8b base)
+================================================================================
+
+Capture: ONE WAKE-STRANDED burst, 390 lines, serial lines 2822-3228, while
+msgstress01 runs (sweep index 668; msgctl12 PASS at 667 immediately before).
+258/390 strands in the 1000-1499ms band (the 1001ms-grid class).
+
+Incumbent pc census across all h-fields in the burst:
+  497 pc=1        (leaked PREEMPT_OFFSET)
+  204 pc=0
+   52 pc=65537    (stranded HARDIRQ bit + preempt bit)
+   22 pc=2
+    4 pc=65536
+    2 pc=65538, 2 pc=65539
+
+Event order at burst start (serial lines 2817-2829):
+  STALE-CLAIM-RESET by_cpu=1 pid=632 from_claim=0
+  PARKED-WILDWRITE pid=0x278 pc=1        <- first firing of this probe ever
+  PARKED-LEAK     pid=0x278 pc=1 state=0x0 tcpu=0
+  ... 390 WAKE-STRANDED ...
+
+Adjudications
+-------------
+1. s13 slot-rewrite producer theory REJECTED at code level.
+   IRQ-BRACKET-LEAK printed ZERO lines of any kind (when=slot/pre/in) during
+   the 390-strand burst. Root cause of the null result: preempt bookings
+   resolve through sched::current() which reads the ARCH tp REGISTER
+   (sched.rs:5237), NOT cpu_state.current. The slot discriminators watch a
+   path bookings never touch; a slot rewrite cannot split a bracket's
+   +offset/-offset across tasks. The brackets stay as standing negatives.
+
+2. PARKED-WILDWRITE pid 0x278 is a PROBE FALSE POSITIVE, not a wild write.
+   The PARKED-LEAK line for the same task shows state=0x0 (TASK_RUNNING):
+   a task preempted mid-switch-out holds the GRQ guard (count=1) while
+   already slotless (the pick published `next`). The parkwalk's `running`
+   classifier scans only cpu_state(c).current and predates R63's
+   SWITCHING_OUT marker, so this legal window classifies as "parked".
+   Under TCG thread=multi a host deschedule parks the vCPU exactly there
+   for tens of ms, which is how the two consecutive walks sampled it.
+   Probe fix (this session): running := slot-names-it OR
+   task_is_mid_switch_out(task). This also stops the 4s PARKED-HEAL from
+   zeroing a live guard mid-switch-out (which would re-open preemption
+   inside the spinlock section and underflow the guard drop).
+
+3. Family causal chain (all four faces, one engine):
+   a parked/switching task RETAINS a leaked +1 (PARKED-LEAK face) -> when
+   picked it runs unpreemptable (pc=1 incumbent face) -> every wake on the
+   other CPU strands on the ~1s grid (WAKE-STRANDED 1001ms face) -> the
+   pc=65537/65536 faces are the same leak with a stranded HARDIRQ bit.
+   Missing piece: WHICH acquire site leaves the +1 (and the 0x10000).
+
+Next instrument round (rolled as fleet-rv64-instr-rux md5 72e03151..., this
+session): leakorigin HARDIRQ shadow (hsite= names the trap bracket),
+IRQ-PAIR booking check (per-CPU irq_enter task token vs irq_exit target;
+tp-register truth, no trap-boundary sampling hole), parkwalk fix above;
+ltp-b relaunched with dfx=leakhunt,wwcensus at sweepstart=660 to replay the
+msg region with the shadow armed.
+
+Raw serial: ltp-b-r1-serial.log (this dir, gitignored), burst excerpt in
+burst-excerpt-lines2800-3240.txt.

@@ -21,7 +21,13 @@ WARN=""
 # dumps' fault counters — e.g. ltp-a r22's writev03 dump — producing a
 # phantom OOPS=1 on clean v5/v7 rounds. Require kernel-mode phrasing.)
 kernpanic=$(grep -c "KERNPANIC" "$SERIAL" 2>/dev/null)
-oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (kernel|supervisor)|PANIC: trap" "$SERIAL" 2>/dev/null)
+# s11 gap fix: the ALLOCTHROW exhaustion path (kernel heap full) prints
+# "Kernel panic - not syncing:" / "PANIC: Allocation error" — neither
+# matched the old patterns, so ~100 fsfuzz rounds r8-r107 that each
+# exhausted the 128MB kernel heap read as WARN (FSFUZZ-ODD only). Any
+# ALLOCTHROW or panic line is kernel-side failure evidence.
+oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (kernel|supervisor)|PANIC: trap|Kernel panic - not syncing|PANIC: Allocation error" "$SERIAL" 2>/dev/null)
+alloct=$(grep -c "ALLOCTHROW" "$SERIAL" 2>/dev/null)
 canary=$(grep -c "WILDWATCH-CANARY" "$SERIAL" 2>/dev/null)
 heal=$(grep -cE "hpet: clock (base|div|offset) healed" "$SERIAL" 2>/dev/null)
 wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>/dev/null)
@@ -32,6 +38,7 @@ wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>
 usigill=$(grep -c "trap: user SIGILL" "$SERIAL" 2>/dev/null)
 [ "$kernpanic" -gt 0 ] 2>/dev/null && CRIT="${CRIT}KERNPANIC=$kernpanic "
 [ "$oosp" -gt 0 ] 2>/dev/null && CRIT="${CRIT}OOPS=$oosp "
+[ "$alloct" -gt 0 ] 2>/dev/null && CRIT="${CRIT}ALLOCTHROW=$alloct "
 [ "$canary" -gt 0 ] 2>/dev/null && CRIT="${CRIT}CANARY=$canary "
 [ "$heal" -gt 0 ] 2>/dev/null && CRIT="${CRIT}SCRIBBLE-HEAL=$heal "
 [ "$wdog" -gt 0 ] 2>/dev/null && CRIT="${CRIT}WATCHDOG=$wdog "
@@ -45,6 +52,10 @@ swaphit=$(grep -c "SWAPHIT" "$SERIAL" 2>/dev/null)
 [ "$dirtyhit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}DIRTYHIT=$dirtyhit "
 [ "$guardhit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}GUARDHIT=$guardhit "
 [ "$swaphit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}SWAPHIT=$swaphit "
+# session 10 (sf2): directory-entry storm — any content corruption is
+# critical evidence (wild write to fs data, or an ENTRY_MUTEX hole).
+dscorrupt=$(grep -c "DIRSTORM-CORRUPT" "$SERIAL" 2>/dev/null)
+[ "$dscorrupt" -gt 0 ] 2>/dev/null && CRIT="${CRIT}DIRSTORM-CORRUPT=$dscorrupt "
 
 # --- WARN: anomaly candidates ------------------------------------------
 # OOM lines, excluding the image-side known class (init userspace write
@@ -64,6 +75,8 @@ census=$(grep -cE "WAKE-STRANDED [1-9][0-9]{2,}|TERM-DESCHED [0-9]{3,}" "$SERIAL
 # probe self-reported anomalies
 odd=$(grep -c "FSFUZZ-ODD" "$SERIAL" 2>/dev/null)
 [ "$odd" -gt 20 ] 2>/dev/null && WARN="${WARN}FSFUZZ-ODD=$odd "
+dsodd=$(grep -c "DIRSTORM-ODD" "$SERIAL" 2>/dev/null)
+[ "$dsodd" -gt 50 ] 2>/dev/null && WARN="${WARN}DIRSTORM-ODD=$dsodd "
 ffail=$(grep -c "MEMSTORM-FORKFAIL" "$SERIAL" 2>/dev/null)
 [ "$ffail" -gt 10 ] 2>/dev/null && WARN="${WARN}FORKFAIL=$ffail "
 enomap=$(grep -c "MEMSTORM-ENOMAP" "$SERIAL" 2>/dev/null)
@@ -96,6 +109,13 @@ noise_samgr=$(grep -cE "SAMgr.*(15|30|89)s|samgr.*cost" "$SERIAL" 2>/dev/null)
 # pctick= on the line splits it — keep counting for rate tracking.
 pleak=$(grep -c "PREEMPT-LEAK" "$SERIAL" 2>/dev/null)
 [ "$pleak" -gt 5 ] 2>/dev/null && WARN="${WARN}PREEMPT-LEAK=$pleak "
+
+# PREEMPT-UNDERFLOW (session-12 class from the origin/main delta
+# 488528dc->979fde80, D-7 percpu territory; perf lane triages): the
+# print is clamp-to-0 — count per round for the sighting watch (any
+# volume >=5 gets WARN so the tail is preserved for pid/lock rows).
+puflow=$(grep -c "PREEMPT-UNDERFLOW" "$SERIAL" 2>/dev/null)
+[ "$puflow" -ge 5 ] 2>/dev/null && WARN="${WARN}PREEMPT-UNDERFLOW=$puflow "
 
 # SOFTIRQ-BRACKET-LEAK (session-6 discriminator): a context switch
 # inside the do_softirq processing window — count-migration producer
