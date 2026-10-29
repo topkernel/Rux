@@ -497,3 +497,51 @@ blocks deduped to one write each. Prediction: p6_mkdrmdir strong median
 today) → low ms; the amortized batch commit adds ≤ (2k + 3) syncs per
 ~500 delete ops.
 
+
+## 7. R20 addendum (2026-10-29): ANY new out-of-band write site needs a handle or a drain point — the deferred-reap conviction
+
+The paired bisection on the R20 tip convicted 5b88fd42 (the O_TMPFILE
+deferred-inode-deletion fix): p6_unlink read 11.7 ms against the
+89-152 µs class, with fsw pc 40 → 3997. Mechanism: the eager path ran
+the reap trio (write_inode_disk + free_inode_blocks + free_inode)
+INSIDE the unlink journal transaction, so its writes deferred under the
+handle and batched at commit; the deferred reap
+(ext4_destroy_inode → PENDING_REAPS → flush_pending_reaps →
+ext4_reap_unlinked) ran the same trio OUTSIDE any handle — three
+UNBATCHED synchronous virtio round trips per inode, each out-of-band
+write firing publication_constrained against the accumulated
+delete-side records → constraint-flush storms. 1000 reaps x (3-4 sync
+writes + constraint IO) = the 11.5 ms. Slimming and namei A are
+exonerated (reverted arms read 11.5 ms too).
+
+**Lesson (the general rule this closes): the publication guards fire
+per out-of-band write, so ANY new out-of-band write site needs a
+journal handle or a standing drain point.** Moving a write out of a
+transaction silently converts it from batched to out-of-band even when
+the code shape looks identical — the batching is a property of the
+handle context, not of the write function. Every future deferral of a
+metadata write must be reviewed against this rule at the same commit.
+
+**Fix shipped (R20-FS1 keeper; written in the ltp-fix-b worktree, its
+agent died at quota before commit/build, landed and gated by the perf
+lane): ext4_reap_unlinked brackets its trio in ext4_journal_start/stop
+(nblocks 12), with the early-out dtime/links check BEFORE the bracket
+so a no-op reap opens no transaction. The bracket also restores jbd2
+revokes for the freed blocks (revoke_freed_block is a no-op without a
+current handle — the unbracketed reap silently skipped them on
+journalled fs: a correctness regression riding the perf one).
+Ordering is safe under deferral: R20-FS1's inode-first order is buffer
+order inside the single transaction. Lock nesting unchanged:
+flush_pending_reaps holds EXT4_BIG_LOCK, the same class every entry
+wrapper's bracket runs under; no ENTRY_MUTEX taken (the reap mutates
+no directory entries). The alternative design (a pending-reap list
+drained at the standing durability points) was not needed — the handle
+bracket alone restores the eager cost shape, and jbd2_journal_stop's
+lazy-commit batching (1024-buffer / 510-revoke high-waters) folds
+consecutive reaps into shared commits exactly as the eager path's
+writes did.**
+
+Verification (same-host A/B, journal image, pa-series defaults):
+p6_unlink median + fsw pc recorded in the perf report ledger row for
+r20; LTP open14/openat03 2x isolation + make test + smokes are the
+functional guards.

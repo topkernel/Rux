@@ -573,16 +573,21 @@ impl VmaManager {
         let start = vma.start();
         let end = vma.end();
 
-        // TRIPWIRE: inserting a VMA whose start key already exists would
-        // silently REPLACE the incumbent (BTreeMap insert) — two owners
-        // for one range. Linux never adds an existing start; every caller
-        // removes first. (heapstress/gnome-shell corruption hunt.)
+        // TRIPWIRE: inserting a VMA whose start key already exists used to
+        // silently REPLACE the incumbent (BTreeMap insert) — two owners for
+        // one range. Linux never adds an existing start; every caller
+        // removes first. (heapstress/gnome-shell corruption hunt.) The add
+        // is now REJECTED with Overlap by construction: the prev-merge
+        // branch is skipped (has_vma_starting_within sees the incumbent's
+        // key) and the overlap check below catches key == start — so this
+        // line names the caller that tried, and its Err path is the
+        // evidence to chase.
         if self.vmas.contains_key(&start) {
             static DUP_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
                 crate::pr_err!(
-                    "VMA-ADD-DUP start={:#x} end={:#x} pid={} — replacing incumbent",
+                    "VMA-ADD-DUP start={:#x} end={:#x} pid={} — add will be REJECTED with Overlap (incumbent kept)",
                     start.as_usize(),
                     end.as_usize(),
                     crate::process::current_pid()

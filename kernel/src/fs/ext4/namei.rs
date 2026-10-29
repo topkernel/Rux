@@ -1411,21 +1411,51 @@ fn ext4_link_inner(
 /// Idempotent via the on-disk marker: an inode with dtime != 0 was already
 /// reaped and is skipped, so duplicate VFS objects for one disk inode (an
 /// icache eviction can leave two) cannot double-free.
+///
+/// R20-FS1 (5b88fd42 follow-up, perf-lane conviction): the three writes
+/// run inside a journal transaction. The eager path executed this exact
+/// trio inside the unlink transaction, so its writes deferred under the
+/// handle and batched at commit; the deferred reap originally ran them
+/// OUTSIDE any handle — each became an out-of-band synchronous virtio
+/// round trip firing publication_constrained against accumulated
+/// delete-side records (constraint-flush storms: fsw pc 40 -> 3997,
+/// p6_unlink 11.7ms vs the 89-152us class). The bracket restores the
+/// eager batching, and also restores jbd2 revokes for the freed blocks
+/// (revoke_freed_block is a no-op without a current handle — the
+/// unbracketed reap silently skipped them on journalled fs).
+/// Ordering: R20-FS1's inode-first order is buffer order inside the one
+/// transaction, so it survives the deferral; the caller (flush_pending_
+/// reaps) holds EXT4_BIG_LOCK, the same nesting every entry wrapper's
+/// journal bracket runs under.
 pub(crate) fn ext4_reap_unlinked(
     fs: &Ext4FileSystem,
     ino: u32,
 ) -> Result<(), i32> {
     let mut inode = super::inode::read_inode(fs, ino)?;
     if inode.i_links_count != 0 || inode.i_dtime != 0 {
-        // Still linked, or already reaped — nothing to do.
+        // Still linked, or already reaped — nothing to do. Checked BEFORE
+        // the bracket: a no-op reap must not open a transaction.
         return Ok(());
     }
-    // R20-FS1 order (same as the old eager path): persist the dead inode
-    // FIRST (dtime set), then free blocks, then the inode number.
-    inode.i_dtime = 1;
-    super::inode::write_inode_disk(fs, ino, &inode)?;
-    free_inode_blocks(fs, &inode)?;
-    free_inode(fs, ino)
+    let mut handle = super::journal::ext4_journal_start(fs, 12)?;
+    // SAFETY: handle is a local variable from ext4_journal_start;
+    // set_current_handle stores it in a thread-local for jbd2 metadata
+    // journaling during this operation; clear_current_handle below resets
+    // it before the stack slot dies.
+    unsafe { set_current_handle(&mut handle); }
+    let result = (|| -> Result<(), i32> {
+        // R20-FS1 order (same as the old eager path): persist the dead
+        // inode FIRST (dtime set), then free blocks, then the inode number.
+        inode.i_dtime = 1;
+        super::inode::write_inode_disk(fs, ino, &inode)?;
+        free_inode_blocks(fs, &inode)?;
+        free_inode(fs, ino)
+    })();
+    // SAFETY: clear_current_handle resets the thread-local journal handle
+    // to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 // ============================================================================

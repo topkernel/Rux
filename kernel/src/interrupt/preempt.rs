@@ -16,7 +16,13 @@
 // lifted until those reads move behind a framework primitive.
 
 // Framekernel layer policy (docs/architecture/framekernel-layers.md):
-// this module must stay Safe Rust.
+// this module must stay Safe Rust. ENFORCED AS deny, not forbid, with
+// exactly one explicit promotion (below) — the s14 IRQ-PAIR report
+// reads stable Task fields through raw pointers and cannot be expressed
+// safely; the forbid form 00521544 added shipped BROKEN (the module
+// also carries 766d60a9's derefs, so every default riscv64 build
+// hard-fails on it).
+#![deny(unsafe_code)]
 
 // ============================================================================
 // Bit masks
@@ -363,6 +369,13 @@ pub fn irqentry_nmi_exit() {
 /// there). This is the booking-time producer of the stranded-0x10000
 /// face, measured where it happens (no trap-boundary sampling hole).
 /// Direct console; budget 60 per boot.
+///
+/// The one unsafe_code promotion in this module: both task pointers were
+/// current on this CPU moments before (pinned by execution), the fields
+/// read are plain integers, and the diagnostic runs with IRQs off —
+/// there is no safe expression for "read through this raw task pointer"
+/// without inventing a reference the type system cannot justify.
+#[allow(unsafe_code)]
 fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
     use crate::console::putchar_no_lock as putchar;
     static BUDGET: core::sync::atomic::AtomicU32 =
