@@ -332,6 +332,15 @@ pub struct SchedEntity {
 
     /// Time slice (nanoseconds)
     pub slice: AtomicU64,
+
+    /// Leg-55 GRQ slimming: the exact BTreeMap key this entity is linked
+    /// under, while linked. Set at enqueue_inner (the key's birthplace),
+    /// cleared at every removal (dequeue/pick_next/pick_next_cpu).
+    /// GRQ-HELD access only — the timeline is GRQ-protected, so the key
+    /// shares its discipline (UnsafeCell, not atomic: no lockless reader).
+    /// dequeue's O(n) pointer scan and is_linked's O(n) scan become
+    /// O(log n) removal / O(log n) exact-membership through this.
+    pub(crate) timeline_key: core::cell::UnsafeCell<Option<VruntimeKey>>,
 }
 
 impl SchedEntity {
@@ -345,6 +354,7 @@ impl SchedEntity {
             prev_sum_exec_runtime: AtomicU64::new(0),
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(0),
+            timeline_key: core::cell::UnsafeCell::new(None),
         }
     }
 
@@ -358,6 +368,7 @@ impl SchedEntity {
             prev_sum_exec_runtime: AtomicU64::new(0),
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(0),
+            timeline_key: core::cell::UnsafeCell::new(None),
         }
     }
 
@@ -473,6 +484,22 @@ impl SchedEntity {
         self.on_rq.store(on_rq, Ordering::Release);
     }
 
+    /// Leg-55: the timeline key this entity is linked under (None when
+    /// unlinked). GRQ-HELD access only — see the field comment.
+    #[inline]
+    pub fn timeline_key(&self) -> Option<VruntimeKey> {
+        // SAFETY: GRQ (or the grq_diag try-lock) is held by every caller
+        // per the timeline discipline; no concurrent writer exists.
+        unsafe { *self.timeline_key.get() }
+    }
+
+    /// Leg-55: GRQ-held key update (enqueue stores it, removal clears it).
+    #[inline]
+    pub fn set_timeline_key(&self, key: Option<VruntimeKey>) {
+        // SAFETY: GRQ held — see timeline_key().
+        unsafe { *self.timeline_key.get() = key; }
+    }
+
     /// Get time slice
     #[inline]
     pub fn get_slice(&self) -> u64 {
@@ -514,6 +541,7 @@ impl Clone for SchedEntity {
             prev_sum_exec_runtime: AtomicU64::new(self.prev_sum_exec_runtime.load(Ordering::Acquire)),
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(self.slice.load(Ordering::Acquire)),
+            timeline_key: core::cell::UnsafeCell::new(None),
         }
     }
 }
@@ -583,6 +611,14 @@ pub struct CfsRunQueue {
 
     /// Next task ID (for generating unique keys)
     next_task_id: AtomicU64,
+
+    /// Leg-55 GRQ slimming: cached leftmost entry. O(1) pick reads
+    /// instead of an O(log n) tree walk on EVERY
+    /// pick/peek/update_min_vruntime/leftmost_vruntime. GRQ-held
+    /// discipline (same as the timeline): maintained at the mutation
+    /// sites (insert may lower it; removing the cached key invalidates
+    /// it and the next read lazily recomputes with one walk).
+    leftmost_cache: Option<(VruntimeKey, *mut crate::process::Task)>,
 }
 
 impl CfsRunQueue {
@@ -595,6 +631,43 @@ impl CfsRunQueue {
             nr_running: AtomicU64::new(0),
             load_weight: AtomicU64::new(0),
             next_task_id: AtomicU64::new(0),
+            leftmost_cache: None,
+        }
+    }
+
+    /// Leg-55: the leftmost (min-vruntime) entry — O(1) via the cache,
+    /// one O(log n) walk only when the cache was invalidated by removing
+    /// the cached key. GRQ-HELD.
+    #[inline]
+    fn leftmost_entry(&mut self) -> Option<(VruntimeKey, *mut crate::process::Task)> {
+        if self.leftmost_cache.is_none() {
+            self.leftmost_cache = self
+                .tasks_timeline
+                .iter()
+                .next()
+                .map(|(&k, &t)| (k, t));
+        }
+        self.leftmost_cache
+    }
+
+    #[inline]
+    fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) {
+        let lower = self
+            .leftmost_cache
+            .map_or(true, |(ck, _)| key < ck);
+        self.tasks_timeline.insert(key, task);
+        if lower {
+            self.leftmost_cache = Some((key, task));
+        }
+    }
+
+    #[inline]
+    fn timeline_remove(&mut self, key: &VruntimeKey) {
+        self.tasks_timeline.remove(key);
+        if self.leftmost_cache.as_ref().map_or(false, |(ck, _)| ck == key) {
+            // Removing the leftmost: invalidate; the next read recomputes
+            // once. (Scanning the successor here would re-walk anyway.)
+            self.leftmost_cache = None;
         }
     }
 
@@ -749,7 +822,9 @@ impl CfsRunQueue {
             Some(unsafe { (*self.curr).sched_entity().get_vruntime() })
         };
 
-        let leftmost = self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime);
+        // Leg-55: O(1) via the leftmost cache (update_min_vruntime runs on
+        // every enqueue/dequeue/pick — the walk was a per-op GRQ cost).
+        let leftmost = self.leftmost_entry().map(|(k, _)| k.vruntime);
 
         // vruntime = curr (if running) clamped by leftmost (if any queued).
         let vruntime = match (curr_v, leftmost) {
@@ -821,8 +896,10 @@ impl CfsRunQueue {
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
             let key = VruntimeKey::new(se.get_vruntime(), task_id);
 
-            // Add to BTreeMap
-            self.tasks_timeline.insert(key, task);
+            // Add to BTreeMap (and record the key on the entity — the
+            // O(log n) dequeue/is_linked handle; see SchedEntity).
+            self.timeline_insert(key, task);
+            se.set_timeline_key(Some(key));
 
             // Update status
             se.set_on_rq(true);
@@ -856,20 +933,36 @@ impl CfsRunQueue {
             let task_ref = &mut *task;
             let se = task_ref.sched_entity();
 
-            // Find and remove task by pointer only.
-            // We do NOT match vruntime because update_curr() may have
-            // changed the sched_entity's vruntime after the task was
-            // enqueued, making the BTreeMap key's vruntime stale.
-            let mut found_key = None;
-            for (&key, &ptr) in self.tasks_timeline.iter() {
-                if ptr == task {
-                    found_key = Some(key);
-                    break;
+            // Leg-55 GRQ slimming: the entity's stored key IS its linkage
+            // (set at enqueue, cleared at every removal) — O(log n)
+            // membership check instead of the O(n) pointer scan. The key
+            // cannot go stale the way the old comment feared: update_curr
+            // mutates se.vruntime but NOT the stored key, and the map's
+            // entry keeps its original sort key — remove(&stored_key) is
+            // exact. The pointer-identity check guards a scribbled key.
+            let stored = se.timeline_key();
+            let found_key = match stored {
+                Some(key) if self.tasks_timeline.get(&key) == Some(&task) => {
+                    Some(key)
                 }
-            }
+                // Heal fallback (scribble/divergence family): the old
+                // scan, preserving the exact pre-leg-55 semantics for any
+                // state the fast path does not recognize.
+                _ => {
+                    let mut found = None;
+                    for (&key, &ptr) in self.tasks_timeline.iter() {
+                        if ptr == task {
+                            found = Some(key);
+                            break;
+                        }
+                    }
+                    found
+                }
+            };
 
             if let Some(key) = found_key {
-                self.tasks_timeline.remove(&key);
+                self.timeline_remove(&key);
+                se.set_timeline_key(None);
 
                 // Update status
                 se.set_on_rq(false);
@@ -903,7 +996,18 @@ impl CfsRunQueue {
         if task.is_null() {
             return false;
         }
-        self.tasks_timeline.iter().any(|(_, &ptr)| ptr == task)
+        // Leg-55: O(log n) exact membership through the stored key (set
+        // at enqueue, cleared at every removal — linkage is exactly
+        // "the map holds task under the entity's key"). Same authority
+        // as the old O(n) scan, without the walk. GRQ held per the
+        // invariant in the comment above.
+        // SAFETY: task is a valid Task pointer (null-checked above) and
+        // the timeline discipline covers its sched_entity access.
+        let se = unsafe { (*task).sched_entity() };
+        match se.timeline_key() {
+            Some(key) => self.tasks_timeline.get(&key) == Some(&task),
+            None => false,
+        }
     }
 
     /// Shared heal-report rate gate: at most one heal line per 2 jiffies
@@ -1109,17 +1213,21 @@ impl CfsRunQueue {
     /// # Returns
     /// Next task pointer to run, or None if queue is empty
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
-        // Get task with smallest vruntime
-        if let Some((&key, &task)) = self.tasks_timeline.iter().next() {
+        // Get task with smallest vruntime (O(1) via the leftmost cache)
+        if let Some((key, task)) = self.leftmost_entry() {
             // b50 #GP guard — see pick_next_cpu. A non-canonical slot
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+                self.timeline_remove(&key);
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
             }
             // Remove from queue using key (don't call dequeue, as vruntime may have changed)
-            self.tasks_timeline.remove(&key);
+            self.timeline_remove(&key);
+            // SAFETY: task was stored in tasks_timeline from a valid &mut
+            // Task pointer; just removed, no aliasing references exist.
+            unsafe { (*task).sched_entity().set_timeline_key(None); }
 
             // SAFETY: task was stored in tasks_timeline from a valid &mut Task pointer;
             // it was just removed from the queue so no aliasing references exist.
@@ -1186,12 +1294,9 @@ impl CfsRunQueue {
         let mut result = None;
 
         loop {
-            let key = match self.tasks_timeline.iter().next() {
-                Some((&k, _)) => k,
-                None => break,
-            };
-            let task = match self.tasks_timeline.get(&key) {
-                Some(&t) => t,
+            // Leg-55: O(1) leftmost read (cache) instead of walk + get.
+            let (key, task) = match self.leftmost_entry() {
+                Some((k, t)) => (k, t),
                 None => break,
             };
 
@@ -1203,6 +1308,7 @@ impl CfsRunQueue {
             // CPU's pick) alive matters more. load_weight is left
             // stale: reading it would deref the same garbage.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+                self.timeline_remove(&key);
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 continue;
@@ -1366,13 +1472,14 @@ impl CfsRunQueue {
             };
             if allowed {
                 // Found a match — remove and return it
-                self.tasks_timeline.remove(&key);
+                self.timeline_remove(&key);
 
                 // SAFETY: task was just removed from the queue; no aliasing references exist.
                 unsafe {
                     let task_ref = &mut *task;
                     let se = task_ref.sched_entity();
                     se.set_on_rq(false);
+                    se.set_timeline_key(None);
 
                     self.nr_running_dec();
                     self.load_weight_sub(se.load.weight);
@@ -1396,13 +1503,22 @@ impl CfsRunQueue {
             // the whole strand window. Armed only under dfx=schedtrace.
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
                 note_pick_skip(task, skip_reason as u8);
-            }
+            }            // Not allowed — remove temporarily and stash (the entity's
+            // recorded key stays valid: the re-insert below uses the same
+            // key, so linkage-through-key remains exact across the stash
+            // window, all under this one GRQ hold).
+            self.timeline_remove(&key);
+            // Not allowed — remove temporarily and stash (the entity's
+            // recorded key stays valid: the re-insert below uses the same
+            // key, so linkage-through-key remains exact across the stash
+            // window, all under this one GRQ hold).
+            self.timeline_remove(&key);
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;
             } else {
                 // Overflow — re-insert and give up (very unlikely)
-                self.tasks_timeline.insert(key, task);
+                self.timeline_insert(key, task);
                 break;
             }
         }
@@ -1410,7 +1526,7 @@ impl CfsRunQueue {
         // Re-insert all skipped entries
         for i in (0..skip_count).rev() {
             let (key, task, _) = skipped[i];
-            self.tasks_timeline.insert(key, task);
+            self.timeline_insert(key, task);
         }
 
         // Advance min_vruntime over the COMPLETE timeline. The pick loop
