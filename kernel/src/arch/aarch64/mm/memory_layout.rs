@@ -111,7 +111,9 @@ pub const PHYS_MEMORY_BASE: usize = 0x4000_0000;
 
 /// VA-PA offset for the linear mapping
 /// va_pa_offset = PAGE_OFFSET - phys_ram_base
-pub const VA_PA_OFFSET: usize = PAGE_OFFSET - PHYS_MEMORY_BASE;
+/// The aarch64 linear map places phys P at PAGE_OFFSET + P (identity from
+/// zero — see setup_linear_mapping), so the VA-PA offset is PAGE_OFFSET.
+pub const VA_PA_OFFSET: usize = PAGE_OFFSET;
 
 /// Check if address is in the linear mapping region.
 ///

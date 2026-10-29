@@ -180,6 +180,25 @@ _start:
     orr     x2, x2, x11                  // normal attrs + valid + block
     str     x2, [x1, #8]
 
+    // ---- TTBR1 early linear map: L0[0x180] -> lin_l1 ----
+    // PAGE_OFFSET (0xffff_c000_0000_0000) sits at L0 index 0x180 — a
+    // different subtree than the kernel window (L0[511]). One 1GB block at
+    // lin_l1[1] covers phys [0x40000000, 0x80000000) = all RAM on -m 1G,
+    // so PAGE_OFFSET-relative accesses (the heap window) are valid from
+    // MMU-on; setup_linear_mapping refines this later.
+    adrp    x0, kern_l0
+    add     x0, x0, :lo12:kern_l0
+    adrp    x1, lin_l1
+    add     x1, x1, :lo12:lin_l1
+    orr     x1, x1, #3
+    str     x1, [x0, #0x180*8]
+
+    adrp    x1, lin_l1
+    add     x1, x1, :lo12:lin_l1
+    ldr     x2, =0x40000000
+    orr     x2, x2, x11                  // normal attrs + valid + 1GB block
+    str     x2, [x1, #8]                 // L1 index 1 = phys 0x40000000
+
     // ---- TTBR1 kernel window: L0[511] → kern_l1 → kern_l2 (2MB blocks) ----
     // VA base 0xffffffff80000000 ↔ phys 0x40000000 (17 × 2MB = 34MB)
     adrp    x0, kern_l0
@@ -426,6 +445,8 @@ kern_l0:     .space 4096
 kern_l1:     .space 4096
 .global kern_l2
 kern_l2:     .space 4096
+.global lin_l1
+lin_l1:      .space 4096          // early linear map (PAGE_OFFSET subtree L0[0x180])
 
 // Per-CPU interrupt stack base (smp::init_per_cpu_intr_stacks publishes it)
 .bss
