@@ -103,6 +103,10 @@ def main():
                          "pbench_arm wrapper and boot init=/test/arm "
                          "(arms /proc/sys/kernel/sched_schedstats then "
                          "execs the probe); the B side is the stock boot")
+    ap.add_argument("--p3d", action="store_true",
+                    help="stage the pbench_p3d wrapper (sets P3D=1 in the "
+                         "probe's env then execs it) — enables the P3d "
+                         "concurrent-fault contention row (ledger 8.10.27)")
     ap.add_argument("--nojournal", action="store_true",
                     help="F4 arm-1 (leg 44): mkfs the probe rootfs WITHOUT "
                          "has_journal so the fs rows run the no-journal "
@@ -142,6 +146,11 @@ def main():
         if not build_probe(arm, src=os.path.join(HERE, "pbench_arm.c")):
             return 2
         init_path = "/test/arm"
+    if args.p3d:
+        arm = os.path.join(WORK, "pbench_p3d")
+        if not build_probe(arm, src=os.path.join(HERE, "pbench_p3d_arm.c")):
+            return 2
+        init_path = "/test/pbench_p3d"
     if args.long_p5:
         # leg 46: stage the wrapper as an extra image file and boot it
         # (the probe itself is still staged — the wrapper execve's it).
