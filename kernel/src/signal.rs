@@ -774,6 +774,87 @@ impl SigContext {
     }
 }
 
+/// aarch64 sigcontext — Linux arm64 uapi shape: fault_address, the 31
+/// GPRs, sp, pc, pstate, then the (elided) reserved block. Stage-2's
+/// setup/restore fills it from PtRegs.
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SigContext {
+    /// FAR at fault time
+    pub fault_address: u64,
+    /// x0..x30
+    pub regs: [u64; 31],
+    /// stack pointer
+    pub sp: u64,
+    /// program counter
+    pub pc: u64,
+    /// PSTATE
+    pub pstate: u64,
+}
+
+#[cfg(feature = "aarch64")]
+impl Default for SigContext {
+    fn default() -> Self {
+        Self { fault_address: 0, regs: [0u64; 31], sp: 0, pc: 0, pstate: 0 }
+    }
+}
+
+#[cfg(feature = "aarch64")]
+impl SigContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// aarch64 ucontext (same skeleton as the riscv64 one)
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct UContext {
+    pub uc_flags: u64,
+    pub uc_link: u64,
+    pub uc_stack: SignalStack,
+    pub uc_mcontext: SigContext,
+    pub uc_sigmask: u64,
+    __unused: [u8; 120],
+}
+
+#[cfg(feature = "aarch64")]
+impl UContext {
+    pub fn new() -> Self {
+        Self {
+            uc_flags: 0,
+            uc_link: 0,
+            uc_stack: SignalStack::new(),
+            uc_sigmask: 0,
+            __unused: [0u8; 120],
+            uc_mcontext: SigContext::new(),
+        }
+    }
+}
+
+/// aarch64 rt_sigframe — Linux arm64: { siginfo, ucontext }, handler
+/// entered with lr = restorer (SA_RESTORER always set by glibc here).
+/// STAGE 2: full setup/restore (the frame lands on the user stack with
+/// x0=sig, x1=&info, x2=&uc per AAPCS64).
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SignalFrame {
+    /// signal info
+    pub info: SigInfo,
+    /// user context
+    pub uc: UContext,
+}
+
+#[cfg(feature = "aarch64")]
+impl SignalFrame {
+    pub const fn size() -> usize {
+        core::mem::size_of::<SignalFrame>()
+    }
+}
+
 /// User context - register state saved during signal handling
 ///
 /// Layout matches `struct ucontext` from `arch/riscv/include/uapi/asm/ucontext.h`:
@@ -1421,6 +1502,25 @@ unsafe fn setup_frame(
         // SAFETY: forwarding the caller's validated pointers.
         unsafe { setup_frame_x86_64(task, sig, action, regs, queued_info) }
     }
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { setup_frame_aarch64(task, sig, action, regs, queued_info) }
+    }
+}
+
+/// aarch64 frame construction — STAGE 2 (signal delivery needs EL0
+/// return through the trap path first). Delivery fails cleanly until
+/// then (the caller treats false as "cannot deliver").
+#[cfg(feature = "aarch64")]
+unsafe fn setup_frame_aarch64(
+    _task: *mut crate::process::task::Task,
+    _sig: i32,
+    _action: &SigAction,
+    _regs: *mut crate::arch::pt_regs::PtRegs,
+    _queued_info: Option<SigInfo>,
+) -> bool {
+    false
 }
 
 // ============================================================================
@@ -1650,6 +1750,13 @@ pub unsafe fn restore_sigcontext(
     {
         // SAFETY: forwarding the caller's validated pointers.
         unsafe { restore_sigcontext_x86_64(task, frame_addr, regs) }
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        // STAGE 2: decode the arm64 sigcontext (regs[31]+sp/pc/pstate)
+        // back into PtRegs. Until then restore fails → SIGSEGV.
+        let _ = (task, frame_addr, regs);
+        false
     }
 }
 

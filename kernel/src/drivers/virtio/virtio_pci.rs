@@ -205,6 +205,11 @@ impl VirtIOPCI {
         // lands; the IRQ path is unreachable with an empty probe set.
         #[cfg(feature = "x86_64")]
         let pci_slot = 0u8;
+        // aarch64: ECAM slot derivation identical to riscv64 (gpex model,
+        // virt machine ECAM base differs — stage-3 probes the DTB PCI node)
+        #[cfg(feature = "aarch64")]
+        let pci_slot =
+            (((pci_base - crate::arch::mm::memory_layout::PCIE_ECAM_BASE) >> 15) & 0x1F) as u8;
 
         // Verify vendor ID and device ID
         let vendor_id = pci_config.vendor_id();
@@ -431,7 +436,7 @@ impl VirtIOPCI {
         // MAP_FIXED mapping may replace the low identity copy in its own
         // address space (gjs cage over 0x0c000000 PLIC did exactly that
         // and KERNPANICed the PLIC claim read).
-        #[cfg(feature = "riscv64")]
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         fn bar_va(bar: u64) -> u64 {
             crate::arch::mm::memory_layout::mmio_alias(bar)
         }
@@ -792,6 +797,11 @@ impl VirtIOPCI {
     pub fn enable_device_interrupt(&self) {
         self.enable_pci_intx_irq(intx_blk_service);
     }
+
+    /// aarch64: PCI INTx arrives as a GICv3 SPI — wired in stage 3 with
+    /// the GIC bring-up (until then the device runs polling/async).
+    #[cfg(feature = "aarch64")]
+    pub fn enable_device_interrupt(&self) {}
 
     /// Register this device on its PIC INTx line with a shared dispatcher.
     ///

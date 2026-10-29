@@ -73,6 +73,10 @@ fn clocksource_name() -> &'static str {
     {
         "sbi-time"
     }
+    #[cfg(feature = "aarch64")]
+    {
+        "cntvct"
+    }
 }
 
 /// One observation; called from the timer softirq (any CPU).

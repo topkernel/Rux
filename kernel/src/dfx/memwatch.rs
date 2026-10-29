@@ -131,6 +131,14 @@ pub fn plausible_fp(fp: u64) -> bool {
     crate::arch::riscv64::mm::is_linear_mapping(fp as usize)
 }
 
+#[cfg(feature = "aarch64")]
+pub fn plausible_fp(fp: u64) -> bool {
+    // aarch64: kernel stacks live in the TTBR1 half (linear map, vmemmap
+    // or the image); both sit above 0xffff_8000_0000_0000.
+    fp >= 0xffff_8000_0000_0000
+        && crate::arch::mm::is_linear_mapping(fp as usize)
+}
+
 #[inline(never)]
 #[cfg(feature = "riscv64")]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
@@ -160,6 +168,30 @@ pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
 /// MEMPSITES attribution (observed live on the pt4 audit boot: f2 slots
 /// full of ASCII data like 0x49657069505d737d, top net=198 against
 /// 442k page frees).
+/// aarch64 twin: AAPCS64 frame layout stores the saved x29 (caller fp)
+/// at [fp] and lr at [fp+8] — the same walk shape as the x86_64 SysV
+/// twin below (NOT the riscv64 top-of-frame layout).
+#[inline(never)]
+#[cfg(feature = "aarch64")]
+pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
+    for slot in out.iter_mut() {
+        *slot = 0;
+        if !(fp >= 0xffff_8000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
+            return;
+        }
+        // AAPCS64: [fp] = caller's saved x29, [fp+8] = this frame's
+        // return address. Stacks grow down, so the caller's fp is
+        // strictly greater than the current one.
+        let next = core::ptr::read_volatile(fp as *const u64);
+        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
+        *slot = ra;
+        if !(next >= 0xffff_8000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
+            return;
+        }
+        fp = next;
+    }
+}
+
 #[inline(never)]
 #[cfg(feature = "x86_64")]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
@@ -219,6 +251,17 @@ fn sanitized_ra(ra: u64) -> u64 {
 #[cfg(feature = "riscv64")]
 fn sanitized_ra(ra: u64) -> u64 {
     ra
+}
+
+/// aarch64: kernel text lives in the image window (not the linear map),
+/// so the x86_64-style image-window test transfers directly.
+#[cfg(feature = "aarch64")]
+fn sanitized_ra(ra: u64) -> u64 {
+    if (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&ra) {
+        ra
+    } else {
+        0
+    }
 }
 
 /// Record one realloc observation. `frames[0]` is the return address out

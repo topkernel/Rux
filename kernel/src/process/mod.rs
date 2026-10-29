@@ -55,6 +55,14 @@ pub fn thread_set_entry(
     {
         thread.ra = entry;
     }
+    #[cfg(feature = "aarch64")]
+    {
+        // Same shape as riscv64: __switch_to returns into thread.ra with
+        // sp = thread.sp. The fork child's ra = ret_from_fork, whose
+        // first switch-in runs the user-exit loop into the seeded
+        // pt_regs frame (child erets to EL0 with x0 = 0).
+        thread.ra = entry;
+    }
     #[cfg(feature = "x86_64")]
     {
         thread.callee.ret_addr = entry;

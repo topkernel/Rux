@@ -16,3 +16,8 @@ pub use x86_64::*;
 
 #[cfg(feature = "x86_64")]
 pub mod hpet;
+
+#[cfg(feature = "aarch64")]
+pub mod aarch64;
+#[cfg(feature = "aarch64")]
+pub use aarch64::*;

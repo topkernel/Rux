@@ -354,6 +354,9 @@ pub fn process_vm_copy(
 /// riscv64: full store fence + per-address TLB invalidation + fence.i.
 /// x86_64: self-modifying code is cache-coherent; a serializing fence for
 /// compiler ordering is sufficient.
+/// aarch64: clean d-cache to PoU, invalidate i-cache to PoU, then
+/// barrier + context sync (Linux arm64 flush_icache_range shape; the
+/// page is already mapped, so no TLB op is needed for the store).
 #[inline]
 fn flush_icache_range(_addr: u64) {
     #[cfg(feature = "riscv64")]
@@ -371,6 +374,19 @@ fn flush_icache_range(_addr: u64) {
     #[cfg(feature = "x86_64")]
     {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(feature = "aarch64")]
+    // SAFETY: dc cvau/ic ivau on the text page are the arm64 text-write
+    // coherence sequence; no memory operands beyond the address register.
+    unsafe {
+        core::arch::asm!(
+            "dc cvau, {0}",
+            "ic ivau, {0}",
+            "dsb ish",
+            "isb",
+            in(reg) _addr,
+            options(nostack, preserves_flags)
+        );
     }
 }
 

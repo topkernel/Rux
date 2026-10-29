@@ -6326,6 +6326,13 @@ pub fn cpu_idle_loop() -> ! {
         unsafe { core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack)) };
         sp
     }
+    #[cfg(feature = "aarch64")]
+    fn idle_guard_sp() -> usize {
+        let sp: usize;
+        // SAFETY: reading sp is side-effect free.
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack)) };
+        sp
+    }
     fn idle_guard_report(cpu: usize, sp: u64, floor: u64) {
         use crate::console::putchar_no_lock as putchar;
         fn ph(mut v: u64) {

@@ -102,7 +102,8 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     //   `0x40(%rbp)` access faulted at tid+0x40 (observed: fcntl34_64
     //   threads faulting at 0x40 and 0x181 with tid 0x141 — the X3
     //   thread-crash family).
-    #[cfg(feature = "riscv64")]
+    // aarch64 raw clone order matches riscv64: (flags, sp, ptid, TLS, ctid)
+    #[cfg(any(feature = "riscv64", feature = "aarch64"))]
     let (tls, child_tid) = (args[3], args[4] as *mut i32);
     #[cfg(feature = "x86_64")]
     let (tls, child_tid) = (args[4], args[3] as *mut i32);
@@ -1894,6 +1895,8 @@ pub fn sys_uname(args: SyscallArgs) -> i64 {
             let s = b"riscv64\0";
             #[cfg(feature = "x86_64")]
             let s = b"x86_64\0";
+            #[cfg(feature = "aarch64")]
+            let s = b"aarch64\0";
             a[..s.len()].copy_from_slice(s);
             a
         },
@@ -4332,6 +4335,8 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const AUDIT_ARCH: u32 = 0x8000_0000 | 0x4000_0000 | 243; // AUDIT_ARCH_RISCV64
 #[cfg(feature = "x86_64")]
 const AUDIT_ARCH: u32 = 0x8000_0000 | 0x4000_0000 | 62; // AUDIT_ARCH_X86_64
+#[cfg(feature = "aarch64")]
+const AUDIT_ARCH: u32 = 0x8000_0000 | 0x4000_0000 | 183; // AUDIT_ARCH_AARCH64
 
 /// Classic-BPF instruction classes/ops (uapi/linux/filter.h subset).
 const BPF_LD: u16 = 0x00;
@@ -4608,6 +4613,15 @@ const STRICT_ALLOWED: [u64; 5] = [
     60,  // exit
     231, // exit_group
     15,  // rt_sigreturn
+];
+/// aarch64: asm-generic syscall numbers — identical to riscv64's set
+#[cfg(feature = "aarch64")]
+const STRICT_ALLOWED: [u64; 5] = [
+    63,  // read
+    64,  // write
+    93,  // exit
+    94,  // exit_group
+    139, // rt_sigreturn
 ];
 
 /// seccomp gate result: None = allow, Some(rv) = block with syscall return
@@ -6149,7 +6163,7 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     } else {
         0
     };
-    #[cfg(feature = "x86_64")]
+    #[cfg(any(feature = "x86_64", feature = "aarch64"))]
     let v_bit = 0;
 
     // SAFETY: pairs_ptr validated with access_ok; get_user/put_user are the

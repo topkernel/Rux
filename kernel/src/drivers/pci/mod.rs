@@ -116,6 +116,13 @@ pub fn ecam_va(ecam_addr: u64) -> u64 {
 pub fn ecam_va(ecam_addr: u64) -> u64 {
     ecam_addr
 }
+/// aarch64: same alias discipline as riscv64 (the low ECAM window must
+/// never be dereferenced from a context whose root a user MAP_FIXED can
+/// replace; the permanent kernel-half alias carries all config access).
+#[cfg(feature = "aarch64")]
+pub fn ecam_va(ecam_addr: u64) -> u64 {
+    crate::arch::mm::memory_layout::mmio_alias(ecam_addr)
+}
 
 impl PCIConfig {
     /// Create new PCI configuration space access

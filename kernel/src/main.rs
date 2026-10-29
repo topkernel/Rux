@@ -453,7 +453,7 @@ pub fn rust_main_tail() -> ! {
             // Re-read memory regions (riscv64 re-parses the FDT via the
             // linear mapping; the x86_64 multiboot copy in BSS is always
             // valid, so just rebuild the list)
-            #[cfg(feature = "riscv64")]
+            #[cfg(any(feature = "riscv64", feature = "aarch64"))]
             let memory_regions = {
                 let dtb_phys = arch::boot::get_dtb_pointer();
                 let dtb_virt = arch::mm::phys_to_virt(
@@ -1171,10 +1171,13 @@ extern "C" fn boot_stack_continuation() -> ! {
 
 // Include platform-specific assembly code
 #[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/boot/boot.S"));
+use core::arch::global_asm;
 
 #[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/trap.S"));
+global_asm!(include_str!("arch/aarch64/boot/boot.S"));
+
+// aarch64/trap.S is included from arch/aarch64/trap.rs via global_asm!
+// (it needs the PtRegs frame offsets interpolated from Rust constants).
 
 /// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
 /// memory + kernel on x86_64) and the heap's physical base.
@@ -1226,6 +1229,10 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
 const KERNEL_HEAP_PHYS: usize = 0x8160_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
+// aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
+// aarch64 linker.ld ASSERTs the image fits). Heap follows the window.
+#[cfg(feature = "aarch64")]
+const KERNEL_HEAP_PHYS: usize = 0x4280_0000;
 
 /// Physical base of RAM and the kernel's physical load address, per arch.
 #[cfg(feature = "riscv64")]
@@ -1236,6 +1243,10 @@ const KERNEL_PHYS_LOAD_ADDR: usize = 0x8020_0000;
 const MEMORY_PHYS_BASE: usize = 0x0000_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_PHYS_LOAD_ADDR: usize = 0x0020_0000; // multiboot1 LMA
+#[cfg(feature = "aarch64")]
+const MEMORY_PHYS_BASE: usize = 0x4000_0000;
+#[cfg(feature = "aarch64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x4008_0000; // RAM base + text_offset
 
 /// Usable memory regions from the multiboot/e820 map (x86_64).
 ///
@@ -1375,6 +1386,12 @@ pub extern "C" fn rust_main() -> ! {
         let dtb_phys = arch::boot::get_dtb_pointer();
         #[cfg(feature = "riscv64")]
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        // aarch64: QEMU passes the DTB in x0; the same generic FDT parser
+        // walks /memory (cmdline.rs is arch-neutral).
+        #[cfg(feature = "aarch64")]
+        let dtb_phys = arch::boot::get_dtb_pointer();
+        #[cfg(feature = "aarch64")]
+        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
         // Prime the V-extension capability from the same DTB (vext.rs):
         // misa is not S-mode readable, so the ISA string is the source.
         #[cfg(feature = "riscv64")]
@@ -1396,7 +1413,7 @@ pub extern "C" fn rust_main() -> ! {
         // consumed (unpacked into the rootfs) much later, after rootfs
         // init. Runs on the early identity mapping, hence the physical
         // dtb pointer like parse_memory_regions above.
-        #[cfg(feature = "riscv64")]
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
             if let Some((start, end)) = unsafe { cmdline::parse_initrd_region(dtb_phys) } {

@@ -13,7 +13,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "riscv64", feature = "aarch64"))]
 use crate::arch::mm::fixmap::uart_virt_addr;
 
 // ============================================================================
@@ -279,9 +279,12 @@ impl Uart {
         crate::dfx::pstore::sink(c);
 
         #[cfg(feature = "aarch64")]
-        // SAFETY: UART0_BASE is a valid MMIO address for the UART data register.
+        // SAFETY: uart_virt_addr() is the PL011 fixmap VA once the early
+        // map is installed (mmu_init::init → fixmap::init_uart_fixmap),
+        // the identity physical address before that (boot.S idmap still
+        // live) — both are valid MMIO data-register addresses.
         unsafe {
-            let addr = UART0_BASE + 0x00;
+            let addr = uart_virt_addr();
             asm!(
                 "str w1, [x0]",
                 in("x0") addr,
@@ -908,6 +911,23 @@ pub fn puts_no_lock(s: &str) {
 #[cfg(any(feature = "riscv64", feature = "x86_64"))]
 pub fn uart_data_ready() -> bool {
     uart_has_data()
+}
+
+/// aarch64 PL011: FR (offset 0x18) bit 4 = RX FIFO empty
+#[cfg(feature = "aarch64")]
+pub fn uart_data_ready() -> bool {
+    // SAFETY: uart_virt_addr() is the fixmap VA (or the early identity
+    // address pre-init — see putc); reading FR is a pure MMIO flag read.
+    unsafe {
+        let fr: u32;
+        core::arch::asm!(
+            "ldr {fr}, [{addr}]",
+            fr = out(reg) fr,
+            addr = in(reg) uart_virt_addr() + 0x18,
+            options(nostack, readonly)
+        );
+        fr & (1 << 4) == 0
+    }
 }
 
 /// Read single character (non-blocking).

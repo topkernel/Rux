@@ -74,7 +74,7 @@ const FS_FAMILY: &[u64] = &[
     257, // openat
     322, // sync_file_range
 ];
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "riscv64", feature = "aarch64"))]
 const FS_FAMILY: &[u64] = &[
     63, 64, // read write
     43, 57, // close dup3 (generic)
@@ -163,6 +163,15 @@ unsafe fn audit(now: u64) {
             // SAFETY: entry-frame read of this task's own kernel stack.
             let r = unsafe { &*regs };
             (r.a7 as u64, r.epc as u64, r.a0 as u64, r.a1 as u64)
+        };
+        #[cfg(feature = "aarch64")]
+        let (sys, epc, a0, a1) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+            // SAFETY: entry-frame read of this task's own kernel stack.
+            let r = unsafe { &*regs };
+            (r.syscallno, r.pc, r.regs[0], r.regs[1])
         };
         if sys == 0 {
             // Not a syscall entry (interrupt frame) — skip.

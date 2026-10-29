@@ -223,6 +223,60 @@ const REG_NAMES: [&str; 31] = [
     "", "", "", "", "", "", "",
 ];
 
+/// aarch64: save_regs captures x0..x30 in slot order
+#[cfg(feature = "aarch64")]
+const REG_NAMES: [&str; 31] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+    "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
+    "x24", "x25", "x26", "x27", "x28", "x29", "x30",
+];
+
+/// aarch64: capture x0..x30 into the dump array (x0 at slot 0).
+#[cfg(feature = "aarch64")]
+pub fn save_regs() -> [u64; 31] {
+    let mut regs: [u64; 31] = [0; 31];
+    // SAFETY: register stores into a stack buffer; no memory reads.
+    unsafe {
+        core::arch::asm!(
+            "str x0, [{buf}, #0]",
+            "str x1, [{buf}, #8]",
+            "str x2, [{buf}, #16]",
+            "str x3, [{buf}, #24]",
+            "str x4, [{buf}, #32]",
+            "str x5, [{buf}, #40]",
+            "str x6, [{buf}, #48]",
+            "str x7, [{buf}, #56]",
+            "str x8, [{buf}, #64]",
+            "str x9, [{buf}, #72]",
+            "str x10, [{buf}, #80]",
+            "str x11, [{buf}, #88]",
+            "str x12, [{buf}, #96]",
+            "str x13, [{buf}, #104]",
+            "str x14, [{buf}, #112]",
+            "str x15, [{buf}, #120]",
+            "str x16, [{buf}, #128]",
+            "str x17, [{buf}, #136]",
+            "str x18, [{buf}, #144]",
+            "str x19, [{buf}, #152]",
+            "str x20, [{buf}, #160]",
+            "str x21, [{buf}, #168]",
+            "str x22, [{buf}, #176]",
+            "str x23, [{buf}, #184]",
+            "str x24, [{buf}, #192]",
+            "str x25, [{buf}, #200]",
+            "str x26, [{buf}, #208]",
+            "str x27, [{buf}, #216]",
+            "str x28, [{buf}, #224]",
+            "str x29, [{buf}, #232]",
+            "str x30, [{buf}, #240]",
+            buf = inout(reg) regs.as_mut_ptr() => _,
+            options(nostack)
+        );
+    }
+    regs
+}
+
 /// Save all integer registers to a stack buffer via inline assembly.
 ///
 /// Returns an array of 31 u64 values representing x1..x31.
@@ -351,4 +405,26 @@ pub fn dump_csrs() {
     let mut w = ConsoleWriter::new();
     let _ = write!(w, "CR2    : {:016x}\n", crate::arch::cpu::read_cr2());
     let _ = write!(w, "CR3    : {:016x}\n\n", crate::arch::cpu::read_cr3());
+}
+
+/// aarch64: print the exception syndrome registers instead of RISC-V CSRs.
+#[cfg(feature = "aarch64")]
+pub fn dump_csrs() {
+    let mut w = ConsoleWriter::new();
+    let (esr, elr, far, spsr): (u64, u64, u64, u64);
+    // SAFETY: pure system-register reads, valid in any context.
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, esr_el1",
+            "mrs {1}, elr_el1",
+            "mrs {2}, far_el1",
+            "mrs {3}, spsr_el1",
+            out(reg) esr, out(reg) elr, out(reg) far, out(reg) spsr,
+            options(nomem, nostack)
+        );
+    }
+    let _ = write!(w, "ESR    : {:016x}\n", esr);
+    let _ = write!(w, "ELR    : {:016x}\n", elr);
+    let _ = write!(w, "FAR    : {:016x}\n", far);
+    let _ = write!(w, "SPSR   : {:016x}\n\n", spsr);
 }
