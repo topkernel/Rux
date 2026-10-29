@@ -519,9 +519,19 @@ impl Ext4FileSystem {
 
         let data = unsafe { &(*bh).b_data };
 
-        // Bounds check: reading a 172-byte on-disk inode at this offset
-        // must stay inside the 4096-byte block (review EXT4-M1).
-        if inode_offset + core::mem::size_of::<inode::Ext4InodeOnDisk>() > data.len() {
+        // Bounds check (read-side twin of the write paths' R20-FS2 clamp,
+        // review EXT4-M1 refined): the parse is clamped to the ON-DISK
+        // slot size (s_inode_size). Requiring the full 172-byte struct
+        // made the LAST slot of every inode-table block read EIO on a
+        // valid s_inode_size=128 filesystem — every lookup of such an
+        // inode surfaced as ENOENT (the i128 boot: /bin/sh "not found").
+        // All fields from_disk consumes live below offset 128, so a
+        // clamped copy is complete for every consumer.
+        let copy_len = core::cmp::min(
+            core::mem::size_of::<inode::Ext4InodeOnDisk>(),
+            self.inode_size as usize,
+        );
+        if inode_offset + copy_len > data.len() {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
@@ -541,12 +551,21 @@ impl Ext4FileSystem {
             }
         }
 
-        // Parse inode
-        let ext4_inode = unsafe {
-            &*(data.as_ptr().add(inode_offset) as *const inode::Ext4InodeOnDisk)
-        };
-
-        let result = inode::Ext4Inode::from_disk(ext4_inode, ino);
+        // Parse inode (slot-clamped local copy; the struct tail stays
+        // zeroed when s_inode_size < sizeof(Ext4InodeOnDisk)).
+        let mut on_disk = inode::Ext4InodeOnDisk::default();
+        {
+            // SAFETY: copy_len bytes at data+inode_offset are within the
+            // bounds-checked buffer; the destination is a fresh local.
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(
+                    &mut on_disk as *mut _ as *mut u8,
+                    copy_len,
+                )
+            };
+            dst.copy_from_slice(&data[inode_offset..inode_offset + copy_len]);
+        }
+        let result = inode::Ext4Inode::from_disk(&on_disk, ino);
 
         bio::brelse(bh);
         Ok(result)
