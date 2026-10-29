@@ -149,12 +149,14 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     };
 
     // Reserve the memory for vmemmap
+    crate::dfx::taskdump::taskdump_raw_line(b"VMRES start\n");
     if super::memblock::memblock_reserve(vmemmap_phys, vmemmap_size).is_err() {
         vmemmap_fail!();
     }
 
     // Zero the vmemmap pages using linear mapping
     // Must use virtual address since MMU is enabled
+    crate::dfx::taskdump::taskdump_raw_line(b"VMZERO start\n");
     let vmemmap_virt = phys_to_virt(PhysAddr::new(vmemmap_phys as u64));
     // SAFETY: vmemmap_virt points to the reserved physical region returned by
     // memblock_find_in_range; vmemmap_size is the exact allocation size.

@@ -868,6 +868,7 @@ fn compile_boot_asm() {
         // Embed the QEMU virt DTB (firmware-independent: QEMU's ELF -kernel
         // boot loads no DTB and zeroes the argument registers). Runs on
         // EVERY invocation so a stale boot object can never skip it.
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let dtb_src = PathBuf::from(&manifest_dir).join("src/arch/aarch64/virt.dtb");
         let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
         fs::write(&dtb_asm, format!(
@@ -880,7 +881,6 @@ fn compile_boot_asm() {
         assert!(status.success(), "failed to assemble dtb_blob.S");
         println!("cargo:rustc-link-arg={}", dtb_obj.display());
 
-        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let boot_obj = out_dir.join("boot_aarch64.o");
 
         if boot_obj.exists() {
