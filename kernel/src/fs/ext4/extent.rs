@@ -321,13 +321,20 @@ fn insert_written_inline(
             let start = e.ee_block as u64;
             let end = start + e.length() as u64;
             let e_unwritten = e.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            // u15 headroom (append_node's discipline, review EXT4-MERGE):
+            // ee_len's bit 15 is the unwritten flag, so a written extent
+            // can cover at most 0x7FFF blocks. `ee_len += len` without
+            // the check wraps a max-length extent into a ZERO-length
+            // unwritten one (silent mapping loss). Guard failed = no
+            // merge, fall through to a separate entry.
+            let fits = e.length() as u64 + len as u64 <= 0x7FFE;
             // Extend a preceding written extent.
-            if !e_unwritten && end == ee_block && e.start_block() + e.length() as u64 == phys {
+            if !e_unwritten && fits && end == ee_block && e.start_block() + e.length() as u64 == phys {
                 e.ee_len += len;
                 return Ok(());
             }
             // Extend a following written extent (ours ends where it starts).
-            if !e_unwritten && start == ee_block + len as u64 && phys + len as u64 == e.start_block() {
+            if !e_unwritten && fits && start == ee_block + len as u64 && phys + len as u64 == e.start_block() {
                 e.ee_block = ee_block as u32;
                 e.ee_start_hi = (phys >> 32) as u16;
                 e.ee_start_lo = phys as u32;
@@ -1592,6 +1599,12 @@ fn find_covering_leaf_blk(
     if n > ROOT_NODE_CAP {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
+    if n == 0 {
+        // Empty index root (corrupt/stale tree): the fallback below would
+        // index idxs[0] of an empty slice and PANIC — report no leaf
+        // instead (the caller treats 0 as a hole).
+        return Ok(0);
+    }
     // SAFETY: root holds up to ROOT_NODE_CAP index entries.
     let idxs = unsafe { node_indices(root, n) };
     let mut child = 0u64;
@@ -1802,13 +1815,25 @@ pub fn ext4_ext_insert_written(
     }
     // SAFETY: n bounded by cap.
     let entries = unsafe { node_extents(&leaf, n) }.to_vec();
-    // Merge with the last entry when contiguous.
+    // Merge with the last entry when contiguous. Guard like append_node
+    // (review EXT4-MERGE): (a) the unwritten states must MATCH — merging a
+    // written insert into a trailing UNWRITTEN extent cleared bit 15 of
+    // ee_len, marking the whole never-materialized preallocation WRITTEN
+    // (reads of it then served disk garbage instead of zeros; Linux's
+    // ext4_can_extents_be_merged rejects mixed states); (b) the u15
+    // headroom — `& 0x7FFF` on an overflowing sum silently truncated the
+    // mapping instead of refusing the merge. Guard failed = separate entry
+    // via the sorted insert below.
     if let Some(last) = entries.last() {
         let last_raw = RawExtent::from_disk(last);
-        if last_raw.end() == ee_block && last_raw.phys + last_raw.len as u64 == phys {
+        if !last_raw.unwritten
+            && last_raw.len as u64 + len as u64 <= 0x7FFE
+            && last_raw.end() == ee_block
+            && last_raw.phys + last_raw.len as u64 == phys
+        {
             let mut ne = entries.clone();
             let l = ne.last_mut().unwrap();
-            l.ee_len = (last_raw.len + len) & 0x7FFF;
+            l.ee_len = last_raw.len + len;
             let h = node_header_mut(&mut leaf);
             h.eh_entries = ne.len() as u16;
             // SAFETY: ne.len() <= cap.
