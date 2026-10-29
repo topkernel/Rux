@@ -711,6 +711,29 @@ int main(void) {
                 "udevadm", "settle", "--timeout=15", NULL };
             int src = run_console_wait("/bin/udevadm", settle, 30);
             printf("[runit] udevadm settle rc=%d\n", src);
+            // gdmr19 diagnostics (two open questions from gdmr18):
+            // (1) the udev db dir /run/udev/data was present seconds
+            // after each trigger (export-db listed bare entries) and
+            // GONE again by every later ls — sample at 1 Hz to catch
+            // the disappearance moment against the EXITGRP timeline;
+            // (2) udevd must narrate worker spawn/exit and rule
+            // decisions: raise its log level so /tmp/udevd.log
+            // (captured by the ground-truth cycles) says which of the
+            // two it is.
+            {
+                const char *const prio[] = {
+                    "udevadm", "control", "--log-priority=debug", NULL };
+                printf("log-priority rc=%d\n",
+                       run_console_wait("/bin/udevadm", prio, 20));
+                const char *const probe[] = {
+                    "sh", "-c",
+                    "for i in $(seq 1 40); do "
+                    "printf 'dbprobe %d: ' $i; "
+                    "ls /run/udev/data 2>/dev/null | wc -l; "
+                    "sleep 1; done",
+                    NULL };
+                run_console_wait("/bin/sh", probe, 60);
+            }
         }
         {
             const char *logind = "/lib/systemd/systemd-logind";
@@ -764,6 +787,29 @@ int main(void) {
                         "echo '-- ps --'; ps -ef 2>&1 | grep -E 'udevd|logind|gdm|polkit' | grep -v grep | head -8",
                         NULL };
                     run_console_wait("/bin/sh", rundump, 20);
+                    // gdmr19: rule-engine ground truth. udevadm test runs
+                    // the FULL rule pipeline on card0 in-process (no
+                    // daemon workers involved) with per-rule decisions —
+                    // the discriminator between "rules never load/match"
+                    // and "the daemon's worker path is broken". The
+                    // rules.d listing + udevd.log tail catch load and
+                    // spawn failures. The helper stat verifies the ext4
+                    // S_ISUID visibility fix (must print 04754 root).
+                    {
+                        const char *const udiag[] = {
+                            "sh", "-c",
+                            "echo '-- rules.d --'; ls /lib/udev/rules.d 2>&1 | head -6; "
+                            "echo '-- helper --'; ls -la /usr/lib/dbus-1.0/dbus-daemon-launch-helper 2>&1; "
+                            "echo '-- udevd.log --'; tail -12 /tmp/udevd.log 2>&1",
+                            NULL };
+                        run_console_wait("/bin/sh", udiag, 20);
+                        const char *const utest[] = {
+                            "udevadm", "test",
+                            "/sys/devices/pci0000:00/0000:00:02.0/drm/card0",
+                            NULL };
+                        printf("udevadm-test rc=%d\n",
+                               run_console_wait("/bin/udevadm", utest, 60));
+                    }
                     const char *const uinfo[] = {
                         "udevadm", "info", "--export-db", NULL };
                     printf("export-db rc=%d\n",
