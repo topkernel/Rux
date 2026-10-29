@@ -1174,7 +1174,7 @@ extern "C" fn boot_stack_continuation() -> ! {
 use core::arch::global_asm;
 
 #[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/boot/boot.S"));
+// boot/boot.S is assembled by build.rs and linked as the first object (duplicate _start otherwise).
 
 // aarch64/trap.S is included from arch/aarch64/trap.rs via global_asm!
 // (it needs the PtRegs frame offsets interpolated from Rust constants).

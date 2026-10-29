@@ -859,11 +859,26 @@ fn compile_boot_asm() {
         // aarch64 boot: assembled with the cross toolchain like the riscv
         // branch (the object must be elf64 and land first in the link so
         // _start sits at the image head / physical load address).
-        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/boot.S");
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/boot/boot.S");
         if !boot_asm.exists() {
             return;
         }
         println!("cargo:rerun-if-changed={}", boot_asm.display());
+
+        // Embed the QEMU virt DTB (firmware-independent: QEMU's ELF -kernel
+        // boot loads no DTB and zeroes the argument registers). Runs on
+        // EVERY invocation so a stale boot object can never skip it.
+        let dtb_src = PathBuf::from(&manifest_dir).join("src/arch/aarch64/virt.dtb");
+        let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
+        fs::write(&dtb_asm, format!(
+            ".section .rodata\n.balign 8\n.globl aarch64_virt_dtb\naarch64_virt_dtb:\n.incbin \"{}\"\n.globl aarch64_virt_dtb_end\naarch64_virt_dtb_end:\n",
+            dtb_src.display())).expect("write dtb_blob.S");
+        let dtb_obj = out_dir.join("dtb_aarch64.o");
+        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+            .arg("-c").arg(&dtb_asm).arg("-o").arg(&dtb_obj).status()
+            .expect("run assembler for dtb_blob.S");
+        assert!(status.success(), "failed to assemble dtb_blob.S");
+        println!("cargo:rustc-link-arg={}", dtb_obj.display());
 
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let boot_obj = out_dir.join("boot_aarch64.o");

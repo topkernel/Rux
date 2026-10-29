@@ -18,7 +18,7 @@ fi
 [ -z "$platform" ] && platform="riscv64"
 
 if [ -n "$OVERRIDE" ]; then
-    if [ "$OVERRIDE" != "riscv64" ] && [ "$OVERRIDE" != "x86_64" ]; then
+    if [ "$OVERRIDE" != "riscv64" ] && [ "$OVERRIDE" != "x86_64" ] && [ "$OVERRIDE" != "aarch64" ]; then
         echo "error: unsupported PLATFORM='$OVERRIDE' (riscv64|x86_64)" >&2
         exit 1
     fi
@@ -26,6 +26,6 @@ if [ -n "$OVERRIDE" ]; then
 fi
 
 case "$platform" in
-    riscv64|x86_64) echo "$platform" ;;
-    *) echo "error: invalid platform '$platform' in config (riscv64|x86_64)" >&2; exit 1 ;;
+    riscv64|x86_64|aarch64) echo "$platform" ;;
+    *) echo "error: invalid platform '$platform' in config (riscv64|x86_64|aarch64)" >&2; exit 1 ;;
 esac
