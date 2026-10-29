@@ -79,7 +79,12 @@ pub fn current_frame_pointer() -> u64 {
     unsafe {
         core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
     }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    #[cfg(feature = "aarch64")]
+    // SAFETY: pure register read, no memory access or side effects.
+    unsafe {
+        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
     {
         fp = 0;
     }
@@ -101,7 +106,12 @@ fn caller_return_address() -> u64 {
     unsafe {
         core::arch::asm!("mov {}, [rbp + 8]", out(reg) ra, options(nomem, nostack));
     }
-    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    #[cfg(feature = "aarch64")]
+    // SAFETY: x29 is the frame-chain base; [x29+8] is the LR slot.
+    unsafe {
+        core::arch::asm!("ldr {}, [x29, 8]", out(reg) ra, options(nomem, nostack));
+    }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
     {
         ra = 0;
     }
