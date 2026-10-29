@@ -458,6 +458,31 @@ crate::mm::flush_tlb_page_local(target_vaddr as u64);
         }
     }
 
+    // R-SC-TLB (abi-review session 4, class-a): every PTE this pass
+    // replaced (zero / swap entry / migration marker) may still sit in
+    // ANOTHER CPU's TLB. The per-address flush inside the loop is
+    // hart-local (R9-18: a "global" sfence buys nothing locally — but
+    // it also reaches no other hart), and unlike the munmap/mprotect/
+    // fork paths — where mm_ops issues arch::ipi::flush_tlb_others for
+    // exactly this reason — the reclaim/migration callers never had a
+    // shootdown. A remote CPU holding a stale entry keeps TRANSLATING
+    // through it after this pass: for compaction that is a write into
+    // the source frame AFTER migrate_page freed it back to the buddy
+    // (cross-frame corruption; the stale entry survives until an
+    // unrelated flush evicts it), and for swap-out a write into a frame
+    // the swap layer already captured (silent lost write + stale-data
+    // readback). One range-agnostic broadcast per pass (the same coarse
+    // form mm_ops uses) closes the window: the fault path's
+    // Migrating-marker wait covers fresh faults in the migration window,
+    // and for swap there is no re-create race (the PTE now holds the
+    // swap entry).
+    if unmapped_count.get() > 0 {
+        #[cfg(feature = "riscv64")]
+        crate::arch::ipi::flush_tlb_others();
+        #[cfg(feature = "x86_64")]
+        crate::arch::ipi::flush_tlb_others(0, 0);
+    }
+
     unmapped_count.get()
 }
 
