@@ -125,6 +125,8 @@ aarch64_vector_table:
     mrs     x22, esr_el1
     mrs     x23, far_el1
     str     x21, [sp, #S_PSTATE]
+    mrs     x21, elr_el1
+    str     x21, [sp, #S_PC]
 .if \class == 0
     str     x22, [sp, #S_ESR]        // synchronous: real syndrome
 .else
