@@ -46,6 +46,10 @@ ifeq ($(PLATFORM),x86_64)
 CARGO_TARGET := x86_64-unknown-none
 CARGO_FEATURE_FLAGS := --no-default-features --features x86_64
 KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
+else ifeq ($(PLATFORM),aarch64)
+CARGO_TARGET := aarch64-unknown-none
+CARGO_FEATURE_FLAGS := --no-default-features --features aarch64
+KERNEL_BIN := $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/rux
 else ifeq ($(PLATFORM),riscv64)
 CARGO_TARGET := riscv64gc-unknown-none-elf
 CARGO_FEATURE_FLAGS :=
@@ -93,6 +97,10 @@ endif
 # x86_64 convenience alias — equivalent to `PLATFORM=x86_64 make build`
 build-x86:
 	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=x86_64 build
+
+# aarch64 convenience alias — equivalent to `PLATFORM=aarch64 make build`
+build-aarch64:
+	@$(MAKE) -C $(PROJECT_ROOT)/build PLATFORM=aarch64 build
 
 # Quick build (compile only, no output)
 build-quiet:

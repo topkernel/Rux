@@ -171,9 +171,11 @@ fn main() {
     }
 
     // Get target platform: the active cargo feature wins over Kernel.toml
-    // (x86_64 builds pass --no-default-features --features x86_64)
+    // (x86_64/aarch64 builds pass --no-default-features --features <arch>)
     let platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
         "x86_64"
+    } else if env::var_os("CARGO_FEATURE_AARCH64").is_some() {
+        "aarch64"
     } else {
         config.get("platform")
             .and_then(|p| p["target"].as_str().or_else(|| p["default_platform"].as_str()))
@@ -186,11 +188,18 @@ fn main() {
     {
         let feat_x86 = env::var_os("CARGO_FEATURE_X86_64").is_some();
         let feat_rv = env::var_os("CARGO_FEATURE_RISCV64").is_some();
+        let feat_aa = env::var_os("CARGO_FEATURE_AARCH64").is_some();
         if platform == "x86_64" && !feat_x86 {
             panic!("config platform x86_64 but cargo feature not enabled — stale build/.config? run make menuconfig");
         }
         if platform == "riscv64" && feat_x86 && !feat_rv {
             panic!("config platform riscv64 but x86_64-only feature build running");
+        }
+        if platform == "riscv64" && feat_aa && !feat_rv {
+            panic!("config platform riscv64 but aarch64-only feature build running");
+        }
+        if platform == "aarch64" && !feat_aa {
+            panic!("config platform aarch64 but cargo feature not enabled — stale build/.config? run make menuconfig");
         }
     }
 
@@ -272,6 +281,8 @@ fn generate_config_code(config: &toml::Value) {
         .unwrap_or("riscv64");
     let target_platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
         "x86_64"
+    } else if env::var_os("CARGO_FEATURE_AARCH64").is_some() {
+        "aarch64"
     } else if env::var_os("CARGO_FEATURE_RISCV64").is_some() && config_platform != "x86_64" {
         "riscv64"
     } else {
@@ -641,10 +652,12 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         // large overruns the memory map and kills the boot before the console
         // comes up (merge gate 2026-10-19: Kernel.toml 1024 broke every
         // riscv64 minimal-rootfs smoke silently). Keeping one shared value in
-        // Kernel.toml is fine — riscv64 can never see more than 128 MiB of it.
+        // Kernel.toml is fine — riscv64 can never see more than 128 MiB of
+        // it. aarch64 (unmeasured arch, -m 1G/2G QEMU targets, same early
+        // carveout-before-console hazard) joins the clamp until measured.
         {
             let heap_mb = get_usize("memory", "kernel_heap_size", 16);
-            let heap_mb = if target_platform.contains("riscv") {
+            let heap_mb = if target_platform.contains("riscv") || target_platform.contains("aarch") {
                 heap_mb.min(128)
             } else {
                 heap_mb
@@ -839,6 +852,43 @@ fn compile_boot_asm() {
         assert!(status.success(), "failed to assemble x86 boot.S");
         println!("cargo:rustc-link-arg={}", boot_obj.display());
         println!("cargo:rerun-if-changed={}", boot_asm.display());
+        return;
+    }
+
+    if target.contains("aarch64") {
+        // aarch64 boot: assembled with the cross toolchain like the riscv
+        // branch (the object must be elf64 and land first in the link so
+        // _start sits at the image head / physical load address).
+        let boot_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/boot.S");
+        if !boot_asm.exists() {
+            return;
+        }
+        println!("cargo:rerun-if-changed={}", boot_asm.display());
+
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let boot_obj = out_dir.join("boot_aarch64.o");
+
+        if boot_obj.exists() {
+            let asm_time = fs::metadata(&boot_asm).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let obj_time = fs::metadata(&boot_obj).and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if asm_time <= obj_time {
+                println!("cargo:rustc-link-arg={}", boot_obj.display());
+                return;
+            }
+        }
+
+        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+            .arg("-c")
+            .arg("-g")
+            .arg(&boot_asm)
+            .arg("-o")
+            .arg(&boot_obj)
+            .status()
+            .expect("failed to run assembler for aarch64 boot.S (is gcc-aarch64-linux-gnu installed?)");
+        assert!(status.success(), "failed to assemble aarch64 boot.S");
+        println!("cargo:rustc-link-arg={}", boot_obj.display());
         return;
     }
 
