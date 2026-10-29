@@ -268,6 +268,14 @@ _start:
     isb
 
     EARLY_PUTC 'M'                     // MMU is on
+    // Re-publish the DTB pointer at its LINKED VA (the pre-MMU adrp above
+    // stored the physical address; Rust walks the .rodata blob at its
+    // linked address).
+    adrp    x19, aarch64_virt_dtb
+    add     x19, x19, :lo12:aarch64_virt_dtb
+    adrp    x1, dtb_pointer
+    add     x1, x1, :lo12:dtb_pointer
+    str     x19, [x1]
     // ------------------------------------------------------------------
     // 6. Populate KERNEL_MAP (physical addressing), switch to the
     //    high-half stack, branch to rust_main
