@@ -1114,7 +1114,6 @@ impl CfsRunQueue {
             // b50 #GP guard — see pick_next_cpu. A non-canonical slot
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.tasks_timeline.remove(&key);
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
@@ -1204,7 +1203,6 @@ impl CfsRunQueue {
             // CPU's pick) alive matters more. load_weight is left
             // stale: reading it would deref the same garbage.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.tasks_timeline.remove(&key);
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 continue;

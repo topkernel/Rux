@@ -463,6 +463,97 @@ static void b_p3c(const char *path)
     close(fd);
 }
 
+/* ---------------- P3d: CONCURRENT file-fault contention ----------------
+ * Leg-56B instrument debt (ledger 8.10.27, coordinator-acknowledged):
+ * the P3 rows are single-process warm-cache and cannot see the global
+ * inodes-lock contention the OH load phase creates. 4 processes, each
+ * mmap-touching a DISTINCT file's pages; per-proc fault medians +
+ * a combined wall row. Gated off by default (env P3D=1).
+ */
+static void b_p3d(const char *dir)
+{
+    const char *ev = getenv("P3D");
+    if (!ev || !ev[0]) return;                 /* gated off by default */
+
+    const int NPROC = 4;
+    const size_t per_file_bytes = 4u << 20;    /* 4 MB = 1024 pages/proc */
+    char paths[NPROC][256];
+    int ok = 1;
+    for (int i = 0; i < NPROC; i++) {
+        snprintf(paths[i], sizeof(paths[i]), "%s/p3d-file-%d", dir, i);
+        int fd = open(paths[i], O_CREAT | O_RDWR | O_TRUNC, 0644);
+        if (fd < 0) { ok = 0; break; }
+        static char blk[4096];
+        for (size_t off = 0; off < per_file_bytes; off += sizeof(blk)) {
+            if (write(fd, blk, sizeof(blk)) != (ssize_t)sizeof(blk)) { ok = 0; break; }
+        }
+        fsync(fd);
+        close(fd);
+        if (!ok) break;
+    }
+    if (!ok) { skip_line("p3d_fault_conc", "prep-errno"); return; }
+
+    size_t pages = per_file_bytes / 4096;
+    int pipefd[NPROC][2];
+    for (int i = 0; i < NPROC; i++) if (pipe(pipefd[i]) < 0) ok = 0;
+    if (!ok) { skip_line("p3d_fault_conc", "pipe-errno"); return; }
+
+    s64 wall0 = mnr_ns();
+    for (int i = 0; i < NPROC; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            /* child i: mmap its OWN file, touch every page */
+            close(pipefd[i][0]);
+            int fd = open(paths[i], O_RDONLY);
+            if (fd < 0) _exit(1);
+            char *p = mmap(0, per_file_bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (p == MAP_FAILED) _exit(2);
+            u64 *t = xmalloc_samples(pages);
+            if (!t) _exit(3);
+            size_t n = 0;
+            u64 acc = 0;
+            for (size_t pg = 0; pg < pages; pg++) {
+                u64 t0 = rdtsc_();
+                char c = *(volatile char *)(p + pg * 4096);
+                u64 t1 = rdtsc_();
+                t[n++] = t1 - t0;
+                acc += t1 - t0;
+                (void)c;
+            }
+            /* summary through the pipe, p3b's shape */
+            struct child_sum cs;
+            cs.n = n;
+            stats_of(t, n, &cs.s);
+            cs.wall_ns = 0;
+            cs.errno_hit = 0;
+            (void)acc;
+            if (write(pipefd[i][1], &cs, sizeof(cs)) != (ssize_t)sizeof(cs)) _exit(44);
+            _exit(0);
+        }
+        if (pid < 0) { ok = 0; break; }
+        close(pipefd[i][1]);
+    }
+    if (!ok) { skip_line("p3d_fault_conc", "fork-errno"); return; }
+    for (int i = 0; i < NPROC; i++) {
+        struct child_sum cs;
+        ssize_t r = read(pipefd[i][0], &cs, sizeof(cs));
+        close(pipefd[i][0]);
+        int st; waitpid(-1, &st, 0);
+        if (r == (ssize_t)sizeof(cs)) {
+            report_s("p3d_fault_conc", cs.n, &cs.s, 0, "measured_by=child_proc");
+        } else {
+            skip_line("p3d_fault_conc", "child-summary-lost");
+        }
+    }
+    s64 wall = mnr_ns() - wall0;
+    {
+        char note[64];
+        snprintf(note, sizeof(note), "ns_per_fault_4proc_wall=%lld", (long long)(wall / (s64)(NPROC * (long long)pages)));
+        emit_len(note, strlen(note));
+    }
+    for (int i = 0; i < NPROC; i++) unlink(paths[i]);
+}
+
 /* ---------------- P4: fork+exit / fork+exec ---------------- */
 static void b_p4(void)
 {
@@ -1404,6 +1495,7 @@ int main(int argc, char **argv)
         char fpath[300];
         snprintf(fpath, sizeof(fpath), "%s/pbench-faultfile.bin", g_work);
         b_p3c(fpath);
+        b_p3d(g_work);
     }
     b_p4();
     b_p5a();
