@@ -654,9 +654,16 @@ int main(void) {
         // - /run/systemd/system makes sd_booted() return true for gdm
         //   and libsystemd clients without systemd as PID1.
         // - logind runs STANDALONE from the systemd package: it owns
-        //   org.freedesktop.login1 on the system bus, needs the cgroup2
-        //   mount (already up) and /dev/tty0 (kernel VT layer — the
-        //   bring-up question this mode maps).
+        //   org.freedesktop.login1 on the system bus and /dev/tty0
+        //   (kernel VT layer — the bring-up question this mode maps).
+        //   NO cgroup2 mount anymore (gdmr17b): with sd_booted()>0 and
+        //   ppid==1, udevd records its "own" cgroup from
+        //   /proc/self/cgroup; when a unified hierarchy is mounted and
+        //   its root lists every task (our synthetic one does), udevd's
+        //   idle cleanup cg_kill()s the whole root — the SIGKILL storm.
+        //   The kernel no longer pre-mounts cgroup2 nor fabricates
+        //   "0::/" in /proc/pid/cgroup, so cg_pid_get_path() answers
+        //   -ENOMEDIUM and udevd records nothing.
         mkdir("/run/systemd", 0755);
         mkdir("/run/systemd/system", 0755);
         // logind does NOT take --debug (r2 lesson: "unrecognized
