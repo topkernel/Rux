@@ -189,6 +189,38 @@ pub fn kill_other_threads(current: *mut Task) {
             }
         });
     }
+    // gdm bring-up r9-r11: a silent mass SIGKILL took out the whole
+    // daemon set with no print at any loglevel; every other kernel
+    // SIGKILL fan-out path is either printed or was excluded by
+    // instrumentation. If this fires with victims OUTSIDE the caller's
+    // thread group, the thread ring is corrupt — this print names the
+    // caller and victims directly.
+    if !victims.is_empty() {
+        let ccomm = unsafe {
+            core::str::from_utf8_unchecked((*current).comm())
+                .trim_end_matches('\0')
+        };
+        let mut vnames: alloc::vec::Vec<alloc::string::String> =
+            alloc::vec::Vec::new();
+        for v in victims.iter().take(20) {
+            let t = unsafe { crate::sched::find_task_by_pid(*v) };
+            if !t.is_null() {
+                unsafe {
+                    vnames.push(alloc::string::String::from(
+                        core::str::from_utf8_unchecked((*t).comm())
+                            .trim_end_matches('\0'),
+                    ));
+                }
+            }
+        }
+        crate::pr_err!(
+            "KOT-KILL: pid={} comm='{}' kills {} group members: {:?}",
+            unsafe { (*current).pid() },
+            ccomm,
+            victims.len(),
+            vnames
+        );
+    }
     for pid in victims {
         // Reuse the KILL path of send_signal: unignorable, wakes sleepers.
         let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGKILL as i32);
@@ -1073,6 +1105,24 @@ pub fn do_exit(exit_code: i32) -> ! {
         // container inits die too.
         if (*current).ns_pid.is_some() && (*current).ns_local_pid == 1 {
             let dying_ns = (*current).ns_pid.clone();
+            // gdm bring-up r9/r10: a silent mass SIGKILL took out the
+            // whole daemon set (dbus, upowerd, accounts, tailer, sink,
+            // polkitd, gdm3) with ZERO prints at any loglevel and no
+            // SIGKILL-SEND trace — this loop is the only silent kernel
+            // SIGKILL fan-out. Name the namespace init and every victim
+            // until this is root-caused.
+            let ccomm = unsafe {
+                alloc::string::String::from(
+                    core::str::from_utf8_unchecked((*current).comm())
+                        .trim_end_matches('\0'),
+                )
+            };
+            let ns_addr = dying_ns
+                .as_ref()
+                .map(|d| alloc::sync::Arc::as_ref(d) as *const _ as usize)
+                .unwrap_or(0);
+            let mut victims: alloc::vec::Vec<(u32, alloc::string::String)> =
+                alloc::vec::Vec::new();
             crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
                 let t = &*task;
                 if t.pid() == current_pid {
@@ -1091,12 +1141,31 @@ pub fn do_exit(exit_code: i32) -> ! {
                     false
                 }).unwrap_or(false);
                 if hit {
-                    let _ = crate::signal::send_signal(
+                    victims.push((
                         t.pid(),
-                        crate::signal::Signal::SIGKILL as i32,
-                    );
+                        alloc::string::String::from(
+                            core::str::from_utf8_unchecked(t.comm())
+                                .trim_end_matches('\0'),
+                        ),
+                    ));
                 }
             });
+            crate::pr_err!(
+                "PIDNS-KILL: ns-init pid={} comm='{}' ns=0x{:x} victims={}",
+                current_pid,
+                ccomm,
+                ns_addr,
+                victims.len()
+            );
+            for (vp, vc) in victims.iter().take(20) {
+                crate::pr_err!("PIDNS-KILL victim pid={} comm='{}'", vp, vc);
+            }
+            for (vp, _) in victims.iter() {
+                let _ = crate::signal::send_signal(
+                    *vp,
+                    crate::signal::Signal::SIGKILL as i32,
+                );
+            }
         }
 
         // ===== PID 1 exit: power the machine down =====
@@ -1159,6 +1228,40 @@ pub fn do_exit_group(exit_code: i32) -> ! {
         Some(c) => c as *mut Task,
         None => do_exit(exit_code),
     };
+    // gdm bring-up r9-r14: every daemon storm-death funnels through here
+    // (fatal signals do_group_exit, plus explicit exit_group). Name the
+    // caller, the code, and the pending-signal set that drove it — the
+    // storm's first domino and the TERM->st=9 status overwrite both
+    // decode from this one print.
+    {
+        let ccomm = unsafe {
+            core::str::from_utf8_unchecked((*current).comm())
+                .trim_end_matches('\0')
+        };
+        let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };
+        crate::pr_err!(
+            "EXITGRP: pid={} comm='{}' code={} pending=0x{:x}",
+            unsafe { (*current).pid() },
+            ccomm,
+            exit_code,
+            pend
+        );
+    }
+    // Publish the group exit status BEFORE stopping the siblings: the
+    // SIGKILL below makes each member's fatal-signal path re-enter
+    // do_exit_group with THIS code, so the whole group - the leader
+    // included - reports the clean status instead of "killed by
+    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
+    // from the mq callback thread).
+    // SAFETY: current is the running task (matched above), non-null.
+    let signal_arc = unsafe { (*current).signal_arc() };
+    if let Some(ss) = signal_arc {
+        ss.group_exit_code
+            .store(exit_code, core::sync::atomic::Ordering::Release);
+        ss.group_exiting
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+
     // Publish the group exit status BEFORE stopping the siblings: the
     // SIGKILL below makes each member's fatal-signal path re-enter
     // do_exit_group with THIS code, so the whole group — the leader

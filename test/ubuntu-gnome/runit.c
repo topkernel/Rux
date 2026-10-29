@@ -684,6 +684,13 @@ int main(void) {
                                        "systemd-udevd", uargv);
             printf("[runit] systemd-udevd started (pid %d)\n", (int)upid);
             sleep(3);
+            // udevadm lives at /bin/udevadm (the r8 "enumeration finds
+            // zero devices" verdict was an artifact: every
+            // /usr/bin/udevadm exec ENOENT'd with silent exit 127, so
+            // the coldplug NEVER ran and the udev db stayed empty for
+            // that reason alone). /lib/systemd/systemd-udevd is a
+            // symlink to the same multi-call binary (argv[0] picks the
+            // tool).
             // Synchronous coldplug of the seat-relevant subsystems
             // (full-tree trigger is slow under TCG for zero seat value).
             const char *const trig[] = {
@@ -691,10 +698,12 @@ int main(void) {
                 "--subsystem-match=drm",
                 "--subsystem-match=input",
                 "--subsystem-match=graphics", NULL };
-            run_console_wait("/usr/bin/udevadm", trig, 120);
+            int trc = run_console_wait("/bin/udevadm", trig, 120);
+            printf("[runit] udevadm trigger rc=%d\n", trc);
             const char *const settle[] = {
                 "udevadm", "settle", "--timeout=15", NULL };
-            run_console_wait("/usr/bin/udevadm", settle, 30);
+            int src = run_console_wait("/bin/udevadm", settle, 30);
+            printf("[runit] udevadm settle rc=%d\n", src);
         }
         {
             const char *logind = "/lib/systemd/systemd-logind";
@@ -740,7 +749,8 @@ int main(void) {
                         "--subsystem-match=drm",
                         "--subsystem-match=input",
                         "--subsystem-match=graphics", NULL };
-                    run_console_wait("/usr/bin/udevadm", trig2, 60);
+                    printf("trigger --verbose rc=%d\n",
+                           run_console_wait("/bin/udevadm", trig2, 60));
                     const char *const rundump[] = {
                         "sh", "-c",
                         "echo '-- /run/udev --'; ls -la /run/udev /run/udev/data 2>&1 | head -14; "
@@ -749,14 +759,16 @@ int main(void) {
                     run_console_wait("/bin/sh", rundump, 20);
                     const char *const uinfo[] = {
                         "udevadm", "info", "--export-db", NULL };
-                    run_console_wait("/usr/bin/udevadm", uinfo, 30);
+                    printf("export-db rc=%d\n",
+                           run_console_wait("/bin/udevadm", uinfo, 30));
                     const char *const cg[] = {
                         "gdbus", "call", "--system",
                         "--dest", "org.freedesktop.login1",
                         "--object-path", "/org/freedesktop/login1/seat0",
                         "--method", "org.freedesktop.DBus.Properties.Get",
                         "org.freedesktop.login1.Seat", "CanGraphical", NULL };
-                    run_console_wait("/usr/bin/gdbus", cg, 25);
+                    printf("CanGraphical rc=%d\n",
+                           run_console_wait("/usr/bin/gdbus", cg, 25));
                     const char *const ls[] = {
                         "gdbus", "call", "--system",
                         "--dest", "org.freedesktop.login1",
@@ -764,7 +776,8 @@ int main(void) {
                         "--method",
                         "org.freedesktop.login1.Manager.ListSessions",
                         NULL };
-                    run_console_wait("/usr/bin/gdbus", ls, 25);
+                    printf("ListSessions rc=%d\n",
+                           run_console_wait("/usr/bin/gdbus", ls, 25));
                 }
             }
             (void)d;
