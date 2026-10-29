@@ -3269,9 +3269,24 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             if crate::arch::uaccess::access_ok(msg_name_ptr as usize, 12)
                 && crate::arch::uaccess::access_ok(msg_namelen_ptr as usize, 4)
             {
+                // Source sockaddr: uevent sockets receive kernel
+                // MULTICAST (group 1) — receivers like sd-device-monitor
+                // reject nl_groups==0 as unicast and drop the message
+                // (gdmr19: 132 drops, empty udev db, no seat tags);
+                // rtnetlink replies stay unicast (groups=0).
+                let src_groups: u32 =
+                    if nlsock.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
+                        1
+                    } else {
+                        0
+                    };
                 // SAFETY: pointers validated with access_ok.
                 unsafe {
-                    crate::net::netlink::put_sockaddr_nl(msg_name_ptr, msg_namelen_ptr);
+                    crate::net::netlink::put_sockaddr_nl(
+                        msg_name_ptr,
+                        msg_namelen_ptr,
+                        src_groups,
+                    );
                 }
             }
         }
@@ -4103,9 +4118,21 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
                     if crate::arch::uaccess::access_ok(addr_ptr as usize, 12)
                         && crate::arch::uaccess::access_ok(addrlen_ptr as usize, 4)
                     {
+                        // Same multicast-source rule as recvmsg above:
+                        // uevent receives are group-1 kernel multicasts.
+                        let src_groups: u32 =
+                            if nlsock.protocol == crate::net::netlink::NETLINK_KOBJECT_UEVENT {
+                                1
+                            } else {
+                                0
+                            };
                         // SAFETY: pointers validated with access_ok.
                         unsafe {
-                            crate::net::netlink::put_sockaddr_nl(addr_ptr, addrlen_ptr);
+                            crate::net::netlink::put_sockaddr_nl(
+                                addr_ptr,
+                                addrlen_ptr,
+                                src_groups,
+                            );
                         }
                     }
                 }
