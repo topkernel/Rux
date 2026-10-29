@@ -3324,12 +3324,21 @@ pub fn create_vfs_inode_in(
     ino: u32,
     ext4_inode: &inode::Ext4Inode,
 ) -> alloc::sync::Arc<Inode> {
+    // Keep the full S_IALLUGO (0o7777: setuid/setgid/sticky included)
+    // for dirs and regs, matching the chmod path (update_mode's
+    // v & 0o7777 below). Masking to 0o777 silently dropped S_ISUID on
+    // lookup: dbus-daemon's activation check stats its setuid launch
+    // helper and refused it ("The permission of the setuid helper is
+    // not correct" for every helper-activated system service —
+    // org.freedesktop.Accounts included) because stat reported 0754
+    // where the image carries 04754 (gdm bring-up gdmr18). Symlinks
+    // stay 0777 (Linux reports them so).
     let mode = if ext4_inode.is_dir() {
-        InodeMode::new(InodeMode::S_IFDIR | (ext4_inode.mode as u32 & 0o777))
+        InodeMode::new(InodeMode::S_IFDIR | (ext4_inode.mode as u32 & 0o7777))
     } else if ext4_inode.is_symlink() {
         InodeMode::new(InodeMode::S_IFLNK | 0o777)
     } else if ext4_inode.is_reg() {
-        InodeMode::new(InodeMode::S_IFREG | (ext4_inode.mode as u32 & 0o777))
+        InodeMode::new(InodeMode::S_IFREG | (ext4_inode.mode as u32 & 0o7777))
     } else {
         InodeMode::new(ext4_inode.mode as u32)
     };
