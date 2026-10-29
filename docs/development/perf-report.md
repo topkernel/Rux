@@ -3547,3 +3547,62 @@ revalidations), which A cheapens directly.
 Both designs are implementation-ready the moment the panic fix lands;
 the concurrent-fault probe (Target 1's instrument debt) can be built
 under the same gate.
+
+**The p6_unlink regression ROOT-CAUSED — NOT my levers; 5b88fd42
+(deferred inode deletion, the LTP backlog's O_TMPFILE fix) is the
+mechanism.** The paired bisection (all boards this morning, load
+13-18): discriminator (e20eebb3+my leg-54 trio, NO deferred reap)
+unlink **139-152us** (two boards, two host-load points); current tip
+WITH slimming **11.7ms** (pa98); current tip with the slimming
+REVERTED **11.54ms** (pa99n — the slimming EXONERATED); with namei A
+also reverted **11.63ms** (pa99m — namei A EXONERATED). The only
+fs-relevant commit in the window: 5b88fd42 (in via the ltp-fix-b
+backlog). Mechanism: the old eager path reaped the dead inode INSIDE
+the unlink journal transaction (dtime write + block frees + inode
+free — all deferred by the handle and batched at commit); 5b88fd42
+moves the reap to `ext4_destroy_inode` (last VFS reference drop =
+the probe's post-unlink close) via `ext4_reap_unlinked` — OUTSIDE any
+journal handle, so its three writes are UNBATCHED synchronous virtio
+round trips per inode (write_inode_disk + free_inode_blocks +
+free_inode), and each out-of-band write fires
+publication_constrained against the accumulated delete-side records →
+constraint-flush storms (fsw pa99f: pc=3997 vs 40 on the control; the
+pc delta is the reap writes' guard traffic, not a queue change —
+qmax/ps match the control's accumulation shape). 1000 reaps x (3-4
+sync writes + constraint I/O) at TCG/KVM virtio latency = the 11.5ms
+per unlink. GRQ slimming 912f05ac, namei A, and the leg-54 trio are
+all EXONERATED by the paired boards. (Process note, owned: my first
+"isolate GRQ" board (pa99bisect3) was built from a broken 2-line
+cherry-pick fragment — the 11535us it read was real content but I
+initially distrusted it; the clean no-slim board (pa99n) is the
+exonerating evidence.)
+
+**Fix shape for the fs lane (my lane's proposal, NOT implemented —
+5b88fd42 is an fs-lane correctness change and the reap order R20-FS1
+is theirs):** wrap `ext4_reap_unlinked`'s three writes in
+`ext4_journal_start/stop` (the reap runs in iput/destroy context —
+the same process context unlink uses, so arming the handle is legal)
+— the writes then defer under the handle and batch at the journal
+commit exactly like the eager path's writes did; R20-FS1's write ORDER
+(dtime → blocks → number) is a buffer-ordering property and survives
+deferral. The alternative (a pending-reap list drained at the standing
+durability points) is the bigger shape and duplicates the journal's
+own batching. Expected post-fix: unlink returns to the ~100us class
+(the reap rides the journal commit the probe's fsync-style ops force
+anyway) and pc drops to the control's ~40.
+
+**Slimming verdict (final for this leg): 912f05ac is
+performance-neutral on the pbench family** (pa98 with = 11.7ms,
+pa99n without = 11.5ms, same-day same-load — the unlink row was
+masking any slimming effect) **and build/make-test clean**; its
+GRQ-hold recount needs the quiet census boot which now rides the
+re-sample rebuild. The revert c4b07f25 is REVERTED BACK
+(3f852c8f reapply) — the slimming stays on the branch for the battery.
+
+**Battery state:** namei A + P3d restored (c917e980); pa98's clean
+P1-P7 (t=303s, zero panics — the panic family is dead on the merged
+tip) banks the functional gate; the fs rows await the fs-lane's reap
+fix before the whole-table refresh; the OH re-sample kernel is
+run/pa98-release-strong-bzImage (md5 5890d74d1f0d, carries GRQ + namei
+A + everything except the two bisection reverts, which are themselves
+reverted).
