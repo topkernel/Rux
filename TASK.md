@@ -22,3 +22,27 @@ Final message: root cause + fix + ladder position (1-4), commits, build status.
 ## Handoff note (coordinator, 02:3x model switch)
 - run/oh-userdata-rw.img is a PRIVATE 16GB rw copy created by the last run (first-boot state repro; boot with USERDATA=run/oh-userdata-rw.img + snapshot off IF you need the mutated /data state — the tracked symlink userdata.img points to the central store seed and must stay READ-ONLY).
 - Your predecessor's last boots: run/oh-sprint3-serial.log + sprint3 shots (still all black at 120/200s). The oracle-painter history question is still open in the charter.
+
+## SCANOUT lane findings (2026-10-31, scanout sprint)
+1. ORACLE QUESTION ANSWERED (was the charter's open question): every prior non-black
+   screenshot was the kernel-side oracle checkerboard (commit 4276946e "scanout binding
+   PROVEN" = kernel-painted banded checker via kva into the composer's GEMs; painter
+   removed in 18eaa659). run/oh-shotmon-MILESTONE shows 8 oracle colors = 100% pixels.
+   Userspace has NEVER produced a single non-black pixel through the whole project.
+   Reframe: kernel binding is fine; the gap is userspace render content.
+2. Sprint4-7 early wedge (~pid 310, PREEMPT-UNDERFLOW spam) NOT reproducible on the
+   current tree: r1 (run/oh-r1-serial.log) boots deep (ServiceStart 117+, pid 650+,
+   5MB log). Likely the stale run/oh-img/userdata.img symlink (relinked 03:00). No
+   kernel regression from 18b7c9cb/85230725/d30e1c81.
+3. r1 milestone: bootanimation RAN its full 150-frame sequence ("play sequence frames
+   end" x2 — Draw() executed; in sprint3 it never appeared = vsync never fired that
+   boot). Vsync chain (kernel WAIT_VBLANK -> HDI DrmVsyncWorker -> RS sampler ->
+   software generator) works, at least sometimes. All 4 r1 shots still pure black =>
+   Skia/EGL draws land in NO visible memory (co2 verdict "CONTENT, not binding" stands;
+   "clear-only buffers" now confirmed on a healthy animation run).
+4. scanpaint (run/scanpaint.c + run/oh-boot-paint.sh, private ramdisk run/ramdisk-paint.img):
+   static musl dumb-buffer painter injected as pid-1 side task, PAGE_FLIPs color bars
+   at 30fps. Purpose: prove/kill the userspace->scanout path with zero GL/Skia involved.
+   Ladder: painter pattern visible => scanout OK from userspace, gap is OH render stack
+   (EGL/GBM/Skia draw->buffer); painter pattern NOT visible => kernel dumb-buffer/flip
+   path has a hole the composer path doesn't exercise.
