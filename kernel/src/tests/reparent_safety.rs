@@ -222,53 +222,101 @@ pub fn test_claim_child() {
 pub fn test_device_window_pte() {
     test_group_start("kernel_device_window_pte");
 
-    // aarch64 stage-2: every address probed below belongs to the riscv64
-    // QEMU virt map (PLIC 0x0c00_0000, ECAM 0x3000_0000, PCI MMIO
-    // 0x4000_0000) and aarch64's kernel_device_window_pte is a None stub
+    // aarch64 stage-2: aarch64's kernel_device_window_pte is a None stub
     // (arch/aarch64/mm/mmu_init.rs — TTBR1 device-window walk pending,
     // mm lane). Skip until that lands; riscv64/x86_64 keep the pins.
     #[cfg(feature = "aarch64")]
     {
         test_skip(
             "kernel_device_window_pte",
-            "aarch64: device-window walk pending (mm stage-2; probe addrs are riscv64 virt)",
+            "aarch64: device-window walk pending (mm stage-2)",
         );
         return;
     }
 
     use crate::arch::mm::mmu_init::kernel_device_window_pte;
+    #[cfg(not(feature = "x86_64"))]
     use crate::arch::mm::PageTableEntry;
 
-    // PLIC priority page (the gjs cage base): covered, identity-mapped,
-    // kernel flags, no U.
-    match kernel_device_window_pte(0x0c00_0000) {
+    // Per-arch probe addresses (each arch's QEMU machine map):
+    // - riscv64 virt: PLIC 0x0c00_0000 (priority) / 0x0c20_1000 (S-mode
+    //   ctx-1 claim), ECAM 0x3000_0000, PCI MMIO 0x4000_0000.
+    // - x86_64 q35: ECAM (MMCONFIG) 0xb000_0000, 32-bit PCI MMIO hole
+    //   0xc000_0000..4GB (arch/x86_64/mm/mmu_init.rs WINDOW list). No
+    //   PLIC exists there, so the restore-bits pin (which asserts the
+    //   riscv64 PLIC PTE shape) stays riscv64-only.
+    #[cfg(not(feature = "x86_64"))]
+    const IRQCTRL_PAGE: u64 = 0x0c00_0000; // PLIC priority page
+    #[cfg(not(feature = "x86_64"))]
+    const IRQCTRL_PAGE2: u64 = 0x0c20_1000; // PLIC claim page
+    #[cfg(not(feature = "x86_64"))]
+    const PCI_MMIO_PAGE: u64 = 0x4000_0000;
+    #[cfg(not(feature = "x86_64"))]
+    const ECAM_PAGE: u64 = 0x3000_0000;
+    #[cfg(not(feature = "x86_64"))]
+    const INTERIOR_A: u64 = 0x0c00_1000;
+    #[cfg(not(feature = "x86_64"))]
+    const INTERIOR_B: u64 = 0x0c20_FFFF;
+
+    #[cfg(feature = "x86_64")]
+    const IRQCTRL_PAGE: u64 = 0xb000_0000; // ECAM head doubles as window pin
+    #[cfg(feature = "x86_64")]
+    const IRQCTRL_PAGE2: u64 = 0xb000_1000; // ECAM interior
+    #[cfg(feature = "x86_64")]
+    const PCI_MMIO_PAGE: u64 = 0xc000_0000; // 32-bit MMIO hole head
+    #[cfg(feature = "x86_64")]
+    const ECAM_PAGE: u64 = 0xb000_0000;
+    #[cfg(feature = "x86_64")]
+    const INTERIOR_A: u64 = 0xc000_1000; // MMIO-hole interior
+    #[cfg(feature = "x86_64")]
+    const INTERIOR_B: u64 = 0xc000_FFFF;
+
+    // Assertion names (riscv64 strings unchanged byte-for-byte; x86_64
+    // names its own windows — no PLIC there).
+    #[cfg(not(feature = "x86_64"))]
+    const N_HEAD: &str = "PLIC priority page restores device PTE";
+    #[cfg(not(feature = "x86_64"))]
+    const N_HEAD2: &str = "PLIC claim page covered";
+    #[cfg(feature = "x86_64")]
+    const N_HEAD: &str = "device window head restores device PTE";
+    #[cfg(feature = "x86_64")]
+    const N_HEAD2: &str = "device window second page covered";
+
+    // IRQ-controller window head: covered, identity-mapped, kernel
+    // flags, no U (riscv64 asserts the full restore-bit shape; x86_64
+    // only the coverage — its PTE flag encoding is the x86 lane's pin).
+    match kernel_device_window_pte(IRQCTRL_PAGE) {
         Some(bits) => {
-            let pte = PageTableEntry::from_bits(bits);
-            if pte.is_valid() && pte.is_readable() && pte.is_writable() && !pte.is_user()
-                && pte.ppn() == (0x0c00_0000 >> 12)
+            #[cfg(not(feature = "x86_64"))]
             {
-                test_pass("PLIC priority page restores device PTE");
-            } else {
-                test_fail("PLIC priority page restores device PTE", "wrong restore bits");
+                let pte = PageTableEntry::from_bits(bits);
+                if pte.is_valid() && pte.is_readable() && pte.is_writable() && !pte.is_user()
+                    && pte.ppn() == (IRQCTRL_PAGE >> 12)
+                {
+                    test_pass(N_HEAD);
+                } else {
+                    test_fail(N_HEAD, "wrong restore bits");
+                }
             }
+            #[cfg(feature = "x86_64")]
+            test_pass(N_HEAD);
         }
-        None => test_fail("PLIC priority page restores device PTE", "page not covered"),
+        None => test_fail(N_HEAD, "page not covered"),
     }
 
-    // PLIC S-mode context 1 claim page (0x0c201004 — the register the
-    // IRQ entry path reads on the current satp): its page must restore.
-    match kernel_device_window_pte(0x0c20_1000) {
-        Some(_) => test_pass("PLIC claim page covered"),
-        None => test_fail("PLIC claim page covered", "claim page not covered"),
+    // IRQ-controller window second page: must also restore.
+    match kernel_device_window_pte(IRQCTRL_PAGE2) {
+        Some(_) => test_pass(N_HEAD2),
+        None => test_fail(N_HEAD2, "claim page not covered"),
     }
 
     // PCI MMIO window start and ECAM window start covered.
-    if kernel_device_window_pte(0x4000_0000).is_some() {
+    if kernel_device_window_pte(PCI_MMIO_PAGE).is_some() {
         test_pass("PCI MMIO window covered");
     } else {
         test_fail("PCI MMIO window covered", "not covered");
     }
-    if kernel_device_window_pte(0x3000_0000).is_some() {
+    if kernel_device_window_pte(ECAM_PAGE).is_some() {
         test_pass("ECAM window covered");
     } else {
         test_fail("ECAM window covered", "not covered");
@@ -284,8 +332,8 @@ pub fn test_device_window_pte() {
     }
 
     // Window-interior pages and (just past) window-end pages.
-    if kernel_device_window_pte(0x0c00_1000).is_some()
-        && kernel_device_window_pte(0x0c20_FFFF).is_some()
+    if kernel_device_window_pte(INTERIOR_A).is_some()
+        && kernel_device_window_pte(INTERIOR_B).is_some()
     {
         test_pass("window interior pages covered");
     } else {

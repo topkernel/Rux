@@ -40,11 +40,12 @@ pub fn test_config() {
     // workload); kernel stacks doubled again (64KB -> 128KB) after the
     // r19 stack fix. build.rs clamps kernel_heap_size to 128MB on
     // riscv64 (Kernel.toml's 1024MB is the x86_64 value; a 1GB heap
-    // overruns the riscv64 memory map — merge gate 2026-10-19), and
-    // the aarch64 suite boots -m 1G machines where the same clamp
-    // applies, so the runtime constant here is always the clamped
-    // 128MB, never the raw Kernel.toml value.
-    test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (riscv64-clamped)");
+    // overruns the riscv64 memory map — merge gate 2026-10-19); aarch64
+    // joins the clamp, x86_64 runs the raw Kernel.toml value.
+    #[cfg(not(feature = "x86_64"))]
+    test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (clamped)");
+    #[cfg(feature = "x86_64")]
+    test_assert_eq!(KERNEL_HEAP_SIZE, 1073741824, "KERNEL_HEAP_SIZE == 1024MB (unclamped)");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     // kernel_stack_size is arch-gated since leg-17: 128KB base for
