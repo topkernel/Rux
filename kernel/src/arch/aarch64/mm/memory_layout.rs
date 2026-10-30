@@ -45,7 +45,12 @@ pub const PMD_SIZE: u64 = 1 << PMD_SHIFT;      // 2MB
 
 /// TASK_SIZE - maximum user space address. riscv64 parity: 256GB. All user
 /// VAs then live inside TTBR0 L0 entry 0 — the aarch64 walker's user half.
-pub const TASK_SIZE: usize = 0x100_0000_0000; // 256GB
+// 0x100_0000_0000 is 1TiB, not 256GB — the typo spilled the mmap-derived
+// layouts (mmap base = TASK_SIZE-64GB = 0xF0_0000_0000 = 960GB) into L0
+// entry 1, outside the walker's user subtree: the first mmap (glibc's TLS
+// block) came back mapped-nowhere and its first write took an unhandled
+// data abort that killed PID 1 (FAR 0xf0000000xx family).
+pub const TASK_SIZE: usize = 0x40_0000_0000; // 256GB
 
 /// USER_PTRS_PER_PGD - user L0 entries (TTBR0 table). With TASK_SIZE=256GB
 /// and 512GB per L0 entry, only entry 0 can ever hold user mappings; keep
