@@ -1789,8 +1789,15 @@ impl TcpSocket {
             return Ok(());
         }
 
-        // Case 2: segment is entirely after the window → out of window, drop
+        // Case 2: segment is entirely after the window → unacceptable.
+        // RFC 793 §3.9: answer an unacceptable non-RST segment with an
+        // ACK carrying the current window (the reference's dupack path —
+        // tcp_send_dupack unless th->rst). This is how a peer's zero-
+        // window persist probe learns the window is still closed instead
+        // of probing blind; the old silent drop left the peer to back off
+        // on its own.
         if self.seq_after_or_eq(seq, rcv_wnd_end) {
+            self.send_ack(tx)?;
             return Ok(());
         }
 
