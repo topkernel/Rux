@@ -407,6 +407,19 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 }
 
 /// SVC syscall dispatch (riscv64 handle_syscall shape)
+///
+/// PC / restart contract (the piece that breaks the first blocking read()
+/// if any side gets it wrong):
+///
+/// - ELR_EL1 points AT the `svc` (AArch64 exceptions from SVC never
+///   auto-advance), so this handler MUST advance pc by 4 before eret —
+///   otherwise the return path re-executes the svc forever.
+/// - Restart sentinels (-ERESTARTSYS/-ERESTARTNOHAND returned in x0 by the
+///   generic layer) are converted by the SIGNAL path, not here:
+///   signal.rs restart_syscall_no_handler / setup_frame rewind pc by 4
+///   (back onto the svc) and restore orig_x0, the exact arm64 reference
+///   do_signal shape (restart_addr = continue_addr - 4). The rewind
+///   mirrors the +4 above — riscv64 is identical modulo instruction size.
 fn handle_syscall(regs: &mut PtRegs) {
     // Re-enable interrupts for the syscall body (riscv64 twin: the trap
     // masks IRQs at entry; running the whole syscall masked would kill
