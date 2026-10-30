@@ -25,8 +25,16 @@ MON="$RUN/pa-$TAG-mon.sock"
 PIDFILE="$RUN/pa-$TAG-qemu.pid"
 STAMPID="$RUN/pa-$TAG-stamp.pid"
 
-# Userdata: private reflink copy of the tok image (first use only).
-UD_SRC="${UD_SRC:-$IMGDIR/userdata-tok.img}"
+# Userdata: private reflink copy of the source image (first use only).
+# The old tok disk (userdata-tok.img) was lost in the 2026-10-30 disk
+# cleanup; the lineage asset is now run/oh-userdata-cooked-r1.img —
+# one snapshot-OFF first-boot pass over the central-store SEED
+# (userdata.img), required because the raw seed aborts at ~49 s
+# (storage_manager critical-crash reboot chain, oh-launcher lane).
+# Default to the cooked asset when present, else the seed.
+UD_DEFAULT="$IMGDIR/userdata.img"
+[ -f "$RUN/oh-userdata-cooked-r1.img" ] && UD_DEFAULT="$RUN/oh-userdata-cooked-r1.img"
+UD_SRC="${UD_SRC:-$UD_DEFAULT}"
 UD="$RUN/pa-$TAG-userdata.img"
 if [ ! -f "$UD" ]; then
     cp --reflink=auto "$UD_SRC" "$UD"
