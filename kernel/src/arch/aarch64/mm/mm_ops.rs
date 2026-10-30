@@ -21,7 +21,10 @@
 //! - The PCACHE page-cache-alias optimization of the twin is not yet
 //!   ported: file faults take the twin's private-copy fallback arm
 //!   (functionally correct, one copy per mapper). cow_flags::PCACHE
-//!   keeps the bit budget ready for it.
+//!   keeps the bit budget ready for it — mprotect_pte_range and the
+//!   PROT_NONE marker re-presentation (page_fault.rs) preserve the bit
+//!   exactly like COW, so the port will not have to revisit them
+//!   (requirements list in page_fault.rs's module doc).
 
 use core::sync::atomic::Ordering;
 
@@ -1876,5 +1879,110 @@ pub unsafe fn check_pte_permissions(
                 bits & PageTableEntry::U != 0,
             )
         })
+    }
+}
+
+// ==================== mprotect + PROT_NONE markers ====================
+
+/// R-WRITESTORM-2 twin: is this leaf a PROT_NONE marker installed by
+/// mprotect(prot==0)? Software mirror V|U with no R/W/X (the descriptor
+/// also denies EL0 in hardware — see rebuild_user_leaf_protnone).
+pub fn is_protnone_marker(bits: u64) -> bool {
+    bits & PageTableEntry::V != 0
+        && bits & PageTableEntry::U != 0
+        && bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X) == 0
+}
+
+/// Rewrite the permissions of every PRESENT user leaf in
+/// [start_virt, start_virt + num_pages*4K) — the mprotect arm
+/// (x86_64 `mprotect_pte_range` twin on the aarch64 4-level walker).
+///
+/// - The output address (PPN) always survives; COW/PCACHE software
+///   bits ride along (COW defers W to the copy fault; PCACHE is a
+///   mapping-ownership pin — dropping it would leak the pin).
+/// - prot == 0 installs the PROT_NONE MARKER: valid descriptor,
+///   software V|U with no R/W/X, hardware denies EL0 entirely. The
+///   marker is advisory PTE state — a later fault under a VMA that
+///   grants the access re-presents the leaf (page_fault.rs).
+/// - User trees only carry L3 page leaves; table/invalid slots are
+///   skipped (the range was validated against the VMA list by the
+///   caller, so unmapped middles mean "not populated yet" — the
+///   demand-fill path will materialize them with the VMA's perms).
+///
+/// TLB: per-page `tlbi aside1e1is`; the caller holds the PTE section.
+///
+/// # Safety
+/// root_ppn must be the caller's live user page-table root; caller
+/// holds the PTE modify section (PTE_MODIFY_LOCK).
+pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64, prot: u32) {
+    // Software base mask. W requires R (hardware AP_RO covers the W=0
+    // half; the software mirror keeps the same fold the fault path uses).
+    let mut base = PageTableEntry::V | PageTableEntry::U
+        | PageTableEntry::A | PageTableEntry::D;
+    if prot & 0x1 != 0 {
+        base |= PageTableEntry::R;
+    }
+    if prot & 0x2 != 0 {
+        base |= PageTableEntry::R | PageTableEntry::W;
+    }
+    if prot & 0x4 != 0 {
+        base |= PageTableEntry::X;
+    }
+
+    for i in 0..num_pages {
+        let va = start_virt.wrapping_add(i * PAGE_SIZE);
+
+        // SAFETY: root_ppn is the live user root; the helper only walks
+        // table descriptors (no leaf writes at upper levels).
+        let Some(l3) = (unsafe { super::mmu_init::user_l3_table_for(root_ppn, va) }) else {
+            continue;
+        };
+        let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
+        // SAFETY: l3 comes from the walker; idx is masked to 9 bits.
+        let raw = unsafe { (*l3).get(idx).bits() };
+        // Empty or non-leaf slots: nothing to rewrite (see doc).
+        if raw & PageTableEntry::V == 0 || raw & PageTableEntry::TYPE_MASK != PageTableEntry::TYPE_PAGE {
+            continue;
+        }
+        // Foreign/kernel-frame leaves carry no U bit in the mirror —
+        // leave them alone (a TTBR0 tree should not hold any, but a
+        // stray boot-reserved leaf must not be user-rewritten).
+        if raw & PageTableEntry::U == 0 {
+            continue;
+        }
+
+        let cow_bit = raw & cow_flags::COW;
+        let pcache_bit = raw & cow_flags::PCACHE;
+
+        let new_pte = if prot & 0x7 == 0 {
+            // PROT_NONE marker (constructor preserves COW/PCACHE itself)
+            PageTableEntry::rebuild_user_leaf_protnone(raw)
+        } else {
+            let mut flags = base;
+            if cow_bit != 0 {
+                flags |= cow_bit;
+                flags &= !PageTableEntry::W; // W deferred to the COW fault
+            }
+            if pcache_bit != 0 {
+                flags |= pcache_bit;
+                // A PRIVATE cache leaf never gains W in place: the frame
+                // is shared with the page cache, so a W-upgrade diverts
+                // the first write through COW (writenotify; twins). A
+                // SHARED cache leaf keeps W — stores must land in the
+                // cache frame (PCACHE is dormant on aarch64 today, but
+                // the ownership rule rides the bit).
+                if flags & PageTableEntry::W != 0 && !cow_flags::pte_is_shared_cache(raw) {
+                    flags |= cow_flags::COW;
+                    flags &= !PageTableEntry::W;
+                }
+            }
+            PageTableEntry::rebuild_user_leaf(raw, flags)
+        };
+
+        // SAFETY: same slot the raw bits came from, under the caller's
+        // PTE section.
+        unsafe { (*l3).set(idx, new_pte) };
+        // SAFETY: this translation changed; drop any cached walk.
+        unsafe { super::asid::flush_tlb_page(va as usize, 0) };
     }
 }

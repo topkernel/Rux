@@ -102,7 +102,7 @@ aarch64_vector_table:
 // touched before the save block — the frame must capture entry state.
 // SP stays 16-aligned throughout (S_FRAME_SIZE is a 16 multiple).
 // ---------------------------------------------------------------------------
-.macro TRAP_BODY, class, exit
+.macro TRAP_BODY, class, exit, elfp=0
     sub     sp, sp, #S_FRAME_SIZE
     stp     x0, x1,  [sp, #16*0]
     stp     x2, x3,  [sp, #16*1]
@@ -158,6 +158,13 @@ aarch64_vector_table:
     mrs     x22, sp_el0
     str     x22, [sp, #S_SP]
 991:
+    // EL0 sources only: capture the USER's live FPSIMD into the task's
+    // user_fpsimd buffer BEFORE any kernel Rust code runs (core/alloc
+    // rlibs contain NEON that would otherwise clobber v0-v31 mid-trap;
+    // el0_exit_fpsimd_restore re-installs the buffer at eret).
+    .if \elfp
+    bl      el0_entry_fpsimd_save
+    .endif
     mov     x0, sp
     bl      aarch64_trap_handler
     b       \exit
@@ -175,13 +182,13 @@ el1_serr:
 
 // EL0 (user) entries — through the signal/reschedule exit loop
 el0_sync:
-    TRAP_BODY 0, aarch64_exit_to_user
+    TRAP_BODY 0, aarch64_exit_to_user, 1
 el0_irq:
-    TRAP_BODY 64, aarch64_exit_to_user
+    TRAP_BODY 64, aarch64_exit_to_user, 1
 el0_fiq:
-    TRAP_BODY 65, aarch64_exit_to_user
+    TRAP_BODY 65, aarch64_exit_to_user, 1
 el0_serr:
-    TRAP_BODY 17, aarch64_exit_to_user
+    TRAP_BODY 17, aarch64_exit_to_user, 1
 
 // ---------------------------------------------------------------------------
 // Bad vectors: dump and park. Nothing may run in these modes (EL1 uses
@@ -267,6 +274,14 @@ restore_and_eret:
     cmp     x22, #0x1000
     b.lo    aarch64_bad_user_frame
 993:
+    // EL0 return only (the EL1 tail branches past this): re-install the
+    // user's FPSIMD before the GPR file loads — everything the helper
+    // clobbers (x16/x17, q0-q31, fpcr/fpsr) is either reloaded from the
+    // frame below or belongs to the user anyway. No kernel code runs
+    // between here and eret, so nothing re-clobbers it.
+    tbnz    x20, #2, 994f
+    bl      el0_exit_fpsimd_restore
+994:
     // Restore the GPR file. x20/x21/x22 hold the exit triple; their own
     // slots are reloaded last, just before sp is switched.
     ldp     x0, x1,  [sp, #16*0]

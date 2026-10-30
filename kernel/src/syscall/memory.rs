@@ -1719,6 +1719,26 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 }
             }
 
+            #[cfg(target_arch = "aarch64")]
+            {
+                // aarch64: 4-level TTBR0 walker — same helper shape as
+                // the x86_64 twin: rebuild each present L3 user leaf from
+                // the new prot (PPN + COW/PCACHE software bits preserved),
+                // with prot==0 installing the hardware-denied PROT_NONE
+                // marker the fault path re-presents.
+                // SAFETY: root_ppn is the current task's live user
+                // page-table root; the helper only rewrites existing
+                // user leaves, under the PTE lock held above.
+                unsafe {
+                    crate::arch::mm::mm_ops::mprotect_pte_range(
+                        root_ppn,
+                        (start_page * PAGE_SIZE as usize) as u64,
+                        num_pages as u64,
+                        prot & 0x7,
+                    );
+                }
+            }
+
             #[cfg(target_arch = "riscv64")]
             for i in 0..num_pages {
                 let virt = ((start_page + i) * PAGE_SIZE as usize) as u64;

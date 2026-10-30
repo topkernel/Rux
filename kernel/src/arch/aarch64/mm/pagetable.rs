@@ -325,6 +325,24 @@ impl PageTableEntry {
             | (sw_flags & Self::SW_SOFTWARE_MASK))
     }
 
+    /// Rebuild a present L3 user leaf as a PROT_NONE MARKER
+    /// (mprotect(prot==0)): the output address and the COW/PCACHE
+    /// software markers survive, the software permission mirror drops
+    /// to V|U with no R/W/X (the marker signature the fault path
+    /// re-presents), and the descriptor becomes HARDWARE-inaccessible
+    /// at EL0 — AP denies EL0 (AP=0b10: kernel RO only) and both XN
+    /// bits are set — so every user access raises a permission fault
+    /// instead of reading through (a software-mirror-only form would
+    /// stay EL0-readable: AP_EL0 + AP_RO still permits user loads).
+    #[inline]
+    pub fn rebuild_user_leaf_protnone(old_bits: u64) -> Self {
+        Self((old_bits & Self::OUTPUT_ADDR_MASK) | Self::V | Self::TYPE_PAGE
+            | Self::AF | Self::SH_IS | Self::ATTR_NORMAL | Self::AP_RO | Self::NG
+            | Self::PXN | Self::UXN
+            | ((Self::V | Self::U | Self::A | Self::D) & Self::SW_MASK)
+            | (old_bits & (Self::SW_COW | Self::SW_PCACHE)))
+    }
+
     /// Create PTE pointing to physical page (read-only, executable) —
     /// riscv64 parity
     #[inline]
