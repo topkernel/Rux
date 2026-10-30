@@ -166,8 +166,10 @@ pub fn drain_if_due() {
 
 /// Free every entry whose deadline has passed. Returns the number freed.
 /// Entry payloads are copied out under the lock; the actual dealloc runs
-/// OUTSIDE the pool lock and calls `dealloc_direct` (not the intercepted
-/// GlobalAlloc path — no re-defer).
+/// OUTSIDE the pool lock and routes by region exactly like
+/// `buddy_allocator::dealloc_direct` (slab region -> kfree, heap ->
+/// untracked buddy) — never through the intercepted GlobalAlloc path, so
+/// a drained entry cannot be re-deferred.
 pub fn drain(now: u64) -> usize {
     let mut batch: [(usize, usize, usize); 64] = [(0, 0, 0); 64]; // ptr,size,align
     let mut batch_n = 0usize;
@@ -187,6 +189,16 @@ pub fn drain(now: u64) -> usize {
             batch_n += 1;
             drained = drained.wrapping_add(1);
         }
+        // Batch-limit truncation: more DUE entries remain behind us. If the
+        // first survivor's deadline were not folded in, EARLIEST_DEADLINE
+        // would go to u64::MAX and the alloc-path drain hook would sleep
+        // until the NEXT deferred free lowers it again — every due entry
+        // behind the batch stalls for up to DEFER_MS (plus forever, on a
+        // pool that only ever drains). Same fixup the break path does.
+        if drained < head {
+            let idx = drained % POOL_CAP;
+            new_earliest = new_earliest.min(pool[idx].deadline);
+        }
         POOL_DRAINED.store(drained, Ordering::Relaxed);
         EARLIEST_DEADLINE.store(new_earliest, Ordering::Relaxed);
     }
@@ -194,7 +206,28 @@ pub fn drain(now: u64) -> usize {
         let (ptr, size, align) = batch[i];
         if let Ok(layout) = Layout::from_size_align(size, align) {
             unsafe {
-                crate::mm::buddy_allocator::dealloc_untracked_pub(ptr as *mut u8, layout);
+                // Route by REGION like buddy_allocator::dealloc_direct: a
+                // registered size class (Arc<MmStruct>, Arc<FdTable>,
+                // Arc<SignalStruct>) is <= 4 KiB and 8-aligned, so the
+                // ORIGINAL allocation usually came from the STATIC slab
+                // region (CombinedAllocator prefers kmalloc for those
+                // layouts), not the buddy heap. The old unconditional
+                // dealloc_untracked_pub refused out-of-heap pointers
+                // (FR_OUT_OF_WINDOW / DEALLOC_OUTSIDE) and permanently
+                // LEAKED every slab-resident entry — the drain comment
+                // claimed "calls dealloc_direct" but the code never did.
+                // kfree never re-defers, so the no-re-defer contract holds.
+                let in_slab = crate::mm::slab::slab_region()
+                    .map(|(s, e)| ptr >= s && ptr < e)
+                    .unwrap_or(false);
+                if in_slab {
+                    crate::mm::kfree(ptr as *mut u8);
+                } else {
+                    crate::mm::buddy_allocator::dealloc_untracked_pub(
+                        ptr as *mut u8,
+                        layout,
+                    );
+                }
             }
         }
     }
