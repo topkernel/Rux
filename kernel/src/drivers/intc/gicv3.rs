@@ -72,12 +72,19 @@ const INTID_SPURIOUS: u32 = 1023;
 // ==================== GICD register offsets ====================
 
 mod gicd {
-    pub const CTLR: usize = 0x0000;       // DS=bit6 ARE_NS=bit4 G1A=bit0
+    pub const CTLR: usize = 0x0000;       // DS=bit6 ARE=RAO G1=bit1 G0=bit0
     pub const TYPER: usize = 0x0004;      // ITLinesNumber bits[4:0]
-    pub const IGROUPR: usize = 0x0020;    // +4*intid/32 (Group select)
+    // GICD_IGROUPR(n) sits at 0x0080 + 4n (GICv3 map; 0x020-0x07c is
+    // reserved/RAZ-WI). The port originally wrote 0x0020, where every
+    // Group-1 assignment silently vanished: SPIs stayed in reset Group 0
+    // while the (correctly-addressed) enable/priority/routing writes
+    // landed — PL011 RX (INTID 33) sat pending+enabled at the
+    // distributor but was never forwarded, because Group-0 distribution
+    // is disabled on this machine.
+    pub const IGROUPR: usize = 0x0080;    // +4*intid/32 (Group select)
     pub const ISENABLER: usize = 0x0100;  // +4*(intid/32)
     pub const ICENABLER: usize = 0x0180;  // +4*(intid/32)
-    pub const IPRIORITYR: usize = 0x0400; // +4*intid (word covers 4 INTIDs)
+    pub const IPRIORITYR: usize = 0x0400; // +intid (byte per INTID)
     pub const IROUTER: usize = 0x6000;    // +8*(intid-32), 64-bit affinity
 }
 
@@ -261,7 +268,12 @@ fn dist_init() {
                 word |= (default_priority_for(id) & 0xFF) << (8 * lane);
             }
         }
-        unsafe { reg_write32(GICD_BASE + gicd::IPRIORITYR + 4 * word_id as usize, word) };
+        // IPRIORITYR is BYTE-indexed by INTID (four INTIDs per word):
+        // the word covering INTIDs [word_id, word_id+4) sits at byte
+        // offset word_id itself. The original +4*word_id spread wrote
+        // each word 4x too far out (INTID 32's priorities landed in
+        // INTID 128's slots), leaving every SPI at its reset priority.
+        unsafe { reg_write32(GICD_BASE + gicd::IPRIORITYR + word_id as usize, word) };
     }
     for intid in 32..limit {
         unsafe {
@@ -437,6 +449,21 @@ fn gic_unmask(data: &IrqData) {
                 1 << (intid % 32),
             )
         };
+        // TEMP aa64-irq: one-shot SPI unmask trace (first unmask only).
+        static FIRST: AtomicU32 = AtomicU32::new(0);
+        if FIRST.swap(1, Ordering::Relaxed) == 0 {
+            use crate::dfx::backtrace::ConsoleWriter;
+            use core::fmt::Write;
+            let rb = unsafe { reg_read32(GICD_BASE + gicd::ISENABLER + 4 * (intid / 32) as usize) };
+            let mut w = ConsoleWriter::new();
+            let _ = writeln!(
+                w,
+                "GIC-UNMASK intid={} isena_rdbit={} word={:#x}",
+                intid,
+                rb >> (intid % 32) & 1,
+                rb
+            );
+        }
     }
 }
 
@@ -564,6 +591,17 @@ pub fn irq_probe(ms: u64) {
         sre, pmr, grp, ctlr,
     );
     let _ = writeln!(w, "IRQ-PROBE gicd_ctlr={:#x}", gicd_ctlr);
+    // SPI bank readbacks (INTID 33 = PL011): group / enable / pending /
+    // routing / priority — the whole distributor-side view of the line.
+    let _ = writeln!(
+        w,
+        "IRQ-PROBE gicd word1: igrp={:#x} isena={:#x} ispend={:#x} irouter33={:#x} iprio33w={:#x}",
+        unsafe { reg_read32(GICD_BASE + gicd::IGROUPR + 4) },
+        unsafe { reg_read32(GICD_BASE + gicd::ISENABLER + 4) },
+        unsafe { reg_read32(GICD_BASE + 0x200 + 4) },
+        unsafe { reg_read64(GICD_BASE + gicd::IROUTER + 8) },
+        unsafe { reg_read32(GICD_BASE + gicd::IPRIORITYR + 32) },
+    );
     match rd_info {
         Some((waker, igrp, isena, rd)) => {
             let _ = writeln!(
