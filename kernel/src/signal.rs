@@ -1459,6 +1459,29 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
             }
         }
     }
+    #[cfg(feature = "aarch64")]
+    {
+        use crate::arch::pt_regs::Cause;
+        // Only SVC frames (ESR still EC 0x15) carry a restart sentinel in
+        // x0; interrupt/fault frames hold user data that may coincidentally
+        // equal -512 (same discipline as the riscv64 cause check).
+        if Cause::from_cause(regs.esr) != Cause::EcallUser {
+            return;
+        }
+        let x0 = regs.regs[0] as i64;
+        if x0 == ERESTARTSYS || x0 == ERESTARTNOHAND {
+            // ELR_EL1 points AT the svc (aarch64 does not auto-advance),
+            // and arch/aarch64/trap.rs handle_syscall advanced pc by
+            // exactly 4 — rewind to the svc and restore the original
+            // first argument so the re-executed syscall sees arg0, not the
+            // -512 sentinel (arm64 reference do_signal: restart_addr =
+            // continue_addr - AARCH64_INSN_SIZE).
+            if regs.pc >= 4 {
+                regs.pc -= 4;
+                regs.regs[0] = regs.orig_x0;
+            }
+        }
+    }
 }
 
 /// Set up signal frame and prepare to call signal handler (RISC-V version)
