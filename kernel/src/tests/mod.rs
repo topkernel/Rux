@@ -207,6 +207,8 @@ pub mod page_allocator;
 #[cfg(feature = "unit-test")]
 pub mod buffer_state;
 #[cfg(feature = "unit-test")]
+pub mod file_buffer;
+#[cfg(feature = "unit-test")]
 pub mod mount_flags;
 #[cfg(feature = "unit-test")]
 pub mod percpu;
@@ -489,6 +491,9 @@ pub fn run_all_tests() {
 
     test_group_start("buffer_state");
     buffer_state::test_buffer_state();
+
+    test_group_start("file_buffer");
+    file_buffer::test_file_buffer();
 
     test_group_start("mount_flags");
     mount_flags::test_mount_flags();
