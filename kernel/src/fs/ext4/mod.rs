@@ -2034,16 +2034,20 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
 
-    // Session 25 (MAP_SHARED writeback): on a SHRINK, flush dirty
+    // Session 25 (MAP_SHARED writeback): on a size change, flush dirty
     // page-cache frames BEFORE the big lock and the new size commit. The
     // flush takes EXT4_BIG_LOCK internally (ext4_write_at_core), so it
     // cannot run inside this function's own critical section. Flush-then-
     // cut: a dirty page straddling the new EOF writes its full content
     // first, then the cut removes the tail (Linux writeback-then-
-    // truncate). A grow needs nothing — dirty pages sit below the old
-    // size. Stores racing after the flush are discarded by the
-    // invalidate below (POSIX: stores at truncate are undefined).
-    if attr == setattr_attr::ATTR_SIZE && arg1 < inode.get_size() {
+    // truncate). A GROW used to skip this while the success tail still
+    // called invalidate_inode on the WHOLE cache — dirty frames below the
+    // old size (unflushed MAP_SHARED stores) were freed by the
+    // invalidate, silently dropping the stores. Flush for every
+    // ATTR_SIZE: the flush iterates dirty entries only, so a no-dirty
+    // call costs nothing. Stores racing after the flush are discarded by
+    // the invalidate below (POSIX: stores at truncate are undefined).
+    if attr == setattr_attr::ATTR_SIZE {
         crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
     }
 
