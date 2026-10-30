@@ -79,9 +79,8 @@ pub fn read_cr2() -> u64 {
     value
 }
 
-/// Read CR3 (page-table root)
-#[inline]
 /// Read CR0.
+#[inline]
 pub fn read_cr0() -> u64 {
     let value: u64;
     // SAFETY: reading CR0 is always safe.

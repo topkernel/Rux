@@ -43,6 +43,20 @@ extern "C" {
     fn __switch_to(prev: *mut Task, next: *mut Task);
 }
 
+// R65-timer twin (riscv64 context.rs pins the same facts): __switch_to
+// releases the ownership qword with ONE aligned 8-byte store of
+// 0xffffffff00000000 (ti_on_cpu=false at byte 0, running_on_cpu=-1 at
+// +4). Pin the two layout facts that store assumes at compile time, so
+// a future Task field reorder fails the build instead of silently
+// clobbering a neighboring field.
+const _: () = {
+    assert!(core::mem::offset_of!(Task, ti_on_cpu) % 8 == 0);
+    assert!(
+        core::mem::offset_of!(Task, running_on_cpu)
+            == core::mem::offset_of!(Task, ti_on_cpu) + 4
+    );
+};
+
 /// Switch the address-space root (interface parity with the riscv64
 /// twin's switch_mm; called from exec/exit paths outside context_switch).
 ///
