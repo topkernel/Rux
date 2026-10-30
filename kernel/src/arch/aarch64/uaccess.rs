@@ -332,3 +332,132 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
     }
     0 // no NUL within maxlen
 }
+
+// ============================================================================
+// Boot-time fault-containment self-check (dfx-aa64-uaccess-selftest)
+// ============================================================================
+
+/// Poissoned-pointer probe for the whole fault-containment chain:
+/// access_ok range rules → asm fault site → data abort (EC 0x25) →
+/// exception-table fixup → short count / -EFAULT, with NO oops.
+///
+/// Runs at dfx init (before init exec — userspace exec is blocked on the
+/// mm walker anyway) on a kernel context where TTBR0 still carries
+/// boot.S's early identity map ([0, 2GB) device + RAM blocks) or an
+/// empty user table, so the probe address must sit INSIDE the user
+/// window but OUTSIDE every mapping: 4 GB — below TASK_SIZE (256GB),
+/// above the early map, an invalid L1 entry either way. access_ok must
+/// ACCEPT it (the exception table, not the range check, contains the
+/// fault).
+#[cfg(feature = "dfx-aa64-uaccess-selftest")]
+pub fn selftest() {
+    // printk's console emit does not reach PL011 on this board yet (the
+    // boot table goes through console::putchar directly) — same here.
+    fn emit(line: &str) {
+        // SAFETY: putchar is the polled console byte writer (the same
+        // path print_status uses); callable in any context.
+        unsafe {
+            for &b in line.as_bytes() {
+                crate::console::putchar(b);
+            }
+            crate::console::putchar(b'\n');
+        }
+    }
+
+    const PROBE: *mut u8 = 0x1_0000_0000 as *mut u8; // 4GB: user window, unmapped
+    const N: usize = 64;
+
+    let mut pass = 0usize;
+    let mut total = 0usize;
+    let mut check = |ok: bool, what: &str, detail: &str| {
+        total += 1;
+        if ok {
+            pass += 1;
+        }
+        emit(&alloc::format!(
+            "aa64-uaccess-selftest: {} {} ({})",
+            if ok { "PASS" } else { "FAIL" },
+            what,
+            detail
+        ));
+    };
+
+    // 1. Range rules: the probe address is INSIDE the user window (the
+    //    fault must come from the exception table, not access_ok), and
+    //    kernel-half / overflow addresses are rejected outright.
+    check(
+        access_ok(PROBE as usize, N),
+        "access_ok accepts user-window probe",
+        "0x100000000+64 in [0, TASK_SIZE)",
+    );
+    check(
+        !access_ok(0xffff_ffff_8000_0000usize, 8),
+        "access_ok rejects kernel half",
+        "0xffffffff80000000",
+    );
+    check(
+        !access_ok(0xffff_ffff_ffff_fff0usize, 32),
+        "access_ok rejects overflow",
+        "addr+size wraps",
+    );
+
+    // 2. copy_from_user on the poisoned pointer: short count + zeroed
+    //    kernel buffer (twin info-leak rule).
+    let mut dst = [0xA5u8; N];
+    // SAFETY: dst is a valid stack buffer; the user source deliberately
+    // faults and must land in the fixup (returns N, zero-fills dst).
+    let uncopied = unsafe { copy_from_user(dst.as_mut_ptr(), PROBE as *const u8, N) };
+    check(
+        uncopied == N && dst.iter().all(|&b| b == 0),
+        "copy_from_user EFAULT",
+        &alloc::format!("uncopied={}/{}, dst zeroed={}", uncopied, N,
+            dst.iter().all(|&b| b == 0)),
+    );
+
+    // 3. copy_to_user to the poisoned pointer: short count.
+    let src = [0x5Au8; N];
+    // SAFETY: src is a valid stack buffer; the user destination
+    // deliberately faults and must land in the fixup.
+    let uncopied = unsafe { copy_to_user(PROBE, src.as_ptr(), N) };
+    check(
+        uncopied == N,
+        "copy_to_user EFAULT",
+        &alloc::format!("uncopied={}/{}", uncopied, N),
+    );
+
+    // 4. clear_user on the poisoned pointer: uncleared count.
+    // SAFETY: the user destination deliberately faults into the fixup.
+    let uncleared = unsafe { clear_user(PROBE, N) };
+    check(
+        uncleared == N,
+        "clear_user EFAULT",
+        &alloc::format!("uncleared={}/{}", uncleared, N),
+    );
+
+    // 5. strncpy_from_user: Err(-EFAULT).
+    let mut sbuf = [0u8; 16];
+    match strncpy_from_user(PROBE as *const u8, 16, &mut sbuf) {
+        Err(e) => check(e == -14, "strncpy_from_user EFAULT", &alloc::format!("errno={}", e)),
+        Ok(_) => check(false, "strncpy_from_user EFAULT", "returned Ok on poisoned ptr"),
+    }
+
+    // 6. strnlen_user: 0 sentinel.
+    // SAFETY: deliberately faulting user read into the fixup.
+    let slen = unsafe { strnlen_user(PROBE as *const u8, 16) };
+    check(slen == 0, "strnlen_user EFAULT", &alloc::format!("len={}", slen));
+
+    // 7. get_user/put_user sized variants: None / false.
+    // SAFETY: deliberately faulting user accesses into the fixup.
+    let g = unsafe { get_user(PROBE as *const u64) };
+    check(g.is_none(), "get_user<u64> EFAULT", "expected None");
+    // SAFETY: deliberately faulting user write into the fixup.
+    let p = unsafe { put_user(PROBE as *mut u64, 1u64) };
+    check(!p, "put_user<u64> EFAULT", "expected false");
+
+    emit(&alloc::format!(
+        "aa64-uaccess-selftest: {} ({}/{})",
+        if pass == total { "ALL PASS" } else { "FAILURES PRESENT" },
+        pass,
+        total
+    ));
+}
