@@ -1804,10 +1804,15 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
         let mut nz: usize = 0;
         let mut clear: usize = 0;
         let mut samples = [0u32; 3];
-        // SAFETY: gem.kva..gem.kva+size is the object's backing.
+        // SAFETY: gem.kva..gem.kva+size is the object's backing; every
+        // sample offset below is clamped into that range (the fixed
+        // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
+        // an imported smaller buffer made the unclamped reads walk past the
+        // allocation).
         unsafe {
             let base = gem.kva as *const u32;
-            for i in 0..gem.size / 4 {
+            let words = gem.size / 4;
+            for i in 0..words {
                 let v = base.add(i).read_volatile();
                 if v != 0 {
                     nz += 1;
@@ -1817,9 +1822,16 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
                 }
             }
             let row_words = 983040 / 1280; // pitch/4 for these buffers
-            samples[0] = base.add(row_words * 640 + 360).read_volatile();
-            samples[1] = base.add(row_words * 640 + 200).read_volatile();
-            samples[2] = base.add(row_words * 300 + 360).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(row_words * 640 + 360);
+            samples[1] = s(row_words * 640 + 200);
+            samples[2] = s(row_words * 300 + 360);
         }
         crate::pr_warn!(
             "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
@@ -1995,8 +2007,10 @@ fn present_fb(fb_id: u32) -> i64 {
         let mut nz: usize = 0;
         let mut paint: usize = 0;
         let mut samples = [0u32; 4];
-        // SAFETY: gem.kva..gem.kva+size is the object's own backing
-        // store; word-aligned reads stay inside the allocation.
+        // SAFETY: gem.kva..gem.kva+size is the object's own backing store;
+        // word-aligned reads stay inside the allocation (sample offsets are
+        // clamped to words — the fixed 720-wide sample geometry only fits
+        // full-size frame GEMs).
         unsafe {
             let base = gem.kva as *const u32;
             let words = gem.size / 4;
@@ -2019,10 +2033,17 @@ fn present_fb(fb_id: u32) -> i64 {
             }
             let mid_row = (height as usize / 2) * row_words;
             let last_row = (height as usize - 1).saturating_mul(row_words);
-            samples[0] = base.add(720 / 4).read_volatile();
-            samples[1] = base.add(row_words + 720 / 4).read_volatile();
-            samples[2] = base.add(mid_row + (width as usize / 2)).read_volatile();
-            samples[3] = base.add(last_row + 720 / 4).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(720 / 4);
+            samples[1] = s(row_words + 720 / 4);
+            samples[2] = s(mid_row + (width as usize / 2));
+            samples[3] = s(last_row + 720 / 4);
         }
         crate::pr_warn!(
             "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
@@ -2041,49 +2062,14 @@ fn present_fb(fb_id: u32) -> i64 {
         );
     }
 
-    // Scanout-binding oracle (compose-content): every composer buffer so
-    // far carries ONLY the RS clear color (nz==clear, paint==0) — a black
-    // screen is then expected even with a perfect binding, which makes
-    // the black screen uninformative about the binding itself. To
-    // separate content from binding, the kernel paints a known banded
-    // checker through kva into the flipped GEM right before the flip's
-    // host transfer: if the pattern reaches the screen, kva==phys and
-    // the whole scanout chain is proven for the composer's own imported
-    // buffers; if the screen stays black, the binding (not content) is
-    // the bug. Painted on flips 1..=60 and every 5th after (any
-    // screendump in any inter-flip gap then catches it); the composer
-    // re-clears its buffers on reuse, so the probe self-erases.
-    if (1..=60).contains(&ft) || ft % 5 == 0 {
-        let row_words = (pitch / 4) as usize;
-        // SAFETY: writes stay in the visible columns of the GEM's own
-        // backing (width*4 <= pitch, row_words*height*4 <= size).
-        unsafe {
-            let base = gem.kva as *mut u32;
-            for row in 0..height as usize {
-                let rowp = base.add(row * row_words);
-                let band = row * 4 / height as usize;
-                let c = match band {
-                    0 => 0xff_d0_30_30, // red
-                    1 => 0xff_30_d0_30, // green
-                    2 => 0xff_30_30_d0, // blue
-                    _ => 0xff_f0_f0_f0, // white
-                };
-                for col in 0..width as usize {
-                    let v = if (row / 16 + col / 16 + ft as usize) % 8 == 0 {
-                        !c | 0xff00_0000
-                    } else {
-                        c
-                    };
-                    rowp.add(col).write_volatile(v);
-                }
-            }
-        }
-        crate::pr_warn!(
-            "drm: oracle#{} painted gem={} (banded checker via kva)",
-            ft,
-            gem.id
-        );
-    }
+    // (The scanout-binding oracle that used to live here painted a banded
+    // checkerboard into the flipped GEM through kva before the host
+    // transfer — on flips 1..=60 and EVERY 5th flip thereafter, with no
+    // upper bound. It was bring-up tooling for the compose-content hunt,
+    // but as permanent code it overwrote the composer's real frame content
+    // with probe patterns on a cadence, corrupting every long-running
+    // desktop session. Removed; the read-only nz/paint counters above keep
+    // the content-vs-binding diagnosis without touching the buffer.)
 
     // Resource geometry: the GEM's real row pitch. Gralloc allocates
     // FB buffers width-aligned to 64 pixels (720 content on a 768-pixel

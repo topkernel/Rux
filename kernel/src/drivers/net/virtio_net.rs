@@ -1067,10 +1067,17 @@ pub fn init_pci(pci_dev: &mut VirtIOPCI) -> Result<(), &'static str> {
         PCI_ISR_ADDR.store(pci_dev.isr_cfg_bar, core::sync::atomic::Ordering::Release);
         let int_pin = pci_dev.pci_config.read_config_byte(0x3D);
         let irq = 32 + (((int_pin as u32).saturating_sub(1) + pci_dev.pci_slot as u32) % 4);
+        // IRQF_SHARED, same as virtio-blk-pci: the gpex swizzle maps
+        // several functions onto IRQs 32..35, and this registration runs
+        // AFTER init_pci_block_devices claimed those lines. A non-shared
+        // registration on an already-claimed line is refused by
+        // request_irq ("IRQ already in use and not shared") and the .ok()
+        // silently dropped it — the net function then had no top half and
+        // RX interrupts never fired on any line shared with a disk.
         crate::interrupt::request_irq(
             irq,
             interrupt_handler_pci,
-            0,
+            crate::interrupt::irqdesc::IRQF_SHARED,
             "virtio-net-pci",
             pci_dev.isr_cfg_bar as usize,
         )
