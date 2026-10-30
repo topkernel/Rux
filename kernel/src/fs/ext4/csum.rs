@@ -170,6 +170,63 @@ pub fn inode_csum_ok(seed: u32, ino: u32, raw: &[u8]) -> bool {
     }
 }
 
+/// Write-path counterpart of `inode_csum_ok`: store the checksum into
+/// the raw on-disk inode bytes. `raw` is the FULL `inode_size` slice of
+/// the inode slot with the final content already in place; the function
+/// zeroes both checksum halves, recomputes over the full slot and
+/// writes lo (+ hi when the slot is larger than the good-old 128).
+///
+/// Scope note (ext4.rwcsum bring-up mode): the kernel READ path
+/// verifies exactly { superblock, group descriptor, inode } checksums;
+/// these three `*_csum_set` helpers maintain those on the write path so
+/// a forced-rw metadata_csum mount stays self-consistent for reads.
+/// Block/inode-bitmap csums (bg_*_bitmap_csum in the descriptor),
+/// extent-tree blocks and directory tails are NOT maintained — e2fsck
+/// will flag those on a real device; the bring-up boots run under QEMU
+/// -snapshot, where nothing persists.
+pub fn inode_csum_set(seed: u32, ino: u32, raw: &mut [u8]) {
+    if raw.len() < INO_CSUM_LO_OFF + 2 {
+        return;
+    }
+    raw[INO_CSUM_LO_OFF] = 0;
+    raw[INO_CSUM_LO_OFF + 1] = 0;
+    if raw.len() > INO_CSUM_HI_OFF + 2 {
+        raw[INO_CSUM_HI_OFF] = 0;
+        raw[INO_CSUM_HI_OFF + 1] = 0;
+    }
+    let calc = inode_csum(seed, ino, raw);
+    let lo = (calc & 0xFFFF) as u16;
+    raw[INO_CSUM_LO_OFF..INO_CSUM_LO_OFF + 2].copy_from_slice(&lo.to_le_bytes());
+    if raw.len() > INO_CSUM_HI_OFF + 2 {
+        let hi = (calc >> 16) as u16;
+        raw[INO_CSUM_HI_OFF..INO_CSUM_HI_OFF + 2].copy_from_slice(&hi.to_le_bytes());
+    }
+}
+
+/// Write-path counterpart of `group_desc_csum_ok`: store bg_checksum
+/// into the raw `desc_size` bytes of one group descriptor.
+pub fn group_desc_csum_set(seed: u32, group: u32, desc: &mut [u8]) {
+    if desc.len() <= GD_CSUM_OFF + 1 {
+        return;
+    }
+    desc[GD_CSUM_OFF] = 0;
+    desc[GD_CSUM_OFF + 1] = 0;
+    let c = group_desc_csum(seed, group, desc);
+    desc[GD_CSUM_OFF..GD_CSUM_OFF + 2].copy_from_slice(&c.to_le_bytes());
+}
+
+/// Write-path counterpart of `superblock_csum_ok`: store s_checksum
+/// into the full 1024-byte on-disk superblock.
+pub fn superblock_csum_set(sb: &mut [u8]) {
+    if sb.len() < SB_CSUM_OFF + 2 {
+        return;
+    }
+    sb[SB_CSUM_OFF] = 0;
+    sb[SB_CSUM_OFF + 1] = 0;
+    let c = (crc32c(0xFFFF_FFFF, &sb[..SB_CSUM_OFF]) & 0xFFFF) as u16;
+    sb[SB_CSUM_OFF..SB_CSUM_OFF + 2].copy_from_slice(&c.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +237,46 @@ mod tests {
         assert_eq!(CRC32C_TABLE[0], 0);
         assert_eq!(CRC32C_TABLE[1], 0x82F6_3B78);
         assert_eq!(CRC32C_TABLE[255], 0x7937_7907);
+    }
+
+    /// The write helpers round-trip through the verify helpers: set
+    /// then ok on the same bytes must hold for every object size class
+    /// the mount can encounter.
+    #[test]
+    fn test_csum_set_round_trip() {
+        // Inode: good-old 128 and a 256-byte slot (checksum hi half used).
+        for size in [128usize, 256] {
+            let mut raw = vec![0u8; size];
+            for i in 0..size {
+                raw[i] = (i * 7 + 3) as u8;
+            }
+            inode_csum_set(0x1234_5678, 42, &mut raw);
+            assert!(inode_csum_ok(0x1234_5678, 42, &raw), "inode size {size}");
+            // Any content change must break the checksum.
+            raw[8] ^= 0xFF;
+            assert!(!inode_csum_ok(0x1234_5678, 42, &raw), "inode size {size}");
+        }
+        // Group descriptor: 32-byte (64-bit desc hi half beyond 32 is
+        // covered by the desc_size>32 case below).
+        for dsize in [32usize, 64] {
+            let mut desc = vec![0u8; dsize];
+            for i in 0..dsize {
+                desc[i] = (i * 13 + 5) as u8;
+            }
+            group_desc_csum_set(0x9ABC_DEF0, 7, &mut desc);
+            assert!(group_desc_csum_ok(0x9ABC_DEF0, 7, &desc), "desc size {dsize}");
+            desc[4] ^= 0x01;
+            assert!(!group_desc_csum_ok(0x9ABC_DEF0, 7, &desc), "desc size {dsize}");
+        }
+        // Superblock: 1024 bytes, checksum lives at 0x3FC.
+        let mut sb = vec![0u8; 1024];
+        for i in 0..0x3FC {
+            sb[i] = (i * 31 + 11) as u8;
+        }
+        superblock_csum_set(&mut sb);
+        assert!(superblock_csum_ok(&sb));
+        sb[0] ^= 0x80;
+        assert!(!superblock_csum_ok(&sb));
     }
 
     /// crc32c("123456789") with init ~0 and final XOR is 0xE306_9283

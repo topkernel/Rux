@@ -572,6 +572,18 @@ pub fn write_inode(
     };
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
 
+    // metadata_csum write path: recompute the slot's crc32c over the
+    // FULL inode_size bytes (the read path verifies exactly that span —
+    // read_inode EIOs on mismatch, so every write must re-seal it).
+    if fs.metadata_csum {
+        let full_end = (in_block_offset + fs.inode_size as usize).min(data.len());
+        crate::fs::ext4::csum::inode_csum_set(
+            fs.csum_seed,
+            ino,
+            &mut data[in_block_offset..full_end],
+        );
+    }
+
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid buffer head from bio::bread; set_state_bit modifies
     // the buffer state flags through an internal spinlock.
@@ -708,6 +720,17 @@ pub fn write_inode_disk(
         )
     };
     data[in_block_offset..in_block_offset + copy_len].copy_from_slice(inode_bytes);
+
+    // metadata_csum write path: re-seal the full inode slot (see
+    // write_inode — the read path verifies the full inode_size span).
+    if fs.metadata_csum {
+        let full_end = (in_block_offset + fs.inode_size as usize).min(data.len());
+        crate::fs::ext4::csum::inode_csum_set(
+            fs.csum_seed,
+            ino,
+            &mut data[in_block_offset..full_end],
+        );
+    }
 
     // Mark buffer dirty and sync
     // SAFETY: bh is a valid BufferHead from bio::bread; set_state_bit modifies
