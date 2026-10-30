@@ -2705,6 +2705,124 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
 }
 
+/// oh-svc abort-reason dump: name the aborting binary/library and the
+/// return chain at the moment of a self-raised SIGABRT. See the tap in
+/// send_signal_from_user_tkill — runs on the raising task, in its
+/// syscall context, so user registers and user memory are live.
+fn abort_reason_dump(leader_tid: u32) {
+    use crate::mm::vma::{VmaFlags, VmaType};
+
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    // SAFETY: task is the current task, valid for the duration.
+    let (comm, tgid) = unsafe { ((*task).comm(), (*task).tgid()) };
+    let comm = core::str::from_utf8(comm).unwrap_or("").trim_end_matches('\0');
+
+    let (rip, rsp) = {
+        #[cfg(feature = "x86_64")]
+        {
+            crate::arch::trap::current_task_pt_regs()
+                .map(|r| (r.rip, r.rsp))
+                .unwrap_or((0, 0))
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            (0u64, 0u64)
+        }
+    };
+    crate::pr_warn!(
+        "ABORT-DUMP tgid={} tid={} comm='{}' rip={:#x} rsp={:#x}",
+        tgid,
+        leader_tid,
+        comm,
+        rip,
+        rsp
+    );
+
+    let Some(aspace) = (unsafe { (*task).address_space_arc() }) else {
+        crate::pr_warn!("ABORT-DUMP: no address space");
+        return;
+    };
+
+    // Snapshot up to 32 exec/file-backed VMAs under one hold, resolve
+    // names outside the guard (generate_maps discipline).
+    let mut ranges: [(u64, u64, usize); 32] = [(0, 0, 0); 32];
+    let mut names: [Option<alloc::string::String>; 32] = Default::default();
+    let mut n = 0usize;
+    {
+        let vma_mgr = aspace.vma_read();
+        for vma in vma_mgr.iter() {
+            if n >= 32 {
+                break;
+            }
+            let start = vma.start().as_usize() as u64;
+            let end = vma.end().as_usize() as u64;
+            let is_exec = vma.flags().is_executable();
+            let is_file = vma.vma_type() == VmaType::FileBacked;
+            if !is_exec && !is_file {
+                continue;
+            }
+            let name = if let Some(file) = aspace.get_vma_file(start as usize) {
+                // SAFETY: read-only dentry access on the pinned file.
+                let dentry = unsafe { &*file.dentry.get() };
+                dentry.as_ref().map(|d| d.name.lock().clone())
+            } else {
+                None
+            };
+            ranges[n] = (start, end, vma.offset());
+            names[n] = name;
+            n += 1;
+        }
+    }
+
+    let label = |addr: u64| -> alloc::string::String {
+        for i in 0..n {
+            let (s, e, _off) = ranges[i];
+            if addr >= s && addr < e {
+                return match &names[i] {
+                    Some(name) => alloc::format!("{}+{:#x}", name, addr - s),
+                    None => alloc::format!("anon+{:#x}", addr - s),
+                };
+            }
+        }
+        alloc::format!("{:#x}", addr)
+    };
+    crate::pr_warn!("ABORT-DUMP rip-in {}", label(rip));
+    for i in 0..n {
+        let (s, e, off) = ranges[i];
+        crate::pr_warn!(
+            "ABORT-MAP {:#x}-{:#x} off={:#x} {}",
+            s,
+            e,
+            off,
+            names[i].as_deref().unwrap_or("?")
+        );
+    }
+
+    // Return-chain scan: 24 qwords from user rsp upward; print only the
+    // values that land inside a mapped exec/file region.
+    let mut line = alloc::string::String::new();
+    for i in 0..24u64 {
+        let mut w = [0u8; 8];
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(w.as_mut_ptr(), (rsp + i * 8) as *const u8, 8)
+        } != 0
+        {
+            continue;
+        }
+        let v = u64::from_le_bytes(w);
+        let inside = ranges[..n]
+            .iter()
+            .any(|(s, e, _)| v >= *s && v < *e);
+        if inside {
+            line.push_str(&alloc::format!(" [{}]{}", i, label(v)));
+        }
+    }
+    crate::pr_warn!("ABORT-STK{}", line);
+}
+
 /// Thread-directed user signal (tkill/tgkill — glibc raise() is tgkill):
 /// identical to send_signal_from_user but the queued siginfo carries
 /// si_code = SI_TKILL, exactly like Linux's do_send_specific(). Without
@@ -2742,6 +2860,28 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
                 cc,
                 tid
             );
+        }
+    }
+    // oh-svc abort-reason tap (2026-10-31): a self-raised SIGABRT (musl
+    // abort()) prints NOTHING — the OH image's stderr is /dev/null and
+    // hilogd may never see the dying process — so render_service's abort
+    // (first composition frame, tgid 896) died with no reason anywhere.
+    // On the FIRST sig-6 of each process, dump the raiser's user rip/rsp
+    // plus its exec-VMA map so the serial names the aborting library and
+    // the return chain into it (musl raise keeps the caller frames live
+    // on the stack; scanning rsp upward for code-region values gives the
+    // poor-man's backtrace). Budgeted: one dump per tgid, 8 per boot.
+    if sig == 6 {
+        static ABORT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static LAST_TGID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
+            && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
+            && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
+        {
+            LAST_TGID.store(tid, core::sync::atomic::Ordering::Relaxed);
+            abort_reason_dump(tid);
         }
     }
     if sig < 1 || sig > 64 {
