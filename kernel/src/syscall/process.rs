@@ -1564,6 +1564,28 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Validate id per idtype (reference kernel_waitid): P_PID wants a
+    // positive pid, P_PGID a non-negative pgid — anything else is
+    // EINVAL, not "no such child" ECHILD.
+    if idtype == 1 && id <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if idtype == 2 && id < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // U1c pid-namespace semantics parity with sys_wait4: a P_PID target
+    // is interpreted in the CALLER's pid namespace (identity in init ns).
+    // do_waitid compares against global child pids.
+    let wait_id: i32 = if idtype == 1 {
+        match crate::process::ns::resolve_vpid(id as u32) {
+            Some(g) => g as i32,
+            None => return -(errno::ECHILD as i64),
+        }
+    } else {
+        id
+    };
+
     // Validate infop pointer
     if infop.is_null() {
         return -(errno::EFAULT as i64);
@@ -1572,7 +1594,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    match crate::process::exit::do_waitid(idtype, id, infop, options) {
+    match crate::process::exit::do_waitid(idtype, wait_id, infop, options) {
         // Ok(false) = WNOHANG, no event: Linux returns 0 and leaves
         // infop untouched (the old -EAGAIN broke every poll loop).
         Ok(_) => 0,

@@ -1249,24 +1249,9 @@ pub fn do_exit_group(exit_code: i32) -> ! {
     }
     // Publish the group exit status BEFORE stopping the siblings: the
     // SIGKILL below makes each member's fatal-signal path re-enter
-    // do_exit_group with THIS code, so the whole group - the leader
-    // included - reports the clean status instead of "killed by
-    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
-    // from the mq callback thread).
-    // SAFETY: current is the running task (matched above), non-null.
-    let signal_arc = unsafe { (*current).signal_arc() };
-    if let Some(ss) = signal_arc {
-        ss.group_exit_code
-            .store(exit_code, core::sync::atomic::Ordering::Release);
-        ss.group_exiting
-            .store(true, core::sync::atomic::Ordering::Release);
-    }
-
-    // Publish the group exit status BEFORE stopping the siblings: the
-    // SIGKILL below makes each member's fatal-signal path re-enter
     // do_exit_group with THIS code, so the whole group — the leader
     // included — reports the clean status instead of "killed by
-    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
+    // signal 9" (reference signal_group_exit; LTP mq_notify03 exit(0)
     // from the mq callback thread).
     // SAFETY: current is the running task (matched above), non-null.
     let signal_arc = unsafe { (*current).signal_arc() };
@@ -1694,12 +1679,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 } else if child.state() == TaskState::new(TaskState::STOPPED)
                     && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
                     && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
+                    && stopped_child.is_none()
                 {
                     // Linux wait_task_stopped(): "Traditionally we see
                     // ptrace'd stopped children regardless of options" —
                     // WUNTRACED gates job-control stops only; a stop of a
                     // task WE trace is always reported (LTP ptrace01/05
-                    // use plain waitpid on a TRACEME'd child).
+                    // use plain waitpid on a TRACEME'd child). First
+                    // match wins, like the zombie selection above.
                     stopped_child = Some(child_ptr);
                 }
             });
@@ -1955,7 +1942,17 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
             found_child = true;
 
-            if child.state() == TaskState::new(TaskState::ZOMBIE) && zombie_ptr.is_none() {
+            // E8-REPAR discipline (same as do_wait): CLAIM the zombie
+            // here, inside the walk's tree-lock critical section. Two
+            // group members polling WNOHANG concurrently (glib reaper
+            // thread + main) could both select the same zombie and
+            // double-release_task it — the second release would
+            // lock/unlink/free through the already-freed Task. A failed
+            // claim means another waiter is reaping it; keep scanning.
+            if child.state() == TaskState::new(TaskState::ZOMBIE)
+                && zombie_ptr.is_none()
+                && Task::claim_child_locked(child_ptr)
+            {
                 zombie_ptr = Some(child_ptr);
             } else if child.state() == TaskState::new(TaskState::STOPPED)
                 && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
@@ -1963,7 +1960,7 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
                 && stopped_ptr.is_none()
             {
                 // ptrace'd stops are reported regardless of WUNTRACED
-                // (Linux wait_task_stopped); see do_wait for the rationale.
+                // (reference wait_task_stopped); see do_wait for the rationale.
                 stopped_ptr = Some(child_ptr);
             }
         });
@@ -1990,6 +1987,13 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
                     &status as *const i32 as *const u8,
                     core::mem::size_of::<i32>(),
                 ) != 0 {
+                    // EFAULT: the caller passed an unwritable status
+                    // pointer. The zombie is already CLAIMED (unlinked),
+                    // so it cannot be left for a later wait — release it
+                    // here and still report the fault (divergence from
+                    // the reference's unreaped-EFAULT, forced by the
+                    // claim's unlinked-implies-reaped invariant).
+                    release_task(child_ptr);
                     return Err(crate::errno::Errno::BadAddress.as_neg_i32());
                 }
             }
@@ -2131,29 +2135,48 @@ pub fn do_waitid(
 
                 found_child = true;
 
+                // First event wins (the reference's wait_consider_task
+                // stops the walk at the first child that yields an
+                // event) — the is_none() guards keep a later match from
+                // overwriting an earlier selection, which would strand
+                // a CLAIMED zombie below.
                 // Check for zombie (exited) — only if WEXITED
                 if options & WEXITED != 0
                     && child.state() == TaskState::new(TaskState::ZOMBIE)
                 {
-                    result_child = Some(child_ptr);
-                    let raw_exit = child.exit_code();
-                    let mut was_killed = false;
-                    if raw_exit >= 0 {
-                        // si_status is the raw 0-255 exit code (Linux
-                        // WEXITSTATUS semantics); sys_exit pre-shifted it
-                        // into bits 8-15, shift back down here.
-                        result_code = ((raw_exit as u32) >> 8) as i32;
-                    } else {
-                        result_code = (-raw_exit) as i32;
-                        was_killed = true;
+                    // E8-REPAR discipline (see do_wait): CLAIM the
+                    // zombie inside the walk's tree-lock critical
+                    // section when this call will reap it — two group
+                    // members blocked in waitid could otherwise both
+                    // select it and double-release_task (free the Task
+                    // twice). WNOWAIT never reaps, so it must NOT claim
+                    // (leaves the zombie reapable by a later wait).
+                    if result_child.is_none()
+                        && (options & WNOWAIT != 0
+                            || Task::claim_child_locked(child_ptr))
+                    {
+                        result_child = Some(child_ptr);
+                        let raw_exit = child.exit_code();
+                        let mut was_killed = false;
+                        if raw_exit >= 0 {
+                            // si_status is the raw 0-255 exit code
+                            // (WEXITSTATUS semantics); sys_exit
+                            // pre-shifted it into bits 8-15, shift back
+                            // down here.
+                            result_code = ((raw_exit as u32) >> 8) as i32;
+                        } else {
+                            result_code = (-raw_exit) as i32;
+                            was_killed = true;
+                        }
+                        result_kind = if was_killed { 3 } else { 0 };
                     }
-                    result_kind = if was_killed { 3 } else { 0 };
                 }
                 // Check for stopped — only if WSTOPPED. Unified with
                 // wait4's one-shot semantics: stop_reported, not a
                 // separate stop_signal()!=0 test (the two mechanisms
                 // racing double-reported one stop event — review 3.3).
                 else if options & WSTOPPED != 0
+                    && result_child.is_none()
                     && child.state() == TaskState::new(TaskState::STOPPED)
                 {
                     if !child.stop_reported.load(core::sync::atomic::Ordering::Acquire) {
@@ -2191,8 +2214,12 @@ pub fn do_waitid(
                     (CLD_EXITED, result_code)
                 };
 
-                // Write siginfo to user
-                write_siginfo(infop, si_code, child_pid, child_uid, si_status);
+                // Write siginfo to user. si_pid is reported in the
+                // CALLER's pid namespace (U1c parity with wait4's
+                // report_wait_pid); the child is still hash-resident at
+                // this point — release_task runs after the write.
+                let report_pid = crate::process::ns::wait_vpid(child_pid);
+                write_siginfo(infop, si_code, report_pid, child_uid, si_status);
 
                 // Reap zombie unless WNOWAIT
                 if (result_kind == 0 || result_kind == 3) && options & WNOWAIT == 0 {
