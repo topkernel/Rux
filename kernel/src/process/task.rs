@@ -3019,10 +3019,15 @@ impl Task {
         // (Per-arch floor: 0xFFFFFFC000000000 is the riscv64 layout — on
         // x86_64 every legitimate linear-map Task sits at 0xFFFF8880...,
         // below that constant, so the riscv floor dropped them all and
-        // stranded fork children forever.)
-        #[cfg(feature = "x86_64")]
+        // stranded fork children forever. The aarch64 linear map starts at
+        // 0xFFFF_C000_0000_0000 — even further below the riscv floor; with
+        // the shared not(x86_64) branch every heap Task's wake was dropped
+        // as "wild" and heap tasks slept forever: PID 1's shell sat parked
+        // with input waiting in the ring. Each arch now uses its own
+        // PAGE_OFFSET.)
+        #[cfg(any(feature = "x86_64", feature = "aarch64"))]
         const WAKE_PTR_FLOOR: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
-        #[cfg(not(feature = "x86_64"))]
+        #[cfg(feature = "riscv64")]
         const WAKE_PTR_FLOOR: usize = 0xFFFF_FFC0_0000_0000;
         if (task as usize) < WAKE_PTR_FLOOR {
             use crate::console::putchar;
