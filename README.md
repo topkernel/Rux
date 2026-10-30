@@ -48,12 +48,10 @@ Stock OpenHarmony boots to its full ~80-service system.
 
 ## 🖥️ Ubuntu 22.04 → GNOME Shell desktop
 
-![Interactive GNOME Shell desktop on Rux](docs/images/ubuntu-gnome-xterm-conversation-2026-10-28.png)
+![GNOME Shell desktop on Rux](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png)
 
 *Unmodified Ubuntu userland: glibc, Xorg, D-Bus, GNOME Shell + mutter,
-interactive xterm. The typed conversation, cursor cell and window
-geometry reproduce across boots — deterministic pixel evidence, no
-vision model. Sessions hold 45 min, zero panics.*
+interactive xterm. Sessions hold 45 min, zero panics.*
 
 ```bash
 make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / rux
@@ -61,12 +59,12 @@ make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / ru
 
 ## 📱 OpenHarmony → the full service stack
 
-![OH bootanimation on the Rux DRM path](docs/images/oh-bootanimation-2026-10-24.png)
+![Graphical boot screen on Rux — stand-in until the OH launcher capture](docs/images/ubuntu-login-riscv-2026-10-15.png)
 
 *Unmodified OH x86_64_virt image: samgr, foundation, render_service,
-hilogd, appspawn, hdf devhosts — ~80 services up and staying up, OH's
-own bootanimation on the kernel's virtio-GPU DRM path, `hdc shell` to
-the live guest.*
+hilogd, appspawn, hdf devhosts — ~80 services up and staying up,
+`hdc shell` to the live guest. Launcher bring-up is the active front;
+the image above is a stand-in for that capture.*
 
 ---
 
