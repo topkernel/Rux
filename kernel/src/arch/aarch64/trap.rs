@@ -455,7 +455,6 @@ fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
     while let Some(intid) = gicv3::claim() {
         match intid {
             gicv3::TIMER_PPI_INTID => {
-                crate::drivers::intc::gicv3::TEMP_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 handle_timer_interrupt(regs, cpu);
                 gicv3::eoi(intid);
             }

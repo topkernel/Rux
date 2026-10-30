@@ -230,14 +230,23 @@ fn dist_init() {
     //    alias; every SPI in [32, limit) is Group 1 and starts
     //    disabled). Level-triggered reset default of GICD_ICFGR matches
     //    every SPI this machine wires (UART, PCI INTx — all level).
+    //    IPRIORITYR packs FOUR INTIDs per 32-bit word — build whole
+    //    words; a naive per-INTID full-word write zeroes the three
+    //    neighbor byte lanes (caught by readback during bring-up).
     let limit = lines.min(DOMAIN_SIZE);
     let boot_mpidr = crate::arch::smp::index_to_mpidr(0);
+    for word_id in (32..limit).step_by(4) {
+        let mut word: u32 = 0;
+        for lane in 0..4u32 {
+            let id = word_id + lane;
+            if id < limit {
+                word |= (default_priority_for(id) & 0xFF) << (8 * lane);
+            }
+        }
+        unsafe { reg_write32(GICD_BASE + gicd::IPRIORITYR + 4 * word_id as usize, word) };
+    }
     for intid in 32..limit {
         unsafe {
-            reg_write32(
-                GICD_BASE + gicd::IPRIORITYR + 4 * intid as usize,
-                default_priority_for(intid),
-            );
             reg_write64(
                 GICD_BASE + gicd::IROUTER + 8 * (intid as usize - 32),
                 boot_mpidr,
@@ -321,14 +330,16 @@ fn redist_configure_local(rd: usize) {
     }
 
     // Group 1 for the whole SGI/PPI bank; keep SGIs + timer PPI enabled.
+    // (IPRIORITYR packs four INTIDs per word — accumulate, see dist_init.)
     unsafe {
         reg_write32(rd + gicr::SGI_IGROUPR0, 0xFFFF_FFFF);
         reg_write32(rd + gicr::SGI_ICENABLER0, 0xFFFF_FFFF);
-        for intid in 0..32u32 {
-            reg_write32(
-                rd + gicr::SGI_IPRIORITYR + 4 * intid as usize,
-                default_priority_for(intid),
-            );
+        for word_id in (0..32u32).step_by(4) {
+            let mut word: u32 = 0;
+            for lane in 0..4u32 {
+                word |= (default_priority_for(word_id + lane) & 0xFF) << (8 * lane);
+            }
+            reg_write32(rd + gicr::SGI_IPRIORITYR + 4 * (word_id / 4) as usize, word);
         }
         let mut enable0: u32 = 0;
         for sgi in 0..16u32 {
@@ -505,129 +516,4 @@ pub fn init() {
     );
     crate::print_status("intc", "IRQ domain + chip registered", true);
 
-    // TEMP tick self-check (removed before commit)
-    // Diag dump first.
-    {
-        let gicd_ctlr = unsafe { reg_read32(GICD_BASE + gicd::CTLR) };
-        let gicd_typer = unsafe { reg_read32(GICD_BASE + gicd::TYPER) };
-        let t0 = unsafe { reg_read64(GICR_FRAMES + gicr::TYPER) };
-        let t1 = unsafe { reg_read64(GICR_FRAMES + GICR_STRIDE + gicr::TYPER) };
-        let mpidr = crate::arch::smp::read_mpidr();
-        let rd = find_my_rd_base();
-        let (isen0, waker, ctlr_r, igrp1, pmr, sre, ctl_v, cval, now) : (u32,u32,u32,u32,u32,u32,u64,u64,u64);
-        unsafe {
-            asm!("mrs {}, icc_igrpen1_el1", out(reg) igrp1, options(nomem, nostack));
-            asm!("mrs {}, icc_pmr_el1", out(reg) pmr, options(nomem, nostack));
-            asm!("mrs {}, icc_sre_el1", out(reg) sre, options(nomem, nostack));
-            asm!("mrs {}, cntv_ctl_el0", out(reg) ctl_v, options(nomem, nostack));
-            asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack));
-        }
-        now = crate::arch::cpu::read_counter();
-        if let Some(r) = rd {
-            isen0 = unsafe { reg_read32(r + gicr::SGI_ISENABLER0) };
-            waker = unsafe { reg_read32(r + gicr::WAKER) };
-            ctlr_r = unsafe { reg_read32(r + gicr::CTLR) };
-        } else {
-            isen0 = 0xDEAD0001; waker = 0xDEAD0002; ctlr_r = 0xDEAD0003;
-        }
-        crate::print_status("intc", &alloc::format!(
-            "DIAG1 ctlr={:#x} typer={:#x} mpidr={:#x}", gicd_ctlr, gicd_typer, mpidr), true);
-        crate::print_status("intc", &alloc::format!(
-            "DIAG2 rd={:#x} t0={:#x} t1={:#x}", rd.map(|v| v as u64).unwrap_or(0), t0, t1), true);
-        crate::print_status("intc", &alloc::format!(
-            "DIAG3 isen0={:#x} waker={:#x} rctlr={:#x}", isen0, waker, ctlr_r), true);
-        crate::print_status("intc", &alloc::format!(
-            "DIAG4 igrp1={} pmr={:#x} sre={}", igrp1, pmr, sre), true);
-        crate::print_status("intc", &alloc::format!(
-            "DIAG5 vctl={:#x} cval={:#x} now={:#x}", ctl_v, cval, now), true);
-    }
-    crate::arch::cpu::enable_irq();
-    let t0 = crate::arch::cpu::read_counter();
-    let freq = crate::arch::cpu::get_counter_freq();
-    crate::drivers::timer::set_next_trigger();
-    enable_ppi(TIMER_PPI_INTID);
-    // Post-arm state: CNTV_CTL bit2 = ISTATUS (condition met), DAIF read.
-    {
-        let ctl: u64; let daif: u64;
-        unsafe {
-            asm!("mrs {}, cntv_ctl_el0", out(reg) ctl, options(nomem, nostack));
-            asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
-        }
-        let cval: u64;
-        unsafe { asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack)) };
-        crate::print_status("intc", &alloc::format!("DIAG6 vctl={:#x} daif={:#x}", ctl, daif), true);
-        crate::print_status("intc", &alloc::format!("DIAG6b freq={} t0={} cval={}", freq, t0, cval), true);
-        // Busy-wait ~20ms past the armed deadline, then sample ISTATUS.
-        let dl = cval + freq / 50;
-        while crate::arch::cpu::read_counter() < dl {}
-        let c: u64;
-        unsafe { asm!("mrs {}, cntv_ctl_el0", out(reg) c, options(nomem, nostack)) };
-        crate::print_status("intc", &alloc::format!("DIAG7 vctl-late={:#x} (bit2=ISTATUS) now={}", c, crate::arch::cpu::read_counter()), true);
-        // Manual claim probe: does the GIC offer the INTID at all?
-        let iar = iar1_read();
-        crate::print_status("intc", &alloc::format!("DIAG8 manual IAR1={:#x} (27=timer, 1023=none)", iar), true);
-        if iar < 1020 {
-            eoir1_write(iar);
-        }
-        if let Some(r) = find_my_rd_base() {
-            let ispendr0 = unsafe { reg_read32(r + gicr::SGI_ISENABLER0 + 0x0100) }; // ISPENDR0 @ +0x200
-            let igroupr0 = unsafe { reg_read32(r + gicr::SGI_IGROUPR0) };
-            let iprio27 = unsafe { reg_read32(r + gicr::SGI_IPRIORITYR + 4 * 27) };
-            let icfgr1 = unsafe { reg_read32(r + gicr::SGI_IPRIORITYR + 0x800 + 4) }; // ICFGR1 @ +0xC04
-            crate::print_status("intc", &alloc::format!("DIAG10 ispendr0={:#x}", ispendr0), true);
-            crate::print_status("intc", &alloc::format!("DIAG11a igroupr0={:#x}", igroupr0), true);
-            crate::print_status("intc", &alloc::format!("DIAG11b iprio27={:#x}", iprio27), true);
-            crate::print_status("intc", &alloc::format!("DIAG11c icfgr1={:#x}", icfgr1), true);
-        }
-        // Software-pend SGI 0 and try acknowledging: splits "PPI-specific
-        // wiring problem" from "delivery machinery broken".
-        if let Some(r) = find_my_rd_base() {
-            unsafe {
-                reg_write32(r + gicr::SGI_ISENABLER0, 1); // ensure SGI 0 enabled
-                reg_write32(r + gicr::SGI_ISENABLER0 + 0x0200, 1); // ISPENDR0 |= SGI0
-            }
-            let iar_sgi = iar1_read();
-            let hppir1: u64; let hppir0: u64;
-            unsafe {
-                asm!("mrs {}, icc_hppir1_el1", out(reg) hppir1, options(nomem, nostack));
-                asm!("mrs {}, icc_hppir0_el1", out(reg) hppir0, options(nomem, nostack));
-            }
-            crate::print_status("intc", &alloc::format!("DIAG13 IAR1={} HPPR1={} HPPR0={}", iar_sgi, hppir1, hppir0), true);
-            if iar_sgi < 1020 {
-                eoir1_write(iar_sgi);
-            }
-            // Brute force: all enable bits on, both group enables on.
-            unsafe {
-                reg_write32(GICD_BASE + gicd::CTLR, 0x57);
-                asm!("msr icc_igrpen0_el1, {}", in(reg) 1u64, options(nomem, nostack));
-                asm!("msr icc_igrpen1_el1, {}", in(reg) 1u64, options(nomem, nostack));
-                asm!("isb", options(nomem, nostack));
-            }
-            wait_not_set(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::RWP);
-            let iar2 = iar1_read();
-            let iar0b: u64;
-            unsafe { asm!("mrs {}, icc_iar0_el1", out(reg) iar0b, options(nomem, nostack)) };
-            crate::print_status("intc", &alloc::format!("DIAG14 ctlr57 IAR1={} IAR0={}", iar2, iar0b), true);
-            if iar2 < 1020 { eoir1_write(iar2); }
-            if iar0b < 1020 { eoir1_write(iar0b as u32); }
-        }
-    }
-    let mut ticks: u64 = 0;
-    while crate::arch::cpu::read_counter().wrapping_sub(t0) < freq / 2 {
-        let c = TEMP_TICKS.load(Ordering::Relaxed);
-        if c > ticks {
-            ticks = c;
-        }
-    }
-    crate::arch::cpu::disable_irq();
-    crate::print_status(
-        "intc",
-        &alloc::format!(
-            "TEMP-TICKCHECK: {} timer IRQs in 500ms (expect ~50), freq {}",
-            ticks, freq
-        ),
-        true,
-    );
 }
-
-pub static TEMP_TICKS: AtomicU64 = AtomicU64::new(0);
