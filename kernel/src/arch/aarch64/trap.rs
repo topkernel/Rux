@@ -267,11 +267,13 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
         // syscallno by the entry), x0-x5 args, return in x0.
         Cause::EcallUser => handle_syscall(regs_ref),
 
-        // HVC from EL1 — the PSCI conduit lands here in stage 3.
-        // Nothing issues HVC today; treat it as a kernel bug.
+        // HVC from EL1 — the PSCI conduit (smp.rs issues hvc #0, consumed
+        // by the EL2 firmware, so it never reaches these vectors on this
+        // machine; the arm exists for a firmware-less/routing changeover).
+        // Nothing expects it today; treat it as a kernel bug.
         Cause::EcallSupervisor => {
             crate::pr_err!(
-                "aarch64: unexpected HVC at pc={:#x} (PSCI conduit lands in stage 3)",
+                "aarch64: unexpected HVC at pc={:#x} (PSCI runs through EL2 and should not land here)",
                 regs_ref.pc
             );
             crate::dfx::oops::oops(
@@ -411,9 +413,10 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 /// PC / restart contract (the piece that breaks the first blocking read()
 /// if any side gets it wrong):
 ///
-/// - ELR_EL1 points AT the `svc` (AArch64 exceptions from SVC never
-///   auto-advance), so this handler MUST advance pc by 4 before eret —
-///   otherwise the return path re-executes the svc forever.
+/// - ELR_EL1 points at the instruction AFTER the `svc` (AArch64 SVC sets
+///   the exception return address past the call — unlike the riscv64
+///   ecall, whose SEPC sits on the ecall and must be advanced), so this
+///   handler must NEVER advance pc before eret.
 /// - Restart sentinels (-ERESTARTSYS/-ERESTARTNOHAND returned in x0 by the
 ///   generic layer) are converted by the SIGNAL path, not here:
 ///   signal.rs restart_syscall_no_handler / setup_frame rewind pc by 4

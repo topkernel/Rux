@@ -197,7 +197,7 @@ pub fn satp_to_ppn(satp: usize) -> usize {
     satp & 0xFFFF_FFFF_FFFF
 }
 
-/// Read the composed value (TTBR0_EL1 + CONTEXTIDR_EL1)
+/// Read the composed value (TTBR0_EL1 root PPN + ASID)
 pub fn read_satp() -> usize {
     super::pagetable::get_satp().0 as usize
 }
