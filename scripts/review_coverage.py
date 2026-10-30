@@ -82,7 +82,7 @@ STATUS = {
     "kernel/src/drivers/virtio/offset.rs": ("todo", ""),
     "kernel/src/drivers/virtio/probe.rs": ("todo", ""),
     "kernel/src/drivers/virtio/queue.rs": ("todo", ""),
-    "kernel/src/drivers/virtio/virtio_pci.rs": ("todo", ""),
+    "kernel/src/drivers/virtio/virtio_pci.rs": ("part", "device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed"),
     "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications"),
     "kernel/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/src/fs/cgroup.rs": ("todo", ""),
@@ -92,7 +92,7 @@ STATUS = {
     "kernel/src/fs/devfs/mod.rs": ("todo", ""),
     "kernel/src/fs/ext4/dir.rs": ("part", "directory ops"),
     "kernel/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
-    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); write body/alloc/lseek/fsync from earlier sessions"),
+    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions"),
     "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
     "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount"),
@@ -139,7 +139,7 @@ STATUS = {
     "kernel/src/fs/selinuxfs.rs": ("todo", ""),
     "kernel/src/fs/stat.rs": ("todo", ""),
     "kernel/src/fs/sysfs.rs": ("part", "sysfs tree, writable attributes"),
-    "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write"),
+    "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it)"),
     "kernel/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化"),
     "kernel/src/fs/xattr.rs": ("todo", ""),
     "kernel/src/interrupt/domain.rs": ("todo", ""),
@@ -171,7 +171,7 @@ STATUS = {
     "kernel/src/mm/rmap.rs": ("done", "read end to end (mm review): no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice"),
     "kernel/src/mm/slab.rs": ("todo", ""),
     "kernel/src/mm/small_alloc.rs": ("part", "size classes、每 CPU magazine、alloc/free 的快慢路径与 D-7 护栏"),
-    "kernel/src/mm/vdso.rs": ("todo", ""),
+    "kernel/src/mm/vdso.rs": ("part", "per-arch e_machine arm + ELF header emit reviewed; clock_gettime payload unchanged"),
     "kernel/src/mm/vma.rs": ("fixed", "re-read end to end after main moved (origin stamps are the last functional change): split/merge offset continuity, chain merges, max_end, expand_downwards, find_stack_vma all verified against the reference kernel; the mmap-after-merge metadata-clobber hypothesis disproven by construction (file VMAs are added with fd=-1, so install-time merges are anon-only and the fd/offset writes find the merged VMA harmlessly). Fixed: VMA-ADD-DUP tripwire message claimed 'replacing incumbent' while the code rejects the add with Overlap — message now states the real outcome"),
     "kernel/src/mm/vmscan.rs": ("todo", ""),
     "kernel/src/mm/vmstat.rs": ("done", "written by this review (page counters)"),
@@ -184,13 +184,13 @@ STATUS = {
     "kernel/src/process/coredump.rs": ("todo", ""),
     "kernel/src/process/exec.rs": ("fixed", "read end to end (abi-review s1): image/stack/interp load, auxv, entry frames; redundant zeroing fixed, linear stack/interp writers audited safe-by-single-block"),
     "kernel/src/process/exit.rs": ("todo", ""),
-    "kernel/src/process/fork.rs": ("part", "task creation paths"),
+    "kernel/src/process/fork.rs": ("part", "task creation paths; TLS inheritance arms (x86_64 fs/gs bases, aarch64 TPIDR_EL0 live read, CLONE_SETTLS) reviewed this session"),
     "kernel/src/process/kthread.rs": ("todo", ""),
     "kernel/src/process/mod.rs": ("todo", ""),
     "kernel/src/process/pid.rs": ("todo", ""),
     "kernel/src/process/pid_hash.rs": ("part", "task iteration"),
     "kernel/src/process/ptrace.rs": ("todo", ""),
-    "kernel/src/process/task.rs": ("part", "task layout, counters, comm"),
+    "kernel/src/process/task.rs": ("part", "task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect)"),
     "kernel/src/process/wait.rs": ("todo", ""),
     "kernel/src/sched/cgroup.rs": ("done", "cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented"),
     "kernel/src/sched/class.rs": ("done", "sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI"),
@@ -221,14 +221,18 @@ STATUS = {
     "kernel/src/syscall/network.rs": ("todo", ""),
     "kernel/src/syscall/process.rs": ("part", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending"),
     "kernel/src/syscall/time.rs": ("part", "nanosleep, realtime clock"),
-    "kernel/src/syscall/x86_compat.rs": ("todo", ""),
+    "kernel/src/syscall/x86_compat.rs": ("done", "every table entry audited against the host x86_64 + riscv64 asm-generic unistd headers (0 mismatches); targets cross-checked against dispatch arms; legacy block (poll/select/dup2/pause/epoll_create/epoll_wait/arch_prctl) covers the no-generic numbers"),
     "kernel/src/tests/*": ("todo", ""),
     "kernel/src/trace/files.rs": ("done", "written by this review (tracefs files)"),
     "kernel/src/trace/mod.rs": ("done", "written by this review (tracepoint core)"),
     "kernel/src/arch/aarch64/boot.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/context.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/boot/boot.S": ("todo", ""),
+    "kernel/src/arch/aarch64/dtb_blob.S": ("todo", ""),
+    "kernel/src/arch/aarch64/trap.S": ("todo", ""),
+    "kernel/src/drivers/timer/aarch64.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/context.rs": ("part", "switch_mm/TTBR0/ASID paths, context_switch step order, R56 switch_abort twin — mirrors riscv64"),
     "kernel/src/arch/aarch64/cpu.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/ipi.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/ipi.rs": ("part", "IPI surface mirrors the riscv64 twin (request/send/flush/handle); GIC SGI wiring from the aarch64 campaign"),
     "kernel/src/arch/aarch64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/aarch64/mm/exception.rs": ("todo", ""),
     "kernel/src/arch/aarch64/mm/fixmap.rs": ("todo", ""),
@@ -239,12 +243,12 @@ STATUS = {
     "kernel/src/arch/aarch64/mm/page_fault.rs": ("todo", ""),
     "kernel/src/arch/aarch64/mm/pagetable.rs": ("todo", ""),
     "kernel/src/arch/aarch64/mod.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/process.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/process.rs": ("part", "start_thread PSTATE, copy_thread parity, flush_thread (FPSIMD + tp_value + live TPIDR_EL0 clear) reviewed"),
     "kernel/src/arch/aarch64/pt_regs.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/smp.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/smp.rs": ("part", "mpidr mapping, boot-complete park/signl shape reviewed against the riscv64 twin"),
     "kernel/src/arch/aarch64/thread.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/trap.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/uaccess.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/trap.rs": ("part", "trap routing + do_page_fault (demand-fill-before-fixup R82, fixup R78, stack-overflow panic) reviewed; mm/ + boot remain"),
+    "kernel/src/arch/aarch64/uaccess.rs": ("part", "access_ok/copy_from_user/clear_user semantics match the twins (zero-fill tails); byte-loop extable copies; NOTE: no explicit fault_in_write retry in copy_to_user — covered by do_page_fault's kernel-uaccess demand-fill-first (R82), a belt-layer divergence from the riscv64/x86_64 second belt, not a defect"),
     "kernel/src/arch/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/boot.S": ("todo", ""),
     "kernel/src/arch/riscv64/boot.rs": ("todo", ""),
@@ -288,7 +292,7 @@ STATUS = {
     "kernel/src/arch/x86_64/trap.S": ("todo", ""),
     "kernel/src/arch/x86_64/uaccess.rs": ("todo", ""),
     "kernel/src/config.rs": ("todo", ""),
-    "kernel/src/console.rs": ("todo", ""),
+    "kernel/src/console.rs": ("part", "arch UART arms: x86_64 16550 THRE/stall machinery, riscv64 raw sb, aarch64 PL011 (FR 0x18/IMSC 0x38/ICR 0x44) — PL011 init_irq follows the twins' ownership discipline (pre-arm drain, IRQ-owned RX, armed-flag fallback)"),
     "kernel/src/dfx/fsw.rs": ("todo", ""),
     "kernel/src/dfx/ksyms_generated.rs": ("todo", ""),
     "kernel/src/dfx/schb.rs": ("todo", ""),
@@ -316,14 +320,14 @@ STATUS = {
     "kernel/src/drivers/net/mod.rs": ("todo", ""),
     "kernel/src/drivers/net/space.rs": ("todo", ""),
     "kernel/src/drivers/net/virtio_net.rs": ("todo", ""),
-    "kernel/src/drivers/pci/mod.rs": ("todo", ""),
+    "kernel/src/drivers/pci/mod.rs": ("fixed", "device-ID table + ECAM scan walk: 04e23b45 shifted the modern virtio IDs (blk 0x1042->0x1041), losing every disable-legacy=on root disk; restored to spec IDs 0x1040+dev (net 1/blk 2), QEMU-verified"),
     "kernel/src/drivers/rtc.rs": ("todo", ""),
     "kernel/src/drivers/timer/hpet.rs": ("todo", ""),
     "kernel/src/drivers/watchdog.rs": ("todo", ""),
     "kernel/src/errno.rs": ("todo", ""),
     "kernel/src/fs/dev_t.rs": ("todo", ""),
     "kernel/src/fs/devfs/registry.rs": ("todo", ""),
-    "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1): Ehdr/Phdr parsing, validate/load/load_dynamic_to; interp BSS double-zero removed"),
+    "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1); this review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every platform)"),
     "kernel/src/fs/ext4/allocator.rs": ("part", "geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending"),
     "kernel/src/fs/ext4/csum.rs": ("todo", ""),
     "kernel/src/fs/ext4/indirect.rs": ("todo", ""),
@@ -381,7 +385,7 @@ STATUS = {
     "kernel/src/security/capability.rs": ("todo", ""),
     "kernel/src/security/lsm.rs": ("todo", ""),
     "kernel/src/security/mod.rs": ("todo", ""),
-    "kernel/src/signal.rs": ("part", "flush_handlers 处置重置语义"),
+    "kernel/src/signal.rs": ("part", "flush_handlers reset semantics; this session: per-arch cfg arms (restart_syscall_no_handler cause-gates, SIGTRAMP_BASE, setup_frame dispatch) reviewed — deliberate and twin-documented"),
     "kernel/src/sync/mod.rs": ("todo", ""),
     "kernel/src/sync/percpu.rs": ("todo", ""),
     "kernel/src/syscall/sched.rs": ("todo", ""),
@@ -459,6 +463,34 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("eaefd06f", "kernel/src/drivers/pci/mod.rs",
+     "04e23b45 (aarch64 campaign) shifted the modern virtio PCI device IDs to net=0x1040/blk="
+     "0x1041, reading the reserved base 0x1040 as the net id. Modern IDs are 0x1040 + virtio "
+     "device id (net=1 -> 0x1041, blk=2 -> 0x1042): with the shifted table a virtio-blk-pci,"
+     "disable-legacy=on device (1af4:1042, QEMU-verified via info pci) matched NOTHING — the "
+     "riscv64 suite/probe boots (which attach the rootfs exactly that way) enumerated zero block "
+     "devices and died at 'init: no init program loadable'. A modern-only net device (0x1041) "
+     "would have bound the BLK probe. The commit's aarch64 motivation was a misdiagnosis: the "
+     "GPEX boot used transitional devices (1af4:1001) and was actually fixed by the BAR "
+     "self-assignment commit 096c4eca. Restored to spec IDs; the suite itself (test/run.sh "
+     "disable-legacy=on) is now the regression guard. How the merge gate went green with the "
+     "broken table is a stale-binary question for the coordinator."),
+    ("76b92e71", "kernel/src/fs/elf.rs",
+     "ElfLoader::validate's machine check was cfg-gated to aarch64/riscv64 (written before the "
+     "x86_64 port): on x86_64 builds a foreign-architecture ELF passed validation, its PT_LOAD "
+     "segments were mapped, and execve jumped into garbage instead of returning ENOEXEC. The "
+     "gate is validate() alone on the exec path (the PT_INTERP image is never machine-checked). "
+     "cfg dropped — check_machine has a per-feature arm on every platform."),
+    ("f73a13d8", "kernel/src/fs/ext4/file.rs, kernel/src/fs/tmpfs.rs, test/inoaccess.c",
+     "IN_ACCESS double-fire: the ext4 read_at op (both arms), the ext4 ops.read O_DIRECT arm, "
+     "and the tmpfs read_at op self-notified while running behind File::read/File::read_at whose "
+     "wrappers already notify — one watched pread(2) queued the event twice. The inotify "
+     "last-event merge (fsnotify_add_event coalescing) masked the visible count, so no test "
+     "failed; the duplicate surfaced only when another watcher event interleaved between the two "
+     "fires. Op-level self-notify now lives only in the ext4 read(2) fast path that genuinely "
+     "bypasses the wrappers; test/inoaccess-probe.sh pins one event per read/pread/O_DIRECT "
+     "pread."),
+
     ("b70a5deb", "kernel/src/fs/ext4/extent.rs",
      "Three defects in the extent engine. (1) ext4_ext_insert_written's external-leaf merge had "
      "NEITHER the unwritten-state check NOR the u15 headroom check append_node has: a written "
