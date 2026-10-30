@@ -2198,10 +2198,21 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                                 ext4_inode.block[i] = 0;
                             }
                         } else {
-                            // Indirect blocks - use ext4_get_block to check, then free
                             match indirect::ext4_get_block(fs, &ext4_inode.block, i as u64) {
                                 Ok(block_num) if block_num != 0 => {
                                     let _ = allocator.free_block(block_num);
+                                    // Clear the freed block's indirect slot: a
+                                    // stale pointer outlives the free, and after
+                                    // a later grow the hole range would resolve
+                                    // to the old physical blocks — which the
+                                    // allocator may have reused — serving
+                                    // foreign bytes for reads and writing
+                                    // through dead mappings (the reference
+                                    // kernel clears each pointer as it frees,
+                                    // ext4_free_branches).
+                                    let _ = indirect::clear_indirect_entry(
+                                        fs, &ext4_inode.block, i as u64,
+                                    );
                                 }
                                 _ => {}
                             }
