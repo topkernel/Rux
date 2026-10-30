@@ -959,6 +959,20 @@ pub(crate) fn do_execve_elf(
         let cred = (*task_ptr).cred();
         (cred.uid as u64, cred.euid as u64, cred.gid as u64, cred.egid as u64)
     };
+    // AT_HWCAP: feature bits libc may key off. riscv64/x86_64 have
+    // historically been 0 here and stay 0. aarch64 must advertise
+    // FP|ASIMD: glibc's static startup and IFUNC resolvers test these
+    // bits before emitting FP instructions, and the kernel enables
+    // CPACR_EL1.FPEN for EL0 (arch/aarch64/boot/boot.S) — reporting no FP
+    // would make libc take software-fallback paths (or refuse SIMD
+    // entirely). QEMU cortex-a72 implements both; no extra extension bits
+    // (crc32, aes, ...) are claimed until the kernel actually probes
+    // MIDR/ID_AA* registers for them.
+    #[cfg(feature = "aarch64")]
+    const AT_HWCAP_VALUE: u64 = (1 << 1) | (1 << 2); // HWCAP_FP | HWCAP_ASIMD
+    #[cfg(not(feature = "aarch64"))]
+    const AT_HWCAP_VALUE: u64 = 0;
+
     let auxv = &[
         (AT_PHDR, phdr_addr),
         (AT_PHENT, phent),
@@ -973,7 +987,7 @@ pub(crate) fn do_execve_elf(
         (AT_EUID, at_euid),
         (AT_GID, at_gid),
         (AT_EGID, at_egid),
-        (AT_HWCAP, 0),
+        (AT_HWCAP, AT_HWCAP_VALUE),
         (AT_CLKTCK, 100),
         (AT_SECURE, secure_exec as u64),
         (AT_RANDOM, random_vaddr),
