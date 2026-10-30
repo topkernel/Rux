@@ -140,3 +140,62 @@ R5. "riscv64 strncpy_from_user returns non-NUL-terminated success at
   process.rs, MM_CTX doc, layout assert): all three rc=0
 - fix batch 2 (uaccess zero-fill/put_user/clear_user, cpu doc): all
   three rc=0
+
+---
+
+# Follow-up (2026-10-31): FD-1 close-out — per-arch leaf primitives
+
+The mm lane's filed FD-1 (run/review-findings-mm.md on main): shared
+mm code (rmap.rs try_to_unmap_inner, compact.rs remap_page) carried
+Sv39-only manual page-table descents — root indexed with bits 38:30 —
+so on the 4-level x86_64/aarch64 trees the walk read the wrong root
+slot and swap-out unmap / compaction migration silently no-oped
+(ENABLE_SWAP defaults true: anonymous reclaim reclaimed nothing on
+those arches).
+
+## FIXED (commits f2cc5e06 + 936e3c8d)
+
+- `arch/{riscv64,x86_64,aarch64}/mm/mm_ops.rs`: new leaf primitives —
+  `leaf_pte_replace(mm, root, va, expect_pfn, new_bits)` (PTE lock,
+  R7-C3 expect-pfn re-validation, raw entry write: 0 = unmap, swap
+  entry, migration marker), `leaf_pte_install(mm, root, va, pfn,
+  flags)` (rebuild a present leaf from saved flags), `pte_flag_bits`
+  + `PTE_FLAGS_ANON_DEFAULT`. Each arch owns its walk shape and PTE
+  encoding. riscv64 keeps the Sv39 encoding (walks gain huge-leaf
+  guards the old shared code lacked); x86_64's flag extraction also
+  carries NX (the old shared `& 0x3FF` stripped it — a migrated NX
+  anon mapping would have come back executable) and its non-present
+  leaf legally holds the raw swap entry (software bits when P=0);
+  aarch64 flags are the descriptor minus the output-address field
+  (attribute/AP/UXN preserved verbatim).
+- `mm/rmap.rs` try_to_unmap_inner and `mm/compact.rs`
+  remap_page/migrate_page now call the primitives; the Sv39 descents
+  are deleted. riscv64 behavior unchanged (same encoding).
+
+## Verification
+
+- Builds: all three platforms rc=0 (run/build-{rv,x86,aa64}-fd1.log).
+- x86_64 end-to-end probe (new, committed: test/swap-x86-probe.sh +
+  test/swap_x86probe.c — the cpuinfo-x86-probe recipe, 128 MB ext4
+  head in a 512 MB disk so boot swap_init carves the 256 MB tail,
+  2 GB RAM, KVM):
+  - FIXED kernel: SwapTotal 262144 kB active; arena 1114788 kB
+    (MemFree 983716 + 128 MB); **SwapFree dropped 133380 kB** —
+    try_to_unmap_with_swap actually replaced PTEs and vmscan moved
+    ~130 MB to swap (the arena excess over RAM); verify pass
+    **0/278697 pages corrupted** (right leaf slot written; swap-in
+    restores data); clean serial; PROBE-RESULT: PASS.
+  - PRE-FIX baseline kernel (built by stashing the fix): the probe's
+    touch loop dies at the pagefault-OOM gate — OOM-DEEP-PASS
+    `freed=0` across passes (nothing reclaimable: unmap no-ops),
+    zone free 0, init killed; no PASS line. Differential confirms
+    the probe is not vacuous and the fix is what changed the
+    outcome.
+- riscv64 in-guest suite (`make test`): all tests passed
+  (run/maketest-fd1.log) — the shared mm rewiring is
+  regression-free on the arch whose encoding did not change.
+
+Filed residue: none — aarch64's swap-entry signature bits (62/61)
+collide with its PCACHE/COW software bits on PRESENT leaves, but
+non-present leaves never carry those bits (every PCACHE install sets
+V), so the primitives are unaffected; noted here for the mm lane.
