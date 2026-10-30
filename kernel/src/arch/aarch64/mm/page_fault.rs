@@ -2,15 +2,27 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! AArch64 page fault handling — surface + stage-2 stubs.
+//! AArch64 page fault handling — stage-2 port of the riscv64 twin.
 //!
-//! handle_mm_fault and the COW/demand machinery are the stage-2 port
-//! (the 4-level PageTableWalker, VMA-driven demand fill, COW protocol —
-//! the riscv64 twin's invariants INV-COW-1..5 apply verbatim). The
-//! signatures match so the generic tree typechecks today; the bodies are
-//! loud `todo!`s so any stage-1-era hit is diagnosable.
+//! handle_mm_fault drives the VMA layer + the 4-level user walker:
+//! demand fill for anonymous/file/shmem VMAs, COW detection, stack
+//! expansion, and the twin's locking protocol (map + rmap setup under one
+//! PTE section, R7-C3 re-check against CLONE_VM siblings).
+//!
+//! Not yet ported from the twin (dormant, no producers on aarch64
+//! today): swap-in (no swap configured), PROT_NONE marker re-presentation
+//! (mprotect is not wired on aarch64 yet), the MAP_SHARED/MAP_PRIVATE
+//! page-cache alias (file faults take the twin's private-copy fallback),
+//! and anonymous fault-around.
 
-use super::memory_layout::VirtAddr;
+use super::memory_layout::*;
+use super::mm_ops::{
+    alloc_user_phys_page, check_pte_permissions, is_cow_page,
+    map_user_page, pte_lock_for, PageTableWalker, PTE_MODIFY_LOCK,
+};
+use super::pagetable::*;
+use crate::mm::page::PAGE_SIZE as PAGE_SIZE_USIZE;
+use crate::mm::vma::VmaType;
 use crate::mm::AddressSpace;
 
 // ==================== Fault Flags ====================
@@ -56,22 +68,473 @@ pub enum MmFaultResult {
     KernelPanic,
 }
 
-// ==================== Fault Handler ====================
+// ==================== Stack Expansion ====================
 
-/// Main page fault handler (VMA-driven demand fill / COW / stack growth)
-///
-/// STAGE 2: port of the riscv64 handle_mm_fault onto the aarch64
-/// 4-level walker (the walker itself lands in mm_ops).
-pub fn handle_mm_fault(
-    _addr_space: &AddressSpace,
-    _fault_addr: VirtAddr,
-    _flags: u32,
+/// Try to expand stack when a page fault occurs below the current stack
+/// bottom (on-demand GROWSDOWN expansion; twin contract)
+fn try_expand_stack(
+    addr_space: &AddressSpace,
+    fault_addr: VirtAddr,
+    flags: u32,
+    root_ppn: u64,
 ) -> MmFaultResult {
-    todo!("aarch64 stage-2: handle_mm_fault (VMA demand fill + COW)")
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+    use crate::mm::page::PAGE_SIZE as MM_PAGE_SIZE;
+    use crate::mm::vma::VmaFlags;
+
+    let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+
+    let stack_limit = addr_space.stack_limit();
+    let fault_addr_val = fault_addr.as_usize();
+
+    if fault_addr_val < stack_limit {
+        return MmFaultResult::Segfault;
+    }
+
+    // Find the stack VMA (GROWSDOWN flag)
+    let vma_mgr_read = addr_space.vma_read();
+    let (vma_start, stack_vma) = match vma_mgr_read.find_stack_vma(page_virt_addr) {
+        Some((start, vma)) => (start, vma),
+        None => {
+            return MmFaultResult::Segfault;
+        }
+    };
+
+    let new_start = PageVirtAddr::new(fault_addr_val & !(MM_PAGE_SIZE - 1));
+
+    // New start must be below the current VMA start and above the limit
+    if new_start.as_usize() >= vma_start.as_usize() {
+        return MmFaultResult::Segfault;
+    }
+    if new_start.as_usize() < stack_limit {
+        return MmFaultResult::Segfault;
+    }
+
+    let vma_flags = stack_vma.flags();
+    let vma_type = stack_vma.vma_type();
+
+    // Verify permissions
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+
+    drop(vma_mgr_read);
+
+    // Expand the stack VMA downward
+    {
+        let mut vma_mgr_write = addr_space.vma_write();
+        if vma_mgr_write.expand_downwards(vma_start, new_start).is_err() {
+            return MmFaultResult::Segfault;
+        }
+    }
+
+    // Allocate the new page
+    let phys_addr = match alloc_user_phys_page() {
+        Some(addr) => PhysAddr::new(addr),
+        None => return MmFaultResult::OutOfMemory,
+    };
+
+    // Initialize page content based on type
+    // SAFETY: page_ptr derives from phys_to_virt on a freshly allocated,
+    // exclusively owned page.
+    let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
+    unsafe {
+        match vma_type {
+            VmaType::Anonymous
+            | VmaType::FileBacked
+            | VmaType::SharedMemory => {
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::Device => {
+                // Device mapping: don't zero
+            }
+        }
+    }
+
+    // Build the software flag mask from the VMA permissions
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    pte_flags |= PageTableEntry::U; // user page
+    if vma_flags.is_readable() || vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::W;
+    }
+    if vma_flags.is_executable() {
+        pte_flags |= PageTableEntry::X;
+    }
+
+    // Map under the PTE-modify lock, kept across the rmap setup (twin
+    // round-6 MED protocol), with the R7-C3 re-check against a CLONE_VM
+    // sibling that won the race.
+    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    // SAFETY: read-only walk under the lock.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
+        drop(_pte_guard);
+        // Lost the race: free our exclusively-owned page; the next entry
+        // sees the winner's mapping (Handled, not AlreadyMapped — the
+        // trap layer maps AlreadyMapped to SIGSEGV).
+        crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        return MmFaultResult::Handled;
+    }
+    // SAFETY: root valid, page-aligned address, owned zeroed page.
+    unsafe {
+        if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure: free the data page, deliver OOM
+            // (trap layer SIGKILLs the user task; twin policy).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
+    }
+
+    // Reverse mapping for the stack page (VMA lock already dropped).
+    {
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
+        let page = pfn_to_page_mut(page_pfn);
+        if !page.is_null() {
+            // SAFETY: null-checked; exclusively owned until the install.
+            unsafe {
+                (*page).set_flag(PageFlag::Anonymous);
+                // SwapBacked + LRU membership: reclaim visibility.
+                (*page).set_flag(PageFlag::SwapBacked);
+                (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                (*page).inc_mapcount();
+                crate::mm::rmap::page_record_mapping(
+                    &*page,
+                    addr_space as *const _ as usize,
+                    fault_addr.bits() as usize,
+                );
+                crate::mm::lru::page_add_anon_lru(&*page);
+            }
+        }
+    }
+    drop(_pte_guard);
+
+    addr_space.add_rss(1);
+
+    MmFaultResult::Handled
 }
 
-/// Walk the user page tables and return the physical page mapped at
-/// vaddr (diagnostics; riscv64 twin)
-pub fn get_user_phys(_root_ppn: u64, _vaddr: u64) -> Option<u64> {
-    todo!("aarch64 stage-2: get_user_phys (4-level user-table walk)")
+// ==================== Main Fault Handler ====================
+
+/// handle_mm_fault - handle a user-mode page fault (twin contract):
+/// 1. Find the VMA to validate the address and permissions
+/// 2. Check whether the page is already mapped (COW / permission arms)
+/// 3. If unmapped, allocate a new page (zero anonymous / file read /
+///    shared-memory zero)
+/// 4. Map it with the VMA's permissions under the PTE section, with the
+///    R7-C3 re-check
+/// 5. Set up rmap/LRU/RSS bookkeeping
+pub fn handle_mm_fault(
+    addr_space: &AddressSpace,
+    fault_addr: VirtAddr,
+    flags: u32,
+) -> MmFaultResult {
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+
+    let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
+    let root_ppn = addr_space.root_ppn();
+
+    // Already-mapped check (lock-free; twin R-WRITESTORM-2's PROT_NONE
+    // marker arm omitted — aarch64 mprotect does not create markers).
+    // SAFETY: read-only walk on the mm's root.
+    let already_mapped = unsafe {
+        PageTableWalker::walk(root_ppn, fault_addr.bits()).is_some()
+    };
+
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+    let is_user = flags & FaultFlags::USER != 0;
+
+    if already_mapped {
+        // COW check first (write fault on an RO+COW leaf)
+        // SAFETY: read-only walk.
+        if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+            crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
+            return MmFaultResult::CowPending;
+        }
+
+        // Permission check against the leaf's software bits
+        // SAFETY: read-only walk.
+        if let Some((has_read, has_write, has_exec, pte_is_user)) =
+            unsafe { check_pte_permissions(root_ppn, fault_addr) }
+        {
+            let perm_ok = (!is_write || has_write)
+                && (!is_read || has_read)
+                && (!is_exec || has_exec)
+                && (!is_user || pte_is_user);
+            if perm_ok {
+                // Permissions fine (e.g. AF-clear style refault): flush
+                // and retry.
+                // SAFETY: translation unchanged; drop any stale entry.
+                unsafe { super::asid::flush_tlb_page(fault_addr.bits() as usize, 0) };
+                return MmFaultResult::Handled;
+            }
+        }
+        return MmFaultResult::PermissionDenied;
+    }
+
+    // Find the VMA
+    let vma_mgr = addr_space.vma_read();
+    let vma = match vma_mgr.find(page_virt_addr) {
+        Some(v) => v,
+        None => {
+            drop(vma_mgr);
+            return try_expand_stack(addr_space, fault_addr, flags, root_ppn);
+        }
+    };
+
+    // Capture everything the fill arms need under this one guard (twin
+    // R-SC note: no re-derived mismatched triples).
+    let vma_flags = vma.flags();
+    let vma_type = vma.vma_type();
+    let vma_file_fd = vma.file_fd();
+    let vma_file_size = vma.file_size();
+    let vma_offset = vma.offset();
+    let vma_start = vma.start().as_usize();
+
+    // Pinned vm_file (Linux vm_file semantics: the mapping must survive
+    // fd close).
+    let vm_file = if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
+        addr_space.get_vma_file(vma_start)
+    } else {
+        None
+    };
+    let file_offset = vma_offset + (page_virt_addr.as_usize() - vma_start);
+    // Effective size: CURRENT inode size when resolvable (a file grown
+    // or truncated since mmap must serve/shrink accordingly); the
+    // mmap-time snapshot stays as the fallback.
+    let effective_size = vm_file
+        .as_ref()
+        .and_then(|f| {
+            if let Some(live) = crate::fs::devfs::devfs_reg_current_size(f.as_ref()) {
+                return Some(live as usize);
+            }
+            // SAFETY: inode cell written at open time; read-only.
+            let inode_opt = unsafe { &*f.inode.get() };
+            inode_opt.as_ref().map(|i| i.get_size() as usize)
+        })
+        .unwrap_or(vma_file_size as usize);
+
+    // Verify permissions
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+
+    crate::pr_debug!(
+        "pagefault: map new page at {:#x}, type={:?}",
+        fault_addr.bits(),
+        vma_type
+    );
+
+    // Release the read lock before any file I/O
+    drop(vma_mgr);
+
+    // File-backed fault BEYOND the file's end is SIGBUS, not a zero page
+    // (twin filemap_fault contract: LTP mmap13 truncation shape).
+    if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
+        if file_offset >= effective_size {
+            return MmFaultResult::BusError;
+        }
+    }
+
+    // MAP_SHARED file mappings and device mappings keep the twin's
+    // private-copy semantics here (see the module doc: the page-cache
+    // alias port is pending). Zero-fill + read covers correctness.
+
+    // Allocate the new page
+    let phys_addr = match alloc_user_phys_page() {
+        Some(addr) => PhysAddr::new(addr),
+        None => return MmFaultResult::OutOfMemory,
+    };
+
+    // Initialize page content based on type
+    // SAFETY: exclusively owned fresh page inside the linear map.
+    let page_ptr = phys_to_virt(phys_addr).bits() as *mut u8;
+    unsafe {
+        match vma_type {
+            VmaType::Anonymous | VmaType::SharedMemory => {
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+            }
+            VmaType::FileBacked => {
+                // Zero-fill first (partial reads / tail holes), then read
+                // the file data. Bounds use the CURRENT inode size (a
+                // file grown by write(2) after mmap must serve its new
+                // pages — twin mmapstress04 note); positional read_at so
+                // the shared file position is never touched (twin R71).
+                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+                if vma_file_fd >= 0 && file_offset < effective_size {
+                    // Prefer the VMA's pinned vm_file (the mapping fd may
+                    // already be closed — twin ld.so note).
+                    let file = vm_file.clone().or_else(|| {
+                        if vma_file_fd >= 0 {
+                            // SAFETY: fd-table lookup.
+                            unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(file) = file {
+                        let bytes_to_read = core::cmp::min(
+                            PAGE_SIZE_USIZE,
+                            effective_size.saturating_sub(file_offset),
+                        );
+                        // SAFETY: page_ptr covers PAGE_SIZE bytes; the
+                        // file was resolved from the fd table.
+                        let bytes_read = unsafe {
+                            file.read_at(
+                                file_offset as u64,
+                                page_ptr,
+                                bytes_to_read,
+                            )
+                        };
+                        if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
+                            core::ptr::write_bytes(
+                                page_ptr.add(bytes_read as usize),
+                                0,
+                                PAGE_SIZE_USIZE - bytes_read as usize,
+                            );
+                        }
+                    }
+                }
+            }
+            VmaType::Device => {
+                // Device mapping: don't zero
+            }
+        }
+    }
+
+    // Build the software flag mask from the VMA permissions (aarch64 has
+    // no W-without-R reserved encoding: a W-only VMA maps RW in hardware
+    // while the VMA keeps the true "-w" view).
+    let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
+    pte_flags |= PageTableEntry::U;
+    if vma_flags.is_readable() || vma_flags.is_writable() {
+        pte_flags |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        // Private pages map writable directly: the page is exclusive
+        // (refcount 1), COW marking happens at fork (twin note).
+        pte_flags |= PageTableEntry::W;
+    }
+    if vma_flags.is_executable() {
+        pte_flags |= PageTableEntry::X;
+    }
+
+    // Map under the PTE-modify lock, held across the rmap setup (twin
+    // round-6 MED), with the R7-C3 re-check (CLONE_VM double-fault race).
+    let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
+    // SAFETY: read-only walk under the lock.
+    if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
+        drop(_pte_guard);
+        // Lost the race: free our exclusively-owned page; retry sees the
+        // winner's mapping (Handled — never AlreadyMapped, which the trap
+        // layer maps to SIGSEGV).
+        crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+        return MmFaultResult::Handled;
+    }
+    // SAFETY: valid root, page-aligned fault address, owned filled page.
+    unsafe {
+        if !map_user_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure: release the data page, deliver OOM.
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
+    }
+
+    // Reverse mapping + LRU for the newly mapped page (twin arms).
+    {
+        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+        let page_pfn = (phys_addr.bits() >> PAGE_SHIFT) as usize;
+        let page = pfn_to_page_mut(page_pfn);
+        if !page.is_null() {
+            // SAFETY: null-checked; frame exclusively owned until the
+            // install above.
+            unsafe {
+                match vma_type {
+                    VmaType::Anonymous => {
+                        (*page).set_flag(PageFlag::Anonymous);
+                        (*page).set_flag(PageFlag::SwapBacked);
+                        (*page).set_index(
+                            fault_addr.bits() as usize / (PAGE_SIZE as usize),
+                        );
+                        (*page).inc_mapcount();
+                        crate::mm::rmap::page_record_mapping(
+                            &*page,
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                        crate::mm::lru::page_add_anon_lru(&*page);
+                    }
+                    VmaType::SharedMemory => {
+                        (*page).set_flag(PageFlag::Anonymous);
+                        (*page).set_index(
+                            fault_addr.bits() as usize / (PAGE_SIZE as usize),
+                        );
+                        (*page).inc_mapcount();
+                        // Shmem stays off the anon LRU (twin note:
+                        // try_to_unmap only walks Anonymous VMAs).
+                        crate::mm::rmap::page_record_mapping(
+                            &*page,
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                    }
+                    _ => {
+                        // Private file copy (the twin's do_cow_fault
+                        // parity arm): an exclusive copy IS an anonymous
+                        // page from reclaim's point of view. Device
+                        // frames keep no state.
+                        if matches!(vma_type, VmaType::FileBacked) {
+                            (*page).set_flag(PageFlag::Anonymous);
+                            (*page).set_flag(PageFlag::SwapBacked);
+                            (*page).set_index(
+                                fault_addr.bits() as usize / (PAGE_SIZE as usize),
+                            );
+                            (*page).inc_mapcount();
+                            crate::mm::rmap::page_record_mapping(
+                                &*page,
+                                addr_space as *const _ as usize,
+                                fault_addr.bits() as usize,
+                            );
+                            crate::mm::lru::page_add_anon_lru(&*page);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(_pte_guard);
+
+    // RSS accounting: this address space gained a resident page.
+    addr_space.add_rss(1);
+
+    MmFaultResult::Handled
+}
+
+// ==================== Utility ====================
+
+/// Get the physical address mapped at a user virtual address
+/// (diagnostics; 4-level user-table walk, block leaves folded)
+pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
+    // SAFETY: read-only walk on a valid root.
+    unsafe { PageTableWalker::walk(root_ppn, vaddr).map(|(ppn, _)| ppn << PAGE_SHIFT) }
 }

@@ -805,10 +805,25 @@ impl VirtIOPCI {
         self.enable_pci_intx_irq(intx_blk_service);
     }
 
-    /// aarch64: PCI INTx arrives as a GICv3 SPI — wired in stage 3 with
-    /// the GIC bring-up (until then the device runs polling/async).
+    /// Enable device interrupt on aarch64: PCI INTx arrives as a GICv3
+    /// SPI through the gpex interrupt-map (DTB pcie@10000000: device n,
+    /// pin p [1-based] → GIC_SPI 3 + ((p-1+n) % 4), level-high). GIC
+    /// INTID = 32 + SPI, so INTID = 35 + ((p-1+n) % 4). Same swizzle
+    /// discipline as the riscv64 arm (shared line, ISR-read demux).
     #[cfg(feature = "aarch64")]
-    pub fn enable_device_interrupt(&self) {}
+    pub fn enable_device_interrupt(&self) {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let intid =
+            35 + (((int_pin as u32).saturating_sub(1) + self.pci_slot as u32) % 4);
+
+        crate::interrupt::request_irq(
+            intid,
+            super::interrupt_handler_pci,
+            crate::interrupt::irqdesc::IRQF_SHARED,
+            "virtio-blk-pci",
+            self.blk_slot,
+        ).ok();
+    }
 
     /// Register this device on its PIC INTx line with a shared dispatcher.
     ///

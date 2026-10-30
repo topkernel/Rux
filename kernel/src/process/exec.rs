@@ -545,6 +545,30 @@ pub(crate) fn do_execve_elf(
                     }
                 }
 
+                // aarch64: the walk and the descriptor rebuild live in
+                // the arch helper (mmu_init::set_user_leaf_flags) — no
+                // call site hand-rolls descriptor bits. The tree is
+                // unpublished (no MmStruct owns it yet, never scheduled),
+                // so no TLB maintenance is needed.
+                #[cfg(feature = "aarch64")]
+                {
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        // SAFETY: user_ppn is the freshly created user
+                        // root; the helper rewrites only present L3
+                        // leaves' permission bits, preserving the output
+                        // address.
+                        unsafe {
+                            crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                user_ppn,
+                                vaddr,
+                                seg_flags,
+                            );
+                        }
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+
         }
     }
 
@@ -795,7 +819,27 @@ pub(crate) fn do_execve_elf(
                             vaddr += PAGE_SIZE as u64;
                         }
                     }
-    
+
+                    // aarch64: arch helper (see the main-image tightening
+                    // block above); unpublished tree, no TLB work.
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            // SAFETY: user_ppn is the freshly created
+                            // user root; the helper rewrites only present
+                            // L3 leaves' permission bits.
+                            unsafe {
+                                crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                    user_ppn,
+                                    vaddr,
+                                    seg_flags,
+                                );
+                            }
+                            vaddr += PAGE_SIZE as u64;
+                        }
+                    }
+
                 }
             }
         }
@@ -1491,6 +1535,7 @@ pub(crate) fn do_execve_elf(
                 r.pc = actual_entry;
                 r.sp = adjusted_stack_top;
                 r.mark_user_frame();
+                r.syscallno = u64::MAX; // not in a syscall (arm64 convention)
             }
 
             {
