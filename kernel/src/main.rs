@@ -1118,7 +1118,9 @@ pub fn rust_main_tail() -> ! {
                 // string is unchanged byte-for-byte.
                 #[cfg(feature = "x86_64")]
                 let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(x86_64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
-                #[cfg(not(feature = "x86_64"))]
+                #[cfg(feature = "aarch64")]
+                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(AArch64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
+                #[cfg(not(any(feature = "x86_64", feature = "aarch64")))]
                 let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
                 for &b in msg {
                     putchar(b);
@@ -1362,7 +1364,9 @@ pub extern "C" fn rust_main() -> ! {
         // unchanged byte-for-byte.
         #[cfg(feature = "x86_64")]
         const VERSION: &[u8] = b"  [ x86_64 | POSIX Compatible | v";
-        #[cfg(not(feature = "x86_64"))]
+        #[cfg(feature = "aarch64")]
+        const VERSION: &[u8] = b"  [ AArch64 | POSIX Compatible | v";
+        #[cfg(not(any(feature = "x86_64", feature = "aarch64")))]
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
         for &b in VERSION { putchar(b); }
         let ver = env!("CARGO_PKG_VERSION");
