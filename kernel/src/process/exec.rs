@@ -516,6 +516,30 @@ pub(crate) fn do_execve_elf(
                     }
                 }
 
+                // aarch64: the walk and the descriptor rebuild live in
+                // the arch helper (mmu_init::set_user_leaf_flags) — no
+                // call site hand-rolls descriptor bits. The tree is
+                // unpublished (no MmStruct owns it yet, never scheduled),
+                // so no TLB maintenance is needed.
+                #[cfg(feature = "aarch64")]
+                {
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        // SAFETY: user_ppn is the freshly created user
+                        // root; the helper rewrites only present L3
+                        // leaves' permission bits, preserving the output
+                        // address.
+                        unsafe {
+                            crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                user_ppn,
+                                vaddr,
+                                seg_flags,
+                            );
+                        }
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+
         }
     }
 
@@ -766,7 +790,27 @@ pub(crate) fn do_execve_elf(
                             vaddr += PAGE_SIZE as u64;
                         }
                     }
-    
+
+                    // aarch64: arch helper (see the main-image tightening
+                    // block above); unpublished tree, no TLB work.
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            // SAFETY: user_ppn is the freshly created
+                            // user root; the helper rewrites only present
+                            // L3 leaves' permission bits.
+                            unsafe {
+                                crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                    user_ppn,
+                                    vaddr,
+                                    seg_flags,
+                                );
+                            }
+                            vaddr += PAGE_SIZE as u64;
+                        }
+                    }
+
                 }
             }
         }
@@ -1426,6 +1470,21 @@ pub(crate) fn do_execve_elf(
                 r.mark_user_frame();
                 r.rflags = 1 << 9; // IF
                 r.rdi = argc;
+            }
+            #[cfg(feature = "aarch64")]
+            {
+                use crate::arch::pt_regs::{SPSR_DAIF, SPSR_M_EL0T, SPSR_M_MASK};
+                let r = &mut *current_regs;
+                // Fresh zeroed frame (ELF_PLAT_INIT discipline — see the
+                // riscv64 arm): entry, user stack, EL0t with DAIF clear
+                // (return with irqs unmasked), argc in the AAPCS64
+                // first-argument slot, syscallno = -1 (not in a syscall).
+                *r = crate::arch::pt_regs::PtRegs::new();
+                r.pc = actual_entry;
+                r.sp = adjusted_stack_top;
+                r.pstate = (SPSR_M_EL0T & SPSR_M_MASK) & !SPSR_DAIF;
+                r.regs[0] = argc;
+                r.syscallno = u64::MAX;
             }
 
             {

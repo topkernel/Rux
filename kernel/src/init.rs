@@ -435,12 +435,21 @@ fn load_and_setup_elf(
             fn ret_from_exception();
             #[cfg(feature = "x86_64")]
             fn ret_from_fork();
+            /// aarch64 fork user-return trampoline (trap.S): schedule_tail
+            /// then the user-exit loop into the seeded pt_regs frame.
+            #[cfg(feature = "aarch64")]
+            fn ret_from_fork();
         }
         // Kernel is linked at KERNEL_LINK_ADDR, so function pointers are
         // already virtual addresses.
         #[cfg(feature = "riscv64")]
         let entry = ret_from_exception as u64;
         #[cfg(feature = "x86_64")]
+        let entry = ret_from_fork as u64;
+        // (aarch64 previously fell through with the ELF `entry` PARAMETER
+        // as the switch target — the first switch-in "returned" straight
+        // into the user image at EL1.)
+        #[cfg(feature = "aarch64")]
         let entry = ret_from_fork as u64;
         let thread = (*task_ptr).thread_mut();
         crate::process::thread_set_entry(thread, entry, child_regs as u64);
