@@ -1248,15 +1248,13 @@ fn tmpfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> is
             Err(_) => return -9,
         };
         // Serialize with plain read/write for node-page consistency; the
-        // file position is never accessed.
+        // file position is never accessed. No IN_ACCESS here: this runs
+        // as ops.read_at behind File::read_at, whose native-op arm owns
+        // the notify — self-notifying double-fired the event (hidden by
+        // the inotify last-event merge except under an interleaving
+        // watcher event; review CR-3).
         let _io_guard = file.io_lock.guard();
         let n = node.read_at(offset as usize, buf);
-        if n > 0 {
-            crate::fs::inotify::notify_file(
-                file,
-                crate::fs::inotify::inotify_events::IN_ACCESS,
-            );
-        }
         n as isize
     }
 }
