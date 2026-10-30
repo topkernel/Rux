@@ -779,7 +779,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                         // live kernel object, the PPN is stable while the
                         // visible content evolves (oh-svc wedge: the path
                         // buffer reads as kernel text '#<n>').
-                        let phys = {
+                        let phys: Option<(Option<u64>, Option<u64>)> = {
                             #[cfg(feature = "x86_64")]
                             {
                                 let task = crate::process::find_task_by_pid(1);
