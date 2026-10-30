@@ -88,6 +88,10 @@ pub fn flush_thread() {
             thread.fpcr = 0;
             thread.fpsr = 0;
             thread.fs = 1; // INITIAL
+            // The USER image too: a fresh exec'd program must not observe
+            // the previous image's FP registers through the eret-tail
+            // restore (el0_exit_fpsimd_restore) or a signal frame.
+            thread.user_fpsimd = Default::default();
         }
     }
 }

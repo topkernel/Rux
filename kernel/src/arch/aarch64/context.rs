@@ -15,10 +15,15 @@ use crate::process::task::Task;
 // Field offsets for the asm (thread::ThreadStruct)
 use super::thread::{
     THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP,
+    THREAD_USER_FPSIMD, THREAD_USER_FPSIMD_FPCR, THREAD_USER_FPSIMD_FPSR,
 };
 
 core::arch::global_asm!(
     r#"
+    // Kernel codegen is general-regs-only (see .cargo/config.toml); the
+    // eager FPSIMD save/restore blocks below re-enable fp/simd for this
+    // asm unit only.
+    .arch armv8-a+fp+simd
     .align 4
     .global __switch_to
     .type __switch_to, %function
@@ -173,6 +178,97 @@ __switch_to:
     fpu_off = const THREAD_FPU,
     fpcr_off = const { core::mem::offset_of!(super::thread::ThreadStruct, fpcr) },
     fpsr_off = const { core::mem::offset_of!(super::thread::ThreadStruct, fpsr) },
+);
+
+// ============================================================================
+// EL0 FPSIMD save/restore (user-state integrity across kernel FP usage)
+// ============================================================================
+
+// Kernel FP discipline: compiler-generated code (core/alloc rlibs) may
+// use NEON, which would corrupt the USER's live v0-v31 across a trap.
+// trap.S calls el0_entry_fpsimd_save at every EL0->EL1 entry and
+// el0_exit_fpsimd_restore just before eret; the faithful user image
+// lives in task.thread.user_fpsimd. Both helpers use ONLY x16/x17 as
+// scratch (their frame slots are already saved at entry / not yet
+// loaded at exit) and need no stack.
+core::arch::global_asm!(
+    r#"
+    .arch armv8-a+fp+simd
+    .align 4
+    .global el0_entry_fpsimd_save
+    .type el0_entry_fpsimd_save, %function
+// C-ABI: no args; task from TPIDR_EL1. Clobbers x16/x17 + q0-q31 + NZCV.
+el0_entry_fpsimd_save:
+    mrs x16, tpidr_el1
+    cbz x16, 1f                    // early boot: no task, nothing to save
+    mov x17, #{t_off}
+    add x16, x16, x17              // x16 = &task.thread
+    mov x17, #{uv_off}
+    add x17, x16, x17              // x17 = &thread.user_fpsimd
+    stp q0, q1, [x17], #32
+    stp q2, q3, [x17], #32
+    stp q4, q5, [x17], #32
+    stp q6, q7, [x17], #32
+    stp q8, q9, [x17], #32
+    stp q10, q11, [x17], #32
+    stp q12, q13, [x17], #32
+    stp q14, q15, [x17], #32
+    stp q16, q17, [x17], #32
+    stp q18, q19, [x17], #32
+    stp q20, q21, [x17], #32
+    stp q22, q23, [x17], #32
+    stp q24, q25, [x17], #32
+    stp q26, q27, [x17], #32
+    stp q28, q29, [x17], #32
+    stp q30, q31, [x17]
+    mrs x16, fpsr
+    str w16, [x17]                 // x17 == &user_fpsimd.fpsr now
+    mrs x16, fpcr
+    str w16, [x17, #4]
+1:  ret
+"#,
+    t_off = const crate::process::task::task_offsets::TASK_THREAD,
+    uv_off = const THREAD_USER_FPSIMD,
+);
+
+core::arch::global_asm!(
+    r#"
+    .arch armv8-a+fp+simd
+    .align 4
+    .global el0_exit_fpsimd_restore
+    .type el0_exit_fpsimd_restore, %function
+// C-ABI: no args; task from TPIDR_EL1. Clobbers x16/x17 + q0-q31 + NZCV.
+el0_exit_fpsimd_restore:
+    mrs x16, tpidr_el1
+    cbz x16, 1f                    // no task: leave FP regs untouched
+    mov x17, #{t_off}
+    add x16, x16, x17              // x16 = &task.thread
+    mov x17, #{uv_off}
+    add x17, x16, x17              // x17 = &thread.user_fpsimd
+    ldp q0, q1, [x17], #32
+    ldp q2, q3, [x17], #32
+    ldp q4, q5, [x17], #32
+    ldp q6, q7, [x17], #32
+    ldp q8, q9, [x17], #32
+    ldp q10, q11, [x17], #32
+    ldp q12, q13, [x17], #32
+    ldp q14, q15, [x17], #32
+    ldp q16, q17, [x17], #32
+    ldp q18, q19, [x17], #32
+    ldp q20, q21, [x17], #32
+    ldp q22, q23, [x17], #32
+    ldp q24, q25, [x17], #32
+    ldp q26, q27, [x17], #32
+    ldp q28, q29, [x17], #32
+    ldp q30, q31, [x17]
+    ldr w16, [x17]                 // x17 == &user_fpsimd.fpsr now
+    ldr w17, [x17, #4]
+    msr fpcr, x17
+    msr fpsr, x16
+1:  ret
+"#,
+    t_off = const crate::process::task::task_offsets::TASK_THREAD,
+    uv_off = const THREAD_USER_FPSIMD,
 );
 
 // ============================================================================

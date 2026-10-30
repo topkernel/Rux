@@ -1785,20 +1785,21 @@ unsafe fn setup_frame_aarch64(
         }
     }
 
-    // FPSIMD record: capture the LIVE v0-v31 + fpsr/fpcr (the eager
-    // __switch_to only moves them at context-switch time; the running
-    // task's user FP state is still in the registers here). fpu_save
-    // stashes the live state into the task's thread image; the frame
-    // record is then read from that image. rt_sigreturn restores the
-    // record back into the live registers.
-    (*task).thread.fpu_save();
-    let t = &(*task).thread;
+    // FPSIMD record: the task's USER image — captured at EL0->EL1 trap
+    // entry by el0_entry_fpsimd_save (trap.S), the only faithful copy
+    // (kernel FP usage between trap entry and this delivery point makes
+    // the LIVE registers untrustworthy: a NEON memcpy in core/alloc
+    // clobbers them mid-syscall — observed v0=0x0 recorded after the
+    // user set v0=0x1111..., aa64-signal lane gdb trace). rt_sigreturn
+    // writes its restore back into the same buffer; the eret tail
+    // re-installs it into the live registers.
+    let u = &(*task).thread.user_fpsimd;
     let mut fpsimd = FpsimdContext::zeroed();
     fpsimd.head.magic = aarch64_ctx_magic::FPSIMD;
     fpsimd.head.size = FpsimdContext::SIZE;
-    fpsimd.vregs.copy_from_slice(&t.fpu);
-    fpsimd.fpsr = t.fpsr;
-    fpsimd.fpcr = t.fpcr;
+    fpsimd.vregs.copy_from_slice(&u.vregs);
+    fpsimd.fpsr = u.fpsr;
+    fpsimd.fpcr = u.fpcr;
     mc.set_fpsimd(&fpsimd);
 
     // Signal mask during handler execution (POSIX): old mask | sa_mask |
@@ -2176,21 +2177,20 @@ unsafe fn restore_sigcontext_aarch64(
         | crate::arch::pt_regs::SPSR_M_EL0T;
 
     // FPSIMD: restore the record the setup path saved (or one the
-    // handler rewrote through its own ucontext edits). The live
-    // registers AND the thread image both take the record's state —
-    // the next context switch would otherwise re-save the handler's
-    // registers over the restored image (eager-switch discipline).
+    // handler rewrote through its own ucontext edits) into the task's
+    // USER image — the eret tail (el0_exit_fpsimd_restore) re-installs
+    // that buffer into the live v0-v31 + fpsr/fpcr, so writing the live
+    // registers here would be overwritten a few instructions later.
+    // The kernel-side thread.fpu image is left alone: the eager
+    // __switch_to rewrites it at the next context switch anyway.
     if let Some(fpsimd) = mc.get_fpsimd() {
-        let t = &mut (*task).thread;
-        t.fpu.copy_from_slice(&fpsimd.vregs);
-        t.fpsr = fpsimd.fpsr;
-        t.fpcr = fpsimd.fpcr;
-        // SAFETY: loads the just-written image into the live v0-v31 +
-        // fpsr/fpcr; we are on the sigreturn path of the CURRENT task.
-        t.fpu_restore();
+        let u = &mut (*task).thread.user_fpsimd;
+        u.vregs.copy_from_slice(&fpsimd.vregs);
+        u.fpsr = fpsimd.fpsr;
+        u.fpcr = fpsimd.fpcr;
     }
     // No FPSIMD record (forged frame or a hand-rolled restorer): keep
-    // the current FP state — FP registers are user data, never a
+    // the current user image — FP registers are user data, never a
     // privilege vector, and the reference kernel's strict bad-frame
     // kill buys nothing here (the GPR/pstate restore already validated).
 
