@@ -1204,6 +1204,12 @@ pub struct Task {
     /// Follows Linux's signal->oom_score_adj
     oom_score_adj: core::sync::atomic::AtomicI32,
 
+    /// I/O scheduling priority (ioprio_set/ioprio_get, block/ioprio ABI):
+    /// (class << 13) | level; 0 = IOPRIO_CLASS_NONE level 0. Stored per
+    /// task and inherited across fork like the reference kernel's
+    /// task_struct::ioprio (not yet fed into I/O scheduling decisions).
+    ioprio: core::sync::atomic::AtomicI32,
+
     /// Filesystem information (cwd, root, umask)
     ///
     /// Shared between threads when CLONE_FS is used
@@ -1610,6 +1616,7 @@ impl Task {
             vfork_parent: core::sync::atomic::AtomicU64::new(0),
             brk: core::sync::atomic::AtomicU64::new(0),
             oom_score_adj: core::sync::atomic::AtomicI32::new(0),
+            ioprio: core::sync::atomic::AtomicI32::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
             sem_undo: Spinlock::new(alloc::vec::Vec::new()),
@@ -4596,6 +4603,19 @@ impl Task {
     #[inline]
     pub fn set_oom_score_adj(&self, adj: i32) {
         self.oom_score_adj.store(adj.clamp(-1000, 1000), Ordering::Release);
+    }
+
+    /// Get the stored I/O scheduling priority
+    /// ((class << 13) | level; 0 = NONE/0)
+    #[inline]
+    pub fn ioprio(&self) -> i32 {
+        self.ioprio.load(Ordering::Acquire)
+    }
+
+    /// Set the stored I/O scheduling priority (ioprio_set).
+    #[inline]
+    pub fn set_ioprio(&self, v: i32) {
+        self.ioprio.store(v, Ordering::Release);
     }
 
     /// Check if has file descriptor table

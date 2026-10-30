@@ -235,7 +235,15 @@ impl<T> IpcIds<T> {
                             return Err(-17); // EEXIST
                         }
                         let perm = &entry.inner.get_perm();
-                        if !ipc_check_permissions(perm, 0o6) {
+                        // The demanded class bits come from the caller's flag
+                        // bits exactly as ipcperms() derives them:
+                        // requested_mode = (flag >> 6) | (flag >> 3) | flag,
+                        // projected onto the low 3 bits. The old hardcoded 06
+                        // (read+write) wrongly failed a read-only lookup —
+                        // e.g. msgget(key, 0444) on a 0444 queue returned
+                        // EACCES instead of the id.
+                        let desired = ((flags >> 6) | (flags >> 3) | flags) & 0o7;
+                        if !ipc_check_permissions(perm, desired as u16) {
                             return Err(-13); // EACCES
                         }
                         return Ok((ipc_build_id(i, perm.seq), i));

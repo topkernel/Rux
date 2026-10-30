@@ -1112,10 +1112,19 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
         -1  // NULL = infinite wait
     } else {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
-        // exception-table copy path (SUM=0 safe).
+        // exception-table copy path (SUM=0 safe). An unreadable page must
+        // be EFAULT — the old unwrap_or(0) turned it into {0,0} and made
+        // ppoll() return immediately instead of failing (reference
+        // do_sys_poll: copy_from_user of the timespec fails with EFAULT).
         unsafe {
-            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = match crate::arch::uaccess::get_user(timeout_ptr) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
+            let tv_nsec = match crate::arch::uaccess::get_user(timeout_ptr.add(1)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
             if tv_nsec >= 1_000_000_000 {
                 // Invalid timespec: match Linux poll_select_set_timeout().
                 return -(errno::EINVAL as i64);
@@ -1164,10 +1173,18 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
         (0i64, false)
     } else {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
-        // exception-table copy path (SUM=0 safe).
+        // exception-table copy path (SUM=0 safe). An unreadable page must
+        // be EFAULT, not a silent {0,0} timeout (reference core_sys_select
+        // fails the copy_from_user with EFAULT).
         unsafe {
-            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = match crate::arch::uaccess::get_user(timeout_ptr) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
+            let tv_nsec = match crate::arch::uaccess::get_user(timeout_ptr.add(1)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
             if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
                 return -(errno::EINVAL as i64);
             }
