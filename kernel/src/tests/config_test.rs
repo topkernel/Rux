@@ -13,10 +13,18 @@ use super::{test_pass, test_fail, test_group_start};
 pub fn test_config() {
     test_group_start("config");
 
-    // Test 1: Kernel identity
+    // Test 1: Kernel identity. TARGET_PLATFORM follows the active build
+    // platform (build.rs: cargo feature must match the config), so the
+    // pin is per-arch — the suite runs on every supported arch, not
+    // just riscv64.
     test_assert_eq!(KERNEL_NAME, "Rux", "KERNEL_NAME == Rux");
     test_assert_eq!(KERNEL_VERSION, "0.1.0", "KERNEL_VERSION == 0.1.0");
+    #[cfg(feature = "riscv64")]
     test_assert_eq!(TARGET_PLATFORM, "riscv64", "TARGET_PLATFORM == riscv64");
+    #[cfg(feature = "aarch64")]
+    test_assert_eq!(TARGET_PLATFORM, "aarch64", "TARGET_PLATFORM == aarch64");
+    #[cfg(feature = "x86_64")]
+    test_assert_eq!(TARGET_PLATFORM, "x86_64", "TARGET_PLATFORM == x86_64");
 
     // Test 2: Page constants
     test_assert_eq!(PAGE_SIZE, 4096, "PAGE_SIZE == 4096");
@@ -30,12 +38,12 @@ pub fn test_config() {
     // Kernel heap grew 32MB -> 128MB -> 512MB -> 1024MB (distro-scale
     // userspace, then the OH/GNOME service set, then the OH sandbox
     // workload); kernel stacks doubled again (64KB -> 128KB) after the
-    // r19 stack fix. The unit-test suite runs on riscv64 only (run.sh
-    // test mode hardcodes qemu-system-riscv64), and build.rs clamps
-    // kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024MB is
-    // the x86_64 value; a 1GB heap overruns the riscv64 memory map —
-    // merge gate 2026-10-19), so the runtime constant here is always
-    // the clamped 128MB, never the raw Kernel.toml value.
+    // r19 stack fix. build.rs clamps kernel_heap_size to 128MB on
+    // riscv64 (Kernel.toml's 1024MB is the x86_64 value; a 1GB heap
+    // overruns the riscv64 memory map — merge gate 2026-10-19), and
+    // the aarch64 suite boots -m 1G machines where the same clamp
+    // applies, so the runtime constant here is always the clamped
+    // 128MB, never the raw Kernel.toml value.
     test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (riscv64-clamped)");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
