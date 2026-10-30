@@ -1427,8 +1427,19 @@ pub fn init_secondary(cpu_id: usize) {
 
         // Verify the current-task pointer matches the pre-created idle task
         let current_tp = crate::arch::cpu::get_thread_id() as usize;
+        #[cfg(not(feature = "aarch64"))]
         debug_assert_eq!(current_tp, idle_ptr as usize,
             "init_secondary: current-task ptr mismatch! tp={:#x}, expected={:#x}", current_tp, idle_ptr as usize);
+        // aarch64 secondary bring-up parks the cpu INDEX in TPIDR_EL1
+        // (boot.S secondary_start has no __secondary_idle_tasks
+        // protocol); the idle task pointer is installed HERE — the
+        // moment the per-task protocol begins. Until this port's IRQ
+        // bring-up, secondaries never got past their masked-wfi park,
+        // so the riscv64-shaped assert above never fired here.
+        #[cfg(feature = "aarch64")]
+        if current_tp != idle_ptr as usize {
+            crate::arch::cpu::set_thread_id(idle_ptr as u64);
+        }
 
         clear_trap_scratch();
 

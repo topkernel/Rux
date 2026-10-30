@@ -350,6 +350,16 @@ secondary_start:
     eret
 
 .Lsec_at_el1:
+    // Enable FP/SIMD at EL1/EL0 (CPACR_EL1.FPEN = 0b11) — the boot core
+    // does this in _start; a PSCI-woken secondary starts from the reset
+    // value and would trap its first NEON store (EC 7) into the illegal
+    // instruction path, oopsing and killing the idle task. Invisible
+    // until IRQs worked: secondaries never ran kernel code before that.
+    mrs     x3, cpacr_el1
+    orr     x3, x3, #(0b11 << 20)
+    msr     cpacr_el1, x3
+    isb
+
     // --- cpu index: trust the PSCI context_id, fall back to our own
     //     MPIDR affinity pack (Aff0 | Aff1<<8 | Aff2<<16) ---
     mrs     x20, mpidr_el1
