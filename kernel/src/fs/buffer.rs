@@ -432,6 +432,12 @@ impl FileBuffer {
     /// Resize (ftruncate semantics: grow-with-zeros / shrink drops bytes).
     /// Growth allocates one chunk at a time; Err(ENOMEM) when the zone
     /// allocator and the heap both fail (R76).
+    ///
+    /// Shrink zeroes the tail of the kept last chunk: ftruncate(2) says the
+    /// file "is extended, and the extended portion reads as null bytes" —
+    /// a shrink-then-grow would otherwise serve the pre-shrink bytes back
+    /// (the chunks are kept, only `len` bounds reads). Same discipline as
+    /// TmpfsNode::truncate.
     pub fn resize(&mut self, new_len: usize) -> Result<(), ()> {
         let new_chunks = new_len.div_ceil(FILE_BUFFER_CHUNK);
         while self.chunks.len() < new_chunks {
@@ -441,10 +447,26 @@ impl FileBuffer {
             }
         }
         if new_len < self.len {
-            // Shrink: drop whole trailing chunks; the new last chunk keeps
-            // stale bytes past new_len, but len bounds every read.
+            // Shrink: drop whole trailing chunks, then zero the kept last
+            // chunk's tail so a later re-extend exposes zeros, not stale
+            // data.
             let keep = new_len.div_ceil(FILE_BUFFER_CHUNK);
             self.chunks.truncate(keep);
+            let tail = new_len % FILE_BUFFER_CHUNK;
+            if tail != 0 {
+                if let Some(c) = self.chunks.last_mut() {
+                    // SAFETY: &mut access to the chunk we own; the write
+                    // stays inside the FILE_BUFFER_CHUNK-sized chunk.
+                    unsafe {
+                        let base = c.base_ptr();
+                        core::ptr::write_bytes(
+                            base.add(tail),
+                            0,
+                            FILE_BUFFER_CHUNK - tail,
+                        );
+                    }
+                }
+            }
         }
         self.len = new_len;
         Ok(())
@@ -464,5 +486,26 @@ impl FileBuffer {
 impl Default for FileBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ftruncate(2): "the extended portion reads as null bytes" — a
+    /// shrink-then-grow of a FileBuffer (the memfd ftruncate path) must not
+    /// resurrect the pre-shrink tail. Mirrors test_tmpfs_truncate_zero_tail.
+    #[test]
+    fn test_file_buffer_truncate_zero_tail() {
+        let mut fb = FileBuffer::new();
+        fb.write(0, &[0xAAu8; 64]);
+        assert_eq!(fb.resize(16), Ok(()));
+        assert_eq!(fb.len(), 16);
+        assert_eq!(fb.resize(64), Ok(()));
+        let mut buf = [0u8; 64];
+        assert_eq!(fb.read(0, &mut buf), 64);
+        assert!(buf[..16].iter().all(|&b| b == 0xAA));
+        assert!(buf[16..].iter().all(|&b| b == 0));
     }
 }
