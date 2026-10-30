@@ -922,18 +922,32 @@ pub fn netlink_close(sock: &Arc<NetlinkSocket>) {
 /// Live uevent listener sockets (Weak: close drops them silently).
 static UEVENT_LISTENERS: Spinlock<Vec<Weak<NetlinkSocket>>> = Spinlock::new(Vec::new());
 
-/// Broadcast a kernel-originated uevent payload to every listener socket.
+/// Broadcast a kernel-originated uevent payload to every listener socket
+/// SUBSCRIBED to the kernel event group (bit 0 of the bind-time mask).
+///
+/// Reference netlink_broadcast delivers only to sockets whose nl_groups
+/// subscription covers the destination group; kernel uevents go to group
+/// 1 (sd-device-monitor's MONITOR_GROUP_KERNEL). netlink_multicast_send
+/// already filtered on this mask (gdmr23) — the kernel-side fanout did
+/// not, so raw kernel-framed events also landed on group-2 (udev) monito-
+/// sockets, which must only ever see the daemon's processed forward. A
+/// socket that bound with nl_groups=0 receives nothing, exactly like the
+/// un-subscribed socket in the reference.
 ///
 /// The payload is pushed verbatim onto each socket's receive queue (one
 /// recvmsg per message, matching the rtnetlink one-message-per-call ABI);
-/// no nlmsghdr is prepended, exactly like Linux's
+/// no nlmsghdr is prepended, exactly like the reference
 /// kobject_uevent_net_broadcast().
 pub fn uevent_broadcast(payload: &[u8]) {
+    /// Kernel uevents are multicast to group 1 (MONITOR_GROUP_KERNEL).
+    const UEVENT_GROUP_MASK: u32 = 1;
     let mut listeners = UEVENT_LISTENERS.lock();
     listeners.retain(|weak| match weak.upgrade() {
         Some(sock) => {
-            sock.recv_queue.lock().push_back(payload.to_vec());
-            sock.wait_queue.wake_up_all();
+            if sock.groups.load(core::sync::atomic::Ordering::Acquire) & UEVENT_GROUP_MASK != 0 {
+                sock.recv_queue.lock().push_back(payload.to_vec());
+                sock.wait_queue.wake_up_all();
+            }
             true
         }
         None => false, // socket closed — drop the listener
