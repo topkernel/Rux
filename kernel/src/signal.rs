@@ -2710,7 +2710,7 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
 /// send_signal_from_user_tkill — runs on the raising task, in its
 /// syscall context, so user registers and user memory are live.
 fn abort_reason_dump(leader_tid: u32) {
-    use crate::mm::vma::{VmaFlags, VmaType};
+
 
     let task = match crate::sched::current() {
         Some(t) => t,
@@ -2746,65 +2746,54 @@ fn abort_reason_dump(leader_tid: u32) {
         return;
     };
 
-    // Snapshot up to 32 exec/file-backed VMAs under one hold, resolve
-    // names outside the guard (generate_maps discipline).
-    let mut ranges: [(u64, u64, usize); 32] = [(0, 0, 0); 32];
-    let mut names: [Option<alloc::string::String>; 32] = Default::default();
+    // Pass 1 (vma_read held, no name resolution): capture every
+    // executable VMA's range. render_service maps hundreds of libraries;
+    // the pass must cover ALL of them or the abort chain's return
+    // addresses fall outside the snapshot.
+    let mut ranges: [(u64, u64, usize); 1024] = [(0, 0, 0); 1024];
     let mut n = 0usize;
     {
         let vma_mgr = aspace.vma_read();
         for vma in vma_mgr.iter() {
-            if n >= 32 {
+            if n >= 1024 {
                 break;
             }
-            let start = vma.start().as_usize() as u64;
-            let end = vma.end().as_usize() as u64;
-            let is_exec = vma.flags().is_executable();
-            let is_file = vma.vma_type() == VmaType::FileBacked;
-            if !is_exec && !is_file {
+            if !vma.flags().is_executable() {
                 continue;
             }
-            let name = if let Some(file) = aspace.get_vma_file(start as usize) {
-                // SAFETY: read-only dentry access on the pinned file.
-                let dentry = unsafe { &*file.dentry.get() };
-                dentry.as_ref().map(|d| d.name.lock().clone())
-            } else {
-                None
-            };
-            ranges[n] = (start, end, vma.offset());
-            names[n] = name;
+            ranges[n] = (vma.start().as_usize() as u64, vma.end().as_usize() as u64, vma.offset());
             n += 1;
         }
     }
 
+    // Pass 2: classify the user rip and the stack words; resolve the
+    // owning library's name lazily (only for values that hit a range).
     let label = |addr: u64| -> alloc::string::String {
         for i in 0..n {
             let (s, e, _off) = ranges[i];
             if addr >= s && addr < e {
-                return match &names[i] {
+                let name = aspace.get_vma_file(s as usize).and_then(|file| {
+                    // SAFETY: read-only dentry access on the pinned file.
+                    let dentry = unsafe { &*file.dentry.get() };
+                    dentry.as_ref().map(|d| d.name.lock().clone())
+                });
+                return match name {
                     Some(name) => alloc::format!("{}+{:#x}", name, addr - s),
-                    None => alloc::format!("anon+{:#x}", addr - s),
+                    None => alloc::format!("exec+{:#x}", addr - s),
                 };
             }
         }
         alloc::format!("{:#x}", addr)
     };
     crate::pr_warn!("ABORT-DUMP rip-in {}", label(rip));
-    for i in 0..n {
-        let (s, e, off) = ranges[i];
-        crate::pr_warn!(
-            "ABORT-MAP {:#x}-{:#x} off={:#x} {}",
-            s,
-            e,
-            off,
-            names[i].as_deref().unwrap_or("?")
-        );
-    }
+    crate::pr_warn!("ABORT-MAPS n={} exec-vmas", n);
 
-    // Return-chain scan: 24 qwords from user rsp upward; print only the
-    // values that land inside a mapped exec/file region.
+    // Return-chain scan: 64 qwords from user rsp upward; values landing
+    // in an exec VMA print as lib+offset, everything else raw (the
+    // abort chain can sit a few hundred bytes above rsp when CFI shims
+    // pad the frames).
     let mut line = alloc::string::String::new();
-    for i in 0..24u64 {
+    for i in 0..64u64 {
         let mut w = [0u8; 8];
         if unsafe {
             crate::arch::uaccess::copy_from_user(w.as_mut_ptr(), (rsp + i * 8) as *const u8, 8)
@@ -2813,11 +2802,14 @@ fn abort_reason_dump(leader_tid: u32) {
             continue;
         }
         let v = u64::from_le_bytes(w);
-        let inside = ranges[..n]
-            .iter()
-            .any(|(s, e, _)| v >= *s && v < *e);
+        if v == 0 {
+            continue;
+        }
+        let inside = ranges[..n].iter().any(|(s, e, _)| v >= *s && v < *e);
         if inside {
             line.push_str(&alloc::format!(" [{}]{}", i, label(v)));
+        } else {
+            line.push_str(&alloc::format!(" [{}]{:#x}", i, v));
         }
     }
     crate::pr_warn!("ABORT-STK{}", line);

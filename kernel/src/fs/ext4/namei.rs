@@ -292,6 +292,17 @@ fn mark_inode_used(
         write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
     }
 
+    // metadata_csum: refresh the inode bitmap csum in the group
+    // descriptor (same discipline as the allocator's write_inode_bitmap;
+    // this site bypasses the allocator helpers).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::ext4::allocator::group_of_bitmap(fs, bitmap_block, true) {
+            let _ = super::ext4::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
+    }
+
     Ok(())
 }
 
@@ -2165,6 +2176,15 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
+    }
+
+    // metadata_csum: refresh the inode bitmap csum (see mark_inode_used).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::ext4::allocator::group_of_bitmap(fs, bitmap_block as u64, true) {
+            let _ = super::ext4::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
     }
 
     // Update group descriptor
