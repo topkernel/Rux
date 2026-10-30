@@ -1180,6 +1180,20 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // VT-layer ioctls (/dev/tty0../dev/ttyN: VT_OPENQRY/ACTIVATE/
+    // WAITACTIVE/SETMODE/GETMODE/GETSTATE/RELDISP + the KD_* family —
+    // gdm-session-worker's new-vt protocol, Xorg's VT takeover, logind
+    // TakeControl): dispatch on the File's ops identity (evdev/pty
+    // pattern). Non-VT files or unhandled requests return None.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::fs::vt::vt_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
     // Loop-family ioctls (LOOP_SET_FD/LOOP_CLR_FD/LOOP_GET_STATUS64/
     // LOOP_CTL_GET_FREE on /dev/loopN and /dev/loop-control): dispatch on
     // the File's ops identity (losetup / LTP tst_acquire_device).
@@ -1578,6 +1592,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             }
             0
         }
+        // TIOCSCTTY - Make this fd the controlling terminal (0x540E).
+        // gdm-session-worker's session child does setsid() then
+        // ioctl(STDIN, TIOCSCTTY, 0) — the tty is the session VT.
+        // Controlling-terminal bookkeeping (SIGHUP delivery, TTY job
+        // control) is not modeled yet; accepting the request matches the
+        // observable contract for every current caller (the worker only
+        // logs on failure).
+        0x540E => 0,
         // TIOCGPGRP - Get foreground process group (0x540F)
         0x540F => {
             if arg == 0 {

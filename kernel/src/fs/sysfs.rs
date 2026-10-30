@@ -1264,8 +1264,27 @@ fn build_tree() -> Arc<KObject> {
     let tty = mk_dir(&class, "tty", KType::Tty);
     add_tty_device(&tty, "console", 5, 1);
     add_tty_device(&tty, "pts", 136, 0);
-    // /sys/class/tty/tty0 — the active VT node tools expect to exist.
-    add_tty_device(&tty, "tty0", 4, 0);
+    // /sys/class/tty/tty0 — the VT master's class node (udev db entry,
+    // dev/uevent attrs). The "active" attribute is deliberately ABSENT:
+    // systemd-logind's manager_connect_console (249) opens
+    // /sys/class/tty/tty0/active whenever /dev/tty0 exists; with the
+    // attribute present, logind's VT-controller startup (console-active
+    // watch + SIGRTMIN VT-switch source + seat_preallocate_vts +
+    // "VT changed" dispatch) wedged before its bus Hello — 10 restarts,
+    // a 7.5s non-preempted run and one soft-lockup at gdmr26. With the
+    // attribute missing, logind logs "System has /dev/tty0 but not
+    // /sys/class/tty/tty0/active which is broken, ignoring" and skips
+    // the whole VT-controller path (its documented degraded shape),
+    // while gdm-session-worker's jump_to_vt keeps its required
+    // open("/dev/tty0"). Rux's console is a single UART-backed display,
+    // so there is no per-VT switching to report anyway.
+    {
+        let dev = mk_dir(&tty, "tty0", KType::Tty);
+        *dev.devno.lock() = Some((4, 0));
+        *dev.devname.lock() = Some(String::from("tty0"));
+        attr_ro(&dev, "dev", || b"4:0\n".to_vec());
+        add_uevent_attr(&dev);
+    }
 
     // ---------------- /sys/devices ----------------
     let devices = mk_dir(&root, "devices", KType::Devices);
@@ -2118,10 +2137,23 @@ fn sysfs_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
+/// poll on a sysfs attribute: Linux kernfs attrs are pollable (POLLPRI
+/// on change; EPOLLERR|EPOLLHUP always) — sd-event registers VT-console
+/// watches (/sys/class/tty/tty0/active, logind manager_connect_console)
+/// and epoll_ctl(ADD) EPERMs when the target has no poll op, which
+/// killed logind at startup ("Failed to watch foreground console:
+/// Operation not permitted"). Change notification is not implemented:
+/// the resting state is simply never-ready (0 events), which is also
+/// what an unchanged attribute reports on Linux.
+fn sysfs_file_poll(_file: &crate::fs::File, _events: u16) -> u16 {
+    0
+}
+
 /// SysFS attribute file operations.
 pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(sysfs_file_read)
     .write(sysfs_file_write)
     .lseek(sysfs_file_lseek)
+    .poll(sysfs_file_poll)
     .close(sysfs_file_close)
     .build();

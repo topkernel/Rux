@@ -1146,6 +1146,26 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         if n > 0 {
             file.set_pos((offset + n) as u64);
         }
+        // TEST-ONLY (gdmr24 dbtrace, removed before merge): udev db
+        // files under /run/udev/data read back with "G:\n" spliced
+        // before each tag line — sd-device parse aborts the tag
+        // (EINVAL), so card0 loses master-of-seat in enumeration.
+        // Trace db-shaped reads: first byte 'I'/'G'/'Q'/'S'/'E'/'V'
+        // followed by ':' narrows to db lines.
+        if n > 0
+            && buf.len() > 1
+            && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
+            && buf[1] == b':'
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DbFileTrace)
+        {
+            let show = n.min(80);
+            crate::println!(
+                "DBR off={} n={} {:?}..",
+                offset,
+                n,
+                core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
+            );
+        }
         n as isize
     }
 }
@@ -1176,6 +1196,21 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         } else {
             file.get_pos() as usize
         };
+        // TEST-ONLY (gdmr24 dbtrace, removed before merge): see the
+        // matching hook in tmpfs_file_read.
+        if !buf.is_empty()
+            && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
+            && buf.get(1) == Some(&b':')
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DbFileTrace)
+        {
+            let show = buf.len().min(80);
+            crate::println!(
+                "DBW off={} len={} {:?}..",
+                offset,
+                buf.len(),
+                core::str::from_utf8(&buf[..show]).map(|s| s.replace('\n', "\\n")).unwrap_or_else(|_| "<bin>".into())
+            );
+        }
         let written = node.write_at(offset, buf);
         inode.size.store(node.file_size(), Ordering::Release);
         if written == 0 && !buf.is_empty() {

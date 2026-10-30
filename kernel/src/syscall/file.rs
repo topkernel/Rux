@@ -2762,7 +2762,14 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     // an empty pathname yields ENOENT regardless of AT_EMPTY_PATH.
 
     // Magic-link shortcut (see sys_fstatat): chmod("/proc/*/fd/<n>")
-    // chmods the file the fd refers to.
+    // chmods the file the fd refers to. glibc maps chmod(2) to
+    // fchmodat(AT_FDCWD, ...), so systemd's fchmod_opath()
+    // (chmod("/proc/self/fd/<n>") on its O_PATH node fd) arrives HERE.
+    // Linux resolves the magic link to the target file — the fd's
+    // O_PATH-ness is invisible on the path route — so the core without
+    // the plain-fchmod O_PATH gate is used (gdmr22's
+    // "Failed to set owner/mode ... Bad file descriptor" was this gate
+    // firing on udev's O_PATH fd).
     if !crate::fs::vfs::chrooted() {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
@@ -2775,9 +2782,10 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 if let Some((_, fd)) = proc_fd_magic(p) {
-                    return sys_fchmod([
-                        fd as u64, mode as u64, 0, 0, 0, 0,
-                    ]);
+                    return match unsafe { crate::fs::get_file_fd(fd as usize) } {
+                        Some(file) => fchmod_file_core(&file, mode & 0o7777),
+                        None => -(errno::EBADF as i64),
+                    };
                 }
             }
         }
@@ -2817,11 +2825,10 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // Magic-link shortcut (see sys_fchmodat / sys_fstatat): musl's fchown()
-    // falls back to fchownat(AT_FDCWD, "/proc/self/fd/<n>") when the direct
-    // SYS_fchown returns EBADF — for an O_PATH fd that fallback must hit
-    // the SAME fd-based O_PATH rejection (LTP open13's fchown case), not
-    // re-resolve the link to the real file and succeed.
+    // Magic-link shortcut (see sys_fchmodat / sys_fstatat): chown through
+    // "/proc/*/fd/<n>" resolves to the target file (the fd's O_PATH-ness
+    // is invisible on the path route — Linux walks the magic link), so
+    // the core without the plain-fchown O_PATH gate applies.
     if !crate::fs::vfs::chrooted() && flags & AT_SYMLINK_NOFOLLOW == 0 {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
@@ -2834,9 +2841,10 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 if let Some((_, fd)) = proc_fd_magic(p) {
-                    return sys_fchown([
-                        fd as u64, uid as u64, gid as u64, 0, 0, 0,
-                    ]);
+                    return match unsafe { crate::fs::get_file_fd(fd as usize) } {
+                        Some(file) => fchown_file_core(&file, uid, gid),
+                        None => -(errno::EBADF as i64),
+                    };
                 }
             }
         }
@@ -2844,9 +2852,13 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
 
     // AT_EMPTY_PATH: operate on the dirfd's own file (Linux; musl maps
     // fchown() to fchownat(fd, "", AT_EMPTY_PATH) on the generic 64-bit
-    // syscall table, which has no fchown). Delegating to sys_fchown keeps
-    // one implementation of the ownership rules — including the O_PATH
-    // EBADF rejection (LTP open13's fchown case runs through here).
+    // syscall table, which has no fchown). Linux ksys_fchownat's
+    // empty-path branch works off file->f_path, which is VALID for
+    // O_PATH fds — that is what the flag exists for — so the core
+    // without the plain-fchown O_PATH gate applies (systemd's
+    // fchmod_and_chown_with_fallback chowns its O_PATH node fd through
+    // this route; a spurious EBADF aborted udev's card0 processing in
+    // gdmr22).
     if flags & AT_EMPTY_PATH != 0 {
         let mut probe = [0u8; 1];
         let empty = unsafe {
@@ -2860,9 +2872,10 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
             if dirfd < 0 {
                 return -(errno::EBADF as i64);
             }
-            return sys_fchown([
-                dirfd as u64, uid as u64, gid as u64, 0, 0, 0,
-            ]);
+            return match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+                Some(file) => fchown_file_core(&file, uid, gid),
+                None => -(errno::EBADF as i64),
+            };
         }
     }
 
@@ -3838,51 +3851,68 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
-            // O_PATH descriptors permit no I/O nor metadata changes (Linux
-            // chmod_common rejects non-readable/writable fds; LTP open13).
+            // O_PATH descriptors permit no metadata changes through the
+            // FD-BASED syscall (LTP open13 asserts plain fchmod on O_PATH
+            // is EBADF — plain fchmod ONLY: the path-based and
+            // AT_EMPTY_PATH routes accept O_PATH fds, see fchmod_file_core).
             if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
                 return -(errno::EBADF as i64);
             }
-            // EROFS: fd-based chmod on a read-only mount (LTP fchmod06).
-            if crate::fs::vfs::file_on_readonly_mount(&file) {
-                return -(errno::EROFS as i64);
+            fchmod_file_core(&file, mode)
+        }
+        None => -(errno::EBADF as i64),
+    }
+}
+
+/// fd-based chmod core WITHOUT the O_PATH rejection. Callers that reach
+/// the file BY PATH (fchmodat on "/proc/<pid>/fd/<n>") must not apply
+/// the plain-fchmod O_PATH gate: Linux's path walk resolves the procfs
+/// fd magic link to the TARGET file and chmods that — the fd's
+/// O_PATH-ness is invisible on this route. systemd's fchmod_opath()
+/// depends on exactly this: udev opens device nodes with
+/// O_PATH|O_NOFOLLOW and applies mode/owner through
+/// chmod("/proc/self/fd/<n>") (udev-node.c node_permissions_apply +
+/// fs-util.c fchmod_and_chown_with_fallback); a spurious EBADF there
+/// aborted card0 processing with "Failed to set owner/mode of
+/// /dev/dri/card0" (gdmr22).
+fn fchmod_file_core(file: &alloc::sync::Arc<crate::fs::file::File>, mode: u32) -> i64 {
+    // EROFS: fd-based chmod on a read-only mount (LTP fchmod06).
+    if crate::fs::vfs::file_on_readonly_mount(file) {
+        return -(errno::EROFS as i64);
+    }
+    // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
+    let inode_opt = unsafe { &*file.inode.get() };
+    match inode_opt.as_ref() {
+        Some(inode) => {
+            // Permission check: require CAP_FOWNER or be the file owner
+            let cred = match crate::sched::current() {
+                Some(t) => t.cred().clone(),
+                None => return -(errno::EPERM as i64),
+            };
+            let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+            if !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
+                && cred.euid != inode_uid {
+                return -(errno::EPERM as i64);
             }
-            // SAFETY: inode is an UnsafeCell; we hold &File so no concurrent mutation.
-            let inode_opt = unsafe { &*file.inode.get() };
-            match inode_opt.as_ref() {
-                Some(inode) => {
-                    // Permission check: require CAP_FOWNER or be the file owner
-                    let cred = match crate::sched::current() {
-                        Some(t) => t.cred().clone(),
-                        None => return -(errno::EPERM as i64),
-                    };
-                    let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
-                    if !crate::security::has_capability(&cred, crate::security::CAP_FOWNER)
-                        && cred.euid != inode_uid {
-                        return -(errno::EPERM as i64);
-                    }
-                    // notify_change S_ISGID rule (same as vfs_chmod): an
-                    // unprivileged caller that is not in the file's group
-                    // loses S_ISGID on chmod — setgid dirs must not survive
-                    // a downgrade by a non-member (LTP fchmod05: nobody
-                    // fchmod's a free_gid-owned directory to 043777 and
-                    // must land on 041777).
-                    let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
-                    let mode = if mode & 0o2000 != 0
-                        && !crate::security::has_capability(&cred, crate::security::CAP_FSETID)
-                        && cred.egid != inode_gid
-                        && !cred.groups.contains(&inode_gid)
-                    {
-                        mode & !0o2000
-                    } else {
-                        mode
-                    };
-                    // Use op_setattr to update mode
-                    let result = inode.op_setattr(0x0001, mode as u64, 0);
-                    if result == 0 { 0 } else { -(result as i64) }
-                }
-                None => -(errno::EBADF as i64),
-            }
+            // notify_change S_ISGID rule (same as vfs_chmod): an
+            // unprivileged caller that is not in the file's group
+            // loses S_ISGID on chmod — setgid dirs must not survive
+            // a downgrade by a non-member (LTP fchmod05: nobody
+            // fchmod's a free_gid-owned directory to 043777 and
+            // must land on 041777).
+            let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+            let mode = if mode & 0o2000 != 0
+                && !crate::security::has_capability(&cred, crate::security::CAP_FSETID)
+                && cred.egid != inode_gid
+                && !cred.groups.contains(&inode_gid)
+            {
+                mode & !0o2000
+            } else {
+                mode
+            };
+            // Use op_setattr to update mode
+            let result = inode.op_setattr(0x0001, mode as u64, 0);
+            if result == 0 { 0 } else { -(result as i64) }
         }
         None => -(errno::EBADF as i64),
     }
@@ -4597,82 +4627,94 @@ pub fn sys_fchown(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
-            // O_PATH descriptors permit no metadata changes either (LTP
-            // open13: fchown on an O_PATH fd is EBADF).
+            // O_PATH descriptors permit no metadata changes through the
+            // FD-BASED syscall (LTP open13 asserts plain fchown on O_PATH
+            // is EBADF — plain fchown ONLY: the AT_EMPTY_PATH route of
+            // fchownat accepts O_PATH fds, see fchown_file_core).
             if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
                 return -(errno::EBADF as i64);
             }
-            // SAFETY: inode.get() points to an Option<Arc<Inode>> initialized during file open.
-            let inode_opt = unsafe { &*file.inode.get() };
-            match inode_opt.as_ref() {
-                Some(inode) => {
-                    // EROFS: fd-based chown on a read-only mount (LTP fchown04).
-                    if crate::fs::vfs::file_on_readonly_mount(&file) {
-                        return -(errno::EROFS as i64);
-                    }
-                    // Linux chown_ok/chgrp_ok (fs/attr.c): CAP_CHOWN holders
-                    // may set anything; an unprivileged OWNER may re-set its
-                    // own uid and any gid it belongs to; anything else EPERMs
-                    // (LTP fchown03: nobody chgrps its own file to its own
-                    // group and expects success).
-                    let cred = match crate::sched::current() {
-                        Some(t) => t.cred().clone(),
-                        None => return -(errno::EPERM as i64),
-                    };
-                    let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
-                    let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
-                    let is_priv = crate::security::has_capability(&cred, crate::security::CAP_CHOWN);
-                    let owner = cred.euid == inode_uid;
-                    if !is_priv {
-                        if uid != u32::MAX && !(owner && uid == inode_uid) {
-                            return -(errno::EPERM as i64);
-                        }
-                        if gid != u32::MAX && !(owner && cred.in_group(gid)) {
-                            return -(errno::EPERM as i64);
-                        }
-                    }
-                    let actual_uid = if uid == u32::MAX { inode_uid } else { uid };
-                    let actual_gid = if gid == u32::MAX { inode_gid } else { gid };
-                    // Persist through the filesystem's setattr (not just the
-                    // cached inode word — ext4 stat() reads the disk inode).
-                    let result = inode.op_setattr(
-                        crate::fs::inode::setattr_attr::ATTR_UID_GID,
-                        actual_uid as u64,
-                        actual_gid as u64,
-                    );
-                    if result != 0 {
-                        return -(result as i64);
-                    }
-                    // Same SUID/SGID kill as chown(2) (Linux chown_common runs
-                    // for fchown too): SUID always dies on a regular file,
-                    // SGID when group-executable or the caller is outside the
-                    // file's group without CAP_FSETID (LTP chown02/fchown02).
-                    if !inode.mode.is_directory() {
-                        let mode = {
-                            let mut st = crate::fs::Stat::default();
-                            if inode.op_getattr(&mut st) == 0 { st.st_mode } else { inode.mode.bits() }
-                        };
-                        let mut new_mode = mode;
-                        if new_mode & 0o4000 != 0 {
-                            new_mode &= !0o4000;
-                        }
-                        let in_group_or_capable = cred.in_group(inode_gid)
-                            || crate::security::has_capability(&cred, crate::security::CAP_FSETID);
-                        if new_mode & 0o2000 != 0 && ((new_mode & 0o010) != 0 || !in_group_or_capable) {
-                            new_mode &= !0o2000;
-                        }
-                        if new_mode != mode {
-                            let _ = inode.op_setattr(
-                                crate::fs::inode::setattr_attr::ATTR_MODE,
-                                new_mode as u64,
-                                0,
-                            );
-                        }
-                    }
-                    0
-                }
-                None => -(errno::EBADF as i64),
+            fchown_file_core(&file, uid, gid)
+        }
+        None => -(errno::EBADF as i64),
+    }
+}
+
+/// fd-based chown core WITHOUT the O_PATH rejection. Linux
+/// ksys_fchownat's empty-path branch (fchownat(fd, "", AT_EMPTY_PATH))
+/// operates on file->f_path — valid for O_PATH fds, which is exactly
+/// what the flag exists for. systemd's fchmod_and_chown_with_fallback
+/// chowns its O_PATH node fd through this route (udev-node.c
+/// node_permissions_apply, gdmr22's EBADF).
+fn fchown_file_core(file: &alloc::sync::Arc<crate::fs::file::File>, uid: u32, gid: u32) -> i64 {
+    // SAFETY: inode.get() points to an Option<Arc<Inode>> initialized during file open.
+    let inode_opt = unsafe { &*file.inode.get() };
+    match inode_opt.as_ref() {
+        Some(inode) => {
+            // EROFS: fd-based chown on a read-only mount (LTP fchown04).
+            if crate::fs::vfs::file_on_readonly_mount(file) {
+                return -(errno::EROFS as i64);
             }
+            // Linux chown_ok/chgrp_ok (fs/attr.c): CAP_CHOWN holders
+            // may set anything; an unprivileged OWNER may re-set its
+            // own uid and any gid it belongs to; anything else EPERMs
+            // (LTP fchown03: nobody chgrps its own file to its own
+            // group and expects success).
+            let cred = match crate::sched::current() {
+                Some(t) => t.cred().clone(),
+                None => return -(errno::EPERM as i64),
+            };
+            let inode_uid = inode.uid.load(core::sync::atomic::Ordering::Relaxed);
+            let inode_gid = inode.gid.load(core::sync::atomic::Ordering::Relaxed);
+            let is_priv = crate::security::has_capability(&cred, crate::security::CAP_CHOWN);
+            let owner = cred.euid == inode_uid;
+            if !is_priv {
+                if uid != u32::MAX && !(owner && uid == inode_uid) {
+                    return -(errno::EPERM as i64);
+                }
+                if gid != u32::MAX && !(owner && cred.in_group(gid)) {
+                    return -(errno::EPERM as i64);
+                }
+            }
+            let actual_uid = if uid == u32::MAX { inode_uid } else { uid };
+            let actual_gid = if gid == u32::MAX { inode_gid } else { gid };
+            // Persist through the filesystem's setattr (not just the
+            // cached inode word — ext4 stat() reads the disk inode).
+            let result = inode.op_setattr(
+                crate::fs::inode::setattr_attr::ATTR_UID_GID,
+                actual_uid as u64,
+                actual_gid as u64,
+            );
+            if result != 0 {
+                return -(result as i64);
+            }
+            // Same SUID/SGID kill as chown(2) (Linux chown_common runs
+            // for fchown too): SUID always dies on a regular file,
+            // SGID when group-executable or the caller is outside the
+            // file's group without CAP_FSETID (LTP chown02/fchown02).
+            if !inode.mode.is_directory() {
+                let mode = {
+                    let mut st = crate::fs::Stat::default();
+                    if inode.op_getattr(&mut st) == 0 { st.st_mode } else { inode.mode.bits() }
+                };
+                let mut new_mode = mode;
+                if new_mode & 0o4000 != 0 {
+                    new_mode &= !0o4000;
+                }
+                let in_group_or_capable = cred.in_group(inode_gid)
+                    || crate::security::has_capability(&cred, crate::security::CAP_FSETID);
+                if new_mode & 0o2000 != 0 && ((new_mode & 0o010) != 0 || !in_group_or_capable) {
+                    new_mode &= !0o2000;
+                }
+                if new_mode != mode {
+                    let _ = inode.op_setattr(
+                        crate::fs::inode::setattr_attr::ATTR_MODE,
+                        new_mode as u64,
+                        0,
+                    );
+                }
+            }
+            0
         }
         None => -(errno::EBADF as i64),
     }

@@ -278,10 +278,33 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
     }
 
     // P0-2: AF_NETLINK bind — sockaddr_nl { family, pid, groups }; the
-    // port id is accepted (kernel-side portid tracking is implicit).
+    // port id is adopted when the caller picks one, and the groups mask
+    // is the socket's multicast SUBSCRIPTION (Linux netlink_bind →
+    // netlink_update_subscription_socket_bit; sd-device-monitor selects
+    // MONITOR_GROUP_KERNEL/UDEV exactly here — netlink_multicast_send
+    // filters delivery on this mask).
     if sin_family == crate::net::netlink::AF_NETLINK as u16 {
         return match crate::net::netlink::netlink_socket_from_fd(fd as usize) {
-            Some(_) => 0,
+            Some(sock) => {
+                if _addrlen >= 12
+                    && crate::arch::uaccess::access_ok(addr_ptr as usize, 12)
+                {
+                    let mut nl = [0u8; 12];
+                    // SAFETY: addr_ptr validated with access_ok(12) above.
+                    if unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            nl.as_mut_ptr(),
+                            addr_ptr,
+                            12,
+                        )
+                    } == 0
+                    {
+                        let groups = u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]]);
+                        sock.bind_groups(groups);
+                    }
+                }
+                0
+            }
             None => -(errno::ENOTSOCK as i64),
         };
     }
@@ -1121,6 +1144,35 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
 ///
 /// # Returns
 /// Returns number of bytes sent on success, negative error code on failure
+/// Parse the nl_groups field (offset 8) of a sockaddr_nl DESTINATION
+/// supplied as a sendmsg msg_name / sendto addr. Returns 0 when no
+/// full 12-byte sockaddr_nl is supplied (rtnetlink requests send with
+/// no or a pid-only destination). Used to route netlink sends: a
+/// nonzero group destination is a monitor multicast (libudev header +
+/// property blob, no nlmsghdr), not an rtnetlink request.
+fn parse_netlink_dest_groups(addr_ptr: *const u8, addrlen: u32) -> u32 {
+    if addr_ptr.is_null() || addrlen < 12 {
+        return 0;
+    }
+    if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
+        return 0;
+    }
+    let mut nl = [0u8; 12];
+    // SAFETY: addr_ptr validated with access_ok(12) above.
+    if unsafe {
+        crate::arch::uaccess::copy_from_user(nl.as_mut_ptr(), addr_ptr, 12)
+    } != 0
+    {
+        return 0;
+    }
+    // struct sockaddr_nl { sa_family_t nl_family; u16 pad;
+    //                      u32 nl_pid; u32 nl_groups; }
+    if u16::from_le_bytes([nl[0], nl[1]]) != crate::net::netlink::AF_NETLINK as u16 {
+        return 0;
+    }
+    u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]])
+}
+
 pub fn sys_sendto(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let buf_ptr = args[1] as *const u8;
@@ -1217,8 +1269,10 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         };
     }
 
-    // P0-2: AF_NETLINK — the buffer is/are rtnetlink request message(s);
-    // execution queues the responses for the matching recv.
+    // P0-2: AF_NETLINK — either rtnetlink request(s) (no group
+    // destination; execution queues the responses for the matching
+    // recv) or a MONITOR MULTICAST to a nonzero nl_groups destination
+    // (see sys_sendmsg's netlink branch).
     if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
@@ -1232,6 +1286,11 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         } != 0
         {
             return -(errno::EFAULT as i64);
+        }
+        let dest_groups = parse_netlink_dest_groups(addr_ptr, _addrlen);
+        if dest_groups != 0 {
+            let _ = crate::net::netlink::netlink_multicast_send(&nlsock, &kbuf, dest_groups);
+            return kbuf.len() as i64;
         }
         return match crate::net::netlink::netlink_send(&nlsock, &kbuf) {
             Ok(n) => n as i64,
@@ -2936,8 +2995,18 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         };
     }
 
-    // P0-2: AF_NETLINK — execute the rtnetlink request(s) in the buffer.
+    // P0-2: AF_NETLINK — either a rtnetlink request (no group
+    // destination) or a MONITOR MULTICAST (systemd's
+    // device_monitor_send_device addresses sockaddr_nl{nl_pid=0,
+    // nl_groups=MONITOR_GROUP_UDEV}; the payload is a libudev header +
+    // property blob with NO nlmsghdr — gdmr22's EINVAL). Route on the
+    // destination's nl_groups.
     if let Some((nlsock, _)) = file_opt.as_ref().and_then(crate::net::netlink::netlink_file_of_file) {
+        let dest_groups = parse_netlink_dest_groups(msg_name_ptr, msg_namelen);
+        if dest_groups != 0 {
+            let _ = crate::net::netlink::netlink_multicast_send(&nlsock, &buf, dest_groups);
+            return buf.len() as i64;
+        }
         return match crate::net::netlink::netlink_send(&nlsock, &buf) {
             Ok(n) => n as i64,
             Err(e) => e as i64,

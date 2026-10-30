@@ -35,6 +35,7 @@ pub mod io_completion;
 pub mod locks;
 pub mod inotify;
 pub mod tty;
+pub mod vt;
 pub mod pty;
 pub mod xattr;
 pub mod memfd;
