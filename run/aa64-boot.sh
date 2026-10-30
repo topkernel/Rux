@@ -9,6 +9,16 @@ KERNEL="${1:-/home/william/rux-agents/aa64-gic/target/aarch64-unknown-none/debug
 OUT="${2:-/home/william/rux-agents/aa64-gic/run/aa64-boot-serial.log}"
 SECS="${3:-30}"
 
+# The embedded DTB blob is untracked by convention (gitignored; build.rs
+# rewrites dtb_blob.S's .incbin to kernel/src/arch/aarch64/virt.dtb per
+# worktree). Regenerate the gic-version=3 dump if a fresh checkout lacks it.
+DTB=/home/william/rux-agents/aa64-gic/kernel/src/arch/aarch64/virt.dtb
+if [ ! -f "$DTB" ]; then
+    qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 -accel tcg \
+        -m 1G -smp 2 -machine dumpdtb="$DTB" 2>/dev/null
+    echo "regenerated $DTB (rebuild needed: make build PLATFORM=aarch64)"
+fi
+
 timeout -k 5 "${SECS}" qemu-system-aarch64 \
     -M virt,gic-version=3 -cpu cortex-a72 -accel tcg,thread=multi \
     -m 1G -smp 2 -nographic -no-reboot \
