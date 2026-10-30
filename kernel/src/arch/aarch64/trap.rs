@@ -429,10 +429,17 @@ fn handle_syscall(regs: &mut PtRegs) {
 
     let syscall_num = regs.syscall_nr() as u64;
 
-    // Default -ENOSYS; advance pc past the SVC (fixed 4-byte encoding
-    // on AArch64 — no compressed-instruction dance like riscv64).
+    // Default -ENOSYS. The PC must NOT be advanced: unlike the riscv64
+    // ecall (SEPC = the ecall itself), the AArch64 SVC exception leaves
+    // ELR at the instruction AFTER the svc — the architectural return
+    // address. The old unconditional pc += 4 (copied from the riscv64
+    // twin) skipped one user instruction after EVERY syscall; eight
+    // glibc wrapper calls survived because their skipped instruction was
+    // a harmless compare, and the ninth (brk) skipped the adrp computing
+    // __curbrk's page, so the following store faulted at [0, #0x28] and
+    // killed PID 1. The ERESTARTSYS rewind (pc -= 4 back onto the svc)
+    // stays correct: ELR-after-svc minus 4 is the svc.
     regs.regs[0] = crate::errno::constants::ENOSYS as u64;
-    regs.pc += 4;
 
     // U1c seccomp gate (riscv64 parity: policy runs before dispatch).
     if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
