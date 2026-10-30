@@ -410,6 +410,16 @@ pub fn rust_main_tail() -> ! {
             cmdline::init_from(arch::boot::boot_cmdline());
             print_status("boot", "multiboot cmdline + e820 parsed", true);
         }
+        // aarch64: QEMU's ELF -kernel boot passes no cmdline (the -append
+        // protocol is Linux-image-only, like the missing DTB pointer) —
+        // parse the embedded DTB's /chosen if present, else the default
+        // (root=/dev/vda rw console=ttyS0 init=/sbin/init) applies.
+        #[cfg(feature = "aarch64")]
+        {
+            let dtb_ptr = arch::boot::get_dtb_pointer();
+            cmdline::init(dtb_ptr);
+            print_status("boot", "DTB cmdline (embedded blob)", true);
+        }
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
