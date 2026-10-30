@@ -57,14 +57,13 @@ interactive xterm. Sessions hold 45 min, zero panics.*
 make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / rux
 ```
 
-## 📱 OpenHarmony → the full service stack
+## 📱 OpenHarmony → launcher
 
-![Graphical boot screen on Rux — stand-in until the OH launcher capture](docs/images/ubuntu-login-riscv-2026-10-15.png)
+![OH launcher home screen](docs/images/oh-launcher-2026-10-31.png)
 
 *Unmodified OH x86_64_virt image: samgr, foundation, render_service,
-hilogd, appspawn, hdf devhosts — ~80 services up and staying up,
-`hdc shell` to the live guest. Launcher bring-up is the active front;
-the image above is a stand-in for that capture.*
+hilogd, appspawn, hdf devhosts — 135+ services, launcher home screen,
+`hdc shell` to the live guest.*
 
 ---
 
