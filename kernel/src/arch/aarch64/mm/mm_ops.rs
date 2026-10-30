@@ -21,7 +21,10 @@
 //! - The PCACHE page-cache-alias optimization of the twin is not yet
 //!   ported: file faults take the twin's private-copy fallback arm
 //!   (functionally correct, one copy per mapper). cow_flags::PCACHE
-//!   keeps the bit budget ready for it.
+//!   keeps the bit budget ready for it — mprotect_pte_range and the
+//!   PROT_NONE marker re-presentation (page_fault.rs) preserve the bit
+//!   exactly like COW, so the port will not have to revisit them
+//!   (requirements list in page_fault.rs's module doc).
 
 use core::sync::atomic::Ordering;
 
