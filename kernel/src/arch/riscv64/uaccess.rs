@@ -298,7 +298,20 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
     }
 
     // Call optimized assembly implementation
-    __clear_user(to, n)
+    let uncleared = __clear_user(to, n);
+    if uncleared == 0 {
+        return 0;
+    }
+
+    // The clear faulted. Same COW/demand discipline as copy_to_user
+    // above (and the x86_64 twin's clear_user): a valid-but-not-yet-
+    // writable target page (post-fork COW stack/heap) must be resolved
+    // and retried, not reported as uncleared — the syscall would return
+    // EFAULT for a perfectly valid buffer.
+    if fault_in_write(to, n) {
+        return __clear_user(to, n);
+    }
+    uncleared
 }
 
 // ============================================================================
