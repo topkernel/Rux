@@ -95,10 +95,14 @@ pub const DFSC_ALIGNMENT: u64 = 0x21;
 
 /// DFSC → fault-kind classification for the generic mm interface.
 ///
-/// AArch64 DFSC encoding: translation = 0b00100..0b00111 (0x04-0x07),
-/// access-flag = 0b01001..0b01100 (0x09-0x0C), permission =
-/// 0b01101..0b01111 + 0b10011 (0x0D-0x0F, 0x13 — L3 permission has its
-/// own row), alignment = 0b100001 (0x21), external = 0b10100/0b10101.
+/// AArch64 DFSC encoding (ARM DDI 0487, ESR_ELx.ISS; the same rows Linux
+/// arm64's esr.h names FSC_FAULT/FSC_ACCESS/FSC_PERM): the fault class
+/// lives in bits [5:2], the level in [1:0] — translation = 0x04..0x07,
+/// access-flag = 0x08..0x0B, permission = 0x0C..0x0F, alignment =
+/// 0b100001 (0x21), synchronous external abort = 0x10. (The first draft
+/// shifted the AF/permission rows by one: it read permission level 0
+/// (0x0C) as an access-flag fault and classified the non-permission
+/// 0x13 as permission.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultStatus {
     /// Translation fault (page not present at some level)
@@ -120,10 +124,10 @@ pub enum FaultStatus {
 pub fn dfsc_class(dfsc: u64) -> FaultStatus {
     match dfsc {
         0x04..=0x07 => FaultStatus::Translation,
-        0x09..=0x0C => FaultStatus::AccessFlag,
-        0x0D..=0x0F | 0x13 => FaultStatus::Permission,
+        0x08..=0x0B => FaultStatus::AccessFlag,
+        0x0C..=0x0F => FaultStatus::Permission,
         DFSC_ALIGNMENT => FaultStatus::Alignment,
-        0x10 | 0x11 => FaultStatus::External,
+        0x10 => FaultStatus::External,
         _ => FaultStatus::Other,
     }
 }
