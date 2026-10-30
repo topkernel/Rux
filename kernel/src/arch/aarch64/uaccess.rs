@@ -150,6 +150,13 @@ extern "C" {
 
 /// Copy data from kernel to user space. Returns number of uncopied bytes.
 ///
+/// NOTE: the riscv64 twin additionally retries once through
+/// fault_in_write (COW/demand resolution) when the first copy faults;
+/// that helper needs the aarch64 handle_mm_fault/handle_cow_fault stage-2
+/// bodies (mm lane) and lands with them. Until then a resolvable COW
+/// fault reports a short count — no user tasks exist on this board yet,
+/// so the case cannot arise.
+///
 /// # Safety
 /// - `from` must point to valid kernel memory
 /// - `to` is validated by access_ok; a fault lands in the exception table
@@ -168,6 +175,10 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
 /// Copy user → kernel. Returns the number of bytes NOT copied.
 ///
+/// On failure the uncopied tail of `to` is zero-filled, matching the
+/// riscv64/x86_64 twins (prevents kernel-heap information disclosure
+/// when the caller proceeds with a short copy).
+///
 /// # Safety
 /// `to` must be writable for `n` bytes; `from` is validated by access_ok.
 #[inline(never)]
@@ -176,10 +187,23 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
         return 0;
     }
     if !access_ok(from as usize, n) {
+        // Zero the whole kernel buffer: callers (e.g. msgsnd, semtimedop)
+        // historically consumed the buffer even on failure, and leaving
+        // previous kernel heap contents in it is an information leak
+        // (riscv64 twin behavior).
+        core::ptr::write_bytes(to, 0, n);
         return n;
     }
     // SAFETY: exception-table copy (see copy_to_user).
-    unsafe { __aa64_copy_from_user(to, from, n) }
+    let uncopied = unsafe { __aa64_copy_from_user(to, from, n) };
+    if uncopied > 0 {
+        // Zero-fill the uncopied tail: the kernel buffer must never keep
+        // stale contents past the point the user copy reached.
+        let copied = n - uncopied;
+        // SAFETY: `copied` bytes were verifiably written; the rest is `to`'s.
+        unsafe { core::ptr::write_bytes(to.add(copied), 0, uncopied) };
+    }
+    uncopied
 }
 
 /// Zero user memory. Returns the number of bytes NOT cleared.
@@ -236,56 +260,75 @@ pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
 }
 
 /// Copy a NUL-terminated string from user space (bounded by max_len),
-/// into `buf`. Returns the borrowed slice on success.
+/// into `buf`. Returns the borrowed slice on success (without the NUL),
+/// Err(-EFAULT) on fault.
 ///
-/// Port of the riscv64 interface: byte-wise copy with early NUL stop;
-/// faults land in the exception table and surface as -EFAULT.
+/// Port of the riscv64 interface: byte-wise copy through the
+/// exception-table core with early NUL stop; the readable span is
+/// clamped to the distance from `from` to USER_END so a pointer near the
+/// top of the user window does not fail a whole-range access_ok.
 pub fn strncpy_from_user<'a>(
     from: *const u8,
     max_len: usize,
     buf: &'a mut [u8],
 ) -> Result<&'a [u8], i64> {
-    if max_len == 0 || buf.is_empty() {
-        return Ok(&[]);
+    // EFAULT = 14
+    const EFAULT: i64 = 14;
+
+    if from.is_null() {
+        return Err(-EFAULT);
     }
     if !access_ok(from as usize, 1) {
-        return Err(-14);
+        return Err(-EFAULT);
     }
-    let cap = max_len.min(buf.len());
-    for i in 0..cap {
-        let mut byte: u8 = 0;
-        // SAFETY: single-byte user read; the address range was validated
-        // per byte and faults land in the exception table (short count).
-        let uncopied = unsafe { copy_from_user(&mut byte as *mut u8 as *mut u8, unsafe { from.add(i) }, 1) };
-        if uncopied != 0 {
-            return Err(-14);
-        }
-        buf[i] = byte;
-        if byte == 0 {
-            return Ok(&buf[..i]); // exclude the NUL
+
+    // Max readable bytes as the distance to USER_END (twin behavior).
+    let addr = from as usize;
+    let user_end = super::mm::user_addr::USER_END;
+    let max = if addr < user_end { user_end - addr } else { return Err(-EFAULT) };
+    let limit = max_len.min(buf.len()).min(max);
+
+    let mut i = 0;
+    while i < limit {
+        // A NUL at index 0 (empty string) is a SUCCESS returning an
+        // empty slice (twin behavior).
+        // SAFETY: single-byte user read through the exception-table copy.
+        match unsafe { get_user(from.add(i)) } {
+            Some(byte) => {
+                buf[i] = byte;
+                if byte == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            None => return Err(-EFAULT),
         }
     }
-    Ok(&buf[..cap])
+    Ok(&buf[..i])
 }
 
-/// strlen for a user string, bounded by max_len (fault-safe)
-pub fn strnlen_user(from: *const u8, max_len: usize) -> Result<usize, i64> {
-    if max_len == 0 {
-        return Ok(0);
+/// strlen for a user string, bounded by maxlen (twin signature).
+///
+/// Returns the length INCLUDING the NUL terminator, or 0 on fault /
+/// no NUL within maxlen (the riscv64/x86_64 convention: 0 is the
+/// failure-or-too-long sentinel — callers treat 0 as EFAULT).
+pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
+    if maxlen == 0 {
+        return 0;
     }
-    if !access_ok(from as usize, 1) {
-        return Err(-14);
+    if !access_ok(str as usize, 1) {
+        return 0;
     }
-    let mut probe: [u8; 1] = [0; 1];
-    for i in 0..max_len {
-        // SAFETY: bounded single-byte fault-safe reads
-        let uncopied = unsafe { copy_from_user(probe.as_mut_ptr(), unsafe { from.add(i) }, 1) };
-        if uncopied != 0 {
-            return Err(-14);
+
+    let mut len = 0;
+    while len < maxlen {
+        // SAFETY: bounded single-byte reads through the exception-table
+        // copy (get_user → copy_from_user → __aa64_copy_from_user).
+        match unsafe { get_user(str.add(len)) } {
+            Some(0) => return len + 1, // include the NUL
+            Some(_) => len += 1,
+            None => return 0,
         }
-        if probe[0] == 0 {
-            return Ok(i + 1); // including the NUL, strnlen_user convention
-        }
     }
-    Ok(max_len)
+    0 // no NUL within maxlen
 }
