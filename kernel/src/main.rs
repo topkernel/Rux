@@ -1135,9 +1135,29 @@ pub fn rust_main_tail() -> ! {
         // Enable timer interrupts (also sets the first trigger internally)
         arch::trap::enable_timer_interrupt();
 
-        // TEMP aa64-irq diagnostic: poll IAR1/CNTV_CTL directly
+        // TEMP aa64-irq diagnostic: tick check + SGI/IAR probe
         #[cfg(feature = "aarch64")]
-        drivers::intc::gicv3::irq_probe(300);
+        {
+            use crate::dfx::backtrace::ConsoleWriter;
+            use core::fmt::Write;
+            let j0 = drivers::timer::get_jiffies();
+            arch::cpu::enable_irq();
+            let t0 = arch::cpu::read_counter();
+            let freq = arch::cpu::get_counter_freq();
+            while arch::cpu::read_counter() - t0 < freq / 2 {}
+            arch::cpu::disable_irq();
+            let j1 = drivers::timer::get_jiffies();
+            let mut w = ConsoleWriter::new();
+            let _ = writeln!(
+                w,
+                "TICK-CHECK: jiffies {} -> {} ({} ticks/500ms)",
+                j0,
+                j1,
+                j1 - j0
+            );
+        }
+        #[cfg(feature = "aarch64")]
+        drivers::intc::gicv3::irq_probe(150);
 
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization

@@ -205,12 +205,17 @@ pub fn eoir1_write(intid: u32) {
 
 /// Generate an SGI (ICC_SGI1R_EL1) to the target list.
 ///
-/// Layout: [3:0] INTID, [15:8] TargetList (Aff0 CPUs), [23:16] Aff1,
-/// [39:32] Aff2, [55:48] Aff3. QEMU virt puts cpu N at Aff0=N for
-/// N < MAX_CPUS=4, so a single-list send targets Aff0 bit N.
+/// GICv3 field layout (unlike the GICv2 GICD_SGIR encoding this driver
+/// originally used): INTID [27:24], TargetList [15:0], Aff1 [23:16],
+/// IRM [40], Aff2 [39:32], Aff3 [55:48]. QEMU virt keeps every cpu in
+/// one cluster (Aff1/2/3 = 0), so a TargetList bit for Aff0 selects the
+/// cpu. The old (1<<aff0)<<8 | intid encoding put the target bit at
+/// [15:8]+n and the INTID at [3:0]; the emulated GIC decoded a
+/// TargetList of 0x100 (no cpu has Aff0=8) and silently dropped the SGI
+/// — the IPI facility never fired.
 #[inline]
 pub fn send_sgi(target_aff0: u8, intid: u32) {
-    let sgi = ((1u64 << target_aff0) << 8) | (intid & 0xF) as u64;
+    let sgi = (((intid as u64) & 0xF) << 24) | (1u64 << (target_aff0 & 0xF));
     // SAFETY: SGI1R write raises the SGI on the target core(s).
     unsafe {
         asm!("dsb st",
