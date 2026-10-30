@@ -2337,10 +2337,18 @@ fn handle_page_fault(regs: &mut PtRegs) {
         MmFaultResult::BusError => {
             crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             if regs.user_mode() {
+                // Handler-first routing like Segfault: LTP mmap13 installs
+                // a SIGBUS handler and must catch it; the default action
+                // kills with SIGBUS. force_unblock (the riscv64 twin):
+                // a blocked SIGBUS would otherwise stay pended while the
+                // task returns to the faulting rip and refaults forever —
+                // the same livelock the SIGSEGV arm guards against.
                 let pid = crate::process::current_pid();
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                } else {
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
                 #[cfg(feature = "x86_64")]
