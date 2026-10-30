@@ -396,6 +396,21 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
+            // metadata_csum write path: the read path verifies each group
+            // descriptor's bg_checksum at MOUNT (mod.rs — a stale checksum
+            // refuses the next mount), so every on-disk counter change must
+            // re-seal the descriptor slot it landed in.
+            if self.fs.metadata_csum {
+                let data = &mut (*bh).b_data;
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::fs::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
             // F4-R2 (leg-31, f4-ext4-route-map.md route 2): group-desc
             // free-BLOCKS counter — durability-deferred like the superblock
             // counters (order-unconstrained; e2fsck class on crash).
@@ -418,6 +433,18 @@ impl<'a> BlockAllocator<'a> {
             let current = free_blocks_ptr.read_volatile();
             let new_count = (current as i64 + delta as i64) as u32;
             free_blocks_ptr.write_volatile(new_count);
+            // metadata_csum write path: the read path verifies s_checksum
+            // at mount — re-seal it over the full 1024-byte superblock
+            // after any counter mutation (see also the free_inodes twin).
+            if self.fs.metadata_csum {
+                let data = &mut (*bh).b_data;
+                let sb_end = (sb_start + 1024).min(data.len());
+                if sb_start < sb_end {
+                    crate::fs::ext4::csum::superblock_csum_set(
+                        &mut data[sb_start..sb_end],
+                    );
+                }
+            }
             // F4-R2 (leg-31): superblock free-BLOCKS counter,
             // durability-deferred (see update_group_desc_free_blocks).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
@@ -800,6 +827,19 @@ impl<'a> InodeAllocator<'a> {
             let free_inodes_ptr = data.as_mut_ptr().add(desc_offset + 14) as *mut u16;
             free_inodes_ptr.write_volatile(free_inodes);
 
+            // metadata_csum write path: re-seal this descriptor slot after
+            // the counter change (see update_group_desc_free_blocks).
+            if self.fs.metadata_csum {
+                let end = (desc_offset + group_desc_size).min(data.len());
+                if desc_offset < end {
+                    crate::fs::ext4::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..end],
+                    );
+                }
+            }
+
             // F4-R2 (leg-31): group-desc free-INODES counter,
             // durability-deferred (order-unconstrained; e2fsck class).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
@@ -829,6 +869,17 @@ impl<'a> InodeAllocator<'a> {
             let current = free_inodes_ptr.read_volatile();
             let new = (current as i32 + delta) as u32;
             free_inodes_ptr.write_volatile(new);
+
+            // metadata_csum write path: re-seal s_checksum after the
+            // counter change (see update_superblock_free_blocks).
+            if self.fs.metadata_csum {
+                let sb_end = (sb_start + 1024).min(data.len());
+                if sb_start < sb_end {
+                    crate::fs::ext4::csum::superblock_csum_set(
+                        &mut data[sb_start..sb_end],
+                    );
+                }
+            }
 
             // F4-R2 (leg-31): superblock free-INODES counter,
             // durability-deferred (see update_group_desc_free_blocks).

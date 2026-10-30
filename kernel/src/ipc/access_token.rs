@@ -84,9 +84,26 @@ fn empty() -> Registry {
 /// path keys by tgid, so it is at least stable per-process. If the
 /// image's userspace sets real tokens for everything, registered values
 /// always take precedence.
+///
+/// A REGISTERED value of 0 is not a token (oh-launcher probe4,
+/// 2026-10-30): when /data/service/el0/access_token/ is missing or /data
+/// fails to mount, init's GetAccessToken() logs "gettotkenid failed" for
+/// every service, still calls SetSelfTokenID(0) in each child, and the
+/// registry then hands out 0 by precedence. samgr's CanRequest() decodes
+/// 0 as TOKEN_INVALID (-1) and denies EVERY AddSystemAbility
+/// ("CanRequest callingTkid:0, tokenType:-1"); storage_manager then
+/// polls CheckSystemAbility(STORAGE_DAEMON_SAID) 1000x20ms, exits 0, and
+/// init's critical-reap counter drives the boot into its sysrq reboot.
+/// No legitimate token id is ever 0 (GetTokenTypeFlag(0) is INVALID by
+/// construction), so a registered 0 is treated here exactly like an
+/// unset entry and falls through to the synthetic native token.
 pub fn token_of(pid: u32) -> (u64, u64) {
     let g = REGISTRY.lock_irqsave();
-    let registered = g.as_ref().and_then(|r| r.by_pid.get(&pid)).copied();
+    let registered = g
+        .as_ref()
+        .and_then(|r| r.by_pid.get(&pid))
+        .copied()
+        .filter(|t| t.token != 0);
     drop(g);
     match registered {
         Some(t) => (t.token, t.ftoken),
