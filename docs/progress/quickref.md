@@ -97,15 +97,28 @@ make verify
 
 ## Architecture Support
 
-### riscv64 (Default and Only Supported)
+### riscv64 (default)
 ```bash
 make build                          # Build
 make run                            # Run
 ```
 
-**Note**: ARM64 (aarch64) has been removed. x86_64 (q35) joined riscv64
-as a supported platform on 2026-10-07 — boots Ubuntu 22.04 amd64;
-build with `PLATFORM=x86_64 make build`.
+### x86_64 (q35) — since 2026-10-07
+```bash
+make build PLATFORM=x86_64          # boots Ubuntu 22.04 amd64
+```
+
+### aarch64 (QEMU virt) — since 2026-10-30
+```bash
+make build PLATFORM=aarch64
+make test PLATFORM=aarch64          # in-kernel suite: 1,119 cases
+# Boot: -M virt,gic-version=3 -cpu cortex-a72 (gic-version=3 is REQUIRED —
+# default virt is GICv2 and the GIC driver/DTB are v3); the DTB is embedded
+# in the image (auto-dumped from the installed QEMU when absent); -append
+# and -dtb are no-ops for ELF -kernel boots on this architecture.
+```
+See [docs/architecture/aarch64.md](../architecture/aarch64.md) for the
+memory map, boot protocol, and per-task state disciplines.
 
 ## Troubleshooting
 
