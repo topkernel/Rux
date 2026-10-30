@@ -497,6 +497,15 @@ const DRM_IOCTL_MODE_GETPROPBLOB: u32 = ioc(3, 0xac, 16);
 const DRM_IOCTL_MODE_ADDFB: u32 = ioc(3, 0xae, 28);
 const DRM_IOCTL_MODE_RMFB: u32 = ioc(3, 0xaf, 4);
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = ioc(3, 0xb0, 24);
+// Upstream-libdrm encodings of the same two ioctls: libdrm builds
+// MODE_RMFB with _IOR (dir=2) and MODE_PAGE_FLIP with _IOW (dir=1),
+// while the table above used IOWR (dir=3) for both — a real libdrm
+// client (drmModeRmFB / drmModePageFlip) would take ENOTTY (proven by
+// the scanpaint painter: _IOW-encoded PAGE_FLIP returned ENOTTY until
+// the painter switched to the dir-3 form). Accept both encodings; the
+// dir-3 forms stay for whatever the baked-in image still sends.
+const DRM_IOCTL_MODE_RMFB_LIBDRM: u32 = ioc(2, 0xaf, 4);
+const DRM_IOCTL_MODE_PAGE_FLIP_LIBDRM: u32 = ioc(1, 0xb0, 24);
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = ioc(3, 0xb2, 32);
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = ioc(3, 0xb3, 16);
 const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = ioc(3, 0xb4, 4);
@@ -989,8 +998,8 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
         DRM_IOCTL_MODE_GETPROPBLOB => get_prop_blob(arg),
         DRM_IOCTL_MODE_ADDFB => addfb(arg),
         DRM_IOCTL_MODE_ADDFB2 => addfb2(arg),
-        DRM_IOCTL_MODE_RMFB => rmfb(rdu32_or(arg)),
-        DRM_IOCTL_MODE_PAGE_FLIP => page_flip(arg),
+        DRM_IOCTL_MODE_RMFB | DRM_IOCTL_MODE_RMFB_LIBDRM => rmfb(rdu32_or(arg)),
+        DRM_IOCTL_MODE_PAGE_FLIP | DRM_IOCTL_MODE_PAGE_FLIP_LIBDRM => page_flip(arg),
         DRM_IOCTL_MODE_CREATE_DUMB => create_dumb(arg),
         DRM_IOCTL_MODE_MAP_DUMB => map_dumb(arg),
         DRM_IOCTL_MODE_DESTROY_DUMB => gem_close(rdu32_or(arg)),

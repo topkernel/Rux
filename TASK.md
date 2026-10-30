@@ -42,7 +42,47 @@ Final message: root cause + fix + ladder position (1-4), commits, build status.
    "clear-only buffers" now confirmed on a healthy animation run).
 4. scanpaint (run/scanpaint.c + run/oh-boot-paint.sh, private ramdisk run/ramdisk-paint.img):
    static musl dumb-buffer painter injected as pid-1 side task, PAGE_FLIPs color bars
-   at 30fps. Purpose: prove/kill the userspace->scanout path with zero GL/Skia involved.
+   at 30fps. Purpose: prove/kill the userspace->kernel scanout path with zero GL/Skia involved.
    Ladder: painter pattern visible => scanout OK from userspace, gap is OH render stack
    (EGL/GBM/Skia draw->buffer); painter pattern NOT visible => kernel dumb-buffer/flip
    path has a hole the composer path doesn't exercise.
+
+## SCANOUT VERDICT (2026-10-31 04:0x) — PIXELS PROVEN; BLOCKER IS OH's MISSING GL DRIVER
+1. **paint6/paint7: userspace pixels ON SCREEN.** run/oh-paint6-shot-*.ppm and
+   run/oh-paint7-shot-*.ppm: 100% non-black (921600/921600) at 25/45/70/100/130s,
+   distinct md5s = the painter's moving stripe = LIVE userspace presentation.
+   Chain: card0 -> GETRESOURCES/GETCONNECTOR -> CREATE_DUMB(720x1280@32) -> MAP_DUMB
+   -> mmap -> paint -> ADDFB2 -> PAGE_FLIP. No oracle, no OH render stack.
+2. Injection mechanics (for reuse): rdinit=/rpaint where /rpaint is a **static ELF**
+   shim (run/paintshim.c: fork painter + exec /init) — a #! script does NOT work
+   (kernel init loader has no binfmt_script: "ELF load failed err=InvalidHeader
+   first8=23212f62", silent fallthrough to /init). Painter logs via /dev/kmsg
+   (klog() in scanpaint.c) — that is how its traces reach the serial log.
+3. **Kernel ABI fix landed (this branch):** Rux encoded MODE_PAGE_FLIP as IOWR(dir 3)
+   and MODE_RMFB as IOWR — upstream libdrm uses _IOW(dir 1) / _IOR(dir 2); real
+   libdrm clients got ENOTTY (painter proved it: _IOW-encoded flip -> errno 25).
+   Now both encodings dispatch (kernel/src/drivers/drm/mod.rs, *_LIBDRM constants).
+   paint7 re-validated with the painter back on the upstream encoding: all 5 shots
+   non-black, 150+ frames presented. Builds rc=0 on x86_64 + riscv64 + aarch64.
+4. **The content root cause, precisely:** r1 log — MUSL-LDSO fails to load
+   `libGLES_mali.so` (errno=2/11, file ABSENT from system.img AND vendor.img;
+   verified with debugfs). OH's Mesa egl_dri2 (dri2_get_proc_address lines) loads,
+   but the GLES driver does not exist => render_service and bootanimation have NO
+   GL context => Skia GPU draws silently no-op => every surface stays at its
+   clear color (opaque black, alpha 0xff — matches the co2 nz/clear=921600 probe).
+   Vsync is FINE (r1: bootanimation ran its full 150-frame sequence; sprint3's
+   stuck case was boot-state-dependent). Scanout binding was NEVER the blocker.
+5. Routes to launcher-first-frame, ranked:
+   a. OH-image: ship a working GL (Mesa llvmpipe/swrast built OH-style, installed
+      as /vendor/lib64/chipsetsdk/libGLES_mali.so; impl symlinks already exist).
+      Needs a private system/vendor.img copy (debugfs -w replace, ext4).
+   b. OH-source: force RS + bootanimation onto CPU/Skia-raster surfaces (no GL).
+      Needs oh-robot rebuild (out/x86_64_virt exists) + image repack.
+   c. Kernel: virtio-gpu venus/virgl 3D contexts so Mesa's virtio driver renders —
+      the "real" fix, large.
+   d. Bridge (this lane, done): scanpaint doubles as a boot-splash stand-in — keep
+      it flipping until RS produces real frames, if a visible screen is needed early.
+6. Other kernel findings to ledger (not fixed here):
+   - binfmt_script missing for the pid1 init path (see 2).
+   - mksh-as-pid1 (rdinit=/bin/sh): interactive rescue shell hard-wedges the boot on
+     a user-mode cow pagefault after a fork (run/oh-repl1-serial.log tail).

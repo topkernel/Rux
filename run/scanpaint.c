@@ -77,9 +77,9 @@ struct drm_mode_connector {
 #define DRM_IOCTL_MODE_CREATE_DUMB DRM_IOWR(0xb2, struct drm_mode_create_dumb)
 #define DRM_IOCTL_MODE_MAP_DUMB   DRM_IOWR(0xb3, struct drm_mode_map_dumb)
 #define DRM_IOCTL_MODE_ADDFB2     DRM_IOWR(0xb8, struct drm_mode_fb_cmd2)
-#define DRM_IOCTL_MODE_RMFB       DRM_IOR(0xaf, uint32_t)
+#define DRM_IOCTL_MODE_RMFB       DRM_IOR(0xaf, uint32_t) /* upstream libdrm encoding */
 struct drm_mode_crtc_page_flip { uint32_t crtc_id, fb_id; uint32_t flags, reserved; uint64_t user_data; };
-#define DRM_IOCTL_MODE_PAGE_FLIP  DRM_IOWR(0xb0, struct drm_mode_crtc_page_flip) /* kernel encodes dir=3 */
+#define DRM_IOCTL_MODE_PAGE_FLIP  DRM_IOW(0xb0, struct drm_mode_crtc_page_flip) /* upstream libdrm encoding */
 
 #define FOURCC_XR24 0x34325258u /* XR24 little-endian */
 
