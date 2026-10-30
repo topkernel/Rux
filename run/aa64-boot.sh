@@ -7,7 +7,7 @@
 # Resource discipline: -smp 2 -m 1G, TCG, hard timeout.
 set -u
 KERNEL="${1:-/home/william/rux-agents/aarch64-port/target/aarch64-unknown-none/debug/rux}"
-OUT="${2:-/home/william/rux-agents/aarch64-port/run/aa64-boot-serial.log}"
+OUT="${2:-/home/william/rux-agents/aa64-signal/run/aa64-boot-serial.log}"
 SECS="${3:-30}"
 
 # The embedded DTB blob is untracked by convention (gitignored); build.rs
