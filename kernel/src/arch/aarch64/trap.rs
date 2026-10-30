@@ -430,16 +430,101 @@ fn handle_syscall(regs: &mut PtRegs) {
     crate::syscall::syscall_handler(regs);
 }
 
-/// IRQ dispatch point (GIC claim lands with stage 3; DAIF-masked
-/// boots never reach this — the warn is the tripwire if one does).
-fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
-    // (The old draft called a phantom crate::drivers::timer::interrupts
-    // module that no backend provides; the external-IRQ accounting hook
-    // is wired with the real GIC claim path in stage 3.)
-    crate::pr_warn!(
-        "aarch64: IRQ delivered with the GIC still disabled (cpu={}) — stage-3 stub path",
-        cpu
-    );
+/// IRQ dispatch point: drain the GIC (ICC_IAR1 acknowledge) and route
+/// each INTID. The timer PPI and IPI SGI are special-cased exactly the
+/// way the riscv64 twin's timer/software trap causes are (arch-core
+/// interrupts that predate the irqchip framework); everything else goes
+/// through the generic domain dispatch, whose flow handler EOIs via the
+/// chip. Fallback EOI only for unmapped INTIDs that bypassed the flow.
+fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
+    use crate::drivers::intc::gicv3;
+
+    while let Some(intid) = gicv3::claim() {
+        match intid {
+            gicv3::TIMER_PPI_INTID => {
+                crate::drivers::intc::gicv3::TEMP_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                handle_timer_interrupt(regs, cpu);
+                gicv3::eoi(intid);
+            }
+            gicv3::IPI_SGI_INTID => {
+                crate::fs::procfs::interrupts::soft_inc(cpu);
+                crate::arch::ipi::handle_software_ipi(cpu);
+                gicv3::eoi(intid);
+            }
+            _ => {
+                let handled = crate::interrupt::get_default_domain()
+                    .map(|d| crate::interrupt::generic_handle_domain_irq(d, intid))
+                    .unwrap_or(false);
+                if !handled {
+                    // Spurious/unmapped: EOI here or the GIC stalls.
+                    gicv3::eoi(intid);
+                }
+            }
+        }
+    }
+}
+
+/// Timer interrupt (GIC PPI for the EL1 virtual timer) — the riscv64
+/// handle_timer_interrupt twin: re-arm first, then accounting, jiffies,
+/// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    // Increment interrupt counter for /proc/interrupts
+    crate::fs::procfs::interrupts::timer_inc(cpu);
+
+    // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
+    // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
+    // line still high re-latches pending and storms).
+    crate::drivers::timer::set_next_trigger();
+
+    // Skip scheduler/schedule logic during early boot (TPIDR holds the
+    // cpu index, no current task yet — riscv64 twin guard).
+    if crate::sched::current().is_none() {
+        return;
+    }
+
+    // 0. Per-CPU time accounting for /proc/stat
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting: user or system time by the mode the
+    // timer hit; idle accounting for kthreads.
+    if let Some(task) = crate::sched::current() {
+        // SAFETY: current() returned a live task pointer; only per-task
+        // atomic counters are touched (riscv64/x86_64 twins).
+        unsafe {
+            if (*task).address_space().is_some() {
+                use core::sync::atomic::Ordering::Relaxed;
+                if regs.user_mode() {
+                    (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
+                    crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
+                } else {
+                    (*task).stime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_kern(regs.pc);
+                    crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
+                }
+            } else {
+                crate::dfx::syscost::tick_idle();
+                crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+            }
+        }
+    } else {
+        crate::dfx::syscost::tick_idle();
+        crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+    }
+
+    // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
+    crate::drivers::timer::timer_interrupt_handler();
+
+    // 2. Scheduler tick
+    crate::sched::scheduler_tick();
+
+    // 3. Check for soft lockups
+    crate::dfx::softlockup::check();
+
+    // 4. Reschedule if needed
+    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
+        crate::sched::schedule();
+    }
 }
 
 /// User-mode illegal instruction: route through signal delivery with
@@ -709,15 +794,26 @@ pub fn init_syscall() {
     // SVC #0 is dispatched in aarch64_trap_handler (EC 0x15)
 }
 
-/// Enable the EL1 timer interrupt (unmask CNTV_CTL; GIC PPI wiring is
-/// stage 3 — until then the PPI stays masked at the distributor)
+/// Enable the EL1 timer interrupt — the riscv64 enable_timer_interrupt
+/// twin: enable the GIC PPI (INTID 27, virtual timer), arm the first
+/// deadline, then unmask the timer itself. Order matters: arming after
+/// the PPI is enabled means the very first expiry is never lost.
 pub fn enable_timer_interrupt() {
-    // SAFETY: unmasking the virtual timer only arms a PPI the GIC still
-    // holds masked until stage 3; no interrupt can fire from this alone.
+    // 1. Enable the timer PPI at this CPU's redistributor (idempotent;
+    //    the distributor was brought up in intc::init).
+    crate::drivers::intc::gicv3::enable_ppi(crate::drivers::intc::gicv3::TIMER_PPI_INTID);
+
+    // 2. Arm the first grid deadline (sets CNTV_CVAL + enables the
+    //    virtual timer).
+    crate::drivers::timer::set_next_trigger();
+
+    // 3. Unmask the timer (enable=1, imask=0).
+    // SAFETY: writing CNTV_CTL_EL0 arms the per-cpu virtual timer; the
+    // only side effect is the future PPI interrupt.
     unsafe {
         asm!(
             "msr cntv_ctl_el0, {v}",
-            v = in(reg) 1u64, // enable, imask=0
+            v = in(reg) 1u64,
             options(nomem, nostack)
         );
     }
@@ -735,7 +831,8 @@ pub fn disable_timer_interrupt() {
     }
 }
 
-/// Enable external interrupts (GICv3 CPU interface — stage 3)
+/// Enable external interrupts (GICv3 CPU interface: redistributor wake,
+/// SGI/PPI bank config, ICC_* system-register enable — per CPU)
 pub fn enable_external_interrupt() {
     crate::drivers::intc::gicv3::enable_cpu_interface();
 }
