@@ -1804,10 +1804,15 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
         let mut nz: usize = 0;
         let mut clear: usize = 0;
         let mut samples = [0u32; 3];
-        // SAFETY: gem.kva..gem.kva+size is the object's backing.
+        // SAFETY: gem.kva..gem.kva+size is the object's backing; every
+        // sample offset below is clamped into that range (the fixed
+        // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
+        // an imported smaller buffer made the unclamped reads walk past the
+        // allocation).
         unsafe {
             let base = gem.kva as *const u32;
-            for i in 0..gem.size / 4 {
+            let words = gem.size / 4;
+            for i in 0..words {
                 let v = base.add(i).read_volatile();
                 if v != 0 {
                     nz += 1;
@@ -1817,9 +1822,16 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
                 }
             }
             let row_words = 983040 / 1280; // pitch/4 for these buffers
-            samples[0] = base.add(row_words * 640 + 360).read_volatile();
-            samples[1] = base.add(row_words * 640 + 200).read_volatile();
-            samples[2] = base.add(row_words * 300 + 360).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(row_words * 640 + 360);
+            samples[1] = s(row_words * 640 + 200);
+            samples[2] = s(row_words * 300 + 360);
         }
         crate::pr_warn!(
             "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
@@ -1995,8 +2007,10 @@ fn present_fb(fb_id: u32) -> i64 {
         let mut nz: usize = 0;
         let mut paint: usize = 0;
         let mut samples = [0u32; 4];
-        // SAFETY: gem.kva..gem.kva+size is the object's own backing
-        // store; word-aligned reads stay inside the allocation.
+        // SAFETY: gem.kva..gem.kva+size is the object's own backing store;
+        // word-aligned reads stay inside the allocation (sample offsets are
+        // clamped to words — the fixed 720-wide sample geometry only fits
+        // full-size frame GEMs).
         unsafe {
             let base = gem.kva as *const u32;
             let words = gem.size / 4;
@@ -2019,10 +2033,17 @@ fn present_fb(fb_id: u32) -> i64 {
             }
             let mid_row = (height as usize / 2) * row_words;
             let last_row = (height as usize - 1).saturating_mul(row_words);
-            samples[0] = base.add(720 / 4).read_volatile();
-            samples[1] = base.add(row_words + 720 / 4).read_volatile();
-            samples[2] = base.add(mid_row + (width as usize / 2)).read_volatile();
-            samples[3] = base.add(last_row + 720 / 4).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(720 / 4);
+            samples[1] = s(row_words + 720 / 4);
+            samples[2] = s(mid_row + (width as usize / 2));
+            samples[3] = s(last_row + 720 / 4);
         }
         crate::pr_warn!(
             "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
