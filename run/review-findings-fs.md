@@ -139,8 +139,10 @@ bug-history-dense areas named in the charter were all read fully.
   `make build PLATFORM=aarch64` rc=0, plus
   `cargo build --features riscv64,unit-test` rc=0 (the guest-suite
   build the new test runs under).
-- Guest unit-test suite booted once (QEMU riscv64) to verify the new
-  "file_buffer" group passes; full suites run centrally at merge.
+- Guest unit-test suite booted (QEMU riscv64, after `make rootfs` built
+  the worktree's missing test/rootfs.img): verdict green — "All tests
+  passed!", including the new "file_buffer" group; full suites run
+  centrally at merge.
 
 Commits (rv-fs): 57134bc8, c10ccc3e, 52b4c324, 45911935, 879a7330,
 a9217b4f.
