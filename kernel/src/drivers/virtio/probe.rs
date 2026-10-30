@@ -329,6 +329,17 @@ pub fn init_pci_block_devices() -> usize {
                         core::hint::spin_loop();
                         reset_timeout -= 1;
                     }
+                    if reset_timeout == 0 {
+                        // Observed flake (aa64-userspace lane): the same
+                        // binary flips between finding and missing the disk
+                        // across boots — loud, not silent, so the next
+                        // occurrence names the failing stage.
+                        crate::pr_warn!(
+                            "virtio-blk: device at {:#x} did not reset (status {:#x})",
+                            ecam_addr,
+                            virtio_dev.get_status()
+                        );
+                    }
 
                     // Set status to ACKNOWLEDGE | DRIVER
                     virtio_dev.set_status(crate::drivers::virtio::offset::status::ACKNOWLEDGE | crate::drivers::virtio::offset::status::DRIVER);
@@ -374,6 +385,10 @@ pub fn init_pci_block_devices() -> usize {
                     // Verify FEATURES_OK was accepted by device
                     let status_after_features = virtio_dev.get_status();
                     if status_after_features & crate::drivers::virtio::offset::status::FEATURES_OK == 0 {
+                        crate::pr_warn!(
+                            "virtio-blk: device at {:#x} rejected feature set (status {:#x}, features {:#x})",
+                            ecam_addr, status_after_features, features
+                        );
                         continue;
                     }
 
@@ -400,7 +415,12 @@ pub fn init_pci_block_devices() -> usize {
                         virtio_dev.get_notify_addr(0),
                         dummy_isr_addr,
                         dummy_isr_addr) {
-                        None => {}
+                        None => {
+                            crate::pr_warn!(
+                                "virtio-blk: queue alloc failed at {:#x} (queue_max {})",
+                                ecam_addr, queue_max
+                            );
+                        }
                         Some(virt_queue) => {
                             match virtio_dev.setup_queue(0, &virt_queue) {
                                 Ok(()) => {
@@ -476,12 +496,24 @@ pub fn init_pci_block_devices() -> usize {
                                     );
                                     device_count += 1;
                                 }
-                                Err(_) => {}
+                                Err(_) => {
+                                    crate::pr_warn!(
+                                        "virtio-blk: queue setup failed at {:#x}",
+                                        ecam_addr
+                                    );
+                                }
                             }
                         }
                     }
                 }
-                Err(_) => {}
+                Err(e) => {
+                    // Cap-walk or BAR assignment failure — the likely home
+                    // of the boot-time find/miss flake; loud for diagnosis.
+                    crate::pr_warn!(
+                        "virtio-blk: VirtIOPCI init failed at {:#x}: {}",
+                        ecam_addr, e
+                    );
+                }
             }
         }
     }
