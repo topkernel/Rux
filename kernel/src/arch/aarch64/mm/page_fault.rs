@@ -226,6 +226,103 @@ fn try_expand_stack(
     MmFaultResult::Handled
 }
 
+// ==================== PROT_NONE marker re-presentation ====================
+
+/// R-WRITESTORM-2 twin: a fault landed on a PROT_NONE marker leaf
+/// (mprotect(prot==0)'s hardware-denied descriptor). The covering VMA
+/// is the authority: if it grants the access, re-present the leaf with
+/// the VMA's permissions (PPN + COW/PCACHE software bits preserved, W
+/// deferred through COW per INV-COW-1); otherwise the access is a real
+/// protection violation.
+fn protnone_represent(
+    addr_space: &AddressSpace,
+    root_ppn: u64,
+    fault_addr: VirtAddr,
+    flags: u32,
+) -> MmFaultResult {
+    use crate::mm::page::VirtAddr as PageVirtAddr;
+
+    let is_write = flags & FaultFlags::WRITE != 0;
+    let is_exec = flags & FaultFlags::EXEC != 0;
+    let is_read = flags & FaultFlags::READ != 0;
+
+    // VMA lookup + access grant (riscv64 twin's verify order)
+    let vma_mgr = addr_space.vma_read();
+    let Some(vma) = (vma_mgr.find(PageVirtAddr::new(fault_addr.as_usize()))) else {
+        // Was mapped (marker), now outside every VMA — a real gap.
+        return MmFaultResult::PermissionDenied;
+    };
+    let vma_flags = vma.flags();
+    if is_write && !vma_flags.is_writable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_exec && !vma_flags.is_executable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    if is_read && !vma_flags.is_readable() {
+        return MmFaultResult::PermissionDenied;
+    }
+    drop(vma_mgr);
+
+    // Compose the re-presented software mask from the VMA grant
+    let mut sw = PageTableEntry::V | PageTableEntry::U
+        | PageTableEntry::A | PageTableEntry::D;
+    if vma_flags.is_readable() {
+        sw |= PageTableEntry::R;
+    }
+    if vma_flags.is_writable() {
+        sw |= PageTableEntry::W | PageTableEntry::R; // W requires R
+    }
+    if vma_flags.is_executable() {
+        sw |= PageTableEntry::X;
+    }
+
+    // Re-present under the PTE section, re-checking the marker (R7-C3
+    // discipline: the leaf may have moved under us between the
+    // lock-free walk and the section).
+    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    // SAFETY: read-only walk on the mm's root.
+    let Some((_ppn, now)) = (unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
+        return MmFaultResult::PermissionDenied;
+    };
+    if !super::mm_ops::is_protnone_marker(now) {
+        // Someone re-presented/unmapped it first: the fresh state rules.
+        return MmFaultResult::Handled;
+    }
+    let cow_bit = now & super::mm_ops::cow_flags::COW;
+    let pcache_bit = now & super::mm_ops::cow_flags::PCACHE;
+    if cow_bit != 0 {
+        sw |= cow_bit;
+        sw &= !PageTableEntry::W; // W deferred to the COW fault
+    }
+    if pcache_bit != 0 {
+        sw |= pcache_bit;
+        // PRIVATE cache leaf never gains W in place (first write goes
+        // through COW); a SHARED cache leaf keeps W (stores must land
+        // in the cache frame). PCACHE is dormant on aarch64 today; the
+        // ownership rule rides the bit (riscv64 twin).
+        if sw & PageTableEntry::W != 0
+            && !super::mm_ops::cow_flags::pte_is_shared_cache(now)
+        {
+            sw |= super::mm_ops::cow_flags::COW;
+            sw &= !PageTableEntry::W;
+        }
+    }
+
+    // Write the L3 leaf: rebuild preserves the PPN (OUTPUT_ADDR field).
+    // SAFETY: root_ppn is this mm's live root; marker re-checked under
+    // the section.
+    if let Some(l3) = (unsafe { super::mmu_init::user_l3_table_for(root_ppn, fault_addr.bits()) }) {
+        let idx = ((fault_addr.bits() >> PAGE_SHIFT) & 0x1FF) as usize;
+        // SAFETY: l3 from the walker; idx masked to 9 bits.
+        unsafe { (*l3).set(idx, PageTableEntry::rebuild_user_leaf(now, sw)) };
+        // SAFETY: this translation changed; drop any cached walk.
+        unsafe { super::asid::flush_tlb_page(fault_addr.bits() as usize, 0) };
+        return MmFaultResult::Handled;
+    }
+    MmFaultResult::PermissionDenied
+}
+
 // ==================== Main Fault Handler ====================
 
 /// handle_mm_fault - handle a user-mode page fault (twin contract):
@@ -246,8 +343,8 @@ pub fn handle_mm_fault(
     let page_virt_addr = PageVirtAddr::new(fault_addr.as_usize());
     let root_ppn = addr_space.root_ppn();
 
-    // Already-mapped check (lock-free; twin R-WRITESTORM-2's PROT_NONE
-    // marker arm omitted — aarch64 mprotect does not create markers).
+    // Already-mapped check (lock-free; the PROT_NONE marker arm runs in
+    // the branch below — markers count as mapped leaves).
     // SAFETY: read-only walk on the mm's root.
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits()).is_some()
@@ -259,6 +356,23 @@ pub fn handle_mm_fault(
     let is_user = flags & FaultFlags::USER != 0;
 
     if already_mapped {
+        // R-WRITESTORM-2 (riscv64 twin): if the leaf is a PROT_NONE
+        // marker (V|U, no R/W/X, PPN preserved — installed by
+        // mprotect(prot==0)) and the covering VMA grants this access,
+        // RE-PRESENT the leaf with the VMA's permissions, preserving
+        // the PPN and the COW software bit (W deferred to the COW
+        // fault, INV-COW-1). A stale marker is advisory PTE state, not
+        // a protection decision: a fault under a VMA that grants the
+        // access must succeed regardless of the region's mprotect
+        // history (the marker's HW denial raised this fault; the VMA
+        // is the authority now).
+        // SAFETY: read-only walk on the mm's root.
+        if let Some((_ppn, raw)) = unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) } {
+            if super::mm_ops::is_protnone_marker(raw) {
+                return protnone_represent(addr_space, root_ppn, fault_addr, flags);
+            }
+        }
+
         // COW check first (write fault on an RO+COW leaf)
         // SAFETY: read-only walk.
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
