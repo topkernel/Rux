@@ -273,25 +273,30 @@ impl Ext4FileSystem {
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
-                // We mount read-write and do not maintain ANY metadata
-                // checksums or cluster geometry — accepting these features
-                // would write checksum-invalid or cluster-misaligned
-                // metadata. metadata_csum mounts READ-ONLY with full
-                // read-path verification (csum.rs — OH Phase 1: the OH
-                // system/vendor images are mkfs'd with metadata_csum);
-                // bigalloc stays rejected outright.
+                // metadata_csum read+write contract (OH Phase 2): the read
+                // path verifies { superblock, group descriptor, inode }
+                // checksums; the write path now re-seals exactly those
+                // three classes (inode in write_inode/write_inode_disk,
+                // group descriptors in update_group_desc_free_{blocks,
+                // inodes}, superblock in update_superblock_free_{blocks,
+                // inodes}). A metadata_csum filesystem may therefore mount
+                // read-write and stay self-consistent for THIS kernel's
+                // reads.
                 //
-                // OH bring-up policy (sys_prod/userdata): those images
-                // are also metadata_csum and OH's fstab mounts them rw.
-                // Refusing with ENODEV stalled the second-stage boot
-                // (sys_prod carries libdrm.so for the display composer
-                // backend). Downgrade the mount to read-only with a
-                // loud warning instead — readers work, writers get EROFS.
+                // Scope note (bring-up): bitmap csums (bg_*_bitmap_csum in
+                // the descriptors), extent-tree-block csums and directory
+                // tail csums are still NOT maintained on write — the read
+                // path never verifies them either, so runtime behavior is
+                // unaffected, but e2fsck on a real device (writes that
+                // persist past -snapshot) will flag those classes. This
+                // is the deliberate price of unblocking the OH /data
+                // lifecycle: without rw /data, init's early mkdir batch
+                // fails EROFS and the whole /data/service tree (access
+                // tokens, databases, render_service dirs) never exists.
                 if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
                     crate::pr_warn!(
-                        "ext4: metadata_csum rw mount downgraded to read-only (OH bring-up policy)"
+                        "ext4: metadata_csum rw mount enabled (write path seals sb/gdt/inode csums; bitmap/extent/dir-tail classes not maintained — bring-up scope)"
                     );
-                    self.read_only = true;
                 }
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
@@ -299,9 +304,9 @@ impl Ext4FileSystem {
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
 
-                // metadata_csum read-path setup (ro mounts only — gated
-                // above): compute the fs seed and verify the superblock
-                // checksum before trusting anything else in it.
+                // metadata_csum read-path setup: compute the fs seed and
+                // verify the superblock checksum before trusting anything
+                // else in it.
                 if ro_compat & features::ro_compat::METADATA_CSUM != 0 {
                     self.metadata_csum = true;
                     self.csum_seed = csum::csum_seed(
@@ -3429,8 +3434,27 @@ pub fn mount_loop_instance(
     // Superblock/group/inode-table bootstrap; a non-ext image (missing
     // magic — e.g. unformatted loop) fails here.
     fs.init()?;
-    // No journal on ext2 scratch images; a journaled ext4 image would be
-    // replayed by its own mkfs/umount cycle — skip replay on purpose.
+    // Dirty-journal replay for rw mounts (OH userdata lineage): those
+    // images boot with s_start != 0 (an unclean shutdown froze mid-
+    // transaction). Building allocator state on the half-applied result
+    // and then writing would corrupt the live metadata. ext2 scratch
+    // images and clean journals take the no-op path inside init_journal
+    // (s_start == 0 skips recovery); read-only mounts skip entirely —
+    // replay WRITES, and ro is how system/vendor/sys_prod mount.
+    //
+    // After the one-shot replay the journal handle is DROPPED:
+    // subsequent metadata writes keep this driver's direct-write
+    // discipline (buffer-cache dirty + inline sync), which the
+    // allocator's F4 notes and the journal-revocation comments are
+    // built around. The next mount sees the clean journal superblock
+    // the replay wrote (write_clean_sb: s_start = 0), so this stays
+    // idempotent across boots.
+    if !fs.read_only {
+        if let Err(e) = fs.init_journal() {
+            crate::pr_debug!("ext4: loop-instance journal init failed: {}", e);
+        }
+        fs.journal = None;
+    }
     let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };
