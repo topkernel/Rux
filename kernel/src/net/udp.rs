@@ -456,7 +456,9 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
     // P1 IPv6: a v6-connected socket sends through the v6 wire path.
     if socket.is_v6 {
         if !socket.connected {
-            return -107; // ENOTCONN
+            // U1: unconnected datagram socket with no destination is
+            // EDESTADDRREQ (reference udp_sendmsg), not ENOTCONN.
+            return -89; // EDESTADDRREQ
         }
         let dest = socket.remote_ip6;
         let port = socket.remote_port;
@@ -466,8 +468,10 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
     let (dest_ip, dest_port) = if socket.connected {
         (socket.remote_ip, socket.remote_port)
     } else {
-        // Unconnected UDP socket needs destination address specified
-        return -107; // ENOTCONN
+        // Unconnected UDP socket needs a destination address: EDESTADDRREQ
+        // (reference udp_sendmsg; POSIX send(2) lists it as "the socket is
+        // not connection-mode and no peer address is set").
+        return -89; // EDESTADDRREQ
     };
 
     udp_send_locked(socket, buf, dest_ip, dest_port)
@@ -583,9 +587,10 @@ fn udp_send_locked6(
 ) -> isize {
     use crate::net::ipv6::{self, next_header};
 
-    if buf.is_empty() {
-        return 0;
-    }
+    // U1: a zero-length UDP payload is a legal datagram (RFC 768; the
+    // reference transmits the 8-byte header and the peer's recvfrom
+    // returns 0). The old early return reported success WITHOUT
+    // transmitting, so zero-length pokes never crossed the wire.
 
     // Multicast / link-local requires no SO_BROADCAST gate (v6 has no
     // broadcast; ff00::/8 is multicast).
@@ -773,9 +778,8 @@ pub fn udp_rcv6(
 ///   datagrams now flow through IPv4 fragmentation);
 /// - the UDP checksum is computed on TX (it used to go out as 0).
 fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
-    if buf.is_empty() {
-        return 0;
-    }
+    // U1: zero-length UDP datagrams are transmitted (header-only frame),
+    // like the reference — the old early return swallowed them.
 
     // P2 SO_BROADCAST: sending to a broadcast address without the option
     // fails with EACCES (Linux udp_sendmsg ip_mc_sf_allow / EACCES gate).
