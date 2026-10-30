@@ -142,7 +142,15 @@ aarch64_vector_table:
     str     x22, [sp, #S_SYSCALLNO]
 
     // frame->sp: user sp (sp_el0) or the interrupted EL1 sp
-    tbz     x21, #2, 990f            // SPSR.M[3:2] == 0b00 -> EL0
+    // (re-load SPSR from the frame: x21 was overwritten with ELR after
+    // the pstate store — the old tbz x21,#2 tested a bit of the faulting
+    // PC, so any EL1 fault whose PC had bit 2 clear was recorded as an
+    // EL0 frame whose ->sp is sp_el0 (garbage in a kernel thread that
+    // never ran at EL0); the fixed-up return then installed that
+    // garbage into SP — the cascading frame-push faults at
+    // 0xffffffffffff.... after the first copy_to_user fixup rewind.)
+    ldr     x22, [sp, #S_PSTATE]
+    tbz     x22, #2, 990f            // SPSR.M[3:2] == 0b00 -> EL0
     add     x22, sp, #S_FRAME_SIZE
     str     x22, [sp, #S_SP]
     b       991f
@@ -271,10 +279,18 @@ restore_and_eret:
     ldp     x14, x15, [sp, #16*7]
     ldp     x16, x17, [sp, #16*8]
     ldp     x18, x19, [sp, #16*9]
-    ldp     x23, x24, [sp, #16*11]
-    ldp     x25, x26, [sp, #16*12]
-    ldp     x27, x28, [sp, #16*13]
-    ldp     x29, x30, [sp, #16*14]
+    // x20/x21/x22 stay in registers (exit triple) — so the tail pairs
+    // start at the ODD register x23 and cannot use 16* pairs: 16*11 is
+    // x22's slot (176), x23's is 184. The old 16* pairing loaded every
+    // restored register from its NEIGHBOUR's slot (x30 got x29's value
+    // — the frame pointer), so any EL1 trap return (the uaccess fixup
+    // rewind was the first exerciser) ret'd through a stack address
+    // into an Undefined exception. Explicit slot offsets; 184 is
+    // 8-mod-16, legal for X-reg pairs on Normal memory with SCTLR.A=0.
+    ldp     x23, x24, [sp, #(23*8)]
+    ldp     x25, x26, [sp, #(25*8)]
+    ldp     x27, x28, [sp, #(27*8)]
+    ldp     x29, x30, [sp, #(29*8)]
 
     msr     elr_el1, x21
     msr     spsr_el1, x20

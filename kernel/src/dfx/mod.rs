@@ -119,6 +119,15 @@ pub fn init() {
     register_debugfs_knobs();
     // Publish the tracepoint control surface (tracefs).
     crate::trace::files::register();
+
+    // aarch64 bring-up probe (dfx-aa64-uaccess-selftest): exercise the
+    // uaccess exception-table fault containment with a poisoned user
+    // pointer before init exec — every access must come back EFAULT
+    // with no oops. Compile-time gated (the aarch64 cmdline cannot
+    // carry a dfx= switch yet: the EL2 trampoline clobbers the x0 DTB
+    // pointer, so cmdline parsing falls back to the default string).
+    #[cfg(all(feature = "aarch64", feature = "dfx-aa64-uaccess-selftest"))]
+    crate::arch::aarch64::uaccess::selftest();
 }
 
 /// Register the DFX instrument switches in debugfs.

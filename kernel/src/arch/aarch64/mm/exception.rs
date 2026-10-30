@@ -6,9 +6,12 @@
 //!
 //! fixup_exception is arch-neutral (the .ex_table section format and the
 //! linker symbols match the other backends byte-for-byte). do_page_fault
-//! decodes the aarch64 fault registers (ESR/FAR) and routes into
-//! handle_mm_fault; the full kill/signal policy is stage 2 (until the
-//! trap entry path delivers frames, faults cannot occur from user mode).
+//! decodes the aarch64 fault registers (ESR/FAR): a kernel-mode abort at
+//! a uaccess fault site rewinds regs.pc to the fixup landing pad
+//! (MmFaultResult::Fixed → the trap return re-executes there and the
+//! copy reports a short count / -EFAULT instead of an oops); user-mode
+//! faults route into handle_mm_fault once the mm lane lands its stage-2
+//! body (VMA demand fill / COW / kill policy).
 
 use super::memory_layout::VirtAddr;
 use super::page_fault::{handle_mm_fault, FaultFlags};
@@ -100,17 +103,14 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         if regs.kernel_mode() { "kernel" } else { "user" }
     );
 
-    // Kernel-mode fault: try the exception table first (uaccess copies)
+    // Kernel-mode fault: try the exception table first (uaccess copies).
+    // A fault inside a uaccess fault-site returns to the fixup landing
+    // pad, which reports a short count — the caller surfaces -EFAULT.
+    // Identical to the riscv64 twin's kernel-mode arm (regs.epc = fixup).
     if regs.kernel_mode() {
-        if let Some(_fixup) = fixup_exception(regs.pc) {
-            // STAGE 2: regs.pc = fixup; return MmFaultResult::Fixed.
-            // The trap entry path (which sets pc from the fixup) arrives
-            // with the frame protocol; until then report loudly.
-            crate::pr_err!(
-                "aarch64 ex_table fixup at pc={:#x} — needs the stage-2 trap path",
-                regs.pc
-            );
-            return MmFaultResult::KernelPanic;
+        if let Some(fixup) = fixup_exception(regs.pc) {
+            regs.pc = fixup;
+            return MmFaultResult::Fixed;
         }
     }
 
@@ -128,7 +128,14 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 }
 
 /// No-address-space fault handling (early boot / kernel thread)
-fn no_context(regs: &PtRegs, addr: VirtAddr) -> MmFaultResult {
+fn no_context(regs: &mut PtRegs, addr: VirtAddr) -> MmFaultResult {
+    // Check the exception table before declaring the fault fatal
+    // (riscv64 twin's no_context: a uaccess fault in a kernel thread —
+    // no address space — still must return through the fixup).
+    if let Some(fixup) = fixup_exception(regs.pc) {
+        regs.pc = fixup;
+        return MmFaultResult::Fixed;
+    }
     crate::pr_err!(
         "aarch64 page fault in no-address-space context: addr={:#x} pc={:#x}",
         addr.bits(),
