@@ -36,6 +36,14 @@ dfx-taskdump-bt = []
 # DFX: futex protocol tracer (one serial line per futex op / wake / return).
 # Diagnostic builds only.
 dfx-futex-trace = []
+# DFX (aarch64 bring-up): boot-time uaccess fault-containment self-check.
+# Probes the exception-table path with a poisoned user pointer at dfx
+# init (before init exec): every access must return a short count /
+# -EFAULT with NO oops. Compile-time gated like dfx-lock-owner; the
+# aarch64 cmdline falls back to the default string (the DTB pointer is
+# clobbered by the EL2 trampoline), so a dfx= switch cannot be armed on
+# that board yet.
+dfx-aa64-uaccess-selftest = []
 
 [[bin]]
 name = "rux"
