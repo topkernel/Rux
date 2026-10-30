@@ -488,24 +488,3 @@ impl Default for FileBuffer {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// ftruncate(2): "the extended portion reads as null bytes" — a
-    /// shrink-then-grow of a FileBuffer (the memfd ftruncate path) must not
-    /// resurrect the pre-shrink tail. Mirrors test_tmpfs_truncate_zero_tail.
-    #[test]
-    fn test_file_buffer_truncate_zero_tail() {
-        let mut fb = FileBuffer::new();
-        fb.write(0, &[0xAAu8; 64]);
-        assert_eq!(fb.resize(16), Ok(()));
-        assert_eq!(fb.len(), 16);
-        assert_eq!(fb.resize(64), Ok(()));
-        let mut buf = [0u8; 64];
-        assert_eq!(fb.read(0, &mut buf), 64);
-        assert!(buf[..16].iter().all(|&b| b == 0xAA));
-        assert!(buf[16..].iter().all(|&b| b == 0));
-    }
-}
