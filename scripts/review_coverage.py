@@ -225,29 +225,29 @@ STATUS = {
     "kernel/src/tests/*": ("todo", ""),
     "kernel/src/trace/files.rs": ("done", "written by this review (tracefs files)"),
     "kernel/src/trace/mod.rs": ("done", "written by this review (tracepoint core)"),
-    "kernel/src/arch/aarch64/boot.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/boot/boot.S": ("todo", ""),
-    "kernel/src/arch/aarch64/dtb_blob.S": ("todo", ""),
-    "kernel/src/arch/aarch64/trap.S": ("todo", ""),
+    "kernel/src/arch/aarch64/boot.rs": ("done", "DTB-pointer extern + get_dtb_pointer; boot.S publishes the pointer pre-MMU and re-publishes post-MMU"),
+    "kernel/src/arch/aarch64/boot/boot.S": ("fixed", "read end to end (this review): EL2 drop, early TTBR0/TTBR1 tables, MAIR/TCR, secondary_start PSCI path; stray 'str x0, [x1]' stored the vector-table base into dtb_pointer (latent — the post-MMU re-publish repaired it before any consumer), store removed"),
+    "kernel/src/arch/aarch64/dtb_blob.S": ("done", "7-line .incbin of the QEMU virt DTB"),
+    "kernel/src/arch/aarch64/trap.S": ("done", "read end to end: VBAR vectors, TRAP_BODY save protocol, SPSR-based EL0/EL1 sp select, FPSIMD capture/restore, exit loop preempt gate, restore_and_eret slot map, ret_from_fork trampolines"),
     "kernel/src/drivers/timer/aarch64.rs": ("todo", ""),
     "kernel/src/arch/aarch64/context.rs": ("part", "switch_mm/TTBR0/ASID paths, context_switch step order, R56 switch_abort twin — mirrors riscv64"),
-    "kernel/src/arch/aarch64/cpu.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/cpu.rs": ("done", "DAIF/timer/TPIDR/barrier primitives; local_flush_tlb_all vmalle1"),
     "kernel/src/arch/aarch64/ipi.rs": ("part", "IPI surface mirrors the riscv64 twin (request/send/flush/handle); GIC SGI wiring from the aarch64 campaign"),
-    "kernel/src/arch/aarch64/mm/asid.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/exception.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/memory_layout.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mm_ops.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mmu_init.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mod.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/page_fault.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/pagetable.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/mm/asid.rs": ("fixed", "read end to end (this review): tlbi operand encodings, composed satp; the bump-only ASID counter exhausted permanently after 254 mm creations (later mms ran ASID 0 = TLB-miss-per-access) — riscv64 twin's reuse bitmap ported, AsidContext::free gained the twin's flush-before-free"),
+    "kernel/src/arch/aarch64/mm/exception.rs": ("fixed", "read end to end (this review): fixup table search, bad_area/no_context, kernel demand-fill-before-fixup (R82/R78 parity), non-canonical gate — the in_interrupt guard both twins carry was MISSING (an IRQ-context fault would run the sleeping mm path); guard added, x86_64 form"),
+    "kernel/src/arch/aarch64/mm/fixmap.rs": ("done", "slot map anchored at VMEMMAP_START, PL011 earlycon slot"),
+    "kernel/src/arch/aarch64/mm/memory_layout.rs": ("done", "TTBR1 bands, VA_PA_OFFSET identity-from-zero linear map, mmio_alias/ECAM alias, VirtAddr sign extension, user_addr block (256GB parity)"),
+    "kernel/src/arch/aarch64/mm/mm_ops.rs": ("done", "read end to end: walker, mmap/MAP_FIXED split surgery, munmap/zap, unmap_pages device/foreign guards, fork COW walk + SMP shootdown, handle_cow_fault (S7 pre-alloc, tri-state, shootdown), mprotect range + PROT_NONE markers; note: mprotect_pte_range doc says aside1e1is but emits all-ASID vaae1is (conservative, correct)"),
+    "kernel/src/arch/aarch64/mm/mmu_init.rs": ("done", "read end to end: staged PT allocator + ledger-guarded frees, TTBR1 adoption from boot.S, linear-map block sizing, device windows, free_user_page_tables teardown"),
+    "kernel/src/arch/aarch64/mm/mod.rs": ("done", "module re-export tree"),
+    "kernel/src/arch/aarch64/mm/page_fault.rs": ("done", "read end to end: stack expansion, PROT_NONE marker re-presentation, handle_mm_fault fill arms (file SIGBUS at EOF, effective-size re-derivation, race-lost free), PTE section + R7-C3 re-checks"),
+    "kernel/src/arch/aarch64/mm/pagetable.rs": ("done", "descriptor model: hardware attrs synthesized from software R/W/X/U/G bits, AP/AP_RO/XN/nG derivation, PROT_NONE marker constructor, no table-XN bits, Satp abstraction"),
     "kernel/src/arch/aarch64/mod.rs": ("todo", ""),
     "kernel/src/arch/aarch64/process.rs": ("part", "start_thread PSTATE, copy_thread parity, flush_thread (FPSIMD + tp_value + live TPIDR_EL0 clear) reviewed"),
-    "kernel/src/arch/aarch64/pt_regs.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/pt_regs.rs": ("done", "Linux arm64 frame layout (320B 16-aligned), ESR decode, pseudo-cause IRQ/FIQ/SError mapping"),
     "kernel/src/arch/aarch64/smp.rs": ("part", "mpidr mapping, boot-complete park/signl shape reviewed against the riscv64 twin"),
-    "kernel/src/arch/aarch64/thread.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/trap.rs": ("part", "trap routing + do_page_fault (demand-fill-before-fixup R82, fixup R78, stack-overflow panic) reviewed; mm/ + boot remain"),
+    "kernel/src/arch/aarch64/thread.rs": ("done", "FPSIMD eager model: live fpu image + user_fpsimd entry-capture buffer, offset exports"),
+    "kernel/src/arch/aarch64/trap.rs": ("fixed", "read end to end (mm/ + boot remainder of the earlier routing pass): dispatch, fault-flag derivation (WnR ISS bit 6), CURRENT_PT_REGS swap, bad-vector dumper; dfsc_class rows contradicted the ARM DFSC encoding (AF 0x09-0x0C / permission 0x0D-0x0F|0x13 vs truth AF 0x08-0x0B, permission 0x0C-0x0F; dead diagnostics) — rows corrected"),
     "kernel/src/arch/aarch64/uaccess.rs": ("part", "access_ok/copy_from_user/clear_user semantics match the twins (zero-fill tails); byte-loop extable copies; NOTE: no explicit fault_in_write retry in copy_to_user — covered by do_page_fault's kernel-uaccess demand-fill-first (R82), a belt-layer divergence from the riscv64/x86_64 second belt, not a defect"),
     "kernel/src/arch/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/boot.S": ("todo", ""),
@@ -463,6 +463,36 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("4ee3e430", "kernel/src/arch/aarch64/mm/asid.rs",
+     "The aarch64 ASID allocator bumped NEXT_ASID monotonically and never consulted the in-use "
+     "table: after 254 mm creations (any process-churning workload — LTP forks thousands) "
+     "alloc_asid returned None FOREVER and every later mm fell back to ASID 0 via context.rs's "
+     "unwrap_or(0) — functionally correct (every leaf write invalidates all-ASID, every switch "
+     "full-flushes) but every user access TLB-misses for the rest of the boot. The riscv64 twin "
+     "scans a reuse bitmap and only exhausts under genuine concurrency. Twin divergence fixed: "
+     "the twin's bitmap allocator ported over the 256-entry pool (TCR_EL1.AS = 0); reuse is safe "
+     "because stale entries die at every all-ASID leaf invalidation and every full-flush switch."),
+    ("cfc04591", "kernel/src/arch/aarch64/mm/exception.rs",
+     "aarch64 do_page_fault ran handle_mm_fault unconditionally — the in_interrupt guard both "
+     "twins carry was missing, so a fault taken from an IRQ handler would run the sleeping "
+     "mm fault path (allocator + PTE section) from interrupt context. Ported the x86_64 guard "
+     "form: in_interrupt() routes to no_context, which still unwinds a uaccess copy through "
+     "the exception table before giving up (the riscv64 arm additionally heals preempt-count "
+     "underflow — no aarch64 counterpart engine, not ported)."),
+    ("6e808eea", "kernel/src/arch/aarch64/boot/boot.S",
+     "The 'Save the DTB pointer' step stored x0 into dtb_pointer, but x0 held the "
+     "aarch64_vector_table address from the VBAR_EL1 setup immediately above — it clobbered "
+     "the DTB pointer published at .Lat_el1 entry. Latent only: nothing reads dtb_pointer "
+     "between the clobber and the post-MMU re-publish that repaired it, so the boot worked; "
+     "the stray store contradicted its own comment and would feed the vector table to the "
+     "first pre-MMU-republish reader if one ever appeared. Store removed."),
+    ("00338fd2", "kernel/src/arch/aarch64/trap.rs",
+     "dfsc_class rows contradicted the ARM DDI 0487 DFSC encoding (the rows Linux arm64 names "
+     "FSC_FAULT/FSC_ACCESS/FSC_PERM): access-flag faults are 0x08-0x0B, permission faults "
+     "0x0C-0x0F — the draft read AF as 0x09-0x0C (misclassifying permission level 0) and "
+     "permission as 0x0D-0x0F|0x13 (0x13 is not a permission row; AF level 0 was missed). "
+     "Dead diagnostics today (zero consumers in-tree); fixed so the first consumer inherits "
+     "the right interface."),
     ("eaefd06f", "kernel/src/drivers/pci/mod.rs",
      "04e23b45 (aarch64 campaign) shifted the modern virtio PCI device IDs to net=0x1040/blk="
      "0x1041, reading the reserved base 0x1040 as the net id. Modern IDs are 0x1040 + virtio "

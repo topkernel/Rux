@@ -103,6 +103,12 @@ _start:
     add     x0, x0, :lo12:aarch64_vector_table
     msr     vbar_el1, x0
     isb
+    // (The DTB pointer was published above with physical addressing and
+    // is re-published at its linked VA once the MMU is on; nothing may
+    // read it in between. An older draft stored x0 here — the vector
+    // table base by then — clobbering the DTB pointer until the
+    // post-MMU re-publish repaired it; two review lanes removed the
+    // store independently.)
     // Per-CPU identity: cpu index 0 (TPIDR_EL1 protocol, smp::cpu_id)
     msr     tpidr_el1, xzr
 
