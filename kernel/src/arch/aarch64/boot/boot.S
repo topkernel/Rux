@@ -103,13 +103,6 @@ _start:
     add     x0, x0, :lo12:aarch64_vector_table
     msr     vbar_el1, x0
     isb
-    // ------------------------------------------------------------------
-    // 2. Save the DTB pointer (physical addressing: MMU still off)
-    // ------------------------------------------------------------------
-    adrp    x1, dtb_pointer             // PC-relative page → physical
-    add     x1, x1, :lo12:dtb_pointer
-    str     x0, [x1]
-
     // Per-CPU identity: cpu index 0 (TPIDR_EL1 protocol, smp::cpu_id)
     msr     tpidr_el1, xzr
 

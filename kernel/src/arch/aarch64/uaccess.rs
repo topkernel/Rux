@@ -150,12 +150,15 @@ extern "C" {
 
 /// Copy data from kernel to user space. Returns number of uncopied bytes.
 ///
-/// NOTE: the riscv64 twin additionally retries once through
-/// fault_in_write (COW/demand resolution) when the first copy faults;
-/// that helper needs the aarch64 handle_mm_fault/handle_cow_fault stage-2
-/// bodies (mm lane) and lands with them. Until then a resolvable COW
-/// fault reports a short count — no user tasks exist on this board yet,
-/// so the case cannot arise.
+/// NOTE: unlike the riscv64 twin, no fault_in_write retry runs here. The
+/// resolvable-fault coverage the twin gets from that retry is provided
+/// by the R82 demand-fill arm in mm/exception.rs::do_page_fault: a
+/// kernel-mode uaccess fault on a VMA-covered user address (not-present
+/// or COW) is resolved by the fault handler itself before the
+/// exception-table fixup ever sees it, so the instruction retries and
+/// the copy proceeds. Only unresolvable faults (no VMA, no mapping
+/// possible) reach the fixup and report a short count — the correct
+/// answer for those.
 ///
 /// # Safety
 /// - `from` must point to valid kernel memory

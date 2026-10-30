@@ -14,8 +14,7 @@ use crate::process::task::Task;
 
 // Field offsets for the asm (thread::ThreadStruct)
 use super::thread::{
-    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP, THREAD_TP_VALUE,
-    THREAD_USER_FPSIMD, THREAD_USER_FPSIMD_FPCR, THREAD_USER_FPSIMD_FPSR,
+    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP, THREAD_TP_VALUE, THREAD_USER_FPSIMD,
 };
 
 core::arch::global_asm!(

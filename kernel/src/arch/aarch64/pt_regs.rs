@@ -312,9 +312,9 @@ impl Cause {
         match ec {
             0x00 => Cause::Unknown,
             0x01 => Cause::TrappedWfx,
-            0x15 => Cause::EcallUser,      // SVC (AArch64)
-            0x11 => Cause::EcallUser,      // SVC (AArch32)
-            0x12 => Cause::EcallSupervisor, // HVC (PSCI conduit)
+            0x11 => Cause::EcallUser,      // SVC (AArch32 state)
+            0x15 => Cause::EcallUser,      // SVC (AArch64 state)
+            0x16 => Cause::EcallSupervisor, // HVC (AArch64 state — PSCI conduit if it ever reaches EL1)
             0x20 => Cause::InstructionAbort,
             0x21 => Cause::InstructionAbortCur,
             0x24 => Cause::DataAbort,
