@@ -242,9 +242,14 @@ _start:
     // TCR_EL1: IPS=0 (32-bit PA), TG1=4KB(2<<30), SH1=IS(3<<28),
     //          ORGN1/IRGN1=WB(1<<26 / 1<<24), T1SZ=16 (48-bit),
     //          TG0=4KB(0), SH0=IS(3<<12), ORGN0/IRGN0=WB, T0SZ=16
-    // TCR = TG1(2b10)<<30 | SH1(3)<<28 | ORGN1(1)<<26 | IRGN1(1)<<24
-    //       | T1SZ(16)<<16 | SH0(3)<<12 | ORGN0(1)<<10 | IRGN0(1)<<8 | T0SZ(16)
-    ldr     x0, =0xB5103510
+    // TCR = IPS(2b101=44-bit PA)<<32 | TG1(2b10)<<30 | SH1(3)<<28
+    //       | ORGN1(1)<<26 | IRGN1(1)<<24 | T1SZ(16)<<16 | SH0(3)<<12
+    //       | ORGN0(1)<<10 | IRGN0(1)<<8 | T0SZ(16)
+    // IPS must cover QEMU virt's highmem windows: ECAM at phys
+    // 0x40_1000_0000 and the 64-bit MMIO window at 0x80_0000_0000 — the
+    // original 32-bit IPS faulted every access above 4GB with a level-2
+    // address-size abort (cortex-a72 implements 44-bit PA).
+    ldr     x0, =0x5B5103510
     msr     tcr_el1, x0
 
     // TTBR0 = idmap_l0 (phys), TTBR1 = kern_l0 (phys)

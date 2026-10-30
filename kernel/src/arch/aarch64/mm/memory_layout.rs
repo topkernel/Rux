@@ -157,8 +157,16 @@ pub const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 pub const GICD_BASE: u64 = 0x0800_0000;
 pub const GICR_BASE: u64 = 0x080A_0000;
 
-/// PCIe ECAM base address (virt high MMIO)
-pub const PCIE_ECAM_BASE: u64 = 0x4010_0000;
+/// PCIe ECAM base address (virt high MMIO). The DTB pcie@10000000 node
+/// carries this as reg = <0x40 0x10000000 0x00 0x10000000> — 0x40_1000_0000,
+/// 256MB above the 256GB mark, NOT 0x4010_0000 (that misread dropped the
+/// high address cell and landed inside RAM: config reads returned kernel
+/// image bytes — garbage that is neither sane IDs nor the 0xffffffff of an
+/// empty slot). Verified fixed across -m 1G/-m 2G via dumpdtb.
+pub const PCIE_ECAM_BASE: u64 = 0x40_1000_0000;
+
+/// ECAM window size: 256MB (256 buses × 1MB; bus 0 is all QEMU virt uses)
+pub const PCIE_ECAM_SIZE: u64 = 0x1000_0000;
 
 /// PCI MMIO base address (virt high MMIO window)
 pub const PCI_MMIO_BASE: u64 = 0x5000_0000;
@@ -174,23 +182,33 @@ pub const PCI_MMIO_BASE: u64 = 0x5000_0000;
 /// Base of the kernel-half alias of the low device window
 pub const MMIO_ALIAS_BASE: usize = VMALLOC_START;
 
-/// Alias window size: covers phys [0, 1GB) — every virt MMIO device
-/// (UART 0x0900_0000, virtio-mmio 0x0a00_0000, GIC 0x0800_0000); RAM
-/// starts at 0x4000_0000 so the alias never double-maps RAM.
-// 0x40000000 (below-RAM MMIO) plus 16MB past the RAM base: QEMU virt's
-// PCI ECAM window sits at phys 0x4010_0000 (DTB pcie@10000000 reg), just
-// above RAM base — the alias must cover it or every config read faults.
-pub const MMIO_ALIAS_SIZE: usize = 0x4000_0000 + 0x0100_0000;
+/// Alias window size: covers phys [0, 1GB) — every low virt MMIO device
+/// (UART 0x0900_0000, virtio-mmio 0x0a00_0000, GIC 0x0800_0000, and the
+/// 32-bit PCI BAR window 0x1000_0000..0x3eff_0000); RAM starts at
+/// 0x4000_0000 so the alias never double-maps RAM.
+pub const MMIO_ALIAS_SIZE: usize = 0x4000_0000;
+
+/// Second alias window: the ECAM lives at phys 0x40_1000_0000, far above
+/// the flat low window, so it gets its own mapping directly after it.
+/// mmio_alias() routes ECAM-range addresses here.
+pub const ECAM_ALIAS_BASE: usize = MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE;
+pub const ECAM_ALIAS_SIZE: usize = PCIE_ECAM_SIZE as usize;
 
 /// Compile-time placement guards (canonical upper half, below linear map)
 const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_0000_0000_0000_usize);
 const _: () = assert!(MMIO_ALIAS_BASE + MMIO_ALIAS_SIZE <= PAGE_OFFSET);
+const _: () = assert!(ECAM_ALIAS_BASE + ECAM_ALIAS_SIZE <= PAGE_OFFSET);
 
 /// Translate a low identity device address (va == phys, below
-/// MMIO_ALIAS_SIZE) to its permanent kernel-half alias.
+/// MMIO_ALIAS_SIZE) to its permanent kernel-half alias. ECAM-range
+/// addresses route to the dedicated second window.
 #[inline]
 pub const fn mmio_alias(low: u64) -> u64 {
-    MMIO_ALIAS_BASE as u64 + low
+    if low >= PCIE_ECAM_BASE && low < PCIE_ECAM_BASE + PCIE_ECAM_SIZE {
+        ECAM_ALIAS_BASE as u64 + (low - PCIE_ECAM_BASE)
+    } else {
+        MMIO_ALIAS_BASE as u64 + low
+    }
 }
 
 /// Device alias for DTB-probed MMIO (same translation; interface parity

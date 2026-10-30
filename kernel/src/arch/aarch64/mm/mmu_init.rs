@@ -518,25 +518,54 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 }
 
 /// Install the permanent device windows: the kernel-half MMIO alias
-/// (phys [0, 1GB) at MMIO_ALIAS_BASE) with Device-nGnRE attributes.
+/// (phys [0, 1GB) at MMIO_ALIAS_BASE) plus the ECAM window (phys
+/// [PCIE_ECAM_BASE, +PCIE_ECAM_SIZE) at ECAM_ALIAS_BASE), with
+/// Device-nGnRE attributes.
 pub fn setup_device_mappings() {
     unsafe {
-        // The alias window: 1GB of phys below RAM base, mapped as 2MB
-        // blocks (device attrs come from map_device semantics)
-        let mut pa = 0usize;
-        while pa < MMIO_ALIAS_SIZE {
-            let va = MMIO_ALIAS_BASE + pa;
-            // 2MB device blocks live at L2 — descend to it, then index
-            // by VA[29:21].
-            let l2_phys = match kernel_table_for(va as u64, 2) {
-                Some(p) => p,
-                None => break,
-            };
-            let l2 = get_page_table_virt(l2_phys);
-            let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
-            let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
-            (*l2).set(idx, entry);
-            pa += 2 << 20;
+        // Device windows as (first phys, alias VA base, total size); both
+        // map 2MB device blocks at L2.
+        const WINDOWS: [(usize, usize, usize); 2] = [
+            (0, MMIO_ALIAS_BASE, MMIO_ALIAS_SIZE),
+            (
+                PCIE_ECAM_BASE as usize,
+                ECAM_ALIAS_BASE,
+                ECAM_ALIAS_SIZE,
+            ),
+        ];
+        for &(phys_base, va_base, size) in WINDOWS.iter() {
+            let mut pa = phys_base;
+            let mut installed = 0usize;
+            while pa < phys_base + size {
+                let va = va_base + (pa - phys_base);
+                // 2MB device blocks live at L2 — descend to it, then index
+                // by VA[29:21].
+                let l2_phys = match kernel_table_for(va as u64, 2) {
+                    Some(p) => p,
+                    None => break,
+                };
+                let l2 = get_page_table_virt(l2_phys);
+                let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
+                let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
+                (*l2).set(idx, entry);
+                installed += 1;
+                pa += 2 << 20;
+            }
+            // Raw console write: printk isn't wired until the console
+            // driver registers later in boot (early println! is dropped).
+            use core::fmt::Write;
+            let ttbr1: u64;
+            unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let _ = write!(
+                w,
+                "devmap: phys {:#x}+{:#x} -> va {:#x}: {} blocks (pools l1/l2/l3 {}/{}/{}, ttbr1={:#x})\n",
+                phys_base, size, va_base, installed,
+                EARLY_L1_NEXT.load(Ordering::Relaxed),
+                EARLY_L2_NEXT.load(Ordering::Relaxed),
+                EARLY_L3_NEXT.load(Ordering::Relaxed),
+                ttbr1
+            );
         }
         crate::arch::cpu::local_flush_tlb_all();
     }
