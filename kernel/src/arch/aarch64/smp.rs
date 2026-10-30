@@ -350,6 +350,17 @@ static BOOT_COMPLETE: core::sync::atomic::AtomicBool =
 /// Called by boot CPU just before entering cpu_idle_loop.
 pub fn signal_boot_complete() {
     BOOT_COMPLETE.store(true, core::sync::atomic::Ordering::Release);
+    // Kick every started secondary out of its boot-complete wfi park.
+    // The SGI is a real GIC event now that the ICC_SGI1R encoding and
+    // Group-1 forwarding are fixed; its handler is a no-op — the wake
+    // itself is the point. (The parked secondary's own timer also wakes
+    // it within one tick; the kick makes it immediate and deterministic.)
+    let me = cpu_id();
+    for cpu in 0..MAX_CPUS {
+        if cpu != me && cpu_started(cpu) {
+            crate::arch::ipi::send_ipi_type(cpu, crate::arch::ipi::IpiType::Wakeup);
+        }
+    }
 }
 
 /// Called by secondary CPUs to check if boot is complete.
@@ -526,10 +537,17 @@ pub extern "C" fn secondary_cpu_entry(cpu: usize) -> ! {
     // spin-wait can detect us and proceed.
     mark_cpu_started(cpu);
 
-    // Set up trap handling and enable timer interrupts.
-    // Following the Linux model, TPIDR_EL1 holds the cpu index here and
-    // the scheduler will install the idle task pointer on init_secondary.
+    // Set up trap handling, then configure THIS cpu's GIC bank and
+    // unmask DAIF BEFORE the boot-complete wait: the wait parks in wfi,
+    // and a halted core whose pending interrupt is masked never wakes to
+    // re-evaluate the loop condition — the secondary parked there for
+    // the whole boot (invisible while the GICD_CTLR bug kept every
+    // interrupt line deasserted). With the CPU interface up and DAIF
+    // clear, the armed vtimer (and the boot cpu's completion kick)
+    // break the wfi properly and the timer's early-boot guard makes the
+    // pre-init ticks harmless.
     crate::arch::trap::init();
+    crate::arch::trap::enable_external_interrupt();
     crate::arch::trap::enable_timer_interrupt();
 
     // Wait for boot CPU to finish ALL single-CPU initialization.
@@ -540,9 +558,6 @@ pub extern "C" fn secondary_cpu_entry(cpu: usize) -> ! {
 
     // Boot CPU has finished init — safe to call kmalloc now.
     crate::sched::init_secondary(cpu);
-
-    // Enable external interrupts (GIC group 1) for this cpu.
-    crate::arch::trap::enable_external_interrupt();
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
     crate::sched::cpu_idle_loop();

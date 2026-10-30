@@ -60,7 +60,13 @@ SECTIONS
 
 	. = ALIGN(8);
 	__ex_table_start = .;
-	.ex_table : AT(ADDR(.ex_table) - VA_OFFSET) { *(.ex_table) }
+	/* KEEP: nothing relocates against .ex_table — the fixup search reads
+	 * it through the __ex_table_start/end bounds — so without KEEP a
+	 * --gc-sections link (rustc's default for embedded targets) collects
+	 * the table and every uaccess fault becomes an oops (observed: the
+	 * linked section came out empty). The x86_64 twin guards its table
+	 * the same way. */
+	.ex_table : AT(ADDR(.ex_table) - VA_OFFSET) { KEEP(*(.ex_table)) }
 	__ex_table_end = .;
 
 	. = ALIGN(4096);

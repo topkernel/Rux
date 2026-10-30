@@ -102,7 +102,7 @@ aarch64_vector_table:
 // touched before the save block — the frame must capture entry state.
 // SP stays 16-aligned throughout (S_FRAME_SIZE is a 16 multiple).
 // ---------------------------------------------------------------------------
-.macro TRAP_BODY, class, exit
+.macro TRAP_BODY, class, exit, elfp=0
     sub     sp, sp, #S_FRAME_SIZE
     stp     x0, x1,  [sp, #16*0]
     stp     x2, x3,  [sp, #16*1]
@@ -142,7 +142,15 @@ aarch64_vector_table:
     str     x22, [sp, #S_SYSCALLNO]
 
     // frame->sp: user sp (sp_el0) or the interrupted EL1 sp
-    tbz     x21, #2, 990f            // SPSR.M[3:2] == 0b00 -> EL0
+    // (re-load SPSR from the frame: x21 was overwritten with ELR after
+    // the pstate store — the old tbz x21,#2 tested a bit of the faulting
+    // PC, so any EL1 fault whose PC had bit 2 clear was recorded as an
+    // EL0 frame whose ->sp is sp_el0 (garbage in a kernel thread that
+    // never ran at EL0); the fixed-up return then installed that
+    // garbage into SP — the cascading frame-push faults at
+    // 0xffffffffffff.... after the first copy_to_user fixup rewind.)
+    ldr     x22, [sp, #S_PSTATE]
+    tbz     x22, #2, 990f            // SPSR.M[3:2] == 0b00 -> EL0
     add     x22, sp, #S_FRAME_SIZE
     str     x22, [sp, #S_SP]
     b       991f
@@ -150,6 +158,13 @@ aarch64_vector_table:
     mrs     x22, sp_el0
     str     x22, [sp, #S_SP]
 991:
+    // EL0 sources only: capture the USER's live FPSIMD into the task's
+    // user_fpsimd buffer BEFORE any kernel Rust code runs (core/alloc
+    // rlibs contain NEON that would otherwise clobber v0-v31 mid-trap;
+    // el0_exit_fpsimd_restore re-installs the buffer at eret).
+    .if \elfp
+    bl      el0_entry_fpsimd_save
+    .endif
     mov     x0, sp
     bl      aarch64_trap_handler
     b       \exit
@@ -167,13 +182,13 @@ el1_serr:
 
 // EL0 (user) entries — through the signal/reschedule exit loop
 el0_sync:
-    TRAP_BODY 0, aarch64_exit_to_user
+    TRAP_BODY 0, aarch64_exit_to_user, 1
 el0_irq:
-    TRAP_BODY 64, aarch64_exit_to_user
+    TRAP_BODY 64, aarch64_exit_to_user, 1
 el0_fiq:
-    TRAP_BODY 65, aarch64_exit_to_user
+    TRAP_BODY 65, aarch64_exit_to_user, 1
 el0_serr:
-    TRAP_BODY 17, aarch64_exit_to_user
+    TRAP_BODY 17, aarch64_exit_to_user, 1
 
 // ---------------------------------------------------------------------------
 // Bad vectors: dump and park. Nothing may run in these modes (EL1 uses
@@ -259,6 +274,14 @@ restore_and_eret:
     cmp     x22, #0x1000
     b.lo    aarch64_bad_user_frame
 993:
+    // EL0 return only (the EL1 tail branches past this): re-install the
+    // user's FPSIMD before the GPR file loads — everything the helper
+    // clobbers (x16/x17, q0-q31, fpcr/fpsr) is either reloaded from the
+    // frame below or belongs to the user anyway. No kernel code runs
+    // between here and eret, so nothing re-clobbers it.
+    tbnz    x20, #2, 994f
+    bl      el0_exit_fpsimd_restore
+994:
     // Restore the GPR file. x20/x21/x22 hold the exit triple; their own
     // slots are reloaded last, just before sp is switched.
     ldp     x0, x1,  [sp, #16*0]
@@ -271,10 +294,18 @@ restore_and_eret:
     ldp     x14, x15, [sp, #16*7]
     ldp     x16, x17, [sp, #16*8]
     ldp     x18, x19, [sp, #16*9]
-    ldp     x23, x24, [sp, #16*11]
-    ldp     x25, x26, [sp, #16*12]
-    ldp     x27, x28, [sp, #16*13]
-    ldp     x29, x30, [sp, #16*14]
+    // x20/x21/x22 stay in registers (exit triple) — so the tail pairs
+    // start at the ODD register x23 and cannot use 16* pairs: 16*11 is
+    // x22's slot (176), x23's is 184. The old 16* pairing loaded every
+    // restored register from its NEIGHBOUR's slot (x30 got x29's value
+    // — the frame pointer), so any EL1 trap return (the uaccess fixup
+    // rewind was the first exerciser) ret'd through a stack address
+    // into an Undefined exception. Explicit slot offsets; 184 is
+    // 8-mod-16, legal for X-reg pairs on Normal memory with SCTLR.A=0.
+    ldp     x23, x24, [sp, #(23*8)]
+    ldp     x25, x26, [sp, #(25*8)]
+    ldp     x27, x28, [sp, #(27*8)]
+    ldp     x29, x30, [sp, #(29*8)]
 
     msr     elr_el1, x21
     msr     spsr_el1, x20
@@ -310,3 +341,27 @@ el1_return_tail:
 ret_from_fork:
     bl      schedule_tail
     b       aarch64_exit_to_user
+
+// ---------------------------------------------------------------------------
+// ret_from_fork_kernel_asm — the first switch-in of a KERNEL thread
+// "returns" here from __switch_to with sp = the scratch pt_regs
+// (thread.sp seeded by kernel_thread), x0 = prev task (the schedule_tail
+// argument), x19 = thread fn, x20 = fn arg (restored by __switch_to from
+// thread.s[0]/s[1]; AAPCS64 callee-saved, so they survive the call).
+// Mirrors the riscv64 trampoline: schedule_tail, then the helper runs
+// fn(arg) and do_exit. Must NOT be ret_from_fork — that path erets the
+// ZEROED scratch frame (pc=0), the same trap the x86_64 twin documented.
+// ---------------------------------------------------------------------------
+.section .text.ret_from_fork_kernel, "ax"
+.align 4
+.global ret_from_fork_kernel_asm
+ret_from_fork_kernel_asm:
+    bl      schedule_tail
+    mov     x0, x20                 // fn_arg
+    mov     x1, x19                 // fn_ptr
+    mov     x2, sp                  // scratch pt_regs
+    bl      ret_from_fork_kernel_helper
+    // Unreachable: the helper ends in do_exit (never returns). Park
+    // defensively so a stray return cannot run off the stack.
+99:  wfe
+    b       99b

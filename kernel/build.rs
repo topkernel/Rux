@@ -870,6 +870,29 @@ fn compile_boot_asm() {
         // EVERY invocation so a stale boot object can never skip it.
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let dtb_src = PathBuf::from(&manifest_dir).join("src/arch/aarch64/virt.dtb");
+        // Fresh-clone support: the blob is a build input git does not
+        // carry (*.dtb is ignored). Regenerate from the installed QEMU —
+        // the dump flags must mirror the boot driver's machine config
+        // (memory@ sizes track -m; the fixed MMIO bases are stable).
+        if !dtb_src.exists() {
+            let dump_arg = format!("dumpdtb={}", dtb_src.display());
+            let ok = std::process::Command::new("qemu-system-aarch64")
+                .args(["-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-m", "1G", "-smp", "2"])
+                .arg("-machine").arg(&dump_arg)
+                .status().map(|s| s.success()).unwrap_or(false);
+            assert!(
+                ok && dtb_src.exists(),
+                "kernel/src/arch/aarch64/virt.dtb missing and could not be dumped: \
+                 install qemu-system-aarch64 or place the blob there"
+            );
+            println!("cargo:warning=generated aarch64 virt.dtb from the installed QEMU");
+        }
+        // The blob is .incbin'd, so a regenerated/edited virt.dtb must
+        // rerun the build script — otherwise the embedded DTB goes stale
+        // with zero diagnostics.
+        if dtb_src.exists() {
+            println!("cargo:rerun-if-changed={}", dtb_src.display());
+        }
         let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
         fs::write(&dtb_asm, format!(
             ".section .rodata\n.balign 8\n.globl aarch64_virt_dtb\naarch64_virt_dtb:\n.incbin \"{}\"\n.globl aarch64_virt_dtb_end\naarch64_virt_dtb_end:\n",

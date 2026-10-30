@@ -20,6 +20,30 @@
 /// FPSIMD register image size: 32 Q registers × 16 bytes = 64 × u64
 const FPU_STATE_SIZE: usize = 64;
 
+/// User-visible FPSIMD image (trap-entry capture; see ThreadStruct docs)
+#[derive(Debug, Clone, Copy)]
+pub struct UserFpsimdImage {
+    /// v0..v31 (32 × 128-bit)
+    pub vregs: [u64; FPU_STATE_SIZE],
+    /// FPSR
+    pub fpsr: u32,
+    /// FPCR
+    pub fpcr: u32,
+}
+
+impl Default for UserFpsimdImage {
+    fn default() -> Self {
+        Self { vregs: [0; FPU_STATE_SIZE], fpsr: 0, fpcr: 0 }
+    }
+}
+
+impl UserFpsimdImage {
+    /// const-context constructor (ThreadStruct::new is a const fn)
+    pub const fn zeroed() -> Self {
+        Self { vregs: [0; FPU_STATE_SIZE], fpsr: 0, fpcr: 0 }
+    }
+}
+
 /// Thread structure - stores architecture-specific thread state
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -38,7 +62,11 @@ pub struct ThreadStruct {
 
     // ==================== FPSIMD state ====================
 
-    /// FPSIMD registers v0-v31 (32 × 128-bit)
+    /// FPSIMD registers v0-v31 (32 × 128-bit) — the LIVE image the
+    /// eager __switch_to saves/restores at context-switch time. Kernel
+    /// code may clobber FP registers mid-syscall (compiler-generated
+    /// NEON in core/alloc rlibs), so this image is kernel-side state,
+    /// NOT a faithful copy of the user's FP registers.
     pub fpu: [u64; FPU_STATE_SIZE],
 
     /// FPSIMD control register (FPCR)
@@ -49,6 +77,17 @@ pub struct ThreadStruct {
 
     /// Saved FPU image validity (eager model: 1 = image live)
     pub fs: u32,
+
+    /// USER FPSIMD image: v0-v31 + fpcr/fpsr captured at EL0->EL1 trap
+    /// entry (trap.S -> el0_entry_fpsimd_save) and re-installed at
+    /// eret (el0_exit_fpsimd_restore). This is the ONLY faithful copy
+    /// of the user's FP state: kernel FP usage between trap entry and
+    /// exit (NEON memcpy/fmt in core/alloc) is thereby made harmless —
+    /// the alternative (general-regs-only codegen for the whole kernel)
+    /// needs build-std + compiler-rt sources on every build host. The
+    /// signal frame's fpsimd_context record is built FROM this buffer,
+    /// and rt_sigreturn writes its restore INTO it.
+    pub user_fpsimd: UserFpsimdImage,
 
     // ==================== Other state ====================
 
@@ -82,6 +121,7 @@ impl ThreadStruct {
             fpu: [0; FPU_STATE_SIZE],
             fpcr: 0,
             fpsr: 0,
+            user_fpsimd: UserFpsimdImage::zeroed(),
             // INITIAL: fresh tasks restore the zeroed FPSIMD image on
             // their first switch-in (riscv64 ARCH-H1 lesson parity)
             fs: 1,
@@ -124,6 +164,10 @@ impl ThreadStruct {
         unsafe {
             let dst = self.fpu.as_mut_ptr();
             core::arch::asm!(
+                // Kernel codegen is general-regs-only (see
+                // .cargo/config.toml); this q-register block re-enables
+                // fp/simd for THIS asm block only.
+                ".arch armv8-a+fp+simd",
                 "stp q0, q1, [{d}], #32",
                 "stp q2, q3, [{d}], #32",
                 "stp q4, q5, [{d}], #32",
@@ -160,6 +204,8 @@ impl ThreadStruct {
             let fpcr = self.fpcr as u64;
             let fpsr = self.fpsr as u64;
             core::arch::asm!(
+                // general-regs-only override (see fpu_save)
+                ".arch armv8-a+fp+simd",
                 "ldp q0, q1, [{s}], #32",
                 "ldp q2, q3, [{s}], #32",
                 "ldp q4, q5, [{s}], #32",
@@ -211,6 +257,15 @@ pub mod thread_offsets {
     pub const THREAD_FPU: usize = core::mem::offset_of!(ThreadStruct, fpu);
     pub const THREAD_FPCR: usize = core::mem::offset_of!(ThreadStruct, fpcr);
     pub const THREAD_FPSR: usize = core::mem::offset_of!(ThreadStruct, fpsr);
+    pub const THREAD_USER_FPSIMD: usize = core::mem::offset_of!(ThreadStruct, user_fpsimd);
+    /// vregs base inside UserFpsimdImage (offset from ThreadStruct)
+    pub const THREAD_USER_FPSIMD_VREGS: usize = THREAD_USER_FPSIMD;
+    /// fpsr offset inside UserFpsimdImage (offset from ThreadStruct)
+    pub const THREAD_USER_FPSIMD_FPSR: usize =
+        THREAD_USER_FPSIMD + core::mem::offset_of!(UserFpsimdImage, fpsr);
+    /// fpcr offset inside UserFpsimdImage (offset from ThreadStruct)
+    pub const THREAD_USER_FPSIMD_FPCR: usize =
+        THREAD_USER_FPSIMD + core::mem::offset_of!(UserFpsimdImage, fpcr);
     pub const THREAD_TP_VALUE: usize = core::mem::offset_of!(ThreadStruct, tp_value);
 }
 

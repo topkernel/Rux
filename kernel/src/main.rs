@@ -410,6 +410,16 @@ pub fn rust_main_tail() -> ! {
             cmdline::init_from(arch::boot::boot_cmdline());
             print_status("boot", "multiboot cmdline + e820 parsed", true);
         }
+        // aarch64: QEMU's ELF -kernel boot passes no cmdline (the -append
+        // protocol is Linux-image-only, like the missing DTB pointer) —
+        // parse the embedded DTB's /chosen if present, else the default
+        // (root=/dev/vda rw console=ttyS0 init=/sbin/init) applies.
+        #[cfg(feature = "aarch64")]
+        {
+            let dtb_ptr = arch::boot::get_dtb_pointer();
+            cmdline::init(dtb_ptr);
+            print_status("boot", "DTB cmdline (embedded blob)", true);
+        }
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
@@ -853,7 +863,11 @@ pub fn rust_main_tail() -> ! {
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
-            print_status("vdso", "clock_gettime fast path", true);
+            // The page is built, but userspace mapping is DISABLED (the
+            // map block in exec is `if false` and AT_SYSINFO_EHDR stays
+            // absent) — [ok] "clock_gettime fast path" claimed a
+            // userspace-visible feature that does not exist.
+            print_status_ex("vdso", "page built; mapping off", None);
             // P2 boot ip=a.b.c.d: override the hardcoded slirp default
             // (10.0.2.15) with the address given on the kernel command
             // line — replaces hardcoding for non-default QEMU networks.
@@ -1047,20 +1061,29 @@ pub fn rust_main_tail() -> ! {
             // Initialize VirtIO Input devices
             let (kb_count, ptr_count) = drivers::input::init_virtio_input();
 
-            // evdev devices registered
-            print_status("driver", "evdev /dev/input/event0", true);
-            print_status("driver", "evdev /dev/input/event1", true);
+            // evdev nodes exist either way (init_evdev registers the two
+            // slots), but an [ok] "driver" line is only honest when real
+            // virtio-input hardware backs them — on a headless virt the
+            // nodes are unfed stubs.
+            if kb_count > 0 || ptr_count > 0 {
+                print_status("driver", "evdev /dev/input/event0-1", true);
+            } else {
+                print_status_ex("driver", "evdev nodes (no input hw)", None);
+            }
 
             if kb_count > 0 {
                 print_status("driver", "virtio-keyboard", true);
             } else {
-                print_status("driver", "PS/2 keyboard (stub)", true);
+                // No keyboard hardware — a neutral line, NOT an [ok] for a
+                // "PS/2 stub" that never existed (there is no PS/2 driver;
+                // the old print was boot-table theater).
+                print_status_ex("driver", "no keyboard (headless)", None);
             }
 
             if ptr_count > 0 {
                 print_status("driver", "virtio-tablet", true);
             } else {
-                print_status("driver", "PS/2 mouse (stub)", true);
+                print_status_ex("driver", "no pointer (headless)", None);
             }
         }
 
@@ -1098,22 +1121,11 @@ pub fn rust_main_tail() -> ! {
             // outcome so the chosen path can be folded into the line).
             init::init();
 
-            // Print shell welcome message after boot
-            unsafe {
-                use crate::console::putchar;
-                // cfg-gated, NOT config::TARGET_PLATFORM: build.rs only
-                // reruns when Kernel.toml changes, so in a worktree that
-                // builds both arches the generated constant can be stale
-                // (x86 build inheriting a riscv64 config.rs). The riscv64
-                // string is unchanged byte-for-byte.
-                #[cfg(feature = "x86_64")]
-                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(x86_64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
-                #[cfg(not(feature = "x86_64"))]
-                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
-                for &b in msg {
-                    putchar(b);
-                }
-            }
+            // (The kernel used to print a fake "Welcome / mrsh" shell
+            // banner here unconditionally — userspace theater that fired
+            // even when init exec had failed. Removed: whatever the boot
+            // disk's init prints is the real welcome.)
+
         }
 
         println!();
@@ -1352,7 +1364,9 @@ pub extern "C" fn rust_main() -> ! {
         // unchanged byte-for-byte.
         #[cfg(feature = "x86_64")]
         const VERSION: &[u8] = b"  [ x86_64 | POSIX Compatible | v";
-        #[cfg(not(feature = "x86_64"))]
+        #[cfg(feature = "aarch64")]
+        const VERSION: &[u8] = b"  [ AArch64 | POSIX Compatible | v";
+        #[cfg(not(any(feature = "x86_64", feature = "aarch64")))]
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
         for &b in VERSION { putchar(b); }
         let ver = env!("CARGO_PKG_VERSION");

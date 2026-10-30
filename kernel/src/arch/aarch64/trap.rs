@@ -407,6 +407,19 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 }
 
 /// SVC syscall dispatch (riscv64 handle_syscall shape)
+///
+/// PC / restart contract (the piece that breaks the first blocking read()
+/// if any side gets it wrong):
+///
+/// - ELR_EL1 points AT the `svc` (AArch64 exceptions from SVC never
+///   auto-advance), so this handler MUST advance pc by 4 before eret —
+///   otherwise the return path re-executes the svc forever.
+/// - Restart sentinels (-ERESTARTSYS/-ERESTARTNOHAND returned in x0 by the
+///   generic layer) are converted by the SIGNAL path, not here:
+///   signal.rs restart_syscall_no_handler / setup_frame rewind pc by 4
+///   (back onto the svc) and restore orig_x0, the exact arm64 reference
+///   do_signal shape (restart_addr = continue_addr - 4). The rewind
+///   mirrors the +4 above — riscv64 is identical modulo instruction size.
 fn handle_syscall(regs: &mut PtRegs) {
     // Re-enable interrupts for the syscall body (riscv64 twin: the trap
     // masks IRQs at entry; running the whole syscall masked would kill
@@ -416,10 +429,17 @@ fn handle_syscall(regs: &mut PtRegs) {
 
     let syscall_num = regs.syscall_nr() as u64;
 
-    // Default -ENOSYS; advance pc past the SVC (fixed 4-byte encoding
-    // on AArch64 — no compressed-instruction dance like riscv64).
+    // Default -ENOSYS. The PC must NOT be advanced: unlike the riscv64
+    // ecall (SEPC = the ecall itself), the AArch64 SVC exception leaves
+    // ELR at the instruction AFTER the svc — the architectural return
+    // address. The old unconditional pc += 4 (copied from the riscv64
+    // twin) skipped one user instruction after EVERY syscall; eight
+    // glibc wrapper calls survived because their skipped instruction was
+    // a harmless compare, and the ninth (brk) skipped the adrp computing
+    // __curbrk's page, so the following store faulted at [0, #0x28] and
+    // killed PID 1. The ERESTARTSYS rewind (pc -= 4 back onto the svc)
+    // stays correct: ELR-after-svc minus 4 is the svc.
     regs.regs[0] = crate::errno::constants::ENOSYS as u64;
-    regs.pc += 4;
 
     // U1c seccomp gate (riscv64 parity: policy runs before dispatch).
     if let Some(rv) = crate::syscall::process::seccomp_syscall_gate(syscall_num, regs) {
@@ -430,16 +450,108 @@ fn handle_syscall(regs: &mut PtRegs) {
     crate::syscall::syscall_handler(regs);
 }
 
-/// IRQ dispatch point (GIC claim lands with stage 3; DAIF-masked
-/// boots never reach this — the warn is the tripwire if one does).
-fn handle_external_interrupt(_regs: &mut PtRegs, cpu: usize) {
-    // (The old draft called a phantom crate::drivers::timer::interrupts
-    // module that no backend provides; the external-IRQ accounting hook
-    // is wired with the real GIC claim path in stage 3.)
-    crate::pr_warn!(
-        "aarch64: IRQ delivered with the GIC still disabled (cpu={}) — stage-3 stub path",
-        cpu
-    );
+/// IRQ dispatch point: drain the GIC (ICC_IAR1 acknowledge) and route
+/// each INTID. The timer PPI and IPI SGI are special-cased exactly the
+/// way the riscv64 twin's timer/software trap causes are (arch-core
+/// interrupts that predate the irqchip framework); everything else goes
+/// through the generic domain dispatch, whose flow handler EOIs via the
+/// chip. Fallback EOI only for unmapped INTIDs that bypassed the flow.
+fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
+    use crate::drivers::intc::gicv3;
+
+    // Bounded drain: a level source whose handler fails to deassert
+    // would otherwise loop forever inside one bracket. On bound-break
+    // the still-pending IRQ re-traps on eret (DAIF unmasked contexts).
+    let mut budget = 64u32;
+    while let Some(intid) = gicv3::claim() {
+        budget = budget.saturating_sub(1);
+        match intid {
+            gicv3::TIMER_PPI_INTID => {
+                handle_timer_interrupt(regs, cpu);
+                gicv3::eoi(intid);
+            }
+            gicv3::IPI_SGI_INTID => {
+                crate::fs::procfs::interrupts::soft_inc(cpu);
+                crate::arch::ipi::handle_software_ipi(cpu);
+                gicv3::eoi(intid);
+            }
+            _ => {
+                let handled = crate::interrupt::get_default_domain()
+                    .map(|d| crate::interrupt::generic_handle_domain_irq(d, intid))
+                    .unwrap_or(false);
+                if !handled {
+                    // Spurious/unmapped: EOI here or the GIC stalls.
+                    gicv3::eoi(intid);
+                }
+            }
+        }
+        if budget == 0 {
+            break;
+        }
+    }
+}
+
+/// Timer interrupt (GIC PPI for the EL1 virtual timer) — the riscv64
+/// handle_timer_interrupt twin: re-arm first, then accounting, jiffies,
+/// scheduler tick, softlockup, and the preemptible in-IRQ reschedule.
+fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    // Increment interrupt counter for /proc/interrupts
+    crate::fs::procfs::interrupts::timer_inc(cpu);
+
+    // Re-arm timer: push CNTV_CVAL to the next grid deadline so the
+    // level-triggered PPI deasserts BEFORE the GIC EOI (an EOI with the
+    // line still high re-latches pending and storms).
+    crate::drivers::timer::set_next_trigger();
+
+    // Skip scheduler/schedule logic during early boot (TPIDR holds the
+    // cpu index, no current task yet — riscv64 twin guard).
+    if crate::sched::current().is_none() {
+        return;
+    }
+
+    // 0. Per-CPU time accounting for /proc/stat
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting: user or system time by the mode the
+    // timer hit; idle accounting for kthreads.
+    if let Some(task) = crate::sched::current() {
+        // SAFETY: current() returned a live task pointer; only per-task
+        // atomic counters are touched (riscv64/x86_64 twins).
+        unsafe {
+            if (*task).address_space().is_some() {
+                use core::sync::atomic::Ordering::Relaxed;
+                if regs.user_mode() {
+                    (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
+                    crate::perf::note_tick(regs.pc, crate::perf::MODE_USER, (*task).pid());
+                } else {
+                    (*task).stime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_kern(regs.pc);
+                    crate::perf::note_tick(regs.pc, crate::perf::MODE_KERNEL, (*task).pid());
+                }
+            } else {
+                crate::dfx::syscost::tick_idle();
+                crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+            }
+        }
+    } else {
+        crate::dfx::syscost::tick_idle();
+        crate::perf::note_tick(regs.pc, crate::perf::MODE_IDLE, 0);
+    }
+
+    // 1. Update jiffies (+ vDSO page refresh, timer softirqs)
+    crate::drivers::timer::timer_interrupt_handler();
+
+    // 2. Scheduler tick
+    crate::sched::scheduler_tick();
+
+    // 3. Check for soft lockups
+    crate::dfx::softlockup::check();
+
+    // 4. Reschedule if needed
+    if crate::sched::need_resched() && crate::interrupt::preempt::preemptible() {
+        crate::sched::schedule();
+    }
 }
 
 /// User-mode illegal instruction: route through signal delivery with
@@ -684,6 +796,20 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     }
 }
 
+/// Kernel-thread trampoline helper (riscv64 twin contract): called by
+/// ret_from_fork_kernel_asm with the fn/arg restored from
+/// thread.s[0]/s[1]; runs the thread function and do_exit — it never
+/// returns (the asm parks defensively).
+#[no_mangle]
+pub extern "C" fn ret_from_fork_kernel_helper(
+    fn_arg: *mut core::ffi::c_void,
+    fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
+    _regs: &mut PtRegs,
+) {
+    let ret = fn_ptr(fn_arg);
+    crate::process::exit::do_exit(ret);
+}
+
 // ============================================================================
 // Vector-table install + timer/IRQ arming (interface parity)
 // ============================================================================
@@ -709,15 +835,26 @@ pub fn init_syscall() {
     // SVC #0 is dispatched in aarch64_trap_handler (EC 0x15)
 }
 
-/// Enable the EL1 timer interrupt (unmask CNTV_CTL; GIC PPI wiring is
-/// stage 3 — until then the PPI stays masked at the distributor)
+/// Enable the EL1 timer interrupt — the riscv64 enable_timer_interrupt
+/// twin: enable the GIC PPI (INTID 27, virtual timer), arm the first
+/// deadline, then unmask the timer itself. Order matters: arming after
+/// the PPI is enabled means the very first expiry is never lost.
 pub fn enable_timer_interrupt() {
-    // SAFETY: unmasking the virtual timer only arms a PPI the GIC still
-    // holds masked until stage 3; no interrupt can fire from this alone.
+    // 1. Enable the timer PPI at this CPU's redistributor (idempotent;
+    //    the distributor was brought up in intc::init).
+    crate::drivers::intc::gicv3::enable_ppi(crate::drivers::intc::gicv3::TIMER_PPI_INTID);
+
+    // 2. Arm the first grid deadline (sets CNTV_CVAL + enables the
+    //    virtual timer).
+    crate::drivers::timer::set_next_trigger();
+
+    // 3. Unmask the timer (enable=1, imask=0).
+    // SAFETY: writing CNTV_CTL_EL0 arms the per-cpu virtual timer; the
+    // only side effect is the future PPI interrupt.
     unsafe {
         asm!(
             "msr cntv_ctl_el0, {v}",
-            v = in(reg) 1u64, // enable, imask=0
+            v = in(reg) 1u64,
             options(nomem, nostack)
         );
     }
@@ -735,9 +872,16 @@ pub fn disable_timer_interrupt() {
     }
 }
 
-/// Enable external interrupts (GICv3 CPU interface — stage 3)
+/// Enable external interrupts (GICv3 CPU interface: redistributor wake,
+/// SGI/PPI bank config, ICC_* system-register enable — per CPU)
 pub fn enable_external_interrupt() {
     crate::drivers::intc::gicv3::enable_cpu_interface();
+    // CPU-side unmask — the daifclr equivalent of the riscv64 twin's
+    // csrs-sie. Enabling the GIC CPU interface alone leaves
+    // PSTATE.DAIF.I set, and the kernel runs its whole boot with every
+    // interrupt (timer included) masked: QEMU -d int showed zero IRQ
+    // exceptions taken.
+    crate::arch::cpu::enable_irq();
 }
 
 /// TrapFrame / ExceptionCause aliases (interface parity)

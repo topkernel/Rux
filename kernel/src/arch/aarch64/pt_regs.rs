@@ -296,6 +296,18 @@ pub enum Cause {
 impl Cause {
     /// Parse from ESR_ELx value
     pub fn from_cause(esr: u64) -> Self {
+        // Asynchronous vectors (trap.S) store pseudo-cause constants in
+        // the frame's esr slot — ESR_EL1 is UNDEFINED on the IRQ/FIQ
+        // vectors, and the SError vectors use the same small-integer
+        // encoding. Map those FIRST: the ec decode below would read
+        // bit 26+ and land on Unknown (64>>26 == 0). This is the same
+        // encoding the riscv64 backend uses for its scause interrupts.
+        match esr {
+            64 => return Cause::Irq,
+            65 => return Cause::Fiq,
+            17 => return Cause::SError,
+            _ => {}
+        }
         let ec = (esr & ESR_EC_MASK) >> ESR_EC_SHIFT;
         match ec {
             0x00 => Cause::Unknown,

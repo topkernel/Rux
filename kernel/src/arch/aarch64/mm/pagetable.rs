@@ -242,10 +242,20 @@ impl PageTableEntry {
         hw
     }
 
-    /// Create a table-pointer descriptor to the next level
+    /// Create a table-pointer descriptor to the next level.
+    ///
+    /// PXN_TABLE/UXN_TABLE are deliberately NOT set: those bits are
+    /// HIERARCHICAL — a set UXN_TABLE makes every page under the subtree
+    /// unprivileged-execute-never, overriding each leaf's own exec
+    /// permission (the silent user-fetch-permission-fault loop of the
+    /// first stage-2 boot: leaves said RX, the walker's software mirror
+    /// said X, and the MMU still refused every EL0 fetch). Exec policy
+    /// stays LEAF-granular: hw_attrs_from_flags sets PXN|UXN on each
+    /// descriptor whose software mask lacks X. (The kernel tree may
+    /// re-tighten with explicit table-XN descriptors later.)
     #[inline]
     pub fn new_table(ppn: u64) -> Self {
-        Self((ppn << 12) | Self::V | Self::TYPE_TABLE | Self::PXN_TABLE | Self::UXN_TABLE)
+        Self((ppn << 12) | Self::V | Self::TYPE_TABLE)
     }
 
     /// L3 PAGE descriptor (normal memory) from a Rux software flag mask
@@ -286,6 +296,53 @@ impl PageTableEntry {
         Self::new_page_kernel_flags(ppn, Self::V | Self::R | Self::W | Self::X | Self::U | Self::A | Self::D)
     }
 
+    /// L3 PAGE descriptor for a USER leaf, synthesized from a Rux
+    /// software permission mask (the riscv64 twin's flag-compose model:
+    /// callers build V/R/W/X/U/A/D[|COW|PCACHE] masks; this constructor
+    /// derives the real hardware attributes — AP_EL0, AP_RO when W is
+    /// clear, PXN|UXN when X is clear, nG when G is clear, normal memory
+    /// AttrIndx — and keeps the software mirror beside them).
+    ///
+    /// This is the ONE place user leaf bits are encoded; call sites must
+    /// compose software masks, never descriptor words.
+    #[inline]
+    pub fn new_page_user_flags(ppn: u64, sw_flags: u64) -> Self {
+        Self((ppn << 12) | Self::V | Self::TYPE_PAGE
+            | Self::hw_attrs_from_flags(sw_flags, true)
+            | (sw_flags & Self::SW_SOFTWARE_MASK))
+    }
+
+    /// Rebuild a present L3 user leaf's PERMISSION fields from a new
+    /// software mask, preserving the old output address (the aarch64
+    /// twin of the riscv64 "preserve PPN, replace flag bits" rewrite:
+    /// exec segment tightening, COW W-restore, mprotect rewrites).
+    /// Hardware attrs are re-derived from `sw_flags` — callers never
+    /// hand-edit descriptor bits.
+    #[inline]
+    pub fn rebuild_user_leaf(old_bits: u64, sw_flags: u64) -> Self {
+        Self((old_bits & Self::OUTPUT_ADDR_MASK) | Self::V | Self::TYPE_PAGE
+            | Self::hw_attrs_from_flags(sw_flags, true)
+            | (sw_flags & Self::SW_SOFTWARE_MASK))
+    }
+
+    /// Rebuild a present L3 user leaf as a PROT_NONE MARKER
+    /// (mprotect(prot==0)): the output address and the COW/PCACHE
+    /// software markers survive, the software permission mirror drops
+    /// to V|U with no R/W/X (the marker signature the fault path
+    /// re-presents), and the descriptor becomes HARDWARE-inaccessible
+    /// at EL0 — AP denies EL0 (AP=0b10: kernel RO only) and both XN
+    /// bits are set — so every user access raises a permission fault
+    /// instead of reading through (a software-mirror-only form would
+    /// stay EL0-readable: AP_EL0 + AP_RO still permits user loads).
+    #[inline]
+    pub fn rebuild_user_leaf_protnone(old_bits: u64) -> Self {
+        Self((old_bits & Self::OUTPUT_ADDR_MASK) | Self::V | Self::TYPE_PAGE
+            | Self::AF | Self::SH_IS | Self::ATTR_NORMAL | Self::AP_RO | Self::NG
+            | Self::PXN | Self::UXN
+            | ((Self::V | Self::U | Self::A | Self::D) & Self::SW_MASK)
+            | (old_bits & (Self::SW_COW | Self::SW_PCACHE)))
+    }
+
     /// Create PTE pointing to physical page (read-only, executable) —
     /// riscv64 parity
     #[inline]
@@ -302,8 +359,24 @@ impl PageTableEntry {
             | ((Self::V | Self::R | Self::W | Self::A | Self::D | Self::G) & Self::SW_MASK))
     }
 
+    /// COW software marker (mm_ops::cow_flags::COW) — PBHA-space bit the
+    /// hardware ignores; sits OUTSIDE SW_MASK so permission rebuilds must
+    /// opt in via SW_SOFTWARE_MASK
+    pub const SW_COW: u64 = 1 << 61;
+    /// Page-cache-pin software marker (mm_ops::cow_flags::PCACHE)
+    pub const SW_PCACHE: u64 = 1 << 62;
+
     /// Mask of all software permission bits (kept alongside hw attrs)
     pub const SW_MASK: u64 = Self::R | Self::W | Self::U | Self::G | Self::A | Self::D | Self::X;
+
+    /// Everything in the software half that a leaf rebuild must preserve
+    /// when the caller passes it in `flags`: the permission mirror plus
+    /// the COW/PCACHE markers (the riscv64 twin keeps those in RSW bits
+    /// that flow through its flag masks; here they are explicit).
+    pub const SW_SOFTWARE_MASK: u64 = Self::SW_MASK | Self::SW_COW | Self::SW_PCACHE;
+
+    /// Output-address field mask (bits [47:12])
+    pub const OUTPUT_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
     /// Table-descriptor bits: PXNTable/UXNTable (bits 59:58 of TABLE
     /// descriptors — note these overlap the software-bit space, which is

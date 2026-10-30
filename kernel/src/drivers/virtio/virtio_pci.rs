@@ -309,6 +309,13 @@ impl VirtIOPCI {
         // Use fixed MMIO region: 0x40000000 - 0x50000000 (256MB)
         #[cfg(feature = "riscv64")]
         const PCI_MMIO_BASE: u64 = 0x40000000;
+        // aarch64/GPEX: no firmware ran (direct -kernel boot), so the
+        // kernel assigns BARs like riscv64 — from the DTB-declared
+        // 32-bit PCI MMIO window (ranges: 0x10000000..0x3eff0000). The
+        // window sits below RAM base, so every assigned BAR resolves
+        // through the low kernel-half MMIO alias with no extra mapping.
+        #[cfg(feature = "aarch64")]
+        const PCI_MMIO_BASE: u64 = 0x1000_0000;
         // x86_64/q35: the BIOS has already enumerated PCI and assigned BARs
         // inside the 32-bit MMIO hole; re-assigning them at a fixed window
         // would fight the firmware (and the old window overlaps the kernel
@@ -351,8 +358,8 @@ impl VirtIOPCI {
                 mmio_offset
             };
 
-            #[cfg(feature = "riscv64")]
-            let bar_addr = PCI_MMIO_BASE + aligned_addr;
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
+        let bar_addr = PCI_MMIO_BASE + aligned_addr;
 
             // x86_64: use the firmware-assigned address verbatim.
             #[cfg(feature = "x86_64")]
@@ -361,9 +368,9 @@ impl VirtIOPCI {
                 pci_config.read_bar(bar_idx).base_addr
             };
 
-            // Write BAR address and store returned PCIBAR object
-            #[cfg(feature = "riscv64")]
-            match pci_config.assign_bar(bar_idx, bar_addr) {
+        // Write BAR address and store returned PCIBAR object
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
+        match pci_config.assign_bar(bar_idx, bar_addr) {
                 Ok(bar_obj) => {
                     mmio_offset = aligned_addr + bar_size;
                     assigned_bars.insert(bar_idx, bar_obj);
@@ -798,10 +805,25 @@ impl VirtIOPCI {
         self.enable_pci_intx_irq(intx_blk_service);
     }
 
-    /// aarch64: PCI INTx arrives as a GICv3 SPI — wired in stage 3 with
-    /// the GIC bring-up (until then the device runs polling/async).
+    /// Enable device interrupt on aarch64: PCI INTx arrives as a GICv3
+    /// SPI through the gpex interrupt-map (DTB pcie@10000000: device n,
+    /// pin p [1-based] → GIC_SPI 3 + ((p-1+n) % 4), level-high). GIC
+    /// INTID = 32 + SPI, so INTID = 35 + ((p-1+n) % 4). Same swizzle
+    /// discipline as the riscv64 arm (shared line, ISR-read demux).
     #[cfg(feature = "aarch64")]
-    pub fn enable_device_interrupt(&self) {}
+    pub fn enable_device_interrupt(&self) {
+        let int_pin = self.pci_config.read_config_byte(0x3D);
+        let intid =
+            35 + (((int_pin as u32).saturating_sub(1) + self.pci_slot as u32) % 4);
+
+        crate::interrupt::request_irq(
+            intid,
+            super::interrupt_handler_pci,
+            crate::interrupt::irqdesc::IRQF_SHARED,
+            "virtio-blk-pci",
+            self.blk_slot,
+        ).ok();
+    }
 
     /// Register this device on its PIC INTx line with a shared dispatcher.
     ///

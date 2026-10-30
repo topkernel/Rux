@@ -193,30 +193,67 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             }
         }
         AllocStage::Late => {
-            // STAGE 2: buddy-backed allocation (crate::mm alloc_pages)
-            let i = EARLY_L3_NEXT.fetch_add(1, Ordering::Relaxed);
-            if i < NUM_EARLY_L3 {
-                // SAFETY: static pool access as above.
-                unsafe {
-                    let ptr = &raw mut EARLY_L3[i] as u64;
-                    let offset = KERNEL_MAP.va_kernel_pa_offset as u64;
-                    Some(ptr.wrapping_sub(offset))
-                }
-            } else {
-                None
+            // Buddy-backed allocation (riscv64 twin semantics): every
+            // stage-2 user tree frame comes from the zone allocator, is
+            // ZEROED here (tables must never leak a previous owner's
+            // entries), and is stamped into the PT ledger so the teardown
+            // walk can tell Late frames (freeable) from boot-pool frames
+            // (image .bss, never freed). The old static-pool fallback
+            // exhausted after a handful of execs (128 frames, bump-only).
+            let phys = crate::mm::alloc_pages(crate::mm::GfpFlags::GFP_KERNEL, 0);
+            if phys == 0 {
+                return None;
             }
+            // SAFETY: phys is a freshly allocated, exclusively owned
+            // order-0 frame inside the linear map.
+            unsafe {
+                let va = phys_to_virt(PhysAddr::new(phys as u64));
+                core::ptr::write_bytes(va.bits() as *mut u8, 0, PAGE_SIZE as usize);
+            }
+            PT_LEDGER.stamp((phys >> PAGE_SHIFT) as u64);
+            PT_LEDGER.live.fetch_add(1, Ordering::Relaxed);
+            Some(phys as u64)
         }
     }
 }
 
-/// Free a page-table frame (stage-2: ledger + buddy; early frames leak
-/// into the pools by design)
+/// Free a page-table frame. Late-stage frames (ledger-stamped, buddy
+/// owned) return to the allocator through the ledger-checked path; every
+/// other frame (early static pools in the image .bss, fixmap/memblock
+/// boot frames) is boot-permanent and leaks by design — refusing the
+/// free keeps a recycled image frame from being handed out twice.
 ///
 /// # Safety
 /// The frame must not be reachable from any live table.
-pub unsafe fn free_page_table(_phys_addr: u64) {
-    // Early pools are never freed (boot-permanent); the ledger-checked
-    // free path lands in stage 2 with the buddy wiring.
+pub unsafe fn free_page_table(phys_addr: u64) {
+    if !free_page_table_checked(phys_addr, "pt") {
+        return;
+    }
+    crate::mm::page_alloc::free_pages(phys_addr as usize, 0);
+}
+
+/// Ledger-guarded half of the free: true when the caller may return the
+/// frame to the buddy (exactly-one-live-stamp discipline; a double or
+/// foreign free is refused with the frame left leaked rather than wired
+/// into two live trees).
+unsafe fn free_page_table_checked(phys_addr: u64, site: &str) -> bool {
+    if get_alloc_stage() != AllocStage::Late {
+        return false; // boot-stage frames are permanent
+    }
+    if !PT_LEDGER.take(phys_addr >> PAGE_SHIFT) {
+        static REFUSED: AtomicUsize = AtomicUsize::new(0);
+        if REFUSED.fetch_add(1, Ordering::Relaxed) < 8 {
+            crate::pr_err!(
+                "PT-FREE-REFUSED: ppn={:#x} site={} pid={} (no live Late stamp — leaked)",
+                phys_addr >> PAGE_SHIFT,
+                site,
+                crate::sched::get_current_pid()
+            );
+        }
+        return false;
+    }
+    PT_LEDGER.freed.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Translate a page-table frame's physical address to a kernel VA
@@ -242,26 +279,199 @@ pub unsafe fn get_page_table_virt(phys_addr: u64) -> *mut PageTable {
 /// Register a fork root (ledger bookkeeping; stage-2 wiring)
 pub fn register_fork_root(_root_ppn: u64, _owner_pid: u32) {}
 
-/// Free a user address space's page tables (stage-2: ledger-checked walk)
+/// Free a user address space's page tables (ledger-checked 4-level walk)
+///
+/// The aarch64 user root is a PURE TTBR0 tree: the kernel half lives in
+/// TTBR1 (a separate root), so — unlike the riscv64 single-root twin —
+/// there are no cloned kernel subtrees to skip and no device-window
+/// leaves to restore. Every valid entry in the tree belongs to this mm:
+/// L3 user leaves get rmap removal + the last-ref page release, and every
+/// table frame (root included) returns through the ledger-checked free.
 ///
 /// # Safety
-/// root_ppn must be an orphaned user root.
+/// root_ppn must be an orphaned user root (no live MmStruct or CPU
+/// references it).
 pub unsafe fn free_user_page_tables(
-    _lock: &crate::mm::mm_struct::PteLock,
-    _root_ppn: u64,
+    lock: &crate::mm::mm_struct::PteLock,
+    root_ppn: u64,
 ) {
-    todo!("aarch64 stage-2: free_user_page_tables")
+    use crate::mm::phys_valid;
+
+    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, Ordering::Relaxed);
+    // Serialize against fork's copy walk and COW/demand faults on any mm
+    // (PTE lock; the freed frames are immediately reusable).
+    let _pte_guard = lock.lock_irqsave();
+
+    let root_phys = root_ppn << PAGE_SHIFT;
+    if !phys_valid(root_phys as usize) {
+        return;
+    }
+    let root_table = get_page_table_virt(root_phys);
+
+    // L0: all 512 slots are user slots in a TTBR0 tree
+    for l0 in 0..512usize {
+        let e0 = (*root_table).get(l0);
+        if !e0.is_valid() || !e0.is_table() {
+            continue; // user trees never host L0 blocks
+        }
+        let t1_phys = e0.ppn() << PAGE_SHIFT;
+        if !phys_valid(t1_phys as usize) || t1_phys == root_phys {
+            continue;
+        }
+        let t1 = get_page_table_virt(t1_phys);
+        for l1 in 0..512usize {
+            let e1 = (*t1).get(l1);
+            if !e1.is_valid() {
+                continue;
+            }
+            if e1.is_leaf() {
+                // 1GB block leaf (never installed by the user walker;
+                // defensive release like the riscv64 twin's L2-leaf arm)
+                release_user_leaf_mm(e1);
+                continue;
+            }
+            if !e1.is_table() {
+                continue;
+            }
+            let t2_phys = e1.ppn() << PAGE_SHIFT;
+            if !phys_valid(t2_phys as usize) || t2_phys == root_phys {
+                continue;
+            }
+            let t2 = get_page_table_virt(t2_phys);
+            for l2 in 0..512usize {
+                let e2 = (*t2).get(l2);
+                if !e2.is_valid() {
+                    continue;
+                }
+                if e2.is_leaf() {
+                    release_user_leaf_mm(e2);
+                    continue;
+                }
+                if !e2.is_table() {
+                    continue;
+                }
+                let t3_phys = e2.ppn() << PAGE_SHIFT;
+                if !phys_valid(t3_phys as usize) || t3_phys == root_phys {
+                    continue;
+                }
+                let t3 = get_page_table_virt(t3_phys);
+                for l3 in 0..512usize {
+                    let e3 = (*t3).get(l3);
+                    if !e3.is_valid() {
+                        continue; // holes and swap markers (none today)
+                    }
+                    release_user_leaf_mm(e3);
+                }
+                if free_page_table_checked(t3_phys, "l3") {
+                    crate::mm::page_alloc::free_pages(t3_phys as usize, 0);
+                }
+            }
+            if free_page_table_checked(t2_phys, "l2") {
+                crate::mm::page_alloc::free_pages(t2_phys as usize, 0);
+            }
+        }
+        if free_page_table_checked(t1_phys, "l1") {
+            crate::mm::page_alloc::free_pages(t1_phys as usize, 0);
+        }
+    }
+
+    if free_page_table_checked(root_phys, "root") {
+        crate::mm::page_alloc::free_pages(root_phys as usize, 0);
+    }
+}
+
+/// Release ONE user leaf frame found by the teardown walk (rmap drop +
+/// last-ref put; riscv64 twin's release_user_leaf minus the text-stamp
+/// adjudication — aarch64's fault paths create no text stamps). Foreign
+/// frames (boot-reserved, kernel-heap, framebuffer) are skipped: their
+/// owner releases them through its own path.
+unsafe fn release_user_leaf_mm(entry: PageTableEntry) {
+    use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid};
+
+    if !entry.is_user() {
+        return; // not this mm's page (defensive; user trees are U-only)
+    }
+    let phys = entry.output_addr();
+    if phys == 0
+        || !phys_valid(phys as usize)
+        || crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
+        || crate::drivers::gpu::get_framebuffer_info()
+            .map_or(false, |i| {
+                phys >= i.addr && phys < i.addr + i.size as u64
+            })
+    {
+        return;
+    }
+    let pfn = phys_to_pfn(phys as usize);
+    let page = pfn_to_page(pfn);
+    if page.is_null() {
+        return;
+    }
+    // SAFETY: descriptor of a leaf frame this mm mapped until this walk.
+    unsafe {
+        if (*page).is_mapped() {
+            crate::mm::rmap::page_remove_rmap(&*page);
+        }
+        (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_RV);
+    }
+}
+
+/// Rewrite ONE present L3 user leaf's permission bits from a software
+/// mask, preserving its output address (exec's per-segment W^X
+/// tightening — the riscv64 twin walks inline in exec.rs; here the walk
+/// and the rebuild live behind this one arch helper so no call site
+/// hand-rolls descriptor bits). No TLB flush: exec uses it on a tree no
+/// CPU has ever translated through.
+///
+/// # Safety
+/// root_ppn must be a valid user root; va page-aligned.
+pub unsafe fn set_user_leaf_flags(root_ppn: u64, va: u64, sw_flags: u64) {
+    unsafe {
+        let l3 = match user_l3_table_for(root_ppn, va) {
+            Some(p) => p,
+            None => return,
+        };
+        let idx = ((va >> PAGE_SHIFT) & 0x1FF) as usize;
+        let old = (*l3).get(idx);
+        if old.is_valid() {
+            (*l3).set(idx, PageTableEntry::rebuild_user_leaf(old.bits(), sw_flags));
+        }
+    }
+}
+
+/// Descend to the L3 table for `va` WITHOUT allocating (present tables
+/// only); None when any intermediate is missing or non-table.
+pub unsafe fn user_l3_table_for(root_ppn: u64, va: u64) -> Option<*mut PageTable> {
+    unsafe {
+        let mut table_phys = root_ppn << PAGE_SHIFT;
+        for cur in 0..3u32 {
+            let shift = PAGE_SHIFT + 9 * (3 - cur) as u64;
+            let idx = ((va >> shift) & 0x1FF) as usize;
+            let table = get_page_table_virt(table_phys);
+            let entry = (*table).get(idx);
+            if !entry.is_valid() || !entry.is_table() {
+                return None;
+            }
+            table_phys = entry.ppn() << PAGE_SHIFT;
+        }
+        Some(get_page_table_virt(table_phys))
+    }
 }
 
 /// Page-table ledger — the live-table registry backing the double-free
-/// REFUSED / FUT-STALE-TREE diagnostics (see the riscv64 twin). Stage-1
-/// carries the counters; the take/stamp machinery lands in stage 2 with
-/// user-space teardown paths.
+/// REFUSED diagnostics (see the riscv64 twin). One bitmap bit per RAM
+/// page frame covers the ledger window [PHYS_MEMORY_BASE, +2 GB); only
+/// LATE-stage allocations (the buddy-backed user-tree frames) are
+/// stamped, so a missing stamp cleanly classifies every boot-pool /
+/// fixmap frame as permanent.
 pub struct PtLedger {
     pub live: AtomicUsize,
     pub freed: AtomicUsize,
     pub refused: AtomicUsize,
 }
+
+/// Ledger bitmap words: 2 GB of 4 KiB frames = 524288 bits = 8192 words
+const PT_LEDGER_WORDS: usize = 8192;
 
 impl PtLedger {
     pub const fn new() -> Self {
@@ -276,12 +486,62 @@ impl PtLedger {
         self.live.load(Ordering::Acquire)
     }
 
-    /// Whether a table frame is registered live (stage-2 ledger wiring;
-    /// early-boot frames count as live by default)
-    pub fn is_live_table(_ppn: u64) -> bool {
-        true
+    /// Bitmap index for a ppn (None outside the ledger window)
+    #[inline]
+    fn index(ppn: u64) -> Option<usize> {
+        let base = (PHYS_MEMORY_BASE >> PAGE_SHIFT) as u64;
+        let span = PT_LEDGER_WORDS as u64 * 64;
+        let idx = ppn.checked_sub(base)?;
+        if idx < span {
+            Some(idx as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Record a Late-stage table allocation (exactly-once discipline: a
+    /// second stamp on a live bit is a producer bug — keep the first).
+    pub fn stamp(&self, ppn: u64) {
+        let Some(i) = Self::index(ppn) else { return };
+        let w = i / 64;
+        let b = i % 64;
+        let old = LEDGER_BITMAP[w].fetch_or(1 << b, Ordering::AcqRel);
+        if old & (1 << b) == 0 {
+            self.live.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Remove the live stamp; false when the frame was never stamped
+    /// (boot pool / foreign / double free — the free must be refused).
+    pub fn take(&self, ppn: u64) -> bool {
+        let Some(i) = Self::index(ppn) else {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        let w = i / 64;
+        let b = i % 64;
+        let old = LEDGER_BITMAP[w].fetch_and(!(1 << b), Ordering::AcqRel);
+        if old & (1 << b) != 0 {
+            true
+        } else {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// Whether a table frame is registered live
+    pub fn is_live_table(ppn: u64) -> bool {
+        let Some(i) = Self::index(ppn) else { return false };
+        let w = i / 64;
+        let b = i % 64;
+        LEDGER_BITMAP[w].load(Ordering::Acquire) & (1 << b) != 0
     }
 }
+
+/// The ledger bitmap itself (64 KiB .bss)
+#[link_section = ".bss"]
+static LEDGER_BITMAP: [AtomicUsize; PT_LEDGER_WORDS] =
+    [const { AtomicUsize::new(0) }; PT_LEDGER_WORDS];
 
 /// Global PT ledger
 pub static PT_LEDGER: PtLedger = PtLedger::new();
@@ -518,25 +778,54 @@ pub fn setup_linear_mapping(memory_regions: &[crate::cmdline::MemoryRegion]) {
 }
 
 /// Install the permanent device windows: the kernel-half MMIO alias
-/// (phys [0, 1GB) at MMIO_ALIAS_BASE) with Device-nGnRE attributes.
+/// (phys [0, 1GB) at MMIO_ALIAS_BASE) plus the ECAM window (phys
+/// [PCIE_ECAM_BASE, +PCIE_ECAM_SIZE) at ECAM_ALIAS_BASE), with
+/// Device-nGnRE attributes.
 pub fn setup_device_mappings() {
     unsafe {
-        // The alias window: 1GB of phys below RAM base, mapped as 2MB
-        // blocks (device attrs come from map_device semantics)
-        let mut pa = 0usize;
-        while pa < MMIO_ALIAS_SIZE {
-            let va = MMIO_ALIAS_BASE + pa;
-            // 2MB device blocks live at L2 — descend to it, then index
-            // by VA[29:21].
-            let l2_phys = match kernel_table_for(va as u64, 2) {
-                Some(p) => p,
-                None => break,
-            };
-            let l2 = get_page_table_virt(l2_phys);
-            let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
-            let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
-            (*l2).set(idx, entry);
-            pa += 2 << 20;
+        // Device windows as (first phys, alias VA base, total size); both
+        // map 2MB device blocks at L2.
+        const WINDOWS: [(usize, usize, usize); 2] = [
+            (0, MMIO_ALIAS_BASE, MMIO_ALIAS_SIZE),
+            (
+                PCIE_ECAM_BASE as usize,
+                ECAM_ALIAS_BASE,
+                ECAM_ALIAS_SIZE,
+            ),
+        ];
+        for &(phys_base, va_base, size) in WINDOWS.iter() {
+            let mut pa = phys_base;
+            let mut installed = 0usize;
+            while pa < phys_base + size {
+                let va = va_base + (pa - phys_base);
+                // 2MB device blocks live at L2 — descend to it, then index
+                // by VA[29:21].
+                let l2_phys = match kernel_table_for(va as u64, 2) {
+                    Some(p) => p,
+                    None => break,
+                };
+                let l2 = get_page_table_virt(l2_phys);
+                let idx = ((va >> PMD_SHIFT) & 0x1FF) as usize;
+                let entry = PageTableEntry::new_block_device((pa >> PAGE_SHIFT) as u64);
+                (*l2).set(idx, entry);
+                installed += 1;
+                pa += 2 << 20;
+            }
+            // Raw console write: printk isn't wired until the console
+            // driver registers later in boot (early println! is dropped).
+            use core::fmt::Write;
+            let ttbr1: u64;
+            unsafe { asm!("mrs {}, ttbr1_el1", out(reg) ttbr1) };
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let _ = write!(
+                w,
+                "devmap: phys {:#x}+{:#x} -> va {:#x}: {} blocks (pools l1/l2/l3 {}/{}/{}, ttbr1={:#x})\n",
+                phys_base, size, va_base, installed,
+                EARLY_L1_NEXT.load(Ordering::Relaxed),
+                EARLY_L2_NEXT.load(Ordering::Relaxed),
+                EARLY_L3_NEXT.load(Ordering::Relaxed),
+                ttbr1
+            );
         }
         crate::arch::cpu::local_flush_tlb_all();
     }
