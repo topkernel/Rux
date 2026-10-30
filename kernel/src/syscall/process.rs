@@ -5318,9 +5318,22 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: rlim_ptr validated with access_ok; get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let rlim_cur = unsafe { crate::arch::uaccess::get_user(rlim_ptr).unwrap_or(0) };
-    let rlim_max = unsafe { crate::arch::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
+    // exception-table copy path (SUM=0 safe). An unreadable struct must
+    // be EFAULT — the old unwrap_or(0) read it as {0, 0} and silently
+    // clamped the limit to zero instead of failing (reference
+    // do_prlimit: copy_from_user of struct rlimit fails with EFAULT).
+    let rlim_cur = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
+    let rlim_max = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr.add(1)) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
