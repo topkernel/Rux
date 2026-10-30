@@ -414,6 +414,20 @@ unsafe fn migrate_page_window(
     dst.set_flag(PageFlag::Referenced);
     dst.set_refcount(1);
 
+    // LRU handover (mm-lane review): try_to_unmap_migration only
+    // decrements _mapcount — it does NOT run page_remove_rmap, so src
+    // still carries its Lru flag and lru links from the fault path that
+    // first mapped it. Freeing it to the buddy in that state leaves the
+    // LRU chain running THROUGH a free-list page; when the frame is
+    // re-allocated (clear_all_flags drops the Lru bit but not the
+    // links) and later re-enters an LRU, the stale predecessor link
+    // splices the two chains and the list double-counts the pfn.
+    // Unlink src here, and link dst in its place — the migrated page
+    // keeps its reclaim visibility (same shape as the vmscan swap-out
+    // cleanup).
+    super::lru::page_remove_lru(src);
+    super::lru::page_add_anon_lru(dst);
+
     // Clear src metadata
     // Note: try_to_unmap() only decrements _mapcount, not _refcount.
     // free_pages() will reset refcount to 0 before releasing to buddy.
