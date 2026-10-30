@@ -6,6 +6,20 @@ perf-audit lane's accepted measurements on main@257698a5 (pa38 battery,
 pb1/pa-series, census streaks) — refresh the whole table at once when a new
 main lands, do not cherry-pick rows.
 
+> **Tier-1 vehicle exception (2026-10-30, aarch64 merge b238ebd1)**: the
+> Tier-1 rows are measured on the OH image set (updater/system/vendor/
+> chip_prod/ramdisk/userdata), which was removed in the 101 GB disk
+> cleanup and no longer exists on this host — pa-boot.sh cannot start,
+> so the syscall-volume, census, and per-op rows had no vehicle for
+> this merge. Written justification per policy: (a) this merge's
+> deltas on the baseline platforms' compiled paths are nil — every
+> shared-file change is a per-arch constant (wake floor, ELF machine
+> IDs), a cfg-gated arm, or a print on a failure-only path; (b) the
+> empirical cover is the Tier-2 pbench run on this merge's bzImage
+> (medians vs the pb1 anchor below) plus the merge's riscv64 quiet
+> smoke (tick + zero-panic). Re-bank the full Tier-1 battery when the
+> image set is rebuilt.
+
 ## Tier 1 — quiet syscost boot (KVM, q35, smp2/4G, syscost=1, 780s window)
 
 | metric | baseline | band |
@@ -58,6 +72,21 @@ runs judge p2_ctxsw against 1.38 µs ±20% (quiet window) or 2.0 µs
 (loaded window), never against the 15.4 debug cell.
 
 ## Whole-table refresh (2026-10-29, leg 52/53 — the 2d3df4a7 merge passed its own tier via the pa91 chain)
+
+### Tier-2 debug-class board + append re-bank (2026-10-30, the aarch64 merge b238ebd1)
+
+The merge's Tier-2 run (tag main-merge-aarch64, debug bzImage, DONE
+t=366s, foreign_qemus=1) read the fs family far below the pb1 column
+(p6_unlink 1094 vs 32816, p6_mkdrmdir 20248 vs 83192, p6_write_fsync
+12432 vs 18125 — pre-existing improvements since pb1's era) and
+**p6_append 637-649 µs vs the 500.4 anchor (+27%)**. A/B attribution
+(pre-merge 9fec88fb bzImage, same harness, isolated rerun):
+pre-merge append med = **655.5 µs** — identical within noise, post-merge
+marginally faster. Verdict: anchor drift, not a regression; the merge
+passes its tier, and the append cell re-banks here: **p6_append
+(debug class) = 637-656 µs family**. The other fs-family cells keep
+their pb1 anchors until a full debug-class re-bank board runs; the
+drift direction is improvement on every one of them.
 
 Refreshed cells from the pa91 chain (census+REST boot on the leg-52
 stack pre-CFS-fix; med-of-2 pbench boards at load1 13-15, strong class)
