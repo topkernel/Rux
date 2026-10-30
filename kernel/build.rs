@@ -877,7 +877,7 @@ fn compile_boot_asm() {
         if !dtb_src.exists() {
             let dump_arg = format!("dumpdtb={}", dtb_src.display());
             let ok = std::process::Command::new("qemu-system-aarch64")
-                .args(["-M", "virt", "-cpu", "cortex-a72", "-m", "1G", "-smp", "2"])
+                .args(["-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-m", "1G", "-smp", "2"])
                 .arg("-machine").arg(&dump_arg)
                 .status().map(|s| s.success()).unwrap_or(false);
             assert!(
