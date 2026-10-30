@@ -173,14 +173,17 @@ pub fn sys_semget(args: [u64; 6]) -> i64 {
     let nsems = args[1] as usize;
     let semflg = args[2] as i32;
 
-    if nsems == 0 || nsems > 256 {
-        return -(errno::EINVAL as i64);
-    }
-
-    // Validate nsems against existing set (per Linux semget): if key already
-    // exists, the requested nsems must not exceed the existing set's nsems.
+    // Existing-set path (ipcget_public): IPC_EXCL → EEXIST takes precedence
+    // over the nsems comparison, and a found key ignores nsems except the
+    // "larger than the set" check. nsems == 0 on an existing key is valid —
+    // semget(key, 0, 0) is the standard "just give me the id" idiom; the old
+    // blanket EINVAL for nsems == 0 broke it (the EINVAL only applies when a
+    // NEW set would be created, newary()'s !nsems check).
     if key != 0 {
         if let Some(existing_idx) = SEM_IDS.find_by_key(key) {
+            if semflg & IPC_EXCL != 0 {
+                return -(errno::EEXIST as i64);
+            }
             let slots = SEM_IDS.slots.lock();
             if let Some(ref entry) = slots[existing_idx] {
                 let existing_nsems = entry.inner.nsems();
@@ -188,7 +191,16 @@ pub fn sys_semget(args: [u64; 6]) -> i64 {
                     return -(errno::EINVAL as i64);
                 }
             }
+        } else if semflg & IPC_CREAT == 0 {
+            // Bare lookup on a nonexistent key: ENOENT (the old nsems EINVAL
+            // preempted this answer).
+            return -(errno::ENOENT as i64);
         }
+    }
+
+    // New-set path (newary): nsems must be 1..=SEMMSL.
+    if nsems == 0 || nsems > 256 {
+        return -(errno::EINVAL as i64);
     }
 
     match SEM_IDS.alloc(SemArray::new(nsems, key, (semflg & 0o777) as u16), key, semflg) {
@@ -367,9 +379,10 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    // Linux returns EFBIG for out-of-range sem_num on GETVAL
-                    // (review IPC L: EFBIG 口径).
-                    return -(errno::EFBIG as i64);
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main; EFBIG belongs to semop's sops check —
+                    // the old EFBIG here was a mis-cite).
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].value.load(Ordering::Relaxed) as i64;
@@ -378,14 +391,17 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             -(errno::EINVAL as i64)
         }
         SETVAL => {
-            if semnum < 0 {
-                return -(errno::EINVAL as i64);
-            }
+            // Reference order (semctl_setval): val range first (ERANGE),
+            // then id (EINVAL), then sem_num range (EINVAL), then write
+            // permission (S_IWUGO — not rw: a write-only mode must pass).
             let val = arg as i32;
             if val < 0 || val > SEMVMX {
                 return -(errno::ERANGE as i64);
             }
-            let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
+            if semnum < 0 {
+                return -(errno::EINVAL as i64);
+            }
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
@@ -393,8 +409,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref mut entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    // Linux returns EFBIG for out-of-range sem_num on SETVAL.
-                    return -(errno::EFBIG as i64);
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_setval; EFBIG is semop-only).
+                    return -(errno::EINVAL as i64);
                 }
                 let prev;
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
@@ -459,7 +476,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if array_ptr.is_null() {
                 return -(errno::EFAULT as i64);
             }
-            let idx2 = match SEM_IDS.find_with_perms(semid, 0o6) {
+            // S_IWUGO: SETALL needs write permission only (reference
+            // semctl_main — the old rw demand wrongly failed write-only modes).
+            let idx2 = match SEM_IDS.find_with_perms(semid, 0o2) {
                 Ok(i) => i,
                 Err(e) => return e as i64,
             };
@@ -469,24 +488,32 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
                 if !access_ok(array_ptr as usize, nsems * 2) {
                     return -(errno::EFAULT as i64);
                 }
+                // Copy the whole array and validate EVERY element before
+                // storing any of them (reference SETALL: copy_from_user +
+                // full ERANGE scan, then apply). The old per-element
+                // apply-as-you-read left the set partially updated when a
+                // later element faulted or was out of range.
+                let mut vals = alloc::vec::Vec::<u16>::with_capacity(nsems);
+                for i in 0..nsems {
+                    // SAFETY: array_ptr was access_ok-validated for nsems*2
+                    // bytes above; get_user is the exception-table copy path
+                    // (SUM=0 safe). LTP semctl03 raw-syscall EFAULT variant.
+                    match unsafe { get_user(array_ptr.add(i)) } {
+                        Some(v) => vals.push(v),
+                        None => return -(errno::EFAULT as i64),
+                    }
+                }
+                for v in vals.iter() {
+                    if (*v as i32) > SEMVMX {
+                        return -(errno::ERANGE as i64);
+                    }
+                }
                 if let Some(ref mut sems) = *entry.inner.sems.lock() {
-                    for i in 0..nsems {
-                        // SAFETY: array_ptr was access_ok-validated for nsems*2 bytes above;
-                        // get_user is the exception-table copy path (SUM=0 safe).
-                        match unsafe { get_user(array_ptr.add(i)) } {
-                            Some(v) => {
-                                let val = v as i32;
-                                if val < 0 || val > SEMVMX {
-                                    return -(errno::ERANGE as i64);
-                                }
-                                sems[i].value.store(val, Ordering::Relaxed);
-                                // SETALL records the caller as the last operator
-                                // of every semaphore (semctl GETPID).
-                                sems[i].pid.store(get_current_pid(), Ordering::Relaxed);
-                            }
-                            // Unreadable user page: EFAULT (LTP semctl03).
-                            None => return -(errno::EFAULT as i64),
-                        }
+                    for (i, v) in vals.iter().enumerate() {
+                        sems[i].value.store(*v as i32, Ordering::Relaxed);
+                        // SETALL records the caller as the last operator
+                        // of every semaphore (semctl GETPID).
+                        sems[i].pid.store(get_current_pid(), Ordering::Relaxed);
                     }
                 }
                 entry.inner.sem_ctime.store(ipc_current_time(), Ordering::Relaxed);
@@ -533,7 +560,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -(errno::EFBIG as i64);
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main).
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].ncnt.load(Ordering::Relaxed) as i64;
@@ -554,7 +583,9 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if let Some(ref entry) = slots[idx2] {
                 let snum = semnum as usize;
                 if snum >= entry.inner.nsems() {
-                    return -(errno::EFBIG as i64);
+                    // Out-of-range sem_num in semctl is EINVAL (reference
+                    // semctl_main).
+                    return -(errno::EINVAL as i64);
                 }
                 if let Some(ref sems) = *entry.inner.sems.lock() {
                     return sems[snum].zcnt.load(Ordering::Relaxed) as i64;
@@ -650,12 +681,12 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             result_id as i64
         }
         20 => {
-            // SEM_STAT_ANY — SEM_STAT without the permission check
-            // (introduced for checkpoint/restore; root-only by capability of
-            // the caller in Linux via CAP_SYS_ADMIN, approximated here).
-            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
-                return -(errno::EPERM as i64);
-            }
+            // SEM_STAT_ANY — SEM_STAT without the permission check. The
+            // reference (semctl_stat) performs NO capability check either:
+            // STAT_ANY is meant to mirror the /proc/sysvipc visibility for
+            // checkpoint/restore ("only audit these calls and do not do
+            // traditional S_IRUGO permission checks"). The old CAP_SYS_ADMIN
+            // gate wrongly returned EPERM to unprivileged callers.
             let raw_idx = semid as usize;
             let buf_ptr = arg as *mut SemidDsUapi;
             if buf_ptr.is_null()
@@ -868,8 +899,12 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         }
     }
 
-    // Find semaphore set with alter permission check
-    let idx = match SEM_IDS.find_with_perms(semid, 0o2) {
+    // Permission: write when any op alters a value (sem_op != 0), otherwise
+    // read — reference __do_semtimedop does ipcperms(alter ? S_IWUGO :
+    // S_IRUGO); the old unconditional write demand wrongly failed an
+    // all-zero (wait-for-zero) operation on a read-only set.
+    let alter = sops.iter().any(|s| s.sem_op != 0);
+    let idx = match SEM_IDS.find_with_perms(semid, if alter { 0o2 } else { 0o4 }) {
         Ok(i) => i,
         Err(e) => return e as i64,
     };
@@ -921,7 +956,14 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                             // Check timeout
                             if let Some(dl) = deadline {
                                 if crate::drivers::timer::get_jiffies() >= dl {
-                                    return -(errno::ETIMEDOUT as i64);
+                                    // Timeout expiry is EAGAIN, matching the
+                                    // reference sleep loop (`if (timed_out)
+                                    // error = -EAGAIN;`) and man semop(2)
+                                    // ("EAGAIN ... or the time limit
+                                    // specified in timeout expired"). The
+                                    // old ETIMEDOUT was never a documented
+                                    // semtimedop outcome.
+                                    return -(errno::EAGAIN as i64);
                                 }
                             }
 
