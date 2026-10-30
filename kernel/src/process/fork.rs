@@ -848,6 +848,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             }
             child.set_cpus_allowed(parent.cpus_allowed());
             child.set_oom_score_adj(parent.oom_score_adj());
+            // ioprio is per-task and inherited across fork (the reference
+            // kernel's copy_process memcpy).
+            child.set_ioprio(parent.ioprio());
             child.sigstack = parent.sigstack;
             child.dumpable = parent.dumpable;
         }
