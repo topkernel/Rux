@@ -1559,6 +1559,118 @@ pub fn pte_lock_for(_mm: &crate::mm::mm_struct::MmStruct) -> &'static crate::mm:
 static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =
     crate::mm::mm_struct::PteLock::new();
 
+// ==================== Leaf primitives for shared mm code (FD-1) ====================
+//
+// mm/rmap.rs (try_to_unmap_inner) and mm/compact.rs (remap_page) used to
+// carry Sv39 manual descents of their own — root indexed with bits 38:30,
+// Sv39 PTE encoding — which silently no-oped on the 4-level arches (wrong
+// slot, is_valid() false, unmap/migration aborted, swap-out reclaimed
+// nothing). The walk shape and the PTE encoding are arch facts and live
+// here; the shared mm code calls only these three primitives.
+
+/// Permission/flag bits of a 4K leaf PTE — everything except the PPN
+/// field: V|R|W|X|U|G|A|D plus the COW/PCACHE software bits. This is the
+/// exact bit set [`leaf_pte_install`] puts back.
+#[inline]
+pub fn pte_flag_bits(bits: u64) -> u64 {
+    bits & 0x3FF
+}
+
+/// Default flag bits for an anonymous user page — compaction's fallback
+/// when the pre-unmap walk could not recover the live PTE. Present, RW,
+/// user, accessed, dirty; non-exec (the historical 0xD7 shape).
+pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::V | PageTableEntry::R
+    | PageTableEntry::W | PageTableEntry::U | PageTableEntry::A
+    | PageTableEntry::D;
+
+/// Replace the 4K leaf PTE at `vaddr` with raw `new_bits` (0 = unmap; a
+/// swap or migration entry), under this mm's PTE lock. The leaf must
+/// still be present and map `expect_pfn` — the R7-C3 re-validation: the
+/// caller's lock-free walk may have raced a concurrent leaf writer (COW
+/// break / swap-in / munmap). Returns true when the leaf was replaced;
+/// the caller owns the TLB flush.
+///
+/// A huge-leaf entry at an upper level has no 4K slot to replace —
+/// returns false (anonymous reclaim targets 4K mappings only).
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_replace(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    expect_pfn: u64,
+    new_bits: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: caller guarantees a live root; the walk only reads table
+    // frames reachable from it, and the leaf write goes through the
+    // validated slot.
+    unsafe {
+        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() {
+            return false;
+        }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let pte0 = (*table0).get(vpn0);
+        if !pte0.is_valid() || pte0.ppn() != expect_pfn {
+            return false;
+        }
+        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
+
+/// Rebuild a PRESENT 4K leaf mapping `pfn` at `vaddr` from saved flag
+/// bits ([`pte_flag_bits`] shape), under this mm's PTE lock. The leaf
+/// slot may currently hold a non-present marker (the compaction
+/// migration window) — only the intermediate levels must exist. The
+/// valid bit is OR-ed in unconditionally (the saved bits of a live leaf
+/// carry it; the fallback constant does too — belt for the marker case).
+/// Returns true when installed; the caller owns the TLB flush.
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_install(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    pfn: u64,
+    flags: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: see leaf_pte_replace.
+    unsafe {
+        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() {
+            return false;
+        }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let new_bits = (pfn << 10) | (flags & 0x3FF) | PageTableEntry::V;
+        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
 
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
