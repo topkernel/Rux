@@ -76,7 +76,10 @@ pub unsafe fn copy_thread(
 }
 
 /// Clean up thread state (execve): clear FPSIMD image so the new image
-/// starts from a zero FP state (the riscv64 "FP residue" lesson)
+/// starts from a zero FP state (the riscv64 "FP residue" lesson), and
+/// reset the user TLS pointer — the new image's TLS is installed by its
+/// own libc startup, and until then a stale foreign base is worse than
+/// zero (a fault at ~(base + slot) reads as memory corruption).
 #[inline]
 pub fn flush_thread() {
     if let Some(current) = crate::sched::current() {
@@ -92,6 +95,15 @@ pub fn flush_thread() {
             // the previous image's FP registers through the eret-tail
             // restore (el0_exit_fpsimd_restore) or a signal frame.
             thread.user_fpsimd = Default::default();
+            // TLS: saved image AND the live register (no context switch
+            // is guaranteed between here and the new image's first user
+            // instruction, so the register itself must be cleared too).
+            thread.tp_value = 0;
+        }
+        // SAFETY: writing our own user TLS register to 0; no side
+        // effects beyond the register value.
+        unsafe {
+            core::arch::asm!("msr tpidr_el0, xzr", options(nostack, preserves_flags));
         }
     }
 }
