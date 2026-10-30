@@ -222,6 +222,20 @@ pub fn test_claim_child() {
 pub fn test_device_window_pte() {
     test_group_start("kernel_device_window_pte");
 
+    // aarch64 stage-2: every address probed below belongs to the riscv64
+    // QEMU virt map (PLIC 0x0c00_0000, ECAM 0x3000_0000, PCI MMIO
+    // 0x4000_0000) and aarch64's kernel_device_window_pte is a None stub
+    // (arch/aarch64/mm/mmu_init.rs — TTBR1 device-window walk pending,
+    // mm lane). Skip until that lands; riscv64/x86_64 keep the pins.
+    #[cfg(feature = "aarch64")]
+    {
+        test_skip(
+            "kernel_device_window_pte",
+            "aarch64: device-window walk pending (mm stage-2; probe addrs are riscv64 virt)",
+        );
+        return;
+    }
+
     use crate::arch::mm::mmu_init::kernel_device_window_pte;
     use crate::arch::mm::PageTableEntry;
 
@@ -286,6 +300,19 @@ pub fn test_device_window_pte() {
 /// Pre-fix this map was silently refused (gnome-shell SIGSEGV family).
 pub fn test_megapage_demotion() {
     test_group_start("megapage demotion (4K map over 2MB leaf)");
+
+    // aarch64 stage-2: create_user_address_space is the mm lane's open
+    // todo (arch/aarch64/mm/mm_ops.rs — panics "not yet implemented"),
+    // so this probe cannot run there yet. The graceful-None skip below
+    // covers the riscv64 "no allocator" case.
+    #[cfg(feature = "aarch64")]
+    {
+        test_skip(
+            "megapage demotion",
+            "aarch64: create_user_address_space pending (mm lane stage-2 todo)",
+        );
+        return;
+    }
 
     use crate::arch::mm::mm_ops::{
         create_user_address_space, PageTableWalker,
