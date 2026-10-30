@@ -64,7 +64,7 @@ pub const PAGE_SIZE: usize = 4096;
 /// architectures). riscv64 re-exports its arch module (the values are the
 /// ABI); x86_64's pinned arch tree carries no such module, so the
 /// constants are defined here.
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "riscv64", feature = "aarch64"))]
 pub use crate::arch::mm::map;
 
 #[cfg(feature = "x86_64")]
@@ -116,7 +116,7 @@ pub unsafe fn alloc_and_map_user_table(
     size: u64,
     flags: u64,
 ) -> Option<u64> {
-    #[cfg(feature = "riscv64")]
+    #[cfg(any(feature = "riscv64", feature = "aarch64"))]
     {
         // SAFETY: caller guarantees a valid root (see fn doc).
         unsafe { crate::arch::mm::alloc_and_map_to_user_table(user_ppn, virt_addr, size, flags) }
@@ -139,7 +139,7 @@ pub unsafe fn alloc_and_map_user_memory(
     size: u64,
     flags: u64,
 ) -> Option<u64> {
-    #[cfg(feature = "riscv64")]
+    #[cfg(any(feature = "riscv64", feature = "aarch64"))]
     {
         // SAFETY: caller guarantees a valid root (see fn doc).
         unsafe { crate::arch::mm::alloc_and_map_user_memory(user_root_ppn, virt_addr, size, flags) }
@@ -156,7 +156,8 @@ pub unsafe fn alloc_and_map_user_memory(
 /// Bridges the per-arch context-switch primitives: riscv64 drives
 /// `context::switch_mm(ppn, asid)` (satp + ASID-scoped sfence); x86_64
 /// writes CR3 through the interface-parity `mm::write_satp` (no PCID
-/// yet, so the ASID argument is unused).
+/// yet, so the ASID argument is unused); aarch64 decomposes the composed
+/// satp into TTBR0_EL1 (root PPA + ASID in [63:48]) with a full flush.
 ///
 /// # Safety
 /// `root_ppn` must be a live page-table root; caller must ensure the
@@ -171,6 +172,11 @@ pub unsafe fn switch_address_space(root_ppn: u64, asid: u16) {
         // SAFETY: caller guarantees a valid root (see fn doc).
         crate::arch::mm::write_satp(root_ppn << 12);
     }
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: caller guarantees a valid root (see fn doc).
+        crate::arch::mm::write_satp(crate::arch::mm::build_satp(asid, root_ppn as usize));
+    }
 }
 
 /// Invalidate one user page mapping in the local TLB (no cross-CPU
@@ -178,13 +184,16 @@ pub unsafe fn switch_address_space(root_ppn: u64, asid: u16) {
 ///
 /// Bridges the per-arch `flush_tlb_page` signatures: riscv64 takes
 /// `(vaddr, asid)` (asid 0 = all address spaces), x86_64 takes the
-/// address alone (PCID-less invlpg).
+/// address alone (PCID-less invlpg), aarch64 takes `(vaddr, 0)` — the
+/// asid-0 convention maps to `tlbi vaae1is` (VA across ALL ASIDs).
 #[inline]
 pub fn flush_tlb_page_local(addr: u64) {
     #[cfg(feature = "riscv64")]
     crate::arch::mm::flush_tlb_page(addr as usize, 0);
     #[cfg(feature = "x86_64")]
     crate::arch::mm::flush_tlb_page(addr);
+    #[cfg(feature = "aarch64")]
+    crate::arch::mm::flush_tlb_page(addr as usize, 0);
 }
 
 // Use physical memory size from config (Kernel.toml: memory.physical_memory)

@@ -36,6 +36,10 @@ fn syscall_get_return(regs: &PtRegs) -> i64 {
     {
         regs.rax as i64
     }
+    #[cfg(feature = "aarch64")]
+    {
+        regs.regs[0] as i64
+    }
 }
 
 // FORENSIC: global syscall ring — replayed at NOVMA crashes to reconstruct

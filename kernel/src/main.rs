@@ -410,6 +410,16 @@ pub fn rust_main_tail() -> ! {
             cmdline::init_from(arch::boot::boot_cmdline());
             print_status("boot", "multiboot cmdline + e820 parsed", true);
         }
+        // aarch64: QEMU's ELF -kernel boot passes no cmdline (the -append
+        // protocol is Linux-image-only, like the missing DTB pointer) —
+        // parse the embedded DTB's /chosen if present, else the default
+        // (root=/dev/vda rw console=ttyS0 init=/sbin/init) applies.
+        #[cfg(feature = "aarch64")]
+        {
+            let dtb_ptr = arch::boot::get_dtb_pointer();
+            cmdline::init(dtb_ptr);
+            print_status("boot", "DTB cmdline (embedded blob)", true);
+        }
         if let Some(cmdline) = cmdline::get_cmdline() {
             if !cmdline.is_empty() {
                 // Truncate long cmdline
@@ -459,6 +469,13 @@ pub fn rust_main_tail() -> ! {
                 let dtb_virt = arch::mm::phys_to_virt(
                     arch::mm::PhysAddr::new(dtb_phys)
                 ).bits();
+                unsafe { cmdline::parse_memory_regions(dtb_virt) }
+            };
+            // aarch64: dtb_pointer holds the embedded blob's LINKED VA —
+            // walk it directly; phys_to_virt would mistranslate.
+            #[cfg(feature = "aarch64")]
+            let memory_regions = {
+                let dtb_virt = arch::boot::get_dtb_pointer();
                 unsafe { cmdline::parse_memory_regions(dtb_virt) }
             };
             #[cfg(feature = "x86_64")]
@@ -750,15 +767,23 @@ pub fn rust_main_tail() -> ! {
                 print_status("fs", "debugfs mounted /sys/kernel/debug", ok);
             }
 
-            // cgroup v2 unified hierarchy (U1b) — systemd's hard
-            // dependency: mount cgroup2 at /sys/fs/cgroup after the
-            // sysfs/procfS boot mounts. The hierarchy root exposes
-            // cgroup.controllers ("cpu memory pids") and a writable
-            // cgroup.procs, which systemd's boot probe requires.
+            // cgroup v2 unified hierarchy (U1b). init ALWAYS registers
+            // the filesystem type (`mount -t cgroup2` from userspace —
+            // what real systemd does for itself). The BOOT pre-mount is
+            // OPT-IN via `cgroup2pre` (gdm bring-up r17b): reference
+            // kernels never mount cgroupfs — a kernel-pre-mounted
+            // /sys/fs/cgroup whose root node lists EVERY task, plus an
+            // always-populated /proc/[pid]/cgroup, made udevd (spawned
+            // by pid 1 with sd_booted()>0) record the ROOT cgroup as
+            // its own; its on_post() idle cleanup then cg_kill()ed the
+            // entire daemon set. With the pre-mount off and no
+            // userspace mount, /proc/self/cgroup reads empty and
+            // cg_pid_get_path() answers -ENOMEDIUM — udevd records no
+            // cgroup and never sweeps.
             {
                 let cg_init = fs::cgroup::init_cgroupfs();
                 print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
-                if cg_init.is_ok() {
+                if cg_init.is_ok() && crate::cmdline::has_param("cgroup2pre") {
                     // The mount point chain must already exist in the
                     // dentry tree WITH inodes (the debugfs precedent
                     // above): vfs_mount walks the path and creates
@@ -838,7 +863,11 @@ pub fn rust_main_tail() -> ! {
             // P2 vDSO: build the vDSO ELF page and prime the time-data
             // page — must run before the first execve maps it.
             crate::mm::vdso::vdso_init();
-            print_status("vdso", "clock_gettime fast path", true);
+            // The page is built, but userspace mapping is DISABLED (the
+            // map block in exec is `if false` and AT_SYSINFO_EHDR stays
+            // absent) — [ok] "clock_gettime fast path" claimed a
+            // userspace-visible feature that does not exist.
+            print_status_ex("vdso", "page built; mapping off", None);
             // P2 boot ip=a.b.c.d: override the hardcoded slirp default
             // (10.0.2.15) with the address given on the kernel command
             // line — replaces hardcoding for non-default QEMU networks.
@@ -1032,20 +1061,29 @@ pub fn rust_main_tail() -> ! {
             // Initialize VirtIO Input devices
             let (kb_count, ptr_count) = drivers::input::init_virtio_input();
 
-            // evdev devices registered
-            print_status("driver", "evdev /dev/input/event0", true);
-            print_status("driver", "evdev /dev/input/event1", true);
+            // evdev nodes exist either way (init_evdev registers the two
+            // slots), but an [ok] "driver" line is only honest when real
+            // virtio-input hardware backs them — on a headless virt the
+            // nodes are unfed stubs.
+            if kb_count > 0 || ptr_count > 0 {
+                print_status("driver", "evdev /dev/input/event0-1", true);
+            } else {
+                print_status_ex("driver", "evdev nodes (no input hw)", None);
+            }
 
             if kb_count > 0 {
                 print_status("driver", "virtio-keyboard", true);
             } else {
-                print_status("driver", "PS/2 keyboard (stub)", true);
+                // No keyboard hardware — a neutral line, NOT an [ok] for a
+                // "PS/2 stub" that never existed (there is no PS/2 driver;
+                // the old print was boot-table theater).
+                print_status_ex("driver", "no keyboard (headless)", None);
             }
 
             if ptr_count > 0 {
                 print_status("driver", "virtio-tablet", true);
             } else {
-                print_status("driver", "PS/2 mouse (stub)", true);
+                print_status_ex("driver", "no pointer (headless)", None);
             }
         }
 
@@ -1083,22 +1121,11 @@ pub fn rust_main_tail() -> ! {
             // outcome so the chosen path can be folded into the line).
             init::init();
 
-            // Print shell welcome message after boot
-            unsafe {
-                use crate::console::putchar;
-                // cfg-gated, NOT config::TARGET_PLATFORM: build.rs only
-                // reruns when Kernel.toml changes, so in a worktree that
-                // builds both arches the generated constant can be stale
-                // (x86 build inheriting a riscv64 config.rs). The riscv64
-                // string is unchanged byte-for-byte.
-                #[cfg(feature = "x86_64")]
-                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(x86_64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
-                #[cfg(not(feature = "x86_64"))]
-                let msg: &[u8] = b"\n\x1b[1;36mWelcome to \x1b[1;32mRux OS\x1b[0m \x1b[90m(RISC-V 64)\x1b[0m\n\x1b[90m- \x1b[1mmrsh\x1b[0m\x1b[90m (POSIX shell) | A minimal POSIX-compatible shell\x1b[0m\n";
-                for &b in msg {
-                    putchar(b);
-                }
-            }
+            // (The kernel used to print a fake "Welcome / mrsh" shell
+            // banner here unconditionally — userspace theater that fired
+            // even when init exec had failed. Removed: whatever the boot
+            // disk's init prints is the real welcome.)
+
         }
 
         println!();
@@ -1163,10 +1190,13 @@ extern "C" fn boot_stack_continuation() -> ! {
 
 // Include platform-specific assembly code
 #[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/boot/boot.S"));
+use core::arch::global_asm;
 
-#[cfg(feature = "aarch64")]
-global_asm!(include_str!("arch/aarch64/trap.S"));
+// boot/boot.S is assembled by build.rs and linked as the first object
+// (duplicate _start otherwise).
+
+// aarch64/trap.S is included from arch/aarch64/trap.rs via global_asm!
+// (it needs the PtRegs frame offsets interpolated from Rust constants).
 
 /// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
 /// memory + kernel on x86_64) and the heap's physical base.
@@ -1205,6 +1235,8 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 const KERNEL_RESERVE_SIZE: usize = 0x160_0000; // 22MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+#[cfg(feature = "aarch64")]
+const KERNEL_RESERVE_SIZE: usize = 0x1800_000; // 24MB static window (the aarch64 reserve arm below uses its own top)
 /// Effective (RAM-clamped) static-region sizes computed by the early
 /// boot block from the discovered memory map (layout.rs
 /// effective_static_regions). HEAP_SIZE_EFF feeds the heap buddy's
@@ -1218,6 +1250,10 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
 const KERNEL_HEAP_PHYS: usize = 0x8160_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
+// aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
+// aarch64 linker.ld ASSERTs the image fits). Heap follows the window.
+#[cfg(feature = "aarch64")]
+const KERNEL_HEAP_PHYS: usize = 0x4280_0000;
 
 /// Physical base of RAM and the kernel's physical load address, per arch.
 #[cfg(feature = "riscv64")]
@@ -1228,6 +1264,10 @@ const KERNEL_PHYS_LOAD_ADDR: usize = 0x8020_0000;
 const MEMORY_PHYS_BASE: usize = 0x0000_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_PHYS_LOAD_ADDR: usize = 0x0020_0000; // multiboot1 LMA
+#[cfg(feature = "aarch64")]
+const MEMORY_PHYS_BASE: usize = 0x4000_0000;
+#[cfg(feature = "aarch64")]
+const KERNEL_PHYS_LOAD_ADDR: usize = 0x4008_0000; // RAM base + text_offset
 
 /// Usable memory regions from the multiboot/e820 map (x86_64).
 ///
@@ -1324,7 +1364,9 @@ pub extern "C" fn rust_main() -> ! {
         // unchanged byte-for-byte.
         #[cfg(feature = "x86_64")]
         const VERSION: &[u8] = b"  [ x86_64 | POSIX Compatible | v";
-        #[cfg(not(feature = "x86_64"))]
+        #[cfg(feature = "aarch64")]
+        const VERSION: &[u8] = b"  [ AArch64 | POSIX Compatible | v";
+        #[cfg(not(any(feature = "x86_64", feature = "aarch64")))]
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
         for &b in VERSION { putchar(b); }
         let ver = env!("CARGO_PKG_VERSION");
@@ -1367,6 +1409,12 @@ pub extern "C" fn rust_main() -> ! {
         let dtb_phys = arch::boot::get_dtb_pointer();
         #[cfg(feature = "riscv64")]
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        // aarch64: QEMU passes the DTB in x0; the same generic FDT parser
+        // walks /memory (cmdline.rs is arch-neutral).
+        #[cfg(feature = "aarch64")]
+        let dtb_phys = arch::boot::get_dtb_pointer();
+        #[cfg(feature = "aarch64")]
+        let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
         // Prime the V-extension capability from the same DTB (vext.rs):
         // misa is not S-mode readable, so the ISA string is the source.
         #[cfg(feature = "riscv64")]
@@ -1381,6 +1429,7 @@ pub extern "C" fn rust_main() -> ! {
             mm::memblock_add(region.base, region.size).ok();
         }
 
+
         // OH Phase 1 prereq: discover the boot initrd (QEMU `-initrd` puts
         // linux,initrd-start/end into /chosen) and reserve its pages BEFORE
         // the zone allocator exists — init_zone_system hands every
@@ -1388,7 +1437,7 @@ pub extern "C" fn rust_main() -> ! {
         // consumed (unpacked into the rootfs) much later, after rootfs
         // init. Runs on the early identity mapping, hence the physical
         // dtb pointer like parse_memory_regions above.
-        #[cfg(feature = "riscv64")]
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
             if let Some((start, end)) = unsafe { cmdline::parse_initrd_region(dtb_phys) } {
@@ -1454,6 +1503,14 @@ pub extern "C" fn rust_main() -> ! {
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
         #[cfg(feature = "x86_64")]
         mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
+        // aarch64: image window + bring-up heap + slab — without this
+        // memblock_find_in_range hands out the RAM base and vmemmap's
+        // zeroing wipes the running kernel (the silent-boot hang).
+        #[cfg(feature = "aarch64")]
+        {
+            const AARCH64_STATIC_TOP: usize = 0x4280_0000 + (128 << 20) + (4 << 20);
+            mm::memblock_reserve(0x4000_0000, AARCH64_STATIC_TOP - 0x4000_0000).ok();
+        }
         if heap_size > 0 {
             mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
         }
@@ -1514,6 +1571,17 @@ pub extern "C" fn rust_main() -> ! {
 
         // Setup linear mapping (PAGE_OFFSET region)
         arch::mm::setup_linear_mapping(&memory_regions);
+
+        // aarch64 bring-up (port plan stage 2): the heap window is now
+        // covered by the linear map; initialize the buddy with a
+        // conservative window that is real RAM on every -m we boot. The
+        // precise clamp below re-derives layout numbers, but init_sized is
+        // idempotent-guarded, so this stands as the definitive init.
+        #[cfg(feature = "aarch64")]
+        {
+            const BRINGUP_HEAP: usize = 128 * 1024 * 1024;
+            mm::init_heap_sized(BRINGUP_HEAP);
+        }
 
         // Now switch to fixmap stage (linear mapping is available)
         arch::mm::pt_ops_set_fixmap();
@@ -1677,11 +1745,15 @@ fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
     }
 
     // Re-link cgroup2 after ext4 overlay (U1b, same defensive re-mount
-    // as procfs above). Pre-lookup first: the boot-time mount already
-    // populated the chain, but this re-mount must not fabricate bare
-    // dentries if the overlay reset it.
-    let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
-    let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+    // as procfs above) — only when the boot pre-mount ran (`cgroup2pre`;
+    // gdm bring-up r17b: reference kernels never mount cgroupfs, see the
+    // boot-mount site above). Pre-lookup first: the boot-time mount
+    // already populated the chain, but this re-mount must not fabricate
+    // bare dentries if the overlay reset it.
+    if crate::cmdline::has_param("cgroup2pre") {
+        let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
+        let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
+    }
 }
 
 // Panic handler — uses dfx::backtrace for all output

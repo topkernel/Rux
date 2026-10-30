@@ -204,6 +204,27 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
             }
         }
 
+        // ===== Inherit TPIDR_EL0 (aarch64 TLS) — same contract =====
+        // The child of a plain fork() must observe the parent's TLS
+        // base: glibc's pthread_atfork child handlers touch TLS (errno,
+        // locks) before any user code could re-install it. The saved
+        // tp_value and the live register are equal for the current task
+        // at every kernel point (the kernel never writes TPIDR_EL0
+        // outside __switch_to), so the live read IS the current value.
+        #[cfg(feature = "aarch64")]
+        {
+            let live_tp: u64;
+            // SAFETY: pure register read; no memory or flags effects.
+            unsafe {
+                core::arch::asm!(
+                    "mrs {}, tpidr_el0",
+                    out(reg) live_tp,
+                    options(nomem, nostack, preserves_flags)
+                );
+            }
+            task.thread_mut().tp_value = live_tp;
+        }
+
         // Set TLS if requested
         if args.flags & CLONE_SETTLS != 0 {
             crate::process::set_user_tls(task, args.tls);

@@ -185,11 +185,25 @@ pub fn generate_comm(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/cgroup content (U2).
 ///
-/// Rux exposes a single cgroups v2 unified hierarchy with every task in
-/// the root group — exactly what Linux reports for a v2-only system:
+/// When a cgroup2 hierarchy is mounted, every task lives in its root
+/// group — exactly what Linux reports for a v2-only system:
 /// `0::/\n` (one line per hierarchy; here just the unified one).
+///
+/// When NO hierarchy is mounted the file is EMPTY — reference kernels
+/// list mounted hierarchies only, and systemd's cg_pid_get_path()
+/// translates the empty read into -ENOMEDIUM ("cgroup2 not mounted").
+/// Fabricating "0::/" without a mount (gdm bring-up r17b storm) made
+/// udevd — spawned by pid 1 with sd_booted()>0 — record the ROOT
+/// cgroup as its own, and its on_post() idle cleanup then cg_kill()ed
+/// every pid the root cgroup.procs listed: the whole daemon set died
+/// by SIGKILL from the udevd daemon itself, PID 1 included (discarded
+/// there by the init-delivery protection).
 pub fn generate_cgroup(_pid: u64) -> Vec<u8> {
-    b"0::/\n".to_vec()
+    if crate::fs::cgroup::cgroup2_mounted() {
+        b"0::/\n".to_vec()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Generate /proc/[pid]/status content

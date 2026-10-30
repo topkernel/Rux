@@ -364,6 +364,35 @@ pub(crate) fn do_execve_elf(
             }
         }
     }
+    // aarch64 twin of the same trampoline page: arm64 glibc/musl normally
+    // return through their OWN SA_RESTORER stub, but restorer-less
+    // rt_sigaction callers (raw syscall users) land on this page — the
+    // reference arm64 kernel's vDSO sigtramp role. Contents:
+    //   movz x8, #139   ; __NR_rt_sigreturn (generic table, same as riscv)
+    //   svc  #0
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: user_ppn is a fresh user page-table root; the semantic
+        // alias flags are the same contract the stack/image mappings above
+        // pass. The returned frame is freshly allocated and exclusively
+        // owned by this address space.
+        let tp = unsafe {
+            alloc_and_map_to_user_table(
+                user_ppn,
+                crate::signal::SIGTRAMP_BASE,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::X | PageTableEntry::A,
+            )
+        };
+        if let Some(tp) = tp {
+            let kva = phys_to_virt(PhysAddr::new(tp)).bits() as usize;
+            unsafe {
+                core::ptr::write_volatile(kva as *mut u32, 0xD280_1168);
+                core::ptr::write_volatile((kva + 4) as *mut u32, 0xD400_0001);
+            }
+        }
+    }
 
     // Load each segment
     if ec2_on { ec2_stack = crate::arch::cpu::read_time(); }
@@ -511,6 +540,30 @@ pub(crate) fn do_execve_elf(
                                 new_bits |= PageTableEntry::NX;
                             }
                             (*table1).set(i1, PageTableEntry::from_bits(new_bits));
+                        }
+                        vaddr += PAGE_SIZE as u64;
+                    }
+                }
+
+                // aarch64: the walk and the descriptor rebuild live in
+                // the arch helper (mmu_init::set_user_leaf_flags) — no
+                // call site hand-rolls descriptor bits. The tree is
+                // unpublished (no MmStruct owns it yet, never scheduled),
+                // so no TLB maintenance is needed.
+                #[cfg(feature = "aarch64")]
+                {
+                    let mut vaddr = seg_start;
+                    while vaddr < seg_end {
+                        // SAFETY: user_ppn is the freshly created user
+                        // root; the helper rewrites only present L3
+                        // leaves' permission bits, preserving the output
+                        // address.
+                        unsafe {
+                            crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                user_ppn,
+                                vaddr,
+                                seg_flags,
+                            );
                         }
                         vaddr += PAGE_SIZE as u64;
                     }
@@ -766,7 +819,27 @@ pub(crate) fn do_execve_elf(
                             vaddr += PAGE_SIZE as u64;
                         }
                     }
-    
+
+                    // aarch64: arch helper (see the main-image tightening
+                    // block above); unpublished tree, no TLB work.
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let mut vaddr = seg_start;
+                        while vaddr < seg_end {
+                            // SAFETY: user_ppn is the freshly created
+                            // user root; the helper rewrites only present
+                            // L3 leaves' permission bits.
+                            unsafe {
+                                crate::arch::mm::mmu_init::set_user_leaf_flags(
+                                    user_ppn,
+                                    vaddr,
+                                    seg_flags,
+                                );
+                            }
+                            vaddr += PAGE_SIZE as u64;
+                        }
+                    }
+
                 }
             }
         }
@@ -840,7 +913,10 @@ pub(crate) fn do_execve_elf(
     // math above is 8-byte granular, so without this the entry rsp can
     // land ≡8 (mod 16) and ld.so's first aligned access (movaps on the
     // entry frame chain) takes a #GP. riscv64 hardware tolerates
-    // misaligned accesses, which is why the twin never tripped.
+    // misaligned accesses, which is why the twin never tripped. aarch64
+    // (AAPCS64) has the same 16-byte requirement at process entry — and
+    // alignment faults by default at EL0 for sp-relative SIMD accesses —
+    // so this is load-bearing on all three targets.
     let adjusted_stack_top = adjusted_stack_top & !0xFu64;
 
     // Build the args block in a KERNEL buffer, then install it with ONE
@@ -959,6 +1035,20 @@ pub(crate) fn do_execve_elf(
         let cred = (*task_ptr).cred();
         (cred.uid as u64, cred.euid as u64, cred.gid as u64, cred.egid as u64)
     };
+    // AT_HWCAP: feature bits libc may key off. riscv64/x86_64 have
+    // historically been 0 here and stay 0. aarch64 must advertise
+    // FP|ASIMD: glibc's static startup and IFUNC resolvers test these
+    // bits before emitting FP instructions, and the kernel enables
+    // CPACR_EL1.FPEN for EL0 (arch/aarch64/boot/boot.S) — reporting no FP
+    // would make libc take software-fallback paths (or refuse SIMD
+    // entirely). QEMU cortex-a72 implements both; no extra extension bits
+    // (crc32, aes, ...) are claimed until the kernel actually probes
+    // MIDR/ID_AA* registers for them.
+    #[cfg(feature = "aarch64")]
+    const AT_HWCAP_VALUE: u64 = (1 << 1) | (1 << 2); // HWCAP_FP | HWCAP_ASIMD
+    #[cfg(not(feature = "aarch64"))]
+    const AT_HWCAP_VALUE: u64 = 0;
+
     let auxv = &[
         (AT_PHDR, phdr_addr),
         (AT_PHENT, phent),
@@ -973,7 +1063,7 @@ pub(crate) fn do_execve_elf(
         (AT_EUID, at_euid),
         (AT_GID, at_gid),
         (AT_EGID, at_egid),
-        (AT_HWCAP, 0),
+        (AT_HWCAP, AT_HWCAP_VALUE),
         (AT_CLKTCK, 100),
         (AT_SECURE, secure_exec as u64),
         (AT_RANDOM, random_vaddr),
@@ -1426,6 +1516,26 @@ pub(crate) fn do_execve_elf(
                 r.mark_user_frame();
                 r.rflags = 1 << 9; // IF
                 r.rdi = argc;
+            }
+            #[cfg(feature = "aarch64")]
+            {
+                let r = &mut *current_regs;
+                // Fresh zeroed frame, mirroring the arm64 reference
+                // start_thread: pc = entry, sp = entry stack, pstate =
+                // EL0t with DAIF clear (interrupts unmasked at eret — the
+                // analogue of the riscv SR_SPIE / x86 IF settings above).
+                // sp is 16-byte aligned by the stack-layout math above
+                // (AAPCS64 requires 16-byte SP alignment at process entry).
+                // x0 deliberately stays 0: aarch64 _start reads argc from
+                // [sp], and no first-argument register is defined at
+                // process entry (unlike the riscv/x86 arms, which set the
+                // ABI argument slot as belt-and-braces for their _start
+                // shapes).
+                *r = crate::arch::pt_regs::PtRegs::new();
+                r.pc = actual_entry;
+                r.sp = adjusted_stack_top;
+                r.mark_user_frame();
+                r.syscallno = u64::MAX; // not in a syscall (arm64 convention)
             }
 
             {

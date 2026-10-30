@@ -4,6 +4,36 @@ This document records important changes and fixes to the Rux kernel.
 
 ## [Unreleased]
 
+### 2026-10-30 — AArch64 platform support merged to main
+
+- QEMU virt (cortex-a72) boots to an interactive root shell with
+  external commands, signals, and the in-kernel suite green
+  (1,119/1,119); `make build PLATFORM=aarch64`,
+  `make test PLATFORM=aarch64`
+- Bring-up: firmware-less ELF boot with an embedded (auto-dumped)
+  DTB; GICv3 + architectural timer + PSCI SMP + SGI IPI + PCI INTx;
+  ECAM at phys 0x40_1000_0000 via a dedicated alias window; 44-bit
+  IPA; self-assigned PCI BARs from the DTB 32-bit MMIO window
+- User space: full 4-level user walker with fork/COW, demand paging,
+  mprotect (+PROT_NONE markers), uaccess with a live `.ex_table`,
+  per-task TPIDR_EL0 TLS switching, per-trap FPSIMD save/restore,
+  complete rt_sigframe ABI (SA_RESTORER + kernel trampoline)
+- Notable root causes fixed on the way (each with in-tree evidence):
+  SVC ELR already points past the svc (an unconditional pc+=4 skipped
+  one user instruction per syscall); TCR IPA left at 32-bit (every
+  ≥4 GB translation took an address-size abort); GICD_CTLR under
+  DS=1 needs bit 1 for Group-1 forwarding (zero IRQs with everything
+  else armed); user TLS was never per-task state (first fork died in
+  glibc atfork/malloc tcache); the virtio modern device-ID table was
+  shifted one place; TASK_SIZE was 1 TiB where all consumers assumed
+  256 GB; the wake wild-pointer floor was the riscv64 constant on
+  every non-x86 build (all aarch64 heap-task wakeups dropped)
+- Shared-code hygiene: per-arch ELF machine checks (x86_64 had
+  skipped the check entirely), `.ex_table` KEEP'd in the link
+  (previously gc'd empty), loud failure paths in the virtio-blk
+  probe, the boot table's userspace theater removed (fake shell
+  banner, stub/overstated driver lines)
+
 ### 2026-10-07 — x86_64 platform support merged to main
 
 - Ubuntu 22.04 amd64 boots to the graphical desktop on q35 (login,

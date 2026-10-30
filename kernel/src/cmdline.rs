@@ -274,6 +274,10 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
     let mut depth = 0;
     let mut in_memory = false;
     let mut has_device_type_memory = false;
+    // QEMU's aarch64 DTB emits `reg` BEFORE `device_type` inside
+    // /memory@... — buffer the reg cells and commit at node exit so the
+    // parse no longer depends on property order.
+    let mut pending_reg: Option<(u64, u64)> = None;
 
     while ptr < end {
         let token = read_u32_at(ptr);
@@ -300,8 +304,20 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                 depth += 1;
             }
             FDT_END_NODE => {
+                if in_memory && has_device_type_memory {
+                    if let Some((base, size)) = pending_reg.take() {
+                        if size > 0 && count < MAX_MEMORY_REGIONS {
+                            regions[count] = MemoryRegion {
+                                base: base as usize,
+                                size: size as usize,
+                            };
+                            count += 1;
+                        }
+                    }
+                }
                 in_memory = false;
                 has_device_type_memory = false;
+                pending_reg = None;
                 depth -= 1;
             }
             FDT_PROP => {
@@ -334,7 +350,7 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                 // Parse "reg" property for memory regions
                 // Format: <address-high address-low size-high size-low> (for 64-bit addresses)
                 // or <address size> (for 32-bit addresses)
-                if in_memory && has_device_type_memory && name == "reg" && len >= 16 {
+                if in_memory && name == "reg" && len >= 16 {
                     // Read 64-bit address and size (each is 2 cells of 32 bits)
                     let addr_high = read_u32_at(ptr) as u64;
                     let addr_low = read_u32_at(ptr.offset(4)) as u64;
@@ -344,12 +360,8 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
                     let base = (addr_high << 32) | addr_low;
                     let size = (size_high << 32) | size_low;
 
-                    if size > 0 && count < MAX_MEMORY_REGIONS {
-                        regions[count] = MemoryRegion {
-                            base: base as usize,
-                            size: size as usize,
-                        };
-                        count += 1;
+                    if size > 0 {
+                        pending_reg = Some((base, size));
                     }
                 }
 

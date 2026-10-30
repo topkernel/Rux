@@ -55,6 +55,14 @@ pub fn thread_set_entry(
     {
         thread.ra = entry;
     }
+    #[cfg(feature = "aarch64")]
+    {
+        // Same shape as riscv64: __switch_to returns into thread.ra with
+        // sp = thread.sp. The fork child's ra = ret_from_fork, whose
+        // first switch-in runs the user-exit loop into the seeded
+        // pt_regs frame (child erets to EL0 with x0 = 0).
+        thread.ra = entry;
+    }
     #[cfg(feature = "x86_64")]
     {
         thread.callee.ret_addr = entry;
@@ -62,7 +70,8 @@ pub fn thread_set_entry(
 }
 
 /// Set the task's user TLS pointer (riscv64: tp register in pt_regs;
-/// x86_64: FS base restored on switch-in).
+/// x86_64: FS base restored on switch-in; aarch64: TPIDR_EL0 saved in
+/// thread.tp_value and re-installed at switch-in).
 pub fn set_user_tls(task: &mut Task, tls: u64) {
     #[cfg(feature = "riscv64")]
     {
@@ -77,6 +86,10 @@ pub fn set_user_tls(task: &mut Task, tls: u64) {
     #[cfg(feature = "x86_64")]
     {
         task.thread_mut().fs_base = tls;
+    }
+    #[cfg(feature = "aarch64")]
+    {
+        task.thread_mut().tp_value = tls;
     }
 }
 

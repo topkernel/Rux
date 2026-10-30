@@ -3628,3 +3628,103 @@ behind a reclaim walk); (4) prerequisite on main: the coherent
 081a01d3 sync carries it. Stage-1 implementation order updated:
 snapshot verification (already merged) → the three locking rules →
 the P3d before-row.
+
+### 8.10.29 Leg 58 (2026-10-29): the held battery CLEARED on the merged tip — BATTERY-CLEAN; the Tier-1 "regressions" dissolve into a debug-vs-strong instrument class (pa109 passes every row); GRQ recount closes in-band, not at target
+
+**Leg 57's unlink board landed clean and the flag is set: BATTERY-CLEAN.**
+The pa105 battery (tip 6d2c3f2d strong kernel md5 f776c6d70700, N=4
+sequential boards at host load1 0-1, whole-table reads from the SERIAL
+log — the stdout view still drops rows):
+
+| row (n=1000 unless noted)      | pa105pb1 | pa105pb2 | pa105pb3 | pa105fsw | verdict |
+|--------------------------------|----------|----------|----------|----------|---------|
+| p6_stat med us (n=10000)       | 16.72    | 16.71    | 16.74    | 16.88    | class   |
+| p6_openclose med us (n=10000)  | 31.13    | 31.00    | 31.01    | 31.30    | class   |
+| p6_getdents med us             | 530.9    | 531.5    | 542.4    | 537.5    | class   |
+| p6_read_cached med us          | 39.20    | 39.20    | 38.52    | 39.35    | class   |
+| p6_write_fsync med ms          | 8.89     | 9.16     | 9.61     | 9.86     | class   |
+| p6_append med us               | 108.7    | 88.0     | 85.0     | 80.5     | class   |
+| p6_mkdrmdir med ms             | 16.27    | 14.65    | 15.21    | 15.28    | 15.5ms class |
+| **p6_unlink med us**           | **80.9** | **92.2** | **90.1** | **85.4** | **fix class** |
+| FSW1 pc                        |          |          |          | **40**   | control |
+| panics/stalls/oops             | 0/0/0    | 0/0/0    | 0/0/0    | 0/0/0    | clean   |
+
+p6_unlink reads the 81-92us class on all four boards — the f3ea05b1
+journal-handle bracket holds on merged main (pre-fix six-board range
+11.15-11.87ms; the fix's own pre-merge boards read 89.7/125.3us). fsw
+pc back at the 40 control (pre-fix 3997). Even the threshold-adjacent
+EXT4-BIGLOCK-STALL watchdog class read ZERO where pa104pb1 read 3.
+**The last blocking battery row is closed. FLAG: BATTERY-CLEAN.**
+
+**The Tier-1 census "regressions" were never regressions: the bands
+are DEBUG-kernel bands and today's censuses were the first STRONG
+ones.** pa103cenA/B (under load 11-19) and pa105cen (load 3) all read
+volume 338-438M vs the 107.5M+-10% band, clock_gettime avg 0us
+(n=161-184M) vs 3-5us, GRQ hold 1129-1165ns vs 4080-7320ns. The
+decisive facts: (1) pa103cenA is PURE main 08b92311 — pre-slimming,
+pre-namei, pre-pcache-B — and reads the same class, so none of this
+lane's changes caused it; (2) every census that banked the current
+bands ran a DEBUG bzImage (pa50main, pa86dbg/pa88dbg/pa91dbg/pa94dbg);
+the strong kernel (LTO, codegen-units=1) runs the guest fast enough
+that clock-bounded busy loops iterate ~5x more (n 38M -> 172-192M) —
+the volume row is pace-coupled, and the per-op averages simply read
+their release-profile values. Two boots close this out:
+
+- **pa108** (strong tip, the day's quietest window, load1<1 at arm):
+  volume 451.6M, clock_gettime n=192.0M avg<0.5us, GRQ 1356ns — the
+  strong class confirmed IN THE QUIET WINDOW; all census health rows
+  dead-center (TERM 8, REFUSED 32, WAKE-STRANDED 5 organic no-grid,
+  ticks 100.00/99.68, 0 panic/OOM, nanosleep 121.7ms, small_alloc REST
+  0.9%, max closed cli segments 3-7ms class).
+- **pa109** (DEBUG tip kernel, same instrument as every band-seeding
+  census): **every Tier-1 row PASSES** — volume 97.6M (band 96.75-118M),
+  clock_gettime 3us n=41.2M, nanosleep 185.5ms, GRQ 5947ns,
+  small_alloc 1.2%, TERM 8 / REFUSED 32, ticks 99.67/100.00, 0
+  panic/OOM. Gate parse rc=0. **The accumulated Tier-1 debt is cleared
+  on the like-for-like instrument.** (One caveat line: two 33ms
+  single max cli segments at host load1~4 on the debug boot — the
+  documented host-contention flake class, both zones healed, miss=0.)
+
+Follow-ups for the coordinator: the perf-gate Tier-1 rows must pin
+the instrument (debug bzImage) or the baseline must bank strong-class
+bands (volume ~450M, clock sub-us, GRQ 1.1-1.4us) — until then any
+strong-kernel census will read the same three FAILs.
+
+**GRQ recount (5.4us -> <=2us target): the target is NOT achieved as
+a slimming-attributable effect; the row closes in-band.** On the
+debug instrument (the one that read 5405ns at pa94, withdrawal-era
+main, no slimming), the tip WITH slimming reads 5947ns (n 19.8M,
+sched.rs:2357) — inside 4080-7320, no demonstrated delta (the boot
+also ran +17% more acquisitions, 16.98M -> 19.83M; REST total 91.8s ->
+117.9s tracks the churn, avg flat). On the strong instrument
+everything reads 1129-1356ns WITH OR WITHOUT the slimming (pure-main
+08b92311 strong: 1165ns). The O(log n)/O(1) rework is real in the
+code but sits under this instrument's noise floor on the OH boot mix
+(the hold is dominated by lock-wait-under-IRQ-off and accounting, not
+the tree walks, once the release optimizer is done with either
+variant). No regression anywhere; the "GRQ REST 96s -> <=40s" hope
+did not materialize either (117.9s at +17% churn). The fdtable levers
+DID show on the same debug A/B: file.rs:1032 calls 132-144M -> 98.3M
+(-30%), time 49-51s -> 26.1s (-48%), avg 342-383 -> 265ns.
+
+**P3d concurrent-fault pair (pa106, interleaved A,B,B,A, all rc=0,
+quiet host): no pcache-B stage-1 regression.** Arm A (pure main
+08b92311): per-boot avg-of-4-proc-avgs 9.42/5.15ms (boot range
+4.7-12.1ms); arm B (tip with pcache B + namei + slimming + reap
+bracket): 6.89/5.36ms (range 5.1-7.7ms). B/A = 0.84. p3a med equal
+(0.080 both arms), p3b med 2.79-2.97us. The before/after instrument
+this lane owed pcache Option B is paid and green.
+
+**prctl04 rerun (pa107, riscv64 release tip, sweep rows 719/722/787):
+open14 PASS, openat03 PASS, prctl04 FAIL — 2 pass / 1 broken**
+("Test 2 haven't reported results" after the STRICT-violation child
+dies by SIGSYS 31 as designed; the relay to the LTP results collector
+is the broken link). Same shape as the standing seccomp merge debt —
+not a new regression from this lane's merges, still owed by the
+security lane.
+
+pa101 ohcheck (150s window, strong): 22039 stamped lines, 0
+panic/oops/OOM. Session note: the host did NOT reboot at 12:50
+(uptime 1d20h) — the coordinator session died; every board from
+pa105 through pa107 had already completed and was harvested from
+disk.

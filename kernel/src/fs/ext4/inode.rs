@@ -403,9 +403,17 @@ pub fn read_inode(
     // SAFETY: bh is a valid BufferHead from bio::bread.
     let data = unsafe { &(*bh).b_data };
 
-    // Bounds check: ensure inode data fits within the block
+    // Bounds check (read-side twin of the write paths' R20-FS2 clamp):
+    // the copy is clamped to the ON-DISK slot size (s_inode_size). With
+    // s_inode_size < 172 a full-struct copy would (a) fail the bounds
+    // check for the last slot(s) of every inode-table block — a spurious
+    // EIO on a perfectly valid 128-byte-inode filesystem — and (b) read
+    // the next slot's bytes into the unused tail fields. All fields
+    // from_disk consumes live below offset 128, so a clamped copy is
+    // complete for every consumer; the tail stays zeroed.
     let inode_size = core::mem::size_of::<Ext4InodeOnDisk>();
-    if in_block_offset + inode_size > data.len() {
+    let copy_len = core::cmp::min(inode_size, fs.inode_size as usize);
+    if in_block_offset + copy_len > data.len() {
         bio::brelse(bh);
         return Err(errno::Errno::IOError.as_neg_i32());
     }
@@ -415,7 +423,7 @@ pub fn read_inode(
     let inode_bytes = unsafe {
         core::slice::from_raw_parts_mut(
             &mut inode_on_disk as *mut _ as *mut u8,
-            inode_size,
+            copy_len,
         )
     };
 
@@ -431,7 +439,7 @@ pub fn read_inode(
         }
     }
 
-    inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + inode_size]);
+    inode_bytes.copy_from_slice(&data[in_block_offset..in_block_offset + copy_len]);
 
     bio::brelse(bh);
 
@@ -520,11 +528,24 @@ pub fn write_inode(
     }
 
     // Convert Ext4Inode to on-disk format
-    // Read existing on-disk inode first to preserve untracked fields
+    // Read existing on-disk inode first to preserve untracked fields.
+    // copy_len bytes only (the clamp above): a full-struct pointer copy
+    // would read copy_len..172 bytes from PAST the slot — with
+    // s_inode_size=128 the last slot of every inode-table block reads
+    // up to 44 bytes past the end of the block buffer (out of bounds).
+    // The struct tail stays zeroed, matching read_inode's clamp.
     let mut inode_on_disk = Ext4InodeOnDisk::default();
     // SAFETY: bounds checked above; in_block_offset + copy_len <= data.len().
-    let src_ptr = data[in_block_offset..in_block_offset + copy_len].as_ptr() as *const Ext4InodeOnDisk;
-    unsafe { core::ptr::copy_nonoverlapping(src_ptr, &mut inode_on_disk, 1) };
+    {
+        let src = &data[in_block_offset..in_block_offset + copy_len];
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(
+                &mut inode_on_disk as *mut _ as *mut u8,
+                copy_len,
+            )
+        };
+        dst.copy_from_slice(src);
+    }
 
     // Update tracked fields
     inode_on_disk.i_mode = inode.mode;

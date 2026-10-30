@@ -590,3 +590,52 @@ touched. Mixed APIs coexist exactly as D-4/D-6 conversions do.
 
 **Guard.** LTP fcntl/flock families; the errno_test unit group pins
 the enum values.
+
+---
+
+## D-12: Window batch-fill on the ext4 read miss path
+
+**Design.** On a page-cache miss, the whole miss window is filled in one
+round trip instead of per-page: `ext4_file_read_cached_dst` computes the
+window (demand range; plus the sequential read-ahead window when the
+access looks sequential, or a 16-page fault-around cluster for the
+page-aligned single-page signature that mmap demand faults produce),
+`fill_page_cache_batch` resolves each uncached page's physical block,
+COALESCES physically-contiguous runs into single multi-block device
+requests (`bio::bread_async_multi`, up to 64 blocks / 128 KiB per
+request), submits the batch back-to-back, kicks the device once, and
+drains everything with one sleep/wake cycle (`drain_batch`). A
+coherence guard splits any run at the first block-cached block so the
+direct DMA can never bypass a live dirty buffer-cache entry (the Xorg
+xkbcomp lesson). The mainstream kernel serves filemap reads/faults
+page-by-page through the per-page bio machinery with separate
+ondemand-readahead heuristics; its fault-around maps the cluster but
+each page still rides the individual fault path.
+
+**Advantage.** Under virtio-blk (TCG in particular), per-request fixed
+cost — chain setup, header/resp allocation, device kick, IRQ — dwarfs
+per-byte DMA cost. Before this design every page miss paid one
+synchronous submit/sleep/wake (~1.8 ms under TCG); the batch turns a
+whole window into one wait, which is what makes the desktop images
+(Linux distro boots, OpenHarmony's ~100 MB of ArkUI libs faulting at
+load) bootable at all. The read-ahead and fault-around windows piggyback
+on the same batch at no extra round trips.
+
+**Compatibility evidence.** External read semantics unchanged
+(read/pread/mmap EOF, short-read, EFAULT and hole-zeroing contracts;
+the Err-vs-hole split of 070770d6 made the error arm match
+ext4_file_read_iter's). LTP read-family green; the perf lane's pcache-B
+stage 1 wraps this exact path (P3d concurrent-fault pair green,
+B/A = 0.84 on the paired board).
+
+**Known cost.** The whole miss path (mapping resolution, DMA, page-cache
+inserts) runs under EXT4_BIG_LOCK — a deliberate correctness-first
+choice (the ftest01/ftest05 write/read coherence conviction); concurrent
+misses on different files serialize at the fill. Run coalescing is
+capped at 64 blocks/request and 512 blocks/batch; a 10s-device-stall
+discipline leaks (never frees) buffers the device may still DMA into.
+
+**Guard.** Perf-gate filesystem hot paths domain: pbench P3 fault rows
+and buffer-cache hit rate >= baseline; the exthunt read-side probes
+(rd_serve/rd_batch/rd_hit/READHOLE) adjudicate serve-truth when a
+read-corruption family appears.

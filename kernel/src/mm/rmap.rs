@@ -481,6 +481,8 @@ crate::mm::flush_tlb_page_local(target_vaddr as u64);
         crate::arch::ipi::flush_tlb_others();
         #[cfg(feature = "x86_64")]
         crate::arch::ipi::flush_tlb_others(0, 0);
+        #[cfg(feature = "aarch64")]
+        crate::arch::ipi::flush_tlb_others();
     }
 
     unmapped_count.get()

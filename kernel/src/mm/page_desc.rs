@@ -878,6 +878,8 @@ pub unsafe fn copy_page_contents(src_pfn: usize, dst_pfn: usize) {
 // RAM starts at 0 (the PFN formulas below are base-relative by design).
 #[cfg(feature = "riscv64")]
 pub const PHYS_MEMORY_BASE: usize = 0x8000_0000;
+#[cfg(feature = "aarch64")]
+pub const PHYS_MEMORY_BASE: usize = 0x4000_0000;
 #[cfg(feature = "x86_64")]
 pub const PHYS_MEMORY_BASE: usize = 0x0000_0000;
 

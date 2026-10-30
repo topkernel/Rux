@@ -1,6 +1,51 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-27): desktop frames reproducible, OH launcher at MainAbility
+## Current Phase (2026-10-30): AArch64 landed — stages 0-3 complete, merged to main
+
+**The third architecture is up end to end on QEMU virt (cortex-a72).**
+
+### AArch64 — from stub tree to interactive root shell
+
+- **Milestones, in order**: serial banner (PL011) → trap/context
+  switch → `make test PLATFORM=aarch64` green (1,119/1,119) →
+  virtio-blk PCI ext4 root mount → userspace exec → **interactive
+  shell with external commands** (`id`, `uname`, fork/exec loops) →
+  full signal path (rt_sigframe + FPSIMD, gdb-verified 5/5 handler
+  round-trips with mcontext edits honored)
+- **Platform bring-up**: firmware-less ELF boot with the DTB embedded
+  in `.rodata` (auto-dumped from the installed QEMU when absent),
+  GICv3 + architectural timer + PSCI SMP + IPI, PCI ECAM at
+  phys 0x40_1000_0000 behind a dedicated kernel-half alias window,
+  44-bit IPA, self-assigned BARs from the DTB 32-bit MMIO window
+- **The bugs the first two architectures could never expose** (all
+  root-caused with evidence, see git history): the SVC
+  return-address convention (ELR already points past the svc — an
+  unconditional pc+=4 skipped one user instruction per syscall),
+  TCR IPA size (32-bit default rejected every ≥4 GB translation),
+  per-task TPIDR_EL0 ownership (user TLS was never switched — the
+  first fork deadlocked the session into TLS-less crashes), GICD_CTLR
+  bit encoding under DS=1 (Group-1 forwarding was never enabled:
+  zero IRQ exceptions despite everything armed), the virtio modern
+  device-ID table shifted one place, TASK_SIZE declared 1 TiB where
+  every consumer assumed 256 GB (mmap fell outside the user subtree)
+- **Shared-code hardening that fell out**: the scheduler's
+  wild-pointer wake floor is now per-arch (the riscv64 constant had
+  been silently dropping every aarch64 heap-task wakeup), ELF machine
+  checks are per-arch (x86_64 had been skipping the check entirely),
+  `.ex_table` is KEEP'd in the link (it was gc'd to empty on every
+  architecture that had one)
+- **Stage 4 (in progress)**: merge gates on main (triple-arch build,
+  riscv regression, Tier-1/Tier-2 performance); the OH-image-bound
+  full-fidelity Tier-1 syscall-volume row is excepted until the image
+  set is rebuilt (assets were removed in the 101 GB disk cleanup)
+- **Known leftovers, registered**: early TTBR0 identity window
+  (0-2 GB) never torn down (low-address usercopies read flash instead
+  of EFAULT — one test SKIP-gated on it), printk not routed to the
+  PL011 console path, kernel-spawned init gets the resolved path as
+  argv[0], a 1-of-9-boot stack-top flake near the linear-map end,
+  LTP-on-aarch64 not yet started
+
+## Previous Phase (2026-10-27): desktop frames reproducible, OH launcher at MainAbility
 
 **Two fronts moved decisively this week.**
 

@@ -100,7 +100,7 @@ stepping on concurrent agents.
 **Rux** is a Linux-like operating system kernel entirely written in Rust.
 
 - **Language**: Rust (no_std, except for necessary platform assembly)
-- **Architecture**: **riscv64 (primary) + x86_64 (q35)** — both boot Ubuntu 22.04; build via `PLATFORM=x86_64 make build` / `build/.config` `platform_target`
+- **Architecture**: **riscv64 (primary) + x86_64 (q35) + aarch64 (QEMU virt)** — riscv64/x86_64 boot Ubuntu 22.04; aarch64 boots to an interactive shell (2026-10-30, `make build PLATFORM=aarch64`, boot needs `-M virt,gic-version=3` — see docs/architecture/aarch64.md before touching that port)
 - **Platform**: QEMU `virt` machine, TCG with MTTCG (`thread=multi`) by default
 - **Userspace**: Ubuntu 22.04 riscv64 rootfs (glibc), plus a musl-based
   minimal rootfs from `make rootfs`
@@ -157,6 +157,8 @@ owning agent is gone (map PID cmdline → worktree; never kill live agents'
 instances; `pkill` stays forbidden), and (4) relaunch the queue at full
 concurrency without waiting for instructions. The user only ever says
 "继续".
+
+**Image store (user rule 2026-10-30): ALL disk images live in /home/william/rux-images/ (outside every repo/worktree, invisible to git) — oh/ (the 7 OH images), aarch64/ (a64-rootfs.img + the toybox cross-build), ubuntu/. Worktrees reference them by SYMLINK only; boots use -snapshot + file.locking=off. Never place real image bytes inside a worktree (a disk cleanup once deleted a whole campaign's assets that way). Rebuildable scratch (probe disks) stays in the lane worktree's run/.
 
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
 

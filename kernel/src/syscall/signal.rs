@@ -165,6 +165,17 @@ struct SigActionUser {
     sa_mask: u64,
 }
 
+/// aarch64 user ABI: same shape as x86_64 (Linux arm64 sigaction carries
+/// sa_restorer; glibc always sets SA_RESTORER) — 32 bytes.
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+struct SigActionUser {
+    sa_handler: usize,
+    sa_flags: u64,
+    sa_restorer: usize,
+    sa_mask: u64,
+}
+
 pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     use crate::signal::{SigAction, Signal};
 
@@ -246,7 +257,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             let user_action = SigActionUser {
                 sa_handler: old_action.sa_handler,
                 sa_flags: old_action.sa_flags.bits(),
-                #[cfg(feature = "x86_64")]
+                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
                 sa_restorer: old_action.sa_restorer,
                 sa_mask: old_action.sa_mask,
             };
@@ -273,7 +284,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
             let mut user_action = SigActionUser {
                 sa_handler: 0,
                 sa_flags: 0,
-                #[cfg(feature = "x86_64")]
+                #[cfg(any(feature = "x86_64", feature = "aarch64"))]
                 sa_restorer: 0,
                 sa_mask: 0,
             };
@@ -298,7 +309,7 @@ let new_action = SigAction {
                 sa_flags: crate::signal::SigFlags::new(user_action.sa_flags),
                 sa_mask: user_action.sa_mask,
                 sa_restorer: {
-                    #[cfg(feature = "x86_64")]
+                    #[cfg(any(feature = "x86_64", feature = "aarch64"))]
                     { user_action.sa_restorer }
                     #[cfg(feature = "riscv64")]
                     { 0 }
@@ -368,6 +379,20 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
                 );
             if sp_ok { sp as u64 } else { (*current).sigframe_addr }
         };
+        // aarch64: the handler is entered with sp == frame (arm64
+        // frames carry no pretcode slot glibc pops first); same
+        // sp-derived recovery as the riscv64 arm.
+        #[cfg(feature = "aarch64")]
+        let frame_addr = {
+            let sp = regs.user_stack_pointer() as usize;
+            let sp_ok = sp != 0
+                && sp % 16 == 0
+                && crate::arch::uaccess::access_ok(
+                    sp,
+                    core::mem::size_of::<crate::signal::SignalFrame>(),
+                );
+            if sp_ok { sp as u64 } else { (*current).sigframe_addr }
+        };
         #[cfg(feature = "x86_64")]
         let frame_addr = {
             let sp = regs.user_stack_pointer() as usize;
@@ -414,6 +439,8 @@ pub fn sys_rt_sigreturn(regs: &mut crate::arch::pt_regs::PtRegs) -> i64 {
         { regs.a0 as i64 }
         #[cfg(feature = "x86_64")]
         { regs.rax as i64 }
+        #[cfg(feature = "aarch64")]
+        { regs.regs[0] as i64 }
     }
 }
 
