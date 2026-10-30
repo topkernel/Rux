@@ -387,6 +387,46 @@ static void fire_notify_banner(void)
     fflush(stdout);
 }
 
+// gdm greeter session bridge (gdmr46): write the sd-login state files
+// that gdm-manager's RegisterDisplay sender lookup needs (see the call
+// site for the full story). Idempotent and cheap; called at boot AND
+// every tailer cycle because logind clears/rewrites these files under
+// its own state management during startup.
+static void write_sdlogin_bridge(void) {
+    mkdir("/run", 0755);
+    mkdir("/run/systemd", 0755);
+    mkdir("/run/systemd/seats", 0755);
+    mkdir("/run/systemd/sessions", 0755);
+    mkdir("/run/systemd/users", 0755);
+    static const char seats_body[] = "ID=seat0\nSTATE=active\nSESSIONS=c1\n";
+    static const char sess_body[] =
+        "UID=120\nACTIVE=1\nSTATE=active\nREMOTE=0\n"
+        "TYPE=x11\nCLASS=greeter\nSEAT=seat0\nDISPLAY=:0\n"
+        "TTY=tty1\nLEADER=1\n";
+    static const char user_body[] =
+        "UID=120\nSTATE=online\nSESSIONS=c1\nSESSIONS_BY_TIME=c1\n"
+        "ACTIVE_SESSIONS=c1\nONLINE_SESSIONS=c1\nONLINE=c1\nACTIVE=c1\n"
+        "SEATS=seat0\nONLINE_SEATS=seat0\nACTIVE_SEATS=seat0\n";
+    const char *to_write[3][2] = {
+        { "/run/systemd/seats/seat0", seats_body },
+        { "/run/systemd/sessions/c1", sess_body },
+        { "/run/systemd/users/120", user_body },
+    };
+    for (int i = 0; i < 3; i++) {
+        int fd = open(to_write[i][0], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            const char *b = to_write[i][1];
+            size_t l = strlen(b), off = 0;
+            while (off < l) {
+                ssize_t w = write(fd, b + off, l - off);
+                if (w <= 0) break;
+                off += (size_t)w;
+            }
+            close(fd);
+        }
+    }
+}
+
 // Minimal /dev/log sink (gdm bring-up r7): gdm3's [debug] output goes
 // to syslog(3); with no syslog daemon and no /dev/log socket every
 // line is silently DROPPED — the single biggest evidence gap in the
@@ -486,6 +526,23 @@ int main(void) {
     // auto-clear stale X locks (an unclean prior run would wedge Xorg)
     unlink("/tmp/.X0-lock");
     unlink("/tmp/.X11-unix/X0");
+    // gdm's greeter Xorg runs as the gdm user (gdm-x-session) and
+    // _XSERVTransmkdir REFUSES to create /tmp/.X11-unix when euid != 0
+    // (gdmr33: "_XSERVTransmkdir: ERROR: euid != 0"), so the listening
+    // socket would never bind. Create it root-side, 1777.
+    mkdir("/tmp/.X11-unix", 01777);
+
+    // gdm greeter session bridge (gdmr46): gdm-x-session's
+    // RegisterDisplay is AccessDenied ("No display available") because
+    // gdm-manager's sender lookup needs a LOGIND session for uid 120:
+    // sd_pid_get_session(pid) -> ENODATA (no pam_systemd, no cgroups),
+    // then sd_uid_get_sessions(120) -> none -> error. The display is
+    // then matched by session id, which the worker takes from the
+    // XDG_SESSION_ID env (pam_systemd normally sets it; here it comes
+    // from /etc/environment via pam_env readenv=1 — same value "c1").
+    // See write_sdlogin_bridge() for the state files; the tailer
+    // re-writes them every cycle because logind clears them at startup.
+    write_sdlogin_bridge();
 
     printf("[runit] starting system dbus\n");
     mkdir("/run/dbus", 0755);
@@ -602,21 +659,63 @@ int main(void) {
             for (;;) {
                 sleep(20);
                 cyc++;
+                // keep the sd-login bridge files alive (logind rewrites
+                // its state dirs) — see write_sdlogin_bridge()
+                write_sdlogin_bridge();
                 // gdm-mode logs ride along (stat-guarded; missing files
                 // are skipped) so the first display-manager boots leave
                 // their forensics on the serial console too.
-                const char *logs[7] = { "/tmp/gnome-session.log",
+                const char *logs[10] = { "/tmp/gnome-session.log",
                                         "/tmp/gnome-shell.log",
                                         "/tmp/Xorg.log",
                                         "/tmp/logind.log",
                                         "/tmp/gdm-syslog.log",
                                         // gdm's X server logs (root-written)
                                         "/var/log/Xorg.0.log",
+                                        // the greeter Xorg runs as the gdm
+                                        // user (gdm-x-session), so its log
+                                        // also lands in the gdm HOME
+                                        "/var/lib/gdm/.local/share/xorg/Xorg.0.log",
+                                        // gdm-launch-environment's program-
+                                        // session log (gdm-session-worker
+                                        // _open_program_session_log) — the
+                                        // greeter's own stdout/stderr;
+                                        // LOGDIR is /var/log/gdm3 (gdm3
+                                        // binary strings)
+                                        "/var/log/gdm3/:0-greeter.log",
+                                        "/var/log/gdm3/greeter.log",
                                         NULL };
-                for (int i = 0; i < 6; i++) {
+                for (int i = 0; i < 9; i++) {
                     struct stat st;
+                // greeter.log paths dump UNCONDITIONALLY: the worker
+                // is believed to create them at session start, and
+                // tail's own "No such file" error is the diagnostic
+                // when it does not.
+                    if (i >= 7) { dump_log_prefix(logs[i], 500); continue; }
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
+                }
+                // gdm bring-up (gdmr37+): the greeter session's output is
+                // the missing forensics (the raw tail is all Xorg
+                // -verbose flood). Filter to session-relevant lines, and
+                // keep knocking down /run/systemd/system so the worker's
+                // sd_booted() stays false and the log file keeps being
+                // written (logind re-creates it via session setup).
+                {
+                    pid_t ls = fork();
+                    if (ls == 0) {
+                        int con = open("/dev/console", O_WRONLY);
+                        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+                        execl("/bin/sh", "sh", "-c",
+                              "echo == greeter-log filtered ==; "
+                              "tail -n 40 /tmp/gxs.log 2>/dev/null; tail -n 40 /tmp/greeter-session.log 2>/dev/null; "
+                              "grep -aiE 'gnome-session|dbus-run|x-session|gnome-shell|"
+                              "gsd-|ERROR|CRITICAL|WARNING|Cannot|cannot|Unable|failed|Failed|"
+                              "abort|Abort|exit' /var/log/gdm3/greeter.log 2>/dev/null | tail -n 80",
+                              (char *)NULL);
+                        _exit(127);
+                    }
+                    if (ls > 0) { int st2; waitpid(ls, &st2, 0); }
                 }
                 // notification-banner probe (leg-8): fire on the shell
                 // marker, re-fire every 10 cycles so at least one lands

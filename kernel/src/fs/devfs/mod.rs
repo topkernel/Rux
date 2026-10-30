@@ -590,8 +590,16 @@ fn devtmpfs_populate() {
             name.clone(),
             Arc::new(DevfsEntry::new_char_device_with_mode(
                 &name,
-                DevNo::new(TTY_MAJOR, minor),
-                0o620, // crw--w--- (Linux devtmpfs VT modes)
+            DevNo::new(TTY_MAJOR, minor),
+            // 0o666, NOT Linux's 0620 root:tty: gdm's greeter runs Xorg
+            // as uid 120 (gdm-x-session), and without systemd-logind's
+            // uaccess/TakeControl path (disabled in our console-skip
+            // shape — see the sysfs tty0 comment) uid 120 cannot open
+            // the console O_RDWR and Xorg's xf86OpenConsole FatalErrors
+            // ("Cannot open /dev/tty0: Permission denied" -> AbortServer
+            // -> abort(), the gdmr32 TKSIG6). Single-user VM console;
+            // revisit if/when logind device ACLs come up.
+            0o666,
             )),
         );
     }
