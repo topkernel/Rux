@@ -425,11 +425,18 @@ pub mod vendor {
 }
 
 /// VirtIO device IDs (PCI)
+///
+/// Modern (virtio 1.0) IDs per the PCI device-ID table: 0x1040 net,
+/// 0x1041 block, 0x1042 balloon, ... 0x1050 GPU, 0x1052 input. The two
+/// modern IDs here were previously swapped (net=0x1041/blk=0x1042) —
+/// harmless on MMIO/legacy transports, but on aarch64 GPEX the devices
+/// are modern-only, so the net probe bound the BLOCK device (0x1041)
+/// and the blk probe matched a balloon ID and found nothing.
 pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
-    pub const VIRTIO_NET_MODERN: u16 = 0x1041;
+    pub const VIRTIO_NET_MODERN: u16 = 0x1040;
     pub const VIRTIO_BLK: u16 = 0x1001;
-    pub const VIRTIO_BLK_MODERN: u16 = 0x1042;
+    pub const VIRTIO_BLK_MODERN: u16 = 0x1041;
     pub const VIRTIO_GPU: u16 = 0x1050;
     pub const VIRTIO_INPUT: u16 = 0x1052;
 }
