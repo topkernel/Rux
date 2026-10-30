@@ -519,19 +519,28 @@ fn ext4_add_entry_locked(
 
         // Try to find space in this block
         if let Some(offset) = find_entry_space(&block_data, name.len(), block_size) {
-            // Found space, create entry
+            // Found space, create entry. add_entry_to_block now reports
+            // "no space" (Err) when the selected slot cannot host the
+            // entry (e.g. a live entry whose slack is exactly the used
+            // length); on that, try the NEXT block instead of returning
+            // a success that never linked anything (oh-svc cook bug).
             let mut new_block = block_data.clone();
-            add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
+            match add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size) {
+                Ok(()) => {
+                    // Write block back — ORDERED: everything this entry publishes
+                    // (the new inode's table block, bitmaps, data blocks) is
+                    // persisted BEFORE the entry block itself.
+                    // SAFETY: same contract as write_block_from_vec.
+                    unsafe {
+                        write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    }
 
-            // Write block back — ORDERED: everything this entry publishes
-            // (the new inode's table block, bitmaps, data blocks) is
-            // persisted BEFORE the entry block itself.
-            // SAFETY: same contract as write_block_from_vec.
-            unsafe {
-                write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Fall through to the next block / fresh allocation.
+                }
             }
-
-            return Ok(());
         }
     }
 
@@ -655,42 +664,84 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
 }
 
 /// Add entry to directory block at given offset
+///
+/// Returns Err(ENOSPC-shaped) when the slot cannot host the entry, so the
+/// caller can fall through to the next block / a fresh block instead of
+/// reporting a successful link that was never written.
+///
+/// Deleted-slot reuse (oh-svc cook lineage bug, 2026-10-31): when
+/// find_entry_space hands us an inode-0 slot (an unlinked entry — e.g.
+/// slots cleared by host-side e2fsck on the cooked userdata image), the
+/// slot's full rec_len is free space; the stale name_len of the dead
+/// entry is NOT a live prefix. The old code always treated the slot as a
+/// live entry: with rec_len == used_len(stale name_len) it took the
+/// early `return` WITHOUT writing anything, while the caller still
+/// returned Ok(()) — mkdir "succeeded", the allocated inode was never
+/// linked, and every later lookup of the name saw the dead entry and
+/// failed with ENOENT (the whole OH first-boot /data population
+/// silently no-oped).
 fn add_entry_to_block(
     block_data: &mut [u8],
     offset: usize,
     name: &[u8],
     ino: u32,
     file_type: u8,
-    _block_size: usize,
-) {
-    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
-    let existing_name_len = block_data[offset + 6] as usize;
-    let used_len = ((8 + existing_name_len + 3) & !3) as u16;
+    block_size: usize,
+) -> Result<(), i32> {
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]) as usize;
+    let slot_ino = u32::from_le_bytes([
+        block_data[offset],
+        block_data[offset + 1],
+        block_data[offset + 2],
+        block_data[offset + 3],
+    ]);
 
-    // Safety: ensure rec_len > used_len before subtracting
-    if rec_len <= used_len {
-        return;
+    // Space the new entry itself needs (4-byte aligned, min 8).
+    let required_len = (8 + name.len() + 3) & !3;
+    if required_len > block_size || offset + required_len > block_size {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
-    // Calculate new entry length
-    let new_rec_len = rec_len - used_len;
+    let (new_offset, new_rec_len) = if slot_ino == 0 {
+        // Deleted entry: the WHOLE rec_len is free. Replace in place.
+        (offset, rec_len)
+    } else {
+        // Live entry: split off its slack.
+        let existing_name_len = block_data[offset + 6] as usize;
+        let used_len = (8 + existing_name_len + 3) & !3;
+        if rec_len <= used_len || rec_len - used_len < required_len {
+            // find_entry_space should never select such a slot for a live
+            // entry; if it does, report no-space instead of a silent no-op.
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+        // Shrink the existing entry to its used length.
+        let used_bytes = (used_len as u16).to_le_bytes();
+        block_data[offset + 4] = used_bytes[0];
+        block_data[offset + 5] = used_bytes[1];
+        (offset + used_len, rec_len - used_len)
+    };
 
-    // Update existing entry's record length
-    let used_bytes = used_len.to_le_bytes();
-    block_data[offset + 4] = used_bytes[0];
-    block_data[offset + 5] = used_bytes[1];
+    if new_offset + new_rec_len > block_size {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
 
-    // Create new entry after existing
-    let new_offset = offset + used_len as usize;
+    // If the slack after the new entry can host another header, leave it
+    // as a free (inode-0) tail entry like ext4 does; otherwise fold the
+    // remainder into the new entry's rec_len.
+    let write_rec_len = if new_rec_len - required_len >= 8 {
+        required_len
+    } else {
+        new_rec_len
+    };
 
     // Write inode number
     let ino_bytes = ino.to_le_bytes();
     block_data[new_offset..new_offset + 4].copy_from_slice(&ino_bytes);
 
     // Write record length
-    let new_rec_bytes = new_rec_len.to_le_bytes();
-    block_data[new_offset + 4] = new_rec_bytes[0];
-    block_data[new_offset + 5] = new_rec_bytes[1];
+    let rec_bytes = (write_rec_len as u16).to_le_bytes();
+    block_data[new_offset + 4] = rec_bytes[0];
+    block_data[new_offset + 5] = rec_bytes[1];
 
     // Write name length
     block_data[new_offset + 6] = name.len() as u8;
@@ -700,6 +751,20 @@ fn add_entry_to_block(
 
     // Write name
     block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+
+    // Free tail entry for the remainder, if any.
+    let tail_offset = new_offset + write_rec_len;
+    if new_rec_len > write_rec_len {
+        let tail_rec = (new_rec_len - write_rec_len) as u16;
+        let tail_bytes = tail_rec.to_le_bytes();
+        block_data[tail_offset..tail_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        block_data[tail_offset + 4] = tail_bytes[0];
+        block_data[tail_offset + 5] = tail_bytes[1];
+        block_data[tail_offset + 6] = 0;
+        block_data[tail_offset + 7] = 0;
+    }
+
+    Ok(())
 }
 
 /// Crash-safe ordering for directory-entry writes (deferred form).

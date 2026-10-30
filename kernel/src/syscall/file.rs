@@ -738,6 +738,20 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                // oh-svc wedge hunt (2026-10-31): init spins in
+                // fstatat->path_lookup->ext4 lookup on a /data path after
+                // the first writable-/data boot. Budgeted one-line trace so
+                // the serial names the polled path before the wedge.
+                {
+                    use core::sync::atomic::{AtomicU64, Ordering};
+                    static COUNT: AtomicU64 = AtomicU64::new(0);
+                    if crate::process::current_pid() == 1
+                        && COUNT.fetch_add(1, Ordering::Relaxed) % 4096 == 0
+                    {
+                        crate::pr_info!("svcdbg pid-1 fstatat #{} path '{}'",
+                            COUNT.load(Ordering::Relaxed), p);
+                    }
+                }
                 if let Some((_, fd)) = proc_fd_magic(p) {
                     let mut stat = Stat::new();
                     match crate::fs::file_stat(fd as usize, &mut stat) {

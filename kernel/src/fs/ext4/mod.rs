@@ -591,6 +591,24 @@ impl Ext4FileSystem {
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_dir_lookup(blocks.len());
 
+            // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
+            // whose block list is absurdly large means a corrupt inode
+            // (i_size/extent garbage) turned lookup into a multi-minute
+            // bread+parse loop that monopolizes the CPU under the bucket
+            // locks. Name the inode before we enter the loop so the boot
+            // log pinpoints which directory went bad. A real directory of
+            // 1024+ blocks (4MiB of dirents) never exists in these images.
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LOOKUP dir ino={} size={} blocks={} blocks_field={} name={:?}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks,
+                    name
+                );
+            }
+
             for block in blocks.iter() {
                 if *block == 0 {
                     continue;
@@ -653,6 +671,16 @@ impl Ext4FileSystem {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_list_dir();
+            // Pathology probe — see the twin in lookup().
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LIST dir ino={} size={} blocks={} blocks_field={}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks
+                );
+            }
 
             for block in blocks.iter() {
                 if *block == 0 {
