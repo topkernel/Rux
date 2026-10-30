@@ -1679,12 +1679,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 } else if child.state() == TaskState::new(TaskState::STOPPED)
                     && !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
                     && (options & WUNTRACED != 0 || child.tracer_pid() == current_pid)
+                    && stopped_child.is_none()
                 {
                     // Linux wait_task_stopped(): "Traditionally we see
                     // ptrace'd stopped children regardless of options" —
                     // WUNTRACED gates job-control stops only; a stop of a
                     // task WE trace is always reported (LTP ptrace01/05
-                    // use plain waitpid on a TRACEME'd child).
+                    // use plain waitpid on a TRACEME'd child). First
+                    // match wins, like the zombie selection above.
                     stopped_child = Some(child_ptr);
                 }
             });
