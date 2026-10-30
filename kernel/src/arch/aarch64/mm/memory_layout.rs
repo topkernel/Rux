@@ -177,7 +177,10 @@ pub const MMIO_ALIAS_BASE: usize = VMALLOC_START;
 /// Alias window size: covers phys [0, 1GB) — every virt MMIO device
 /// (UART 0x0900_0000, virtio-mmio 0x0a00_0000, GIC 0x0800_0000); RAM
 /// starts at 0x4000_0000 so the alias never double-maps RAM.
-pub const MMIO_ALIAS_SIZE: usize = 0x4000_0000;
+// 0x40000000 (below-RAM MMIO) plus 16MB past the RAM base: QEMU virt's
+// PCI ECAM window sits at phys 0x4010_0000 (DTB pcie@10000000 reg), just
+// above RAM base — the alias must cover it or every config read faults.
+pub const MMIO_ALIAS_SIZE: usize = 0x4000_0000 + 0x0100_0000;
 
 /// Compile-time placement guards (canonical upper half, below linear map)
 const _: () = assert!(MMIO_ALIAS_BASE >= 0xffff_0000_0000_0000_usize);
