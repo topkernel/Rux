@@ -97,7 +97,9 @@ impl IpHdr {
         checksum::ip_checksum(&header)
     }
 
-    /// Verify checksum
+    /// Verify checksum over the first 20 header bytes. Only correct for
+    /// IHL == 5 packets — the RX path (ip_rcv) verifies over IHL*4 bytes;
+    /// this helper remains for the (option-less) TX build path.
     pub fn is_valid_checksum(&self) -> bool {
         self.compute_checksum() == 0
     }
@@ -400,11 +402,24 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         return Ok(());
     }
 
-    if !ip_hdr.is_valid_checksum() {
+    // The internet checksum covers IHL*4 header bytes (RFC 791 §3.1 —
+    // options included). The old fixed 20-byte verification failed every
+    // well-formed packet carrying options (record route, LSRR...), so any
+    // options-bearing datagram was silently dropped at this gate.
+    let ihl = ip_hdr.version_ihl & 0x0F;
+    if ihl < 5 {
+        return Ok(());
+    }
+    let hdr_len = (ihl as usize) * 4;
+    if hdr_len > data.len() {
+        return Ok(());
+    }
+    if checksum::ip_checksum(&data[..hdr_len]) != 0 {
         return Ok(());
     }
 
-    // Trim skb to IP-reported length (matches Linux ip_rcv: skb_trim(skb, ntohs(iph->tot_len)))
+    // Trim skb to IP-reported length (matches the reference ip_rcv:
+    // skb_trim(skb, ntohs(iph->tot_len)))
     let ip_total_len = u16::from_be(ip_hdr.tot_len) as u32;
     if ip_total_len < 20 || ip_total_len > skb.len {
         return Ok(()); // Invalid tot_len
@@ -415,9 +430,7 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     let dest_ip = u32::from_be(ip_hdr.daddr);
 
     // Advance skb past IP header so upper layers see only the transport payload
-    let ihl = ip_hdr.version_ihl & 0x0F;
-    let hdr_len = (ihl as usize) * 4;
-    // Validate IHL against packet length (per Linux ip_rcv)
+    // Validate IHL against packet length (per the reference ip_rcv)
     if hdr_len > ip_total_len as usize {
         return Ok(());
     }

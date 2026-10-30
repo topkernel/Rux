@@ -119,6 +119,16 @@ pub fn ip_defrag(
     let now = crate::drivers::timer::get_jiffies();
     let id = u16::from_be(ip_hdr.id);
 
+    // N2 guard: the rebuilt datagram's header is a 20-byte copy. A
+    // fragment whose IHL > 5 carries options the fixed-size rebuild would
+    // drop while the rebuilt IHL still advertises them — ip_dispatch would
+    // pull ihl*4 bytes and misparse the transport header. Dropping the
+    // fragment (peer retransmits; fragmented-options datagrams are
+    // vanishingly rare) is safer than a wrong reassembly.
+    if (ip_hdr.version_ihl & 0x0F) as usize > (IPHDR_LEN / 4) {
+        return;
+    }
+
     // The finished datagram is dispatched outside the table lock.
     let mut complete: Option<([u8; IPHDR_LEN], alloc::vec::Vec<u8>)> = None;
 
