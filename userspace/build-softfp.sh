@@ -15,6 +15,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/soft-fp"
 OUT_A="${SRC}/libsoftfp-pin.a"
 
+# Sources ship as a local tarball (same convention as toybox/linux-ltp:
+# tarball tracked in git, extracted tree is not — keeps the source out of
+# the code statistics while a fresh clone can still build). gcc-pin/ is
+# never extracted; it is derived from the host libgcc.a on every build.
+if ! ls "$SRC"/*.c &> /dev/null; then
+    TARBALL="${SRC}/soft-fp-src.tar.xz"
+    if [ ! -f "$TARBALL" ]; then
+        echo "Error: no soft-fp sources in ${SRC} and no tarball to extract" >&2
+        exit 1
+    fi
+    echo "Extracting soft-fp sources from $(basename "$TARBALL")"
+    tar -xJf "$TARBALL" -C "$SRC"
+fi
+
 if ! command -v riscv64-linux-gnu-gcc &> /dev/null; then
     echo "Error: riscv64-linux-gnu-gcc not found" >&2
     exit 1

@@ -29,9 +29,8 @@ pub mod riscv64;
 #[cfg(feature = "x86_64")]
 pub mod x86_64;
 
-// aarch64 backend: interface skeleton only — does not build yet
-// (see docs/development/multiarch-gnome-ubuntu-plan.md for the gap
-// inventory and bring-up order).
+// aarch64 backend: under bring-up — see docs/development/aarch64-port-plan.md
+// (the living spine of the port; stage gates and the interface contract).
 #[cfg(feature = "aarch64")]
 pub mod aarch64;
 
@@ -51,6 +50,12 @@ pub use x86_64::{
     smp, thread, trap, uaccess,
 };
 
+#[cfg(feature = "aarch64")]
+pub use aarch64::{
+    arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
+    smp, thread, trap, uaccess,
+};
+
 /// Direct switch of context (see backend `context` module for the exact
 /// semantics; both backends expose `context_switch` with the same signature).
 #[cfg(feature = "riscv64")]
@@ -58,3 +63,6 @@ pub use riscv64::context::context_switch;
 
 #[cfg(feature = "x86_64")]
 pub use x86_64::context::context_switch;
+
+#[cfg(feature = "aarch64")]
+pub use aarch64::context::context_switch;

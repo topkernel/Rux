@@ -371,7 +371,16 @@ fn ext4_file_read_cached_dst(
         // an ALLOCATED-but-uncached page gets a synchronous single-block
         // read here; only true holes (block 0) zero-fill.
         if cache.get(fs_id, ino, page_index).is_none() {
-            let block_nr = inode.get_data_block(fs, page_index).unwrap_or(0);
+            // Distinguish a HOLE (Ok(0) — zero-fill, the sparse contract)
+            // from a metadata ERROR (Err — the extent/bitmap read failed):
+            // the old unwrap_or(0) folded both into the hole arm and served
+            // ZEROS for real data on a failing extent read (Linux returns
+            // the ext4_map_blocks error as EIO — ext4_file_read_iter's
+            // error-is-error discipline).
+            let block_nr = match inode.get_data_block(fs, page_index) {
+                Ok(b) => b,
+                Err(_) => return Err(errno::Errno::IOError.as_neg_i32()),
+            };
             if block_nr != 0 {
                 // SAFETY: bio::bread returns a valid pinned BufferHead on
                 // success; b_data points to a block-sized buffer.
@@ -2211,10 +2220,17 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
 
         let _io_guard = file.io_lock.guard();
 
-        if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+        // atime on a successful positional read, same as the shared-pos
+        // read(2) paths (Linux file_accessed in vfs_read — pread64 is
+        // the same path; filemap_fault's read_at demand fills are the
+        // mmap-fault arm). Advisory volatile write, no disk I/O.
+        let mut atime_pending = false;
+
+        let ret = if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
             match ext4_file_read(fs, ext4_inode, offset, buf) {
                 Ok(read_bytes) => {
                     if read_bytes > 0 {
+                        atime_pending = true;
                         crate::fs::inotify::notify_file(
                             file,
                             crate::fs::inotify::inotify_events::IN_ACCESS,
@@ -2229,6 +2245,7 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
             match ext4_file_read_cached(fs, ext4_inode, offset, buf, ra_state) {
                 Ok(read_bytes) => {
                     if read_bytes > 0 {
+                        atime_pending = true;
                         crate::fs::inotify::notify_file(
                             file,
                             crate::fs::inotify::inotify_events::IN_ACCESS,
@@ -2238,7 +2255,20 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
                 }
                 Err(e) => e as isize,
             }
+        };
+        if atime_pending {
+            let atime = crate::drivers::rtc::wall_secs() as u32;
+            // SAFETY: the cached Ext4Inode in inode.sb is a Box owned
+            // by this VFS inode; advisory field, plain volatile write
+            // (same discipline as ext4_file_read_vfs).
+            unsafe {
+                core::ptr::write_volatile(
+                    &mut (*(inode.sb.unwrap() as *mut super::inode::Ext4Inode)).atime,
+                    atime,
+                );
+            }
         }
+        ret
     }
 }
 

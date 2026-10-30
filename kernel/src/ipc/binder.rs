@@ -3353,6 +3353,14 @@ pub fn txn_hang_audit() {
                         // SAFETY: entry-frame read of this task's own stack.
                         unsafe { ((*regs).a7, (*regs).epc, (*regs).a0, (*regs).a1) }
                     };
+                    #[cfg(feature = "aarch64")]
+                    let (sys, rip, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).syscallno, (*regs).pc, (*regs).regs[0], (*regs).regs[1]) }
+                    };
                     (state, sys as u64, rip as u64, a0 as u64, a1 as u64)
                 }
             }
@@ -3421,7 +3429,7 @@ pub fn txn_hang_audit() {
         } else {
             None
         };
-        #[cfg(feature = "riscv64")]
+        #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         let fam = if matches!(sys, 56 | 24) {
             Some(crate::dfx::pathstash::OP_OPEN)
         } else if matches!(sys, 64 | 66) {
@@ -3541,6 +3549,8 @@ pub fn txn_hang_audit() {
                 let entry_sz = crate::arch::x86_64::pt_regs::PT_REGS_SIZE;
                 #[cfg(feature = "riscv64")]
                 let entry_sz = crate::arch::riscv64::pt_regs::PT_REGS_SIZE;
+                #[cfg(feature = "aarch64")]
+                let entry_sz = crate::arch::aarch64::pt_regs::PT_REGS_SIZE;
                 let start = (top - entry_sz).saturating_sub(8) & !7usize;
                 let mut bline = alloc::string::String::new();
                 let _ = write!(bline, " top-dn:");

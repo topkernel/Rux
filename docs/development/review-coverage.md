@@ -22,17 +22,19 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 415 |
-| source lines in kernel/src | 295,507 |
-| files fully reviewed | 38 |
-| files partially reviewed | 81 |
-| files not yet reviewed | 296 |
-| lines in fully reviewed files | 25,912 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 94 |
+| source lines in kernel/src | 295,829 |
+| files fully reviewed | 42 |
+| files partially reviewed | 80 |
+| files not yet reviewed | 293 |
+| lines in fully reviewed files | 30,132 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 97 |
 
 ## Defects found and fixed
 
 | commit | file | defect |
 |---|---|---|
+| `b70a5deb` | `kernel/src/fs/ext4/extent.rs` | Three defects in the extent engine. (1) ext4_ext_insert_written's external-leaf merge had NEITHER the unwritten-state check NOR the u15 headroom check append_node has: a written insert landing right after a trailing UNWRITTEN extent (physically contiguous) cleared bit 15 of ee_len, marking the whole never-materialized fallocate preallocation WRITTEN — reads then served disk garbage instead of zeros (Linux ext4_can_extents_be_merged rejects mixed states); the same site's '(len + len) & 0x7FFF' silently TRUNCATED an overflowing length instead of refusing the merge. (2) insert_written_inline's 'ee_len += len' without the headroom check wraps a max-length (0x7FFF) written extent into a ZERO-length unwritten one. (3) find_covering_leaf_blk indexed idxs[0] of an EMPTY index root (eh_entries=0, depth>=1, corrupt/stale tree) — kernel panic; now Ok(0) (hole). |
+| `070770d6` | `kernel/src/fs/ext4/file.rs, kernel/src/fs/ext4/mod.rs, kernel/src/fs/ext4/allocator.rs` | Three line-review fixes in the read/fill region. (1) ext4_file_read_cached_dst's sync fallback folded get_data_block's Err into the hole arm via unwrap_or(0): a failing extent/bitmap read served ZEROES for real data — Err is now EIO (Linux propagates ext4_map_blocks errors). (2) Ext4FileSystem::read_inode addressed the inode table with bg_inode_table_lo only — every inode of a >2^32-block (64BIT) filesystem resolved to the wrong disk location; now lo|hi<<32 like the four inode.rs twins. (3) allocator.rs's six bitmap-addressing sites (bg_block_bitmap_lo x4, bg_inode_bitmap_lo x2) same class, now lo|hi<<32 (the mount parse already populates the hi halves). Note: no write path recomputes metadata_csum checksums — fenced, not a live defect: KNOWN_RO_COMPAT refuses metadata_csum rw mounts; the OH policy path mounts such fs read-only. |
 | `92377595` | `kernel/src/arch/riscv64/mm/page_fault.rs` | R-SC-RV64: the riscv64 file-fault path re-derived (vma_start, file, effective_size) in FOUR separately locked lookups (SIGBUS gate, shared-alias resolution, private cache pin, fill arm); the shared-alias site took TWO back-to-back vma_read() acquisitions (file from one, vma_start from the other). A CLONE_VM sibling mutating the VMA tree between the lookups could pair one file with another VMA's start: wrong-offset fill, or a page-cache pin taken under ANOTHER file's (fs_id, ino, index) key. Fixed with a single entry-time snapshot (x86_64 twin parity) plus the devfs live-size consult (b74) the twin has had since its session-14; 3 VMA finds and up to 4 pin-table lookups per file fault become 1 each. |
 | `6c56c0b6` | `kernel/src/syscall/process.rs` | The shebang optional argument was truncated at the next whitespace after the first word; the reference kernel (binfmt_script) passes the WHOLE rest of the interpreter line as one argument, so '#!/usr/bin/env -S python3 -u' lost 'python3 -u'. A 255-byte interpreter line without a newline was also rejected instead of parsed. Fixed to binfmt_script parity with 14 unit rows. |
 | `2fbb5a64` | `kernel/src/syscall/process.rs, kernel/src/process/exec.rs, kernel/src/fs/elf.rs` | execve of a directory returned ENOENT (failed read) instead of EACCES (may_open S_ISDIR); the PT_INTERP interpreter was opened without the MAY_EXEC gate; and the exec ladder walked the exe path four times plus double-zeroed every freshly mapped page (the arch allocators already zero before mapping). Fixed with resolve_exec_file (one walk feeds gate/stat/read/vm_file pin) and removal of the redundant zero passes. |
@@ -49,7 +51,7 @@ when the tree gains a file the map does not know about.
 
 ## Per-file status
 
-### kernel/src (12794 lines)
+### kernel/src (12806 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -60,7 +62,7 @@ when the tree gains a file the map does not know about.
 | `init.rs` | 489 | ⬜ |  |
 | `initrd.rs` | 781 | ⬜ |  |
 | `list.rs` | 273 | ⬜ |  |
-| `main.rs` | 1742 | 🔶🔁 | boot sequence, panic handler, layout constants; 主线已改动，需重读 |
+| `main.rs` | 1754 | 🔶🔁 | boot sequence, panic handler, layout constants; 主线已改动，需重读 |
 | `panic_policy.rs` | 98 | ✅🔁 | written by this review (panic= parameter); 主线已改动，需重读 |
 | `print.rs` | 77 | ⬜ |  |
 | `printk.rs` | 2133 | 🔶🔁 | ring buffer, console level; 主线已改动，需重读 |
@@ -172,7 +174,7 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 199 | ⬜ |  |
 
-### kernel/src/dfx (36515 lines)
+### kernel/src/dfx (36520 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -183,7 +185,7 @@ when the tree gains a file the map does not know about.
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 135 | ✅🔁 | written by this review (symbol table); 主线已改动，需重读 |
-| `ksyms_generated.rs` | 24044 | ⬜ |  |
+| `ksyms_generated.rs` | 24049 | ⬜ |  |
 | `leakorigin.rs` | 308 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `memwatch.rs` | 1084 | 🔶🔁 | heap census; 主线已改动，需重读 |
@@ -294,13 +296,13 @@ when the tree gains a file the map does not know about.
 | `queue.rs` | 1040 | ⬜ |  |
 | `virtio_pci.rs` | 2103 | ⬜ |  |
 
-### kernel/src/fs (31293 lines)
+### kernel/src/fs (31325 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `bio.rs` | 2546 | 🔶🔁 | sync_buffers, ordered publications; 主线已改动，需重读 |
 | `buffer.rs` | 468 | 🔶 | FileBuffer chunked read/write |
-| `cgroup.rs` | 857 | ⬜ |  |
+| `cgroup.rs` | 879 | ⬜ |  |
 | `char_dev.rs` | 259 | ⬜ |  |
 | `debugfs.rs` | 596 | ✅🔁 | written by this review (debugfs); 主线已改动，需重读 |
 | `dentry.rs` | 760 | 🔶 | per-directory locking |
@@ -312,7 +314,7 @@ when the tree gains a file the map does not know about.
 | `inode.rs` | 1068 | 🔶🔁 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）; 主线已改动，需重读 |
 | `inotify.rs` | 812 | 🔶🔁 | event notification; 主线已改动，需重读 |
 | `io_completion.rs` | 388 | ⬜ |  |
-| `locks.rs` | 1068 | 🔶🔁 | flock/POSIX record locks; 主线已改动，需重读 |
+| `locks.rs` | 1078 | 🔶🔁 | flock/POSIX record locks; 主线已改动，需重读 |
 | `memfd.rs` | 458 | 🔧🔁 | memfd_create 的参数校验与 seal 语义（参数校验已对齐 879328f3）; 主线已改动，需重读 |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
@@ -339,20 +341,20 @@ when the tree gains a file the map does not know about.
 | `mod.rs` | 2121 | ⬜ |  |
 | `registry.rs` | 85 | ⬜ |  |
 
-### kernel/src/fs/ext4 (12801 lines)
+### kernel/src/fs/ext4 (12955 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `allocator.rs` | 826 | ⬜ |  |
+| `allocator.rs` | 841 | 🔶🔁 | geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending; 主线已改动，需重读 |
 | `csum.rs` | 193 | ⬜ |  |
 | `dir.rs` | 182 | 🔶 | directory ops |
-| `extent.rs` | 1851 | ⬜ |  |
-| `file.rs` | 2272 | 🔶🔁 | read/write/fsync paths; 主线已改动，需重读 |
+| `extent.rs` | 1876 | 🔧🔁 | read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb); 主线已改动，需重读 |
+| `file.rs` | 2302 | 🔶🔁 | read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); write body/alloc/lseek/fsync from earlier sessions; 主线已改动，需重读 |
 | `indirect.rs` | 321 | ⬜ |  |
-| `inode.rs` | 751 | 🔶🔁 | inode table; 主线已改动，需重读 |
+| `inode.rs` | 772 | 🔧🔁 | read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2); 主线已改动，需重读 |
 | `journal.rs` | 238 | 🔶🔁 | jbd2 transaction start/stop; 主线已改动，需重读 |
-| `mod.rs` | 3399 | 🔶🔁 | superblock, mount; 主线已改动，需重读 |
-| `namei.rs` | 2434 | ⬜ |  |
+| `mod.rs` | 3432 | 🔶🔁 | superblock, mount; 主线已改动，需重读 |
+| `namei.rs` | 2464 | ⬜ |  |
 | `superblock.rs` | 334 | ⬜ |  |
 
 ### kernel/src/fs/jbd2 (3497 lines)
@@ -368,7 +370,7 @@ when the tree gains a file the map does not know about.
 | `transaction.rs` | 571 | ⬜ |  |
 | `types.rs` | 294 | ⬜ |  |
 
-### kernel/src/fs/procfs (7848 lines)
+### kernel/src/fs/procfs (7862 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -384,7 +386,7 @@ when the tree gains a file the map does not know about.
 | `mod.rs` | 2538 | 🔶🔁 | 节点树、read/write 分发、/proc/<pid> 路径解析; 主线已改动，需重读 |
 | `mounts.rs` | 187 | ⬜ |  |
 | `net.rs` | 339 | ⬜ |  |
-| `pid.rs` | 1438 | 🔶🔁 | status/stat generators; 主线已改动，需重读 |
+| `pid.rs` | 1452 | 🔶🔁 | status/stat generators; 主线已改动，需重读 |
 | `procfile.rs` | 344 | ⬜ |  |
 | `schedstat.rs` | 118 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `self_proc.rs` | 41 | ⬜ |  |
@@ -398,7 +400,7 @@ when the tree gains a file the map does not know about.
 | `version.rs` | 37 | ⬜ |  |
 | `vmstat.rs` | 207 | ✅🔁 | written by this review; 主线已改动，需重读 |
 
-### kernel/src/interrupt (2177 lines)
+### kernel/src/interrupt (2190 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -407,7 +409,7 @@ when the tree gains a file the map does not know about.
 | `irqdesc.rs` | 502 | 🔶 | descriptor registry |
 | `ksoftirqd.rs` | 186 | 🔶 | drain loop |
 | `mod.rs` | 67 | ⬜ |  |
-| `preempt.rs` | 419 | ✅🔁 | preempt_count 位布局与参考内核一致，irq_enter/exit 的软中断派发条件; 主线已改动，需重读 |
+| `preempt.rs` | 432 | ✅🔁 | preempt_count 位布局与参考内核一致，irq_enter/exit 的软中断派发条件; 主线已改动，需重读 |
 | `softirq.rs` | 432 | 🔧🔁 | 2ms 预算改为逐 vector 检查（ddfa8abc）; 主线已改动，需重读 |
 | `tasklet.rs` | 382 | ⬜ |  |
 
@@ -430,7 +432,7 @@ when the tree gains a file the map does not know about.
 | `sysv_shm.rs` | 1091 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 463 | ✅🔁 | idr allocation, permission checks; 主线已改动，需重读 |
 
-### kernel/src/mm (16251 lines)
+### kernel/src/mm (16281 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -452,12 +454,12 @@ when the tree gains a file the map does not know about.
 | `page_desc.rs` | 1374 | 🔧🔁 | stale Page.mapping/index field-contract docs corrected (mapping is the cache eviction key, never rmap slot 0); Chinese comment translated; 主线已改动，需重读 |
 | `pagemap.rs` | 76 | ⬜ |  |
 | `pglist.rs` | 381 | ⬜ |  |
-| `rmap.rs` | 481 | ⬜ |  |
+| `rmap.rs` | 506 | ✅🔁 | read end to end (mm review): no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice; 主线已改动，需重读 |
 | `slab.rs` | 786 | ⬜ |  |
 | `small_alloc.rs` | 886 | 🔶🔁 | size classes、每 CPU magazine、alloc/free 的快慢路径与 D-7 护栏; 主线已改动，需重读 |
 | `swap.rs` | 545 | ⬜ |  |
 | `vdso.rs` | 574 | ⬜ |  |
-| `vma.rs` | 1048 | 🔶🔁 | VMA 结构、split/merge、can_merge 的文件偏移连续性、VmaManager 增删查; 主线已改动，需重读 |
+| `vma.rs` | 1053 | 🔧🔁 | re-read end to end after main moved (origin stamps are the last functional change): split/merge offset continuity, chain merges, max_end, expand_downwards, find_stack_vma all verified against the reference kernel; the mmap-after-merge metadata-clobber hypothesis disproven by construction (file VMAs are added with fd=-1, so install-time merges are anon-only and the fd/offset writes find the merged VMA harmlessly). Fixed: VMA-ADD-DUP tripwire message claimed 'replacing incumbent' while the code rejects the add with Overlap — message now states the real outcome; 主线已改动，需重读 |
 | `vmemmap.rs` | 221 | ⬜ |  |
 | `vmscan.rs` | 514 | ⬜ |  |
 | `vmstat.rs` | 73 | ✅🔁 | written by this review (page counters); 主线已改动，需重读 |
@@ -469,7 +471,7 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 486 | ⬜ |  |
 
-### kernel/src/net (15758 lines)
+### kernel/src/net (15780 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -478,7 +480,7 @@ when the tree gains a file the map does not know about.
 | `ethernet.rs` | 585 | ⬜ |  |
 | `icmp.rs` | 428 | ⬜ |  |
 | `mod.rs` | 32 | ⬜ |  |
-| `netlink.rs` | 1509 | ⬜ |  |
+| `netlink.rs` | 1531 | ⬜ |  |
 | `raw.rs` | 709 | ⬜ |  |
 | `socket.rs` | 2087 | ⬜ |  |
 | `tcp.rs` | 4461 | ⬜ |  |
@@ -565,7 +567,7 @@ when the tree gains a file the map does not know about.
 | `seqlock.rs` | 260 | ⬜ |  |
 | `spinlock.rs` | 621 | ⬜ |  |
 
-### kernel/src/syscall (33056 lines)
+### kernel/src/syscall (33096 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -575,8 +577,8 @@ when the tree gains a file the map does not know about.
 | `memory.rs` | 3936 | 🔶🔁 | mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; 主线已改动，需重读 |
 | `misc.rs` | 4017 | 🔶🔁 | timerfd 族已对齐 v6.6（sys_timerfd_settime 契约已修 4e1f6110）；epoll/poll/eventfd/signalfd 未读; 主线已改动，需重读 |
 | `mod.rs` | 438 | ⬜ |  |
-| `network.rs` | 4312 | ⬜ |  |
-| `process.rs` | 6491 | 🔶🔁 | exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending; 主线已改动，需重读 |
+| `network.rs` | 4339 | ⬜ |  |
+| `process.rs` | 6504 | 🔶🔁 | exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending; 主线已改动，需重读 |
 | `sched.rs` | 1185 | ⬜ |  |
 | `signal.rs` | 747 | ⬜ |  |
 | `time.rs` | 2000 | 🔶🔁 | nanosleep, realtime clock; 主线已改动，需重读 |

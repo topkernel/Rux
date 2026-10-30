@@ -858,6 +858,16 @@ pub fn inode_open_unregister(file: &File) {
     }
 }
 
+/// Number of open file descriptions holding `inode` for write access
+/// (the i_writecount analogue). execve's ETXTBSY gate reads this
+/// (Linux deny_write_access in do_open_execat; LTP execve04): executing
+/// a file some open description still writes would alias the text
+/// against a concurrent writer's bytes.
+pub fn inode_write_open_count(inode: &Inode) -> u32 {
+    let key = inode_lock_key(inode);
+    INODE_OPENS.lock().get(&key).map(|e| e.1).unwrap_or(0)
+}
+
 /// F_SETLEASE core. `lease_type` is the user's flock l_type value:
 /// F_RDLCK(0) / F_WRLCK(1) / F_UNLCK(2). Typed `Errno` on failure
 /// (mapped to the ABI at the boundary).

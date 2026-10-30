@@ -111,9 +111,10 @@ ubuntu-run: build $(UBUNTU_IMG)
 $(UBUNTU_IMG):
 	@bash test/ubuntu-gui/build-img.sh
 
-# Run kernel test script
+# Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
+# x86_64 run the suite under that arch's QEMU; see test/run.sh)
 test:
-	@./test/run.sh test
+	@PLATFORM=$(PLATFORM) ./test/run.sh test
 
 # Run formal verification (sync check + proptest)
 verify:

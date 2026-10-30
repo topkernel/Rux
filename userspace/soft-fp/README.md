@@ -4,6 +4,13 @@ Origin: gcc releases/gcc-15 `libgcc/soft-fp/*` + `libgcc/config/riscv/sfp-machin
 + `include/longlong.h` (fetched from gcc.gnu.org gitweb, blob_plain). GPL-3.0+
 with GCC runtime library exception, same as libgcc itself.
 
+Source of record: `soft-fp-src.tar.xz` in this directory (tracked in git,
+same tarball convention as userspace/toybox and userspace/linux-ltp).
+`build-softfp.sh` extracts it automatically when the .c/.h files are
+absent, so a fresh clone needs no network access. The extracted tree and
+all build outputs (including `gcc-pin/`, which is derived from the host
+libgcc.a on every build) stay untracked.
+
 Why this exists: the host cross toolchain's prebuilt libgcc.a
 (/usr/lib/gcc-cross/riscv64-linux-gnu/15) is compiled with
 `-march=..._zbb..._zcb...`, so every static link that pulls a __*tf3/__floatsitf

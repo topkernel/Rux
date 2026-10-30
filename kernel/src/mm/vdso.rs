@@ -539,11 +539,24 @@ fn build_code_page() -> [u8; 4096] {
         e[6] = 1; // EV_CURRENT
         e[7] = 0; // ELFOSABI_NONE
         e[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
-        e[18..20].copy_from_slice(&243u16.to_le_bytes()); // EM_RISCV
+        // e_machine must match the target: loaders sanity-check it against
+        // their own arch before trusting the vDSO image. Mirrors
+        // fs::elf::Elf64Ehdr::check_machine.
+        #[cfg(feature = "aarch64")]
+        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_AARCH64 as u16;
+        #[cfg(feature = "riscv64")]
+        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_RISCV as u16;
+        #[cfg(feature = "x86_64")]
+        let e_machine: u16 = crate::fs::elf::ElfMachine::EM_X86_64 as u16;
+        e[18..20].copy_from_slice(&e_machine.to_le_bytes());
         e[20..24].copy_from_slice(&1u32.to_le_bytes()); // version
         e[24..32].copy_from_slice(&(F_CLOCK_GETTIME as u64).to_le_bytes()); // entry
         e[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
         e[40..48].copy_from_slice(&0u64.to_le_bytes()); // shoff
+        // e_flags 0 is honest on all three targets: riscv 0 = base ISA with
+        // soft-float conventions (the emitted code is integer-only, so no
+        // float-ABI byte matters), and aarch64/x86_64 define no e_flags
+        // bits at all.
         e[48..52].copy_from_slice(&0u32.to_le_bytes()); // flags
         e[52..54].copy_from_slice(&64u16.to_le_bytes()); // ehsize
         e[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize

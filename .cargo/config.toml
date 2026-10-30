@@ -19,7 +19,11 @@ rustflags = [
 [target.aarch64-unknown-none]
 rustflags = [
     "-C", "link-arg=-Tkernel/src/arch/aarch64/linker.ld",
-    "-C", "force-frame-pointers=yes"
+    "-C", "force-frame-pointers=yes",
+    # twin parity (riscv64/x86_64): rustc's default embedded link runs
+    # --gc-sections; unreferenced-but-load-bearing sections (.ex_table)
+    # must survive it
+    "-C", "link-arg=--no-gc-sections",
 ]
 
 # Userspace programs with musl libc (std support)

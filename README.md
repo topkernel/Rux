@@ -6,11 +6,11 @@
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
+[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
 [![Tests](https://img.shields.io/badge/tests-4%2C250%20cases-brightgreen.svg)](#-test-status)
 [![Code](https://img.shields.io/badge/code-~250%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
-**Platforms: RISC-V 64-bit (RV64GC, primary) · x86_64 (q35)**
+**Platforms: RISC-V 64-bit (RV64GC, primary) · x86_64 (q35) · AArch64 (QEMU virt)**
 
 </div>
 
@@ -94,6 +94,44 @@ The kernel work behind it (full campaign in git history and the
 
 ---
 
+## 🦾 Rux Runs AArch64
+
+**The third architecture landed end to end (2026-10-30): QEMU virt
+(cortex-a72) boots through GICv3 + architectural timer + SMP (PSCI),
+mounts the virtio-blk PCI ext4 root, and reaches an interactive root
+shell — typed commands run, external binaries fork/exec (`id`,
+`uname`), signals deliver through the full rt_sigframe path with
+FPSIMD state, and the in-kernel test suite is green (1,119/1,119).**
+
+What the port carries today:
+
+- **Boot without firmware**: QEMU's ELF `-kernel` protocol passes no
+  DTB and no arguments on this architecture — the device tree blob is
+  embedded in `.rodata` (auto-dumped from the installed QEMU when
+  missing) and the cmdline parses out of it
+- **GICv3 + architectural timer**: distributor/redistributor/CPU
+  interface, SPI/PPI/SGI routing, IPI with bitmap multiplexing, the
+  virtual-timer tick at HZ=100 on both CPUs, PCI INTx through the
+  GPEX interrupt-map swizzle
+- **Full user memory management**: 4-level TTBR0/1 walker, fork with
+  COW, demand paging, mprotect with PROT_NONE markers, uaccess with a
+  real exception table (`.ex_table` kept alive in the link), per-task
+  TPIDR_EL0 (user TLS) switched with the context, per-trap FPSIMD
+  save so library NEON cannot dirty user FP state mid-syscall
+- **The port's own diagnostics found architecture-level semantics
+  bugs that the other two never exercised** — SVC's return-address
+  convention, the IPA size check, TLS-base ownership across fork
+
+```bash
+make build PLATFORM=aarch64
+qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
+    -accel tcg,thread=multi -m 1G -smp 2 -nographic -no-reboot \
+    -kernel target/aarch64-unknown-none/debug/rux <rootfs drive>
+make test PLATFORM=aarch64     # in-kernel suite: 1,119 cases
+```
+
+---
+
 ## 🤖 AI Generation Statement
 
 **This project's code is developed with AI assistance (Claude Code +
@@ -131,7 +169,7 @@ GLM-5.3).**
 | Metric | Value | Details |
 |--------|-------|---------|
 | **Source Lines** | ~249,500 lines in kernel/src (399 files) | [Review Coverage Map](docs/development/review-coverage.md) |
-| **Kernel Unit Tests** | 1,122 cases, all green | `make test` |
+| **Kernel Unit Tests** | 1,190 cases (riscv64), 1,119 (aarch64), all green | `make test [PLATFORM=…]` |
 | **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
 | **Linux LTP** | **1,005 / 1,869** (r15; trend 35 → 524 → 801 → 945 → 1,005) | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |

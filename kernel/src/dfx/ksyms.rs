@@ -58,6 +58,8 @@ pub fn table_valid() -> bool {
     }
     #[cfg(target_arch = "riscv64")]
     const WANT: &str = "riscv64";
+    #[cfg(feature = "aarch64")]
+    const WANT: &str = "aarch64";
     #[cfg(target_arch = "x86_64")]
     const WANT: &str = "x86_64";
     TARGET.starts_with(WANT)

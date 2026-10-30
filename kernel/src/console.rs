@@ -13,7 +13,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
-#[cfg(feature = "riscv64")]
+#[cfg(any(feature = "riscv64", feature = "aarch64"))]
 use crate::arch::mm::fixmap::uart_virt_addr;
 
 // ============================================================================
@@ -279,9 +279,12 @@ impl Uart {
         crate::dfx::pstore::sink(c);
 
         #[cfg(feature = "aarch64")]
-        // SAFETY: UART0_BASE is a valid MMIO address for the UART data register.
+        // SAFETY: uart_virt_addr() is the PL011 fixmap VA once the early
+        // map is installed (mmu_init::init → fixmap::init_uart_fixmap),
+        // the identity physical address before that (boot.S idmap still
+        // live) — both are valid MMIO data-register addresses.
         unsafe {
-            let addr = UART0_BASE + 0x00;
+            let addr = uart_virt_addr();
             asm!(
                 "str w1, [x0]",
                 in("x0") addr,
@@ -641,7 +644,7 @@ pub fn init_irq() {
     }
 }
 
-#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+#[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
 pub fn init_irq() {}
 
 // ============================================================================
@@ -910,6 +913,23 @@ pub fn uart_data_ready() -> bool {
     uart_has_data()
 }
 
+/// aarch64 PL011: FR (offset 0x18) bit 4 = RX FIFO empty
+#[cfg(feature = "aarch64")]
+pub fn uart_data_ready() -> bool {
+    // SAFETY: uart_virt_addr() is the fixmap VA (or the early identity
+    // address pre-init — see putc); reading FR is a pure MMIO flag read.
+    unsafe {
+        let fr: u32;
+        core::arch::asm!(
+            "ldr {fr}, [{addr}]",
+            fr = out(reg) fr,
+            addr = in(reg) uart_virt_addr() + 0x18,
+            options(nostack, readonly)
+        );
+        fr & (1 << 4) == 0
+    }
+}
+
 /// Read single character (non-blocking).
 ///
 /// Returns Some(c) if data is available (from ring buffer or hardware),
@@ -999,7 +1019,24 @@ pub fn getchar() -> Option<u8> {
 
     #[cfg(feature = "aarch64")]
     {
-        // TODO: Implement aarch64 getchar
+        // Ring buffer first (interrupt-driven path)
+        let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+        let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+        if head != tail {
+            if let Some(c) = UART_RX_BUF.get() {
+                return process_input(c);
+            }
+        }
+
+        // Hardware polling fallback — ONLY before the RX IRQ is armed
+        // (same ownership rule as the twins: once armed, DR belongs to
+        // the IRQ handler).
+        if !UART_IRQ_ARMED.load(Ordering::Acquire) && pl011_rx_pending() {
+            // SAFETY: DR read consumes the byte; no handler competes for
+            // it while the armed flag is clear.
+            let c = unsafe { core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8 };
+            return process_input(c);
+        }
     }
 
     None
@@ -1050,9 +1087,102 @@ pub fn uart_has_data() -> bool {
     read_reg(COM1_BASE, UART_LSR) & LSR_DR != 0
 }
 
-#[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+#[cfg(not(any(feature = "riscv64", feature = "x86_64", feature = "aarch64")))]
 pub fn uart_has_data() -> bool {
     false
+}
+
+/// aarch64 PL011 helper: RX FIFO empty (FR bit 4)
+#[cfg(feature = "aarch64")]
+fn pl011_rx_pending() -> bool {
+    // SAFETY: FR is a pure flag register at the live PL011 base.
+    unsafe { core::ptr::read_volatile((uart_virt_addr() + 0x18) as *const u32) & (1 << 4) == 0 }
+}
+
+/// aarch64 PL011: interrupt-driven RX on GICv3 SPI 1 (INTID 33; the DTB
+/// uart@09000000 node declares interrupts <0 1 4> — SPI 1, level-high).
+/// Same ownership contract as the twins: once armed, the IRQ handler is
+/// the only context that consumes hardware RX; task-context readers go
+/// through the ring.
+#[cfg(feature = "aarch64")]
+pub fn init_irq() {
+    fn pl011_irq_handler(_irq: u32, _dev_id: usize) -> crate::interrupt::IrqReturn {
+        let mut received = 0usize;
+        // SAFETY: DR reads consume RX bytes the handler owns; ICR is the
+        // clear register (RX | receive-timeout).
+        unsafe {
+            while pl011_rx_pending() {
+                let c = core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8;
+                UART_RX_BUF.put(c);
+                tty_isig_record(c);
+                uart_rx_debug_magic(c);
+                received += 1;
+            }
+            core::ptr::write_volatile((uart_virt_addr() + 0x44) as *mut u32, (1 << 4) | (1 << 6));
+        }
+        if received > 0 {
+            static FIRST_RX: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !FIRST_RX.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                use core::fmt::Write;
+                let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                let _ = write!(w, "PL011: first RX irq, {} bytes\n", received);
+            }
+            UART_READ_WAITQ.wake_up_one();
+        }
+        crate::interrupt::IrqReturn::Handled
+    }
+
+    // Drain bytes that reached the FIFO before the IRQ was armed (same
+    // cold-boot first-command family as the twins' pre-arm drain: without
+    // it, early input is capped by the 16-byte FIFO).
+    // SAFETY: single-CPU boot context with the GIC line still masked.
+    unsafe {
+        while pl011_rx_pending() {
+            let c = core::ptr::read_volatile(uart_virt_addr() as *const u32) as u8;
+            UART_RX_BUF.put(c);
+        }
+        // Arm RX (IMSC bit 4) AND the receive-timeout interrupt (bit 6):
+        // the default FIFO threshold is 2 bytes, so a single typed char
+        // raises only the 32-cycle RT interrupt — without RTIM the lone
+        // keystroke never interrupts at all.
+        core::ptr::write_volatile((uart_virt_addr() + 0x38) as *mut u32, (1 << 4) | (1 << 6));
+    }
+    if crate::interrupt::request_irq(
+        33, // SPI 1 → INTID 33
+        pl011_irq_handler,
+        0, // Not shared
+        "PL011",
+        0,
+    )
+    .is_ok()
+    {
+        UART_IRQ_ARMED.store(true, Ordering::Release);
+    }
+    // aarch64 bring-up diagnostic (raw console write — printk routing to
+    // PL011 is not verified on this port yet): the whole console input
+    // chain hangs on this arm result.
+    {
+        use core::fmt::Write;
+        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let _ = write!(w, "PL011: RX irq {}\n",
+            if UART_IRQ_ARMED.load(Ordering::Acquire) { "registered" } else { "FAILED" });
+    }
+}
+
+/// aarch64 PL011: ring first; FR only while the RX IRQ is not armed
+/// (same ownership rule as the twins).
+#[cfg(feature = "aarch64")]
+pub fn uart_has_data() -> bool {
+    let head = UART_RX_BUF.head.load(Ordering::Relaxed);
+    let tail = UART_RX_BUF.tail.load(Ordering::Acquire);
+    if head != tail {
+        return true;
+    }
+    if UART_IRQ_ARMED.load(Ordering::Acquire) {
+        return false;
+    }
+    pl011_rx_pending()
 }
 
 /// Process input character: handle ISIG, echo, and newline translation.

@@ -66,6 +66,13 @@ const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 #[cfg(feature = "x86_64")]
 const VA_PA_OFFSET: usize = 0xffff_8880_0000_0000;
+// aarch64: heap follows the 32MB kernel window (see memory_layout.rs)
+#[cfg(feature = "aarch64")]
+const KERNEL_HEAP_PHYS: usize = 0x4280_0000;
+#[cfg(feature = "aarch64")]
+// The aarch64 linear map places phys P at PAGE_OFFSET + P (identity from 0),
+// unlike riscv64 which mounts phys RAM_BASE at PAGE_OFFSET.
+const VA_PA_OFFSET: usize = 0xffff_c000_0000_0000;
 const HEAP_START: usize = KERNEL_HEAP_PHYS + VA_PA_OFFSET;
 
 // Heap size - read from configuration file

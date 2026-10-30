@@ -141,7 +141,12 @@ impl<'a> BlockAllocator<'a> {
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
+            // lo|hi<<32 at every geometry site (review EXT4-64BIT, same
+            // class as the inode.rs/mod.rs inode-table twins): bitmap
+            // block numbers are 64-bit on a 64BIT fs.
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
         };
         if free_blocks == 0 || block_bitmap_block == 0 {
             return Ok(None);
@@ -207,7 +212,9 @@ impl<'a> BlockAllocator<'a> {
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
         };
 
         if free_blocks == 0 || block_bitmap_block == 0 {
@@ -305,7 +312,9 @@ impl<'a> BlockAllocator<'a> {
         let (free_blocks, block_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
         };
 
         let mut bitmap = self.read_block_bitmap(block_bitmap_block)?;
@@ -500,7 +509,9 @@ pub fn alloc_block_with_prealloc(
         let (free_blocks, block_bitmap_block) = {
             let group_descs = fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_blocks_count_lo, group_desc.bg_block_bitmap_lo as u64)
+            (group_desc.bg_free_blocks_count_lo,
+                (group_desc.bg_block_bitmap_lo as u64)
+                    | ((group_desc.bg_block_bitmap_hi as u64) << 32))
         };
 
         // Don't preallocate if the group is nearly full
@@ -612,7 +623,9 @@ impl<'a> InodeAllocator<'a> {
             let (free_inodes, inode_bitmap_block) = {
                 let group_descs = self.fs.group_descs.lock();
                 let group_desc = &group_descs[group_idx as usize];
-                (group_desc.bg_free_inodes_count_lo, group_desc.bg_inode_bitmap_lo as u64)
+                (group_desc.bg_free_inodes_count_lo,
+                (group_desc.bg_inode_bitmap_lo as u64)
+                    | ((group_desc.bg_inode_bitmap_hi as u64) << 32))
             };
 
             // Check if there are free inodes
@@ -680,7 +693,9 @@ impl<'a> InodeAllocator<'a> {
         let (free_inodes, inode_bitmap_block) = {
             let group_descs = self.fs.group_descs.lock();
             let group_desc = &group_descs[group_idx as usize];
-            (group_desc.bg_free_inodes_count_lo, group_desc.bg_inode_bitmap_lo as u64)
+            (group_desc.bg_free_inodes_count_lo,
+                (group_desc.bg_inode_bitmap_lo as u64)
+                    | ((group_desc.bg_inode_bitmap_hi as u64) << 32))
         };
 
         // Read inode bitmap

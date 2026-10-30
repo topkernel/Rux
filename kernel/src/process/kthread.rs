@@ -105,6 +105,11 @@ pub fn kernel_thread(
         /// (the boot-time triple fault).
         #[cfg(feature = "x86_64")]
         fn ret_from_fork_kernel();
+        /// aarch64 kernel-thread trampoline: schedule_tail, then the
+        /// helper runs fn(arg) (fn/arg arrive in the switch-restored
+        /// x19/x20 from thread.s[0]/s[1]) and do_exit.
+        #[cfg(feature = "aarch64")]
+        fn ret_from_fork_kernel_asm();
     }
     {
         let thread = task.thread_mut();
@@ -128,6 +133,20 @@ pub fn kernel_thread(
             thread.sp = pt_regs_ptr as u64;
             thread.callee.r12 = fn_ptr as u64;
             thread.callee.r13 = arg as u64;
+        }
+        #[cfg(feature = "aarch64")]
+        {
+            // Contract pinned by trap.S ret_from_fork_kernel_asm: after
+            // __switch_to restores the callee-saved set, x19 = fn,
+            // x20 = fn_arg, sp = the scratch pt_regs at thread.sp; the
+            // trampoline calls schedule_tail then the helper (which
+            // runs fn and do_exit). Landing on ret_from_fork instead
+            // would eret the ZEROED supervisor scratch frame — pc 0
+            // (same trap the x86_64 twin documented).
+            thread.ra = ret_from_fork_kernel_asm as u64;
+            thread.sp = pt_regs_ptr as u64;
+            thread.s[0] = fn_ptr as u64;
+            thread.s[1] = arg as u64;
         }
     }
 

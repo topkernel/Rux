@@ -156,6 +156,10 @@ pub fn init_vmemmap(start_pfn: usize, nr_pages: usize) -> Result<(), ()> {
     // Zero the vmemmap pages using linear mapping
     // Must use virtual address since MMU is enabled
     let vmemmap_virt = phys_to_virt(PhysAddr::new(vmemmap_phys as u64));
+    {
+        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        use core::fmt::Write;
+    }
     // SAFETY: vmemmap_virt points to the reserved physical region returned by
     // memblock_find_in_range; vmemmap_size is the exact allocation size.
     unsafe {
