@@ -121,9 +121,9 @@ impl SigFlags {
     pub const SA_RESTART: u64 = 0x10000000;    // Restart system call
     pub const SA_NODEFER: u64 = 0x40000000;    // Don't block self during handler
     pub const SA_RESETHAND: u64 = 0x80000000;  // Reset to default after handling
-    #[cfg_attr(not(feature = "x86_64"), allow(dead_code))] // riscv64 has no SA_RESTORER
-    pub const SA_RESTORER: u64 = 0x04000000;   // x86_64 ABI: sa_restorer is
-                                              // valid (unused on riscv64)
+    #[cfg_attr(not(any(feature = "x86_64", feature = "aarch64")), allow(dead_code))] // riscv64 has no SA_RESTORER
+    pub const SA_RESTORER: u64 = 0x04000000;   // x86_64/aarch64 ABI: sa_restorer
+                                              // is valid (unused on riscv64)
 
     pub fn new(flags: u64) -> Self {
         Self(flags)
@@ -165,8 +165,9 @@ pub struct SigAction {
     pub sa_flags: SigFlags,
     /// Signal mask
     pub sa_mask: u64,
-    /// Userspace restorer (x86_64 SA_RESTORER ABI; always 0 on riscv64,
-    /// where the kernel-owned SIGTRAMP page is the only return path)
+    /// Userspace restorer (x86_64/aarch64 SA_RESTORER ABI; always 0 on
+    /// riscv64, where the kernel-owned SIGTRAMP page is the only return
+    /// path — on aarch64 it is the fallback for restorer-less callers)
     pub sa_restorer: usize,
 }
 
@@ -1503,7 +1504,13 @@ unsafe fn restart_syscall_no_handler(regs: *mut crate::arch::pt_regs::PtRegs) {
 /// so the old stack-trampoline fallback returned into an NX stack page and
 /// every glibc signal handler died with SIGSEGV (dash exiting status=11
 /// the moment a child sent SIGCHLD was this bug).
-#[cfg(feature = "riscv64")]
+/// aarch64 carries the same kernel-owned page as the fallback for
+/// restorer-less rt_sigaction callers: arm64 glibc/musl normally ALWAYS
+/// pass SA_RESTORER with their own `mov x8,#139; svc #0` stub, but a raw
+/// syscall user that skips SA_RESTORER must still have somewhere
+/// executable to land — the reference arm64 kernel points those at the
+/// vDSO sigtramp; Rux points them here.
+#[cfg(any(feature = "riscv64", feature = "aarch64"))]
 pub const SIGTRAMP_BASE: u64 = 0x3FBE_0000_00;
 
 /// Set up the arch-specific signal frame and redirect the trap frame into

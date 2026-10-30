@@ -364,6 +364,35 @@ pub(crate) fn do_execve_elf(
             }
         }
     }
+    // aarch64 twin of the same trampoline page: arm64 glibc/musl normally
+    // return through their OWN SA_RESTORER stub, but restorer-less
+    // rt_sigaction callers (raw syscall users) land on this page — the
+    // reference arm64 kernel's vDSO sigtramp role. Contents:
+    //   movz x8, #139   ; __NR_rt_sigreturn (generic table, same as riscv)
+    //   svc  #0
+    #[cfg(feature = "aarch64")]
+    {
+        // SAFETY: user_ppn is a fresh user page-table root; the semantic
+        // alias flags are the same contract the stack/image mappings above
+        // pass. The returned frame is freshly allocated and exclusively
+        // owned by this address space.
+        let tp = unsafe {
+            alloc_and_map_to_user_table(
+                user_ppn,
+                crate::signal::SIGTRAMP_BASE,
+                4096,
+                PageTableEntry::V | PageTableEntry::U | PageTableEntry::R
+                    | PageTableEntry::X | PageTableEntry::A,
+            )
+        };
+        if let Some(tp) = tp {
+            let kva = phys_to_virt(PhysAddr::new(tp)).bits() as usize;
+            unsafe {
+                core::ptr::write_volatile(kva as *mut u32, 0xD280_1168);
+                core::ptr::write_volatile((kva + 4) as *mut u32, 0xD400_0001);
+            }
+        }
+    }
 
     // Load each segment
     if ec2_on { ec2_stack = crate::arch::cpu::read_time(); }
