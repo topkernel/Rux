@@ -452,7 +452,12 @@ fn handle_syscall(regs: &mut PtRegs) {
 fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
     use crate::drivers::intc::gicv3;
 
+    // Bounded drain: a level source whose handler fails to deassert
+    // would otherwise loop forever inside one bracket. On bound-break
+    // the still-pending IRQ re-traps on eret (DAIF unmasked contexts).
+    let mut budget = 64u32;
     while let Some(intid) = gicv3::claim() {
+        budget = budget.saturating_sub(1);
         match intid {
             gicv3::TIMER_PPI_INTID => {
                 handle_timer_interrupt(regs, cpu);
@@ -472,6 +477,9 @@ fn handle_external_interrupt(regs: &mut PtRegs, cpu: usize) {
                     gicv3::eoi(intid);
                 }
             }
+        }
+        if budget == 0 {
+            break;
         }
     }
 }
