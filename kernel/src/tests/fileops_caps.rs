@@ -245,7 +245,11 @@ pub fn test_fileops_caps() {
     check(
         "sysfs file caps",
         &crate::fs::sysfs::SYSFS_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+        // poll: true since the gdm bring-up (91ad754b) — reference-kernel
+        // kernfs attrs are pollable (kernfs_fop_poll: POLLPRI on content
+        // change), and udev/gdm poll sysfs attributes; without the slot
+        // epoll_ctl(ADD) EPERMs and the poller falls back to spinning.
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: false },
     );
     check(
         "debugfs file caps",
