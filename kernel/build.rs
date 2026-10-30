@@ -870,6 +870,12 @@ fn compile_boot_asm() {
         // EVERY invocation so a stale boot object can never skip it.
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let dtb_src = PathBuf::from(&manifest_dir).join("src/arch/aarch64/virt.dtb");
+        // The blob is .incbin'd, so a regenerated/edited virt.dtb must
+        // rerun the build script — otherwise the embedded DTB goes stale
+        // with zero diagnostics.
+        if dtb_src.exists() {
+            println!("cargo:rerun-if-changed={}", dtb_src.display());
+        }
         let dtb_asm = PathBuf::from(&manifest_dir).join("src/arch/aarch64/dtb_blob.S");
         fs::write(&dtb_asm, format!(
             ".section .rodata\n.balign 8\n.globl aarch64_virt_dtb\naarch64_virt_dtb:\n.incbin \"{}\"\n.globl aarch64_virt_dtb_end\naarch64_virt_dtb_end:\n",
