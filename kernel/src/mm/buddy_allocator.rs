@@ -650,9 +650,17 @@ impl BuddyAllocator {
         NET_PAGES[order].fetch_sub(1usize << order, Ordering::Relaxed);
 
         loop {
-            // Boundary check: order cannot exceed MAX_ORDER
-            if current_order > MAX_ORDER {
-                // Exceeds maximum order, add directly to MAX_ORDER list
+            // Merge ceiling (page-buddy parity): stop coalescing AT the
+            // maximum order. The old `> MAX_ORDER` guard let two
+            // MAX_ORDER buddies merge first and only then registered the
+            // oversized block at MAX_ORDER — the buddy half's free bits
+            // were cleared by remove_from_free_list but its pages were on
+            // no list: 2^MAX_ORDER pages orphaned per event, invisible to
+            // both the allocator and the census. Unreachable with the
+            // shipped config (BUDDY_MAX_ORDER=20 covers the whole heap),
+            // but latent for any smaller max order.
+            if current_order >= MAX_ORDER {
+                // At the ceiling already: add directly to MAX_ORDER list.
                 self.add_to_free_list(page_idx, MAX_ORDER);
                 break;
             }
