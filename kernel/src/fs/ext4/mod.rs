@@ -273,26 +273,23 @@ impl Ext4FileSystem {
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
-                // We mount read-write and do not maintain ANY metadata
-                // checksums or cluster geometry — accepting these features
-                // would write checksum-invalid or cluster-misaligned
-                // metadata. metadata_csum mounts READ-ONLY with full
-                // read-path verification (csum.rs — OH Phase 1: the OH
-                // system/vendor images are mkfs'd with metadata_csum);
-                // bigalloc stays rejected outright.
+                // We mount read-write and maintain ALL metadata checksum
+                // classes (csum.rs: superblock/group-descriptor/inode are
+                // re-sealed by the *_csum_set wiring; bitmap csums,
+                // directory tails and extent tails are sealed at their
+                // write sites — oh-svc 2026-10-31). metadata_csum mounts
+                // READ-WRITE with full read-path verification (csum.rs —
+                // the OH system/vendor images are mkfs'd with
+                // metadata_csum); bigalloc stays rejected outright.
                 //
-                // OH bring-up policy (sys_prod/userdata): those images
-                // are also metadata_csum and OH's fstab mounts them rw.
-                // Refusing with ENODEV stalled the second-stage boot
-                // (sys_prod carries libdrm.so for the display composer
-                // backend). Downgrade the mount to read-only with a
-                // loud warning instead — readers work, writers get EROFS.
-                if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
-                    crate::pr_warn!(
-                        "ext4: metadata_csum rw mount downgraded to read-only (OH bring-up policy)"
-                    );
-                    self.read_only = true;
-                }
+                // History (OH bring-up): this used to DOWNGRADE every rw
+                // metadata_csum mount to read-only because the write path
+                // did not maintain checksums. OH's fstab mounts /data rw;
+                // the downgrade made that mount fail (EIO from the
+                // geometry guard upstream) and the entire first-boot
+                // /data cascade — native token file, persist params,
+                // el1/el2 service dirs — ran against an unmounted /data
+                // on every boot.
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
                     bio::brelse(sb_bh);
@@ -1808,6 +1805,8 @@ fn add_dir_entry(
                     // Reuse this entry
                     let entry_data = &mut data[offset..offset + entry_size];
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                    // metadata_csum: refresh the block's dir tail.
+                    super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                     (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
@@ -1846,6 +1845,8 @@ fn add_dir_entry(
                 let entry_data = &mut data[offset..offset + entry_size];
                 create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
 
+                // metadata_csum: refresh the block's dir tail.
+                super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                 (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
@@ -1905,6 +1906,8 @@ fn append_dir_block(
         let data = &mut (*bh).b_data;
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
+        // metadata_csum: refresh the block's dir tail.
+        super::ext4::namei::dir_block_seal(fs, parent_ino, data);
         (*bh).set_state_bit(bio::BufferState::BH_Dirty);
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);

@@ -738,18 +738,86 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         {
             let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
-                // oh-svc wedge hunt (2026-10-31): init spins in
-                // fstatat->path_lookup->ext4 lookup on a /data path after
-                // the first writable-/data boot. Budgeted one-line trace so
-                // the serial names the polled path before the wedge.
+                // oh-svc wedge hunt (2026-10-31): init (pid 1) enters an
+                // infinite fstatat(fd=11, "#<n>") loop the instant
+                // check_module_update reaps on a writable-/data boot. The
+                // '#' path filter isolates the loop from all normal pid-1
+                // stats; each hit dumps the dirfd's identity, the caller's
+                // user rip and the top of its user stack (return chain).
+                // Budgeted: first 3 hits name the loop, later ones are
+                // silent (the boot log stays readable).
                 {
                     use core::sync::atomic::{AtomicU64, Ordering};
                     static COUNT: AtomicU64 = AtomicU64::new(0);
                     if crate::process::current_pid() == 1
-                        && COUNT.fetch_add(1, Ordering::Relaxed) % 4096 == 0
+                        && p.as_bytes().first() == Some(&b'#')
+                        && COUNT.fetch_add(1, Ordering::Relaxed) < 3
                     {
-                        crate::pr_info!("svcdbg pid-1 fstatat #{} path '{}'",
-                            COUNT.load(Ordering::Relaxed), p);
+                        let (rip, ursp) = {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                crate::arch::trap::current_task_pt_regs()
+                                    .map(|r| (r.rip, r.rsp))
+                                    .unwrap_or((0, 0))
+                            }
+                            #[cfg(not(feature = "x86_64"))]
+                            {
+                                (0u64, 0u64)
+                            }
+                        };
+                        // fd identity: resolve args[0] through pid 1's fdtable.
+                        let fdpath = (|| {
+                            let task = crate::process::find_task_by_pid(1)?;
+                            let ft = task.try_fdtable()?;
+                            let file = ft.get_file(dirfd.max(0) as usize)?;
+                            let dentry = unsafe { &*file.dentry.get() };
+                            let d = dentry.as_ref()?;
+                            Some(d.name.lock().clone())
+                        })();
+                        // Physical frames behind the path buffer and the
+                        // loop's stack page: if the user mapping aliases a
+                        // live kernel object, the PPN is stable while the
+                        // visible content evolves (oh-svc wedge: the path
+                        // buffer reads as kernel text '#<n>').
+                        let phys = {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let task = crate::process::find_task_by_pid(1);
+                                task.and_then(|t| {
+                                    let root = t.address_space_arc()?.root_ppn();
+                                    let path_pa = crate::arch::mm::get_user_phys(
+                                        root, pathname_ptr as u64);
+                                    let rsp_pa = crate::arch::mm::get_user_phys(
+                                        root, ursp);
+                                    Some((path_pa, rsp_pa))
+                                })
+                            }
+                            #[cfg(not(feature = "x86_64"))]
+                            {
+                                None
+                            }
+                        };
+                        // Caller chain: 16 qwords from the USER rsp upward.
+                        let mut stk = alloc::string::String::new();
+                        for i in 0..16u64 {
+                            let mut w = [0u8; 8];
+                            if unsafe {
+                                crate::arch::uaccess::copy_from_user(
+                                    w.as_mut_ptr(),
+                                    (ursp + i * 8) as *const u8,
+                                    8,
+                                )
+                            } == 0
+                            {
+                                stk.push_str(&alloc::format!(" {:02x}",
+                                    u64::from_le_bytes(w)));
+                            } else {
+                                stk.push_str(" --");
+                            }
+                        }
+                        crate::pr_info!(
+                            "svcdbg LOOP fstatat path='{}' dirfd={} dirfd-name={:?} rip={:#x} rsp={:#x} phys={:?} stk{}",
+                            p, dirfd, fdpath, rip, ursp, phys, stk);
                     }
                 }
                 if let Some((_, fd)) = proc_fd_magic(p) {
