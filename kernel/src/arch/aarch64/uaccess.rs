@@ -23,8 +23,22 @@ use core::arch::global_asm;
 
 global_asm!(
     r#"
+    // extable insn, fixup — add an exception-table entry: when the
+    // instruction at `insn` faults, the trap path rewinds PC to `fixup`.
+    //
+    // CRITICAL usage rule (matches the riscv64 twin's EXTABLE): the
+    // label referenced by \insn MUST be placed immediately BEFORE the
+    // faulting instruction, and the macro invoked immediately AFTER it:
+    //
+    //     .Lfault_site:
+    //         <load/store that may fault>
+    //         extable .Lfault_site, fixup
+    //
+    // A label defined after the macro binds to the NEXT instruction, and
+    // the entry would cover the wrong instruction.
     .macro extable, insn, fixup
     .pushsection .ex_table, "a"
+    .balign 8
     .quad \insn
     .quad \fixup
     .popsection
@@ -32,20 +46,28 @@ global_asm!(
 
     // x0 = user dst, x1 = kernel src, x2 = n; returns uncopied in x0.
     // On a fault the post-indexed store's writeback is architecturally
-    // suppressed, so x2 still holds the not-yet-copied count.
+    // suppressed, so x2 still holds the not-yet-copied count. The
+    // extable entry MUST label the user store (the strb), NOT the kernel
+    // load: a fault's PC is the faulting instruction's own address, and
+    // an entry on the ldrb would never match a user-address abort (the
+    // store would oops instead of returning a short count).
     .align 4
     .global __aa64_copy_to_user
     .type __aa64_copy_to_user, %function
 __aa64_copy_to_user:
-    cbz x2, 2f
-1:  ldrb w4, [x1], #1
+    cbz x2, .Lctu_done
+.Lctu_load:
+    ldrb w4, [x1], #1
+.Lctu_store:
     strb w4, [x0], #1
-    extable 1b, 3f
+    extable .Lctu_store, .Lctu_fault
     subs x2, x2, #1
-    b.ne 1b
-2:  mov x0, #0
+    b.ne .Lctu_load
+.Lctu_done:
+    mov x0, #0
     ret
-3:  mov x0, x2
+.Lctu_fault:
+    mov x0, x2
     ret
 
     // x0 = kernel dst, x1 = user src, x2 = n; returns uncopied in x0.
@@ -53,15 +75,18 @@ __aa64_copy_to_user:
     .global __aa64_copy_from_user
     .type __aa64_copy_from_user, %function
 __aa64_copy_from_user:
-    cbz x2, 2f
-1:  ldrb w4, [x1], #1
-    extable 1b, 3f
+    cbz x2, .Lcfu_done
+.Lcfu_load:
+    ldrb w4, [x1], #1
+    extable .Lcfu_load, .Lcfu_fault
     strb w4, [x0], #1
     subs x2, x2, #1
-    b.ne 1b
-2:  mov x0, #0
+    b.ne .Lcfu_load
+.Lcfu_done:
+    mov x0, #0
     ret
-3:  mov x0, x2
+.Lcfu_fault:
+    mov x0, x2
     ret
 
     // x0 = user dst, x1 = n; returns uncleared in x0.
@@ -70,14 +95,17 @@ __aa64_copy_from_user:
     .type __aa64_clear_user, %function
 __aa64_clear_user:
     mov x2, x1
-    cbz x2, 2f
-1:  strb wzr, [x0], #1
-    extable 1b, 3f
+    cbz x2, .Lclru_done
+.Lclru_store:
+    strb wzr, [x0], #1
+    extable .Lclru_store, .Lclru_fault
     subs x2, x2, #1
-    b.ne 1b
-2:  mov x0, #0
+    b.ne .Lclru_store
+.Lclru_done:
+    mov x0, #0
     ret
-3:  mov x0, x2
+.Lclru_fault:
+    mov x0, x2
     ret
 "#
 );
