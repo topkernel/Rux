@@ -624,7 +624,15 @@ impl Ext4FileSystem {
 
                     let entry_name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        // Non-UTF8 (corrupt/binary) name: SKIP the entry but
+                        // still advance — a bare `continue` here retried the
+                        // SAME offset forever and livelocked the walker (the
+                        // OH userdata carries such entries; two vCPUs spun
+                        // in from_bytes with no serial output).
+                        Err(_) => {
+                            offset += entry.rec_len as usize;
+                            continue;
+                        }
                     };
 
                     if entry_name == name {
@@ -688,7 +696,12 @@ impl Ext4FileSystem {
                     // Skip . and ..
                     let name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        // Non-UTF8 name: skip but ADVANCE (see lookup — a
+                        // bare continue livelocked on the same offset).
+                        Err(_) => {
+                            offset += entry.rec_len as usize;
+                            continue;
+                        }
                     };
                     if name != "." && name != ".." {
                         entries.push(entry.clone());
