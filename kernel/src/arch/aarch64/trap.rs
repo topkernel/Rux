@@ -869,6 +869,12 @@ pub fn disable_timer_interrupt() {
 /// SGI/PPI bank config, ICC_* system-register enable — per CPU)
 pub fn enable_external_interrupt() {
     crate::drivers::intc::gicv3::enable_cpu_interface();
+    // CPU-side unmask — the daifclr equivalent of the riscv64 twin's
+    // csrs-sie. Enabling the GIC CPU interface alone leaves
+    // PSTATE.DAIF.I set, and the kernel runs its whole boot with every
+    // interrupt (timer included) masked: QEMU -d int showed zero IRQ
+    // exceptions taken.
+    crate::arch::cpu::enable_irq();
 }
 
 /// TrapFrame / ExceptionCause aliases (interface parity)
