@@ -283,6 +283,8 @@ pub enum ElfMachine {
     EM_ST100_2 = 134,
     /// Xilinx MicroBlaze
     EM_MICROBLAZE = 189,
+    /// AArch64 (64-bit ARM)
+    EM_AARCH64 = 183,
     /// RISC-V
     EM_RISCV = 243,
 }
@@ -393,9 +395,20 @@ impl Elf64Ehdr {
         self.e_type == ElfType::ET_DYN as u16
     }
 
-    /// Check if machine type matches
+    /// Check if machine type matches the running architecture
     pub fn check_machine(&self) -> bool {
-        self.e_machine == ElfMachine::EM_RISCV as u16
+        #[cfg(feature = "riscv64")]
+        {
+            self.e_machine == ElfMachine::EM_RISCV as u16
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            self.e_machine == ElfMachine::EM_X86_64 as u16
+        }
+        #[cfg(feature = "aarch64")]
+        {
+            self.e_machine == ElfMachine::EM_AARCH64 as u16
+        }
     }
 
     /// Get program headers
