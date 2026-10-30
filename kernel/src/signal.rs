@@ -791,6 +791,7 @@ impl SigContext {
 #[derive(Debug, Copy, Clone)]
 pub struct SigReservedBlock([u8; 4096]);
 
+#[cfg(feature = "aarch64")]
 impl Default for SigReservedBlock {
     fn default() -> Self {
         Self([0u8; 4096])
