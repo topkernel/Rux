@@ -45,6 +45,20 @@ pub const CPUINFO_X86_FIELDS: &[&str] = &[
     "cache_alignment\t",
 ];
 
+/// Declared key order of one /proc/cpuinfo block, aarch64 (the
+/// reference kernel's arm64 layout — keys carry their own tab padding;
+/// `CPU architecture` is long enough that it gets none).
+pub const CPUINFO_AARCH64_FIELDS: &[&str] = &[
+    "processor\t",
+    "BogoMIPS\t",
+    "Features\t",
+    "CPU implementer\t",
+    "CPU architecture",
+    "CPU variant\t",
+    "CPU part\t",
+    "CPU revision\t",
+];
+
 /// Generate /proc/cpuinfo content
 pub fn generate() -> Vec<u8> {
     use crate::arch::smp::num_started_cpus;
@@ -90,6 +104,23 @@ pub fn generate() -> Vec<u8> {
             content.push_str(&super::procfile::render_kvtab_pad(rows));
         }
 
+        #[cfg(feature = "aarch64")]
+        {
+            // Static cortex-a72 values (MIDR_EL1-driven detection is a
+            // later upgrade), same honesty class as the x86_64 branch.
+            let rows: &[(&'static str, &dyn core::fmt::Display)] = &[
+                ("processor\t", &cpu),
+                ("BogoMIPS\t", &"0.00"),
+                ("Features\t", &""), // no features: `Features\t:\n` byte shape
+                ("CPU implementer\t", &"0x41"),
+                ("CPU architecture", &"8"),
+                ("CPU variant\t", &"0x0"),
+                ("CPU part\t", &"0xd08"),
+                ("CPU revision\t", &"0"),
+            ];
+            content.push_str(&super::procfile::render_kvtab_pad(rows));
+        }
+
         if cpu < num_cpus - 1 {
             content.push('\n');
         }
@@ -109,6 +140,8 @@ pub mod cpuinfo_file_tests {
     const FIELDS: &[&str] = super::CPUINFO_RISCV_FIELDS;
     #[cfg(feature = "x86_64")]
     const FIELDS: &[&str] = super::CPUINFO_X86_FIELDS;
+    #[cfg(feature = "aarch64")]
+    const FIELDS: &[&str] = super::CPUINFO_AARCH64_FIELDS;
 
     pub fn shape_check() {
         for k in FIELDS {

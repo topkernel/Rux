@@ -1120,10 +1120,12 @@ pub fn rust_main_tail() -> ! {
             // "ELF loaded"/"enqueued" pair moved next to the candidate
             // outcome so the chosen path can be folded into the line).
             init::init();
+
             // (The kernel used to print a fake "Welcome / mrsh" shell
             // banner here unconditionally — userspace theater that fired
             // even when init exec had failed. Removed: whatever the boot
             // disk's init prints is the real welcome.)
+
         }
 
         println!();
