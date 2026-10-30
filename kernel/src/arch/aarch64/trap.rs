@@ -789,6 +789,20 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {
     }
 }
 
+/// Kernel-thread trampoline helper (riscv64 twin contract): called by
+/// ret_from_fork_kernel_asm with the fn/arg restored from
+/// thread.s[0]/s[1]; runs the thread function and do_exit — it never
+/// returns (the asm parks defensively).
+#[no_mangle]
+pub extern "C" fn ret_from_fork_kernel_helper(
+    fn_arg: *mut core::ffi::c_void,
+    fn_ptr: extern "C" fn(*mut core::ffi::c_void) -> i32,
+    _regs: &mut PtRegs,
+) {
+    let ret = fn_ptr(fn_arg);
+    crate::process::exit::do_exit(ret);
+}
+
 // ============================================================================
 // Vector-table install + timer/IRQ arming (interface parity)
 // ============================================================================

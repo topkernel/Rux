@@ -326,3 +326,27 @@ el1_return_tail:
 ret_from_fork:
     bl      schedule_tail
     b       aarch64_exit_to_user
+
+// ---------------------------------------------------------------------------
+// ret_from_fork_kernel_asm — the first switch-in of a KERNEL thread
+// "returns" here from __switch_to with sp = the scratch pt_regs
+// (thread.sp seeded by kernel_thread), x0 = prev task (the schedule_tail
+// argument), x19 = thread fn, x20 = fn arg (restored by __switch_to from
+// thread.s[0]/s[1]; AAPCS64 callee-saved, so they survive the call).
+// Mirrors the riscv64 trampoline: schedule_tail, then the helper runs
+// fn(arg) and do_exit. Must NOT be ret_from_fork — that path erets the
+// ZEROED scratch frame (pc=0), the same trap the x86_64 twin documented.
+// ---------------------------------------------------------------------------
+.section .text.ret_from_fork_kernel, "ax"
+.align 4
+.global ret_from_fork_kernel_asm
+ret_from_fork_kernel_asm:
+    bl      schedule_tail
+    mov     x0, x20                 // fn_arg
+    mov     x1, x19                 // fn_ptr
+    mov     x2, sp                  // scratch pt_regs
+    bl      ret_from_fork_kernel_helper
+    // Unreachable: the helper ends in do_exit (never returns). Park
+    // defensively so a stray return cannot run off the stack.
+99:  wfe
+    b       99b

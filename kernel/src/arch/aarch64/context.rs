@@ -135,6 +135,14 @@ __switch_to:
     msr fpcr, x11
     msr fpsr, x12
 
+    // ---- switch the current-task identity to NEXT (aarch64 tp twin:
+    //      the riscv64 __switch_to does `mv tp, a1`; without this every
+    //      post-switch current() keeps naming the PREVIOUS task — the
+    //      trap entry, sched::current and the R56 slot machinery all
+    //      read TPIDR_EL1). Written at the COMMIT point only (after the
+    //      affirm/sp gates): an abort path must keep naming prev. ----
+    msr tpidr_el1, x1
+
     ldp x19, x20, [x8, #{s_off}]
     ldp x21, x22, [x8, #{s_off} + 16]
     ldp x23, x24, [x8, #{s_off} + 32]
