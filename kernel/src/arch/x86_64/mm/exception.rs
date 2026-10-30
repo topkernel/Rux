@@ -196,18 +196,6 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 
     // Kernel mode access
     if regs.kernel_mode() {
-        // Check for kernel stack overflow
-        // If fault address is near current task's kernel stack, it's likely
-        // a stack overflow
-        let fault_addr_usize = fault_addr.bits() as usize;
-
-        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
-            panic!(
-                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x})",
-                current.pid(), fault_addr_usize, regs.rsp
-            );
-        }
-
         // Kernel-mode access to a USER address whose VMA covers it: demand-
         // fill the page and RETRY the instruction (Linux semantics — the
         // kernel's copy_from_user on a not-yet-faulted user page must fault
@@ -277,10 +265,34 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             }
         }
 
-        // Check exception table (copy_to_user/copy_from_user etc.)
+        // R78 twin parity (riscv64): the exception-table fixup runs BEFORE
+        // the stack-overflow panic. A faulting rip that has a fixup entry
+        // is BY CONSTRUCTION inside a copy_to_user/copy_from_user window —
+        // the right recovery is the fixup (short copy -> EFAULT), letting
+        // the syscall unwind normally (dropping any locks its frames
+        // hold). With panic-first, a uaccess fault at a wild address that
+        // happens to land in this task's kernel-stack range (or a
+        // cross-stack rsp) killed the whole machine and carried every
+        // held lock into the grave — the exact family the riscv64 twin
+        // convicted on three full-session terminal captures. Genuine
+        // kernel corruption (no fixup entry) still reaches the loud
+        // stack-overflow panic below unchanged. Wild addresses are not
+        // VMA-covered, so the demand-fill above already declined them.
         if let Some(fixup) = fixup_exception(regs.rip) {
             regs.rip = fixup;
             return MmFaultResult::Handled;
+        }
+
+        // Check for kernel stack overflow
+        // If fault address is near current task's kernel stack, it's likely
+        // a stack overflow
+        let fault_addr_usize = fault_addr.bits() as usize;
+
+        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
+            panic!(
+                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x})",
+                current.pid(), fault_addr_usize, regs.rsp
+            );
         }
 
         // Kernel accessed invalid address (possibly a bug)

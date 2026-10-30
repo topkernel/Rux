@@ -647,8 +647,11 @@ fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 
-    // Default return value is -ENOSYS
-    regs.a0 = crate::errno::constants::ENOSYS as u64;
+    // Default return value is -ENOSYS (the sign matches the comment, the
+    // x86_64 twin and the ABI; the dispatch overwrites it on every path
+    // that returns, so this only matters if a future early-return forgets
+    // to set a0 — +38 would leak as a bogus success-sized return).
+    regs.a0 = -(crate::errno::constants::ENOSYS as i64) as u64;
 
     // Skip ecall instruction
     // RISC-V has both 32-bit ecall and 16-bit c.ecall instructions
