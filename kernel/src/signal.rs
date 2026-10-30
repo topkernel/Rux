@@ -775,9 +775,82 @@ impl SigContext {
     }
 }
 
-/// aarch64 sigcontext — Linux arm64 uapi shape: fault_address, the 31
-/// GPRs, sp, pc, pstate, then the (elided) reserved block. Stage-2's
-/// setup/restore fills it from PtRegs.
+/// aarch64 sigcontext — arm64 uapi shape: fault_address, the 31 GPRs,
+/// sp, pc, pstate, then the 4KB extension-record block.
+///
+/// The extension block mirrors the reference arm64 ABI exactly: it
+/// starts at offset 0x120 (8 bytes of ABI padding follow pstate at
+/// 0x118, because the block is 16-byte aligned — an fpsimd_context's
+/// vregs are only stp/ldp-reachable at 16-byte granularity), and holds
+/// a list of tagged records `{ u32 magic, u32 size, payload }`,
+/// terminated by a null record (magic 0). Stage-2 fills one record:
+/// the fpsimd_context (live v0-v31 + fpsr/fpcr) at offset 0 of the
+/// block, exactly like the reference `fpsimd_signal_preserve`.
+#[cfg(feature = "aarch64")]
+#[repr(C, align(16))]
+#[derive(Debug, Copy, Clone)]
+pub struct SigReservedBlock([u8; 4096]);
+
+impl Default for SigReservedBlock {
+    fn default() -> Self {
+        Self([0u8; 4096])
+    }
+}
+
+/// arm64 extension-record header (`struct _aarch64_ctx`)
+#[cfg(feature = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct Aarch64Ctx {
+    pub magic: u32,
+    pub size: u32,
+}
+
+/// Extension-record magics (arm64 uapi sigcontext.h)
+#[cfg(feature = "aarch64")]
+pub mod aarch64_ctx_magic {
+    /// FPSIMD register state record
+    pub const FPSIMD: u32 = 0x4650_8001;
+    /// ESR_ELx exception context record (not written by Rux today)
+    pub const ESR: u32 = 0x4553_5201;
+    /// Additional context (SVE pointer) record (not written today)
+    pub const EXTRA: u32 = 0x4558_5401;
+}
+
+/// fpsimd_context record: `_aarch64_ctx` head followed by
+/// `struct user_fpsimd_state` — 32 x 128-bit vregs, fpsr, fpcr.
+/// Total size 0x210 (528 bytes); must sit 16-byte aligned inside the
+/// sigcontext reserved block.
+#[cfg(feature = "aarch64")]
+#[repr(C, align(16))]
+#[derive(Debug, Copy, Clone)]
+pub struct FpsimdContext {
+    /// Record header: { magic = FPSIMD, size = 0x210 }
+    pub head: Aarch64Ctx,
+    /// v0..v31 (32 x 128-bit, little-endian halves)
+    pub vregs: [u64; 64],
+    /// FPSR
+    pub fpsr: u32,
+    /// FPCR
+    pub fpcr: u32,
+}
+
+#[cfg(feature = "aarch64")]
+impl FpsimdContext {
+    /// sizeof(struct fpsimd_context) — the value written to head.size
+    pub const SIZE: u32 = core::mem::size_of::<FpsimdContext>() as u32;
+
+    /// All-zero state (fresh-task image)
+    pub const fn zeroed() -> Self {
+        Self {
+            head: Aarch64Ctx { magic: 0, size: 0 },
+            vregs: [0; 64],
+            fpsr: 0,
+            fpcr: 0,
+        }
+    }
+}
+
 #[cfg(feature = "aarch64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -792,12 +865,22 @@ pub struct SigContext {
     pub pc: u64,
     /// PSTATE
     pub pstate: u64,
+    /// 4KB extension-record block (fpsimd_context here; 16-aligned,
+    /// padded from 0x118 — see the struct doc)
+    pub reserved: SigReservedBlock,
 }
 
 #[cfg(feature = "aarch64")]
 impl Default for SigContext {
     fn default() -> Self {
-        Self { fault_address: 0, regs: [0u64; 31], sp: 0, pc: 0, pstate: 0 }
+        Self {
+            fault_address: 0,
+            regs: [0u64; 31],
+            sp: 0,
+            pc: 0,
+            pstate: 0,
+            reserved: SigReservedBlock::default(),
+        }
     }
 }
 
@@ -806,9 +889,67 @@ impl SigContext {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Write the fpsimd_context record at the head of the extension
+    /// block and terminate the list (null record right after). The
+    /// reference kernel writes exactly this pair.
+    pub fn set_fpsimd(&mut self, fpsimd: &FpsimdContext) {
+        let bytes = self.reserved.0.as_mut_ptr() as *mut u8;
+        // SAFETY: fpsimd is a plain Copy struct; reserved is 4096 bytes,
+        // far larger than the 0x210 record + 8-byte terminator.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                fpsimd as *const FpsimdContext as *const u8,
+                bytes,
+                core::mem::size_of::<FpsimdContext>(),
+            );
+            // null terminator immediately after the record
+            core::ptr::write_bytes(
+                bytes.add(core::mem::size_of::<FpsimdContext>()),
+                0,
+                core::mem::size_of::<Aarch64Ctx>(),
+            );
+        }
+    }
+
+    /// Read the fpsimd_context record back out of the extension block
+    /// (returns None when the block holds no FPSIMD record — a handler
+    /// that swapped ucontexts, or a forged frame).
+    pub fn get_fpsimd(&self) -> Option<FpsimdContext> {
+        let mut off: usize = 0;
+        let bytes = self.reserved.0.as_ptr() as *const u8;
+        while off + core::mem::size_of::<Aarch64Ctx>() <= self.reserved.0.len() {
+            // SAFETY: off is bounded to the 4096-byte block; both fields
+            // are u32-aligned (the block is 16-aligned).
+            let head = unsafe {
+                core::ptr::read_unaligned(bytes.add(off) as *const Aarch64Ctx)
+            };
+            if head.magic == 0 || head.size == 0 {
+                return None; // terminator / empty
+            }
+            if head.magic == aarch64_ctx_magic::FPSIMD
+                && head.size == FpsimdContext::SIZE
+                && off + head.size as usize <= self.reserved.0.len()
+            {
+                // SAFETY: size validated against the block bounds.
+                return Some(unsafe {
+                    core::ptr::read_unaligned(
+                        bytes.add(off) as *const FpsimdContext
+                    )
+                });
+            }
+            off = off.checked_add(head.size as usize)?; // skip unknown records
+        }
+        None
+    }
 }
 
-/// aarch64 ucontext (same skeleton as the riscv64 one)
+/// aarch64 ucontext — arm64 uapi field order: the sigmask (+ its
+/// 120-byte glibc padding) sits BETWEEN uc_stack and uc_mcontext, and
+/// uc_mcontext lands at offset 176 (0xB0, 16-aligned). glibc SA_SIGINFO
+/// handlers and swapcontext readers take register state at that fixed
+/// offset; the riscv-style mcontext-first order would put the GPR array
+/// where glibc reads the sigmask.
 #[cfg(feature = "aarch64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -816,9 +957,9 @@ pub struct UContext {
     pub uc_flags: u64,
     pub uc_link: u64,
     pub uc_stack: SignalStack,
-    pub uc_mcontext: SigContext,
     pub uc_sigmask: u64,
     __unused: [u8; 120],
+    pub uc_mcontext: SigContext,
 }
 
 #[cfg(feature = "aarch64")]
@@ -835,10 +976,10 @@ impl UContext {
     }
 }
 
-/// aarch64 rt_sigframe — Linux arm64: { siginfo, ucontext }, handler
-/// entered with lr = restorer (SA_RESTORER always set by glibc here).
-/// STAGE 2: full setup/restore (the frame lands on the user stack with
-/// x0=sig, x1=&info, x2=&uc per AAPCS64).
+/// aarch64 rt_sigframe — arm64: { siginfo, ucontext }, handler entered
+/// with lr = restorer (glibc/musl always pass sa_restorer; restorer-less
+/// raw-syscall callers fall back to the kernel SIGTRAMP page) and
+/// x0=sig, x1=&info, x2=&uc per AAPCS64.
 #[cfg(feature = "aarch64")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -855,6 +996,18 @@ impl SignalFrame {
         core::mem::size_of::<SignalFrame>()
     }
 }
+
+// Layout assertions (arm64 ABI): sigcontext extension block at 0x120,
+// ucontext mcontext at 176, siginfo 128 bytes, fpsimd record 0x210.
+#[cfg(feature = "aarch64")]
+const _: () = {
+    assert!(core::mem::offset_of!(SigContext, reserved) == 0x120);
+    assert!(core::mem::size_of::<SigContext>() == 0x1120);
+    assert!(core::mem::offset_of!(UContext, uc_mcontext) == 176);
+    assert!(core::mem::size_of::<SigInfo>() == 128);
+    assert!(core::mem::size_of::<FpsimdContext>() == 0x210);
+    assert!(core::mem::size_of::<SignalStack>() == 24);
+};
 
 /// User context - register state saved during signal handling
 ///
