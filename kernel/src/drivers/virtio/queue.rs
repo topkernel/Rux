@@ -758,6 +758,13 @@ impl VirtQueue {
                 };
                 if eid == expected_desc_id {
                     wait_queue.finish_wait(current);
+                    // R36-B2 compensation (same as wait_for_used_interruptible
+                    // and the wait_event! macro): a racing wake between
+                    // prepare_to_wait and this re-check may have enqueued us
+                    // while we never slept — take ourselves back off the GRQ
+                    // or nr_running stays inflated until our next context
+                    // switch. dequeue_task is a no-op when nothing enqueued us.
+                    crate::sched::dequeue_task(&*current);
                     return true;
                 }
                 si = si.wrapping_add(1);

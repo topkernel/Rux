@@ -148,6 +148,9 @@ pub fn fifo_open_file(peer: &Arc<FifoPeer>, flags: u32) -> Result<Arc<File>, i32
     let accmode = flags & FileFlags::O_ACCMODE;
     if accmode == FileFlags::O_RDONLY || accmode == FileFlags::O_RDWR {
         let prev = peer.readers.fetch_add(1, Ordering::AcqRel);
+        // Mirror on the shared pipe: this count survives FIFO unlink (the
+        // registry entry does not) and drives the close-side decision.
+        peer.pipe.fifo_readers.fetch_add(1, Ordering::AcqRel);
         if prev == 0 {
             peer.pipe.reopen_read();
             peer.open_queue.wake_up_all();
@@ -155,6 +158,7 @@ pub fn fifo_open_file(peer: &Arc<FifoPeer>, flags: u32) -> Result<Arc<File>, i32
     }
     if accmode == FileFlags::O_WRONLY || accmode == FileFlags::O_RDWR {
         let prev = peer.writers.fetch_add(1, Ordering::AcqRel);
+        peer.pipe.fifo_writers.fetch_add(1, Ordering::AcqRel);
         if prev == 0 {
             peer.pipe.reopen_write();
             peer.open_queue.wake_up_all();
@@ -189,50 +193,49 @@ fn fifo_file_poll(file: &File, events: u16) -> u16 {
 /// when this was the last open File of that direction (the anonymous-pipe
 /// close marks the end closed unconditionally — correct for its one-File-
 /// per-end model, wrong for a FIFO with several concurrent readers or
-/// writers). The peer counters live in the registry entry, recovered via
-/// the File's inode identity; an UNLINKED FIFO (registry entry gone) has
-/// no future opens to protect, so the ends close unconditionally.
+/// writers). The last-of-direction decision reads the reader/writer
+/// counters ON THE SHARED PIPE: they survive an unlink of the FIFO (the
+/// fifo registry entry does not), so an unlinked FIFO's surviving fds keep
+/// the ends logically open — writers keep writing while any reader fd is
+/// open (no premature EPIPE) and readers see EOF exactly when the last
+/// writer fd closes. The registry entry, when present, only supplies the
+/// blocking-open wait counters and wakeups.
 fn fifo_file_close(file: &File) -> i32 {
     let accmode = file.flags().bits() & FileFlags::O_ACCMODE;
     let is_reader = accmode == FileFlags::O_RDONLY || accmode == FileFlags::O_RDWR;
     let is_writer = accmode == FileFlags::O_WRONLY || accmode == FileFlags::O_RDWR;
 
-    // Last-of-direction decision (registry-aware), wakeups outside the lock.
-    // SAFETY: inode is written once at open time; read-only access here.
+    // Registry-side bookkeeping (open-wait counters), wakeups outside the
+    // lock. SAFETY: inode is written once at open time; read-only access.
     let inode_opt = unsafe { (*file.inode.get()).clone() };
-    let (last_reader, last_writer, wake_peer) = if let Some(ref inode) = inode_opt {
-        let reg_peer = FIFO_REGISTRY.lock().get(&(inode.fs_id, inode.ino)).cloned();
-        match reg_peer {
-            Some(peer) => {
-                let lr = if is_reader {
-                    peer.readers.fetch_sub(1, Ordering::AcqRel) == 1
-                } else {
-                    false
-                };
-                let lw = if is_writer {
-                    peer.writers.fetch_sub(1, Ordering::AcqRel) == 1
-                } else {
-                    false
-                };
-                (lr, lw, Some(peer))
+    let wake_peer = inode_opt.as_ref().and_then(|inode| {
+        let peer = FIFO_REGISTRY.lock().get(&(inode.fs_id, inode.ino)).cloned();
+        if let Some(ref p) = peer {
+            if is_reader {
+                p.readers.fetch_sub(1, Ordering::AcqRel);
             }
-            // Unlinked FIFO: no bookkeeping to update.
-            None => (is_reader, is_writer, None),
+            if is_writer {
+                p.writers.fetch_sub(1, Ordering::AcqRel);
+            }
         }
-    } else {
-        (is_reader, is_writer, None)
-    };
+        peer
+    });
     if let Some(peer) = wake_peer {
         // New blocking opens of the other direction may proceed now.
         peer.open_queue.wake_up_all();
     }
 
-    // Pipe end close + Arc drop.
+    // Pipe end close + Arc drop. The last-of-direction verdict comes from
+    // the pipe's own (unlink-proof) counters.
     // SAFETY: private_data was installed by fifo_open_file as
     // Arc::into_raw(Pipe) and remains valid while the File exists.
     unsafe {
         if let Some(ptr) = file.private_data.get().replace(None) {
             let pipe = Arc::from_raw(ptr as *const Pipe);
+            let last_reader =
+                is_reader && pipe.fifo_readers.fetch_sub(1, Ordering::AcqRel) == 1;
+            let last_writer =
+                is_writer && pipe.fifo_writers.fetch_sub(1, Ordering::AcqRel) == 1;
             if last_reader {
                 pipe.close_read();
             }

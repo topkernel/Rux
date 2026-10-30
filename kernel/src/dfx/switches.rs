@@ -58,6 +58,7 @@ macro_rules! dfx_switch_table {
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
             InputTrace => "inputtrace",
+            DbFileTrace => "dbtrace",
             EpollTrace => "epolltrace",
             EpollScan => "epollscan",
             ClaimInject => "claiminject",
@@ -92,6 +93,8 @@ macro_rules! dfx_switch_table {
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
             ExecCost => "execcost",
+            ThPark => "thpark",
+            RipSample => "ripsample",
         }
     };
 }
@@ -136,6 +139,11 @@ pub enum DfxSwitch {
     /// count. Used to hunt phantom input streams; printing happens on the
     /// event path so it is OFF in production boots.
     InputTrace,
+    /// TEST-ONLY udev-db tracer (gdmr24 hunt; remove before merge):
+    /// tmpfs reads/writes whose payload is shaped like a udev db line
+    /// (I:/G:/Q:/S:/E:/V: prefix) print offset+content, catching the
+    /// "G:\n" splice that breaks sd-device tag loading.
+    DbFileTrace,
     /// epoll delivery trace: every (rate-limited) epoll_wait return prints
     /// pid/comm plus each ready fd's number and event bits — hunts
     /// permanently ready fds that spin epoll_pwait/ppoll callers.
@@ -403,9 +411,25 @@ pub enum DfxSwitch {
     /// the first 64 execs. For decomposing the p4_fork_exec reference
     /// gap; prints only when explicitly enabled. OFF by default.
     ExecCost,
+    /// dfx=thpark (leg-40B family A): user-stack park dump of hung
+    /// binder SERVER threads from the txn-hunt audit — 48 frame words
+    /// above the parked syscall's entry sp, VMA+fileoff+instruction
+    /// bytes for offline symbolize against the image's libraries.
+    /// Names the image-side handler chain that entered a nested sync
+    /// txn (the mutual-ABBA candidate side, sc334B tid472<->841
+    /// shape). Deliberately SEPARATE from ParkDump: that switch also
+    /// arms the freeze-scan full-tgid dumps whose UART volume is the
+    /// known boot-timing dodge amplifier (sc186-188); this one is
+    /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
+    /// OFF by default.
+    ThPark,
+    /// leg-40C perf rider: user-mode rip sampling for launcher-comm
+    /// tasks (page-bucketed histogram + utime/stime split), reported
+    /// every 60 s from the tick path. OFF by default.
+    RipSample,
 }
 
-const SWITCH_COUNT: usize = 44;
+const SWITCH_COUNT: usize = 47;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -490,6 +514,9 @@ impl DfxSwitch {
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
             DfxSwitch::ExecCost => 43,
+            DfxSwitch::ThPark => 44,
+            DfxSwitch::RipSample => 45,
+            DfxSwitch::DbFileTrace => 46,
         }
     }
 

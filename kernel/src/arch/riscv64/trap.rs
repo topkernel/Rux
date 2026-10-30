@@ -647,8 +647,11 @@ fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 
-    // Default return value is -ENOSYS
-    regs.a0 = crate::errno::constants::ENOSYS as u64;
+    // Default return value is -ENOSYS (the sign matches the comment, the
+    // x86_64 twin and the ABI; the dispatch overwrites it on every path
+    // that returns, so this only matters if a future early-return forgets
+    // to set a0 — +38 would leak as a bogus success-sized return).
+    regs.a0 = -(crate::errno::constants::ENOSYS as i64) as u64;
 
     // Skip ecall instruction
     // RISC-V has both 32-bit ecall and 16-bit c.ecall instructions
@@ -1071,6 +1074,17 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
 /// Handle breakpoint
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
+        // gdmr28/r29 bring-up instrumentation (temporary, REMOVE before
+        // merge): an untraced user ebreak is a silent SIGTRAP death
+        // otherwise (gdm-session-worker died this way at gdmr27 with no
+        // diagnostic). Print the epc so the site can be symbolized.
+        let comm_now = crate::sched::current()
+            .map(|t| {
+                let c = t.comm();
+                let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+                core::str::from_utf8(&c[..len]).unwrap_or("?")
+            })
+            .unwrap_or("?");
         // PTRACE_SINGLESTEP (P1): the ebreak we displaced at epc fired —
         // restore the original instruction and report the step to the
         // tracer (or pend SIGTRAP when nobody traces). epc is NOT
@@ -1102,6 +1116,14 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                     }
                 } else {
                     // Untraced single-step (raced DETACH): plain SIGTRAP.
+                    // gdmr29 (temporary): this path is a SIGTRAP-death
+                    // candidate for the gdm-session-worker kill — name it.
+                    // REMOVE before merge.
+                    crate::pr_info!(
+                        "SSBRK: comm={} epc={:#x} (untraced single-step ebreak)",
+                        comm_now,
+                        regs.epc
+                    );
                     (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
                 }
                 return;
@@ -1126,6 +1148,12 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 return;
             }
         }
+        crate::pr_info!(
+            "UBRK: comm={} epc={:#x} ra={:#x}",
+            comm_now,
+            regs.epc,
+            regs.ra
+        );
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {

@@ -2718,10 +2718,12 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     // instrumented path; tkill/tgkill delivery was the silent one (the
     // legacy sys_tkill has NO tgid restriction — any process can
     // tkill(ANY_PID, SIGKILL)). Name caller + target for fatal signals.
-    if sig == 9 || sig == 15 {
+    // gdmr29 (TEMPORARY widening to every signal): catch the SIGTRAP
+    // sender that kills gdm-session-worker. Revert to 9/15 before merge.
+    if true {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (
@@ -2819,10 +2821,13 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     // kill_other_threads (instrumented, legitimate). This is the CORE
     // kernel-origin entry — name caller + target for every kernel
     // SIGKILL/SIGTERM until the storm is attributed.
-    if sig == 9 || sig == 15 {
+    // gdmr29 (TEMPORARY widening to every signal): gdm-session-worker
+    // dies of a pending SIGTRAP(5) right after jump_to_vt; the sender is
+    // invisible under the 9/15 filter. Revert to 9/15 before merge.
+    if true {
         static KS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (

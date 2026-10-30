@@ -8,14 +8,13 @@
 //! EAGER FPSIMD save/restore inline (see thread.rs for the discipline
 //! rationale). The wrapper mirrors the riscv64 backend's steps:
 //! pick-state abort check → prev FPU bookkeeping → switch_mm (TTBR0_EL1
-//! + CONTEXTIDR_EL1 ASID) → __switch_to.
+//! root + ASID) → __switch_to.
 
 use crate::process::task::Task;
 
 // Field offsets for the asm (thread::ThreadStruct)
 use super::thread::{
-    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP, THREAD_TP_VALUE,
-    THREAD_USER_FPSIMD, THREAD_USER_FPSIMD_FPCR, THREAD_USER_FPSIMD_FPSR,
+    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP, THREAD_TP_VALUE, THREAD_USER_FPSIMD,
 };
 
 core::arch::global_asm!(
@@ -351,17 +350,26 @@ pub unsafe fn __switch_mm_linear(next_ppn: u64) {
 /// next_ppn must be a valid user root PPN; asid must belong to this mm
 #[inline]
 pub unsafe fn switch_mm(next_ppn: u64, asid: u16) {
-    // SAFETY: TTBR0 + CONTEXTIDR(ASID) switch with an ASID-scoped
-    // invalidation (covers ASID reuse; kernel half unaffected).
+    // SAFETY: TTBR0 switch + ASID-scoped invalidation — the twin of the
+    // riscv64 "csrw satp | sfence.vma zero, {asid}" pair. The ASID rides
+    // INSIDE the TTBR0 word (bits [63:48] are the TLB-tag source with
+    // TCR_EL1.A1 = 0; CONTEXTIDR_EL1 is a trace/debug register and does
+    // NOT tag entries — see mm/asid.rs), and the TLBI operand carries the
+    // ASID in ITS bits [63:48] — an unshifted small value would target
+    // ASID 0 (the GICv2-style silent-no-op encoding class). The scoped
+    // invalidation only reaches this ASID's non-global entries: stale
+    // entries from a (re)allocated ASID's previous owner die on switch-in,
+    // and the shared kernel half (global, TTBR1) never thrashes. dsb ish
+    // completes the inner-shareable broadcast before the caller proceeds.
     unsafe {
         core::arch::asm!(
             "msr ttbr0_el1, {ttbr}",
-            "msr contextidr_el1, {asid}",
             "tlbi aside1is, {asid}",
-            "dsb nsh",
+            "dsb ish",
             "isb",
-            ttbr = in(reg) next_ppn << 12,
-            asid = in(reg) asid as u64,
+            ttbr = in(reg) ((next_ppn << 12) & 0x0000_FFFF_FFFF_F000)
+                | (((asid as u64) & 0xFF) << 48),
+            asid = in(reg) ((asid as u64) & 0xFF) << 48,
             options(nostack)
         );
     }

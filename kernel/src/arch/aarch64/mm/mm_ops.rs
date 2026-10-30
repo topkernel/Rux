@@ -1230,6 +1230,140 @@ pub fn pte_lock_for(_mm: &crate::mm::mm_struct::MmStruct) -> &'static crate::mm:
 static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =
     crate::mm::mm_struct::PteLock::new();
 
+// ==================== Leaf primitives for shared mm code (FD-1) ====================
+//
+// mm/rmap.rs (try_to_unmap_inner) and mm/compact.rs (remap_page) used to
+// carry Sv39 manual descents of their own — root indexed with bits 38:30
+// — which on this 4-level arch read the WRONG L0 slot, failed
+// is_valid(), and silently no-oped (swap-out unmap / compaction
+// migration reclaimed nothing). The walk shape (L0 → L1 → L2 → L3, bits
+// 47:39..20:12) and the descriptor encoding are arch facts and live
+// here; the shared mm code calls only these three primitives.
+
+/// Permission/flag bits of a 4K L3 descriptor — everything except the
+/// output-address field (bits 47:12): valid/type, AttrIndx, AP, SH, AF,
+/// nG, PXN/UXN and the Rux software permission bits. This is the exact
+/// bit set [`leaf_pte_install`] puts back.
+#[inline]
+pub fn pte_flag_bits(bits: u64) -> u64 {
+    bits & !0x0000_FFFF_FFFF_F000u64
+}
+
+/// Default flag bits for an anonymous user page — compaction's fallback
+/// when the pre-unmap walk could not recover the live PTE. Valid PAGE
+/// descriptor, normal cacheable, inner-shareable, AF, nG, EL0 RW
+/// (software V|R|W|U|A|D), execute-never — the new_page_user shape with
+/// X dropped.
+pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::V
+    | PageTableEntry::TYPE_PAGE
+    | PageTableEntry::ATTR_NORMAL
+    | PageTableEntry::SH_IS
+    | PageTableEntry::AF
+    | PageTableEntry::NG
+    | PageTableEntry::AP_EL0
+    | PageTableEntry::PXN
+    | PageTableEntry::UXN
+    | PageTableEntry::R
+    | PageTableEntry::W
+    | PageTableEntry::U
+    | PageTableEntry::A
+    | PageTableEntry::D;
+
+/// Replace the 4K L3 descriptor at `vaddr` with raw `new_bits` (0 =
+/// unmap; a swap or migration entry — a non-valid descriptor may carry
+/// arbitrary software bits, the fault path decodes them), under this
+/// mm's PTE lock. The leaf must still be valid and map `expect_pfn`
+/// (the R7-C3 re-validation: the caller's lock-free walk may have raced
+/// a concurrent leaf writer). Returns true when the leaf was replaced;
+/// the caller owns the TLB flush.
+///
+/// A BLOCK leaf at L0-L2 has no 4K slot to replace — returns false
+/// (anonymous reclaim targets 4K mappings only).
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_replace(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    expect_pfn: u64,
+    new_bits: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: caller guarantees a live root; the walk only reads table
+    // frames reachable from it, and the leaf write goes through the
+    // validated slot.
+    unsafe {
+        let idx = |shift: u64| ((vaddr >> shift) & 0x1FF) as usize;
+        let root_table = super::mmu_init::get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let l0 = (*root_table).get(idx(39));
+        if !l0.is_valid() || l0.is_leaf() {
+            return false;
+        }
+        let t1 = super::mmu_init::get_page_table_virt(l0.ppn() << PAGE_SHIFT);
+        let l1 = (*t1).get(idx(30));
+        if !l1.is_valid() || l1.is_leaf() {
+            return false;
+        }
+        let t2 = super::mmu_init::get_page_table_virt(l1.ppn() << PAGE_SHIFT);
+        let l2 = (*t2).get(idx(21));
+        if !l2.is_valid() || l2.is_leaf() {
+            return false;
+        }
+        let t3 = super::mmu_init::get_page_table_virt(l2.ppn() << PAGE_SHIFT);
+        let l3 = (*t3).get(idx(12));
+        if !l3.is_valid() || l3.ppn() != expect_pfn {
+            return false;
+        }
+        (*t3).set(idx(12), PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
+
+/// Rebuild a VALID 4K L3 descriptor mapping `pfn` at `vaddr` from saved
+/// flag bits ([`pte_flag_bits`] shape), under this mm's PTE lock. The
+/// leaf slot may currently hold a non-valid marker (the compaction
+/// migration window) — only the intermediate levels must exist. The
+/// valid bit is OR-ed in unconditionally. Returns true when installed;
+/// the caller owns the TLB flush.
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_install(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    pfn: u64,
+    flags: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: see leaf_pte_replace.
+    unsafe {
+        let idx = |shift: u64| ((vaddr >> shift) & 0x1FF) as usize;
+        let root_table = super::mmu_init::get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let l0 = (*root_table).get(idx(39));
+        if !l0.is_valid() || l0.is_leaf() {
+            return false;
+        }
+        let t1 = super::mmu_init::get_page_table_virt(l0.ppn() << PAGE_SHIFT);
+        let l1 = (*t1).get(idx(30));
+        if !l1.is_valid() || l1.is_leaf() {
+            return false;
+        }
+        let t2 = super::mmu_init::get_page_table_virt(l1.ppn() << PAGE_SHIFT);
+        let l2 = (*t2).get(idx(21));
+        if !l2.is_valid() || l2.is_leaf() {
+            return false;
+        }
+        let t3 = super::mmu_init::get_page_table_virt(l2.ppn() << PAGE_SHIFT);
+        let new_bits = (pfn << 12) | pte_flag_bits(flags) | PageTableEntry::V;
+        (*t3).set(idx(12), PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
+
 // ==================== Bulk alloc-map helpers ====================
 
 /// Allocate and map anonymous user memory (sys_brk path; riscv64 twin):

@@ -183,6 +183,60 @@ pub fn read_indirect_block(
     }
 }
 
+/// Clear the indirect-mapping slot for `block_index` (write 0 into the
+/// containing indirect block).
+///
+/// Truncate twin of ext4_get_block: the shrink path frees the DATA blocks
+/// beyond the new EOF but must also zero their indirect slots — a stale
+/// pointer survives the free, and after the file grows again (or a sparse
+/// write lands past the freed range) every reader resolves those logical
+/// blocks to the OLD physical numbers, which the allocator may have handed
+/// to another file: holes serve stale/foreign bytes instead of zeroes, and
+/// the write path reuses the stale mapping without allocating. The
+/// reference kernel clears each pointer as it frees the block
+/// (ext4_free_branches); direct slots are cleared inline by the caller
+/// (i_block itself is rewritten with the inode).
+pub fn clear_indirect_entry(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    block_array: &[u32; 15],
+    block_index: u64,
+) -> Result<(), i32> {
+    if block_index < 12 {
+        return Ok(()); // direct slot: owned by the inode itself
+    }
+    let block_size = fs.block_size as u64;
+    let pointers_per_block = block_size / 4;
+    let indirect_offset = block_index - 12;
+
+    if indirect_offset < pointers_per_block {
+        let indirect_block = block_array[12];
+        if indirect_block == 0 {
+            return Ok(());
+        }
+        return write_indirect_block(fs, indirect_block as u64, indirect_offset as usize, 0);
+    }
+
+    let double_offset = indirect_offset - pointers_per_block;
+    let double_pointers = pointers_per_block * pointers_per_block;
+    if double_offset < double_pointers {
+        let double_block = block_array[13];
+        if double_block == 0 {
+            return Ok(());
+        }
+        let first_index = (double_offset / pointers_per_block) as usize;
+        let indirect_block = read_indirect_block(fs, double_block as u64, first_index)?;
+        if indirect_block == 0 {
+            return Ok(());
+        }
+        let second_index = (double_offset % pointers_per_block) as usize;
+        return write_indirect_block(fs, indirect_block, second_index, 0);
+    }
+
+    // Triple-indirect files are rejected before this point by the write
+    // path (EFBIG); nothing to clear.
+    Ok(())
+}
+
 pub fn write_indirect_block(
     fs: &crate::fs::ext4::Ext4FileSystem,
     indirect_block: u64,

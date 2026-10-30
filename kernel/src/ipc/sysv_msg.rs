@@ -212,10 +212,14 @@ pub fn sys_msgget(args: [u64; 6]) -> i64 {
     let msgflg = args[1] as i32;
 
     // ENOSPC at the runtime MSGMNI (Linux msgget checks ids->in_use >=
-    // ns->msg_ctlmni before allocating; an existing key still resolves).
+    // ns->msg_ctlmni inside newque — i.e. only on the create path). An
+    // existing key still resolves, and a bare lookup on a nonexistent key
+    // is ENOENT (alloc answers that under the table lock); only a queue
+    // that would actually be created hits the limit.
     if MSG_IDS.count() >= msgmni() as usize {
         let existing = if key != 0 { MSG_IDS.find_by_key(key) } else { None };
-        if existing.is_none() {
+        let would_create = existing.is_none() && (key == 0 || (msgflg & IPC_CREAT) != 0);
+        if would_create {
             return -(errno::ENOSPC as i64);
         }
     }
@@ -394,18 +398,18 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 let new_gid = ds.msg_perm.gid;
                 let new_mode = ds.msg_perm.mode;
                 entry.inner.perm.update_from_set(new_uid, new_gid, new_mode);
-                // Per Linux msgctl IPC_SET: raising msg_qbytes above the system
-                // default (MSGMNB) requires CAP_SYS_RESOURCE.
+                // Per reference msgctl IPC_SET: msg_qbytes is stored
+                // UNCONDITIONALLY (0 is a legal value that blocks all
+                // sends — the old >0 gate silently ignored it), and raising
+                // it above the system default (MSGMNB, 16384) requires
+                // CAP_SYS_RESOURCE.
                 let new_qbytes = ds.msg_qbytes;
-                if new_qbytes > 0 {
-                    let old_qbytes = entry.inner.qbytes.load(Ordering::Relaxed) as u64;
-                    if new_qbytes > 16384 && new_qbytes > old_qbytes {
-                        if !crate::security::capable(crate::security::CAP_SYS_RESOURCE) {
-                            return -(errno::EPERM as i64);
-                        }
-                    }
-                    entry.inner.qbytes.store(new_qbytes as usize, Ordering::Relaxed);
+                if new_qbytes > 16384
+                    && !crate::security::capable(crate::security::CAP_SYS_RESOURCE)
+                {
+                    return -(errno::EPERM as i64);
                 }
+                entry.inner.qbytes.store(new_qbytes as usize, Ordering::Relaxed);
                 entry.inner.msg_ctime.store(ipc_current_time(), Ordering::Relaxed);
             }
             0
@@ -482,9 +486,10 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             // MSG_STAT=11, MSG_INFO=12, MSG_STAT_ANY=13; the old arm at 13
             // implemented MSG_STAT and the real MSG_STAT(11) fell through
             // to EINVAL — LTP msgctl12 via libc msgctl(MSG_STAT=11)).
-            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
-                return -(errno::EPERM as i64);
-            }
+            // The reference msgctl_stat performs NO capability check for
+            // STAT_ANY (it exists precisely so unprivileged checkpoint/
+            // restore can read queue state); the old CAP_SYS_ADMIN gate
+            // wrongly returned EPERM.
             let raw_idx = msqid as usize;
             let buf_ptr = buf as *mut MsqidDsUapi;
             if buf_ptr.is_null()
@@ -627,8 +632,14 @@ pub fn sys_msgsnd(args: [u64; 6]) -> i64 {
     }
 
     // SAFETY: msgp was null-checked and access_ok-validated above; get_user
-    // is the exception-table copy path (SUM=0 safe).
-    let mtype = unsafe { get_user(msgp as *const i64).unwrap_or(0) };
+    // is the exception-table copy path (SUM=0 safe). An unreadable head must
+    // be EFAULT — the old unwrap_or(0) turned a PROT_NONE page into
+    // mtype=0 and reported EINVAL (reference ksys_msgsnd: get_user failure
+    // is EFAULT before any EINVAL on the type).
+    let mtype = match unsafe { get_user(msgp as *const i64) } {
+        Some(v) => v,
+        None => return -(errno::EFAULT as i64),
+    };
     if mtype <= 0 {
         return -(errno::EINVAL as i64);
     }
@@ -828,9 +839,18 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
 
     let msg_copy = (msgflg & super::util::MSG_COPY) != 0;
 
-    // MSG_COPY (Linux CHECKPOINT_RESTORE semantics): msgtyp is the ORDINAL
-    // position in the queue (0-based), NOT a type filter. Negative values
-    // are invalid (review IPC M: MSG_COPY 仅队首).
+    // MSG_COPY (reference CHECKPOINT_RESTORE semantics): msgtyp is the ORDINAL
+    // position in the queue (0-based), NOT a type filter. The reference
+    // requires IPC_NOWAIT and rejects MSG_EXCEPT with EINVAL (copy mode never
+    // blocks); negative ordinals are EINVAL (review IPC M: MSG_COPY 仅队首).
+    if msg_copy {
+        if (msgflg & super::util::MSG_EXCEPT) != 0 || (msgflg & IPC_NOWAIT) == 0 {
+            return -(errno::EINVAL as i64);
+        }
+        if msgtyp < 0 {
+            return -(errno::EINVAL as i64);
+        }
+    }
 
     loop {
         // Try to find a matching message
@@ -847,9 +867,6 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 let mut messages = entry.inner.messages.lock();
                 // MSG_COPY: treat msgtyp as the ordinal index into the queue.
                 let match_idx = if msg_copy {
-                    if msgtyp < 0 {
-                        return -(errno::EINVAL as i64);
-                    }
                     let ord = msgtyp as usize;
                     if ord < messages.len() {
                         Some(ord)
@@ -861,6 +878,14 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                 };
 
                 if let Some(mi) = match_idx {
+                    // Size check BEFORE unlink (reference do_msgrcv): a
+                    // too-small buffer must leave the queue untouched — no
+                    // remove/re-insert churn, no rtime/lrpid update.
+                    let head_len = messages[mi].data.len();
+                    if head_len > msgsz && !msg_noerror {
+                        return -(errno::E2BIG as i64);
+                    }
+
                     if msg_copy {
                         // MSG_COPY: non-destructive read — copy without removing
                         let msg = &messages[mi];
@@ -870,10 +895,8 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
                         unsafe {
                             let _ = put_user(msgp as *mut i64, msg.mtype);
                         }
-                        let msg_len = msg.data.len();
-                        if msg_len > msgsz {
-                            return -(errno::E2BIG as i64);
-                        }
+                        // MSG_NOERROR truncates to msgsz like the normal read.
+                        let msg_len = msg.data.len().min(msgsz);
                         // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
                         // msg_len <= msgsz, so the copy is within bounds.
                         unsafe {
@@ -903,37 +926,18 @@ pub fn sys_msgrcv(args: [u64; 6]) -> i64 {
             }
         };
 
-        if let Some((mi, msg)) = result {
+        if let Some((_mi, msg)) = result {
             // Copy mtype (8 bytes)
             // SAFETY: msgp was access_ok-validated for msgsz+8 bytes above;
             // put_user is the exception-table copy path.
             unsafe {
                 let _ = put_user(msgp as *mut i64, msg.mtype);
             }
-            // Copy message data
-            let msg_len = msg.data.len();
-            let copy_len = if msg_len > msgsz {
-                if msg_noerror {
-                    // Truncate and return success
-                    msgsz
-                } else {
-                    // Restore the message to queue
-                    // R32 (NEW-11): re-insert at the ORIGINAL position —
-                    // the old push-to-tail reordered the queue on every
-                    // failed (too-small-buffer) receive, so a retry with a
-                    // larger buffer could observe a different message.
-                    let slots = MSG_IDS.slots.lock();
-                    if let Some(ref entry) = slots[idx] {
-                        let mut messages = entry.inner.messages.lock();
-                        messages.insert(mi, msg);
-                        entry.inner.cbytes.fetch_add(msg_len, Ordering::Relaxed);
-                        entry.inner.qnum.fetch_add(1, Ordering::Relaxed);
-                    }
-                    return -(errno::E2BIG as i64);
-                }
-            } else {
-                msg.data.len()
-            };
+            // Copy message data. The E2BIG check ran BEFORE the removal
+            // above (reference do_msgrcv), so the only size case left here
+            // is MSG_NOERROR truncation; the old remove-then-restore path
+            // reordered the queue and updated rtime/lrpid on failure.
+            let copy_len = msg.data.len().min(msgsz);
             // SAFETY: msgp+8 was access_ok-validated for msgsz bytes above;
             // copy_len <= msgsz, so the copy is within bounds.
             unsafe {

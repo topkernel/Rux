@@ -95,10 +95,14 @@ pub const DFSC_ALIGNMENT: u64 = 0x21;
 
 /// DFSC → fault-kind classification for the generic mm interface.
 ///
-/// AArch64 DFSC encoding: translation = 0b00100..0b00111 (0x04-0x07),
-/// access-flag = 0b01001..0b01100 (0x09-0x0C), permission =
-/// 0b01101..0b01111 + 0b10011 (0x0D-0x0F, 0x13 — L3 permission has its
-/// own row), alignment = 0b100001 (0x21), external = 0b10100/0b10101.
+/// AArch64 DFSC encoding (ARM DDI 0487, ESR_ELx.ISS; the same rows Linux
+/// arm64's esr.h names FSC_FAULT/FSC_ACCESS/FSC_PERM): the fault class
+/// lives in bits [5:2], the level in [1:0] — translation = 0x04..0x07,
+/// access-flag = 0x08..0x0B, permission = 0x0C..0x0F, alignment =
+/// 0b100001 (0x21), synchronous external abort = 0x10. (The first draft
+/// shifted the AF/permission rows by one: it read permission level 0
+/// (0x0C) as an access-flag fault and classified the non-permission
+/// 0x13 as permission.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultStatus {
     /// Translation fault (page not present at some level)
@@ -120,10 +124,10 @@ pub enum FaultStatus {
 pub fn dfsc_class(dfsc: u64) -> FaultStatus {
     match dfsc {
         0x04..=0x07 => FaultStatus::Translation,
-        0x09..=0x0C => FaultStatus::AccessFlag,
-        0x0D..=0x0F | 0x13 => FaultStatus::Permission,
+        0x08..=0x0B => FaultStatus::AccessFlag,
+        0x0C..=0x0F => FaultStatus::Permission,
         DFSC_ALIGNMENT => FaultStatus::Alignment,
-        0x10 | 0x11 => FaultStatus::External,
+        0x10 => FaultStatus::External,
         _ => FaultStatus::Other,
     }
 }
@@ -267,11 +271,13 @@ pub extern "C" fn aarch64_trap_handler(regs: *mut PtRegs) {
         // syscallno by the entry), x0-x5 args, return in x0.
         Cause::EcallUser => handle_syscall(regs_ref),
 
-        // HVC from EL1 — the PSCI conduit lands here in stage 3.
-        // Nothing issues HVC today; treat it as a kernel bug.
+        // HVC from EL1 — the PSCI conduit (smp.rs issues hvc #0, consumed
+        // by the EL2 firmware, so it never reaches these vectors on this
+        // machine; the arm exists for a firmware-less/routing changeover).
+        // Nothing expects it today; treat it as a kernel bug.
         Cause::EcallSupervisor => {
             crate::pr_err!(
-                "aarch64: unexpected HVC at pc={:#x} (PSCI conduit lands in stage 3)",
+                "aarch64: unexpected HVC at pc={:#x} (PSCI runs through EL2 and should not land here)",
                 regs_ref.pc
             );
             crate::dfx::oops::oops(
@@ -411,9 +417,10 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
 /// PC / restart contract (the piece that breaks the first blocking read()
 /// if any side gets it wrong):
 ///
-/// - ELR_EL1 points AT the `svc` (AArch64 exceptions from SVC never
-///   auto-advance), so this handler MUST advance pc by 4 before eret —
-///   otherwise the return path re-executes the svc forever.
+/// - ELR_EL1 points at the instruction AFTER the `svc` (AArch64 SVC sets
+///   the exception return address past the call — unlike the riscv64
+///   ecall, whose SEPC sits on the ecall and must be advanced), so this
+///   handler must NEVER advance pc before eret.
 /// - Restart sentinels (-ERESTARTSYS/-ERESTARTNOHAND returned in x0 by the
 ///   generic layer) are converted by the SIGNAL path, not here:
 ///   signal.rs restart_syscall_no_handler / setup_frame rewind pc by 4

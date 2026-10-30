@@ -158,6 +158,8 @@ instances; `pkill` stays forbidden), and (4) relaunch the queue at full
 concurrency without waiting for instructions. The user only ever says
 "继续".
 
+**Image store (user rule 2026-10-30): ALL disk images live in /home/william/rux-images/ (outside every repo/worktree, invisible to git) — oh/ (the 7 OH images), aarch64/ (a64-rootfs.img + the toybox cross-build), ubuntu/. Worktrees reference them by SYMLINK only; boots use -snapshot + file.locking=off. Never place real image bytes inside a worktree (a disk cleanup once deleted a whole campaign's assets that way). Rebuildable scratch (probe disks) stays in the lane worktree's run/.
+
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
 
 - Boot shared images with `-snapshot` and `file.locking=off` only.

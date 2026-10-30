@@ -177,6 +177,15 @@ fi
 echo "-- custom.conf as booted:"
 sed 's/^/   /' "$ROOT/etc/gdm3/custom.conf"
 
+echo "== gdm-theme.gresource (update-alternatives gap)"
+# gnome-shell-common's postinst installs gdm-theme.gresource via
+# update-alternatives -> gnome-shell-theme.gresource (priority 10).
+# dpkg-deb -x never runs postinst, so the link would be absent and
+# gnome-shell's reloadThemeResource (main.js:497) ENOENTs -> shell
+# exits(1) -> gdm-session re-starts it forever (the gdmr48 loop).
+ln -sfn gnome-shell-theme.gresource \
+    "$ROOT/usr/share/gnome-shell/gdm-theme.gresource"
+
 echo "== gsettings schemas refresh"
 command -v glib-compile-schemas >/dev/null && \
     glib-compile-schemas "$ROOT/usr/share/glib-2.0/schemas/" \
