@@ -83,8 +83,21 @@ mod gicd {
 
 mod gicd_ctlr_bits {
     pub const RWP: u32 = 1 << 31;         // Read-Write Pending
-    pub const ARE_NS: u32 = 1 << 4;       // affinity routing (NS state)
-    pub const ENABLE_G1A: u32 = 1 << 0;   // Group-1 (NS) forwarding
+    // GICD_CTLR group enables on this machine (QEMU virt GICv3 with
+    // security unsupported: GICD_CTLR.DS is RAO, so the security-disabled
+    // view applies — bit 0 = EnableGrp0, bit 1 = EnableGrp1(NS), and the
+    // ARE bits are RAO/WI, affinity routing is permanently on).
+    //
+    // The port originally wrote bit 0 believing it was the Group-1
+    // enable, leaving Group-1 forwarding off while every INTID was
+    // configured Group 1 (IGROUPR all-ones). The delivery scan then
+    // masked every pending interrupt out (its group mask degenerated
+    // to zero): ICC_IAR1_EL1 read 0x3FF forever, no IRQ exception was
+    // ever taken, and the architectural timer's PPI sat pending in the
+    // redistributor (GICR_ISPENDINGR0 bit 27 latched) without ever
+    // reaching the CPU interface. Group-1 forwarding is bit 1.
+    pub const ENABLE_G1: u32 = 1 << 1;    // Group-1 (NS) forwarding
+    pub const ENABLE_G0: u32 = 1 << 0;    // Group-0 forwarding (unused)
 }
 
 // ==================== GICR register offsets ====================
@@ -260,12 +273,10 @@ fn dist_init() {
         }
     }
 
-    // 3. Enable: affinity routing + Group-1 forwarding.
+    // 3. Enable: Group-1 forwarding (bit 1 — see gicd_ctlr_bits; ARE is
+    //    RAO/WI on this machine and needs no write).
     unsafe {
-        reg_write32(
-            GICD_BASE + gicd::CTLR,
-            gicd_ctlr_bits::ARE_NS | gicd_ctlr_bits::ENABLE_G1A,
-        )
+        reg_write32(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::ENABLE_G1)
     };
     wait_not_set(GICD_BASE + gicd::CTLR, gicd_ctlr_bits::RWP);
 }
@@ -474,6 +485,172 @@ pub fn claim() -> Option<u32> {
 #[inline]
 pub fn eoi(intid: u32) {
     eoir1_write(intid);
+}
+
+// ==================== Boot-time IRQ probe (temporary diagnostic) ====================
+//
+// Spins ~ms milliseconds with the timer armed, polling BOTH sides of the
+// interrupt delivery path and printing raw register state over the raw
+// console (printk is not routed on this port):
+//   - CPU-side claim: ICC_IAR1_EL1 — a real INTID here proves the GIC is
+//     signaling this core (loss would be DAIF/EL2-routing)
+//   - Timer-side assert: CNTV_CTL_EL0.ISTATUS — proves the timer output
+//   - CPU-interface config readback: ICC_SRE/PMR/IGRPEN1/CTLR
+//   - Dist/redist config readback: GICD_CTLR, GICR_WAKER/IGROUPR0/ISENABLER0
+
+#[inline]
+fn sysreg_read(reg: &str) -> u64 {
+    let v: u64;
+    // SAFETY: pure system-register reads dispatched below.
+    unsafe {
+        match reg {
+            "icc_sre_el1" => asm!("mrs {}, icc_sre_el1", out(reg) v, options(nomem, nostack)),
+            "icc_pmr_el1" => asm!("mrs {}, icc_pmr_el1", out(reg) v, options(nomem, nostack)),
+            "icc_igrpen1_el1" => asm!("mrs {}, icc_igrpen1_el1", out(reg) v, options(nomem, nostack)),
+            "icc_ctlr_el1" => asm!("mrs {}, icc_ctlr_el1", out(reg) v, options(nomem, nostack)),
+            "cntv_ctl_el0" => asm!("mrs {}, cntv_ctl_el0", out(reg) v, options(nomem, nostack)),
+            "cntv_cval_el0" => asm!("mrs {}, cntv_cval_el0", out(reg) v, options(nomem, nostack)),
+            "cntvct_el0" => asm!("mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)),
+            "cntfrq_el0" => asm!("mrs {}, cntfrq_el0", out(reg) v, options(nomem, nostack)),
+            _ => unreachable!(),
+        }
+    }
+    v
+}
+
+pub fn irq_probe(ms: u64) {
+    use crate::dfx::backtrace::ConsoleWriter;
+    use core::fmt::Write;
+
+    let mut w = ConsoleWriter::new();
+    let mut line = alloc::string::String::new();
+
+    let freq = sysreg_read("cntfrq_el0");
+    let t0 = sysreg_read("cntvct_el0");
+    let deadline = t0 + freq.saturating_mul(ms) / 1000;
+
+    // Config snapshot
+    let (sre, pmr, grp, ctlr) = (
+        sysreg_read("icc_sre_el1"),
+        sysreg_read("icc_pmr_el1"),
+        sysreg_read("icc_igrpen1_el1"),
+        sysreg_read("icc_ctlr_el1"),
+    );
+    let gicd_ctlr = unsafe { reg_read32(GICD_BASE + gicd::CTLR) } as u64;
+    let rd_info = find_my_rd_base().map(|rd| {
+        (
+            unsafe { reg_read32(rd + gicr::WAKER) } as u64,
+            unsafe { reg_read32(rd + gicr::SGI_IGROUPR0) } as u64,
+            unsafe { reg_read32(rd + gicr::SGI_ISENABLER0) } as u64,
+            rd as u64,
+        )
+    });
+
+    let _ = writeln!(
+        w,
+        "\nIRQ-PROBE t0={} freq={} cntv_ctl={:#x} cntv_cval={:#x}",
+        t0, freq,
+        sysreg_read("cntv_ctl_el0"),
+        sysreg_read("cntv_cval_el0"),
+    );
+    let _ = writeln!(
+        w,
+        "IRQ-PROBE icc: sre={:#x} pmr={:#x} igrpen1={:#x} ctlr={:#x}",
+        sre, pmr, grp, ctlr,
+    );
+    let _ = writeln!(w, "IRQ-PROBE gicd_ctlr={:#x}", gicd_ctlr);
+    match rd_info {
+        Some((waker, igrp, isena, rd)) => {
+            let _ = writeln!(
+                w,
+                "IRQ-PROBE rd={:#x}: waker={:#x} igrp0={:#x} isena0={:#x}",
+                rd, waker, igrp, isena
+            );
+            let _ = writeln!(
+                w,
+                "IRQ-PROBE rd: typer={:#x} ctlr={:#x} ispend0={:#x} iprio27={:#x} icfgr1={:#x}",
+                unsafe { reg_read64(rd as usize + gicr::TYPER) },
+                unsafe { reg_read32(rd as usize + gicr::CTLR) },
+                unsafe { reg_read32(rd as usize + 0x10280) },
+                unsafe { reg_read32(rd as usize + gicr::SGI_IPRIORITYR + 4 * (27 / 4)) },
+                unsafe { reg_read32(rd as usize + 0x10C04) },
+            );
+        }
+        None => {
+            let _ = writeln!(w, "IRQ-PROBE: NO RD FRAME FOUND");
+        }
+    }
+
+    // Poll loop
+    let mut iar_hits: [(u32, u32); 4] = [(0, 0); 4];
+    let mut total_iar = 0u32;
+    let mut istatus_seen = 0u32;
+    let mut first_iar: Option<u32> = None;
+    let mut sgi_sent = false;
+    loop {
+        let ctl = sysreg_read("cntv_ctl_el0");
+        if ctl & 0x4 != 0 {
+            istatus_seen += 1;
+        }
+        // Mid-window self-SGI: an SGI needs no device wiring — if IAR1
+        // acknowledges it, forwarding works and the loss is vtimer-side.
+        if !sgi_sent && sysreg_read("cntvct_el0") >= t0 + freq / 10 {
+            sgi_sent = true;
+            send_sgi(0, IPI_SGI_INTID);
+            let _ = writeln!(w, "IRQ-PROBE: sent self SGI {} at cntvct={}", IPI_SGI_INTID, sysreg_read("cntvct_el0"));
+            if let Some(rd) = find_my_rd_base() {
+                let _ = writeln!(
+                    w,
+                    "IRQ-PROBE post-SGI: gicr_ctlr={:#x} ispend0={:#x} icfgr1={:#x}",
+                    unsafe { reg_read32(rd + gicr::CTLR) },
+                    unsafe { reg_read32(rd + 0x10280) },
+                    unsafe { reg_read32(rd + 0x10C04) },
+                );
+            }
+        }
+        let iar = iar1_read();
+        if iar != INTID_SPURIOUS {
+            total_iar += 1;
+            if first_iar.is_none() {
+                first_iar = Some(iar);
+                let _ = writeln!(w, "IRQ-PROBE: FIRST IAR1={:#x} at cntvct={}", iar, sysreg_read("cntvct_el0"));
+            }
+            for slot in iar_hits.iter_mut() {
+                if slot.0 == 0 || slot.0 == iar {
+                    slot.0 = iar;
+                    slot.1 += 1;
+                    break;
+                }
+            }
+            eoir1_write(iar);
+        }
+        if sysreg_read("cntvct_el0") >= deadline {
+            break;
+        }
+    }
+
+    line.clear();
+    let _ = write!(line, "IRQ-PROBE: {}ms: ISTATUS samples={} IAR1 hits={} [", ms, istatus_seen, total_iar);
+    for (id, n) in iar_hits.iter() {
+        if *id != 0 {
+            let _ = write!(line, " intid={} x{}", id, n);
+        }
+    }
+    let _ = writeln!(line, "]");
+    for b in line.bytes() {
+        if b == b'\n' {
+            unsafe { crate::console::putchar_no_lock(b'\r') };
+        }
+        unsafe { crate::console::putchar_no_lock(b) };
+    }
+    // Tail snapshot
+    let _ = writeln!(
+        w,
+        "IRQ-PROBE end: cntv_ctl={:#x} cntv_cval={:#x} cntvct={}",
+        sysreg_read("cntv_ctl_el0"),
+        sysreg_read("cntv_cval_el0"),
+        sysreg_read("cntvct_el0"),
+    );
 }
 
 // ==================== Init ====================

@@ -1135,6 +1135,10 @@ pub fn rust_main_tail() -> ! {
         // Enable timer interrupts (also sets the first trigger internally)
         arch::trap::enable_timer_interrupt();
 
+        // TEMP aa64-irq diagnostic: poll IAR1/CNTV_CTL directly
+        #[cfg(feature = "aarch64")]
+        drivers::intc::gicv3::irq_probe(300);
+
         // Signal secondary CPUs that they may now enable their timer interrupts.
         // This must happen AFTER boot CPU has finished all initialization
         // to prevent secondary timer interrupts from interfering with boot.
