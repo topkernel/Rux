@@ -18,3 +18,7 @@ Find WHERE/WHY storage_daemon's main parks after the txn18 reply. Tools: EXTRA_A
 ## Discipline
 One QEMU at a time (check ps first — other lanes run); kill only your own PIDs; pkill FORBIDDEN. All three builds rc=0 before pushing. Small commits, English, NEVER the word "Linux" (use reference-kernel/POSIX). Push: origin/oh-launcher (branch = this worktree's). Quota deaths mid-run: commit early; a successor resumes from this file + git.
 Final message: root cause + fix + ladder position (1-4), commits, build status.
+
+## Handoff note (coordinator, 02:3x model switch)
+- run/oh-userdata-rw.img is a PRIVATE 16GB rw copy created by the last run (first-boot state repro; boot with USERDATA=run/oh-userdata-rw.img + snapshot off IF you need the mutated /data state — the tracked symlink userdata.img points to the central store seed and must stay READ-ONLY).
+- Your predecessor's last boots: run/oh-sprint3-serial.log + sprint3 shots (still all black at 120/200s). The oracle-painter history question is still open in the charter.
