@@ -1692,18 +1692,181 @@ unsafe fn setup_frame(
     }
 }
 
-/// aarch64 frame construction — STAGE 2 (signal delivery needs EL0
-/// return through the trap path first). Delivery fails cleanly until
-/// then (the caller treats false as "cannot deliver").
+/// aarch64 frame construction — arm64 rt_sigframe ABI.
+///
+/// Frame = { siginfo(128B), ucontext } built on the user stack at
+/// `round_down(sp - frame_size, 16) - 128` (the reference arm64
+/// get_sigframe's 16-byte AAPCS64 alignment plus its 128-byte bias
+/// below sp), handler entered with x0=sig (x1=&info, x2=&uc for
+/// SA_SIGINFO), lr = the caller's sa_restorer when it passed one
+/// (glibc/musl always do — their own `mov x8,#139; svc #0` stub) or the
+/// kernel-owned SIGTRAMP page for restorer-less raw-syscall callers.
+///
+/// # Safety
+/// `regs` is the current task's live PtRegs; `task` is the running task.
 #[cfg(feature = "aarch64")]
 unsafe fn setup_frame_aarch64(
-    _task: *mut crate::process::task::Task,
-    _sig: i32,
-    _action: &SigAction,
-    _regs: *mut crate::arch::pt_regs::PtRegs,
-    _queued_info: Option<SigInfo>,
+    task: *mut crate::process::task::Task,
+    sig: i32,
+    action: &SigAction,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+    queued_info: Option<SigInfo>,
 ) -> bool {
-    false
+    use crate::arch::pt_regs::Cause;
+
+    let regs = &mut *regs;
+
+    // Check if need to use signal stack
+    let use_altstack = (action.sa_flags.bits() & crate::signal::SigFlags::SA_ONSTACK) != 0;
+
+    // Get user stack pointer
+    let user_sp = regs.sp;
+    const SIGNAL_FRAME_SIZE: u64 = SignalFrame::size() as u64;
+
+    // Decide which stack to use based on flags (twin contract)
+    let frame_addr = if use_altstack {
+        let sigstack = &(*task).sigstack;
+
+        if sigstack.is_disabled() || sigstack.ss_sp == 0 {
+            user_sp - SIGNAL_FRAME_SIZE
+        } else {
+            sigstack.ss_sp + sigstack.ss_size - SIGNAL_FRAME_SIZE
+        }
+    } else {
+        user_sp - SIGNAL_FRAME_SIZE
+    };
+
+    // Reference arm64 get_sigframe: 16-byte AAPCS64 alignment, then the
+    // 128-byte bias below sp. The bias keeps the frame clear of any
+    // data the interrupted EL0 code keeps just under its stack pointer
+    // (the ABI leaves that window to the callee); without it a frame
+    // could land on data a leaf routine still holds below sp.
+    let frame_addr = (frame_addr & !0xF) - 128;
+
+    // SA_SIGINFO handlers decode the payload fields, so prefer the
+    // siginfo queued by the sender; fall back to a generic SI_KERNEL
+    // placeholder (twin contract).
+    let mut frame = SignalFrame {
+        info: queued_info
+            .unwrap_or_else(|| SigInfo::new(sig, crate::signal::si_code::SI_KERNEL, (*task).pid(), 0)),
+        uc: UContext::new(),
+    };
+
+    // Save current PtRegs into the sigcontext (arm64 uapi shape)
+    let mc = &mut frame.uc.uc_mcontext;
+    mc.fault_address = 0;
+    mc.regs.copy_from_slice(&regs.regs);
+    mc.sp = regs.sp;
+    mc.pc = regs.pc;
+    mc.pstate = regs.pstate;
+
+    // Syscall restart handling (frame-based, the handler path). The
+    // interrupted syscall's sentinel lives in x0 ONLY on SVC frames —
+    // an interrupt/fault frame may hold user data that coincidentally
+    // equals -512, so gate on the frame's exception class first (the
+    // no-handler twin's discipline). ELR_EL1 points AT the svc after
+    // the trap path advanced pc by 4, so rewind by exactly one insn.
+    //   SA_RESTART + ERESTARTSYS: frame pc = pc - 4 (rewind to the svc),
+    //     frame x0 = orig_x0 (the ORIGINAL first argument — restoring
+    //     the -512 sentinel restarted read(-512,...) with EBADF/EFAULT).
+    //   otherwise: frame x0 = -EINTR for userspace.
+    const ERESTARTSYS: i64 = -512;
+    const ERESTARTNOHAND: i64 = -514;
+    if Cause::from_cause(regs.esr) == Cause::EcallUser {
+        let x0_val = regs.regs[0] as i64;
+        if x0_val == ERESTARTSYS || x0_val == ERESTARTNOHAND {
+            if action.sa_flags.bits() & SigFlags::SA_RESTART != 0 && x0_val == ERESTARTSYS {
+                mc.pc = regs.pc - 4;
+                mc.regs[0] = regs.orig_x0;
+            } else {
+                mc.regs[0] = (-(crate::errno::constants::EINTR as i64)) as u64;
+            }
+        }
+    }
+
+    // FPSIMD record: capture the LIVE v0-v31 + fpsr/fpcr (the eager
+    // __switch_to only moves them at context-switch time; the running
+    // task's user FP state is still in the registers here). fpu_save
+    // stashes the live state into the task's thread image; the frame
+    // record is then read from that image. rt_sigreturn restores the
+    // record back into the live registers.
+    (*task).thread.fpu_save();
+    let t = &(*task).thread;
+    let mut fpsimd = FpsimdContext::zeroed();
+    fpsimd.head.magic = aarch64_ctx_magic::FPSIMD;
+    fpsimd.head.size = FpsimdContext::SIZE;
+    fpsimd.vregs.copy_from_slice(&t.fpu);
+    fpsimd.fpsr = t.fpsr;
+    fpsimd.fpcr = t.fpcr;
+    mc.set_fpsimd(&fpsimd);
+
+    // Signal mask during handler execution (POSIX): old mask | sa_mask |
+    // the signal itself (unless SA_NODEFER); SIGKILL/SIGSTOP stay
+    // unblockable (twin contract). The FRAME's uc_sigmask must hold the
+    // PRE-handler mask — it is what rt_sigreturn reinstates (SMP
+    // lost-wait root fix, see the riscv64 twin).
+    let mut new_sigmask = (*task).sigmask | action.sa_mask;
+    if (action.sa_flags.bits() & SigFlags::SA_NODEFER) == 0 {
+        new_sigmask |= 1u64 << ((sig as u32) - 1);
+    }
+    new_sigmask &= !((1u64 << 8) | (1u64 << 18));
+    frame.uc.uc_sigmask = (*task).sigmask;
+    (*task).sigmask = new_sigmask;
+
+    // Save signal stack info
+    frame.uc.uc_stack = (*task).sigstack;
+
+    // Save signal frame to task structure (kernel backup copy)
+    (*task).sigframe_addr = frame_addr;
+    (*task).sigframe = Some(frame);
+
+    // Copy signal frame to user stack so the handler can access
+    // siginfo/ucontext
+    let frame_size = core::mem::size_of::<SignalFrame>();
+    let uncopied = crate::arch::uaccess::copy_to_user(
+        frame_addr as *mut u8,
+        &frame as *const SignalFrame as *const u8,
+        frame_size,
+    );
+    if uncopied != 0 {
+        // copy_to_user failed (e.g., stack overflow) — force SIGSEGV
+        (*task).sigframe = None;
+        (*task).sigframe_addr = 0;
+        handle_default_signal(11);
+        return false;
+    }
+
+    // Handler arguments (AAPCS64: x0-x7). SA_SIGINFO:
+    //   void handler(int sig, siginfo_t *info, void *uc)
+    // otherwise: void handler(int sig) — x1/x2 zeroed so a sloppy
+    // libc wrapper never dereferences a stale pointer (twin contract).
+    if action.sa_flags.bits() & SigFlags::SA_SIGINFO != 0 {
+        regs.regs[0] = sig as u64;
+        regs.regs[1] = frame_addr + core::mem::offset_of!(SignalFrame, info) as u64;
+        regs.regs[2] = frame_addr + core::mem::offset_of!(SignalFrame, uc) as u64;
+    } else {
+        regs.regs[0] = sig as u64;
+        regs.regs[1] = 0;
+        regs.regs[2] = 0;
+    }
+
+    // Enter the handler: pc = handler, sp = frame. lr = the return path
+    // — the caller's sa_restorer when provided (arm64 glibc/musl ALWAYS
+    // pass their own `mov x8,#139; svc #0` stub via rt_sigaction), or
+    // the kernel trampoline page as the fallback for restorer-less raw
+    // callers (the reference kernel's vDSO sigtramp role).
+    regs.pc = action.sa_handler as u64;
+    regs.sp = frame_addr;
+    regs.regs[30] = if action.sa_restorer != 0 {
+        action.sa_restorer as u64
+    } else {
+        SIGTRAMP_BASE
+    };
+    // Terminate the frame-pointer chain: unwinders stop at a handler
+    // frame boundary (arm64 ABI; the reference kernel zeroes x29 here).
+    regs.regs[29] = 0;
+
+    true  // Success
 }
 
 // ============================================================================
@@ -1937,10 +2100,107 @@ pub unsafe fn restore_sigcontext(
     #[cfg(feature = "aarch64")]
     {
         // STAGE 2: decode the arm64 sigcontext (regs[31]+sp/pc/pstate)
-        // back into PtRegs. Until then restore fails → SIGSEGV.
-        let _ = (task, frame_addr, regs);
-        false
+        // back into PtRegs — frame located at the user sp (the restorer
+        // never moves sp).
+        // SAFETY: forwarding the caller's validated pointers.
+        unsafe { restore_sigcontext_aarch64(task, frame_addr, regs) }
     }
+}
+
+// ============================================================================
+// aarch64 frame restore (rt_sigreturn, NR 139)
+// ============================================================================
+
+/// Restore signal context from the arm64 rt_sigframe at `frame_addr`.
+///
+/// # Safety
+/// `task` is the running task; `regs` is its live PtRegs.
+#[cfg(feature = "aarch64")]
+unsafe fn restore_sigcontext_aarch64(
+    task: *mut crate::process::task::Task,
+    frame_addr: u64,
+    regs: *mut crate::arch::pt_regs::PtRegs,
+) -> bool {
+    // Validate signal frame address
+    if frame_addr == 0 {
+        return false;
+    }
+
+    // Read the frame back from USER memory first (M-04 discipline: a
+    // handler that edited the ucontext — swapcontext, siglongjmp
+    // trampolines — must have its edits win). Fall back to the kernel
+    // backup only when the user copy is unreadable.
+    let mut user_frame: SignalFrame = unsafe { core::mem::zeroed() };
+    let copied = unsafe {
+        crate::arch::uaccess::copy_from_user(
+            &mut user_frame as *mut SignalFrame as *mut u8,
+            frame_addr as *const u8,
+            core::mem::size_of::<SignalFrame>(),
+        )
+    };
+    let frame = if copied == 0 {
+        user_frame
+    } else {
+        match (*task).sigframe {
+            Some(f) => f,
+            None => return false,
+        }
+    };
+
+    let regs = &mut *regs;
+
+    // Restore x0..x30, sp, pc
+    let mc = &frame.uc.uc_mcontext;
+    regs.regs.copy_from_slice(&mc.regs);
+    regs.sp = mc.sp;
+    regs.pc = mc.pc;
+
+    // PSTATE: only user-writable classes survive. The value came from
+    // USER memory (M-04), so rebuild the privilege-relevant bits from
+    // kernel policy (riscv64 twin's SSTATUS discipline, arm64 shape):
+    // keep NZCV/DAIF trace/btype, force mode EL0t, drop IL (an illegal
+    // PSTATE.IL on eret is an immediate exception-return fault loop)
+    // and every RES0 bit, and force the IRQ/FIQ masks OPEN — a forged
+    // frame that returned to EL0 with PSTATE.I set would run a whole
+    // timeslice with IRQs blacked out for that task (user-triggerable
+    // wedge; the riscv64 SSTATUS_SPIE fix's twin).
+    const SPSR_NZCV: u64 = 0xF << 28; // N Z C V
+    const SPSR_SS: u64 = 1 << 21; // software step
+    const SPSR_IL: u64 = 1 << 20; // illegal execution state
+    const SPSR_BTYPE: u64 = 0x3 << 32; // branch type
+    const SPSR_I: u64 = 1 << 7; // IRQ mask
+    const SPSR_F: u64 = 1 << 6; // FIQ mask
+    regs.pstate = (mc.pstate & (SPSR_NZCV | crate::arch::pt_regs::SPSR_DAIF | SPSR_SS | SPSR_BTYPE))
+        & !(SPSR_IL | SPSR_I | SPSR_F)
+        | crate::arch::pt_regs::SPSR_M_EL0T;
+
+    // FPSIMD: restore the record the setup path saved (or one the
+    // handler rewrote through its own ucontext edits). The live
+    // registers AND the thread image both take the record's state —
+    // the next context switch would otherwise re-save the handler's
+    // registers over the restored image (eager-switch discipline).
+    if let Some(fpsimd) = mc.get_fpsimd() {
+        let t = &mut (*task).thread;
+        t.fpu.copy_from_slice(&fpsimd.vregs);
+        t.fpsr = fpsimd.fpsr;
+        t.fpcr = fpsimd.fpcr;
+        // SAFETY: loads the just-written image into the live v0-v31 +
+        // fpsr/fpcr; we are on the sigreturn path of the CURRENT task.
+        t.fpu_restore();
+    }
+    // No FPSIMD record (forged frame or a hand-rolled restorer): keep
+    // the current FP state — FP registers are user data, never a
+    // privilege vector, and the reference kernel's strict bad-frame
+    // kill buys nothing here (the GPR/pstate restore already validated).
+
+    // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
+    (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
+
+    // Clear signal frame record
+    (*task).sigframe = None;
+    (*task).sigframe_addr = 0;
+
+    true
 }
 
 // ============================================================================
