@@ -470,6 +470,7 @@ fn read_target_user_mm(
     start: usize,
     len: usize,
 ) -> Vec<u8> {
+    use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     let root_ppn = addr_space.root_ppn();
@@ -477,56 +478,29 @@ fn read_target_user_mm(
         return Vec::new();
     }
 
+    // Arch page-table walker (x86_64 PML4 / riscv64 SV39 / aarch64 L4 —
+    // same contract: (ppn, pte) for the page holding `virt`, huge-leaf
+    // offsets folded in). This function USED to hand-roll an SV39 walk,
+    // which on x86_64 read x86 PML4 entries as SV39 PTEs: every
+    // /proc/<pid>/cmdline and /proc/<pid>/environ read of ANOTHER process
+    // came back empty — on the OH image the EGL wrapper's process-name
+    // lookup fgets() failed for every graphics process. Page-granular
+    // copy keeps the arch leaf handling exact for any page-size mix.
     let mut out = Vec::with_capacity(len);
     let mut remaining = len;
     let mut va = start as u64;
 
     while remaining > 0 {
-        // SV39 walk: level-2 → level-1 → level-0
-        let a2 = (root_ppn << 12) + ((va >> 30) & 0x1FF) * 8;
-        // SAFETY: a2 is the physical address of a valid PTE in the target's
-        // level-2 table (page-aligned base + in-table index).
-        let e2 = unsafe { core::ptr::read_volatile(phys_to_virt(PhysAddr::new(a2 as u64)).0 as *const u64) };
-        if e2 & 1 == 0 {
-            break; // unmapped
-        }
-        let mut pte = e2;
-        let mut level = 2u32;
-        loop {
-            let is_leaf = pte & 0xE != 0; // R|W|X
-            if is_leaf || level == 0 {
-                break;
-            }
-            let shift = 12 + 9 * (level - 1);
-            let next_table = ((pte >> 10) & 0xFFF_FFFF_FFFF) << 12;
-            let idx = (va >> shift) & 0x1FF;
-            // SAFETY: next_table is a valid page-table page in the target mm.
-            pte = unsafe {
-                core::ptr::read_volatile(
-                    phys_to_virt(PhysAddr::new(next_table + idx * 8)).0 as *const u64,
-                )
-            };
-            if pte & 1 == 0 {
-                return out; // unmapped
-            }
-            level -= 1;
-        }
-
-        // Compute the physical page base for this virtual page.
-        let (page_phys, page_len) = if level == 0 {
-            (((pte >> 10) & 0xFFF_FFFF_FFFF) << 12, 4096u64)
-        } else {
-            // 2 MiB (or 1 GiB) leaf: lower PPN bits are zero for the base.
-            let shift = 12 + 9 * level;
-            let mask: u64 = !((1u64 << shift) - 1);
-            ((((pte >> 10) & 0xFFF_FFFF_FFFF) << 12) & mask, 1u64 << shift)
+        // SAFETY: root_ppn belongs to the pinned target mm (callers hold
+        // a PinnedTask or are the current task); walk is read-only.
+        let Some((ppn, _pte)) = (unsafe { PageTableWalker::walk(root_ppn, va) }) else {
+            break; // unmapped — truncated content, not a kernel error
         };
-
-        let in_page_off = (va & (page_len - 1)) as usize;
-        let copy = core::cmp::min(remaining, page_len as usize - in_page_off);
-        // SAFETY: page_phys+off is a mapped user page of the target; the
+        let in_page_off = (va & 0xFFF) as usize;
+        let copy = core::cmp::min(remaining, 4096 - in_page_off);
+        // SAFETY: ppn<<12+off is a mapped user page of the target; the
         // kernel linear mapping makes it readable here.
-        let src = phys_to_virt(PhysAddr::new(page_phys + in_page_off as u64)).0 as *const u8;
+        let src = phys_to_virt(PhysAddr::new((ppn << 12) + in_page_off as u64)).0 as *const u8;
         let chunk = unsafe { core::slice::from_raw_parts(src, copy) };
         out.extend_from_slice(chunk);
 
