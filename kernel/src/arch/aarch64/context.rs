@@ -14,7 +14,7 @@ use crate::process::task::Task;
 
 // Field offsets for the asm (thread::ThreadStruct)
 use super::thread::{
-    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP,
+    THREAD_FPU, THREAD_RA, THREAD_S0, THREAD_SP, THREAD_TP_VALUE,
     THREAD_USER_FPSIMD, THREAD_USER_FPSIMD_FPCR, THREAD_USER_FPSIMD_FPSR,
 };
 
@@ -40,6 +40,22 @@ __switch_to:
     mov x9, sp
     str x9, [x8, #{sp_off}]
     str lr, [x8, #{ra_off}]
+
+    // ---- user TLS (TPIDR_EL0): save prev ----
+    // TPIDR_EL0 is per-CPU hardware state that EL0 writes directly
+    // (glibc/musl TLS base; there is no set-tls syscall on this ABI).
+    // The kernel never reads or writes it outside these two spots, so
+    // while a task is current its live TPIDR_EL0 always equals its
+    // saved tp_value — capture that here, reinstall for next below.
+    // Without this, a task resuming on a CPU whose TPIDR_EL0 was last
+    // set by a DIFFERENT image runs userspace with a foreign (or zero)
+    // TLS base: glibc's first TLS access then faults at
+    // ~(tp + slot-offset), which is exactly the post-fork SIGSEGV
+    // storm that killed every external command in the interactive
+    // shell (parent in __free at 0*4097+0x90, child in
+    // pthread_rwlock_unlock at 0-0x720+208).
+    mrs x9, tpidr_el0
+    str x9, [x8, #{tp_off}]
 
     // ---- eager FPSIMD save: prev ----
     add x10, x8, #{fpu_off}
@@ -148,6 +164,11 @@ __switch_to:
     //      affirm/sp gates): an abort path must keep naming prev. ----
     msr tpidr_el1, x1
 
+    // ---- user TLS (TPIDR_EL0): restore next (commit point, same
+    //      discipline as the identity switch above) ----
+    ldr x9, [x8, #{tp_off}]
+    msr tpidr_el0, x9
+
     ldp x19, x20, [x8, #{s_off}]
     ldp x21, x22, [x8, #{s_off} + 16]
     ldp x23, x24, [x8, #{s_off} + 32]
@@ -175,6 +196,7 @@ __switch_to:
     s_off = const THREAD_S0,
     sp_off = const THREAD_SP,
     ra_off = const THREAD_RA,
+    tp_off = const THREAD_TP_VALUE,
     fpu_off = const THREAD_FPU,
     fpcr_off = const { core::mem::offset_of!(super::thread::ThreadStruct, fpcr) },
     fpsr_off = const { core::mem::offset_of!(super::thread::ThreadStruct, fpsr) },
