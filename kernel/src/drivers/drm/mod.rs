@@ -2062,49 +2062,14 @@ fn present_fb(fb_id: u32) -> i64 {
         );
     }
 
-    // Scanout-binding oracle (compose-content): every composer buffer so
-    // far carries ONLY the RS clear color (nz==clear, paint==0) — a black
-    // screen is then expected even with a perfect binding, which makes
-    // the black screen uninformative about the binding itself. To
-    // separate content from binding, the kernel paints a known banded
-    // checker through kva into the flipped GEM right before the flip's
-    // host transfer: if the pattern reaches the screen, kva==phys and
-    // the whole scanout chain is proven for the composer's own imported
-    // buffers; if the screen stays black, the binding (not content) is
-    // the bug. Painted on flips 1..=60 and every 5th after (any
-    // screendump in any inter-flip gap then catches it); the composer
-    // re-clears its buffers on reuse, so the probe self-erases.
-    if (1..=60).contains(&ft) || ft % 5 == 0 {
-        let row_words = (pitch / 4) as usize;
-        // SAFETY: writes stay in the visible columns of the GEM's own
-        // backing (width*4 <= pitch, row_words*height*4 <= size).
-        unsafe {
-            let base = gem.kva as *mut u32;
-            for row in 0..height as usize {
-                let rowp = base.add(row * row_words);
-                let band = row * 4 / height as usize;
-                let c = match band {
-                    0 => 0xff_d0_30_30, // red
-                    1 => 0xff_30_d0_30, // green
-                    2 => 0xff_30_30_d0, // blue
-                    _ => 0xff_f0_f0_f0, // white
-                };
-                for col in 0..width as usize {
-                    let v = if (row / 16 + col / 16 + ft as usize) % 8 == 0 {
-                        !c | 0xff00_0000
-                    } else {
-                        c
-                    };
-                    rowp.add(col).write_volatile(v);
-                }
-            }
-        }
-        crate::pr_warn!(
-            "drm: oracle#{} painted gem={} (banded checker via kva)",
-            ft,
-            gem.id
-        );
-    }
+    // (The scanout-binding oracle that used to live here painted a banded
+    // checkerboard into the flipped GEM through kva before the host
+    // transfer — on flips 1..=60 and EVERY 5th flip thereafter, with no
+    // upper bound. It was bring-up tooling for the compose-content hunt,
+    // but as permanent code it overwrote the composer's real frame content
+    // with probe patterns on a cadence, corrupting every long-running
+    // desktop session. Removed; the read-only nz/paint counters above keep
+    // the content-vs-binding diagnosis without touching the buffer.)
 
     // Resource geometry: the GEM's real row pitch. Gralloc allocates
     // FB buffers width-aligned to 64 pixels (720 content on a 768-pixel
