@@ -1536,9 +1536,13 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 /// exactly the former single-Spinlock whole-domain serialization. The
 /// split-mode (per-mm) migration is an x86_64 change for now; riscv64
 /// follows once its own site audit is done.
-///
-/// Shared mmap-context generation counter (interface parity with x86_64's
-/// MM_CTX — the mremap/IPC paths reference it generically).
+
+/// map_page caller-context marker (advisory, interface parity with
+/// x86_64's MM_CTX): arch-neutral sites (sysv_shm, mremap, the mmap
+/// paths) store a small call-site id before the unchecked map helpers
+/// run. On x86_64 the PTE-OVERWRITE-LIVE tripwire reads it to name the
+/// site; on riscv64 no reader exists yet — the stores stay cheap and
+/// inert.
 pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
