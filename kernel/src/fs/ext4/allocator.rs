@@ -375,6 +375,17 @@ impl<'a> BlockAllocator<'a> {
             let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
             sync_res?;
+            // metadata_csum: the block bitmap's checksum rides in the
+            // group descriptor — refresh it (and bg_checksum) after the
+            // bitmap bytes are out, or the cook lineage's next e2fsck
+            // flags the mismatch.
+            if self.fs.metadata_csum {
+                let size = (self.fs.blocks_per_group as usize) / 8;
+                let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+                if let Some(g) = group_of_bitmap(self.fs, bitmap_block, false) {
+                    let _ = set_bitmap_csum_in_gd(self.fs, g, false, c);
+                }
+            }
             Ok(())
         }
     }
@@ -415,6 +426,17 @@ impl<'a> BlockAllocator<'a> {
             // free-BLOCKS counter — durability-deferred like the superblock
             // counters (order-unconstrained; e2fsck class on crash).
             // Bitmaps and inode tables keep their inline syncs.
+            // metadata_csum: the descriptor's bg_checksum covers the
+            // counter — re-seal it over the buffered content or the NEXT
+            // mount's descriptor verification fails on the cook lineage.
+            if self.fs.metadata_csum {
+                let data: &mut [u8] = &mut (*bh).b_data;
+                super::csum::group_desc_csum_set(
+                    self.fs.csum_seed,
+                    group_idx as u32,
+                    &mut data[desc_offset..desc_offset + group_desc_size],
+                );
+            }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
             Ok(())
@@ -447,6 +469,11 @@ impl<'a> BlockAllocator<'a> {
             }
             // F4-R2 (leg-31): superblock free-BLOCKS counter,
             // durability-deferred (see update_group_desc_free_blocks).
+            // metadata_csum: s_checksum covers the counter — re-seal.
+            if self.fs.metadata_csum {
+                let data: &mut [u8] = &mut (*bh).b_data;
+                super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
+            }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
             Ok(())
@@ -454,8 +481,79 @@ impl<'a> BlockAllocator<'a> {
     }
 }
 
+/// metadata_csum: locate the group whose bitmap block is `bitmap_block`
+/// (bitmaps sit at descriptor-declared blocks — flex_bg placement included
+/// — so a small descriptor scan is the robust mapping).
+pub(crate) fn group_of_bitmap(
+    fs: &super::Ext4FileSystem,
+    bitmap_block: u64,
+    inode_bitmap: bool,
+) -> Option<u64> {
+    let descs = fs.group_descs.lock();
+    for (i, g) in descs.iter().enumerate() {
+        let b = if inode_bitmap {
+            (g.bg_inode_bitmap_lo as u64) | ((g.bg_inode_bitmap_hi as u64) << 32)
+        } else {
+            (g.bg_block_bitmap_lo as u64) | ((g.bg_block_bitmap_hi as u64) << 32)
+        };
+        if b == bitmap_block && b != 0 {
+            return Some(i as u64);
+        }
+    }
+    None
+}
+
+/// metadata_csum: store a freshly computed bitmap checksum into the
+/// group descriptor's bg_{block,inode}_bitmap_csum_{lo,hi} fields and
+/// re-seal bg_checksum over the updated descriptor. Deferred write like
+/// the other descriptor updates (buffer cache is coherent).
+pub(crate) fn set_bitmap_csum_in_gd(
+    fs: &super::Ext4FileSystem,
+    group_idx: u64,
+    inode_bitmap: bool,
+    csum: u32,
+) -> Result<(), i32> {
+    let group_desc_size = fs.desc_size as usize;
+    if group_desc_size < super::csum::BG_INODE_BITMAP_CSUM_LO_OFF + 2 {
+        // 32-byte descriptors carry no bitmap csum fields at all.
+        return Ok(());
+    }
+    let group_desc_start_block = if fs.block_size == 1024 { 2 } else { 1 };
+    let desc_per_block = fs.block_size as u64 / group_desc_size as u64;
+    let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+    let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+
+    let (lo_off, hi_off) = if inode_bitmap {
+        (
+            super::csum::BG_INODE_BITMAP_CSUM_LO_OFF,
+            super::csum::BG_INODE_BITMAP_CSUM_HI_OFF,
+        )
+    } else {
+        (
+            super::csum::BG_BLOCK_BITMAP_CSUM_LO_OFF,
+            super::csum::BG_BLOCK_BITMAP_CSUM_HI_OFF,
+        )
+    };
+
+    // SAFETY: desc_offset + desc_size is within the 4K block; the fields
+    // written above are within desc_size when the bounds checks passed.
+    unsafe {
+        let bh = bio::bread(fs.device, desc_block)
+            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let data = &mut (*bh).b_data;
+        let d = &mut data[desc_offset..desc_offset + group_desc_size];
+        d[lo_off..lo_off + 2].copy_from_slice(&((csum & 0xFFFF) as u16).to_le_bytes());
+        if group_desc_size >= hi_off + 2 {
+            d[hi_off..hi_off + 2].copy_from_slice(&((csum >> 16) as u16).to_le_bytes());
+        }
+        super::csum::group_desc_csum_set(fs.csum_seed, group_idx as u32, d);
+        (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        bio::brelse(bh);
+    }
+    Ok(())
+}
+
 /// Find a free bit in a block bitmap (single block, order=0).
-///
 /// Scans byte-by-byte, skipping fully-occupied bytes (0xFF).
 /// This is the buddy allocator's order-0 search — fast path for
 /// the common single-block allocation case.
@@ -783,6 +881,16 @@ impl<'a> InodeAllocator<'a> {
 
             sync_res?;
 
+            // metadata_csum: inode bitmap csum lives in the group
+            // descriptor (see write_block_bitmap).
+            if self.fs.metadata_csum {
+                let size = (self.fs.inodes_per_group as usize) / 8;
+                let c = super::csum::bitmap_csum(self.fs.csum_seed, bitmap, size);
+                if let Some(g) = group_of_bitmap(self.fs, bitmap_block, true) {
+                    let _ = set_bitmap_csum_in_gd(self.fs, g, true, c);
+                }
+            }
+
             Ok(())
         }
     }
@@ -842,6 +950,15 @@ impl<'a> InodeAllocator<'a> {
 
             // F4-R2 (leg-31): group-desc free-INODES counter,
             // durability-deferred (order-unconstrained; e2fsck class).
+            // metadata_csum: re-seal the descriptor checksum (see
+            // update_group_desc_free_blocks).
+            if self.fs.metadata_csum {
+                super::csum::group_desc_csum_set(
+                    self.fs.csum_seed,
+                    group_idx as u32,
+                    &mut data[desc_offset..desc_offset + group_desc_size],
+                );
+            }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
 
@@ -883,6 +1000,12 @@ impl<'a> InodeAllocator<'a> {
 
             // F4-R2 (leg-31): superblock free-INODES counter,
             // durability-deferred (see update_group_desc_free_blocks).
+            // metadata_csum: re-seal (see update_superblock_free_blocks).
+            if self.fs.metadata_csum {
+                super::csum::superblock_csum_set(
+                    &mut data[sb_start..sb_start + 1024],
+                );
+            }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             bio::brelse(bh);
 

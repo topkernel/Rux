@@ -1,20 +1,37 @@
-# Lane: OH launcher — storage_daemon registration stall (hot evidence)
-Work autonomously; never ask; commit every real step. Worktree: THIS one (already built: x86_64 bzImage; run/oh-boot.sh = battle-tested driver: q35 KVM, -m 4G -smp 2, serial-to-file, USERDATA/EXTRA_APPEND env; run/oh-img/* symlinks the image set from the CENTRAL STORE /home/william/rux-images/oh — READ-ONLY, boot with -snapshot + file.locking=off, NEVER write them).
-IMAGES now live in /home/william/rux-images/ (central store, git-invisible). OH source tree: /home/william/workspace/oh-robot (grep freely).
+# Lane: OH boot — SERVICE-SIDE of the black screen (complementary to the oh-launcher graphics lane)
+A sibling agent (worktree /home/william/rux-agents/oh-launcher) owns the SCANOUT path. YOU own the SERVICE side: why the graphics services misbehave/die. DO NOT touch drivers/gpu/**, drivers/drm/** or kernel/src/drivers/virtio/virtio_gpu.rs (sibling's files). Everything else kernel-side is yours if a root cause lands there.
 
-## Evidence chain (verified on run/oh-probe1-serial.log, 25372 lines)
-1. Boot goes deep: 185 ServiceStart, 634 SAMGR lines, 1114 appspawn/ability lines — the old seed-userdata hard-wedge is GONE on current main.
-2. Boot ABORTED by OH init: "ServiceReap error critical service crashed storage_manager 4" -> "ExecReboot panic" -> StopAllServices -> sysrq 'c'. storage_manager (critical) exits cleanly (exit_group 0) repeatedly; 4 strikes -> panic reboot. LAUNCHER NEVER GETS ITS CHANCE.
-3. Why storage_manager exits: StorageDaemonClient::CheckServiceStatus (storage_daemon/client/storage_daemon_client.cpp:58 in the OH tree) polls samgr CheckSystemAbility(STORAGE_DAEMON_SAID) ~15x200ms, then E_SERVICE_IS_NULLPTR -> main gives up -> exit(0). Log: "check storage daemon status 0 times".
-4. Why the check fails: storage_daemon (pid 325) is ALIVE the whole boot (EXITGRP code=-9 only at shutdown sweep, line 25018) but NEVER SENDS its AddSystemAbility registration. Last exchange: SAREG txn14 send line 4362 ("ohos.samgr.accessTo..ken" capability query), samgr reply txn18 line 4369 — then SILENCE from pid 325. STUCK between handshake and registration.
-5. Red herrings eliminated: "fails: nr29=-4" on every IPC worker's first call = ioctl(BINDER_WRITE_READ) interrupted once by a signal (nr post-translation generic; 0xc0306201=_IOWR('b',1,48)) — normal, retried fine. The sysrq 'c' is OH's own reboot path.
+## STATE (oh-svc session 2026-10-31, commits 428328dd..a1b147ff)
+Ladder positions: (1) render_service abort PARTIALLY named — see T1. (3) /data cascade RESOLVED. (2) token RESOLVED as a consequence.
 
-## Mission
-Find WHERE/WHY storage_daemon's main parks after the txn18 reply. Tools: EXTRA_APPEND="dfx=taskdump,watchdog" boots (probe3 tried taskdump alone — no periodic dumps appeared; investigate the dump trigger in kernel/src/dfx/ — probe3-serial.log exists); per-task LASTSYS latch (last_syscall_nr/a0/a1) via taskdumps; gdb (-s + gdb-multiarch, attach-then-interrupt, symbols target/x86_64-unknown-none/debug/rux); compare with a HEALTHY registrant (hdf_devmgr pid 335 SAREG'd fine — what did it do next that 325 never reached?); OH source: storage_daemon main = foundation/filemanagement/storage_service/services/storage_daemon — read the startup sequence between the access-token check and AddSystemAbility. Suspects: (a) binder wake lost for pid 325's main (binder.rs thread.hist EV_WAKE_RET instrumentation exists); (b) ioctl/futex return mismatch -> userspace parked in a sleep-forever branch; (c) bounded wait stretched by timer/nanosleep inaccuracy; (d) parcel byte-order/offset corruption of the txn18 reply.
+### T3 RESOLVED — the /data first-boot ENOENT cascade (root causes, all three stacked)
+1. **The central-store seed userdata.img is a 16G filesystem truncated into a 1.3G file.** The ext4 mount geometry guard (total_blocks > device_blocks) EIOed EVERY mount attempt — /data was never mounted in ANY sprint boot. The "metadata_csum rw mount downgraded to read-only" warning printed next to it was a red herring (downgrade was non-fatal).
+2. **metadata_csum rw mounts were refused by policy.** Fixed: the write path now maintains ALL checksum classes (csum.rs helpers + wiring): sb re-sealed on free-count writes (allocator + namei), GDs re-sealed after every descriptor write, bitmap csums (bg_*_bitmap_csum_lo/hi) refreshed on every bitmap write (allocator + namei's mark_inode_used/free_inode), dir blocks sealed with ext4_dir_tail on every finalized write (add-entry/fresh-block/mkdir/delete/dotdot + mod.rs add_dir_entry/append_dir_block), find_entry_space never hands out a slot overlapping the tail. The rw→ro downgrade is LIFTED (ext4/mod.rs).
+3. **The cook lineage (userdata-cook1.img) wedges init forever**: host e2fsck on the truncated seed reconnected THOUSANDS of orphan inodes into lost+found/#<ino>; init walks that directory with fstatat per entry — each lookup scans the whole ~400-block dir (O(N²) walk, looked like a hang; NOT a hang). Do NOT cook the truncated seed.
 
-## Ladder
-1. storage_daemon completes SA registration live (SAREG send from pid 325 after handshake). 2. CheckServiceStatus succeeds -> no critical-crash cascade -> NO ExecReboot. 3. Boot survives past the panic point; launcher/appspawn chain proceeds. 4. New stalls past that: diagnose with the same toolkit.
+**THE WORKING LINEAGE: run/userdata-fresh.img = mke2fs 16G ext4 -b 4096 -I 256 -O metadata_csum,64bit,has_journal,extent,huge_file,dir_nlink,extra_isize,flex_bg,dir_index,sparse_super,filetype,large_file,^orphan_file,^metadata_csum_seed.** Boot it with run/oh-boot-cook.sh <tag> /home/william/rux-agents/oh-svc/run/userdata-fresh.img. First boot is SLOW (population, ~8min); second+ boots fast. It persists (no -snapshot on that drive).
 
+### T2 RESOLVED (via T3) — composer_host native token
+With /data mounted rw, init creates /data/service/el0/access_token and the nativetoken file; the boot logs `ATM: [InitNativeTokenInfos]Init native token ... composer_host, permSize 0 ok!`. "gettotkenid failed" is GONE on fresh-lineage boots.
+
+### T1 PARTIALLY NAMED — render_service SIGABRT
+- Repro on every boot: abort ~2 hilog lines after `RSEglImageManager::MapEglImageFromSurfaceBuffer` + `RenderFrame: RenderFrame: Canvas` (first composition frame, 720x1280). musl abort prints nothing (stderr=/dev/null).
+- Kernel tap added: signal.rs abort_reason_dump() fires on the FIRST sig-6 per tgid (budget 8/boot), dumps rip/rsp + all exec VMAs + 64 stack words classified lib+offset. The observed raise is the FAULTLOGGERD crash-handler RE-raise (handler frames on the stack; libfaultloggerd mapped). Also seen right there: `pagefault: Permission denied at 0x7ff00067c000, rip=0x3fbf08ad30 (musl)` — a write to a read-only mapping near the abort; NOT yet attributed (param-workspace write? CFI shadow?). NEXT STEP: decode that fault + the ABORT-STK chain values (the serial line tears from UART interleave — the [18]=0x7ff08c0ada9a-class values are heap/so pointers, not code returns; the real chain is likely BELOW the handler frames — consider catching the ORIGINAL signal, or reading faultloggerd's dump from /data/log/faultlog/temp (the fresh lineage persists it — host-side reading currently blocked, see known-gap below).
+- The mali symlink (coordinator's Mesa finding) is IN (private images, see below) and `dlopen /vendor/lib64/chipsetsdk/libGLES_mali.so` now SUCCEEDS (1126ms init) — the abort is NOT the missing GLES driver.
+
+### PRIVATE IMAGES (this worktree's run/, never the central store)
+- run/system-ohsvc.img = central system.img copy + `rm /system/bin/resize2fs` (silences the fstab resize attempt; resize2fs/e2fsck cannot open /dev/block/vdf anyway, see known-gaps) + symlink /system/lib64/libGLES_mali.so → /vendor/lib64/chipsetsdk/swrast_dri.so.
+- run/vendor-ohsvc.img = central vendor.img copy + symlinks /lib64/libGLES_mali.so and /lib64/chipsetsdk/libGLES_mali.so → chipsetsdk/swrast_dri.so.
+- run/oh-img/system.img + vendor.img symlinks POINT AT THESE (svc boots use them automatically).
+
+### KNOWN GAPS (successor queue, in order)
+1. **e2fsck-cleanliness of the written fresh image**: guest-side self-consistency HOLDS (the kernel's own mount-time csum verification passes across repeated boots), but host e2fsck 1.47.2 rejects it ("superblock checksum mismatch" → backup; inode/bitmap csum mismatches). Root suspicion: csum.rs's inode_csum span/formula for 256-byte inodes with the extent root tail, and possibly the bitmap-csum byte span. Verify csum.rs against `e2fsck` on a small test image (host loop, no boot needed) before touching anything. Until then debugfs on the image needs `-b 4096 -s 32768` and still trips bitmap csums — extract files via guest-side instead (tarsync over serial, or fix the csum first).
+2. **devfs block-device nodes cannot be opened at all** (devfs_get_file_ops returns None for every BlockDevice → ENXIO): resize2fs/e2fsck (fstab check/resize on /data) always fail with "while opening /dev/block/vdf". Real fix = block-device FileOps routed to the registered GenDisk by devno (+ O_EXCL semantics later).
+3. **render_service registers no SAMGR ability** on fresh-lineage boots (clients spam "RenderService connect fail"); it also didn't render before aborting. Cross-check with the sibling: display HDI/vsync ARE up (DISP lines + drm import 720x1280 succeed).
+4. svcdbg/ABORT taps: hunt instrumentation, budgeted; drop or gate behind dfx= switches before any perf-gate merge.
+
+## Booting
+run/oh-boot.sh <tag> (snapshot boots, tok-era flags) — run/oh-boot-cook.sh <tag> [userdata] [kernel] for writable /data. run/oh-boot-cook-gdb.sh adds -gdb tcp::1239. SECS env. One QEMU at a time; check `ps aux | grep qemu` (sibling boots too!); kill only your own; pkill FORBIDDEN (note: `pkill -f <tag>` matches your own compound command — use the ps|kill loop).
 ## Discipline
 One QEMU at a time (check ps first — other lanes run); kill only your own PIDs; pkill FORBIDDEN. All three builds rc=0 before pushing. Small commits, English, NEVER the word "Linux" (use reference-kernel/POSIX). Push: origin/oh-launcher (branch = this worktree's). Quota deaths mid-run: commit early; a successor resumes from this file + git.
 Final message: root cause + fix + ladder position (1-4), commits, build status.
@@ -86,3 +103,9 @@ Final message: root cause + fix + ladder position (1-4), commits, build status.
    - binfmt_script missing for the pid1 init path (see 2).
    - mksh-as-pid1 (rdinit=/bin/sh): interactive rescue shell hard-wedges the boot on
      a user-mode cow pagefault after a fork (run/oh-repl1-serial.log tail).
+
+---
+# (svc-lane charter section, preserved at merge)
+Small commits, English, NEVER "Linux". x3 builds rc=0 before push. Push: origin/oh-svc. Quota/concurrency deaths: commit early; TASK.md persists.
+## Ladder
+1. render_service abort reason FULLY named (fault attribution at 0x7ff00067c000 or the handler-frame chain). 2. Fixed → render_service survives its first life AND registers (SAMGR). 3. DONE (fresh lineage + csum write path + token OK). 4. With the sibling: bootanimation/launcher pixels.

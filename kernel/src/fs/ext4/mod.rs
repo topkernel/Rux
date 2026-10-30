@@ -273,31 +273,23 @@ impl Ext4FileSystem {
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
-                // metadata_csum read+write contract (OH Phase 2): the read
-                // path verifies { superblock, group descriptor, inode }
-                // checksums; the write path now re-seals exactly those
-                // three classes (inode in write_inode/write_inode_disk,
-                // group descriptors in update_group_desc_free_{blocks,
-                // inodes}, superblock in update_superblock_free_{blocks,
-                // inodes}). A metadata_csum filesystem may therefore mount
-                // read-write and stay self-consistent for THIS kernel's
-                // reads.
+                // We mount read-write and maintain ALL metadata checksum
+                // classes (csum.rs: superblock/group-descriptor/inode are
+                // re-sealed by the *_csum_set wiring; bitmap csums,
+                // directory tails and extent tails are sealed at their
+                // write sites — oh-svc 2026-10-31). metadata_csum mounts
+                // READ-WRITE with full read-path verification (csum.rs —
+                // the OH system/vendor images are mkfs'd with
+                // metadata_csum); bigalloc stays rejected outright.
                 //
-                // Scope note (bring-up): bitmap csums (bg_*_bitmap_csum in
-                // the descriptors), extent-tree-block csums and directory
-                // tail csums are still NOT maintained on write — the read
-                // path never verifies them either, so runtime behavior is
-                // unaffected, but e2fsck on a real device (writes that
-                // persist past -snapshot) will flag those classes. This
-                // is the deliberate price of unblocking the OH /data
-                // lifecycle: without rw /data, init's early mkdir batch
-                // fails EROFS and the whole /data/service tree (access
-                // tokens, databases, render_service dirs) never exists.
-                if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
-                    crate::pr_warn!(
-                        "ext4: metadata_csum rw mount enabled (write path seals sb/gdt/inode csums; bitmap/extent/dir-tail classes not maintained — bring-up scope)"
-                    );
-                }
+                // History (OH bring-up): this used to DOWNGRADE every rw
+                // metadata_csum mount to read-only because the write path
+                // did not maintain checksums. OH's fstab mounts /data rw;
+                // the downgrade made that mount fail (EIO from the
+                // geometry guard upstream) and the entire first-boot
+                // /data cascade — native token file, persist params,
+                // el1/el2 service dirs — ran against an unmounted /data
+                // on every boot.
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
                     bio::brelse(sb_bh);
@@ -596,6 +588,24 @@ impl Ext4FileSystem {
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_dir_lookup(blocks.len());
 
+            // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
+            // whose block list is absurdly large means a corrupt inode
+            // (i_size/extent garbage) turned lookup into a multi-minute
+            // bread+parse loop that monopolizes the CPU under the bucket
+            // locks. Name the inode before we enter the loop so the boot
+            // log pinpoints which directory went bad. A real directory of
+            // 1024+ blocks (4MiB of dirents) never exists in these images.
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LOOKUP dir ino={} size={} blocks={} blocks_field={} name={:?}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks,
+                    name
+                );
+            }
+
             for block in blocks.iter() {
                 if *block == 0 {
                     continue;
@@ -666,6 +676,16 @@ impl Ext4FileSystem {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_list_dir();
+            // Pathology probe — see the twin in lookup().
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LIST dir ino={} size={} blocks={} blocks_field={}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks
+                );
+            }
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -1798,6 +1818,8 @@ fn add_dir_entry(
                     // Reuse this entry
                     let entry_data = &mut data[offset..offset + entry_size];
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                    // metadata_csum: refresh the block's dir tail.
+                    super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                     (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
@@ -1836,6 +1858,8 @@ fn add_dir_entry(
                 let entry_data = &mut data[offset..offset + entry_size];
                 create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
 
+                // metadata_csum: refresh the block's dir tail.
+                super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                 (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
@@ -1895,6 +1919,8 @@ fn append_dir_block(
         let data = &mut (*bh).b_data;
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
+        // metadata_csum: refresh the block's dir tail.
+        super::ext4::namei::dir_block_seal(fs, parent_ino, data);
         (*bh).set_state_bit(bio::BufferState::BH_Dirty);
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);

@@ -227,6 +227,78 @@ pub fn superblock_csum_set(sb: &mut [u8]) {
     sb[SB_CSUM_OFF..SB_CSUM_OFF + 2].copy_from_slice(&c.to_le_bytes());
 }
 
+// ---------------------------------------------------------------------------
+// metadata_csum write path, remaining classes (rw-mount support):
+// block/inode bitmap csums (carried in the group descriptor), directory
+// block tails and extent tree block tails. These are not verified by the
+// read path (only sb/GD/inode are), but a rw mount that leaves them stale
+// writes e2fsck-dirty metadata into every persistent image — and the OH
+// cook lineage boots a writable /data for real.
+// ---------------------------------------------------------------------------
+
+/// Byte offsets of the bitmap-checksum fields within a 64-bit on-disk
+/// group descriptor (struct ext4_group_desc, ext2_fs.h layout).
+pub const BG_BLOCK_BITMAP_CSUM_LO_OFF: usize = 0x18;
+pub const BG_INODE_BITMAP_CSUM_LO_OFF: usize = 0x1A;
+pub const BG_BLOCK_BITMAP_CSUM_HI_OFF: usize = 0x38;
+pub const BG_INODE_BITMAP_CSUM_HI_OFF: usize = 0x3A;
+
+/// Per-inode seed used by directory and extent checksums: crc32c(fs seed,
+/// le32(ino)) — ext4_i_csum_seed in the reference kernel.
+pub fn inode_csum_seed(seed: u32, ino: u32) -> u32 {
+    crc32c(seed, &ino.to_le_bytes())
+}
+
+/// Compute a bitmap checksum: crc32c over the first `size` bytes of the
+/// bitmap block (block: clusters_per_group/8; inode: inodes_per_group/8),
+/// exactly ext4_block_bitmap_csum / ext4_inode_bitmap_csum.
+pub fn bitmap_csum(seed: u32, bitmap: &[u8], size: usize) -> u32 {
+    let size = size.min(bitmap.len());
+    crc32c(seed, &bitmap[..size])
+}
+
+/// Directory block tail (struct ext4_dir_tail): 4 reserved-zero bytes +
+/// crc32c(inode seed, block[0..block_len-8]) at the very end. The last
+/// dirent's rec_len covers the tail; the tail itself is never parsed as
+/// an entry.
+pub fn dir_block_csum(inode_seed: u32, block: &[u8]) -> u32 {
+    if block.len() < 8 {
+        return 0;
+    }
+    crc32c(inode_seed, &block[..block.len() - 8])
+}
+
+/// Set the directory tail on a finalized dir block (block.len() == block
+/// size). Writes det_reserved_zero1=0 and the checksum.
+pub fn dir_block_csum_set(inode_seed: u32, block: &mut [u8]) {
+    let n = block.len();
+    if n < 8 {
+        return;
+    }
+    let c = dir_block_csum(inode_seed, block);
+    block[n - 8..n - 4].copy_from_slice(&0u32.to_le_bytes());
+    block[n - 4..n].copy_from_slice(&c.to_le_bytes());
+}
+
+/// Extent tree block checksum (ext4_extent_tail, 4 bytes at the block
+/// end): crc32c(inode seed, block[0..block_len-4]).
+pub fn extent_block_csum(inode_seed: u32, block: &[u8]) -> u32 {
+    if block.len() < 4 {
+        return 0;
+    }
+    crc32c(inode_seed, &block[..block.len() - 4])
+}
+
+/// Set the extent tail on a finalized extent tree block.
+pub fn extent_block_csum_set(inode_seed: u32, block: &mut [u8]) {
+    let n = block.len();
+    if n < 4 {
+        return;
+    }
+    let c = extent_block_csum(inode_seed, block);
+    block[n - 4..n].copy_from_slice(&c.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
