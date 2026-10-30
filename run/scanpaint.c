@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <time.h>
+#include <stdarg.h>
 
 #define DRM_IOCTL_BASE 'd'
 #define DRM_IOW(nr, size) (_IOW(DRM_IOCTL_BASE, nr, size))
@@ -78,9 +79,26 @@ struct drm_mode_connector {
 #define DRM_IOCTL_MODE_ADDFB2     DRM_IOWR(0xb8, struct drm_mode_fb_cmd2)
 #define DRM_IOCTL_MODE_RMFB       DRM_IOR(0xaf, uint32_t)
 struct drm_mode_crtc_page_flip { uint32_t crtc_id, fb_id; uint32_t flags, reserved; uint64_t user_data; };
-#define DRM_IOCTL_MODE_PAGE_FLIP  DRM_IOW(0xb0, struct drm_mode_crtc_page_flip)
+#define DRM_IOCTL_MODE_PAGE_FLIP  DRM_IOWR(0xb0, struct drm_mode_crtc_page_flip) /* kernel encodes dir=3 */
 
 #define FOURCC_XR24 0x34325258u /* XR24 little-endian */
+
+static int kmsg_fd = -1;
+
+static void klog(const char *fmt, ...)
+{
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+	va_end(ap);
+	if (n > 0) {
+		buf[n] = '\n';
+		if (kmsg_fd >= 0)
+			write(kmsg_fd, buf, n + 1);
+		fprintf(stderr, "%s", buf);
+	}
+}
 
 static long long now_ms(void)
 {
@@ -93,9 +111,9 @@ static int xioctl(int fd, unsigned long req, void *a, const char *what)
 {
 	int r = ioctl(fd, req, a);
 	if (r < 0)
-		fprintf(stderr, "[scanpaint] %s -> %d errno=%d (%s)\n", what, r, errno, strerror(errno));
+		klog("scanpaint: %s -> %d errno=%d (%s)", what, r, errno, strerror(errno));
 	else
-		fprintf(stderr, "[scanpaint] %s ok\n", what);
+		klog("scanpaint: %s ok", what);
 	return r;
 }
 
@@ -124,19 +142,36 @@ int main(int argc, char **argv)
 	int h = argc > 2 ? atoi(argv[2]) : 1280;
 	long long deadline = now_ms() + 180000;
 
-	fprintf(stderr, "[scanpaint] start %dx%d pid=%d\n", w, h, getpid());
+	/* Mirror logs to the serial console once devfs provides it. */
+	{
+		int cfd = -1;
+		for (int i = 0; i < 200 && cfd < 0; i++) {
+			cfd = open("/dev/console", O_WRONLY);
+			if (cfd < 0) usleep(100000);
+		}
+		if (cfd >= 0) { dup2(cfd, 1); dup2(cfd, 2); }
+	}
+	for (int i = 0; i < 100 && kmsg_fd < 0; i++) {
+		kmsg_fd = open("/dev/kmsg", O_WRONLY);
+		if (kmsg_fd < 0) usleep(100000);
+	}
+	setvbuf(stderr, NULL, _IONBF, 0);
+	klog("scanpaint: start %dx%d pid=%d kmsgfd=%d", w, h, getpid(), kmsg_fd);
 	int fd = -1;
+	int polls = 0;
 	while (now_ms() < deadline) {
 		fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
 		if (fd >= 0)
 			break;
+		if ((polls++ % 20) == 0)
+			klog("scanpaint: polling /dev/dri/card0 errno=%d", errno);
 		usleep(100000);
 	}
 	if (fd < 0) {
-		fprintf(stderr, "[scanpaint] FATAL: no /dev/dri/card0 after 180s\n");
+		klog("scanpaint: FATAL no /dev/dri/card0 after 180s");
 		return 1;
 	}
-	fprintf(stderr, "[scanpaint] card0 open fd=%d\n", fd);
+	klog("scanpaint: card0 open fd=%d", fd);
 
 	struct drm_mode_card_res res;
 	memset(&res, 0, sizeof(res));
@@ -147,7 +182,7 @@ int main(int argc, char **argv)
 	res.count_connectors = 4;
 	if (xioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res, "GETRESOURCES") < 0)
 		return 1;
-	fprintf(stderr, "[scanpaint] crtcs=%u conns=%u crtc0=%u conn0=%u\n",
+	klog("scanpaint: crtcs=%u conns=%u crtc0=%u conn0=%u",
 		res.count_crtcs, res.count_connectors, crtcs[0], conns[0]);
 
 	struct drm_mode_connector conn;
@@ -161,7 +196,7 @@ int main(int argc, char **argv)
 	conn.connector_id = conns[0];
 	if (xioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn, "GETCONNECTOR") < 0)
 		return 1;
-	fprintf(stderr, "[scanpaint] conn status=%u modes=%u mode0=%ux%u\n",
+	klog("scanpaint: conn status=%u modes=%u mode0=%ux%u",
 		conn.connection, conn.count_modes, modes[0].v[1], modes[0].v[6]);
 
 	uint32_t handles[2], pitches[2];
@@ -180,7 +215,7 @@ int main(int argc, char **argv)
 		handles[i] = cd.handle;
 		pitches[i] = cd.pitch;
 		sizes[i] = cd.size;
-		fprintf(stderr, "[scanpaint] dumb[%d] handle=%u pitch=%u size=%llu\n",
+		klog("scanpaint: dumb[%d] handle=%u pitch=%u size=%llu",
 			i, cd.handle, cd.pitch, (unsigned long long)cd.size);
 
 		struct drm_mode_map_dumb md;
@@ -190,7 +225,7 @@ int main(int argc, char **argv)
 			return 1;
 		cpu[i] = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, md.offset);
 		if (cpu[i] == MAP_FAILED) {
-			fprintf(stderr, "[scanpaint] mmap failed errno=%d\n", errno);
+			klog("scanpaint: mmap failed errno=%d", errno);
 			return 1;
 		}
 		memset(cpu[i], 0, cd.size);
@@ -204,7 +239,7 @@ int main(int argc, char **argv)
 		if (xioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fbreq, "ADDFB2") < 0)
 			return 1;
 		fbs[i] = fbreq.fb_id;
-		fprintf(stderr, "[scanpaint] fb[%d]=%u\n", i, fbs[i]);
+		klog("scanpaint: fb[%d]=%u", i, fbs[i]);
 	}
 
 	/* First frame: present fb0. */
@@ -215,12 +250,12 @@ int main(int argc, char **argv)
 	flip.fb_id = fbs[0];
 	if (xioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &flip, "PAGE_FLIP#0") < 0)
 		return 1;
-	fprintf(stderr, "[scanpaint] PATTERN LIVE\n");
+	klog("scanpaint: PATTERN LIVE");
 
 	int frame = 1;
 	int cur = 0;
 	while (1) {
-		struct timespec ts = { 0, 33 * 1000 * 1000 }; /* ~30 fps */
+		struct timespec ts = { 0, 250 * 1000 * 1000 }; /* 4 fps proof cadence */
 		nanosleep(&ts, NULL);
 		cur ^= 1;
 		paint(cpu[cur], w, h, pitches[cur] / 4, frame);
@@ -228,12 +263,12 @@ int main(int argc, char **argv)
 		flip.crtc_id = crtcs[0];
 		flip.fb_id = fbs[cur];
 		if (xioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &flip, "PAGE_FLIP") < 0) {
-			fprintf(stderr, "[scanpaint] flip loop broke, retry in 1s\n");
+			klog("scanpaint: flip loop broke, retry in 1s");
 			sleep(1);
 			continue;
 		}
 		if ((frame % 30) == 0)
-			fprintf(stderr, "[scanpaint] frame %d presented\n", frame);
+			klog("scanpaint: frame %d presented", frame);
 		frame++;
 	}
 	return 0;
