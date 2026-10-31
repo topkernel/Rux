@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r54"
+NEXT="r55"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
@@ -74,6 +74,15 @@ if [ -f "$DEB" ]; then
 else
     echo "warn: libpam-systemd deb missing — greeter session will use the stale sd-login bridge" >&2
 fi
+
+echo "== /var/log/gdm3 (gdm3 LogDir — greeter stderr evidence)"
+# gdm-session-worker writes the greeter's stdout/stderr to
+# <LogDir>/:0-greeter.log; without the directory the open fails and the
+# greeter's own failure messages ("Unable to ..." from gdm-x-session's
+# EX_SOFTWARE exits) go nowhere at all (gdmr55: exit 70 with zero
+# diagnostic surface).
+mkdir -p "$ROOT/var/log/gdm3"
+chmod 0755 "$ROOT/var/log/gdm3"
 
 echo "== gdm-theme.gresource (update-alternatives gap)"
 # gnome-shell-common's postinst installs gdm-theme.gresource via

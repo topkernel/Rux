@@ -220,6 +220,15 @@ fi
 echo "-- custom.conf as booted:"
 sed 's/^/   /' "$ROOT/etc/gdm3/custom.conf"
 
+echo "== /var/log/gdm3 (gdm3 LogDir — greeter stderr evidence)"
+# gdm-session-worker writes the greeter's stdout/stderr to
+# <LogDir>/:0-greeter.log; without the directory the open fails and the
+# greeter's own failure messages ("Unable to ..." from gdm-x-session's
+# EX_SOFTWARE exits) go nowhere at all (gdmr55: exit 70 with zero
+# diagnostic surface).
+mkdir -p "$ROOT/var/log/gdm3"
+chmod 0755 "$ROOT/var/log/gdm3"
+
 echo "== gdm-theme.gresource (update-alternatives gap)"
 # gnome-shell-common's postinst installs gdm-theme.gresource via
 # update-alternatives -> gnome-shell-theme.gresource (priority 10).
