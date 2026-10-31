@@ -1241,19 +1241,23 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
 
     // P0-1: AF_UNIX sendto — stage the payload and route through the unix
     // send engine (sendto cannot carry cmsg data; SCM_RIGHTS is sendmsg).
+    // perf-ipc: the stage is handed to the engine OWNED (the enqueue moves
+    // it into the segment — one copy total), and the reserve is no longer
+    // zero-filled (copy_from_user overwrites every staged byte before any
+    // read; a faulting copy returns EFAULT with the buffer discarded).
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
         }
-        kbuf.resize(stage, 0);
-        // SAFETY: buf_ptr validated with access_ok(len) above; stage <= len.
-        if unsafe {
-            crate::arch::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage)
-        } != 0
-        {
-            return -(errno::EFAULT as i64);
+        // SAFETY: capacity is exactly stage; the copy below fills all of
+        // it or the call returns EFAULT (set_len only runs on success).
+        unsafe {
+            if crate::arch::uaccess::copy_from_user(kbuf.as_mut_ptr(), buf_ptr, stage) != 0 {
+                return -(errno::EFAULT as i64);
+            }
+            kbuf.set_len(stage);
         }
         let dest = if !addr_ptr.is_null() {
             const SOCKADDR_UN_LEN: usize = crate::net::unix::SOCKADDR_UN_LEN;
@@ -1277,7 +1281,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         let deadline = usock.sndtimeo_deadline();
         return match crate::net::unix::unix_send(
             &usock,
-            &kbuf,
+            kbuf,
             alloc::vec::Vec::new(),
             None,
             dest.as_ref(),
@@ -3011,7 +3015,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         let deadline = usock.sndtimeo_deadline();
         return match crate::net::unix::unix_send(
             &usock,
-            &buf,
+            buf,
             scm_files,
             cred,
             udest.as_ref(),
@@ -4147,13 +4151,18 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
 
     // P0-1: AF_UNIX — receive into a kernel buffer, report the sender path.
+    // perf-ipc: no zero-fill of the stage (the receive engine writes
+    // exactly the bytes it reports back; a `resize(stage, 0)` was a
+    // memset of up to 64 KiB on EVERY recvfrom before any byte landed).
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
         }
-        kbuf.resize(stage, 0);
+        // SAFETY: capacity is exactly stage; the engine writes buf[..n]
+        // before the caller reads kbuf[..r.len] (r.len <= n <= stage).
+        unsafe { kbuf.set_len(stage); }
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let peek = (flags & MSG_PEEK) != 0;
         let deadline = usock.rcvtimeo_deadline();
