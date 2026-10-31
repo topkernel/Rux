@@ -1452,6 +1452,41 @@ impl PageCache {
                 break;
             }
 
+            // Fill and describe every frame BEFORE any pcache lock (perf
+            // review 2026-10-31): the chunk's memcpy used to run under
+            // wlock + the per-inode lock — up to 64x4 KiB of copying with
+            // both serialization points held, stalling every reader and
+            // every other inserter for the duration. The frames are still
+            // private here (allocated above, not yet published), so the
+            // copy and the descriptor stamping need no lock. A frame whose
+            // index turns out to be a duplicate at insert time pays one
+            // wasted copy (the rare dedup path) and is freed exactly as
+            // the old in-lock order did.
+            for k in 0..got {
+                let phys = phys_buf[k];
+                let pfn = phys / PAGE_SIZE;
+                let page_index = first_index + done as u64 + k as u64;
+                let src_off = (done + k) * block_size;
+                let copy_len = core::cmp::min(PAGE_SIZE, buf.len() - src_off);
+                // SAFETY: phys is a valid page frame from the zone
+                // allocator; the linear mapping covers all RAM.
+                unsafe {
+                    let dst = phys_to_virt_ptr(phys);
+                    core::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), dst, copy_len);
+                }
+                let page_desc = pfn_to_page_mut(pfn);
+                if !page_desc.is_null() {
+                    // SAFETY: pfn came from the zone allocator; its page
+                    // descriptor is valid for the frame's lifetime.
+                    unsafe {
+                        (*page_desc).set_page_type(PageType::PageCache);
+                        (*page_desc).set_flag(PageFlag::UpToDate);
+                        (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
+                        (*page_desc).set_index(page_index as usize);
+                    }
+                }
+            }
+
             // The first-touch Arc allocation stays outside wlock (same
             // R-WRITESTORM-1 rule as insert); dropped unused when the
             // entry already exists.
@@ -1510,27 +1545,15 @@ impl PageCache {
                         // too. The frame was popped from the zone — release
                         // it right away.
                         if g.contains_key(&page_index) {
+                            // Duplicate index: the frame was already filled
+                            // and described in the unlocked stage above —
+                            // release it exactly as the old in-lock order
+                            // did (no clobber, no leak).
                             free_page(phys);
                             continue;
                         }
-                        let src_off = (done + k) * block_size;
-                        let copy_len = core::cmp::min(PAGE_SIZE, buf.len() - src_off);
-                        // SAFETY: phys is a valid page frame from the zone
-                        // allocator; the linear mapping covers all RAM.
-                        unsafe {
-                            let dst = phys_to_virt_ptr(phys);
-                            core::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), dst, copy_len);
-                        }
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
-                            // SAFETY: pfn came from the zone allocator; its page
-                            // descriptor is valid for the frame's lifetime.
-                            unsafe {
-                                (*page_desc).set_page_type(PageType::PageCache);
-                                (*page_desc).set_flag(PageFlag::UpToDate);
-                                (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
-                                (*page_desc).set_index(page_index as usize);
-                            }
                             lru_batch[lru_n] = page_desc;
                             lru_n += 1;
                         }
