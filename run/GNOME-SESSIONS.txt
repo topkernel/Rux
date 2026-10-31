@@ -1780,3 +1780,86 @@ gdm3, sd-login state dumps); fd/fifo probes in runit.
    the full coldplug/monitor path on current main).
 3. console-VT — the VT layer (fs/vt.rs, gdmr28-48 era) + tty0/active
    (this session) carry logind's whole VT-controller path; no wedge.
+
+## Session 21 — the LAST seam closed: sd-bus fd negotiation was never on (2026-10-31, r65-r72)
+
+Lane: feature/gnome-bringup. Hunt: the session-fifo domino (session 20
+next-steps a-d, all executed).
+
+### The elimination ladder (each step serial-verified)
+1. r64/r65 evidence re-read: pam_systemd's debug line "Reply from
+   logind:" NEVER printed — not once, any boot — while logind's
+   "Sending reply about created session ... session_fd=16" printed for
+   every attempt. The fd-carrying method_return never reached pam.
+2. dfx=scmtap kernel tap (caa3b832, KERN_ERR so it survives
+   loglevel=3 boots): TX/RX per unix-fd hop, DROP-{NOCTL,EFAULT,
+   EMFILE,PLAINREAD}, ORPHAN (fds queued at socket close), and
+   FIFO-LASTWRITER (the exact EPOLLHUP source). gdmr66: ZERO TX lines
+   from logind — the kernel never saw ONE fd-carrying sendmsg from
+   logind. All session-20 "kernel relay" suspects (cmsg copy, MSG_CTRUNC,
+   plain-read drops, fifo poll) were thereby EXONERATED: the message
+   never entered the kernel.
+3. Zero-new-code probe (r65 image): logind's Inhibit (returns "h")
+   answered org.freedesktop.DBus.Error.NotSupported — the sd-bus send
+   was REFUSED in userspace (sd_bus_can_send==0 → -EOPNOTSUPP), and
+   gdmr68's wrong-what control proved the error came from logind, not
+   the bus.
+4. Raw auth probes in runit (AUTHPROBE/AUTHIOV): the daemon answers
+   AGREE_UNIX_FD — including for sd-bus's EXACT shape (one 3-iov
+   sendmsg "\0AUTH EXTERNAL\r\nDATA\r\n"+"NEGOTIATE_UNIX_FD\r\n"+
+   "BEGIN\r\n"; all three reply lines DATA/OK/AGREE arrive in one
+   clean recvmsg, flags=0, no cmsg). Transport byte-perfect.
+
+### ROOT CAUSE
+socket(2)/accept(2) Files carry no VFS inode, and file_stat's
+anonymous branch (pipe → char_dev → drm → memfd → EBADF) had NO socket
+case: fstat(2) on ANY socket fd returned EBADF. sd-bus probes its bus
+connection with sd_is_socket() (fstat + S_ISSOCK + SO_DOMAIN) inside
+bus_socket_start_auth(); on failure it clears accept_fd BEFORE the
+auth write — so the client NEVER SENDS NEGOTIATE_UNIX_FD, the daemon
+never answers AGREE_UNIX_FD, can_fds stays false, and EVERY
+fd-carrying sd-bus send returns -EOPNOTSUPP. For CreateSession the
+refusal happens inside the JobRemoved match callback, where the error
+is swallowed: pam times out ("Connection timed out"), the fifo write
+fd is _cleanup_close_'d, and logind logs "Session c1 logged out"
+milliseconds after the create. The once-per-boot bus-connection drops
+were the same EOPNOTSUPP surfacing through other reply paths.
+
+### FIX (be5b2709)
+net/socket.rs socket_file_stat(): S_IFSOCK|0777, per-description
+st_ino = file_id, dispatched from fs/vfs.rs file_stat's anonymous
+branch (before char_dev), covering all four socket ops tables (inet,
+unix, netlink, raw).
+
+### gdmr72 verification boot (r65 image + fixed kernel)
+- INHIBIT-FD-PROBE busctl rc=0, gdbus rc=0 (fd arrives both stacks).
+- scmtap chain complete: TX pid=512(logind) → RX pid=307(dbus-daemon)
+  fds=[14] → TX pid=307 → RX client fds=[n].
+- pam_systemd: "Reply from logind: id=c1 ... session_fd=10 seat=seat0
+  vtnr=1" — first time on this system.
+- ZERO "Session c1 logged out" lines; session STATE=active; no
+  gdm-x-session exit-70, no "not active or online".
+- Greeter chain runs: gdm-x-session → dbus-run-session →
+  gnome-session (gsd daemons register) → gnome-shell.
+- SCREEN LIT: t=420s shot 99% non-black — gnome-shell renders its
+  "Oh no! Something has gone wrong." recovery screen
+  (runs/gnome-gdmr72/shot-0420s.ppm). The whole session stays up.
+- Remaining (NEXT lane): gnome-shell itself exits code 1 in the
+  greeter (repeats "App org.gnome.Shell.desktop exited with code 1";
+  a "[pango] FcInit" worker thread exists before death — fontconfig/
+  theme suspects). That is past this charter's seam; gsd-* plugins
+  and the session survive the crash now.
+
+### Validation
+x3 builds rc=0 (riscv64, x86_64, aarch64 fresh .config); riscv make
+test: maketest-gdmr72.log (see below). Image r65 = central store
+gnome-gdm-r65.img (repack uses the LOCAL musl toolchain — the shared
+ltp-r20 toolchain symlink died mid-session and silently produced a
+glibc-static runit that killed boots at t=2s; rebuilt via
+toolchain/build-musl.sh, 03f406c3).
+
+### Commits this session (pushed)
+caa3b832 dfx(scmtap) relay tap; ce322b38 KERN_ERR; 4002dcd6 TXERR
+tap; f5646935 PLAINREAD tap; 3d22366f Inhibit probe; 03f406c3 musl
+toolchain rebuild (+idle arg fix); 80b7b6fe auth probes tarball;
+be5b2709 THE FIX (fstat S_IFSOCK).
