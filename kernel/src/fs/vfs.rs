@@ -1393,6 +1393,58 @@ pub fn chrooted() -> bool {
     get_process_root() != "/"
 }
 
+/// (perf-syscall lane) The allocation-free chroot probe for
+/// path_lookup's fast path: reads the fs_struct slots directly instead
+/// of materializing the root String (get_root() allocates a Vec and,
+/// with a recorded root dentry, walks the whole parent chain — ~5 heap
+/// objects per call, paid 3x per lookup before this).
+pub fn process_rooted() -> bool {
+    match crate::sched::current() {
+        Some(t) => match unsafe { (*t).fs_arc() } {
+            Some(fs) => !fs.root_is_slash(),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// (perf-syscall lane) Fast normality probe: true when `abs` (an
+/// absolute path) is already in path_normalize's normal form — no
+/// empty components, no "."/".." components, no trailing slash. One
+/// byte scan, no allocations; lets the common clean-absolute-path
+/// lookup skip path_normalize entirely.
+fn path_is_normalized_fast(abs: &str) -> bool {
+    if abs.is_empty() || !abs.starts_with('/') {
+        return false;
+    }
+    if abs == "/" {
+        return true;
+    }
+    if abs.ends_with('/') {
+        return false;
+    }
+    // No empty component (== "//"), no "." or ".." component. Walk
+    // slash-separated segments.
+    let bytes = abs.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // skip the separator
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'/' {
+            i += 1;
+        }
+        let seg = &abs[start..i];
+        if seg.is_empty() {
+            return false; // "//"
+        }
+        if seg == "." || seg == ".." {
+            return false;
+        }
+    }
+    true
+}
+
 /// The current task's cwd AS THE USER SEES IT: relative to the task root
 /// (the getcwd(3) string, e.g. "/bin" under chroot("/usr")). Callers that
 /// feed the result into path_lookup-style resolution — which PREFIXES the
@@ -1664,14 +1716,54 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // interpreted in the CURRENT TASK'S namespace (root prefix), and the
     // normalization floor clamps ".." at that root — a chrooted process
     // cannot lexically climb out of the jail.
-    let abs_path = make_absolute_rooted(pathname);
-    let normalized = normalize_with_root(&abs_path, &get_process_root());
+    // (perf-syscall lane) Root + normalize with ZERO heap objects on
+    // the common shape (not chrooted, absolute already-clean path):
+    // the old sequence paid ~15 allocations per lookup — make_absolute_
+    // rooted's String, THREE get_process_root() Strings (each itself a
+    // Vec clone + path_normalize's two Vec<&str> collects + output
+    // String), and path_normalize's output for the abs path — before
+    // the walk even started. Only chrooted tasks and non-normal paths
+    // take the allocating arms now.
+    let rooted = process_rooted();
+    let abs_owned: Option<String>;
+    let abs_path: &str = if pathname.starts_with('/') {
+        if rooted {
+            abs_owned = Some(make_absolute_rooted(pathname));
+            abs_owned.as_deref().unwrap()
+        } else {
+            pathname
+        }
+    } else {
+        abs_owned = Some(make_absolute(pathname));
+        abs_owned.as_deref().unwrap()
+    };
+    let root_owned: Option<String>;
+    let root_str: &str = if rooted {
+        root_owned = Some(get_process_root());
+        root_owned.as_deref().unwrap()
+    } else {
+        "/"
+    };
+    let norm_owned: Option<String>;
+    let normalized: alloc::borrow::Cow<'_, str> = if rooted || !path_is_normalized_fast(abs_path) {
+        alloc::borrow::Cow::Owned(if rooted {
+            normalize_with_root(abs_path, root_str)
+        } else {
+            path_normalize(abs_path)
+        })
+    } else {
+        alloc::borrow::Cow::Borrowed(abs_path)
+    };
 
     // sc30/sc31 hunt: collect a component-by-component trail for sandbox
     // walks (the topology question — which mount each step lands in — is
-    // exactly what the serial needs to answer).
-    let sbx_tracing = (sbx_want(&normalized) || sbx_want(pathname))
-        && !sbx_noise(&normalized)
+    // exactly what the serial needs to answer). (perf-syscall lane)
+    // Hunt instrumentation — the two sbx_want/sbx_noise byte scans ran
+    // on EVERY lookup in every boot; now only on sysforensic boots.
+    let sbx_tracing = crate::dfx::switches::enabled(
+            crate::dfx::switches::DfxSwitch::SysForensic)
+        && (sbx_want(normalized.as_ref()) || sbx_want(pathname))
+        && !sbx_noise(normalized.as_ref())
         && !sbx_noise(pathname);
     let mut trail = String::new();
 
@@ -1682,7 +1774,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // probe, so record the walk's starting identity instead: VFS-root
     // vs task-root (chroot) dentry pointers and the root's view of
     // "storage"/"mnt" — the divergence the errnos point at.
-    if normalized == "/storage/media" || normalized == "/mnt/sandbox" {
+    if normalized.as_ref() == "/storage/media" || normalized.as_ref() == "/mnt/sandbox" {
         static WALKPRB_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
@@ -1728,13 +1820,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // symlink bases in follow_symlink.
     let mut current = follow_mount(vfs_root.clone());
     let mut symlink_depth: usize = 0;
-    let task_root_dentry: Option<Arc<Dentry>> = {
-        let root = get_process_root();
-        if root == "/" {
-            None
-        } else {
-            dentry_walk_no_symlink(&root)
-        }
+    let task_root_dentry: Option<Arc<Dentry>> = if rooted {
+        dentry_walk_no_symlink(root_str)
+    } else {
+        None
     };
 
     // Split into path components, skip empty ones
@@ -1760,16 +1849,17 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // walk INTO the next component — a regular file / FIFO / device in
         // the middle of a path fails with ENOTDIR, not ENOENT (LTP
         // chmod06 "t_file/tfile_3" expects ENOTDIR).
+        // DAC: search (x) permission is required on every directory we
+        // traverse through (Linux checks MAY_EXEC per component).
+        // (perf-syscall lane) ONE get_inode() serves both checks — it
+        // takes the dentry inode spinlock and clones the Arc, and the
+        // two separate calls doubled that cost on every component of
+        // every walk.
         if let Some(ref cur_inode) = current.get_inode() {
             if !cur_inode.mode.is_directory() {
                 return Err(errno::Errno::NotADirectory.as_neg_i32());
             }
-        }
-
-        // DAC: search (x) permission is required on every directory we
-        // traverse through (Linux checks MAY_EXEC per component).
-        if let Some(ref dir_inode) = current.get_inode() {
-            if !crate::fs::permission::inode_permission(dir_inode, crate::fs::permission::MAY_EXEC) {
+            if !crate::fs::permission::inode_permission(cur_inode, crate::fs::permission::MAY_EXEC) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
             }
         }
@@ -1850,9 +1940,16 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
+                // (perf-syscall lane) skip the set_inode lock+Arc swap
+                // when the icache hands back the SAME inode the dentry
+                // already holds — a no-op replace that still took the
+                // inode spinlock and churned the Arc refcount on every
+                // walk of every cached component.
                 if let Some(ref cached_inode) = c.get_inode() {
                     if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
-                        c.set_inode(fresh);
+                        if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
+                            c.set_inode(fresh);
+                        }
                     }
                 }
                 crate::dfx::fsw::note_walk_hit();
@@ -2219,9 +2316,16 @@ fn follow_symlink(
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
+                // (perf-syscall lane) skip the set_inode lock+Arc swap
+                // when the icache hands back the SAME inode the dentry
+                // already holds — a no-op replace that still took the
+                // inode spinlock and churned the Arc refcount on every
+                // walk of every cached component.
                 if let Some(ref cached_inode) = c.get_inode() {
                     if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
-                        c.set_inode(fresh);
+                        if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
+                            c.set_inode(fresh);
+                        }
                     }
                 }
                 c

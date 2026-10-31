@@ -138,6 +138,19 @@ impl FsStruct {
         self.root.read().clone()
     }
 
+    /// Whether the task is chrooted somewhere other than the global
+    /// root — the ALLOCATION-FREE check path_lookup's fast path needs
+    /// (get_root() allocates and, with a recorded root dentry, walks
+    /// the parent chain; calling it per lookup cost ~5 heap objects
+    /// per open). No allocs: read-lock the two slots and compare.
+    pub fn root_is_slash(&self) -> bool {
+        if self.root_dentry.read().is_some() {
+            return false;
+        }
+        let r = self.root.read();
+        r.as_slice() == b"/"
+    }
+
     /// Set root directory path (chroot), string only — clears any
     /// recorded root dentry.
     pub fn set_root(&self, path: &[u8]) {
