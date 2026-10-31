@@ -20,13 +20,31 @@ pub struct Console;
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // Acquire lock only once, output entire string
+        // Acquire lock only once; batched TX with \n expansion staged
+        // into a stack buffer (perf-console: the old per-byte loop paid
+        // per-byte 16550 register traffic — this writer carries panic
+        // output, which can be thousands of bytes).
         let uart = console::lock();
+        let mut buf = [0u8; 256];
+        let mut n = 0usize;
         for b in s.bytes() {
             if b == b'\n' {
-                uart.putc(b'\r');
+                if n == buf.len() {
+                    uart.puts_batch(&buf);
+                    n = 0;
+                }
+                buf[n] = b'\r';
+                n += 1;
             }
-            uart.putc(b);
+            if n == buf.len() {
+                uart.puts_batch(&buf);
+                n = 0;
+            }
+            buf[n] = b;
+            n += 1;
+        }
+        if n > 0 {
+            uart.puts_batch(&buf[..n]);
         }
         Ok(())
     }

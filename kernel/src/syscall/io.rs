@@ -556,6 +556,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         // Use a small stack buffer to avoid heap allocation
         const CHUNK_SIZE: usize = 256;
         let mut kernel_buf = [0u8; CHUNK_SIZE];
+        let mut expand_buf = [0u8; CHUNK_SIZE * 2];
         let mut remaining = count;
         let mut total_written = 0;
         let mut user_ptr = buf;
@@ -576,19 +577,26 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
                 break;
             }
 
-            // Output the copied bytes through the console UART
-            // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
-            // x86_64 — the old fixmap write_volatile addressed
-            // a riscv-only MMIO window and silently dumped
-            // user bytes into VA 0 on x86).
-            let uart = crate::console::lock();
+            // \n -> \r\n expansion (the unconditional OPOST translation
+            // this fast path has always applied, byte-for-byte), then ONE
+            // call into the chunked batched TX path (perf-console: the
+            // old inline loop held a single irqsave UART lock across the
+            // whole 256-byte chunk and pushed every byte through
+            // per-byte putc register traffic — the OH init/hilog boot
+            // volume, ~26k prints, rode exactly this loop. Delegating to
+            // char_dev::uart_write_kernel keeps the 32-byte
+            // lock/cond_resched discipline and the FIFO-burst TX of the
+            // shared path.)
+            let mut n = 0usize;
             for &b in &kernel_buf[..to_copy] {
                 if b == b'\n' {
-                    uart.putc(b'\r');
+                    expand_buf[n] = b'\r';
+                    n += 1;
                 }
-                uart.putc(b);
+                expand_buf[n] = b;
+                n += 1;
             }
-            drop(uart);
+            let _ = crate::fs::char_dev::uart_write_kernel(&expand_buf[..n]);
 
             total_written += to_copy;
             remaining -= to_copy;
