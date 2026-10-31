@@ -96,6 +96,7 @@ macro_rules! dfx_switch_table {
             ThPark => "thpark",
             RipSample => "ripsample",
             OhHunt => "ohhunt",
+            TfdCensus => "tfdcensus",
         }
     };
 }
@@ -439,9 +440,17 @@ pub enum DfxSwitch {
     /// pollute the structured boot table. OFF by default — enable with
     /// `dfx=ohhunt` when the graphics lanes are hunting.
     OhHunt,
+    /// dfx=tfdcensus (oh-launcher lane): windowed timerfd_create caller
+    /// census — the syscost boots showed a 4k/s timerfd_create storm
+    /// (833k calls by t=240s, several CPUs of kernel work) whose caller
+    /// the boot-start TFDC budget could never name. Behind this switch
+    /// the TFDC tap prints the first 16 calls of every 5s window, so
+    /// every boot phase names its storm caller. Purely diagnostic; OFF
+    /// by default.
+    TfdCensus,
 }
 
-const SWITCH_COUNT: usize = 48;
+const SWITCH_COUNT: usize = 49;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -530,6 +539,7 @@ impl DfxSwitch {
             DfxSwitch::RipSample => 45,
             DfxSwitch::DbFileTrace => 46,
             DfxSwitch::OhHunt => 47,
+            DfxSwitch::TfdCensus => 48,
         }
     }
 

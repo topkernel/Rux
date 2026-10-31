@@ -1074,14 +1074,15 @@ impl CfsRunQueue {
     }
 
     /// R85 (tail-phase PICK-SKIP wedge): always-on, rate-limited report
-    /// for the pick-side stale on_cpu heal — the released FULL qword is
+    /// for the stale on_cpu heal (pick-side leg passes the classic tag,
+    /// the tick-side CLAIM-SWEEP passes its own) — the released FULL qword is
     /// the store __switch_to would have made; the print names the victim
     /// (pid, state word, ti_cpu), the pre-heal claim, the advisory
     /// pick-state and the owner masks, so a capture can tell a lost
     /// release (slot=0 swout=0) from a lying-slot double-run fight
     /// (marks flipping between two cpus' claims). Same R34 discipline
     /// and 2s system-wide budget as the claim twin.
-    fn stale_oncpu_healed(cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
+    fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
         WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
         if !Self::heal_report_budget_ok() {
             return;
@@ -1094,7 +1095,7 @@ impl CfsRunQueue {
             let tcpu = (*task).ti_cpu() as i64;
             let slot = crate::sched::sched::owner_slot_mask(task);
             let swout = crate::sched::sched::switching_out_mask(task);
-            Self::stale_heal_line(b"STALE-ONCPU-RESET", cpu_id, pid, claim, pk);
+            Self::stale_heal_line(tag, cpu_id, pid, claim, pk);
             // Context tail: st= state word, tcpu= ti_cpu, slot=/swout=
             // owner masks at heal time (both must be 0 — that is the
             // adjudication's precondition; a nonzero mask here names a
@@ -1204,6 +1205,132 @@ impl CfsRunQueue {
             }
         }
         n
+    }
+
+    /// OH-launcher wall (2026-10-31, lb20/lb21): the pick-side stale-claim
+    /// heal only fires when a pick WALK examines the victim — and the walk
+    /// scans leftmost-first, stopping at the first allowed candidate. A
+    /// stale-claimed victim sitting mid-tree (its vruntime is frozen at the
+    /// strike; the pack has to advance past it for it to drift leftmost)
+    /// is skipped by every walk without ever being EXAMINED, so
+    /// STALE-CLAIM-RESET never fires for it. lb20's softbus_server (pid
+    /// 724) went silent at registration (228.8s) with exactly one reset at
+    /// 262s and the next at 841s — a 579s hole during which its worker
+    /// threads were never swept at all, while device_manager's code-3
+    /// handler burned its 5.24s softbus timeout 102 times and
+    /// bootevent.account.ready never landed. accesstoken (17 resets) and
+    /// device_manager's own worker (16) show the same repeat-victim
+    /// pattern: the phantom-mark producer strikes, the victim strands for
+    /// as long as it takes to drift leftmost.
+    ///
+    /// This sweep makes the heal POSITION-INDEPENDENT: run from the timer
+    /// tick (once per 100 jiffies, one CPU), it walks the WHOLE timeline
+    /// under the GRQ and applies the exact pick-side adjudication to every
+    /// linked task — {on_cpu=false, claim!=-1} owned by no CPU slot and no
+    /// in-flight switch-out is protocol-impossible (an in-flight pick
+    /// unlinks and publishes under one GRQ hold, so it cannot interleave
+    /// this scan; a mid-switch-out task carries on_cpu=TRUE until the
+    /// full-qword release store, which cannot leave a half-written claim),
+    /// so the claim is scribble residue and resetting it makes the task
+    /// pickable where it stands. CFS ordering then schedules it within the
+    /// normal service latency instead of after a leftmost drift measured
+    /// in hundreds of seconds. Caller holds the GRQ lock.
+    ///
+    /// Returns the census tuple (linked, stale_reset, owned_claim,
+    /// oncpu_marked, oncpu_pids, owned_pids) — printed by the tick hook
+    /// (dfx=wwcensus). owned_claim counts the lying-slot shape (a live
+    /// slot names the task): NOT healable here (that adjudication needs
+    /// the frozen-exec-clock conviction against the SLOT's liveness, not
+    /// just the task's), but the census names its pids so the next
+    /// capture can size it.
+    pub fn claim_sweep(
+        &self,
+        cpu_id: usize,
+    ) -> (usize, usize, usize, usize, [u32; 4], [u32; 4]) {
+        let mut linked = 0usize;
+        let mut stale_reset = 0usize;
+        let mut owned_claim = 0usize;
+        let mut oncpu_marked = 0usize;
+        let mut oncpu_pids = [0u32; 4];
+        let mut owned_pids = [0u32; 4];
+        for (_, &task) in self.tasks_timeline.iter() {
+            // b50 #GP guard family: a scribbled timeline slot must not
+            // reach the deref below.
+            if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+                continue;
+            }
+            // SAFETY: task is from the BTreeMap, a valid pointer stored
+            // during enqueue; the caller's GRQ hold pins the timeline and
+            // excludes every concurrent pick publish / switch-out release.
+            unsafe {
+                if (*task).on_cpu() {
+                    // Legitimate mid-switch-out / fast-repick transient,
+                    // or an orphaned on_cpu mark. The idle-loop harvester
+                    // owns this shape but only runs when a CPU goes IDLE
+                    // — under the OH load collapse the CPUs never idle,
+                    // and the pick-side stale-oncpu heal is as
+                    // order-dependent as the claim leg was. Sweep it with
+                    // the R80 discipline: no live owner (slot /
+                    // SWITCHING_OUT) under this GRQ hold, PLUS the
+                    // 50-jiffy exec-frozen orphan-watch confirmation, then
+                    // release the FULL qword — the exact store
+                    // __switch_to would have made. A legitimately
+                    // mid-switch-out task (microseconds) never matures
+                    // the watch; a LIVE-published fast repick keeps its
+                    // picker's slot naming it (owner_live) and is never
+                    // touched.
+                    let owner_live = crate::sched::sched::pick_owner_live(task);
+                    if !owner_live
+                        && crate::sched::sched::stale_mark_confirm(task, (*task).pid(), 50)
+                    {
+                        let was_pk = (*task).pick_state();
+                        let claim =
+                            (*task).running_on_cpu.load(Ordering::Acquire);
+                        (*task).release_pick_ownership();
+                        stale_reset += 1;
+                        Self::stale_oncpu_healed(
+                            b"SWEEP-ONCPU-RESET",
+                            cpu_id,
+                            task,
+                            claim,
+                            was_pk,
+                        );
+                        continue;
+                    }
+                    oncpu_marked += 1;
+                    if let Some(slot) = oncpu_pids.iter_mut().find(|p| **p == 0) {
+                        *slot = (*task).pid();
+                    }
+                    continue;
+                }
+                let claim = (*task).running_on_cpu.load(Ordering::Acquire);
+                if claim == -1 {
+                    linked += 1; // fully released: pickable class
+                    continue;
+                }
+                linked += 1;
+                // {on_cpu=false, claim!=-1}: pickable class UNLESS a live
+                // owner backs the claim. Same adjudication as the pick
+                // walk's R85/R74 legs: slots and SWITCHING_OUT are
+                // scheduler-truth, and under this GRQ hold a genuinely
+                // owned task is always named by one of them.
+                if crate::sched::sched::pick_owner_live(task) {
+                    owned_claim += 1;
+                    if let Some(slot) = owned_pids.iter_mut().find(|p| **p == 0) {
+                        *slot = (*task).pid();
+                    }
+                    continue;
+                }
+                (*task).running_on_cpu.store(-1, Ordering::Release);
+                stale_reset += 1;
+                WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+                if Self::heal_report_budget_ok() {
+                    Self::stale_heal_line(b"SWEEP-CLAIM-RESET", cpu_id, (*task).pid(), claim, u32::MAX);
+                    crate::console::putchar_no_lock(b'\n');
+                }
+            }
+        }
+        (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids)
     }
 
     /// Pick next task to run
@@ -1452,7 +1579,7 @@ impl CfsRunQueue {
                         {
                             let was_pk = (*task).pick_state();
                             (*task).release_pick_ownership();
-                            Self::stale_oncpu_healed(cpu_id, task, claim, was_pk);
+                            Self::stale_oncpu_healed(b"STALE-ONCPU-RESET", cpu_id, task, claim, was_pk);
                             skip_reason = 5;
                         } else {
                             skip_reason = 1;

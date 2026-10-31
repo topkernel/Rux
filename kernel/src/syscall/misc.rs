@@ -3445,7 +3445,36 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     static TFDC_N: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
     let tfdc_i = TFDC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let tfdc_log = tfdc_i < 60;
+    // dfx=tfdcensus: WINDOWED caller census. The syscost boots show the
+    // storm accelerating 1.9k -> 4.3k/s by t=240s, so a boot-start budget
+    // only ever names bluetooth/audio's one-shots. Behind the switch the
+    // tap prints the first 16 calls of every 500-jiffy window, so the
+    // phase that runs the storm names its caller.
+    let tfdc_log = if crate::dfx::switches::enabled(
+        crate::dfx::switches::DfxSwitch::TfdCensus,
+    ) {
+        static WIN_JIF: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static WIN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let jif = crate::drivers::timer::get_jiffies();
+        let win = WIN_JIF.load(core::sync::atomic::Ordering::Relaxed);
+        if jif.wrapping_sub(win) >= 500
+            && WIN_JIF
+                .compare_exchange(
+                    win,
+                    jif,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            WIN_N.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        WIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+    } else {
+        tfdc_i < 60
+    };
     if tfdc_log {
         let comm = crate::sched::current()
             .map(|t| unsafe { (*t).comm() })
