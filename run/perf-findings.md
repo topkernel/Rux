@@ -954,3 +954,67 @@ argv/envp, and the exec'd image re-faults its pages on first run.
 - test/pmmprobe.c — the PMMP decomposition probe (cold/warm file fault,
   anon fault, fork syscall vs round trip vs vfork vs fork+exec). Boot
   with: pbench_boot.py --probe-bin work/pmmprobe --bzimage <k>.
+# perf-gaps lane findings — 2026-11-01
+
+## G1 (FIXED): p6_append 301x → 13.7x — ext4 buffered writes (delayed allocation)
+
+The gap table's #1: rux 117.4 vs reference 0.390 us (KVM medians).
+Root cause (fs lane's F5): every plain write(2) ran the full write-
+through machinery — journal start, disk-fresh inode read, block
+allocation, bitmap/extent/inode rewrites, SYNCHRONOUS journal commit at
+stop. The reference kernel does delayed allocation: write(2) only
+copies bytes into (dirty) page-cache frames and lifts the in-memory
+size; allocation + journaling defer to the writeback points.
+
+Change (completed from the predecessor's uncommitted draft, plus three
+correctness holes closed this session):
+
+- `ext4_buffered_write` (fs/ext4/file.rs): plain writes to regular
+  files (no O_SYNC/O_DSYNC/O_DIRECT, fs not read-only) copy into
+  page-cache frames born dirty (`PageCache::insert_dirty` — no
+  clean-then-mark window an eviction could drop), reserve the append
+  range with one CAS on Inode.size, and publish the sb-cached size LAST
+  under EXT4_BIG_LOCK (data-before-size). Partial pages that may carry
+  disk content fill through the read machinery first; bounded-retry
+  losers fall back to the write-through core per page.
+- Writeback points (all verified present): fsync
+  (ext4_flush_dirty_inode), msync MS_SYNC (added span flush), truncate
+  (setattr flush-then-cut, pre-existing), direct reclaim
+  (shrink_reclaim, pre-existing), and — added this session — sync(2),
+  syncfs(2), sync_file_range(2) and shutdown
+  (`PageCache::flush_all_dirty` + call sites; the buffer-cache-only
+  sync family would otherwise persist NOTHING of a buffered write).
+- Icache-eviction revival: dirty frames can outlive the VFS inode;
+  `create_vfs_inode_in` lifts the fresh inode's size to the EXACT
+  dirty-tail EOF (`dirty_tail_eof` = publish-time `dirty_eof`
+  watermark clamped to the surviving dirty extent — the predecessor's
+  page-rounded version would have reported 4096 for a 1000-byte file).
+  `refresh_cached_vfs_inode` holds the cached size while dirty frames
+  live beyond the disk-fresh size (predecessor's guard, kept).
+
+Numbers (pbench KVM, smp2/2G, same machine class; run/pg1-*-kvm.out):
+- p6_append med: 126.555 -> 5.330 us (23.7x); reference 0.390 -> 13.7x
+  residual (syscall entry 0.34 + one frame insert/publish).
+- Full board flat: p1_null 0.34->0.34, p2_ctxsw 1.24->1.28, p6_stat
+  4.93->5.02, p6_openclose 21.1->21.7, p6_read_cached 23.5->24.2,
+  p6_unlink 52.7->47.9, p6_write_fsync 8.8ms->9.9ms (row p99 swings
+  37-47 ms across runs — noise band; predecessor's fix run measured
+  8.5ms).
+- Correctness: `make test` 1198/1198 green; x3 builds rc=0 (x86_64 +
+  riscv64 x2); the delalloc semantics battery
+  (test/delalloc_check.c, 11 cases: append/reopen/exact-size, fsync,
+  sparse holes, unaligned straddling, truncate-down, mmap+msync, two
+  concurrent appenders, O_SYNC passthrough, unlink-while-open,
+  400-file icache churn + reread, immediate fstat) 11/11 PASS on KVM
+  (run/pg1-delalloc-semantics4.out).
+
+LTP note: write(2) semantics for the whole ext4 regular-file surface
+changed class (buffered). The ltp lane's next full scan owns the
+regression verdict; write/fsync/truncate families got the dedicated
+battery above.
+
+Remaining p6 rows on this branch (measured same run):
+openclose 21.7 vs 0.371 (58x), read_cached 24.2 vs 0.541 (45x),
+mkdrmdir 233 vs 7.2 (32x), unlink 47.9 vs 1.70 (28x), stat 5.0 vs
+0.230 (22x) — next targets, in that order (all path-walk/icache
+shaped).
