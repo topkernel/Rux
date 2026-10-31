@@ -1012,6 +1012,9 @@ static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32
 // StartUser sender proc. What is ABSENT names the dead leg.
 static AMS46_T0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static AMS46_SENDER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5: the thread that READ the traced code-46 (for the
+// THREAD-SNAPSHOT leg of the audit — its in-flight syscall + ring).
+static AMS46_READER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static AMS46_RIP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
@@ -3683,6 +3686,95 @@ pub fn ams46_audit() {
     }
     if !found {
         return;
+    }
+    // leg-30B5 THREAD-SNAPSHOT: lb32 showed the code-46 READ by
+    // foundation's main thread, its IsOsAccountExists reply returned,
+    // then the thread went dark with the async slot held forever and
+    // zero follow-up binder traffic — stuck in pure userspace inside
+    // the StartUser handler. The reader task's in-flight syscall
+    // (kernel-stack entry frame) + syscall-nr ring names the shape:
+    // nanosleep poll loop (the isBoot BMS retry ladder), a futex park,
+    // or live compute.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let rtid = AMS46_READER.load(Relaxed);
+        if rtid != 0 {
+            static SNAP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SNAP_N.fetch_add(1, Relaxed);
+            if n < 40 && (n % 2) == 0 {
+                let tk = unsafe { crate::sched::find_task_by_pid(rtid) };
+                if tk.is_null() {
+                    crate::pr_warn!("AMS46-T j={} tid={} GONE", now / 100, rtid);
+                } else {
+                    // SAFETY: diagnostic reads of the task's own fields
+                    // and mapped kernel stack (sleep_snapshot contract).
+                    let t = unsafe { &*tk };
+                    let state = t.state().bits() as u64;
+                    let (sys, rip, a0) = match t.kernel_stack_top_checked() {
+                        None => (0u64, 0u64, 0u64),
+                        Some(top) => {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi) }
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).a7, (*regs).epc, (*regs).regs[0]) }
+                            }
+                            #[cfg(feature = "aarch64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe {
+                                    ((*regs).syscallno, (*regs).pc, (*regs).regs[0])
+                                }
+                            }
+                        }
+                    };
+                    use core::fmt::Write;
+                    let mut s = alloc::string::String::new();
+                    const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                    let cur = t.last_calls_cur.load(Relaxed);
+                    let mut shown = 0usize;
+                    for k in 0..RL {
+                        // newest first
+                        let i = (cur + RL - k) % RL;
+                        let v = t.last_calls[i].load(Relaxed);
+                        if v != 0 {
+                            let _ = write!(s, " {}", v & 0xffff);
+                            shown += 1;
+                            if shown >= 16 {
+                                break;
+                            }
+                        }
+                    }
+                    crate::pr_warn!(
+                        "AMS46-T j={} tid={} state={:#x} sys={} rip={:#x} a0={:#x} calls:{}",
+                        now / 100,
+                        rtid,
+                        state,
+                        sys,
+                        rip,
+                        a0,
+                        s
+                    );
+                }
+            }
+        }
     }
     if async_held || parked > 0 || todo_d > 0 {
         static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -7882,7 +7974,8 @@ fn binder_thread_read(
                                 );
                                 // leg-30B5 RIPPLE: open the 120 s
                                 // follow-window at the traced code-46's
-                                // kernel delivery; latch the sender proc.
+                                // kernel delivery; latch the sender proc
+                                // and the reading thread.
                                 if AMS46_T0.load(core::sync::atomic::Ordering::Relaxed) == 0 {
                                     AMS46_T0.store(
                                         crate::drivers::timer::get_jiffies() as u32,
@@ -7894,10 +7987,15 @@ fn binder_thread_read(
                                         .map(|p| p.pid)
                                         .unwrap_or(0);
                                     AMS46_SENDER.store(fp, core::sync::atomic::Ordering::Relaxed);
+                                    AMS46_READER.store(
+                                        thread.tid,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
                                     crate::pr_warn!(
-                                        "AMS46 RIPPLE window open (foundation={} sender={})",
+                                        "AMS46 RIPPLE window open (foundation={} sender={} reader={})",
                                         AMS46_TPID.load(core::sync::atomic::Ordering::Relaxed),
-                                        fp
+                                        fp,
+                                        thread.tid
                                     );
                                 }
                             }
