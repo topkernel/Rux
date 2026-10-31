@@ -1024,6 +1024,52 @@ fn ams46_on() -> bool {
     crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
 }
 
+// lb47 (sixth successor): failed-send reason shadow. The fast-fail decode
+// (lb44/lb45) proved the code-46 handler's IsExistOsAccount returned false
+// in ~1 ms with ZERO binder traffic from foundation — the cached
+// osaccount proxy is death-marked (IPCObjectProxy::SendRequestInner's
+// IsObjectDead() early return, ERR_DEAD_OBJECT, only a ZLOGD) and
+// GetOsAccountProxy keeps returning it forever (proxy_ != nullptr). A
+// proxy only gets death-marked when an EARLIER send returned
+// BR_DEAD_REPLY/BR_FAILED_REPLY — and our kernel-side reason prints for
+// those are pr_info (invisible at LOGLEVEL=6) and the R-FAIL tap only
+// covers the 120 s ripple window. This shadow: every err_cmd site inside
+// binder_transaction stores a reason code; the send-command loop prints
+// each failed send at WARN with pid/tid/code/handle/BR/reason (budget
+// 400, ams46-gated). The FIRST such line for a foundation->accountmgr
+// handle names the moment the boot got poisoned.
+static SENDFAIL_WHY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn sendfail_why(code: u64) {
+    if ams46_on() {
+        SENDFAIL_WHY.store(code, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn sendfail_reason_name(code: u64) -> &'static str {
+    match code {
+        1 => "invalid-handle",
+        2 => "child-node-dead",
+        3 => "owner-proc-dead",
+        4 => "no-ctxmgr",
+        5 => "self-ctxmgr",
+        6 => "reply-empty-stack",
+        7 => "reply-stack-top",
+        8 => "reply-oneway",
+        9 => "reply-requester-dead",
+        10 => "target-alloc-none",
+        11 => "offsets-misalign",
+        12 => "buffer-alloc",
+        13 => "target-gone-relock",
+        14 => "target-died-pre-copy",
+        15 => "data-copy-fault",
+        16 => "offsets-copy-fault",
+        17 => "reply-target-gone",
+        18 => "translate-fd",
+        _ => "unknown",
+    }
+}
+
 // ============================================================================
 // POOL CENSUS (leg-33B, dfx=poolcensus) — reader-exhaustion adjudication
 //
@@ -5304,6 +5350,29 @@ fn binder_thread_write(
                 let mut err_cmd: u32 = 0;
                 binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
                 if err_cmd != 0 {
+                    // lb47: ALWAYS-ON failed-send WARN under ams46 (the
+                    // R-FAIL print below only covers the 120 s ripple
+                    // window; the proxy-poisoning send happens long before
+                    // any code-46). Budget 400; reason shadow from the
+                    // sendfail_why stores inside binder_transaction.
+                    if ams46_on() {
+                        static SF_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if SF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                            let why = SENDFAIL_WHY.load(core::sync::atomic::Ordering::Relaxed);
+                            crate::pr_warn!(
+                                "AMS46-SENDFAIL pid={} tid={} code={:#x} h={} BR={:#x} why={}-{} {}",
+                                proc.pid,
+                                thread.tid,
+                                tr.code,
+                                tr.target_handle,
+                                err_cmd,
+                                why,
+                                sendfail_reason_name(why),
+                                if reply { "reply" } else { "txn" }
+                            );
+                        }
+                    }
                     crate::pr_info!(
                         "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
                         proc.pid,
@@ -5927,11 +5996,13 @@ fn binder_transaction(
                 // transaction delivered TO this thread.
                 let stack_top = thread.st().txn_stack.last().cloned();
                 let Some(t) = stack_top else {
+                    sendfail_why(6);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY with empty transaction stack");
                     return;
                 };
                 if t.to_tid() != Some(thread.tid) || !Arc::ptr_eq(&t.to_proc, proc) {
+                    sendfail_why(7);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!(
                         "binder: BC_REPLY stack top not ours (to_tid={:?}, me={})",
@@ -6009,6 +6080,7 @@ fn binder_transaction(
                     }
                 }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
+                    sendfail_why(8);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY on oneway");
                     return;
@@ -6017,6 +6089,7 @@ fn binder_transaction(
                 // it, a failed reply leaves the original sender unwakeable.
                 thread.hist(EV_REPLY_POP, t.id as u32, from_proc.pid);
                 if from_proc.im().is_dead {
+                    sendfail_why(9);
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: BC_REPLY requester dead");
                     return;
@@ -6033,6 +6106,7 @@ fn binder_transaction(
                     .find(|r| r.desc == tr.target_handle)
                     .map(|r| r.node.clone());
                 let Some(node) = node else {
+                    sendfail_why(1);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
                     // sc141: failed-send visibility for the launcher lane —
@@ -6045,6 +6119,7 @@ fn binder_transaction(
             } else {
                 let mgr = world.mgr_node[proc.ctx as usize].clone();
                 let Some(mgr) = mgr else {
+                    sendfail_why(4);
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
                     app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
@@ -6053,6 +6128,7 @@ fn binder_transaction(
                 if mgr.proc_id == proc.id {
                     // Linux: a transaction to the context manager from its
                     // own process is a protocol error.
+                    sendfail_why(5);
                     *err_cmd = BR_FAILED_REPLY;
                     return;
                 }
@@ -6066,6 +6142,7 @@ fn binder_transaction(
                 // delivery (work_readable_by gate); fail fast like a
                 // dead-owner node instead of queueing forever.
                 if node.dead.load(core::sync::atomic::Ordering::Acquire) {
+                    sendfail_why(2);
                     *err_cmd = BR_DEAD_REPLY;
                     app_txn_fail_print(proc, "child-node-dead", tr.target_handle as u64, tr.code as u64);
                     return;
@@ -6073,6 +6150,7 @@ fn binder_transaction(
                 match world.procs.iter().find(|p| p.id == node.proc_id) {
                     Some(p) if !p.im().is_dead => target_proc = Some(p.clone()),
                     _ => {
+                        sendfail_why(3);
                         *err_cmd = BR_DEAD_REPLY;
                         return;
                     }
@@ -6089,10 +6167,12 @@ fn binder_transaction(
             // own process stays an error above, exactly like 5.10's
             // "got transaction to context manager from process owning it".
             if tp.im().alloc.is_none() {
+                sendfail_why(10);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
             }
             if offsets_size % 8 != 0 {
+                sendfail_why(11);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
             }
@@ -6171,6 +6251,7 @@ fn binder_transaction(
                     }) {
                         Some(Some(o)) => o,
                         _ => {
+                            sendfail_why(12);
                             *err_cmd = BR_FAILED_REPLY;
                             crate::pr_info!(
                                 "binder: buffer alloc failed (need {}+{}+{})",
@@ -6200,6 +6281,7 @@ fn binder_transaction(
     // allocator before this re-lock. Reply DEAD instead of unwrapping a
     // freed alloc; the cleanup mirrors the copy-fault paths below.
     let Some(target) = target_proc.clone() else {
+        sendfail_why(13);
         *err_cmd = BR_DEAD_REPLY;
         return;
     };
@@ -6230,6 +6312,7 @@ fn binder_transaction(
         None => {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(14);
             *err_cmd = BR_DEAD_REPLY;
             crate::pr_info!(
                 "binder: target pid {} died before payload copy — BR_DEAD_REPLY",
@@ -6246,6 +6329,7 @@ fn binder_transaction(
         {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(15);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
@@ -6259,6 +6343,7 @@ fn binder_transaction(
         {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(16);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
@@ -7104,6 +7189,7 @@ fn binder_transaction(
                     wakes.push(tproc.clone());
                     wakes.push(proc.clone());
                 } else {
+                    sendfail_why(17);
                     *err_cmd = BR_DEAD_REPLY;
                     reply_target_gone = true;
                     thread.hist(
@@ -7418,6 +7504,7 @@ fn fail_txn_after_fixups(
     release_block(target, block_off);
     close_installed_fds(installed_fds);
     unpin_after_failure(target, node, reply, oneway);
+    sendfail_why(18);
     *err_cmd = BR_FAILED_REPLY;
 }
 

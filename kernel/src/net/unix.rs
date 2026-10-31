@@ -1600,7 +1600,7 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 28] = [
+                const AMS_KEYS: [&str; 33] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
@@ -1624,7 +1624,22 @@ pub fn unix_send(
                     "failed to get account",
                     "can't find target",
                     "IsOsAccountExists path",
-                    "SendRequest",
+                    // lb47: the ipc-skeleton failure verdicts. The bare
+                    // "SendRequest" key matched the SA_CLIENT success flood
+                    // ("SubscribeSystemAbility SendRequest succeed!") and
+                    // ate the whole 600 budget by ~125 s on lb46 — dark for
+                    // the entire StartUser window. Tightened to the failure
+                    // shapes only: IPCObjectProxy's ZLOGE "failed, handle:"
+                    // (every SendRequest error verdict, includes the
+                    // ERR_DEAD_OBJECT class), the null-invoker ZLOGE, the
+                    // samgr stub-object error, the work-thread pool family,
+                    // and the measured-cost lines.
+                    "failed, handle:",
+                    "invoker is null",
+                    "Invalid samgr stub",
+                    "SendRequestInner cost",
+                    "SendRequest failed",
+                    "SendRequest fail",
                     "work thread",
                     "find target AbilityInfo",
                     "create user:",
