@@ -1594,18 +1594,22 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 11] = [
+                const AMS_KEYS: [&str; 15] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
                     "user is not existed",
                     "invalid userId",
                     "CreateNewUser user",
+                    "CreateNewUser end",
+                    "bundle size:",
+                    "wait complete",
                     "AbilityManagerAdapter",
                     "in call back",
                     "StartUser current",
                     "low-mem mode",
                     "foregroundUserId:",
+                    "not supported!",
                 ];
                 let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
                 if ams_family {
