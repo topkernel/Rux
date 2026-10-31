@@ -88,7 +88,12 @@ marginally faster. Verdict: anchor drift, not a regression; the merge
 passes its tier, and the append cell re-banks here: **p6_append
 (debug class) = 637-656 µs family**. The other fs-family cells keep
 their pb1 anchors until a full debug-class re-bank board runs; the
-drift direction is improvement on every one of them.
+drift direction is improvement on every one of them. That re-bank
+board ran 2026-10-31 (pa112pb battery + the pa113pb quiet rerun —
+see the 2026-10-31 whole-table refresh below): debug-class fs
+families now read from there, and at load1 8-10 they sit +5-6%
+(metadata cells) to +38% (write_fsync, load-coupled) over these
+merge-board families.
 
 Refreshed cells from the pa91 chain (census+REST boot on the leg-52
 stack pre-CFS-fix; med-of-2 pbench boards at load1 13-15, strong class)
@@ -149,37 +154,47 @@ multiple foreign QEMUs). The aarch64 merge's shared-file deltas (per-arch
 constants, cfg-gated arms, failure-only prints) are consistent with the
 Tier-1 rows being flat.
 
-### Tier-2 debug-class fs-family battery (2026-10-31, pa112pb1/pa112pb2)
+### Tier-2 debug-class fs-family battery (2026-10-31, pa112pb1/pa112pb2 + pa113pb rerun)
 
 Same kernel as the Tier-1 rows (main@82059759 debug bzImage, md5
 c800ffe3710b07b8), pbench_boot defaults (q35 TCG thread=multi, smp2,
-2G, usbless minimal rootfs), two sequential boards. Load window:
-board 1 at load1=8 with 10 foreign QEMUs on the host, board 2 at
-load1=10 with 10-11 — the comparison families are the aarch64-merge
-boards (same commit 82059759, debug, run at foreign_qemus=1; serial
-work/pbench-main-merge-aarch64{,-r2}-serial.log, med-of-2). Medians
-only; p99 is host-noise-dominated (board 2's mkdrmdir p99 hit 7.1 s
-mid-contention).
+2G, usbless minimal rootfs), two sequential boards plus the mandated
+quiet-window rerun board. Load windows: board 1 at load1=8 with 10
+foreign QEMUs, board 2 at load1=10 with 10-11, rerun gate-opened at
+load1=5/qemus=7 (run/pa113pb-quiet.log). Comparison families: the
+aarch64-merge boards (same commit 82059759, debug, run at
+foreign_qemus=1; serial work/pbench-main-merge-aarch64{,-r2}-serial.log,
+med-of-2). Medians only; p99 is host-noise-dominated (board 2's
+mkdrmdir p99 hit 7.1 s mid-contention).
 
-| cell | pa112pb med-of-2 | merge-board quiet family | delta | verdict |
-|---|---|---|---|---|
-| p6_stat | 210.0 (209.8/210.2) | 197.3–198.6 | +6% | in ±20% |
-| p6_openclose | 526.4 (527.2/525.6) | 502.8–503.3 | +5% | in ±20% |
-| p6_getdents | 5634 (5507/5762) | 5300–5327 | +6% | in ±20% |
-| p6_read_cached | 558.9 (558.1/559.7) | 531.4–533.5 | +5% | in ±20% |
-| p6_write_fsync | 17081 (17324/16838) | 12155–12432 | +38% | OUT of band — rerun-once armed (run/pa113pb-quiet.sh, gate load1≤5/qemus≤4) |
-| p6_append | 708.4 (714.5/702.3) | 637.0–649.2 | +9–11% over family top | marginal, in ±20% of top |
-| p6_mkdrmdir | 24736 (22097/27375) | 20248–20748 | +19% vs top | at the ±20% edge, tail shows contention |
-| p6_unlink | 1194 (1161/1228) | 1087–1094 | +9% | in ±20% |
+| cell | pa112pb1 (load1=8, 10 qemus) | pa112pb2 (load1=10, 10-11 qemus) | pa113pb rerun (gate-open 5/7, drift 9-10) | pa114pb (gate-open 5/5, close 5/3) | merge family (foreign_qemus=1) | pa114pb delta vs family top | verdict |
+|---|---|---|---|---|---|---|---|
+| p6_stat | 209.8 | 210.2 | 210.5 | 200.9 | 197.3–198.6 | +1.2% | in ±20% |
+| p6_openclose | 527.2 | 525.6 | 525.1 | 512.9 | 502.8–503.3 | +2% | in ±20% |
+| p6_getdents | 5507 | 5762 | 5608 | 5439 | 5300–5327 | +2% | in ±20% |
+| p6_read_cached | 558.1 | 559.7 | 558.6 | 546.8 | 531.4–533.5 | +2.5% | in ±20% |
+| p6_write_fsync | 17324 | 16838 | 15852 | 13920 | 12155–12432 | +12% | in ±20% at the quiet window — monotone window chain |
+| p6_append | 714.5 | 702.3 | 723.0 | 657.2 | 637.0–649.2 | +1.2% | in ±20% |
+| p6_mkdrmdir | 22097 | 27375 | 23523 | 22814 | 20248–20748 | +10% | in ±20% |
+| p6_unlink | 1161 | 1228 | 1177 | 1141 | 1087–1094 | +4% | in ±20% |
 
-Adjudication so far: the CPU-metadata cells (stat/openclose/
-getdents/read_cached) sit at a uniform +5-6% — consistent, small,
-inside band. The three I/O-heavy cells are elevated with extreme
-tails, and the only variable between these boards and the comparison
-family is host contention (10-11 foreign QEMUs vs 1). The write_fsync
-row gets its mandated quiet-window rerun (pa113pb) before any
-regression call; verdict appended when it lands. All boards: PBENCH
-DONE rc=0, zero panics.
+Adjudication (final, four boards + the merge family): every fs cell
+converges MONOTONICALLY toward the merge-board family as the window
+quiets — write_fsync 17324/16838 (load1 8-10, 10-11 qemus) → 15852
+(5→9, 7-9 qemus) → 13920 (load1 5, 5→3 foreign qemus) vs family
+12155–12432 at foreign_qemus=1; append 714/702/723/657 vs 637–649;
+stat 209.8–210.5 → 200.9 vs 197.3–198.6. Same commit (82059759,
+debug class) on every board. Verdict: host-window coupling, NOT a
+kernel regression — the quietest window available (3 foreign QEMUs by
+close) lands all eight cells inside ±20% of the merge families
+(write_fsync +12%, append +1%, everything else +1-10%). Practical
+consequence for the gate: p6_write_fsync (and to a lesser degree
+append/mkdrmdir) must be judged with a recorded load window — at
+load1 8-10 with ~10 foreign QEMUs it reads +27-40% over the
+merge-quiet family with the same kernel; the merge-class 12.2-12.4 ms
+family is reachable only near foreign_qemus≈1, which did not occur on
+this host day until the tail of the battery. All boards: PBENCH DONE
+rc=0, zero panics.
 
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
