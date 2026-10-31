@@ -73,6 +73,49 @@ hilogd, appspawn, hdf devhosts — 135+ services, launcher home screen,
 
 ---
 
+## Getting started
+
+Prerequisites: stable Rust (with the `riscv64gc-unknown-none-elf` and
+`riscv64gc-unknown-linux-musl` targets), QEMU ≥ 5.0, and
+`riscv64-linux-gnu-gcc`.
+
+```bash
+git clone https://github.com/topkernel/rux.git && cd rux
+make build            # riscv64 kernel
+make test             # in-kernel unit tests under QEMU
+make run              # boot the minimal rootfs to an interactive shell
+```
+
+C probe sources and the x86_64 musl sysroot ship as tarballs and are
+extracted automatically on the first `make user` / `make test`. Full
+details: [docs/guides/getting-started.md](docs/guides/getting-started.md).
+
+## Driving this repo with an AI agent
+
+This repository is maintained **by AI agents**. Everything an agent
+needs — environment, build map, verification ladder, coding contracts,
+debugging toolkit — is in one file: **[AI_GUIDE.md](AI_GUIDE.md)**.
+Point your agent at it first; then use any of these prompts as-is:
+
+> Read AI_GUIDE.md, then build the kernel for riscv64, run
+> `make test`, and boot `make run` to a shell. Report the test pass
+> count and any failure with serial-log excerpts.
+
+> Read AI_GUIDE.md. Here is the failure I observed: `<paste panic
+> excerpt / test name / LTP case>`. Symbolize it, find the root
+> cause, fix it, and verify with `make test` plus a boot. Commit in
+> English per AGENTS.md.
+
+> Read AI_GUIDE.md. Implement `<syscall or feature>` to the POSIX
+> contract, add a guest-side probe under `test/`, extend the
+> in-kernel tests, and pass the full verification ladder.
+
+> Read AI_GUIDE.md and AGENTS.md. Review `kernel/src/<subsystem>`
+> against the syscall contract and the merge-gate checklist; report
+> findings as file:line references with severity.
+
+---
+
 ## Platforms
 
 | | riscv64 | x86_64 | aarch64 |
