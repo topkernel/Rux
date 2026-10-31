@@ -218,6 +218,38 @@ pub fn read_counter() -> u64 {
     (lo as u64) | ((hi as u64) << 32)
 }
 
+/// CR4.SMAP (bit 21): Supervisor-Mode Access Prevention. When set, the
+/// kernel can only touch user pages through the uaccess primitives
+/// (which bracket the copy with STAC/CLAC); any stray direct
+/// dereference of a user pointer faults into the exception table — the
+/// same default-deny the riscv64 port gets from leaving sstatus.SUM
+/// clear. Enables usercopy semantics like the reference kernel's;
+/// without it the low identity-mapped PML4[0] window let
+/// copy_from_user(VA 1) silently read physical page 1 instead of
+/// returning EFAULT (prlimit64 new_rlim test, 2026-10-31 review).
+#[allow(dead_code)] // pending the kernel-wide user-pointer audit (2026-10-31)
+pub fn enable_smap() {
+    // CPUID leaf 7 subleaf 0, EBX bit 20 = SMAP capability.
+    let (_, _, _, d7) = cpuid(7, 0);
+    if d7 & (1 << 20) == 0 {
+        crate::println!("arch: SMAP not available, leaving CR4 untouched");
+        return;
+    }
+    // SAFETY: CR4 update with the SMAP bit only; CPUID gated. BIOS may
+    // already have it set — the or is idempotent.
+    unsafe {
+        core::arch::asm!(
+            "movq %cr4, %rax",
+            "orq {bit}, %rax",
+            "movq %rax, %cr4",
+            bit = const (1u64 << 21),
+            out("rax") _,
+            options(nomem, nostack, att_syntax)
+        );
+    }
+    crate::println!("arch: CR4.SMAP enabled");
+}
+
 /// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).
 ///
 /// NOTE: `subleaf` is only meaningful for leaves that use ECX as a

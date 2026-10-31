@@ -187,7 +187,7 @@ fn try_expand_stack(
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
     // R7-C3: re-check under the lock. The already_mapped walk at entry was
     // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
     // mapped", both allocate+zero (+read for file VMAs), and the second
@@ -601,7 +601,7 @@ pub fn handle_mm_fault(
                     }
                 }
                 let _pte_guard =
-                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                    crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
                 if let Some(now) = read_pte_raw(root_ppn, page_base) {
                     if is_protnone_marker(now) {
                         let new_pte = (now & !0x3FF) | flags;
@@ -901,7 +901,7 @@ pub fn handle_mm_fault(
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
     // R7-C3: re-check under the lock. The already_mapped walk at entry was
     // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
     // mapped", both allocate+zero (+read for file VMAs), and the second
@@ -1204,7 +1204,7 @@ fn anon_faultaround_forward(
         let page_ptr = phys_to_virt(PhysAddr::new(phys)).bits() as *mut u8;
         unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
 
-        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
         // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may
         // have installed the page between the lock-free walk and here.
         if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
@@ -1483,7 +1483,7 @@ fn handle_swap_fault(
     // and pte_flags are built from valid VMA permissions. The page is exclusively owned.
     // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
     // finished above, so no I/O happens inside the irqsave section.
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock_irqsave();
     // R7-C3: re-check under the lock (same double-fault race as the demand
     // paths). The swap-in page is exclusively owned, so freeing on loss is
     // safe; the swap slot is freed by the winner.
