@@ -3164,8 +3164,44 @@ impl Task {
                     return false;
                 }
 
-                // Set need_resched flag on target CPU and send IPI if cross-CPU
-                crate::sched::resched_cpu(target_cpu as usize);
+                // Dispatch the woken task: prefer an idle CPU within the
+                // wakee's affinity (the reference's select_idle_sibling +
+                // remote-enqueue shape); only when none is idle, set
+                // need_resched on the wakee's previous CPU.
+                //
+                // Why this matters for IPC throughput (perf-ipc lane,
+                // ipcdisc2 timeline evidence): the old unconditional
+                // resched of the previous CPU pokes the WAKER's own (busy)
+                // CPU, which preempts the sender at trap-exit and
+                // serializes sender and receiver into a preempt ping-pong
+                // on one CPU while the other CPU stays parked — a
+                // 74-byte unix-stream record cost ~275 us of dance
+                // (wake 19us + preempt-switch 56us + receiver cycle
+                // 131us + sender cycle 86us) against the reference's
+                // ~2.5 us with the receiver drained concurrently on the
+                // idle CPU. Dispatching the wakee to the idle CPU lets
+                // the sender run unmolested (its trap-exit preempt never
+                // fires — no NEED_RESCHED on its CPU) and the receiver
+                // runs in parallel. The GLOBAL run queue keeps the IPI
+                // advisory: whichever CPU schedules first picks the task,
+                // so a sender that blocks immediately after the wake
+                // (pipe echo, futex handoff) still gets the in-place
+                // handoff from its own schedule().
+                let allowed = (*task).cpus_allowed();
+                match crate::sched::claim_idle_cpu_for(allowed) {
+                    Some(idle_cpu) => {
+                        crate::sched::resched_cpu(idle_cpu);
+                    }
+                    None => {
+                        // No idle CPU: poke a busy CPU only when the wakee
+                        // wins the wakeup-preemption comparison (see
+                        // preempt_check_wake) — the old unconditional
+                        // resched of the previous CPU forced a preempt
+                        // dance per record on same-CPU sender/receiver
+                        // pairs.
+                        crate::sched::preempt_check_wake(task);
+                    }
+                }
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue

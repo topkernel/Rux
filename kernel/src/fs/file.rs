@@ -1517,6 +1517,33 @@ pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
     v
 }
 
+/// Append `len` bytes from user address `src_user` to `dst`, one copy,
+/// no zero-fill of the appended window (perf-ipc: the writev gather used
+/// to resize(+0) — a memset of every iovec — before copy_in overwrote
+/// it). Returns false on a faulting user range or a failed reservation
+/// with NOTHING appended (the uncopied tail is discarded unexposed).
+pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: usize) -> bool {
+    let start = dst.len();
+    if dst.try_reserve_exact(len).is_err() {
+        return false;
+    }
+    // SAFETY: capacity covers start..start+len; copy_from_user fills all
+    // of it or we return without exposing the bytes (set_len runs only
+    // on the fully-copied path).
+    unsafe {
+        let copied_ok = crate::arch::uaccess::copy_from_user(
+            dst.as_mut_ptr().add(start),
+            src_user as *const u8,
+            len,
+        ) == 0;
+        if !copied_ok {
+            return false;
+        }
+        dst.set_len(start + len);
+    }
+    true
+}
+
 pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)

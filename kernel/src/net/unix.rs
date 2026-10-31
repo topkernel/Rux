@@ -1221,9 +1221,15 @@ fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
 /// (DGRAM sendto). `files` is the SCM_RIGHTS payload (already resolved
 /// from the sender's fd table). `cred` is the SCM_CREDENTIALS triple
 /// (kernel-filled from the sending task).
+///
+/// `data` is OWNED: the successful enqueue moves the Vec straight into
+/// the queued segment (zero further copies). The syscall layer builds
+/// this Vec with the ONE user copy of the payload (perf-ipc: the old
+/// `&[u8]` + `data.to_vec()` at the enqueue made every unix send a
+/// double copy — staged user→kernel, then kernel→segment).
 pub fn unix_send(
     sock: &Arc<UnixSocket>,
-    data: &[u8],
+    data: alloc::vec::Vec<u8>,
     files: Vec<Arc<File>>,
     cred: Option<UnixCred>,
     dest: Option<&UnixAddr>,
@@ -1750,8 +1756,9 @@ pub fn unix_send(
                 }
                 let charge = seg_charge(data.len());
                 q.charge += charge;
+                let sent_len = data.len();
                 q.segs.push_back(UnixSeg {
-                    data: data.to_vec(),
+                    data,
                     files,
                     cred,
                     src,
@@ -1768,7 +1775,7 @@ pub fn unix_send(
                 if fid != 0 {
                     crate::syscall::misc::epoll_notify_file(fid);
                 }
-                return Ok(data.len());
+                return Ok(sent_len);
             }
         }
 
@@ -2191,7 +2198,72 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
     }
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
-    match unix_send(&socket, buf, Vec::new(), None, None, nonblock, deadline) {
+    // Owned-Vec send (perf-ipc): one copy here (buf is the generic write
+    // path's staging slice); write(2) on a unix socket normally takes the
+    // unix_write_user direct path instead — zero staging.
+    let data = buf.to_vec();
+    match unix_send(&socket, data, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// write(2)/writev fast path for AF_UNIX: build the segment with the ONE
+/// user→kernel copy (no staging buffer, no second copy at the enqueue).
+/// Mirrors pipe_write_user. `src` must be access_ok-validated for `count`
+/// bytes. A faulting source is EFAULT with nothing sent (the generic
+/// staged path's contract).
+pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
+    use crate::arch::uaccess::copy_from_user;
+    // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
+    // private_data holds the UnixSocket Arc installed at open. `count`
+    // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
+    // allocation per call, same heap discipline as the generic staging.
+    let socket = match unsafe { unix_of_file(file) } {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    if *socket.shut_wr.lock() {
+        return -32; // EPIPE
+    }
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+
+    let mut kbuf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if kbuf.try_reserve_exact(count).is_err() {
+        return -12; // ENOMEM
+    }
+    // SAFETY: capacity is exactly count; copy_from_user fills it before
+    // set_len exposes the bytes. A partial copy is EFAULT with nothing
+    // sent — the exact contract the generic staged path had (its staged
+    // copy_in returned EFAULT on a first-chunk fault, no short send).
+    unsafe {
+        let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
+        if uncopied > 0 {
+            return -14; // EFAULT
+        }
+        kbuf.set_len(count);
+    }
+    match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// writev(2) gather entry for DGRAM/SEQPACKET unix sockets: hand the
+/// already-gathered kernel buffer to the send engine OWNED (the generic
+/// fallback would route through write_slice → a second copy at the
+/// enqueue). Returns write(2)-style isize.
+pub fn unix_write_slice_owned(file: &File, gathered: alloc::vec::Vec<u8>) -> isize {
+    // SAFETY: dispatcher verified ops identity (unix_file_of_file in
+    // sys_writev) — private_data holds the UnixSocket Arc.
+    let socket = match unsafe { unix_of_file(file) } {
+        Some(s) => s,
+        None => return -9,
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+    match unix_send(&socket, gathered, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => n as isize,
         Err(e) => e as isize,
     }

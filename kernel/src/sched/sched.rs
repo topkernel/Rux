@@ -215,6 +215,19 @@ impl GlobalRunQueue {
         Some(cpu)
     }
 
+    /// Claim an idle CPU in `affinity` for a wake dispatch: find one and
+    /// atomically clear its idle bit, so two racing wakes cannot both
+    /// target it. Returns the claimed CPU, or None when no idle CPU is
+    /// available (or the racing claim lost).
+    pub fn claim_idle_cpu(&self, affinity: u32) -> Option<usize> {
+        let cpu = self.find_idle_cpu(affinity)?;
+        if self.clear_idle(cpu) {
+            Some(cpu)
+        } else {
+            None
+        }
+    }
+
     /// Total load across all classes (for informational purposes).
     /// Expose total nr_running for diagnostic use.
     pub fn grq_nr_running() -> usize {
@@ -1241,6 +1254,61 @@ pub fn resched_cpu(cpu: usize) {
             let this_cpu = crate::arch::cpu_id() as usize;
             if this_cpu != cpu {
                 crate::arch::ipi::send_reschedule_ipi(cpu);
+            }
+        }
+    }
+}
+
+/// Claim an idle CPU (within `affinity`) for a wake dispatch (perf-ipc):
+/// the wake path's public entry for idle steering (see
+/// `Task::wake_up_impl`). The claim atomically clears the idle bit so two
+/// racing wakes cannot both dispatch to the same CPU.
+pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
+    grq().claim_idle_cpu(affinity)
+}
+
+/// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke
+/// a CPU only when the wakee actually wins the wakeup-preemption
+/// comparison — the reference's check_preempt_curr semantics. Policy
+/// dispatch mirrors enqueue_task's checks.
+pub fn preempt_check_wake(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: task is validated non-null by the caller (Task::wake_up);
+    // the check fns only read per-CPU current slots and task fields.
+    unsafe {
+        let allowed = (*task).cpus_allowed();
+        match (*task).policy() {
+            SchedPolicy::Fifo | SchedPolicy::Rr => check_rt_preempt(task, allowed),
+            SchedPolicy::Deadline => check_dl_preempt(task, allowed),
+            _ => {
+                // CFS: the vruntime-credit comparison is unusable as a
+                // wakeup gate in this tree — the sleeper-credit clamp
+                // (enqueue floor = min_vruntime − SCHED_LATENCY_NS) and
+                // the place-on-wake adjustments hold a freshly-pinged
+                // peer permanently a few ms of vruntime "behind" its
+                // running producer, so a raw check_cfs_preempt passes on
+                // EVERY wake of a ping-pong receiver and re-creates the
+                // per-record preempt dance (measured: parent +~10 ms
+                // vruntime jumps at requeue clamps, CHG probe 2026-10-31).
+                // Gate on the MEASURED wait instead: a wakee that last ran
+                // within one scheduling-latency window (its producer is
+                // mid-batch — IPC drains, log readers, socket pairs) is
+                // left to the slice/handoff machinery (the reference
+                // batches exactly this way); a wakee that waited a full
+                // latency window or more keeps its immediate preempt
+                // (the starvation/latency case the wakeup preemption
+                // exists for). exec_start holds the last PICK clock; at
+                // wake, sched_clock − exec_start ≈ last run + sleep, and
+                // the last run is µs-to-ms against a 6 ms threshold.
+                let se = (*task).sched_entity();
+                let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
+                let waited = crate::sched::fair::sched_clock().saturating_sub(exec_start);
+                if exec_start != 0 && waited < crate::sched::fair::SCHED_LATENCY_NS {
+                    return;
+                }
+                check_cfs_preempt(task, allowed);
             }
         }
     }
@@ -6761,6 +6829,20 @@ pub fn cpu_idle_loop() -> ! {
             WW_IDLE_PHASE[cpu_id].store(3, core::sync::atomic::Ordering::Release);
             if crate::console::uart_has_data() {
                 crate::console::read_waitq().wake_up_one();
+            }
+
+            // Close the IPI-before-halt window for wake dispatches to an
+            // idle CPU (perf-ipc): a resched IPI that lands between the
+            // nr_running recheck above and the halt below is SERVICED but
+            // consumed — the subsequent WFI would sleep with the task
+            // enqueued and the idle bit already cleared by the claim, and
+            // nothing wakes us until the next tick. The IPI handler sets
+            // our NEED_RESCHED flag; honoring it here (the reference's
+            // need_resched-check-before-halt discipline) skips the halt
+            // and the loop's schedule() picks the dispatched task.
+            if need_resched() {
+                grq().clear_idle(cpu_id);
+                continue;
             }
 
             // Enter WFI to halt CPU until next interrupt (timer, UART, IPI).
