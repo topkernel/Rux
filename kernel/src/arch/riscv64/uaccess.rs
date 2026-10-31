@@ -415,9 +415,6 @@ pub fn strncpy_from_user<'a>(from: *const u8, max_len: usize, buf: &'a mut [u8])
     // Note (kept from the byte-loop era): a NUL at index 0 (empty string)
     // is a SUCCESS returning an empty slice — callers rely on it for
     // empty-argument execs and openat("") -> ENOENT.
-    let limit = core::cmp::min(max_len, buf.len());
-    let limit = core::cmp::min(limit, max);
-
     // (perf-syscall lane) CHUNKED copy, scanning kernel memory for the
     // NUL after each chunk. The old byte-at-a-time loop paid one
     // exception-safe accessor call PER CHARACTER (each with its own AC
