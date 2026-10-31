@@ -51,6 +51,14 @@ pub struct FsStruct {
     /// here it just reports success for the matching path once.
     pivot_put_old: RwSpinlock<Option<alloc::vec::Vec<u8>>>,
 
+    /// True when the current root was installed by pivot_root(2) or by
+    /// setns(2) entering a pivoted mount namespace (NOT by plain chroot).
+    /// setns back into a non-pivoted namespace must then reset the root
+    /// to that ns's root — the pivot's whole purpose is to be undone by
+    /// the namespace jump (OH beget: pivot into the sandbox, setns back
+    /// to the default ns for the rest of the boot).
+    root_is_pivot: RwSpinlock<bool>,
+
     /// File creation mask
     umask: AtomicU32,
 }
@@ -64,6 +72,7 @@ impl FsStruct {
             cwd_dentry: RwSpinlock::new(None),
             root_dentry: RwSpinlock::new(None),
             pivot_put_old: RwSpinlock::new(None),
+            root_is_pivot: RwSpinlock::new(false),
             umask: AtomicU32::new(0o022),  // Default umask
         }
     }
@@ -166,6 +175,17 @@ impl FsStruct {
         *self.pivot_put_old.write() = None;
     }
 
+    /// Whether the current root came from pivot_root(2)/setns (see the
+    /// field doc) — drives setns(CLONE_NEWNS) root re-anchoring.
+    pub fn root_is_pivot(&self) -> bool {
+        *self.root_is_pivot.read()
+    }
+
+    /// Set/clear the pivot-root marker (sys_pivot_root, ns::setns).
+    pub fn set_root_is_pivot(&self, v: bool) {
+        *self.root_is_pivot.write() = v;
+    }
+
     /// Copy the full filesystem context (cwd/root strings, cwd/root
     /// dentries) from `other` — fork()'s non-CLONE_FS duplicate. The
     /// old fork path copied only the cwd STRING, so a forked child of
@@ -180,6 +200,8 @@ impl FsStruct {
         *self.cwd_dentry.write() = cd;
         let rd = other.root_dentry.read().clone();
         *self.root_dentry.write() = rd;
+        let rp = *other.root_is_pivot.read();
+        *self.root_is_pivot.write() = rp;
     }
 
     // ==================== Umask Operations ====================

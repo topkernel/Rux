@@ -1597,7 +1597,7 @@ pub fn unix_send(
                     let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 3000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("hilog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("hilog[{}] {}{}", n, p, s);
                     }
                 }
                 // Spawn-chain tap (launcher hunt, b16): the appspawn ->
@@ -1634,7 +1634,7 @@ pub fn unix_send(
                     // full OH boot's spawn-cohort traffic (~4.5MB serial).
                     if n < 30000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("slog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("slog[{}] {}{}", n, p, s);
                     }
                 }
                 // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
@@ -1663,7 +1663,7 @@ pub fn unix_send(
                     let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 6000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("alog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("alog[{}] {}{}", n, p, s);
                     }
                 }
                 // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
@@ -1688,7 +1688,7 @@ pub fn unix_send(
                     let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 10000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("ilog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("ilog[{}] {}{}", n, p, s);
                     }
                 }
             }

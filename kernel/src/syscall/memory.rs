@@ -2560,7 +2560,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     // first), so a VMA-shape filter can't catch the move — and MREMAP_FIXED
     // is rare outside CFI/JIT moves anyway: always trace it.
     if (flags & MREMAP_FIXED) != 0 {
-        crate::pr_info!(
+        crate::pr_debug!(
             "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
             crate::process::current_pid(),
             old_addr,

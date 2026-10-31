@@ -2358,7 +2358,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         FUTEX_CMP_REQUEUE => "CMP-REQ",
                         _ => "other",
                     };
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "FXRS #{} {} tid {} comm='{}' uaddr={:#x} val={:#x} u2={:#x} v3={:#x} tmo={:#x}",
                         n,
                         cmd,
@@ -2372,7 +2372,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     );
                     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
                     rwfz_op_log(uaddr, op, val, r);
-                    crate::pr_warn!("FXRS #{} -> ret={}", n, r);
+                    crate::pr_debug!("FXRS #{} -> ret={}", n, r);
                     return r;
                 }
             }
