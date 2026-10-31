@@ -736,6 +736,26 @@ USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
 3. The re-leak producer / samgr service-start timeouts (15-101s) remain
    the deep wall behind everything; the perf lane owns them.
 
+### lb44-lb46 addenda (the fast-fail's engine, still one facet short)
+- lb44: errcode 2097193 again; euid=3058 correct; NO IsOsAccountExists
+  query ENQ, NO proxy-failure line at the moment, accountmgr did NOT
+  restart — the failing call never left foundation's userspace. The
+  ipc-skeleton keys ("SendRequest", "work thread") landed after lb44.
+- lb45 (dfx=poolcensus): ZERO POOL census lines all boot = no proc ever
+  had queued todo at census time — the "queued work undrained" pool
+  shape is absent; the exhaustion shape (all workers parked as CLIENTS,
+  SendRequest failing locally) is invisible to that census gate.
+- lb46: reader freed the code-46 after a 160s SILENT handler (sys=16
+  parked in a nested binder ioctl the whole window; no TAG_LOGI even
+  printed), then OnStartUserDone(100, 2097193) again. The osaccount
+  query chain under load is the engine; its exact failing leg (ipc
+  work-thread exhaustion vs a 160s-stuck nested call returning false)
+  is the ONE remaining unnamed hop. "SendRequest: Invalid samgr stub
+  object" x2 and SendRequestInner cost:1583ms lines appear on these
+  boots.
+- Screen on every boot this session: the frozen bootanimation frame
+  (md5 5f8b704d / 06b933b4 class).
+
 ### Artifacts this session (all committed+pushed)
 - Instrumentation: AMS46 RIPPLE (a7189470), THREAD-SNAPSHOT (19b195f3),
   HILOG-AMS WARN cohort + account-kits/query-verdict keys, AMS46-R parcel
