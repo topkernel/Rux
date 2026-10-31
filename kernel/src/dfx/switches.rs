@@ -467,24 +467,16 @@ pub enum DfxSwitch {
     /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
     /// default.
     SigTrace,
-}
-
-const SWITCH_COUNT: usize = 5;
-    /// dfx=sysforensic (perf-syscall lane): per-syscall forensic
-    /// instrumentation — the SYSCALL_RING entry/exit records (NOVMA
-    /// crash replay), the post-translate LASTSYS latch, the per-task
-    /// last_calls/init_calls/birth_calls rings, the fail-tail ring and
-    /// the sc-series comm-gated hooks (appioctl/applog/appconn/
-    /// prctl-einval/missstat/openmiss). Together these cost a dozen
-    /// atomics plus comm scans on EVERY syscall; they exist for hunt
-    /// boots only. The pre-translate LASTSYS latch at dispatch entry
-    /// stays always-on (taskdump's lastsys= field reads it; 3 stores).
-    /// OFF by default — boot with dfx=sysforensic when a hunt needs
-    /// the rings or the comm-gated prints.
+    /// dfx=sysforensic (perf-syscall lane): arms the per-syscall forensic
+    /// instruments the dispatcher carried unconditionally before the perf
+    /// sprint — the SYSCALL_RING double-record, the per-task fail rings,
+    /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
+    /// 12 atomics per syscall for them).
     SysForensic,
 }
 
-const SWITCH_COUNT: usize = 5;
+const SWITCH_COUNT: usize = 52;
+
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -576,7 +568,7 @@ impl DfxSwitch {
             DfxSwitch::TfdCensus => 48,
             DfxSwitch::ScmTap => 49,
             DfxSwitch::SigTrace => 50,
-            DfxSwitch::SysForensic => 50,
+            DfxSwitch::SysForensic => 51,
         }
     }
 
