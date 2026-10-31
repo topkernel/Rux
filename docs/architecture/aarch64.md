@@ -111,9 +111,11 @@ the MMIO alias), CPU interface by system registers. Notes that bit us:
 
 ## Diagnostics on this port
 
-- printk is **not routed** to the PL011 console path yet — only
-  `print_status` table lines and `dfx::backtrace::ConsoleWriter` raw
-  writes appear on serial; `pr_info` output is dropped.
+- printk is routed to the PL011 (`console.rs` `puts_batch` aarch64
+  arm: per-byte DR stores at the fixmap VA — the same contract as
+  `putc`); `pr_info` and friends appear on serial from early boot on.
+  No recursion hazard: IMSC arms only RX and receive-timeout, so the
+  console's own DR writes never raise a serial IRQ.
 - `dfx=` boot flags are unusable (the EL2 trampoline clobbers the DTB
   pointer x0 before cmdline parsing; the cmdline falls back to the
   default string) — compile-time features gate the probes instead.
