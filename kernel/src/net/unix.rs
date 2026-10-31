@@ -2113,6 +2113,24 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
     sock.accept_queue.lock().clear();
+    // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
+    // queue at close time are about to be released — the receiver died
+    // (or stopped reading) before the ancillary segment was touched.
+    if crate::dfx::scmtap::enabled() {
+        let q = sock.recv_queue.lock();
+        let mut nfds = 0usize;
+        let mut segs = 0usize;
+        for seg in q.segs.iter() {
+            if !seg.files.is_empty() {
+                segs += 1;
+                nfds += seg.files.len();
+            }
+        }
+        drop(q);
+        if nfds > 0 {
+            crate::dfx::scmtap::tap_orphan(nfds, segs);
+        }
+    }
     // Wake senders blocked on OUR queue and our own waiters.
     sock.wait_queue.wake_up_all();
 }
@@ -2255,6 +2273,9 @@ pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
                 if r.len == 0 {
                     return 0; // EOF
                 }
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                }
                 // SAFETY: dst validated with access_ok(count) by the
                 // caller; r.len <= stage <= count.
                 if unsafe {
@@ -2294,6 +2315,15 @@ pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
                 let n = r.len;
                 if n == 0 {
                     break; // peer EOF
+                }
+                // scmtap: read(2) cannot report ancillary data — the
+                // queued fds are released here (Linux closes them the
+                // same way). A fd-carrying segment touched by a plain
+                // read is the dbus "message refers to more unix fds
+                // than were sent" corruption shape, so make the loss
+                // visible when hunting (dfx=scmtap).
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // SAFETY: user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv

@@ -629,12 +629,23 @@ unsafe fn deliver_unix_cmsgs(
     for f in files {
         let fd = match fdtable.alloc_fd() {
             Some(f) => f,
-            None => return Err(unwind(&mut new_fds, -(errno::EMFILE as i64))),
+            None => {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_rx_drop("EMFILE", files.len());
+                }
+                return Err(unwind(&mut new_fds, -(errno::EMFILE as i64)));
+            }
         };
         if fdtable.install_fd(fd, f.clone()).is_err() {
+            if crate::dfx::scmtap::enabled() {
+                crate::dfx::scmtap::tap_rx_drop("EMFILE", files.len());
+            }
             return Err(unwind(&mut new_fds, -(errno::EMFILE as i64)));
         }
         new_fds.push(fd as i32);
+    }
+    if crate::dfx::scmtap::enabled() {
+        crate::dfx::scmtap::tap_rx(&new_fds);
     }
 
     // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
@@ -677,6 +688,9 @@ unsafe fn deliver_unix_cmsgs(
         // No control buffer room: the fds cannot be reported — close them
         // and zero msg_controllen (Linux semantics: the caller's CMSG walk
         // must not see stale user-memory cmsg_len values).
+        if crate::dfx::scmtap::enabled() {
+            crate::dfx::scmtap::tap_rx_drop("NOCTL", new_fds.len());
+        }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
@@ -685,6 +699,9 @@ unsafe fn deliver_unix_cmsgs(
         return Ok(0);
     }
     if !access_ok(control, cmsg.len()) {
+        if crate::dfx::scmtap::enabled() {
+            crate::dfx::scmtap::tap_rx_drop("EFAULT", new_fds.len());
+        }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
@@ -692,6 +709,9 @@ unsafe fn deliver_unix_cmsgs(
     }
     // SAFETY: control/cmsg.len() validated with access_ok above.
     if copy_to_user(control as *mut u8, cmsg.as_ptr(), cmsg.len()) != 0 {
+        if crate::dfx::scmtap::enabled() {
+            crate::dfx::scmtap::tap_rx_drop("EFAULT", new_fds.len());
+        }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
         }
@@ -2939,8 +2959,16 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         // (msghdr offsets 32/40).
         let (scm_files, want_cred) = match parse_unix_cmsgs(msg_ptr) {
             Ok(f) => f,
-            Err(e) => return e,
+            Err(e) => {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_tx_err(e);
+                }
+                return e;
+            }
         };
+        if crate::dfx::scmtap::enabled() && !scm_files.is_empty() {
+            crate::dfx::scmtap::tap_tx(scm_files.len());
+        }
         // P2 SCM_CREDENTIALS: the kernel fills the sender's own
         // {pid,uid,gid} (Linux semantics — user-supplied values would be
         // a spoofing vector).
@@ -2991,7 +3019,12 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             deadline,
         ) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_tx_err(e as i64);
+                }
+                e as i64
+            }
         };
     }
 
