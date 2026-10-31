@@ -183,6 +183,8 @@ def main():
     print(f"[scan] {len(tests)} tests, chunk={args.chunk}", flush=True)
 
     results = {}  # name -> (class, rc, tail)
+    if args.keep_logs:
+        os.makedirs(args.keep_logs, exist_ok=True)
     t0 = time.time()
     for ci in range(0, len(tests), args.chunk):
         chunk = tests[ci:ci + args.chunk]
