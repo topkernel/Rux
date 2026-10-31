@@ -425,6 +425,40 @@ lb1x boot ran WITHOUT it; that alone explains lb13/14/15's zero heals).
   itself runs 41s (crypto+syscalls under the collapse), same family as
   the deviceauth 129s / asset_service 135s census stalls.
 
+### lb20 ENDGAME (read before next boot) — the wedge is now NAMED
+lb20 (full 2400s, WAKE-HEAL + need_resched insurance): the healthiest boot
+yet, AND the account-chain wedge is now a concrete starvation cascade:
+1. accountmgr SA LOADED for the first time ever ("SAFWK: StartSystemAbilityTask
+   accountmgr SA:200 init finished, 252 ms" @221.9s, pid 976; SACB callbacks
+   DELIVERED to tid 976 x16 @268-311s — the samgr->client direction works).
+2. softbus_server (pid 724) registered @228.8s then went SILENT — its worker
+   never answers. Its pick claim was reset once (STALE-CLAIM-RESET by_cpu=0
+   pid=724 @841.7s) with no recovery. This is the R85 "linked but starved /
+   pick-skip wedge" family (orphaned on_cpu mark / stale claim), NOT a leak.
+3. Consequence cascade, live in the log: device_manager (pid 568) code-3
+   handler waits ~5.24s (softbus LNN timeout) PER CALL, x102 SLOW-TXNs from
+   distributeddata's DB_TaskExecutor in a 5.75s retry loop; 104 stale-binder-
+   buffer reclaims of pid 568 (its own waiters' reply buffers age out);
+   distributed account queries (SAREG code=4 ohos.account.f...) spam accountmgr
+   x dozens/second from 355s on; bootevent.account.ready never SET (the
+   param_watcher wait at 211s hangs); useriam watchdog-killed at 641s (own
+   OS_DfxWatchdog) and restarts (687->1064->1135); screen stays md5 06b933b4.
+4. NO PARKED-LEAK on any softbus thread; last WAKE-STRANDED at 315s (pid 318
+   behind incumbents pid 684 pc=0x102 and pid 1 pc=1) — the strand/heal
+   machinery QUIETED after 315s. The final state is a stable starvation
+   equilibrium, not a collapse in progress.
+=> NEXT KERNEL TARGET: the R85 pick-skip/starved-linked shape on softbus
+   threads. Evidence kit for the next boot: dfx=taskdump,wwcensus (W3
+   refusal + frozen-exec-slot + taskdump of pid 724's threads at the stall).
+   The harvest_relink / orphan-watch machinery fired once (841s) but did not
+   recover the task — check why the relink didn't stick (pick-skip why=
+   reason codes in fair.rs decision legs).
+=> OH-side note: even with accountmgr up, the DISTRIBUTED account path
+   (ohos.account.foreign/distributed) drags device_manager/softbus into the
+   critical path at boot. The hmdfs-disable image edit killed hmdfs, but
+   distributeddata's device_manager dependency remains. If the kernel
+   starvation is fixed, this chain should complete on its own.
+
 ### Boot inventory this session
 lb16 (merged heal): anim.ready 221s, distributeddata watchdog-killed
   (OS_DfxIpcCheck KOT-KILL 15 members) at 260s, wedge same class.
