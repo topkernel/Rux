@@ -97,7 +97,10 @@ while True:
         text = line.decode("utf-8", "replace")
         log.write(f"[{stamp:9.3f}] {text}\n")
         for mk in MARKERS:
-            if mk in text and mk not in seen:
+            # "not set" bootevent warnings are the negative of the event —
+            # a bare substring match turned lb17's "launcher.ready not set"
+            # WARNING into a false marker.
+            if mk in text and "not set" not in text and mk not in seen:
                 seen[mk] = stamp
                 log.write(f"[{stamp:9.3f}] ===MARKER {mk}===\n")
                 log.flush()
