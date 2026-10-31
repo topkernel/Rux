@@ -25,6 +25,11 @@ pub fn arch_init() {
 pub fn init() {
     println!("arch: Initializing x86_64 architecture...");
 
+    // Default-deny for direct kernel-side user-pointer dereferences
+    // (see enable_smap): user memory is reachable ONLY through the
+    // uaccess primitives, matching the riscv64 SUM-clear semantics.
+    cpu::enable_smap();
+
     // Set up the IDT, TSS, GDT (user + TSS entries) and the syscall MSRs.
     trap::init();
     trap::init_syscall();

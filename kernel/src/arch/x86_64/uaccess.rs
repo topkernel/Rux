@@ -43,6 +43,9 @@ __x64_copy_to_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     cld
 1:  rep movsb
     .pushsection __ex_table, "a"
@@ -51,8 +54,14 @@ __x64_copy_to_user:
     .quad 3f
     .popsection
 2:  movq %rcx, %rax          /* rcx == 0 on completion */
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 
 /* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
@@ -63,6 +72,9 @@ __x64_copy_from_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     cld
 1:  rep movsb
     .pushsection __ex_table, "a"
@@ -71,8 +83,14 @@ __x64_copy_from_user:
     .quad 3f
     .popsection
 2:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 
 /* __x64_clear_user: rdi = user dst, rsi = n.
@@ -83,6 +101,9 @@ __x64_clear_user:
     movq %rsi, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     xorl %eax, %eax
     cld
 1:  rep stosb
@@ -92,8 +113,14 @@ __x64_clear_user:
     .quad 3f
     .popsection
 2:  xorl %eax, %eax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 "#,
     options(att_syntax)
