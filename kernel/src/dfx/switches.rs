@@ -459,9 +459,6 @@ pub enum DfxSwitch {
     /// fd dies between logind → dbus-daemon → pam (the "Session c1
     /// logged out" milliseconds-after-create shape). OFF by default.
     ScmTap,
-}
-
-const SWITCH_COUNT: usize = 5;
     /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
     /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
     /// handler, restorer, pc) and one per restore_sigcontext_aarch64
@@ -471,7 +468,8 @@ const SWITCH_COUNT: usize = 5;
     SigTrace,
 }
 
-const SWITCH_COUNT: usize = 5;
+const SWITCH_COUNT: usize = 51;
+
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -562,7 +560,7 @@ impl DfxSwitch {
             DfxSwitch::OhHunt => 47,
             DfxSwitch::TfdCensus => 48,
             DfxSwitch::ScmTap => 49,
-            DfxSwitch::SigTrace => 48,
+            DfxSwitch::SigTrace => 50,
         }
     }
 
