@@ -1148,19 +1148,26 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     // Source: the MOUNTPOINT dentry (not the mounted root) — the walk
     // follows mounts on the way but takes the final component without
     // following, so `from` names the covered dentry that carries the
-    // VfsMountInternal.
+    // VfsMountInternal. Intermediate results must cross their mounts
+    // (path_lookup discipline): resolving /mnt/data descends into the
+    // tmpfs mounted on /mnt BEFORE looking up "data" — the old walk
+    // looked "data" up in the ramdisk's /mnt placeholder and OH's
+    // switch_root MS_MOVE /mnt/data → /usr/mnt/data failed ENOENT
+    // (lb9: switch_root.c:121), stranding that tmpfs.
     let src_child = {
         let vfs_root = VFS_STATE.lock().root_dentry.clone()
             .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
         let comps: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
         let mut current = vfs_root;
         for (i, component) in comps.iter().enumerate() {
-            if i + 1 < comps.len() {
-                current = follow_mount(current);
-            }
-            current = current
+            let child = current
                 .lookup_child(component)
                 .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+            current = if i + 1 < comps.len() {
+                follow_mount(child)
+            } else {
+                child
+            };
         }
         current
     };
@@ -2039,6 +2046,26 @@ fn follow_symlink(
         return Ok(dentry);
     }
 
+    // /proc/[pid]/ns/<kind> magic link: TERMINAL for path resolution —
+    // the readlink target "<kind>:[<inum>]" is an nsfs identifier, not a
+    // walkable path (Linux nd_jump_link: opening the link yields an nsfd;
+    // walking the string is always wrong). Return the link dentry itself;
+    // file_open recognizes the (pid, kind) inode and builds the ns fd.
+    // Without this, open("/proc/self/ns/mnt") ENOENTs — OH's beget then
+    // loses InitDefaultNamespace/EnterDefaultNamespace and init stays
+    // stuck inside the sandbox after its pivot_root (the lb-lane
+    // /storage-invisibility root cause).
+    if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if crate::fs::procfs::pid::is_valid_pid(pid_val)
+            && rem >= crate::fs::procfs::NS_LINK_INO_OFF
+            && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+        {
+            return Ok(dentry);
+        }
+    }
+
     // /proc/[pid]/fd/N magic link: resolution goes straight to the target
     // descriptor's dentry, never through the target path STRING — the
     // printed path is stale for unlinked files (O_TMPFILE linkat, LTP
@@ -2452,8 +2479,6 @@ fn vfs_dir_epoch_bump() {
 /// 1. Resolving the parent directory path
 /// 2. Calling the parent's inode_operations->mkdir
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
@@ -2479,6 +2504,13 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
     // mkdir callback, which succeeded.
+    //
+    // EROFS comes AFTER the existence decision (Linux order:
+    // filename_create reports -EEXIST before mnt_want_write can fail
+    // -EROFS): mkdir of an EXISTING name inside a read-only bind returns
+    // EEXIST, not EROFS — OH's sandbox MakeDirRecursive over the ro
+    // /vendor bind treats EEXIST as success (old order aborted the whole
+    // bind chain with EROFS).
     match path_lookup(pathname, LOOKUP_NOFOLLOW) {
         Ok(_) => {
             sbx_mkdir_stage("precheck", -17);
@@ -2496,6 +2528,10 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
             return Err(e);
         }
     }
+
+    // Write-intent guard (mnt_want_write): new names on a MS_RDONLY mount
+    // fail EROFS (LTP needs_rofs family: mkdir03, unlink09, ...).
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = match lookup_parent_dir(pathname) {
         Ok(v) => v,
@@ -2614,18 +2650,20 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 /// umask is applied by the caller (sys_mknodat), matching
 /// do_mknodat's `mode &= ~current_umask()`.
 pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (do_mknodat resolves through
-    // user_path_create, which fails on an existing name).
+    // user_path_create, which fails on an existing name). EROFS after
+    // the existence decision — same order as vfs_mkdir.
     match path_lookup(pathname, LOOKUP_NOFOLLOW) {
         Ok(_) => return Err(errno::Errno::FileExists.as_neg_i32()),
         Err(e) if e == -(errno::constants::ENOENT) => {}
         Err(e) => return Err(e),
     }
+
+    // Write-intent guard after the existence decision (see vfs_mkdir).
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
     let parent_inode = parent_vpath.inode.as_ref()
@@ -2672,16 +2710,17 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
 
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (Linux sys_symlinkat; LTP symlink01
-    // derivatives expect failure when the link name is taken).
+    // derivatives expect failure when the link name is taken). EROFS
+    // after the existence decision — same order as vfs_mkdir.
     if path_lookup(pathname, LOOKUP_NOFOLLOW).is_ok() {
         return Err(errno::Errno::FileExists.as_neg_i32());
     }
+
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
@@ -3925,6 +3964,40 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     && flags & FileFlags::O_PATH == 0
                 {
                     return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32()); // ELOOP
+                }
+                // /proc/[pid]/ns/<kind> magic link (followed — plain open):
+                // the fd IS the namespace reference (Linux nsfs). The
+                // syscall-layer string shortcut only covers non-chrooted
+                // tasks; the generic walk (used by jailed/pivoted tasks —
+                // OH init after its sandbox pivot) lands here via the
+                // terminal follow_symlink rule.
+                if inode.fs_id == crate::fs::inode::FS_ID_PROCFS
+                    && inode.private_data.is_none()
+                    && inode.mode.is_symlink()
+                {
+                    let pid_val = inode.ino / 10000;
+                    let rem = inode.ino % 10000;
+                    if crate::fs::procfs::pid::is_valid_pid(pid_val)
+                        && rem >= crate::fs::procfs::NS_LINK_INO_OFF
+                        && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+                    {
+                        if let Some(kind) =
+                            crate::process::ns::NsKind::from_index(rem - crate::fs::procfs::NS_LINK_INO_OFF)
+                        {
+                            let file = crate::process::ns::build_ns_file(
+                                pid_val as u32,
+                                kind,
+                                flags,
+                            )
+                            .map_err(|e| e)?;
+                            return match get_file_fd_install(file) {
+                                Some(fd) => Ok(fd),
+                                None => {
+                                    Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                                }
+                            };
+                        }
+                    }
                 }
                 // O_PATH on a symlink: install a descriptor-only File on
                 // the link inode (no read/write ops — matches Linux, where
