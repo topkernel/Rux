@@ -465,3 +465,59 @@ Raw-log re-derivation of all three boots:
    foundation/ability/ability_runtime/services/abilitymgr/src/
    ability_manager_service.cpp:9596 (StartUser -> CheckUserParam ->
    OnStartUserDone on ANY failure).
+
+## SEVENTH-SUCCESSOR SESSION (2026-11-01, branch @ fe7dee8a+) — decode CORRECTED; kernel semantics audited clean
+The sixth-successor decode's engine is WRONG in one load-bearing detail, and the
+kernel-side audit closes most of the rest. Facts (OH source at
+/home/william/workspace/oh-robot, reference binder.c v5.10 at /tmp/binder-510.c):
+1. **A kernel BR_DEAD_REPLY does NOT death-mark an IPCObjectProxy.**
+   SendRequestInner marks only on `status == ERR_DEAD_OBJECT`, and ERR_DEAD_OBJECT
+   (c_utils errors.h, BASE_ERR_OFFSET=0) is **+32**. The kernel read-side DEAD
+   arrives as the raw cmd 0x7205 (OnDeadOrFailedReply sets error=cmd); the
+   write-side ioctl errno arrives as -32. Neither equals +32, so a FAILED SEND
+   NEVER MARKS. The ONLY binder-proxy mark is **SendObituary**, reached only from
+   OnBinderDied (a DELIVERED BR_DEAD_BINDER whose cookie is the IPCObjectProxy
+   pointer — armed with cookie=proxy in RegisterBinderDeathRecipient).
+2. SendObituary also notifies recipients → OsAccountDeathRecipient::OnRemoteDied →
+   ResetOsAccountProxy → proxy_=nullptr → self-heal on next GetOsAccountProxy.
+   PERMANENT poison therefore needs the notice dropped (OnBinderDied's refcount
+   legs: "Invalid proxy object" / "failed to increment strong reference count" —
+   both now HILOG-tapped) or recipients already consumed (a SECOND obituary on
+   the same proxy). Kernel cannot produce the second notice: descs
+   (next_desc) and proc ids (NEXT_PROC_ID) are monotonic, no reuse; the
+   arm/clear/DONE state machine and the phase guard match the reference
+   (including DEAD_BINDER_AND_CLEAR via clear_pending).
+3. **Any failing IsOsAccountExists yields 2097193**: AMS's wrapper is
+   `(errCode == 0) && isExist` — proxy null (ERR_ACCOUNT_COMMON_GET_PROXY), send
+   error (raw 0x7205), or isExist=false ALL collapse to "userId not exist".
+   The "silent fast-fail" on lb44/45/46 may be the mark OR a null proxy whose
+   ACCOUNT_LOGE ("failed to get os account service") was dropped by hilog flood
+   — "no line" no longer proves proxy non-null.
+4. lb44 mark-window forensics (fail 266.819-820, 1 ms, ZERO kernel traffic,
+   ripple budget FRESH — window opened 266.818): foundation=864, accountmgr=956
+   (SA 200 registered 178.175, alive at fail). Deaths in the window: usb_host
+   crash loop x4 (SIGSEGV+KOT-KILL; refs held by pid 334, NOT foundation),
+   distributeddata(885) CLEAN EXIT at 258.48 — foundation held 7 refs → 7 dd
+   notices (dd cookies only). lb45: fail 208.830; el5_filekey_manager(311)
+   SIGKILLed 153.95, foundation(912) held 2 refs; accountmgr(990) alive.
+   NO accountmgr death on either boot → the osaccount proxy's own ref was never
+   death-noticed → the silent fail is most likely the NULL-PROXY leg or a
+   failed samgr GetSystemAbility, NOT a death-marked osaccount proxy.
+5. Kernel vs reference audit: BR constants match OH sys_binder.h
+   (BR_FAILED_REPLY nr=17, NOT upstream's 16); no-ctxmgr → BR_DEAD_REPLY matches
+   the reference (2937); thread/proc release, DRS equivalents, notice queueing,
+   arm-on-dead-node immediate queue, ref-0/0 dropping queued notice — all match.
+   Routing: top-level sync → proc todo (survives worker death), nested →
+   originator thread todo — same as reference. Our extra divergence:
+   binder_task_died reaps threads at task exit (reference leaks them; senders
+   hang instead of getting DEAD) — aggressive but reference-equivalent per call.
+6. lb49: samgr itself died once (musl ld.so "Error relocating /system/bin/samgr:
+   _ZN4OHOS3QOS12SetThreadQosE..." — same flake on lb3/lb4) and init did NOT
+   restart it → 90x why=4-no-ctxmgr BR_DEAD_REPLY fail+retry (NOT a poison;
+   callers retry) until boot end. lb50: slow-variant dud (15 SAs at 634s,
+   console silent ~15min).
+7. lb51 (running): release kernel + system-lb2.img + fresh /data + dfx=ams46 with
+   the full net (SENDFAIL/DRS/WERR/ARM+ARMdup/notices at WARN + HILOG verdict
+   keys). It decides between: (a) osaccount send fails kernel-side (SENDFAIL/
+   DRS/WERR name the leg), (b) proxy null (samgr leg), (c) notice-mark (ARM map
+   + notice name the desc/owner).
