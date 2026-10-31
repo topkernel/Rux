@@ -12,6 +12,8 @@ SECS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 SYSIMG = sys.argv[3] if len(sys.argv) > 3 else "run/oh-img/system.img"
 KERNEL = sys.argv[4] if len(sys.argv) > 4 else "target/x86_64-unknown-none/debug/bzImage"
 EXTRA = sys.argv[5] if len(sys.argv) > 5 else ""   # extra kernel cmdline (e.g. "syscost=1")
+if EXTRA and not EXTRA.startswith(" "):
+    EXTRA = " " + EXTRA
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
