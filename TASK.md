@@ -447,12 +447,44 @@ yet, AND the account-chain wedge is now a concrete starvation cascade:
    behind incumbents pid 684 pc=0x102 and pid 1 pc=1) — the strand/heal
    machinery QUIETED after 315s. The final state is a stable starvation
    equilibrium, not a collapse in progress.
-=> NEXT KERNEL TARGET: the R85 pick-skip/starved-linked shape on softbus
-   threads. Evidence kit for the next boot: dfx=taskdump,wwcensus (W3
-   refusal + frozen-exec-slot + taskdump of pid 724's threads at the stall).
-   The harvest_relink / orphan-watch machinery fired once (841s) but did not
-   recover the task — check why the relink didn't stick (pick-skip why=
-   reason codes in fair.rs decision legs).
+### Session close (third successor, 2026-10-31 ~17:50) — LADDER POSITION
+Ladder 1 (foundation survives) NOT yet held; the wall moved from "generic
+collapse" to ONE concrete cluster. Facts at close:
+- lb21 (dfx=wwcensus, same kernel): strand volume COLLAPSED to 6/boot
+  (strand_max 10.4s; lb15/16 class was 17-36) — the heal stack (rotation-
+  proof 2s tick heal + WAKE-HEAL + need_resched insurance) works. All my
+  QEMUs are dead; screen md5 06b933b4 (frozen logo) on lb20/lb21.
+- accountmgr SA loads (both boots); samgr->client callbacks work; the
+  remaining wall is the softbus/device_manager/accountmgr distributed-
+  cluster handshake: every call in that cluster runs multi-second (5.25s
+  device_manager timeouts on lb20; softbus->accountmgr code-14 SLOW-TXNs
+  on lb21), so activation never lands inside the watchdog windows.
+- Stale-claim resets keep regenerating (lb20: pids 497x2/457; lb21: 532x2/
+  584/1092) — the phantom-mark producer is alive but bounded.
+- Branch oh-launcher pushed through 7c850d6d + TASK commits; x3 builds
+  rc=0 (x86_64/riscv64/aarch64); make test ALL PASSED twice (lb18/lb21
+  maketest logs) on the final tree.
+
+### FOURTH-SUCCESSOR ENTRY POINTS (in order)
+1. The softbus starvation (lb20 evidence above): first boot with
+   `dfx=wwcensus` (lb21's recipe), watch pid 7xx softbus_server threads'
+   W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT lines + the PICK-SKIP reason
+   codes in fair.rs's pick decision legs. If a softbus worker is linked-
+   but-skipped with why=on_cpu, the R85 stale_oncpu heal's relink leg is
+   the fix site (it fired STALE-CLAIM-RESET on 724 at 841s on lb20 without
+   recovering the task).
+2. The re-leak engine (unchanged): OS_IPC worker carriers re-acquire
+   phantom +1 every ~200ms (lb17 tail); drops underflow at spinlock.rs:461/
+   rwlock.rs:457 with heap lock instances in the slab region
+   (0xffff88807d28a2d0/0xffff88807df62290/0xffff88807d2876d0 — the last
+   one DEADLOCKED both cpus under kpreempt). Root remains the double-run/
+   wild-write family (sc265/266/73 convictions; r83hunt is the tool).
+3. kpreempt=1 is armed-but-NEGATIVE until guards-held->2s disappear
+   (the false-heal preempts real lock holders; lb19b DEADLOCK proof).
+   Prerequisite: cond_resched at lock-free boundaries of the long kernel
+   loops (fork copy / exit unmap / rmap batches) OR the producer fix.
+4. timerfd_create storm caller still unnamed (4k/s; the 10-line TFDC
+   budget only caught boot-start callers: bluetooth/audio).
 => OH-side note: even with accountmgr up, the DISTRIBUTED account path
    (ohos.account.foreign/distributed) drags device_manager/softbus into the
    critical path at boot. The hmdfs-disable image edit killed hmdfs, but
