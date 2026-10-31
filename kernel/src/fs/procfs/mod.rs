@@ -1062,6 +1062,13 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
 
+    // (perf-syscall lane) prefix gate before the components Vec — this
+    // runs on EVERY non-O_DIRECTORY openat (sys_openat's procfs
+    // shortcut chain); non-proc paths must not allocate here.
+    if !path.starts_with("/proc") {
+        return None;
+    }
+
     // Handle /proc/[pid]/xxx paths directly (lookup() doesn't support PID dirs)
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
