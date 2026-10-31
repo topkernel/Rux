@@ -86,7 +86,25 @@ unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, bloc
 /// Write a Vec<u8> to a block
 // SAFETY: device pointer is valid; bio functions handle buffer lifecycle
 unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
-    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
+    // (perf: the plain bread here read EVERY block it was about to
+    // completely overwrite — a fresh dir block allocated by mkdir was
+    // READ from disk first, one synchronous device round trip per create,
+    // the ~3ms p6_mkdrmdir floor after the publication-drain fix. The
+    // reference kernel never reads a block it is about to fully rewrite).
+    // Partial writes still take the read path — they splice into existing
+    // content. The buffer cache's block size is fixed at 4 KiB
+    // (bio::get_block_cache), so >=4096 is full coverage.
+    // SAFETY: getblk_overwrite returns a valid BufferHead (cached or
+    // freshly created zeroed+dirty); the full-block copy below overwrites
+    // every byte, so the never-read content never becomes observable.
+    let full_block = data.len() >= 4096;
+    let bh = if full_block {
+        bio::getblk_overwrite(device, blocknr)
+    } else {
+        bio::bread(device, blocknr)
+    }
+    .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
     // Get mutable reference to buffer head
     let bh_ref = &mut *bh;
