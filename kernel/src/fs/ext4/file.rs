@@ -1977,8 +1977,16 @@ unsafe fn ext4_write_at_core(
                     // skip_update_pfn: the msync/fsync flush path writes a
                     // cache frame's own bytes back to the file — updating
                     // THAT entry would copy the frame onto itself.
+                    //
+                    // writeback_populate_range (perf-mm 2026-10-31): the
+                    // update arm is unchanged, PLUS the fully-written
+                    // page run is inserted into the page cache as clean
+                    // frames — the reference kernel's buffered-write
+                    // shape. A file written then mmap'd faults from the
+                    // cache (p3c cold 14.1 us/page vs warm 0.94) instead
+                    // of repopulating through the read machinery.
                     if written_bytes > 0 {
-                        page_cache::get_page_cache().writeback_update_range(
+                        page_cache::get_page_cache().writeback_populate_range(
                             fs as *const crate::fs::ext4::Ext4FileSystem as u64,
                             ext4_ino as u64,
                             offset,

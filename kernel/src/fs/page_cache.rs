@@ -1082,6 +1082,72 @@ impl PageCache {
         drop(entry);
     }
 
+    /// Write-through populate (perf-mm lane, 2026-10-31): the write path's
+    /// coherence twin of `writeback_update_range`. First updates every
+    /// EXISTING entry in the written range (identical semantics), then
+    /// INSERTS the run of pages the write FULLY covers as clean cache
+    /// frames — the reference kernel's buffered-write shape: a file that
+    /// was just written then mmap'd/read faults from the cache instead of
+    /// repopulating through the read machinery on first touch (measured
+    /// pmm-decomp: cold fault 14.1 us/page vs warm 0.94 us/page — a 20x
+    /// class gap on the p3c shape; the reference kernel populates its
+    /// cache at write time, so its "cold" shape is our warm one).
+    ///
+    /// Partially covered pages (the head/tail of an unaligned write) are
+    /// NOT inserted — the uncovered bytes are unknown here; their first
+    /// fault populates through the read path as before. Inserted frames
+    /// are CLEAN (the write already committed these bytes through the
+    /// buffer cache), so the dirty-flush and eviction paths treat them
+    /// exactly like read-cached pages.
+    ///
+    /// The full-page run is contiguous in `data` by construction, so the
+    /// insert goes through `insert_batch` (ONE wlock + ONE per-inode lock
+    /// + power-of-two buddy allocations for the whole run) instead of a
+    /// per-page `insert` — the append/copy rows must not pay a lock round
+    /// trip per page.
+    pub fn writeback_populate_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfn: u64,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        // Existing entries first — same-body update (an inserted page
+        // below carries exactly its slice of `data`, so there is no
+        // second copy for fresh frames).
+        self.writeback_update_range(fs_id, ino, file_off, data, skip_pfn);
+
+        let len = data.len() as u64;
+        let first_index = file_off / PAGE_SIZE as u64;
+        let last_index = (file_off + len - 1) / PAGE_SIZE as u64;
+
+        // The fully covered run is the interior of [first, last]: drop a
+        // partial head and a partial tail.
+        let mut run_first = first_index;
+        if file_off % PAGE_SIZE as u64 != 0 {
+            run_first += 1;
+        }
+        let mut run_last = last_index;
+        if (file_off + len) % PAGE_SIZE as u64 != 0 {
+            run_last = run_last.saturating_sub(1);
+        }
+        if run_first > run_last {
+            return;
+        }
+        let src = (run_first * PAGE_SIZE as u64 - file_off) as usize;
+        let n = ((run_last - run_first + 1) * PAGE_SIZE as u64) as usize;
+        // Bounds are exact: run pages are fully inside [file_off,
+        // file_off+len), so src+n <= data.len().
+        if src + n > data.len() {
+            return;
+        }
+        self.insert_batch(fs_id, ino, run_first, PAGE_SIZE, &data[src..src + n]);
+    }
+
     /// Collect up to `out.len()` dirty pages in [first_index, last_index]
     /// (inclusive), PINNING each (ref++) so its frame cannot be freed
     /// while the caller flushes it OUTSIDE all pcache locks. Fills `out`
