@@ -78,3 +78,39 @@ in flight); medians are load-inflated for BOTH sides but ratios hold
   959us med - no fab0e029 regression class on the no-journal image.
 
 Pushed: origin/perf-fs (5 commits).
+
+## KVM columns (policy 2026-10-31: KVM is the primary rig; x86_64-first)
+
+Same battery, --accel kvm, same rootfs. Medians in us.
+
+row             ref-KVM   rux-base-KVM   ratio     rux-fix-KVM   ratio    fix gain
+p6_stat         0.230     14.717         64x       14.768        64x      -
+p6_openclose    0.371     37.129         100x      37.159        100x     -
+p6_getdents     80.781    511.648        6.3x      505.843       6.3x     -
+p6_read_cached  0.541     38.852         72x       38.752        72x      -
+p6_write_fsync  10420.3   9078.5         0.87x     9068.0        0.87x    (better than ref both)
+p6_append       0.390     120.844        310x      117.429       301x     -
+p6_mkdrmdir     7.224     15209.7        2108x     244.085       34x      62x
+p6_unlink       1.703     67.996         40x       65.272        38x      -
+
+TCG vs KVM: the TCG ratios understate the fs-sync gaps because TCG
+inflates the reference too (reference mkdrmdir 153us TCG vs 7.2us KVM).
+The per-mkdir publication drain cost is I/O-bound (same absolute ms on
+both rigs), so the fix gain is 62x under KVM vs 10x under loaded TCG.
+
+## Residual attribution (fsw op-bracket timers, FSW2 mk/rm/ul/jd)
+- Under KVM the fixed pair median is 233-244us: mkdir ~50us avg, the
+  rest is the rmdir side (fsw rm= sum; note the coarse timer quantizes
+  at 10ms so rm averages are outlier-skewed - use the pair medians and
+  mk avg). NEXT: sub-bracket timers inside ext4_rmdir_inner
+  (is_dir_empty / delete_entry / free_inode / free_inode_blocks) to
+  split the ~180us; suspects: the two 4 KiB clones (is_dir_empty
+  read_block_to_vec, free_inode bitmap read), post-capture queue
+  scans, and the eager frees' deferred-write bookkeeping.
+- jd (jbd2 dirty_metadata dedup scan): ~230K iterations over the whole
+  battery, ~5-8 per scan - NOT a bottleneck; recorded to close the
+  suspicion.
+- p99 on mkdrmdir under KVM: 39-721ms - the PUB_BATCH=64 ordered
+  drains (sequential sync_block_ordered). If the p99 matters, the next
+  step is phase-batched submission (submit all blocks of a phase, wait
+  once) or a write-back kthread.
