@@ -42,13 +42,22 @@ macro_rules! test_println {
 
 #[cfg(feature = "unit-test")]
 fn test_println_str(s: &str) {
-    let mut uart = crate::console::lock();
-    for b in s.bytes() {
-        uart.putc(b);
-        if b == b'\n' {
-            uart.putc(b'\r');
+    // Same byte stream as the old per-byte loop: raw bytes, with a '\r'
+    // AFTER each '\n' (the original emitted b then '\r').
+    let mut buf = [0u8; 64];
+    let mut n = 0usize;
+    for &b in s.as_bytes() {
+        if n < buf.len() {
+            buf[n] = b;
+            n += 1;
+        }
+        if b == b'\n' && n < buf.len() {
+            buf[n] = b'\r';
+            n += 1;
         }
     }
+    let uart = crate::console::lock();
+    uart.puts_batch(&buf[..n]);
 }
 
 /// Maximum number of failed tests to record

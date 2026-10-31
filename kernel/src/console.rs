@@ -903,10 +903,21 @@ pub fn putchar(c: u8) {
 
 /// Write string (SMP safe, IRQ safe, acquire lock only once)
 pub fn puts(s: &str) {
+    puts_bytes(s.as_bytes());
+}
+
+/// Write bytes (SMP safe, IRQ safe) — ONE lock acquisition plus ONE
+/// batched TX pass for the whole slice (perf-console lane: the per-byte
+/// `putchar` loop in this family — uart_write chunks, the boot-table
+/// printer, the tty console sink — paid the full lock_irqsave/cli/sti
+/// pair AND the per-byte 16550 register traffic (x86_64: one LSR `inb`
+/// + one THR `outb` = 2 exits per byte under KVM, one TCG helper pair
+/// per byte otherwise). `puts_batch` does one bounded THRE wait per
+/// FIFO-sized burst instead, cutting register traffic ~16x on the
+/// 26k-print-per-boot OH console volume).
+pub fn puts_bytes(bytes: &[u8]) {
     let uart = UART.lock_irqsave();
-    for b in s.bytes() {
-        uart.putc(b);
-    }
+    uart.puts_batch(bytes);
 }
 
 /// Acquire UART lock (for batch output, IRQ safe)
@@ -924,6 +935,13 @@ pub fn putchar_no_lock(c: u8) {
 pub fn puts_no_lock(s: &str) {
     let uart = Uart::new();
     uart.puts_batch(s.as_bytes());
+}
+
+/// Interrupt-safe byte output (no lock) — batched TX, `puts_no_lock`
+/// for byte slices (crash-context writers stage expanded bytes).
+pub fn puts_bytes_no_lock(bytes: &[u8]) {
+    let uart = Uart::new();
+    uart.puts_batch(bytes);
 }
 
 // ============================================================================
@@ -1276,12 +1294,33 @@ fn process_input(c: u8) -> Option<u8> {
 
 impl fmt::Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        // Batched (perf-console): coalesce runs between newlines into a
+        // stack buffer and flush via puts_batch — one register-IO pass
+        // per burst instead of per byte. fmt fragments arriving here are
+        // small, but crash/DFX writers dump whole stack dumps through
+        // this impl one fmt piece at a time.
+        let mut buf = [0u8; 128];
+        let mut n = 0usize;
+        let flush = |buf: &[u8], n: usize| {
+            if n > 0 {
+                self.puts_batch(&buf[..n]);
+            }
+        };
         for b in s.bytes() {
             if b == b'\n' {
-                self.putc(b'\r');
+                flush(&buf, n);
+                n = 0;
+                self.puts_batch(b"\r\n");
+            } else {
+                if n == buf.len() {
+                    flush(&buf, n);
+                    n = 0;
+                }
+                buf[n] = b;
+                n += 1;
             }
-            self.putc(b);
         }
+        flush(&buf, n);
         Ok(())
     }
 }

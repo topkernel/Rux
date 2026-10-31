@@ -86,8 +86,26 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
     bytes_read as isize
 }
 
+/// Task-context console TX over a kernel-owned slice: 32-byte chunked
+/// locking (R20-4 atomicity / 2026-10-20 IRQ-off window bounds), batched
+/// register traffic per chunk (perf-console), cond_resched between
+/// chunks (leg-32B discipline). See `uart_write` for the history.
+pub fn uart_write_kernel(slice: &[u8]) -> isize {
+    const UART_TX_CHUNK: usize = 32;
+    let mut idx = 0usize;
+    while idx < slice.len() {
+        let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
+        {
+            let uart = console::lock();
+            uart.puts_batch(&slice[idx..end]);
+        }
+        idx = end;
+        crate::sched::cond_resched();
+    }
+    slice.len() as isize
+}
+
 pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
-    let slice = core::slice::from_raw_parts(buf, count);
     // R20-4 (PIPE2 pp=0 root cause): console output must stay atomic
     // against other task-context writers, or the nettest PIPE2 marker
     // splits and the gate greps 0 hits. The old fix took the UART lock
@@ -107,33 +125,7 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     // the IRQ-off windows shrink from whole-buffer to sub-chunk (the
     // per-byte putc stall bound lives in console.rs). Byte dropping on
     // TX_STALLED is unchanged (putc latches and drops per its budget).
-    const UART_TX_CHUNK: usize = 32;
-    let mut idx = 0usize;
-    while idx < slice.len() {
-        let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
-        {
-            let uart = console::lock();
-            let mut i = idx;
-            while i < end {
-                uart.putc(slice[i]);
-                i += 1;
-            }
-        }
-        idx = end;
-        // leg-32B (WAKE-STRANDED strand family): a console burst is
-        // hundreds of back-to-back chunks (~2.8 ms each at 115200 THRE
-        // pacing) in ONE task context. With no IRQ-exit preemption the
-        // writer monopolizes its CPU for the whole burst — sc326B/
-        // sc328B stranded every other runnable task 1-13.8 s behind
-        // hilogd's serial mirror (the recurring strand incumbents,
-        // pc!=0, tp=-confirmed). Between chunks the console lock is
-        // dropped and we are in plain task context — a cond_resched
-        // point per the 2026-10-20 discipline (the teardown sweeps got
-        // theirs; this loop did not). 32-byte marker atomicity is
-        // unchanged: the lock is still held across each whole chunk.
-        crate::sched::cond_resched();
-    }
-    count as isize
+    uart_write_kernel(core::slice::from_raw_parts(buf, count))
 }
 
 /// UART character device file operations (public access)
