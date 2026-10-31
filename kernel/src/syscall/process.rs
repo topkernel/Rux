@@ -1334,6 +1334,34 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 unsafe { crate::process::current_pid() }
             );
         }
+    } else if rc < 0 {
+        // lb-lane hunt (syscost census): a stockperf boot made ~111k
+        // execve syscalls in the first 60 s while only ~110 execs
+        // succeeded — a failed-exec retry storm burning ~2 CPUs (the
+        // rmap/fork churn in the rip histogram matches a spawn-loop).
+        // The /data and /mnt/sandbox gates above never see it, so name
+        // ANY other failing path with its caller comm, then go quiet.
+        static EXEC_FAIL2_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static EXEC_FAIL2_SEEN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        EXEC_FAIL2_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let n = EXEC_FAIL2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 48 {
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "execfail2[{}] '{}' -> {} comm='{}' (pid {})",
+                n,
+                pathname_str,
+                rc,
+                comm,
+                unsafe { crate::process::current_pid() }
+            );
+        }
     }
     rc
 }

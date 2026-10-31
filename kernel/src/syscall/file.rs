@@ -1146,14 +1146,24 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
             // no errno on the guest side; the sandbox roots live under
             // /mnt and /data, so surface failed mkdirs there on serial.
-            if e != -(17) && (full_path.starts_with("/mnt") || full_path.starts_with("/data")) {
-                crate::pr_info!(
-                    "mkdirfail '{}' mode {:#o}: {} (pid {})",
-                    full_path,
-                    mode,
-                    e,
-                    unsafe { crate::process::current_pid() }
-                );
+            // lb-lane (launcher bring-up): widened to EVERY path —
+            // storage_daemon's MakeDir('/storage/media/100/local') failed
+            // with guest errno 11 (EAGAIN?! tmpfs_mkdir has no such path)
+            // during StartUser(100), so every failed mkdir needs its
+            // kernel-side errno and caller pid on serial. EEXIST stays
+            // filtered (install streams would flood the budget).
+            if e != -(17) {
+                static MKDIRFAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if MKDIRFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                    crate::pr_info!(
+                        "mkdirfail '{}' mode {:#o}: {} (pid {})",
+                        full_path,
+                        mode,
+                        e,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
             }
             e as i64
         }
@@ -2065,6 +2075,20 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // filesystem-specific helper runs — the old code fabricated success for
     // any path string).
     if let Err(e) = ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
+        // lb-lane hunt (switch_root): OH's switch_root MS_MOVE loop got
+        // err=2 here with NO kernel mount-tap line (this early return
+        // sits before the tap), hiding which move failed and why. Ring
+        // every ENOENT-before-mount so the switch_root move map is
+        // complete on serial.
+        if args[3] & 8192 != 0 {
+            crate::pr_warn!(
+                "mnt-precheck-fail MS_MOVE '{}' -> '{}': {} (pid {})",
+                source,
+                target,
+                e,
+                crate::process::current_pid()
+            );
+        }
         return e as i64;
     }
 
@@ -2115,6 +2139,23 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
             return -(errno::EINVAL as i64);
         }
         let source_abs = crate::fs::path::path_normalize(&source_owned);
+        // lb-lane hunt (switch_root): every MS_MOVE and its result on
+        // serial — the OH switch_root loop's successes are LOGV-silent
+        // userspace-side, and this branch returns before the generic
+        // mount tap, so the move map is otherwise invisible.
+        {
+            static MSMV_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MSMV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                crate::pr_warn!(
+                    "MSMOVE[{}] '{}' -> '{}' (pid {})",
+                    MSMV_N.load(core::sync::atomic::Ordering::Relaxed),
+                    source_abs,
+                    target,
+                    crate::process::current_pid()
+                );
+            }
+        }
         return match ph.t(6, || crate::fs::vfs::vfs_move_mount(&source_abs, target)) {
             Ok(()) => {
                 // Keep the /proc/mounts row pointed at the new target.
