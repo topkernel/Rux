@@ -2113,6 +2113,24 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
     sock.accept_queue.lock().clear();
+    // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
+    // queue at close time are about to be released — the receiver died
+    // (or stopped reading) before the ancillary segment was touched.
+    if crate::dfx::scmtap::enabled() {
+        let q = sock.recv_queue.lock();
+        let mut nfds = 0usize;
+        let mut segs = 0usize;
+        for seg in q.segs.iter() {
+            if !seg.files.is_empty() {
+                segs += 1;
+                nfds += seg.files.len();
+            }
+        }
+        drop(q);
+        if nfds > 0 {
+            crate::dfx::scmtap::tap_orphan(nfds, segs);
+        }
+    }
     // Wake senders blocked on OUR queue and our own waiters.
     sock.wait_queue.wake_up_all();
 }

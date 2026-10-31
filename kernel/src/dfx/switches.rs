@@ -95,6 +95,7 @@ macro_rules! dfx_switch_table {
             ExecCost => "execcost",
             ThPark => "thpark",
             RipSample => "ripsample",
+            ScmTap => "scmtap",
         }
     };
 }
@@ -427,9 +428,18 @@ pub enum DfxSwitch {
     /// tasks (page-bucketed histogram + utime/stime split), reported
     /// every 60 s from the tick path. OFF by default.
     RipSample,
+    /// dfx=scmtap (gdm session-fifo hunt, session 21): SCM_RIGHTS relay
+    /// tap — one line per unix sendmsg that attaches fds (TX), per
+    /// recvmsg that installs them (RX with the new fd numbers), per
+    /// drop (no control room / EFAULT / EMFILE / queue orphaned at
+    /// socket close), plus the fifo last-writer-close line. Answers,
+    /// from the kernel side, where the CreateSession reply's session
+    /// fd dies between logind → dbus-daemon → pam (the "Session c1
+    /// logged out" milliseconds-after-create shape). OFF by default.
+    ScmTap,
 }
 
-const SWITCH_COUNT: usize = 47;
+const SWITCH_COUNT: usize = 48;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -517,6 +527,7 @@ impl DfxSwitch {
             DfxSwitch::ThPark => 44,
             DfxSwitch::RipSample => 45,
             DfxSwitch::DbFileTrace => 46,
+            DfxSwitch::ScmTap => 47,
         }
     }
 
