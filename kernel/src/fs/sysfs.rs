@@ -1274,24 +1274,32 @@ fn build_tree() -> Arc<KObject> {
     add_tty_device(&tty, "console", 5, 1);
     add_tty_device(&tty, "pts", 136, 0);
     // /sys/class/tty/tty0 — the VT master's class node (udev db entry,
-    // dev/uevent attrs). The "active" attribute is deliberately ABSENT:
-    // systemd-logind's manager_connect_console (249) opens
-    // /sys/class/tty/tty0/active whenever /dev/tty0 exists; with the
-    // attribute present, logind's VT-controller startup (console-active
-    // watch + SIGRTMIN VT-switch source + seat_preallocate_vts +
-    // "VT changed" dispatch) wedged before its bus Hello — 10 restarts,
-    // a 7.5s non-preempted run and one soft-lockup at gdmr26. With the
-    // attribute missing, logind logs "System has /dev/tty0 but not
-    // /sys/class/tty/tty0/active which is broken, ignoring" and skips
-    // the whole VT-controller path (its documented degraded shape),
-    // while gdm-session-worker's jump_to_vt keeps its required
-    // open("/dev/tty0"). Rux's console is a single UART-backed display,
-    // so there is no per-VT switching to report anyway.
+    // dev/uevent attrs) plus the "active" attribute with the CURRENT
+    // VT (Linux shape: "ttyN\n" of the foreground console).
+    //
+    // History: the attribute was deliberately absent from gdmr26 to
+    // gdmr51 — back then the kernel had NO VT layer and logind's
+    // VT-controller startup (console-active watch + SIGRTMIN
+    // VT-switch source + seat_preallocate_vts) wedged before its bus
+    // Hello. With fs/vt.rs now implementing the VT ioctl set the
+    // kernel side is real, and pam_systemd's CreateSession is REJECTED
+    // without this attribute: logind's seat_has_vts() (v249) is
+    // exactly `seat_is_seat0() && console_active_fd >= 0`, and
+    // console_active_fd is the open("/sys/class/tty/tty0/active") fd
+    // from manager_connect_console — absent attr => fd<0 => "Seat has
+    // no VTs but VT number not 0" => no greeter session => gdm-x-
+    // session RegisterDisplay fails ("No display available") and the
+    // greeter exit-loops (gdmr52). Content is live from the VT layer
+    // (fs::vt::active_vt()), which starts at VT 1 (gdm's
+    // GDM_INITIAL_VT).
     {
         let dev = mk_dir(&tty, "tty0", KType::Tty);
         *dev.devno.lock() = Some((4, 0));
         *dev.devname.lock() = Some(String::from("tty0"));
         attr_ro(&dev, "dev", || b"4:0\n".to_vec());
+        attr_ro(&dev, "active", || {
+            format!("tty{}\n", crate::fs::vt::active_vt()).into_bytes()
+        });
         add_uevent_attr(&dev);
     }
 
