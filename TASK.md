@@ -126,6 +126,91 @@ Final message: root cause + fix + ladder position (1-4), commits, build status.
    (EGL/GBM/Skia draw->buffer); painter pattern NOT visible => kernel dumb-buffer/flip
    path has a hole the composer path doesn't exercise.
 
+## LAUNCHER-BRINGUP lane state (2026-10-31 12:xx, session continues)
+Worktree on branch oh-launcher @ 773f701e (base main 40e925fd). All boots
+q35+KVM x86_64, GL-fixed images (oh-svc system/vendor), snapshot everywhere,
+fresh userdata every boot. Driver: run/lb-boot.py <tag> <secs> [sysimg]
+[kernel] [extra-cmdline] — per-line wall timestamps, launcher markers, shots.
+
+### Ladder position: launcher SPAWNS and reports ready (boot-dependent race);
+screen still shows the frozen bootanimation logo at 780s (sysc1 boot).
+1. sysc1 (syscost=1 boot): `bootevent.launcher.ready` at 541.8s — appspawn
+   spawned com.ohos.launcher, the ability initialized. Shots 420-780s all the
+   frozen OH logo frame (2.5% pixels, md5 06b933b4) — launcher not drawing
+   yet (ArkUI first frame slow under the current perf; or no composition).
+2. lb1 (clean, no syscost): bootanimation.ready 253.9s, install stream
+   FINISHED at ~324s (systemres last), `bootevent.bms.main.bundles.ready`
+   331s — then WEDGED: accountmgr (SA 200) never received ANY
+   OnAddSystemAbility callback (its first log line, account_mgr_service.cpp:616,
+   never printed), so user 100 was never created (QueryActiveOsAccountIds:
+   "no accounts"), so AMS never called StartUser → no launcher spawn. Direct
+   client→accountmgr binder queries worked (SAREG reply from accountmgr at
+   254.2s), so the accountmgr service itself is up; the samgr→client
+   NOTIFICATION direction is the suspect. Boot-to-boot race: sysc1 got
+   through (ActivateDefaultOsAccount 332.7s, appspawn lockstatus_100 333.4s),
+   lb1 did not.
+3. 8521220 DECODED: ERR_BUNDLE_MANAGER_BUNDLE_NOT_EXIST — BMS answer while
+   the preinstall stream hasn't reached com.ohos.launcher yet. NOT a bug in
+   itself; a symptom of the slow install stream.
+4. sprux1's "reboot" at 442s: the stockperf pbench injector's probe ran as
+   key_enable IN INIT'S PROCESS GROUP (pgid 1; OH init never setpgids
+   services) and its cleanup kill(0,SIGTERM) hit init → ExecReboot →
+   StopAllServices → samgr died → "no context manager". Same behavior on
+   the reference kernel (init blocks SIGTERM for signalfd, so it consumes
+   it) — NOT a kernel bug, but the injector MUST setpgid(0,0) before any
+   group kill. sprux1 markers before that: bootanimation.ready 228s (ref
+   kernel: 8.3s; full ref boot to launcher.ready: 14.4s).
+
+### Next steps (in order)
+1. lb2 (RUNNING at time of writing, 1800s, instrumented kernel 773f701e):
+   SACB tap (binder.rs: every non-reply txn sent BY samgr to a foreign
+   proc) + execfail2 tap (any failing execve, budget 48). Watch: does SACB
+   deliver to accountmgr's pid when it subscribes (~250s)? If callbacks
+   ARE sent but OnAddSystemAbility never logs, the loss is between binder
+   enqueue and the safwk work thread (parked oneway?). If NO callback to
+   accountmgr at all, it's samgr-side subscription handling.
+2. If launcher.ready fires: watch shots past 540s for non-logo pixels
+   (ArkUI first frame may take minutes at current perf). Ladder: non-logo
+   pixels → home screen → screenshot + report immediately.
+3. The wedge race (lb1-style) is the launcher-spawn blocker; the PERF
+   census below is the boot-time blocker. Both are live fronts.
+
+### PERF CENSUS (syscost=1 boot sysc1, dumps at t=60/120/180/240s) — handoff
+for the perf lane (guarded domains: sched + fs + ipc; raw log:
+run/oh-sysc1-serial.log in THIS worktree):
+- Whole-boot shape: ref kernel (stock OHOS 6.6.101 bzImage, same images,
+  same machine class) reaches launcher.ready in 14.4s. Rux: bootanimation
+  ~254s, install stream done ~324s, launcher.ready 541s (on a good boot).
+  The wall is NOT compute: init spends 129s stalled after deviceauth,
+  135s on `start asset_service` (condition-wait on DATA_SHARE_READY),
+  futex avg 17ms→108ms as the boot progresses.
+- **Futex wake→run latency is tick-quantized**: slow-ring full of ~10ms
+  and ~30ms futex waits; TaskExecutorRDB futex max 30s; WAKE-STRANDED
+  pid=1 strand=131s matches init's 135s stall. Wake path has preempt
+  checks + idle-CPU IPIs (sched.rs:3300) but under this load woken tasks
+  wait whole ticks. THE master multiplier (every IPC handoff pays it).
+- **UART console tax**: prints cost 0.36-0.93ms EACH (LSR polling under
+  KVM, multi-poll 68%/100% on the two CPUs = console-lock serialization);
+  26k prints/60s ≈ 15s CPU per 60s window. The boot's DFX taps (43k
+  "pagefault: cow" pr_debug lines at loglevel=7, 9k MREMAP-CFI pr_info,
+  KSIG per-send prints, 30k slog/ilog/alog hilog-socket echoes with
+  kernel-side UTF-16 decode+match per send) are most of that volume.
+  Gating/removing them before any perf-gate run is mandatory anyway
+  (known-gap 4 of the svc charter).
+- **hilog socket traffic**: hilogd.server 703k recvfrom in 60s, 5.06M by
+  240s (21k/s sustained), recvfrom avg 353µs. Every send pays the kernel
+  hilog tap decode. mmi_service 185k recvfrom.
+- **Failed-exec storm**: 111k execve in first 60s, 833k by 240s
+  (accelerating 1.9k→4.3k/s), only ~110 succeeded. ~2 CPUs of kernel work
+  (rmap/page_record_mapping = 28% of kernel-tick rip histogram; slab
+  churn 24M hits; consistent with a fork+failed-exec+exit loop). The
+  execfail2 tap (this branch) names path+comm — early hits were benign
+  init one-shots (hks_compatibility_bin, hmos_cust_*_mount); the storm
+  actor likely starts later (watch lb2's execfail2 lines past ~250s).
+- openat avg 252µs (85k/60s), read avg 1.1ms — fs path/read 5-10x slow;
+  secondary next to the above.
+- ticks at t=60s: u/k/i = 512/5130/352 per CPU — 85% kernel mode.
+
 ## SCANOUT VERDICT (2026-10-31 04:0x) — PIXELS PROVEN; BLOCKER IS OH's MISSING GL DRIVER
 1. **paint6/paint7: userspace pixels ON SCREEN.** run/oh-paint6-shot-*.ppm and
    run/oh-paint7-shot-*.ppm: 100% non-black (921600/921600) at 25/45/70/100/130s,
