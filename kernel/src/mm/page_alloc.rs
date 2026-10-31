@@ -109,6 +109,22 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
         let zone_type = gfp_flags.zone_type();
         if let Some(zone) = node.zone_mut(zone_type) {
             if zone.is_initialized() {
+                // Per-CPU pageset fast path (perf review 2026-10-31):
+                // order-0 allocations — the page-fault / COW / page-cache
+                // bulk class — are served from this CPU's pcp row with no
+                // zone-lock acquisition; the lock is paid once per
+                // PCP_BATCH refill. ZoneNormal only: the pcp rows cache
+                // frames from that zone, and GFP-forced alternate zones
+                // keep their exact historical semantics.
+                if order == 0 && zone_type == ZoneType::ZoneNormal {
+                    if let Some(pfn) = super::pcp::alloc_order0(zone) {
+                        ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                        return pfn_to_phys(pfn);
+                    }
+                    // pcp miss with an exhausted row falls through to
+                    // zone.alloc_pages below (which refills the row next
+                    // time); a zone failure reaches the slow path as before.
+                }
                 if let Some(pfn) = zone.alloc_pages(order) {
                     ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                     // Page descriptors (refcount/mapcount/flags/order) were
@@ -818,6 +834,21 @@ pub fn free_pages(addr: usize, order: usize) {
                     let start_pfn = zone.start_pfn();
                     let end_pfn = zone.end_pfn();
                     if pfn >= start_pfn && pfn < end_pfn {
+                        // Per-CPU pageset fast path (perf review
+                        // 2026-10-31): eligible order-0 frames cache on
+                        // this CPU with no zone-lock round trip; every
+                        // tripwire above (mapped/wild/reserved/text) has
+                        // already passed, and pcp::free_order0 owns the
+                        // OnPcp double-free tripwire. Cache full -> the
+                        // drain inside free_order0 returns frames to the
+                        // buddy in bulk.
+                        if order == 0
+                            && zone_type == ZoneType::ZoneNormal
+                            && super::pcp::free_order0(pfn, zone)
+                        {
+                            dw::FREE_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
                         zone.free_pages(pfn, order);
                         dw::FREE_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         return;
