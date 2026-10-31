@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r66"
+NEXT="r67"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
@@ -91,21 +91,25 @@ echo "== gnome-shell stderr tee (gdmr73: the greeter shell exits 1 silently)"
 # thread exits code 1 with the [pango] FcInit worker still alive — a
 # JS-init failure shape) is unrecoverable. gdm's own greeter logs
 # (/var/log/gdm3/:0-greeter.log, greeter.log) never appear on this
-# image. Wrap the binary with a dash tee to /tmp/gshell.log; runit's
-# monitor tailer dumps it every cycle. Idempotent: skips when
-# gnome-shell.bin is already in place.
+# image. Wrap the binary to dump the greeter shell's environment and
+# startup errors straight to inherited stderr (the console — GLib
+# messages already land there, gdmr73). Idempotent: the real binary
+# moves aside only once; the wrapper is rewritten every roll.
 if [ ! -f "$ROOT/usr/bin/gnome-shell.bin" ]; then
     mv "$ROOT/usr/bin/gnome-shell" "$ROOT/usr/bin/gnome-shell.bin"
-    cat > "$ROOT/usr/bin/gnome-shell" <<'EOF'
-#!/bin/sh
-# stderr tee wrapper (gdmr73 forensics) — real binary is gnome-shell.bin
-{
-    echo "== wrapper: args='$*' mode=${GNOME_SHELL_SESSION_MODE:-unset} display=${DISPLAY:-unset}"
-    exec /usr/bin/gnome-shell.bin "$@"
-} >> /tmp/gshell.log 2>&1
-EOF
-    chmod 0755 "$ROOT/usr/bin/gnome-shell"
 fi
+cat > "$ROOT/usr/bin/gnome-shell" <<'EOF'
+#!/bin/sh
+# env dump wrapper (gdmr74 forensics) - real binary is gnome-shell.bin.
+# gdmr73: the shell dies of JS ERROR TypeError this._userProxy.Display
+# is null at loginManager.js:111 AFTER "Unset XDG_SESSION_ID" - this
+# wrapper records whether XDG_SESSION_ID (set by pam_systemd into the
+# PAM env) actually reaches the greeter program env.
+echo "== shell-wrap: args='$*' mode=${GNOME_SHELL_SESSION_MODE:-UNSET} display=${DISPLAY:-UNSET}" >&2
+echo "== shell-env: XDG_SESSION_ID='${XDG_SESSION_ID-UNSET}' CLASS='${XDG_SESSION_CLASS-UNSET}' TYPE='${XDG_SESSION_TYPE-UNSET}' SEAT='${XDG_SEAT-UNSET}' VTNR='${XDG_VTNR-UNSET}' RUNTIME='${XDG_RUNTIME_DIR-UNSET}' DESKTOP='${XDG_SESSION_DESKTOP-UNSET}'" >&2
+exec /usr/bin/gnome-shell.bin "$@"
+EOF
+chmod 0755 "$ROOT/usr/bin/gnome-shell"
 
 echo "== gdm-theme.gresource (update-alternatives gap)"
 # gnome-shell-common's postinst installs gdm-theme.gresource via
