@@ -4000,7 +4000,55 @@ pub fn wake_up_enqueue_opt(
                     & crate::process::task::task_flags::TaskFlags::PF_EXITING
                         .bits()
                     != 0;
-                let mid_switch = task_is_mid_switch_out(task);
+                let mut mid_switch = task_is_mid_switch_out(task);
+                // Stale-marker confirmation: a real context switch-out is
+                // microseconds and the marker is cleared on the same CPU
+                // right after the coroutine switch. A marker that names
+                // this task across wake attempts 50+ jiffies apart (same
+                // discipline as orphan_watch_confirm) is a wedged leftover
+                // of an aborted switch — no CPU is saving this context,
+                // the task is parked, and treating the marker as live
+                // would poison every future wake-heal of this task (the
+                // same per-task forever-skip the parkwalk's mid-switch
+                // skip produces). Time-confirm, then ignore.
+                if mid_switch {
+                    const WMS: usize = 8;
+                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
+                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
+                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
+                    let key = task as usize;
+                    let jif = crate::drivers::timer::get_jiffies();
+                    let mut stale = false;
+                    for s in 0..WMS {
+                        let prev = WM_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                        if prev == key {
+                            let prev_jif =
+                                WM_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
+                            if jif.wrapping_sub(prev_jif) >= 50 {
+                                stale = true;
+                            }
+                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        if prev == 0
+                            && WM_TASK[s]
+                                .compare_exchange(
+                                    0,
+                                    key,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    if stale {
+                        mid_switch = false;
+                    }
+                }
                 let mut curr_on = false;
                 if !mid_switch {
                     for c in 0..MAX_CPUS {
@@ -4039,6 +4087,54 @@ pub fn wake_up_enqueue_opt(
                             putchar(b);
                         }
                         ph(pc as u32 as u64);
+                        putchar(b'\n');
+                    }
+                } else {
+                    // Skip-reason census (budgeted): names which guard
+                    // ate the heal — without this the zero-fire state is
+                    // indistinguishable between "never reached" and
+                    // "predicate always skips" (the lb17 capture: 21
+                    // PARKED-LEAK, 0 WAKE-HEAL).
+                    static WHS_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if WHS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                        use crate::console::putchar_no_lock as putchar;
+                        fn pdec(mut v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut buf = [0u8; 20];
+                            let mut n = 0;
+                            if v == 0 {
+                                putchar(b'0');
+                                return;
+                            }
+                            while v > 0 {
+                                buf[n] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                n += 1;
+                            }
+                            while n > 0 {
+                                n -= 1;
+                                putchar(buf[n]);
+                            }
+                        }
+                        const M: &[u8] = b"\nWAKE-HEAL-SKIP pid=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        pdec((*task).pid() as u64);
+                        const R1: &[u8] = b" why=";
+                        for &b in R1 {
+                            putchar(b);
+                        }
+                        if exiting {
+                            putchar(b'e');
+                        }
+                        if mid_switch {
+                            putchar(b's');
+                        }
+                        if curr_on {
+                            putchar(b'c');
+                        }
                         putchar(b'\n');
                     }
                 }
