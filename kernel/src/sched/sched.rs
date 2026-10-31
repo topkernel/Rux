@@ -4552,6 +4552,49 @@ pub fn scheduler_tick() {
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
 
+    // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
+    // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
+    // victim a pick walk EXAMINES, and walks stop at the first allowed
+    // leftmost candidate: a stale-claimed task mid-tree (frozen vruntime
+    // at strike time) is skipped forever without ever being examined —
+    // lb20's softbus_server lost 579s between its two resets, and its
+    // worker threads were never swept at all. Once per 100 jiffies
+    // (1 s), one CPU wins the CAS below and sweeps the whole CFS
+    // timeline under the GRQ with the pick-side adjudication (see
+    // CfsRunQueue::claim_sweep for the protocol-impossibility proof).
+    // Every strike then costs at most ~1 s + normal CFS service latency
+    // instead of a leftmost drift measured in hundreds of seconds —
+    // inside the 5.24 s softbus timeout that gates the
+    // device_manager/accountmgr chain. The census line is wwcensus-only;
+    // the reset report shares the pick-side 2-jiffy print budget.
+    {
+        static SWEEP_LAST: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = SWEEP_LAST.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) >= 100
+            && SWEEP_LAST
+                .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+                .is_ok()
+        {
+            let g = grq().lock_irqsave();
+            let (linked, stale_reset, owned_claim, oncpu_marked) =
+                g.cfs_rq.claim_sweep(cpu_id);
+            drop(g);
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+                && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
+            {
+                crate::pr_info!(
+                    "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={}",
+                    linked,
+                    stale_reset,
+                    owned_claim,
+                    oncpu_marked
+                );
+            }
+        }
+    }
+
     // Kernel-preemption round 2 (2026-10-20): LEAK tripwire. A task whose
     // preempt_count stays nonzero for seconds while it keeps RUNNING in
     // task context is carrying a leaked count bit — with IRQ-exit kernel
