@@ -36,6 +36,7 @@ OUT = os.path.join(ROOT, "docs", "development", "review-coverage.md")
 STATUS = {
     "kernel/src/arch/riscv64/mm/memory_layout.rs": ("part", "image window constants"),
     "kernel/src/arch/riscv64/mm/mmu_init.rs": ("part", "kernel image mapping"),
+    "kernel/src/arch/uaccess_safe.rs": ("part", "safe uaccess capsules over the arch primitives"),
     "kernel/src/arch/riscv64/trap.rs": ("part", "tick accounting, trap entry"),
     "kernel/src/arch/riscv64/vext.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/memory_layout.rs": ("todo", ""),
