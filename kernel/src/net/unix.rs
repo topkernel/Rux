@@ -1594,7 +1594,7 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 33] = [
+                const AMS_KEYS: [&str; 38] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
@@ -1638,6 +1638,24 @@ pub fn unix_send(
                     "find target AbilityInfo",
                     "create user:",
                     "permission verification failed, not account",
+                    // lb48 (seventh successor): the death-mark verdicts.
+                    // A death-marked IPCObjectProxy answers every later
+                    // SendRequest locally with ERR_DEAD_OBJECT (ZLOGD
+                    // only) — the permanent fast-fail engine. These keys
+                    // name every path that marks, un-marks, or rejects
+                    // the mark: WaitForInit's self-heal ("init again"),
+                    // OnBinderDied's address-reject ("Invalid proxy
+                    // object"), the ioctl-level errno verdict ("fail,
+                    // result:" — the ONLY path whose value can be -32 ==
+                    // ERR_DEAD_OBJECT, since a kernel BR_DEAD_REPLY maps
+                    // to +0x7205 which SendRequestInner never compares),
+                    // the parcel-side write failure, and the obituary
+                    // refcount reject.
+                    "init again",
+                    "Invalid proxy object",
+                    "fail, result:",
+                    "WriteTransaction ERROR",
+                    "failed to increment strong reference count",
                 ];
                 let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
                 if ams_family {
