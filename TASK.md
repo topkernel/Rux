@@ -465,3 +465,76 @@ Raw-log re-derivation of all three boots:
    foundation/ability/ability_runtime/services/abilitymgr/src/
    ability_manager_service.cpp:9596 (StartUser -> CheckUserParam ->
    OnStartUserDone on ANY failure).
+
+## PREEMPT-HUNT SESSION (2026-11-01 02:00-07:00, branch preempt-hunt @ 1607f62e+)
+The phantom preempt-count producer is NAMED: two faces, one dominant.
+
+### Face A (DOMINANT, killed): the preempt-disabled SPIN-WAIT convoy
+1. Instrument chain (commits 88dd4b82→bd4410ff): outermost 0->1 acquire
+   shadow + exact caller-site attribution (#[track_caller] threaded
+   through Spinlock/RwSpinlock acquire paths via preempt_count_add_at)
+   + live ACQUIRE-DIVERGENT report + multiplicative slot hash (the old
+   XOR mixes aliased task structs 0x1000000/0x2080000 apart — ph2's 40
+   "splits" were hash collisions; ph3 with the Fibonacci hash: 1).
+2. ph2 evidence (system-lb.img + userdata-fresh2.img, dfx=leakhunt,
+   wwcensus, debug kernel, 1200s): 320 tick-heals, 109 underflows, 321
+   strands. The >2s "phantom" incumbents name SHORT-section locks
+   (dentry children/vfsmount, unix dgram_peer/recv_queue, inode icache,
+   mm vma_files) — because preempt_disable runs BEFORE the TTAS spin,
+   a waiter's whole 0->1 booking covers the SPIN. Behind any holder
+   running a multi-second section (unix stream drain memcpy under
+   recv_queue, build_path under an fs_struct read guard, mm unmap under
+   the pte lock — the rmap_alt_remove rip), every waiter monopolized
+   its own CPU preempt-off for the whole hold: the pc=1 WAKE-STRANDED
+   incumbents, the 2s-heal stripping LIVE spin bookings, the post-heal
+   SpinlockGuard::drop underflows (31+/boot), the kpreempt deadlock.
+3. FIX (5f0537a8): Spinlock::lock and RwSpinlock::read/write now wait
+   PREEMPTIBLY at the outermost depth in task context (TTAS with
+   preempt on, disable only around the acquiring CAS, schedule() to the
+   holder after a 20k budget); nested/IRQ callers keep the legacy
+   preempt-off spin (mid-nesting schedule = the LTP r2 WEDGE family).
+   RwSpinlock::read waits on has_writer() only. Also fixes the if-let
+   temporary-extension guard in FsStruct::get_cwd/get_root (the #1
+   origin family, 46 lines/boot). Holder side: unix stream drain now
+   copies OUTSIDE recv_queue (1607f62e; the memcpy was a named >2s
+   origin and user-page faults nested the fault path under the lock).
+4. VERIFICATION (ph3 vs ph2, full 1200s boots): tick-heals 320->171
+   (-47%), strands 321->221 (-31%), underflows 109->96, panics 6->2,
+   SLOW-TXN median exec 5780ms->2250ms (count 32->57: fewer forever-
+   wedged txns means more complete past the threshold). make test
+   riscv64 GREEN (1198/0); x3 builds rc=0 (x86_64/riscv64/aarch64).
+   ph4 (drain split + live divergence) running at write time.
+
+### Face B (residual, ~4 user-return phantoms/boot): the lying sched slot
+- The definitive phantom: LEAK-ORIGIN user-return pc=1 (a +1 at user
+  return can never be a live guard). Exact osites: dentry.rs:370/395
+  (vfsmount/mountpoint locks), always omis=1 — the acquire ran while
+  tp named the victim but the CPU's sched slot named ANOTHER task
+  (oslot recorded; live ACQUIRE-DIVERGENT lines show slotpid).
+- ph4 live data: divergent acquires spread across MANY short-section
+  sites (dentry/unix/syscall) — the producer is the SLOT lying (naming
+  a task that is not executing), not any one lock. Windows that leave
+  slot != tp: pick-publish (sched.rs:2515) -> tp-swap tail on prev;
+  the R56c lying-idle-slot heal; abort paths repair via
+  republish_current_after_abort (verified present). NEXT HUNT: freeze
+  on a live divergent acquire with slotpid, walk WHICH machinery wrote
+  that slot last (slot_tag_write tags exist: SLOT_W_SCHED_PICK,
+  SLOT_W_R56C — add a tag read to the divergence report).
+- WAKE-HEAL/CLAIM-SWEEP/2s-tick-heal remain symptom treatment for this
+  face; they are what converts a lying-slot window into a stripped
+  guard + underflow.
+
+### kpreempt=1 verdict (stretch NOT taken)
+Still blocked: 171 tick-heals/boot remain (mm unmap loops under the pte
+lock are the biggest residue — the rmap_alt_remove incumbent family).
+Every heal strips a possibly-live guard; with the IRQ-exit hook armed
+that means preempting a holder mid-critical-section = the lb19b
+DEADLOCK shape. Prerequisite unchanged: bound the unmap-loop holds
+(drop/reacquire the pte lock every N pages) or make the heal holder-
+aware. The convoy fix removed the WAITER-side blockers only.
+
+### Boots this session
+ph1 (tap v1, last-wins sites, 374 user-return lines all pid 568 — the
+  rate gate + exact sites landed after), ph2 (exact sites: the site
+  distribution table), ph3 (convoy fix: the -47%/-31% numbers),
+  ph4 (drain split + ACQUIRE-DIVERGENT live).
