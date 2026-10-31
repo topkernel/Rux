@@ -607,6 +607,89 @@ impl BlockCache {
         true
     }
 
+    /// Discard ONE dirty buffer without writing it (freed-block forget).
+    ///
+    /// Called by the block allocator when it frees a block: the freed
+    /// block's cached content is DEAD — leaving the dirty buffer in the
+    /// cache means the next publication drain / eviction / commit writes
+    /// dead data to disk (the P6 mkdrmdir battery dirtied one fresh dir
+    /// block per mkdir and freed it in the paired rmdir: every ordered
+    /// drain then synchronously wrote ~64 already-freed blocks — the
+    /// 3.1ms/pair amortized floor after the publication-batching fix).
+    ///
+    /// Drops the buffer ONLY when it is dirty and unreferenced; a clean
+    /// or pinned buffer is left alone (clean costs nothing, pinned
+    /// belongs to a live user — it will be written later, which is
+    /// correct, just not optimal).
+    ///
+    /// Protocol: R7-C1-shaped like evict_one, minus the Phase-4 sync:
+    ///   Phase 1 (bucket lock): find the entry, verify !evicting,
+    ///     dirty, count==0; unhash and set evicting — one lock hold, no
+    ///     pick/re-verify window (we address the block by key, and a
+    ///     count!=0 entry simply aborts).
+    ///   Phase 2 (LRU lock): unlink from the LRU.
+    ///   Phase 3 (no locks): free.
+    /// A pending publication record referencing the dropped blockno
+    /// already no-ops: sync_block_ordered peeks by key, misses, returns
+    /// Ok — the H1/H2 plans degrade exactly as they do for a block that
+    /// was never cached. The bitmap free (which carries the semantics)
+    /// rides its own deferred write with its own ordering record.
+    fn drop_block(&self, mj: u32, mi: u32, blocknr: u64) {
+        let index = self.hash_index(mj, mi, blocknr);
+        let victim: *mut CacheEntry;
+        {
+            let mut bucket = self.buckets[index].lock();
+            let mut found: Option<*mut CacheEntry> = None;
+            let mut prev: Option<*mut CacheEntry> = None;
+            let mut current = bucket.head;
+            while let Some(cp) = current {
+                // SAFETY: chain pointers are valid under the bucket lock
+                // (created by Box::into_raw, freed only under this lock).
+                unsafe {
+                    if (*cp).key == (mj, mi, blocknr) {
+                        found = Some(cp);
+                        break;
+                    }
+                    prev = Some(cp);
+                    current = (*cp).hash_next;
+                }
+            }
+            let cp = match found {
+                Some(cp) => cp,
+                None => return, // nothing cached for this block
+            };
+            // SAFETY: cp was found in the chain under this lock.
+            unsafe {
+                if (*cp).evicting || (*cp).bh.is_null() {
+                    return; // mid-eviction / dead — nothing to drop
+                }
+                let bh = &*(*cp).bh;
+                if bh.count() != 0 || !bh.is_dirty() {
+                    return; // pinned or clean — leave it
+                }
+                // Unhash under the same lock that get() pins under:
+                // after this, no new pins can arrive.
+                (*cp).evicting = true;
+                if let Some(pp) = prev {
+                    (*pp).hash_next = (*cp).hash_next;
+                } else {
+                    bucket.head = (*cp).hash_next;
+                }
+            }
+            victim = cp;
+        }
+        // Bucket lock released; victim unhashed and unpinnable.
+        {
+            let mut lru = self.lru.lock_irqsave();
+            // SAFETY: victim was LRU-linked; LRU lock held for the unlink.
+            unsafe { Self::remove_from_lru(&mut lru, victim); }
+        }
+        crate::dfx::fsw::note_drop_block();
+        // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
+        unsafe { let _ = Box::from_raw(victim); }
+        self.count.fetch_sub(1, Ordering::Release);
+    }
+
     /// Get or create buffer (synchronous read on cache miss).
     fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
@@ -1249,6 +1332,43 @@ pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut 
 /// See BlockCache::get_overwrite.
 pub fn getblk_overwrite(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_overwrite(device, blocknr)
+}
+
+/// Forget a FREED block's dirty buffer without writing it (see
+/// BlockCache::drop_block). Best-effort: pinned or clean buffers are
+/// left in place.
+pub fn drop_freed_block(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
+    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
+    // fields are read.
+    unsafe {
+        get_block_cache().drop_block((*device).major, (*device).first_minor, blocknr);
+    }
+}
+
+/// Forget a FREED block's dirty buffer AND its jbd2 registration: same as
+/// drop_freed_block, but first removes the buffer from the CURRENT task's
+/// running transaction (jbd2_journal_forget) so a later commit does not
+/// re-read the dead block from disk and write its stale content back (or
+/// into the journal area on the revoke slow path). Called from the block
+/// allocator's free path, which always runs inside the freeing op's
+/// journal bracket.
+pub fn drop_freed_block_forgotten(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
+    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
+    // fields are read.
+    unsafe {
+        let (mj, mi) = ((*device).major, (*device).first_minor);
+        // Forget under NO bio locks (peek pins, jbd2 locks only its own
+        // transaction lists — no bucket->t_dirty nesting exists).
+        if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
+            // SAFETY: get_current_handle is task-local and null-safe; the
+            // handle outlives this call (the freeing op's bracket).
+            if let Some(h) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh);
+            }
+            get_block_cache().put(bh);
+        }
+        get_block_cache().drop_block(mj, mi, blocknr);
+    }
 }
 
 /// Invalidate every cached buffer of `device` without writing anything

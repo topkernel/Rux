@@ -271,6 +271,13 @@ pub fn note_mkdir_us(delta_us: u64) {
 pub fn note_j_dedup(iters: usize) {
     bump!(J_DEDUP_ITERS, iters);
 }
+/// Freed-block dirty-buffer drops (bio::drop_freed_block) — the
+/// discard-on-free path that keeps dead data out of publication drains.
+pub static DROP_BLOCK: AtomicU64 = AtomicU64::new(0);
+#[inline]
+pub fn note_drop_block() {
+    bump!(DROP_BLOCK);
+}
 /// Record one whole-bracket ext4_rmdir duration (microseconds). Count
 /// rides MKDIR-class counters' shape: RMDIR count = FREE_RUN-free path is
 /// not 1:1, so a dedicated count is not kept — use MKDIR_US_N for mkdir
@@ -525,7 +532,7 @@ pub fn dump() {
     crate::pr_warn!(
         // rmdir phase sums in MICROSECONDS (find+empty / delete / inodes
         // / free_inode / free_blocks) and per-phase max in us.
-        "FSW3 t={}s rmd={} {} {} {} {} rmdmax={} {} {} {} {}",
+        "FSW3 t={}s rmd={} {} {} {} {} rmdmax={} {} {} {} {} db={}",
         secs,
         v(&RMD_PHASE1_NS) / 1000, v(&RMD_PHASE2_NS) / 1000,
         v(&RMD_PHASE3_NS) / 1000, v(&RMD_PHASE4_NS) / 1000,
@@ -533,5 +540,6 @@ pub fn dump() {
         v(&RMD_PHASE_MAX_US[0]), v(&RMD_PHASE_MAX_US[1]),
         v(&RMD_PHASE_MAX_US[2]), v(&RMD_PHASE_MAX_US[3]),
         v(&RMD_PHASE_MAX_US[4]),
+        v(&DROP_BLOCK),
     );
 }
