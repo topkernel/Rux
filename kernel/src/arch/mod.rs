@@ -38,6 +38,11 @@ pub mod aarch64;
 // Interface: re-export the active backend's surface
 // ---------------------------------------------------------------------------
 
+/// Safe typed user-memory entries over the active backend's uaccess
+/// mechanics (see `uaccess_safe.rs`): the only user-copy surface the
+/// `#![forbid(unsafe_code)]` service files are allowed to call.
+pub mod uaccess_safe;
+
 #[cfg(feature = "riscv64")]
 pub use riscv64::{
     arch_init, cpu_id, enable_interrupts, init, boot, context, cpu, ipi, mm, process, pt_regs,
