@@ -4956,6 +4956,17 @@ pub fn scheduler_tick() {
                             }
                             ph(now.wrapping_sub(t0));
                             putchar(b'\n');
+                            // preempt-hunt (2026-11-01): the
+                            // outermost-acquire record is guaranteed
+                            // intact here — the incumbent's base never
+                            // returned to 0 since the phantom formed
+                            // (inner pairs are 1->2->1 and do not clear
+                            // it), so this names the acquire whose 1->0
+                            // release is missing / late.
+                            crate::dfx::leakorigin::report_outermost(
+                                b"PREEMPT-HEAL-ORIGIN",
+                                cur,
+                            );
                         }
                     }
                 }
