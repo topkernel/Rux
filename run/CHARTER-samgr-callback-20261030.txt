@@ -1,0 +1,15 @@
+# Lane: samgr-callback (OH-adjacent) — resume + pivot option
+Work autonomously; never ask; commit every step. Worktree = THIS (lane branch tip d76bd68a, 28 dirty files = predecessor's start — INVENTORY FIRST: cat any *.md state notes in this worktree + run/, git status/diff). Then `git fetch origin && git merge origin/main` (main=82059759; the aarch64 campaign touched shared IPC surfaces — semantic reconciliation for binder.rs conflicts, both sides' intent).
+
+## Context
+- OH campaign rebooted TODAY with fresh evidence (sibling agent in rux-agents/oh-launcher, its TASK.md has the chain): boot reaches 185 services, aborts on a storage_daemon registration stall -> storage_manager critical-crash panic-reboot. Your lane's samgr/binder-callback direction may be the UPSTREAM of that stall.
+- OH source tree: /home/william/workspace/oh-robot. OH images: CENTRAL STORE /home/william/rux-images/oh (READ-ONLY; boot -snapshot + file.locking=off). Boot driver to copy: rux-agents/oh-launcher/run/oh-boot.sh.
+
+## Mission
+1. Reconstruct lane state from notes/git; continue its registered next step if alive.
+2. If stale/complete, pivot to the samgr side of the storage_daemon stall (samgr pid 328 replied txn18 at oh-launcher/run/oh-probe1-serial.log:4369 then pid 325 went silent): was a later push/callback from samgr to storage_daemon lost? SAREG/SLRD instrumentation in kernel/src/ipc/binder.rs + OH samgr sources name the expected exchange.
+3. Fixes: x3 builds rc=0, riscv make test green, small commits, English, NEVER "Linux". Push to the lane branch.
+
+## Discipline
+One QEMU at a time (check ps); kill only yours; pkill FORBIDDEN. Quota deaths: commit early.
+Final message: lane state found + continued-vs-pivoted + reasoning, progress, commits, build/test status.
