@@ -96,6 +96,7 @@ macro_rules! dfx_switch_table {
             ThPark => "thpark",
             RipSample => "ripsample",
             OhHunt => "ohhunt",
+            SigTrace => "sigtrace",
         }
     };
 }
@@ -439,9 +440,16 @@ pub enum DfxSwitch {
     /// pollute the structured boot table. OFF by default — enable with
     /// `dfx=ohhunt` when the graphics lanes are hunting.
     OhHunt,
+    /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
+    /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
+    /// handler, restorer, pc) and one per restore_sigcontext_aarch64
+    /// (pid, frame_addr, restored pc/sp/x29). For hunting the LTP
+    /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
+    /// default.
+    SigTrace,
 }
 
-const SWITCH_COUNT: usize = 48;
+const SWITCH_COUNT: usize = 49;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -530,6 +538,7 @@ impl DfxSwitch {
             DfxSwitch::RipSample => 45,
             DfxSwitch::DbFileTrace => 46,
             DfxSwitch::OhHunt => 47,
+            DfxSwitch::SigTrace => 48,
         }
     }
 

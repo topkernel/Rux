@@ -2,9 +2,9 @@
 # aa64-tail task-5 diagnosis: run a few LTP binaries with VISIBLE
 # output to classify the smoke failures (assertion vs crash vs loader).
 set -u
-RUN=/home/william/rux-agents/aa64-tail/run
+RUN=/home/william/rux-agents/aa64-ltp/run
 IMG="$RUN/a64-ltpsmoke.img"
-KERNEL="${1:-/home/william/rux-agents/aa64-tail/target/aarch64-unknown-none/debug/rux}"
+KERNEL="${1:-/home/william/rux-agents/aa64-ltp/target/aarch64-unknown-none/debug/rux}"
 OUT="${2:-$RUN/ltpdiag-serial.log}"
 
 ( sleep 28

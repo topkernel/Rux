@@ -9,7 +9,7 @@
 # staging tree (consumed by aa64-ltp-smoke.sh to inject into an image
 # copy). Rebuildable scratch stays in the lane worktree.
 set -u
-LANE=/home/william/rux-agents/aa64-tail
+LANE=/home/william/rux-agents/aa64-ltp
 TARBALL="$LANE/userspace/linux-ltp/ltp-20240524.tar.xz"
 WORK="$LANE/run/ltp-aa64"
 SRC="$WORK/ltp-full-20240524"
