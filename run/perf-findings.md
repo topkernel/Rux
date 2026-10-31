@@ -140,3 +140,28 @@ blocks, floor ~3.1ms/pair -> ~100us/pair class, p99 collapses.
 Remaining per-pair typical cost after that: mkdir 41us (mk=, monotonic)
 + rmdir inner 43us + ~160us syscall/VFS layer (matches the p6_stat
 14.8us + openclose 37us shared lookup costs - syscall lane overlap).
+
+## Fix 6 landed: discard-on-free (KVM board)
+p6_mkdrmdir avg 3371 -> 2107us, p99 54 -> 16.4ms, max 53 -> 22.8ms;
+mkdir bracket max 10ms -> 137us (mkdirs no longer pay drains at all).
+Median ~245us unchanged - bounded by the shared syscall/lookup path
+(p6_stat 15.2us vs reference 0.23us, p6_openclose 37us vs 0.37us):
+VFS path walk + fd machinery, overlapping the syscall lane's p1_null
+work. Gates: make test 1204/1204 PASSED, dual-arch rc=0.
+
+Remaining mkdrmdir tail (p99 16ms): the revoke-threshold slow commits
+still write the accumulated registered set (inode tables, bitmaps,
+GD, SB - ~70-130 unique blocks) into the journal area; shrinking that
+needs the jbd2 commit to write only CHANGED-since-last-commit blocks
+(the reference kjournald checkpoint shape) - jbd2-level design work.
+
+Final KVM verdict table for this session (medians, us):
+row             ref     base    fixed   ratio-now
+p6_mkdrmdir     7.2     15210   245     34x (2108x -> 34x)
+p6_unlink       1.7     68      66      39x
+p6_write_fsync  10420   9079    9174    0.88x (better than ref)
+p6_append       0.39    121     112     287x  (syscall+write-path, next)
+p6_stat         0.23    14.7    14.8    64x   (lookup path, syscall lane)
+p6_openclose    0.37    37.1    36.9    100x  (same)
+p6_read_cached  0.54    38.9    38.3    71x   (same + read path)
+p6_getdents     80.8    512     500     6.2x
