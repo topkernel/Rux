@@ -411,3 +411,57 @@ USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
 - Image: run/lb-mkimage2.sh -> run/system-lb2.img (installs resident).
 - Boots lb30-lb42; make test ALL PASSED on the final tree; x3 builds
   rc=0 (x86_64/riscv64/aarch64).
+## SIXTH-SUCCESSOR DECODE (2026-11-01 01:3x, branch @ 3ad7c3e7+)
+The "160s silent handler" was an INSTRUMENTATION ARTIFACT, not a shape.
+Raw-log re-derivation of all three boots:
+1. **2097193 = AAFWK INVALID_USERID_VALUE, source-confirmed**:
+   ErrCodeOffset(SUBSYS_AAFWK=1) = 1<<21; ability_manager_errors.h
+   offset+41 (0x29) with the source comment "Result(2097193) for
+   invalid userid". The ONLY return sites are user_controller.cpp:157/
+   166/176 (CheckUserParam's three legs).
+2. **lb44 @266.819-820 and lb45 @208.830-831 are decisive**: the code-46
+   handler prints "startUser in service:100" and "userId not exist"
+   (user_controller.cpp:175) 1 ms apart. The ripple window (prints EVERY
+   foundation txn) shows ZERO sends between them; R-FAIL never fired;
+   AMS46 lifecycle READ->FREE = 4-6 ms. So CheckUserParam's
+   IsExistOsAccount leg completed in ~1 ms with NO kernel binder
+   traffic and NO "failed to get os account service" log (lb44's
+   HILOG-AMS budget was only at [100] then — alive).
+3. **The engine, named**: `OsAccount::IsOsAccountExists` pre-sets
+   isExist=false; on a cached proxy_ it calls
+   `proxy->IsOsAccountExists()`. `IPCObjectProxy::SendRequestInner`'s
+   FIRST line: `if (IsObjectDead()) return ERR_DEAD_OBJECT;` — silent
+   (ZLOGD only), instant, no kernel contact. And `GetOsAccountProxy`
+   returns proxy_ whenever non-null — a DEATH-MARKED proxy is returned
+   FOREVER (the death recipient only clears on an actual death
+   notification; a failed send's SetObjectDied(true) is never undone).
+   So ONE earlier send to the osaccount handle that returned
+   ERR_DEAD_OBJECT (kernel BR_DEAD_REPLY; the mark is also set on any
+   send whose status maps DEAD) poisons EVERY later osaccount query in
+   foundation for the whole boot — CheckUserParam always fails, StartUser
+   always returns 2097193, the launcher NEVER spawns.
+4. **Why the window looked "silent for 160s"**: the AMS_KEYS "SendRequest"
+   matched SA_CLIENT's "SubscribeSystemAbility SendRequest succeed!"
+   flood — budget [599] exhausted at 125.6s on lb46, dark from 125s to
+   the end; lb44's AMS46-T sys=16 snapshots are all AFTER the fail
+   (foundation's main looper parked in BWR — its normal idle posture).
+5. **The open kernel question (lb47 hunts this)**: WHICH send failed and
+   WHY — our kernel returned BR_DEAD_REPLY/BR_FAILED_REPLY to some
+   foundation->accountmgr(-osaccount) handle earlier in the boot. All
+   reason prints were pr_info (invisible at LOGLEVEL=6) or
+   launcher-family-gated (app_txn_fail_print). Candidates: ref lost
+   from proc.refs (invalid-handle), node wrongly marked dead
+   (child-node-dead), owner seen dead. New taps (3ad7c3e7):
+   AMS46-SENDFAIL always-on WARN (pid tid code handle BR reason,
+   budget 400, reason shadow 1-18) + de-flooded AMS keys
+   ('failed, handle:' = IPCObjectProxy's error verdict, 'invoker is
+   null', 'Invalid samgr stub', 'SendRequestInner cost').
+6. OH-source reference points: SendRequestInner early-dead return at
+   foundation/communication/ipc/ipc/native/src/core/framework/source/
+   ipc_object_proxy.cpp:218-247; the poison-cache at
+   base/account/os_account/frameworks/osaccount/core/src/os_account.cpp
+   GetOsAccountProxy (proxy_ != nullptr fast path) + IsOsAccountExists
+   (isExist=false preset); AMS handler at
+   foundation/ability/ability_runtime/services/abilitymgr/src/
+   ability_manager_service.cpp:9596 (StartUser -> CheckUserParam ->
+   OnStartUserDone on ANY failure).
