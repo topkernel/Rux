@@ -118,6 +118,40 @@ for b in "$ROOT/usr/sbin/gdm3" \
 done
 [ "$MISSING" = 0 ] && echo "   all DT_NEEDED present"
 
+echo "== systemd1shim (gdmr54: org.freedesktop.systemd1 bus owner)"
+# logind's CreateSession starts the session scope through
+# org.freedesktop.systemd1; without the name owned, dbus activation
+# fails ("Launch helper exited with unknown return code 1") and no
+# logind session can exist for the greeter — gdm-x-session's
+# RegisterDisplay then fails and the greeter exit-loops (gdmr53).
+# The shim (test/ubuntu-gnome/systemd1shim.c) owns the name and
+# completes every unit job instantly. Build: cross gcc against the
+# tree's glib + the riscv64 glib headers extracted from the
+# libglib2.0-dev deb into work/glibdev-riscv64 (kept between walks).
+GLIBDEV="$WORK/glibdev-riscv64"
+SHIM="$ROOT/usr/libexec/systemd1shim"
+mkdir -p "$ROOT/usr/libexec"
+if [ -d "$GLIBDEV/usr/include/glib-2.0" ]; then
+    riscv64-linux-gnu-gcc -O2 -Wall -o "$SHIM" \
+        "$WT/test/ubuntu-gnome/systemd1shim.c" \
+        -I"$GLIBDEV/usr/include/glib-2.0" \
+        -I"$GLIBDEV/usr/lib/riscv64-linux-gnu/glib-2.0/include" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libgio-2.0.so" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libgobject-2.0.so" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libglib-2.0.so" \
+        -Wl,-rpath-link,"$ROOT/usr/lib/riscv64-linux-gnu" \
+        -Wl,-rpath-link,"$ROOT/lib/riscv64-linux-gnu" \
+        -L/usr/riscv64-linux-gnu/lib \
+        && cp "$SHIM" "$WORK/gnome-debs-gdm/systemd1shim.bin" 2>/dev/null \
+        || echo "warn: systemd1shim build failed (needs glib headers)" >&2
+    chmod 0755 "$SHIM" 2>/dev/null || true
+elif [ -f "$WORK/gnome-debs-gdm/systemd1shim.bin" ]; then
+    cp "$WORK/gnome-debs-gdm/systemd1shim.bin" "$SHIM"
+    chmod 0755 "$SHIM"
+else
+    echo "warn: no glib headers, no banked shim — greeter needs systemd1" >&2
+fi
+
 echo "== users, groups, shadow, homes"
 # gdm greeter user (uid 120 range like stock adduser) + login user.
 # password for 'rux' is 'rux' (sha512-crypt, fixed salt — reproducible).

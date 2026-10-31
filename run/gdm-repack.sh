@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r52"
+NEXT="r54"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
@@ -37,6 +37,18 @@ fi
 
 echo "== runit (recompile from current runit.c)"
 CC "$ROOT/sbin/runit" "$WT/test/ubuntu-gnome/runit.c"
+
+echo "== systemd1shim (gdmr54: org.freedesktop.systemd1 bus owner)"
+# logind's CreateSession starts the session scope through
+# org.freedesktop.systemd1; without the name owned, dbus activation
+# fails and no logind session can exist for the greeter (gdmr53). The
+# shim is built by gdm-img.sh's full walk (cross gcc + image glib,
+# headers banked in work/glibdev-riscv64); the repack refreshes it from
+# the banked binary.
+if [ -f "$WORK/gnome-debs-gdm/systemd1shim.bin" ]; then
+    cp "$WORK/gnome-debs-gdm/systemd1shim.bin" "$ROOT/usr/libexec/systemd1shim"
+    chmod 0755 "$ROOT/usr/libexec/systemd1shim"
+fi
 
 echo "== pam_systemd (gdmr52: real logind session for the greeter)"
 # gdm-manager's RegisterDisplay lookup needs a logind session for the
