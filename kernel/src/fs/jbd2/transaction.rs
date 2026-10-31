@@ -365,11 +365,17 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
         // Check if already tracked
+        let mut scanned = 0usize;
         for (existing_nr, _) in dirty_bufs.iter() {
+            scanned += 1;
             if *existing_nr == blocknr {
+                crate::dfx::fsw::note_j_dedup(scanned);
                 return Ok(()); // Already tracked
             }
         }
+        // fsw: the miss pays the full-set walk (set grows with the
+        // transaction's unique blocks — every fresh block registered).
+        crate::dfx::fsw::note_j_dedup(scanned);
         // R3FIX: no data clone — the commit paths read the live
         // buffer-cache content through the block number (see
         // Transaction::t_dirty_buffers).
@@ -425,12 +431,18 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::
         let blocknr = (*bio_bh).b_blocknr;
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
+        let mut scanned = 0usize;
         for (existing_nr, existing_kind) in dirty_bufs.iter_mut() {
+            scanned += 1;
             if *existing_nr == blocknr {
                 *existing_kind = super::journal::TxnBufferKind::Live;
+                crate::dfx::fsw::note_j_dedup(scanned);
                 return Ok(());
             }
         }
+        // fsw: miss pays the full-set walk (the set grows with the
+        // transaction's unique blocks — every fresh block registered).
+        crate::dfx::fsw::note_j_dedup(scanned);
         // Not previously registered via get_write_access — register now
         dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Live));
     }

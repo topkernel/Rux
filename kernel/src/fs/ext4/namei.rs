@@ -1319,6 +1319,8 @@ fn ext4_mkdir_inner(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
+    // fsw op-cost anatomy: whole-bracket duration (guard to stop), us.
+    let t0 = crate::drivers::timer::coarse_ns_since_boot();
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
@@ -1334,6 +1336,9 @@ fn ext4_mkdir_inner(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_mkdir_us(
+        (crate::drivers::timer::coarse_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 
@@ -2013,6 +2018,8 @@ pub fn ext4_unlink(
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
+    // fsw op-cost anatomy: whole-bracket duration (us).
+    let t0 = crate::drivers::timer::coarse_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -2020,6 +2027,9 @@ pub fn ext4_unlink(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_unlink_us(
+        (crate::drivers::timer::coarse_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 
@@ -2161,6 +2171,8 @@ pub fn ext4_rmdir(
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
+    // fsw op-cost anatomy: whole-bracket duration (us).
+    let t0 = crate::drivers::timer::coarse_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -2168,6 +2180,9 @@ pub fn ext4_rmdir(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_rmdir_us(
+        (crate::drivers::timer::coarse_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 

@@ -117,6 +117,26 @@ pub static BIGLOCK: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions that fell past the adaptive spin (queued/spun for the lock).
 pub static BIGLOCK_CONTEND: AtomicU64 = AtomicU64::new(0);
 
+// === op-cost anatomy (perf-fs lane 2026-10-31) ============================
+/// Whole-bracket ext4_mkdir duration (ENTRY_MUTEX guard to journal stop),
+/// microseconds: count / cumulative / max. The residual p6_mkdrmdir floor
+/// (~2.5ms/pair under load with zero steady-state device I/O) needs an
+/// in-op cost attribution; this bracket timer plus the registration-scan
+/// counter below bracket the two suspects (CPU in the op vs jbd2 dedup
+/// scans that grow with the running transaction's unique-block set).
+pub static MKDIR_US_N: AtomicU64 = AtomicU64::new(0);
+pub static MKDIR_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static MKDIR_US_MAX: AtomicU64 = AtomicU64::new(0);
+/// Same bracket timer for ext4_rmdir / ext4_unlink (us).
+pub static RMDIR_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static RMDIR_US_MAX: AtomicU64 = AtomicU64::new(0);
+pub static UNLINK_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static UNLINK_US_MAX: AtomicU64 = AtomicU64::new(0);
+/// jbd2_journal_get_write_access dedup-scan iterations (the linear
+/// already-tracked walk over t_dirty_buffers): grows O(set) per metadata
+/// registration between commits.
+pub static J_DEDUP_ITERS: AtomicU64 = AtomicU64::new(0);
+
 // === VFS walk ============================================================
 /// path_lookup calls.
 pub static WALK: AtomicU64 = AtomicU64::new(0);
@@ -225,6 +245,72 @@ pub fn note_pub_hiwat() {
 #[inline]
 pub fn note_pub_batch() {
     bump!(PUB_BATCH_DRAINS);
+}
+/// Record one whole-bracket ext4_mkdir duration (microseconds).
+#[inline]
+pub fn note_mkdir_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        MKDIR_US_N.fetch_add(1, Ordering::Relaxed);
+        MKDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = MKDIR_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match MKDIR_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
+/// jbd2 registration dedup-scan iterations (see J_DEDUP_ITERS).
+#[inline]
+pub fn note_j_dedup(iters: usize) {
+    bump!(J_DEDUP_ITERS, iters);
+}
+/// Record one whole-bracket ext4_rmdir duration (microseconds). Count
+/// rides MKDIR-class counters' shape: RMDIR count = FREE_RUN-free path is
+/// not 1:1, so a dedicated count is not kept — use MKDIR_US_N for mkdir
+/// only; rmdir/unlink report sum/max.
+#[inline]
+pub fn note_rmdir_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        RMDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = RMDIR_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match RMDIR_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
+/// Record one whole-bracket ext4_unlink duration (microseconds).
+#[inline]
+pub fn note_unlink_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        UNLINK_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = UNLINK_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match UNLINK_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
 }
 #[inline]
 pub fn note_pub_lazy() {
@@ -385,7 +471,7 @@ pub fn dump() {
         crate::printk::console_emit_skipped(),
     );
     crate::pr_warn!(
-        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{}",
+        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{} mk={}.{}.{} rm={}.{} ul={}.{} jd={}",
         secs,
         v(&READ_INODE), v(&WRITE_INODE),
         v(&DIR_LOOKUP), v(&DIR_BLOCKS), v(&LIST_DIR),
@@ -394,5 +480,9 @@ pub fn dump() {
         v(&J_COMMIT_FAST), v(&J_REVOKE),
         v(&BIGLOCK), v(&BIGLOCK_CONTEND),
         v(&WALK), v(&WALK_HIT), v(&WALK_MISS),
+        v(&MKDIR_US_N), v(&MKDIR_US_SUM), v(&MKDIR_US_MAX),
+        v(&RMDIR_US_SUM), v(&RMDIR_US_MAX),
+        v(&UNLINK_US_SUM), v(&UNLINK_US_MAX),
+        v(&J_DEDUP_ITERS),
     );
 }
