@@ -1874,6 +1874,18 @@ pub fn init() {
     }
 }
 
+/// Drop the bootstrap identity map (PML4[0] -> boot_pdpt_lo, identity
+/// 0..2GB supervisor-only) from the kernel CR3. See boot_stack_continuation
+/// for the call site and the run/perf-review-ledger.md for the contract.
+pub fn drop_bootstrap_identity() {
+    // SAFETY: exclusive owner of the kernel root table (init() built it);
+    // runs once on the BSP after the stack switch, task context.
+    unsafe {
+        (*&raw mut ROOT_PAGE_TABLE).set(0, PageTableEntry::new());
+        crate::arch::cpu::write_cr3(root_static_phys());
+    }
+}
+
 /// Setup linear mapping for physical memory (PAGE_OFFSET region).
 ///
 /// Called from main.rs after memblock is initialized and the memory

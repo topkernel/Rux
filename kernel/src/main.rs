@@ -612,6 +612,8 @@ pub fn rust_main_tail() -> ! {
         // snapshots the offset) and any file creation; if the device is
         // unreadable the offset stays 0 and the system runs on monotonic
         // boot time (the pre-RTC behaviour).
+        #[cfg(feature = "x86_64")]
+        drivers::rtc::rtc_init_alias();
         drivers::rtc::rtc_init_wall_clock();
 
         // Initialize IRQ framework
@@ -1167,6 +1169,9 @@ pub fn rust_main_tail() -> ! {
 #[cfg(feature = "x86_64")]
 #[no_mangle]
 extern "C" fn boot_stack_continuation() -> ! {
+    // The bootstrap identity map (PML4[0]) has outlived every user —
+    // unlink it before any syscall ever runs.
+    crate::arch::x86_64::mm::mmu_init::drop_bootstrap_identity();
     crate::rust_main_tail()
 }
 

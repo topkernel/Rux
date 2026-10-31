@@ -35,11 +35,26 @@ pub enum VirtIODeviceId {
 
 /// VirtIO device MMIO base addresses
 ///
-/// VirtIO device address range for QEMU virt platform
-/// Uses identity mapping: VIRTIO_MMIO_BASE near 0x10000000
+/// VirtIO device address range for QEMU virt platform (registers at
+/// 0x10001000.., one page per device).
+///
+/// Identity-window history (perf review 2026-10-31): this used to be
+/// `mmio_alias(0x10001000)` — identity on x86_64 — and the register
+/// reads only worked through the bootstrap identity link in PML4[0].
+/// The window is ioremapped into the kernel-half dynamic alias arena at
+/// probe start (see virtio_probe_devices), same as the RTC page.
+#[cfg(feature = "x86_64")]
+static VIRTIO_MMIO_VA: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x10001000);
+#[cfg(not(feature = "x86_64"))]
 const VIRTIO_MMIO_BASE: u64 =
     crate::arch::mm::memory_layout::mmio_alias(0x10001000);
 const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+
+#[cfg(feature = "x86_64")]
+fn virtio_mmio_va(pa: u64) -> u64 {
+    VIRTIO_MMIO_VA.load(core::sync::atomic::Ordering::Relaxed) + (pa - 0x10001000)
+}
 
 /// Number of VirtIO devices - from config
 const VIRTIO_MAX_DEVICES: usize = crate::config::VIRTIO_MAX_DEVICES;
@@ -52,10 +67,27 @@ const VIRTIO_MAX_DEVICES: usize = crate::config::VIRTIO_MAX_DEVICES;
 /// # Notes
 /// Scans all 8 VirtIO device slots
 pub fn virtio_probe_devices() -> usize {
+    #[cfg(feature = "x86_64")]
+    {
+        // Identity-window history (see VIRTIO_MMIO_VA): ioremap the
+        // virtio-mmio register window into the kernel-half alias arena
+        // before any register access.
+        if let Some(va) = crate::arch::x86_64::mm::mmu_init::ioremap_bar_kernel(
+            0x10001000,
+            VIRTIO_MMIO_SIZE * 8,
+        ) {
+            VIRTIO_MMIO_VA.store(va, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let mut device_count = 0;
 
     // Scan all VirtIO device slots
     for device_index in 0..VIRTIO_MAX_DEVICES {
+        #[cfg(feature = "x86_64")]
+        let base_addr = virtio_mmio_va(
+            0x10001000 + (device_index as u64 * VIRTIO_MMIO_SIZE),
+        );
+        #[cfg(not(feature = "x86_64"))]
         let base_addr = VIRTIO_MMIO_BASE + (device_index as u64 * VIRTIO_MMIO_SIZE);
 
         // Quick read magic number
@@ -633,6 +665,10 @@ pub fn pci_rescan_block_hotplug() -> usize {
         };
         // SAFETY: cfg_base is a valid MMIO-mapped virtio-blk device
         // config region (parsed from the device's PCI capabilities).
+        crate::println!(
+            "AUDIT: rescan cfg_base={:#x} dev_bar={:#x} common_bar={:#x}",
+            cfg_base, dev.device_cfg_bar, dev.common_cfg_bar
+        );
         let capacity = unsafe { core::ptr::read_volatile(cfg_base as *const u64) };
 
         // Assign identity: vdX with minor stride 16, continuing past the

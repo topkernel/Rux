@@ -122,17 +122,16 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
     // user-pointer dereference. Name the instruction BEFORE the oops
     // machinery mangles the context — the audit loop is: run the tests,
     // read this line, convert the site to uaccess, repeat.
-    if crate::arch::cpu::smap_enabled()
-        && (regs.rflags & (1u64 << 18)) == 0
-        && _fault_addr.bits() < crate::arch::mm::user_addr::USER_END as u64
     {
         static SHOWN: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         if SHOWN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
             crate::println!(
-                "SMAP-VIOL rip={:#x} addr={:#x} — raw user-pointer dereference (audit)",
+                "PF-NOCTX rip={:#x} addr={:#x} ac={} cr4smap={}",
                 regs.rip,
-                _fault_addr.bits()
+                _fault_addr.bits(),
+                (regs.rflags >> 18) & 1,
+                crate::arch::cpu::smap_enabled() as u8
             );
         }
     }

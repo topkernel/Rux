@@ -134,3 +134,21 @@ Remaining: prlimit64 EFAULT needs the PML4[0] identity window out of
 the kernel CR3 (KPTI-shaped work); SMAP makes no difference to it (the
 window is U=0 and STAC windows still read it — only removing the link
 fixes it).
+
+## Identity-window drop attempt (2026-10-31 late) — parked, evidence banked
+
+Unlinking PML4[0] (bootstrap identity 0..2GB) from the kernel CR3 at
+boot_stack_continuation worked mechanically (build clean, tests start)
+and immediately EXPOSED a real consumer: virtio pci_rescan_block_hotplug
+reads device cfg at physical 0x101000+4K through the identity mapping
+(kernel paging request at 0x101004). The bar_va() x86 path falls through
+to the bare physical address for BARs outside both static device-alias
+windows (a firmware-placed low MMIO BAR at 0xFF000/0x101000), and the
+added ioremap_bar_kernel fallback did not take effect — the assigned
+BAR base_addr resolution (ECAM path) needs the virtio/pci lane to
+verify. Parked until that lane owns it; main stays with the identity
+window and the documented prlimit64 EFAULT gap.
+
+Also confirmed this round: STAC/CLAC #UD under QEMU TCG is CR4-invariant,
+and the syscall layer has ZERO raw user-pointer dereferences (SMAP-VIOL
+beacons silent across the full x86_64 suite with CR4.SMAP on).
