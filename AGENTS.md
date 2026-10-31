@@ -78,6 +78,24 @@ The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
 
 ---
 
+### Platform priority (user directive 2026-10-31): x86_64-FIRST
+
+The host is x86 with KVM — the fastest virtualization for x86 guests
+(near-native; our own A/B: reference kernel p1_null 0.040µs KVM vs
+0.240µs TCG, 6x; IO/timer paths larger). Consequences:
+- The PRIMARY dev/test/perf loop is x86_64 + KVM (`-accel kvm`): fast
+  iteration, perf numbers closest to real hardware. Perf work is
+  measured on x86/KVM first.
+- riscv64/aarch64 remain regression gates (triple-arch builds + suites
+  green) but are NOT the perf focus until x86 is stable and optimized.
+  Their boots stay TCG (KVM cannot emulate them on an x86 host).
+- ~90% of the kernel is arch-generic (fs/mm/ipc/sched/syscall):
+  optimizations landed via x86/KVM measurement carry to every arch;
+  only arch-specific hot paths (entry/exit, TLB, context switch) are
+  x86-priority for now.
+- Fair-comparison rule stays: when comparing two kernels, same accel
+  both sides (the perf-syscall calibration lesson).
+
 ## Current Goals (2026-10)
 
 Two active goals, in priority order:
