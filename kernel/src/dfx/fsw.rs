@@ -312,6 +312,43 @@ pub fn note_unlink_us(delta_us: u64) {
         }
     }
 }
+/// ext4_rmdir_inner per-phase nanosecond sums (monotonic clock):
+/// find+is_dir_empty / delete_entry / inode writes / free_inode /
+/// free_inode_blocks. Dumped as FSW3.
+pub static RMD_PHASE1_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE2_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE3_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE4_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE5_NS: AtomicU64 = AtomicU64::new(0);
+/// ext4_rmdir_inner phase-N max (microseconds), same order.
+pub static RMD_PHASE_MAX_US: [AtomicU64; 5] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0),
+];
+#[inline]
+pub fn note_rmdir_phases(p1: u64, p2: u64, p3: u64, p4: u64, p5: u64) {
+    if !crate::dfx::fsw::on() {
+        return;
+    }
+    RMD_PHASE1_NS.fetch_add(p1, Ordering::Relaxed);
+    RMD_PHASE2_NS.fetch_add(p2, Ordering::Relaxed);
+    RMD_PHASE3_NS.fetch_add(p3, Ordering::Relaxed);
+    RMD_PHASE4_NS.fetch_add(p4, Ordering::Relaxed);
+    RMD_PHASE5_NS.fetch_add(p5, Ordering::Relaxed);
+    let ps = [p1, p2, p3, p4, p5];
+    for (i, &v) in ps.iter().enumerate() {
+        let us = v / 1000;
+        let mut cur = RMD_PHASE_MAX_US[i].load(Ordering::Relaxed);
+        while us > cur {
+            match RMD_PHASE_MAX_US[i].compare_exchange_weak(
+                cur, us, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(x) => cur = x,
+            }
+        }
+    }
+}
 #[inline]
 pub fn note_pub_lazy() {
     bump!(PUB_LAZY);
@@ -484,5 +521,17 @@ pub fn dump() {
         v(&RMDIR_US_SUM), v(&RMDIR_US_MAX),
         v(&UNLINK_US_SUM), v(&UNLINK_US_MAX),
         v(&J_DEDUP_ITERS),
+    );
+    crate::pr_warn!(
+        // rmdir phase sums in MICROSECONDS (find+empty / delete / inodes
+        // / free_inode / free_blocks) and per-phase max in us.
+        "FSW3 t={}s rmd={} {} {} {} {} rmdmax={} {} {} {} {}",
+        secs,
+        v(&RMD_PHASE1_NS) / 1000, v(&RMD_PHASE2_NS) / 1000,
+        v(&RMD_PHASE3_NS) / 1000, v(&RMD_PHASE4_NS) / 1000,
+        v(&RMD_PHASE5_NS) / 1000,
+        v(&RMD_PHASE_MAX_US[0]), v(&RMD_PHASE_MAX_US[1]),
+        v(&RMD_PHASE_MAX_US[2]), v(&RMD_PHASE_MAX_US[3]),
+        v(&RMD_PHASE_MAX_US[4]),
     );
 }

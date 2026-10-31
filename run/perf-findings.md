@@ -114,3 +114,29 @@ both rigs), so the fix gain is 62x under KVM vs 10x under loaded TCG.
   drains (sequential sync_block_ordered). If the p99 matters, the next
   step is phase-batched submission (submit all blocks of a phase, wait
   once) or a write-back kthread.
+
+## rmdir floor attribution (FSW3 phase timers, KVM, 1000 rmdirs)
+Phase sums per op (find+is_dir_empty 8.3us / delete_entry 9.3us / inode
+writes 4.3us / free_inode 12.4us / free_blocks 8.5us): inner work is
+~43us/op. Whole bracket (rm=, monotonic clock): 3158us/op AVERAGE -
+the difference is the PUB_BATCH drain running inside the journal-stop
+bracket: each drain synchronously writes the ~64 records' unique dirty
+blocks, dominated by the FRESH DIR BLOCKS of mkdirs that rmdir has
+ALREADY FREED by drain time (dead data written to disk). Pair median
+243us / average 3371us / p99 54ms is exactly this distribution.
+
+Next fix (design worked out, not landed): discard-on-free - when
+free_block_run frees a block whose cached buffer is dirty and
+unreferenced, DROP the buffer instead of leaving it to be written
+(the content is dead; the bitmap free carries the semantics; the
+reference kernel forgets freed buffers). Needs bio::invalidate_block
+(unhash+free, modeled on evict_one Phase 1-3 without the sync) +
+careful notes: publication records referencing the dropped blockno
+already no-op in sync_block_ordered (peek miss); jbd2 commits may
+re-read + re-write the stale content (correct, rare, harmless).
+Expected: drain work drops from ~64 blocks to the ~4-6 shared metadata
+blocks, floor ~3.1ms/pair -> ~100us/pair class, p99 collapses.
+
+Remaining per-pair typical cost after that: mkdir 41us (mk=, monotonic)
++ rmdir inner 43us + ~160us syscall/VFS layer (matches the p6_stat
+14.8us + openclose 37us shared lookup costs - syscall lane overlap).
