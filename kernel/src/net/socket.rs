@@ -1273,6 +1273,25 @@ pub fn socket_accept_wait_round(socket: &Socket, deadline: Option<u64>) -> Resul
 // Socket File Operations
 // ============================================================================
 
+/// Safe-typed socket introspection for the syscall capsule layer
+/// (framekernel): the socket type carried by an INET socket file.
+/// `None` for non-INET files (ops identity gate) and for files whose
+/// private_data was never installed.
+pub fn inet_socket_type(file: &File) -> Option<SocketType> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(
+        ops as *const _,
+        &SOCKET_OPS as *const _,
+    ) {
+        return None;
+    }
+    // SAFETY: SOCKET_OPS files carry an Arc<Socket> in private_data,
+    // installed at socket creation (socket_read's invariant).
+    let ptr = unsafe { *file.private_data.get() }?;
+    // SAFETY: ptr is a valid Arc<Socket> pointer set during file creation.
+    Some(unsafe { &*(ptr as *const Socket) }.sock_type)
+}
+
 fn socket_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data was set during socket creation to a valid Arc<Socket> pointer.
     let ptr = match unsafe { *file.private_data.get() } {

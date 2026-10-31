@@ -365,6 +365,17 @@ impl File {
         unsafe { *self.ops.get() }
     }
 
+    /// Get the backing inode of this open file description, if it has one.
+    ///
+    /// Same cell discipline as get_ops: the inode cell is written at
+    /// open/creation time before the File is published to an fd table and
+    /// is not mutated afterwards.
+    pub fn get_inode(&self) -> Option<&Arc<Inode>> {
+        // SAFETY: no write to the cell after publication (see doc), so a
+        // shared read through the shared &self borrow is race-free.
+        unsafe { &*self.inode.get() }.as_ref()
+    }
+
     /// Set private data
     pub fn set_private_data(&self, data: *mut u8) {
         unsafe { *self.private_data.get() = Some(data); }

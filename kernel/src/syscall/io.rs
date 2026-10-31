@@ -1016,14 +1016,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // Linux fdget() gate: an ioctl on an fd that is not open fails with
     // EBADF before the request is even looked at (LTP sockioctl01 uses
     // fd=1025 with SIOCATMARK and expects EBADF, not ENOTTY).
-    if fd < 0 || unsafe { crate::fs::file::get_file_fd(fd as usize) }.is_none() {
+    if fd < 0 || crate::fs::file::get_file_fd_safe(fd as usize).is_none() {
         return -errno::EBADF as i64;
     }
 
     // O_PATH descriptors permit no ioctls either (Linux empty-fops; LTP
     // open13: ioctl(FIGETBSZ) on an O_PATH fd is EBADF).
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
                 return -errno::EBADF as i64;
             }
@@ -1037,7 +1037,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // return ENOTTY there, so udesk fell back to a default 640x480 mode
     // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if crate::drivers::gpu::fbdev::is_fb_file(&file) {
                 return crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
             }
@@ -1049,7 +1049,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // (drmPrimeHandleToFD exports) carry their own ops table — only
     // DMA_BUF_IOCTL_SYNC reaches them.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if crate::drivers::drm::is_drm_file(&file) {
                 return crate::drivers::drm::drm_ioctl(request, arg);
             }
@@ -1074,7 +1074,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // its own version/size checks.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1093,7 +1093,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // aborted its device probe.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::input::evdev::evdev_file_ioctl(&file, request, arg)
             {
                 return ret;
@@ -1107,7 +1107,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // below — the terminal state must follow the fd, not the system.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::fs::pty::pty_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1119,7 +1119,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // the File's ops identity (losetup / LTP tst_acquire_device).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1131,7 +1131,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // ops identity (evdev/loop pattern). Non-firing softdog.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::watchdog::watchdog_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1143,7 +1143,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // buffer management; port plan §6 item 2).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::ashmem::ashmem_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1155,7 +1155,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // port plan §6 item 3).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) =
                 crate::drivers::access_tokenid::tokenid_file_ioctl(&file, request, arg)
             {
@@ -1175,14 +1175,12 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         use crate::fs::inode::{
             FS_APPEND_FL, FS_FL_USER_MODIFIABLE, FS_FL_USER_VISIBLE, FS_IMMUTABLE_FL,
         };
-        // SAFETY: get_file_fd returns a valid Arc<File> or None; the fd
+        // get_file_fd_safe returns a valid Arc<File> or None; the fd
         // existence was already validated above.
-        let Some(file) = (unsafe { crate::fs::file::get_file_fd(fd as usize) }) else {
+        let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) else {
             return -errno::EBADF as i64;
         };
-        // SAFETY: inode cell written once at open time; read-only here.
-        let inode_opt = unsafe { &*file.inode.get() };
-        let Some(inode) = inode_opt.as_ref() else {
+        let Some(inode) = file.get_inode() else {
             return -errno::ENOTTY as i64;
         };
         if !inode.mode.is_regular_file() && !inode.mode.is_directory() {
@@ -1194,22 +1192,15 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         if request == FS_IOC_GETFLAGS {
             let flags =
                 inode.ioc_flags.load(core::sync::atomic::Ordering::Acquire) & FS_FL_USER_VISIBLE;
-            // SAFETY: arg validated non-null, 4-byte writable.
-            if !unsafe {
-                crate::arch::uaccess::put_user(
-                    arg as *mut u32,
-                    flags,
-                )
-            } {
+            // arg validated non-null, 4-byte writable.
+            if !crate::arch::uaccess_safe::write_user(arg, flags) {
                 return -errno::EFAULT as i64;
             }
             return 0;
         }
         // FS_IOC_SETFLAGS
-        // SAFETY: arg validated non-null, 4-byte readable.
-        let Some(new_flags) = (unsafe {
-            crate::arch::uaccess::get_user(arg as *const u32)
-        }) else {
+        // arg validated non-null, 4-byte readable.
+        let Some(new_flags) = crate::arch::uaccess_safe::read_user::<u32>(arg) else {
             return -errno::EFAULT as i64;
         };
         if new_flags & !FS_FL_USER_MODIFIABLE != 0 {
@@ -1233,38 +1224,9 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         inode.ioc_flags.store(merged, core::sync::atomic::Ordering::Release);
         // ext4: persist into the on-disk i_flags so the flags survive an
         // icache eviction (the VFS copy is reseeded from disk at iget).
-        if core::ptr::eq(
-            inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
-            &crate::fs::ext4::EXT4_INODE_OPS as *const _,
-        ) {
-            let _guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
-            if let Some(fs_ptr) = inode.private_data {
-                let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-                // SAFETY: private_data holds the Ext4FileSystem for
-                // EXT4_INODE_OPS inodes.
-                unsafe {
-                    if let Ok(mut on_disk) =
-                        crate::fs::ext4::inode::read_inode(&*fs, inode.ino as u32)
-                    {
-                        on_disk.i_flags = (on_disk.i_flags & !FS_FL_USER_MODIFIABLE)
-                            | (merged & FS_FL_USER_MODIFIABLE);
-                        if crate::fs::ext4::inode::write_inode_disk(
-                            &*fs,
-                            inode.ino as u32,
-                            &on_disk,
-                        )
-                        .is_ok()
-                        {
-                            // Keep the VFS-cached Ext4Inode copy in sync.
-                            if let Some(sb) = inode.sb {
-                                let cached = &mut *(sb as *mut crate::fs::ext4::inode::Ext4Inode);
-                                cached.flags = on_disk.i_flags;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // The ops-identity gate and EXT4_BIG_LOCK discipline live in the
+        // ext4-owned entry (framekernel: fs internals behind a typed fn).
+        crate::fs::ext4::inode::persist_ioc_flags(inode, merged);
         return 0;
     }
 
@@ -1275,7 +1237,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         // Linux checks the fd BEFORE the request: an ioctl on a nonexistent
         // fd is EBADF, not ENOTTY (LTP sockioctl01 "bad file descriptor").
         let file_opt = if fd >= 0 {
-            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            crate::fs::file::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1319,7 +1281,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // data, so the answer is always 0).
     if request == 0x8905 {
         let file_opt = if fd >= 0 {
-            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            crate::fs::file::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1355,10 +1317,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                     if !is_inet {
                         return Some(true); // AF_UNIX: no datagram distinction
                     }
-                    // SAFETY: private_data holds an Arc<Socket> for
-                    // SOCKET_OPS files, installed at socket creation.
-                    let ptr = unsafe { *file.private_data.get() }? as *const crate::net::socket::Socket;
-                    Some(unsafe { (*ptr).sock_type == crate::net::socket::SocketType::Tcp })
+                    // The socket type carried by the INET socket file
+                    // (net-owned typed entry; a file with no installed
+                    // private_data counts as stream, as before).
+                    Some(
+                        crate::net::socket::inet_socket_type(file)
+                            .map(|st| st == crate::net::socket::SocketType::Tcp)
+                            .unwrap_or(true),
+                    )
                 })
                 .unwrap_or(true);
             if !is_stream {
@@ -1368,8 +1334,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         if arg == 0 || !crate::arch::uaccess::access_ok(arg, 4) {
             return -errno::EFAULT as i64;
         }
-        // SAFETY: arg validated non-null with access_ok(4).
-        if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, 0i32) } {
+        // arg validated non-null with access_ok(4).
+        if !crate::arch::uaccess_safe::write_user(arg, 0i32) {
             return -errno::EFAULT as i64;
         }
         return 0;
@@ -1392,7 +1358,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         0x5401..=0x540F | 0x5410 | 0x5413 | 0x5414)
         || (request & 0xFF00) == 0x5400 && !matches!(request, 0x541B | 0x5421)
     {
-        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        match crate::fs::file::get_file_fd_safe(fd as usize) {
             None => return -errno::EBADF as i64,
             Some(file) => {
                 if !crate::fs::tty::file_is_tty(&file) {
@@ -1423,14 +1389,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             crate::fs::tty::termios_to_kernel_bytes(&tio, &mut termios_buf);
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(36); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    termios_buf.as_ptr(),
-                    crate::fs::tty::TERMIOS_KERNEL_SIZE
-                )
-            };
+            // (arg validated with access_ok(36) above).
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &termios_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1445,17 +1405,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, crate::fs::tty::TERMIOS_KERNEL_SIZE) {
                 return -errno::EFAULT as i64;
             }
-            // Read termios structure from user space using copy_from_user
+            // Read termios structure from user space using copy_in
             // (kernel-ABI 36-byte layout, c_cc[19]).
-            // SAFETY: arg validated with access_ok(36); copy_from_user safely reads from user.
+            // (arg validated with access_ok(36) above.)
             let mut termios_buf = [0u8; crate::fs::tty::TERMIOS_KERNEL_SIZE];
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    termios_buf.as_mut_ptr(),
-                    arg as *const u8,
-                    crate::fs::tty::TERMIOS_KERNEL_SIZE
-                )
-            };
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut termios_buf, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1480,14 +1434,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             let console_tty = crate::fs::tty::console();
             let mut kbuf = [0u8; 17]; // struct termio: 4x u16 + c_line + c_cc[8]
             if set {
-                // SAFETY: arg validated with access_ok(17); copy_from_user safely reads from user.
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        kbuf.as_mut_ptr(),
-                        arg as *const u8,
-                        17
-                    )
-                } > 0 {
+                // (arg validated with access_ok(17) above.)
+                if crate::arch::uaccess_safe::copy_in(&mut kbuf, arg) > 0 {
                     return -errno::EFAULT as i64;
                 }
                 let base = console_tty.get_termios();
@@ -1499,14 +1447,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             } else {
                 let tio = console_tty.get_termios();
                 crate::fs::tty::termios_to_termio_bytes(&tio, &mut kbuf);
-                // SAFETY: arg validated with access_ok(17); copy_to_user handles user writes.
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(
-                        arg as *mut u8,
-                        kbuf.as_ptr(),
-                        17
-                    )
-                } > 0 {
+                // (arg validated with access_ok(17) above.)
+                if crate::arch::uaccess_safe::copy_out(arg, &kbuf) > 0 {
                     return -errno::EFAULT as i64;
                 }
             }
@@ -1534,14 +1476,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 pgid
             };
             let pgid_bytes = (pgid as u32).to_le_bytes();
-            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    pgid_bytes.as_ptr(),
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &pgid_bytes);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1556,14 +1492,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut pgid_bytes = [0u8; 4];
-            // SAFETY: arg validated with access_ok(4); copy_from_user safely reads from user.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    pgid_bytes.as_mut_ptr(),
-                    arg as *const u8,
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut pgid_bytes, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1587,14 +1517,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             let winsize_buf = crate::fs::tty::console().get_winsize().to_le_bytes();
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(8); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    winsize_buf.as_ptr(),
-                    8
-                )
-            };
+            // (arg validated with access_ok(8) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &winsize_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1609,14 +1533,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut kbuf = [0u8; 8];
-            // SAFETY: arg validated with access_ok(8); copy_from_user safely reads from user.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    kbuf.as_mut_ptr(),
-                    arg as *const u8,
-                    8
-                )
-            } > 0 {
+            // (arg validated with access_ok(8) above.)
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf, arg) > 0 {
                 return -errno::EFAULT as i64;
             }
             let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
@@ -1638,30 +1556,22 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             // Real readable count (review批次1: previously hard-coded 0):
             // pipes report their buffered bytes; regular files report
             // size - position; other objects report 0.
-            let readable: i32 = unsafe {
-                crate::fs::file::get_file_fd(fd as usize)
-                    .map(|file| {
-                        if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
-                            n as i32
-                        } else if let Some(inode) = (&*file.inode.get()).as_ref() {
-                            let size = inode.get_size();
-                            let pos = file.get_pos();
-                            if size > pos { (size - pos) as i32 } else { 0 }
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0)
-            };
+            let readable: i32 = crate::fs::file::get_file_fd_safe(fd as usize)
+                .map(|file| {
+                    if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
+                        n as i32
+                    } else if let Some(inode) = file.get_inode() {
+                        let size = inode.get_size();
+                        let pos = file.get_pos();
+                        if size > pos { (size - pos) as i32 } else { 0 }
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
             let result_buf: [u8; 4] = readable.to_le_bytes();
-            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    result_buf.as_ptr(),
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &result_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1678,20 +1588,13 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut flag_buf = [0u8; 4];
-            // SAFETY: arg validated with access_ok(4); copy_from_user handles user reads.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    flag_buf.as_mut_ptr(),
-                    arg as *const u8,
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut flag_buf, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
             let on = i32::from_le_bytes(flag_buf) != 0;
-            // SAFETY: get_file_fd returns valid File or None.
-            let file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+            let file = crate::fs::file::get_file_fd_safe(fd as usize);
             match file {
                 Some(file) => {
                     use crate::fs::file::FileFlags;

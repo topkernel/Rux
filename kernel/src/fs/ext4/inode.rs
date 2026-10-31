@@ -770,3 +770,46 @@ pub mod perm {
     /// Others execute
     pub const S_IXOTH: u16 = 0o001;
 }
+
+// ============================================================================
+// Framekernel typed entries
+// ============================================================================
+
+/// FS_IOC_SETFLAGS backing (safe entry for the syscall capsule layer):
+/// persist the merged chattr flags into the on-disk inode so they survive
+/// an icache eviction (the VFS copy is reseeded from disk at iget), and
+/// keep the VFS-cached Ext4Inode copy in sync. No-op for non-ext4 inodes
+/// (the ops-identity gate lives here, not at the ioctl call site).
+pub fn persist_ioc_flags(vfs_inode: &crate::fs::inode::Inode, merged: u32) {
+    use super::{EXT4_BIG_LOCK, EXT4_INODE_OPS};
+    use crate::fs::inode::FS_FL_USER_MODIFIABLE;
+
+    if !core::ptr::eq(
+        vfs_inode.ops.unwrap_or(&EXT4_INODE_OPS) as *const _,
+        &EXT4_INODE_OPS as *const _,
+    ) {
+        return; // not an ext4 inode — nothing to persist
+    }
+    let _guard = EXT4_BIG_LOCK.lock_fair();
+    if let Some(fs_ptr) = vfs_inode.private_data {
+        let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
+        // SAFETY: private_data holds the Ext4FileSystem for
+        // EXT4_INODE_OPS inodes (installed at mount/iget time).
+        unsafe {
+            if let Ok(mut on_disk) = read_inode(&*fs, vfs_inode.ino as u32) {
+                on_disk.i_flags =
+                    (on_disk.i_flags & !FS_FL_USER_MODIFIABLE) | (merged & FS_FL_USER_MODIFIABLE);
+                if write_inode_disk(&*fs, vfs_inode.ino as u32, &on_disk).is_ok() {
+                    // Keep the VFS-cached Ext4Inode copy in sync.
+                    if let Some(sb) = vfs_inode.sb {
+                        // SAFETY: sb points at the Ext4Inode cache entry
+                        // for this inode (set at iget), exclusively
+                        // reachable under EXT4_BIG_LOCK here.
+                        let cached = &mut *(sb as *mut Ext4Inode);
+                        cached.flags = on_disk.i_flags;
+                    }
+                }
+            }
+        }
+    }
+}
