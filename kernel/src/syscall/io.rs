@@ -1072,14 +1072,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 {
                     // struct drm_mode_map_dumb: handle@0 (read via uaccess;
                     // a bad arg just reports 0 — the trace is diagnostic).
-                    let mut hbuf = [0u8; 4];
-                    let uncopied =
-                        unsafe { crate::arch::uaccess::copy_from_user(hbuf.as_mut_ptr(), arg as *const u8, 4) };
-                    let handle = if uncopied == 0 {
-                        u32::from_le_bytes(hbuf)
-                    } else {
-                        0
-                    };
+                    // Safe boundary: uaccess_safe::read_user returns None
+                    // on a bad arg (the trace reports 0 — diagnostic only).
+                    let handle = crate::arch::uaccess_safe::read_user::<u32>(arg)
+                        .unwrap_or(0);
                     static MAPDUMB_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = MAPDUMB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1179,7 +1175,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // pattern). Non-VT files or unhandled requests return None.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::fs::vt::vt_file_ioctl(&file, request, arg) {
                 return ret;
             }
