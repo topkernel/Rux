@@ -110,15 +110,26 @@ mid-chunk fault zero-fills the tail and returns the same Ok/EFAULT the
 byte loop produced. Short names cost ONE chunk; nothing ever copies
 more than 63 bytes past the NUL.
 
-## Cumulative (strong profile, TCG, med-of-1 per build; med-of-3 pending)
+### F6 — symlink check reuses the walk's inode (follow_symlink_hinted)
 
-| row            | base    | fixed   | delta | vs reference TCG |
-|----------------|---------|---------|-------|------------------|
-| p1_null        | 0.611   | ~0.48   | -21%  | 2.5x -> 2.0x     |
-| p6_stat        | 18.294  | 8.277   | -55%  | 4.7x -> 2.1x     |
-| p6_openclose   | 32.582  | 14.380  | -56%  | 5.2x -> 2.3x     |
-| p6_read_cached | 40.502  | 22.396  | -45%  | 3.3x -> 1.8x     |
-| p6_unlink      | 88.164  | 67.8    | -23%  | 3.5x -> 2.7x     |
+The per-component follow_symlink call re-took the dentry inode spinlock
+and cloned the Arc just to check is_symlink, although both walk loops
+already hold the child's inode (icache-refresh arm / iget arm). The
+Arc now flows through as a hint; a mount hop (different dentry) passes
+None. pbench: p6_openclose 13.65 -> 12.64 us, p6_stat 7.23 -> 6.62,
+p6_read_cached 21.48 -> 20.33; one spinlock acquisition per component
+removed under SMP contention too.
+
+## Cumulative — med-of-3 interleaved (base vs fix5, orders F,B,F,B,F,B)
+
+| row            | base med | fix5 med | delta | fix6 build | reference | final ratio |
+|----------------|----------|----------|-------|------------|-----------|-------------|
+| p1_null        | 0.611    | 0.491    | -20%  | 0.491      | 0.240     | 2.05x       |
+| p6_stat        | 18.440   | 7.229    | -61%  | 6.622      | 3.877     | 1.71x       |
+| p6_openclose   | 33.265   | 13.648   | -59%  | 12.642     | 6.241     | 2.03x       |
+| p6_read_cached | 42.162   | 21.478   | -49%  | 20.326     | 12.122    | 1.68x       |
+| p6_unlink      | 88.164   | 74.438   | -16%  | 70.784     | 25.216    | 2.81x       |
+| p6_append      | 85.8     | 90.3     | flat  | 79.9       | 9.377     | 8.5x (F5)   |
 
 ## Open findings (not fixed in this lane)
 
@@ -133,12 +144,12 @@ F5. p6_append (a single 4K write() to an open fd) = 77-89us vs reference
 F6. p6_getdents 544us vs reference 882us — we are AHEAD (full-dir sweep
     of 1000 files).
 
-F7. Remaining p6_openclose gap (14.4 vs 6.24): per-component walk locks
-    (dentry children lock, inode lock, vfsmount lock, icache global lock,
-    follow_symlink's extra get_inode per component) and VFS_STATE's
-    global spinlock per lookup. The reference walks dcache RCU-style with
-    zero locks. Candidates: bucket-level icache locking, dentry-embedded
-    RCU-walkable name hash, VFS root ArcSwap.
+F7. Remaining p6_openclose gap (12.6 vs 6.24): per-component walk locks
+    (dentry children lock, parent inode lock, vfsmount lock, icache
+    global lock — ~5 lock pairs per component still) and VFS_STATE's
+    global spinlock per lookup. The reference walks dcache RCU-style
+    with zero locks. Candidates: bucket-level icache locking,
+    dentry-embedded RCU-walkable name hash, VFS root ArcSwap.
 
 F8. Relative-path opens rebuild the cwd from the dentry parent chain on
     every make_absolute (FsStruct::get_cwd -> build_path() — locks + a
@@ -153,6 +164,14 @@ F9. p1_null residual 2.0x (0.48 vs 0.24): trap entry SCRIBBLE2-GUARD
 
 ## Artifacts
 
-- Kernels: run/sys-{base,fix1,fix2,fix3,fix4,fix5}-bzImage
-- Results: run/<tag>-results.txt (PBENCH lines), serial logs in work/
+- Kernels: run/sys-{base,fix1..fix6}-bzImage
+- Results: run/<tag>-results.txt (PBENCH lines), serial logs in work/,
+  confirmation script run/sys-confirm.sh (interleaved med-of-3)
 - Reference TCG column: run/sysref-tcg1-results.txt
+
+## Gates run for the final state (fix6, commit 542bbc6d)
+
+- `make test` riscv64: ALL TESTS PASSED (1204/1204 at fix5 state,
+  1203 at fix6 state — one row flake between runs, zero failures both)
+- PLATFORM=x86_64 build-release-opt / riscv64 build / aarch64 build: rc=0
+  (aarch64's regenerated dtb_blob.S restored, not committed)
