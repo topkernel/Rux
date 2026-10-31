@@ -1594,7 +1594,7 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 25] = [
+                const AMS_KEYS: [&str; 26] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
@@ -1617,6 +1617,7 @@ pub fn unix_send(
                     "account iface_cast",
                     "failed to get account",
                     "can't find target",
+                    "IsOsAccountExists path",
                     "find target AbilityInfo",
                     "create user:",
                     "permission verification failed, not account",
