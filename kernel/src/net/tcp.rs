@@ -1106,6 +1106,11 @@ pub struct TcpSocket {
     /// Receive sequence number (next expected)
     pub rcv_nxt: TcpSeq,
 
+    /// Graceful-close marker (perf review finding 6): close() found
+    /// send_buffer non-empty and deferred the FIN until the queued data
+    /// is transmitted; serviced at the tail of tx_packets.
+    pub fin_pending: bool,
+
     // === Sliding window ===
     /// Send window (advertised by peer)
     pub snd_wnd: u16,
@@ -1206,6 +1211,7 @@ impl TcpSocket {
             send_buffer: alloc::collections::VecDeque::new(),
             recv_buffer: alloc::collections::VecDeque::new(),
             retrans_queue: alloc::collections::VecDeque::new(),
+            fin_pending: false,
             user_refs: core::sync::atomic::AtomicU32::new(0),
             orphaned: false,
             pending_error: 0,
@@ -1521,9 +1527,38 @@ impl TcpSocket {
     /// (SYN-ACK/ACK/FIN/retransmit) as deferred descriptors; the caller
     /// emits them after dropping TCP_TABLE_LOCK.
     pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8], tx: &mut TcpTxBatch) -> Result<(), ()> {
-        // Global RST handling (RFC 793 §3.9)
+        // Global RST handling (RFC 793 §3.9 / RFC 1122 §4.2.3.30), with
+        // the sequence-number validation the reference requires before an
+        // RST is processed at all:
+        //  - SYN_SENT: acceptable only if SEG.ACK == SND.NXT (acknowledges
+        //    our SYN);
+        //  - every other state: acceptable only if RCV.NXT <= SEG.SEQ <
+        //    RCV.NXT + RCV.WND (in-window).
+        // A blind RST previously reset ANY connection regardless of
+        // sequence — a stale or forged segment could kill a live stream
+        // (and, with the W3 TIME_WAIT tuple reuse, even a PREVIOUS
+        // incarnation's RST could kill the new connection).
         if tcp_hdr.rst() {
-            self.handle_rst_recv();
+            let acceptable = match self.state {
+                TcpState::TCP_SYN_SENT => {
+                    tcp_hdr.ack() && tcp_hdr.ack_seq == self.snd_nxt.wrapping_add(1)
+                }
+                TcpState::TCP_LISTEN | TcpState::TCP_CLOSE => false,
+                _ => {
+                    let seq = tcp_hdr.seq;
+                    seq >= self.rcv_nxt.wrapping_sub(1)
+                        && seq < self
+                            .rcv_nxt
+                            .wrapping_add(self.rcv_wnd as u32)
+                            .max(self.rcv_nxt.wrapping_add(1))
+                }
+            };
+            if acceptable {
+                self.handle_rst_recv();
+            }
+            // Out-of-window RSTs are dropped silently (reference
+            // tcp_validate_incoming); the peer keeps retransmitting until
+            // a valid segment (or the real closer) arrives.
             return Ok(());
         }
 
@@ -1533,7 +1568,20 @@ impl TcpSocket {
         // gets dropped by the peer (SYN options were ignored entirely).
         // P2: also adopt the peer's window-scale shift and negotiate
         // timestamps (RFC 7323: TS is on only when BOTH SYNs offered it).
-        if tcp_hdr.syn() {
+        //
+        // RFC 7323 (perf review finding 5): options are negotiated at SYN
+        // time ONLY. Adopting them from a SYN-flagged segment in any
+        // other state let a retransmitted SYN-ACK (arriving after our
+        // final ACK was lost and the client already moved to
+        // ESTABLISHED) reset peer_wscale from the PEER's own SYN options
+        // — collapsing the send window to unscaled and stalling the
+        // connection. Gate the whole block to the handshake states.
+        if tcp_hdr.syn()
+            && matches!(
+                self.state,
+                TcpState::TCP_LISTEN | TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV
+            )
+        {
             if let Some(mss) = tcp_parse_mss(tcp_hdr) {
                 if mss < self.mss {
                     self.mss = mss;
@@ -2048,17 +2096,35 @@ impl TcpSocket {
     }
 
     /// Close connection
+    ///
+    /// Graceful close (perf review finding 6): the FIN previously went
+    /// out with snd_nxt STILL covering the queued send_buffer —
+    /// write-then-close silently discarded every byte the window had not
+    /// yet carried. Drain the buffer first; if a zero window (or a
+    /// cwnd cap) leaves bytes queued, defer the FIN behind them via
+    /// fin_pending and let the normal transmit/ACK cycle send it once
+    /// the buffer empties.
     pub fn close(&mut self, tx: &mut TcpTxBatch) {
         match self.state {
             TcpState::TCP_ESTABLISHED => {
                 self.state = TcpState::TCP_FIN_WAIT1;
-                let _ = self.send_fin(tx);
+                let _ = self.tx_packets(tx);
+                if self.send_buffer.is_empty() {
+                    let _ = self.send_fin(tx);
+                } else {
+                    self.fin_pending = true;
+                }
             }
             TcpState::TCP_CLOSE_WAIT => {
                 self.state = TcpState::TCP_LAST_ACK;
                 // R32-B8: leaving CLOSE_WAIT — disarm the orphan timeout.
                 self.timers.close_wait_since = 0;
-                let _ = self.send_fin(tx);
+                let _ = self.tx_packets(tx);
+                if self.send_buffer.is_empty() {
+                    let _ = self.send_fin(tx);
+                } else {
+                    self.fin_pending = true;
+                }
             }
             _ => {
                 self.state = TcpState::TCP_CLOSE;
@@ -2237,6 +2303,15 @@ impl TcpSocket {
         // Start retransmit timer
         if !self.retrans_queue.is_empty() && self.timers.retransmit_deadline == 0 {
             self.start_retransmit_timer();
+        }
+
+        // Graceful close (finding 6): the buffer emptied — send the
+        // deferred FIN now. Loop guard: send_fin consumes exactly one
+        // sequence number and pushes no data, so fin_pending cannot
+        // re-trigger through this tail.
+        if self.fin_pending && self.send_buffer.is_empty() {
+            self.fin_pending = false;
+            let _ = self.send_fin(tx);
         }
 
         Ok(())
