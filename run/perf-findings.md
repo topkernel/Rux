@@ -65,3 +65,16 @@ in flight); medians are load-inflated for BOTH sides but ratios hold
 - stat/openclose/read_cached/append (42-77x): shared syscall-entry +
   lookup-path costs (p1_null is 5.3us vs ref 0.23 = 23x, syscall lane).
 - p6_getdents 5.8x: per-call re-materialization of the whole directory.
+
+## Gates (2026-10-31 session close)
+- Dual-arch builds: PLATFORM=x86_64 rc=0, PLATFORM=riscv64 rc=0.
+- make test (riscv64): 1204/1204 PASSED.
+- pbench boards (Tier 2, this battery): all p6 rows improved or in
+  class; write_fsync now BETTER than reference (11.1-13.0ms vs 15.0ms).
+- Tier-1 quiet syscost boot: REFUSED by run/perf-gate.sh host-capacity
+  guard (6 foreign QEMUs from sibling lanes). Rerun once quiet before
+  merge; the pbench A/B above is the lane's primary evidence.
+- NJ-arm (--nojournal) validation board: mkdrmdir 2880us med / unlink
+  959us med - no fab0e029 regression class on the no-journal image.
+
+Pushed: origin/perf-fs (5 commits).
