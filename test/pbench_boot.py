@@ -126,6 +126,8 @@ def main():
                          "then windows + pinned spread/samecpu variants; "
                          "pin = the serialized-cycle discriminators "
                          "(samecpu read 64K/4K, samecpu recvfrom, spread)")
+    ap.add_argument("--probe-bin", default=None,
+                    help="ship this prebuilt probe as init instead of building pbench.c")
     ap.add_argument("--append-extra", default=None,
                     help="leg 46: extra kernel cmdline tokens appended "
                          "to -append (e.g. 'dfx=wwcensus')")
@@ -136,7 +138,10 @@ def main():
         print("[boot] bzImage missing: %s" % args.bzimage)
         return 2
     probe = os.path.join(WORK, "pbench")
-    if not build_probe(probe):
+    if args.probe_bin:
+        import shutil as _sh
+        _sh.copy(args.probe_bin, probe)
+    elif not build_probe(probe):
         return 2
     img = os.path.join(WORK, "pbench-%s.img" % args.tag)
     arm = None
