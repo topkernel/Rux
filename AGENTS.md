@@ -86,9 +86,14 @@ The host is x86 with KVM — the fastest virtualization for x86 guests
 - The PRIMARY dev/test/perf loop is x86_64 + KVM (`-accel kvm`): fast
   iteration, perf numbers closest to real hardware. Perf work is
   measured on x86/KVM first.
-- riscv64/aarch64 remain regression gates (triple-arch builds + suites
-  green) but are NOT the perf focus until x86 is stable and optimized.
-  Their boots stay TCG (KVM cannot emulate them on an x86 host).
+- ALL functional, performance, LTP and compatibility testing runs on
+  x86_64 + KVM (user directive 2026-10-31): the OH campaign already
+  boots KVM (oh-boot.sh ACCEL=kvm default, lb-boot.py -accel kvm); LTP
+  scans, pbench batteries, suite runs and compatibility checks all
+  target x86_64+KVM first. riscv64/aarch64 remain triple-arch BUILD +
+  suite regression gates (TCG boots — KVM cannot emulate them on an
+  x86 host) but carry no performance or compatibility testing duty
+  until x86 is stable and optimized.
 - ~90% of the kernel is arch-generic (fs/mm/ipc/sched/syscall):
   optimizations landed via x86/KVM measurement carry to every arch;
   only arch-specific hot paths (entry/exit, TLB, context switch) are
