@@ -3969,6 +3969,81 @@ pub fn wake_up_enqueue_opt(
         // branch ensure_linked_locked's re-insert already set RUNNING;
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
+        //
+        // WAKE-HEAL (launcher perf wall, 2026-10-31): the OH boots show
+        // the same few service tasks (mmi_service, os_ds_service, OS_IPC
+        // workers) parking with preempt_count==1 and waking back up with
+        // it still set — every wake runs them UNPREEMPTIBLE, so each
+        // kernel-side IPC loop monopolizes its CPU until the user-mode
+        // return (the 1-2.6 s WAKE-STRANDED class; lb13/14/15: strands
+        // with h0/h1 incumbents at pc=1/2). The parkwalk's 4 s PARKED-HEAL
+        // never matures for them because the park/run bursts reset the
+        // window, and the tick-side 2 s PREEMPT-HEAL only bounds the
+        // monopoly after it formed. This closes the cycle at the exact
+        // right point: the task is being woken RIGHT NOW, so it is about
+        // to execute — and a task owned by no CPU slot (verified under
+        // this GRQ hold, which excludes every concurrent pick publish)
+        // holds no legal guard by construction (guards live on the
+        // executing task; the pre-sleep window's task is still in its
+        // CPU's current slot and the mid-switch-out shape still carries
+        // the R63 marker — both skipped below, mirroring the parkwalk
+        // adjudication). sc265 convicted the invariant: ZERO guards are
+        // ever booked on a task current on no CPU. A nonzero count here
+        // is phantom 100%; zeroing it means the woken task runs
+        // preemptible from its first instruction, so the monopoly never
+        // forms at all. Full zero (base + stranded hardirq bits), the
+        // same medicine PARKED-HEAL administers to the same class.
+        {
+            let pc = (*task).preempt_count();
+            if pc != 0 {
+                let exiting = (*task).ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                        .bits()
+                    != 0;
+                let mid_switch = task_is_mid_switch_out(task);
+                let mut curr_on = false;
+                if !mid_switch {
+                    for c in 0..MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            curr_on = true;
+                            break;
+                        }
+                    }
+                }
+                if !exiting && !mid_switch && !curr_on {
+                    (*task).ti_preempt_count_zero();
+                    static WH_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if WH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                        // R34 discipline: GRQ is held — direct console,
+                        // no printk/UART lock under GRQ.
+                        use crate::console::putchar_no_lock as putchar;
+                        fn ph(v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            for sh in (0..16).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
+                        }
+                        const M: &[u8] = b"\nWAKE-HEAL pid=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        ph((*task).pid() as u64);
+                        const M2: &[u8] = b" was=";
+                        for &b in M2 {
+                            putchar(b);
+                        }
+                        ph(pc as u32 as u64);
+                        putchar(b'\n');
+                    }
+                }
+            }
+        }
         if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
@@ -4609,6 +4684,20 @@ pub fn scheduler_tick() {
                             unsafe {
                                 (*cur).ti_preempt_count_clear_base();
                             }
+                            // "Actually preempt" (launcher perf wall): the
+                            // zero alone leaves the incumbent running —
+                            // the kernel IPC-loop shapes never call
+                            // schedule() and the trap-exit asm gate only
+                            // fires at user-mode return (sc267: the
+                            // leaked incumbents were stranded exactly
+                            // there, the 1-2.6 s self-bound). The flag is
+                            // pure insurance: setting it never forces a
+                            // switch by itself, but every preempt point
+                            // the healed task passes from here on
+                            // (user-return, cond_resched in loops,
+                            // lock_fair slowpath) now takes it instead of
+                            // waiting for the next tick's slice check.
+                            set_need_resched();
                             // Re-arm: next nonzero observation starts a
                             // fresh window instead of re-healing each
                             // tick.
