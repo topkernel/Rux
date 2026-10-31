@@ -648,3 +648,69 @@ ams46 boot through a 237s-class unlock (lb27 config luck) and read the
 AMS46 read/free/retire + census lines for node 12xxx — they name
 whether the oneway is parked in the async slot, read and dropped, or
 racing a dead reader.
+
+## FIFTH-SUCCESSOR SESSION (2026-10-31 20:00-23:xx, branch oh-launcher @ a7189470+)
+Kernel delivery is CLEAN; the wall is INSIDE foundation userspace, and it
+has TWO shapes. All boots: release kernel, LOGLEVEL=6, SMP=2,
+USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
+
+### The ams46 verdict (lb30/lb32/lb34/lb35/lb36/lb37)
+1. **lb30**: ENQ 807.707 (accountmgr→foundation AMS node, oneway 0x11) ->
+   READ by foundation MAIN thread 1ms later -> BC_FREE 8ms after. The 30s
+   silence-rule drop NEVER fired — kernel delivery is NOT the wall. The
+   old "ams46 walled-draw" family is closed: the oneway executes.
+2. Instrumentation landed for the follow-window (all pushed):
+   - RIPPLE (a7189470): after the traced READ, print every txn whose
+     sender/receiver is foundation or the StartUser sender, 120s, budget 640.
+   - THREAD-SNAPSHOT (19b195f3): the reader thread's in-flight syscall
+     (kernel-stack entry frame) + 16-entry nr-ring, every 10s.
+   - HILOG-AMS cohort at WARN in the unix-socket hilog tap (unix.rs): BMS/
+     AMS/accountmgr verdict lines on the console at loglevel 6.
+   - AMS46-R parcel hex (80B) + ENQ sender euid.
+
+### Shape A — the LOOP (lb34, lb36): DECODED, root cause named
+- Chain on the console: `CreateNewUser user(100) start` → `startUser in
+  service:100` → `foregroundUserId:0` → `SwitchToUser old=0 new=100` →
+  `waiting query highest priority ability info completed` x588+ forever.
+- THREAD-SNAPSHOT: reader tid in nanosleep (sys=35) + clock_gettime churn
+  = AMS's StartHighestPriorityAbility isBoot=true retry ladder
+  (ability_manager_service.cpp:7905): `ImplicitQueryInfoByPriority` keeps
+  returning false → usleep → retry, NO attempt limit on the boot path.
+- The query needs com.ohos.launcher's PER-USER record for user 100, which
+  comes from CreateNewUser(100)'s per-user install stream
+  (OnCreateNewUser → InstallByBundleName for EVERY preinstalled bundle →
+  installd SA 511). On our kernel that stream's installd loads burn
+  15-101s EACH ("Start dynamic proc:installs,511,105_*ms" — samgr's
+  ServiceControlWithExtra against init timing out) and repeat.
+- FIX LANDED (image): run/lb-mkimage2.sh → run/system-lb2.img flips
+  installs.cfg "ondemand" true→false. Result on lb36/37: 0 dynamic
+  loads, CreateNewUser(100) COMPLETES (start+end lines). Necessary.
+  NOTE: sa_main for an on-demand-profile SA still only registers its
+  PROFILE at boot (samgr code 10 = ADD_ONDEMAND); the live SA loads on
+  the first LoadSystemAbility(511) — now into a resident process.
+
+### Shape B — the FAST-FAIL (lb35, lb37): errcode pending lb38
+- `CreateNewUser end` (success!) → `startUser in service:100` →
+  OnStartUserDone oneway (code 0x1, dlen 68) back to accountmgr within
+  ~5ms → accountmgr logs "Failed to AbilityManagerService in call back"
+  → activation fails, rollback, NOTHING spawns. No foregroundUserId/
+  SwitchToUser lines → the fail is INSIDE CheckUserParam (AMS
+  user_controller CheckUserParam), and NO IsOsAccountExists binder call
+  nor samgr lookup preceded the callback (ripple). Kernel euid stamp at
+  ENQ = 3058 (correct, printed). The errcode rides at parcel offset 62
+  (int32): 2097177=CHECK_PERMISSION_FAILED(uid leg), 2097193=
+  INVALID_USERID_VALUE(IsExistOsAccount false). lb38 (80B parcel lens)
+  reads it.
+
+### Successor entry points (in order)
+1. lb38's OnStartUserDone errcode (decode table above). If CHECK_PERMISSION_
+   FAILED: audit the BR_TRANSACTION sender_euid the receiver-side ipc
+   skeleton reads (our stamp is right at ENQ; suspect OH-side TLS for
+   oneway deliveries). If INVALID_USERID_VALUE: IsExistOsAccount returned
+   false with NO binder traffic — audit GetOsAccountProxy()'s cached-null
+   path (ohos_account_kits_impl GetService caches accountProxy_).
+2. With Shape B fixed and installd resident, Shape A's ladder should exit
+   when the per-user stream lands the launcher record — watch AMSI1640,
+   appspawn com.ohos.launcher, then pixels.
+3. The re-leak producer / samgr service-start timeouts (15-101s) remain
+   the deep-perf wall behind everything; the perf lane owns them.
