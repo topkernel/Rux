@@ -136,7 +136,8 @@ buffer-cache write ordering).
 
 The pcp pageset re-introduction (mm/pcp.rs + 5-file wiring) found
 dirty in this worktree was stashed untouched (stash@{0},
-"predecessor WIP: pcp pageset reintroduction (unreviewed)") — it is
-guarded-domain (allocator) perf work that needs its own
-small_alloc/IF=0 gate measurements; restored to the tree at session
-end.
+"predecessor WIP: pcp pageset reintroduction (unreviewed)"). A sibling
+lane (worktree /home/william/rux-agents/code-review-perf, live during
+this session) is continuing exactly that work in its own worktree —
+the stash is a redundant copy and was deliberately NOT popped; drop it
+only after the pcp work lands on main.
