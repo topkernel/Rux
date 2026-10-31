@@ -428,6 +428,10 @@ const DRM_IOCTL_SET_MASTER: u32 = ioc(0, 0x1e, 0);
 const DRM_IOCTL_DROP_MASTER: u32 = ioc(0, 0x1f, 0);
 const DRM_IOCTL_AUTH_MAGIC: u32 = ioc(1, 0x11, 4);
 const DRM_IOCTL_GEM_CLOSE: u32 = ioc(1, 0x09, 4);
+/// Upstream libdrm's drm_gem_close passes drm_gem_close (8 bytes:
+/// handle + pad), not a bare u32 — accept both encodings (the
+/// 4-byte one predates the ABI audit; real clients send 8).
+const DRM_IOCTL_GEM_CLOSE_8B: u32 = ioc(1, 0x09, 8);
 const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
 /// Same ioctl with the CORRECT upstream size: struct drm_prime_handle
 /// is 12 bytes (handle, flags, fd — no pad). The 16-byte constant above
@@ -981,7 +985,7 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
             // displays. Single-client DRM: accept every auth.
             0
         }
-        DRM_IOCTL_GEM_CLOSE => gem_close(rdu32_or(arg)),
+        DRM_IOCTL_GEM_CLOSE | DRM_IOCTL_GEM_CLOSE_8B => gem_close(rdu32_or(arg)),
         DRM_IOCTL_PRIME_HANDLE_TO_FD => prime_handle_to_fd(arg, 16),
         DRM_IOCTL_PRIME_HANDLE_TO_FD_12 => prime_handle_to_fd(arg, 12),
         DRM_IOCTL_PRIME_FD_TO_HANDLE => prime_fd_to_handle(arg, 16),
@@ -1691,9 +1695,23 @@ fn gem_close(handle: u32) -> i64 {
     if handle == 0 {
         return -22;
     }
+    // Reference drm_gem_handle_create gives each open file its own
+    // handle namespace: an exporter's GEM_CLOSE only removes ITS file's
+    // handle and the object lives while any other file's handle (or the
+    // prime import) keeps a reference. This kernel's table is global, so
+    // the faithful proxy is reference-count-shaped: when another holder
+    // still has a clone (RS's cached EGLImage resolves through this
+    // entry), keep the entry — removing it unconditionally left the
+    // compositor's next MAP_DUMB of handle 1003 with a dead key and
+    // Mesa's llvmpipe assert-aborted render_service on every first
+    // composition (oh-svc lane, boot oh-glm5). The entry goes away when
+    // the caller's close is the last reference.
     let taken = {
         let mut st = DRM_STATE.lock_irqsave();
-        st.gems.remove(&handle)
+        match st.gems.get(&handle) {
+            Some(gem) if Arc::strong_count(gem) > 1 => None, // still referenced elsewhere
+            _ => st.gems.remove(&handle),
+        }
     };
     match taken {
         // Drop OUTSIDE the state lock: GemObject::drop runs virtio
