@@ -3019,7 +3019,12 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             deadline,
         ) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_tx_err(e as i64);
+                }
+                e as i64
+            }
         };
     }
 
