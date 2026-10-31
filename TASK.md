@@ -702,15 +702,44 @@ USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
   INVALID_USERID_VALUE(IsExistOsAccount false). lb38 (80B parcel lens)
   reads it.
 
+### CLOSE-OUT (00:30): Shape B named to its source line; errcode decoded
+- lb38 parcel decode: OnStartUserDone(100, 2097193=INVALID_USERID_VALUE).
+- lb40 keys landed: "failed to get os account service" (os_account.cpp:894
+  GetOsAccountProxy) fires x137 in foundation 9.9-139.8s — ALL before
+  samgr's "insert SA:200" (141.3s): the ohos-account kits' proxy is
+  unobtainable until SA 200 registers; every osaccount query in that
+  window fails with NO kernel traffic (proxy null).
+- lb42 (the clean kill): CreateNewUser end -> startUser at 225.485 ->
+  **UN: [user_controller175]userId not exist** at 225.486 -> callback
+  error. At 225s SA 200 was long registered and NO proxy-failure line
+  fired — the IsOsAccountExists QUERY RAN and accountmgr answered FALSE
+  for the user it had just created+unlocked: the osaccount DB read
+  (OsAccountControlManager -> distributeddata KV, the DB_TaskExecutor
+  SLOW-TXN family) is the boot-to-boot coin flip. Kernel-side that is
+  the distributeddata/exec-class perf wall (userspace-internal futex
+  waits inside executing handlers — prior TXN-HANG decode), NOT binder.
+- lb40 (the loop shape with everything right): CheckUserParam passed,
+  SwitchToUser entered, ladder still spinning post-CreateNewUser-end —
+  the BMS "can't find target AbilityInfo" verdict key landed too late
+  for that boot; UNVERIFIED whether the ladder eventually exits.
+
 ### Successor entry points (in order)
-1. lb38's OnStartUserDone errcode (decode table above). If CHECK_PERMISSION_
-   FAILED: audit the BR_TRANSACTION sender_euid the receiver-side ipc
-   skeleton reads (our stamp is right at ENQ; suspect OH-side TLS for
-   oneway deliveries). If INVALID_USERID_VALUE: IsExistOsAccount returned
-   false with NO binder traffic — audit GetOsAccountProxy()'s cached-null
-   path (ohos_account_kits_impl GetService caches accountProxy_).
-2. With Shape B fixed and installd resident, Shape A's ladder should exit
-   when the per-user stream lands the launcher record — watch AMSI1640,
-   appspawn com.ohos.launcher, then pixels.
+1. Boot run/system-lb2.img + dfx=ams46,txnhunt (LOGLEVEL=6, SMP=2,
+   USERDATA=run/userdata-fresh2.img). Hope for the lb40 shape and read
+   the "can't find target AbilityInfo" verdict: if BMS's
+   ImplicitQueryAbilityInfos misses the launcher for user 100 even after
+   CreateNewUser end, check GetAllPreInstallBundleInfos' disallowList
+   path and the per-user record for com.ohos.launcher.
+2. Shape B mitigation candidates (image-side): none clean; kernel-side
+   it is the distributeddata KV read reliability under load — the
+   guarded-domain perf work.
 3. The re-leak producer / samgr service-start timeouts (15-101s) remain
-   the deep-perf wall behind everything; the perf lane owns them.
+   the deep wall behind everything; the perf lane owns them.
+
+### Artifacts this session (all committed+pushed)
+- Instrumentation: AMS46 RIPPLE (a7189470), THREAD-SNAPSHOT (19b195f3),
+  HILOG-AMS WARN cohort + account-kits/query-verdict keys, AMS46-R parcel
+  hex 80B + ENQ euid, AMS46-R-FAIL (send failures in-window).
+- Image: run/lb-mkimage2.sh -> run/system-lb2.img (installs resident).
+- Boots lb30-lb42; make test ALL PASSED on the final tree; x3 builds
+  rc=0 (x86_64/riscv64/aarch64).
