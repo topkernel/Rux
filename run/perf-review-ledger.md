@@ -55,3 +55,45 @@ F6. MmStruct::drop runs synchronize_rcu outside the vma_write lock
 - pre-fix quiet bank: pb1 (main 40e925fd = pre-pcp), pcp1/pcp2
   (pcp only). Every post-fix run records foreign_qemus from the
   boot line; runs at load>=4 are void (qs1 voided).
+
+## Round 2 results (2026-10-31 afternoon)
+
+Commits on feature/code-review-perf:
+- 45ccb66d pcp pagesets (p3b dbg -14%; strong: p2/p5 rows slightly better)
+- c312944d RCU QS on return-to-user (p2 wall half-rt 4.37 -> 3.08 us
+  quiet; med -4.7% back-to-back at foreign=3). Attribution correction:
+  the earlier "grace = 10 ms tick" theory was WRONG — RCU_GEN never
+  advances without call_rcu users, so grace was already cheap; the p2
+  gain comes from the QS path shortening stall windows, mechanism
+  verified by A/B only.
+- 11517d2a(+amend) forkbench probe in the packed set
+- (leaf fast path commit) fork COW-exempt scan: leaf-table granularity;
+  no pbench-visible delta (pbench's exempt list is short) — kept for
+  the OH many-VMA shape.
+- 49f40d2d page_cache fill/describe outside the locks; single-threaded
+  pbench unchanged (expected: readers use the lock-free claim path);
+  concurrency is the beneficiary.
+
+## Where the 10x stands (strong profile, TCG, vs reference TCG column)
+
+- p2 ctxsw: 3.08 us vs 15.4 us -> 5x AHEAD
+- p5a pipe: 2.11 vs 21.5 -> 10x AHEAD
+- p5b dgram: 40 vs 462 -> 11.6x AHEAD
+- p5c stream: 36.4 vs 568 -> 15.6x AHEAD
+- p3 fault family: at or ahead of the reference (p3b 2.9 us vs the
+  A-line 3.4 us; p3a/p3c marked "ahead" in the reference table)
+- p4 fork+exit: 472 us — the LAST lagging row. forkbench shows a small
+  mm forks in 75 us; the pbench probe carries p3's 64 MB map (16K PTEs
+  of COW marking + teardown) and the TCG per-PTE atomic tax dominates.
+  Next levers, in order: batched COW write-protect with per-table TLB
+  flush instead of per-PTE atomics; exit teardown chunking. Risk:
+  fork/exit correctness paths are the most bug-dense in the tree —
+  gate every step with make test + the full LTP fork family.
+- dbg-profile rows are 12-100x the strong rows by COMPILE-PROFILE tax
+  alone (p1 6.9 -> 0.55; p2 wall 437 -> 4.37); the perf gate anchors
+  dbg runs against dbg columns only (perf-report 8.10.1) — never
+  compare across profiles.
+
+Noise protocol (validated): back-to-back A/B at equal foreign_qemus;
+med-of-runs for verdicts; void any run at host load >= 4 for
+absolute claims.
