@@ -127,8 +127,14 @@ the MMIO alias), CPU interface by system registers. Notes that bit us:
 
 ## Registered leftovers
 
-Early identity-window teardown; printk→PL011 routing; kernel-spawned
-init argv[0] uses the resolved path (workaround: name the init binary
-so its basename is the applet name); a 1-of-9 boot flake with a trap
-frame just past the linear-map end (kernel stack top question —
-`aa64-fork/run/fix2.log`); LTP-on-aarch64 not started.
+A 1-of-9 boot flake with a trap frame just past the linear-map end
+(kernel stack top question — `aa64-fork/run/fix2.log`); LTP-on-aarch64
+not started (groundwork in this lane's `run/`: cross-build +
+serial-fed smoke subset).
+
+Landed since the port merge: early identity-window teardown (SMP-start
+gated), printk→PL011 routing, kernel-started init argv[0] keeps the
+candidate path — verified on the shared image: `$0` and
+/proc/1/cmdline both report `/bin/sh` (the arg/env bounds land via
+exec's setup_argv/setup_envp; /proc/[pid]/cmdline|environ read through
+the arch-neutral PageTableWalker).
