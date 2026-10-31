@@ -42,9 +42,15 @@ FPEN is set — NEON traps otherwise).
   *address-size* abort (DFSC=2 — not a translation fault; the
   distinction cost a debugging day).
 - The early TTBR0 identity window (phys [0, 2 GB)) built by boot.S is
-  **not yet torn down** after boot — registered leftover; low-address
-  kernel usercopies read flash instead of faulting (one unit test is
-  SKIP-gated on it).
+  torn down after SMP start (`arch::mm::teardown_early_identity_map`,
+  called from `rust_main_tail` right after `start_secondaries` — the
+  secondary stubs are the last physical-PC consumers, and
+  `secondary_cpu_entry` installs the high-VA VBAR *before* reporting
+  itself started, so cpu_started(n) ⇒ core n needs no low VAs).
+  Low-address kernel usercopies fault into the exception-table fixup →
+  -EFAULT like on riscv64/x86_64; the boot core's TTBR0 parks on the
+  kernel root (kernel-thread parity) and a broadcast `vmalle1is`
+  clears every core's cached identity translations.
 
 ## Interrupts (GICv3)
 

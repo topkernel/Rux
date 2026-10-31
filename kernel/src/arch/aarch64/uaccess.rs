@@ -346,12 +346,12 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
 ///
 /// Runs at dfx init (before init exec — userspace exec is blocked on the
 /// mm walker anyway) on a kernel context where TTBR0 still carries
-/// boot.S's early identity map ([0, 2GB) device + RAM blocks) or an
-/// empty user table, so the probe address must sit INSIDE the user
-/// window but OUTSIDE every mapping: 4 GB — below TASK_SIZE (256GB),
-/// above the early map, an invalid L1 entry either way. access_ok must
-/// ACCEPT it (the exception table, not the range check, contains the
-/// fault).
+/// boot.S's early identity map ([0, 2GB) device + RAM blocks — it is
+/// torn down only after SMP start, well after this probe), so the probe
+/// address must sit INSIDE the user window but OUTSIDE every mapping:
+/// 4 GB — below TASK_SIZE (256GB), above the early map, an invalid L1
+/// entry either way. access_ok must ACCEPT it (the exception table, not
+/// the range check, contains the fault).
 #[cfg(feature = "dfx-aa64-uaccess-selftest")]
 pub fn selftest() {
     // printk's console emit does not reach PL011 on this board yet (the
