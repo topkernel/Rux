@@ -6,3 +6,7 @@
 *.zip binary
 *.img binary
 *.bin binary
+
+# Vendored third-party trees: excluded from language statistics
+toolchain/** linguist-vendored
+run/a64-userspace/** linguist-vendored
