@@ -1001,6 +1001,18 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 
 static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5 RIPPLE (fifth successor): lb30 proved the code-46 oneway is
+// ENQ'd, READ by foundation's main thread, and BC_FREE'd 8 ms later —
+// kernel delivery clean, yet no ability ever spawns. The next question
+// is what foundation DID in that window: OnStartUserDone back to the
+// sender (every early-return path calls it), the BMS launcher query, or
+// an appspawn Schedule hop. At the READ of the traced txn we latch
+// jiffies + the sender pid; for the next 120 s the ENQ hook prints every
+// transaction whose sender OR receiver is the foundation proc or the
+// StartUser sender proc. What is ABSENT names the dead leg.
+static AMS46_T0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_SENDER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_RIP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -6583,6 +6595,43 @@ fn binder_transaction(
         }
     }
 
+    // leg-30B5 RIPPLE (dfx=ams46): inside the 120 s window after the
+    // traced code-46 was READ, print every transaction whose sender or
+    // receiver is the foundation proc (AMS46_TPID) or the StartUser
+    // sender proc (AMS46_SENDER). Budget 640; zero lines outside the
+    // window.
+    if ams46_on() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let t0 = AMS46_T0.load(Relaxed);
+        if t0 != 0 {
+            let now_j = crate::drivers::timer::get_jiffies() as u32;
+            if now_j.wrapping_sub(t0) < (crate::config::KERNEL_HZ as u32).saturating_mul(120) {
+                let tp = AMS46_TPID.load(Relaxed);
+                let sp = AMS46_SENDER.load(Relaxed);
+                if proc.pid == tp || proc.pid == sp || target.pid == tp || target.pid == sp {
+                    if AMS46_RIP_N.fetch_add(1, Relaxed) < 640 {
+                        let rcomm = crate::sched::current()
+                            .map(|t| unsafe { (*t).comm() })
+                            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                            .unwrap_or("")
+                            .trim_end_matches('\0');
+                        crate::pr_warn!(
+                            "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={}",
+                            txn.id,
+                            proc.pid,
+                            thread.tid,
+                            rcomm,
+                            target.pid,
+                            tr.code,
+                            tr.flags & TF_ONE_WAY != 0,
+                            data_size
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // sc262 (leg-23): launcher lifecycle-path tracer. Every sc261-class
     // boot ends in the AMS restart loop — LIFECYCLE_TIMEOUT for
     // com.ohos.launcher.MainAbility ("load" phase, the same timeout
@@ -7831,6 +7880,26 @@ fn binder_thread_read(
                                     t.code,
                                     is_reply
                                 );
+                                // leg-30B5 RIPPLE: open the 120 s
+                                // follow-window at the traced code-46's
+                                // kernel delivery; latch the sender proc.
+                                if AMS46_T0.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                    AMS46_T0.store(
+                                        crate::drivers::timer::get_jiffies() as u32,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    let fp = t
+                                        .from_proc
+                                        .as_ref()
+                                        .map(|p| p.pid)
+                                        .unwrap_or(0);
+                                    AMS46_SENDER.store(fp, core::sync::atomic::Ordering::Relaxed);
+                                    crate::pr_warn!(
+                                        "AMS46 RIPPLE window open (foundation={} sender={})",
+                                        AMS46_TPID.load(core::sync::atomic::Ordering::Relaxed),
+                                        fp
+                                    );
+                                }
                             }
                             // sc262 (leg-23): SLTX read-side — an
                             // app-family child's thread picked this
