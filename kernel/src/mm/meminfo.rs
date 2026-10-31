@@ -53,8 +53,8 @@ pub struct MemoryInfo {
     pub slab_frees: usize,
 
     // ========== Per-CPU Pages ==========
-    /// PCP page count for each CPU — always 0: the pcp module was removed
-    /// (zero callers; review 4.6 / wave-6). Field kept for /proc ABI shape.
+    /// PCP page count for each CPU — frames cached in that CPU's
+    /// per-CPU pageset (mm/pcp.rs); counted free by zone.free_pages.
     pub pcp_pages: [usize; 4],
 
     // ========== Page Descriptor Statistics ==========
@@ -188,7 +188,9 @@ pub fn get_memory_info() -> MemoryInfo {
     info.slab_allocs = slab_stats.cache_stats.iter().map(|c| c.alloc_count).sum();
     info.slab_frees = slab_stats.cache_stats.iter().map(|c| c.free_count).sum();
 
-    // Per-CPU Pages: module removed (wave-6, review 4.6) — pcp_pages stay 0.
+    // Per-CPU Pages: real counts from the pcp rows (INV-PCP-2: these
+    // frames are already included in the zone free_pages counters).
+    info.pcp_pages = super::pcp::cached_pages_per_cpu();
 
     // Page descriptor statistics
     let page_stats = page_desc_stats();

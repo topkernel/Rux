@@ -2198,12 +2198,28 @@ pub unsafe fn copy_page_table_cow(
                     | ((vpn1 as u64) << 21)
                     | ((vpn0 as u64) << 12);
                 let leaf_ppn = pte0.ppn();
-                let cow_exempt_leaf = cow_exempt
+                // Leaf-table fast path (perf review 2026-10-31; x86 twin):
+                // riscv leaf tables are 2MB — when the whole table lies
+                // outside every exempt region and the framebuffer range,
+                // skip the per-PTE scans. One range check per table
+                // replaces one scan per PTE; overlapping tables keep the
+                // exact per-PTE granularity.
+                let leaf_base = leaf_va & !0x1F_FFFF;
+                let leaf_end = leaf_base + 0x20_0000;
+                let leaf_all_clear = cow_exempt
                     .iter()
-                    .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
-                    || fb_frame_range.map_or(false, |(lo, hi)| {
-                        leaf_ppn >= lo && leaf_ppn < hi
+                    .all(|(s, e)| leaf_end <= *s || leaf_base >= *e)
+                    && fb_frame_range.map_or(true, |(lo, hi)| {
+                        leaf_end <= (lo << 12) || leaf_base >= (hi << 12)
                     });
+                let cow_exempt_leaf = !leaf_all_clear
+                    && (cow_exempt
+                        .iter()
+                        .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
+                        || fb_frame_range.map_or(false, |(lo, hi)| {
+                            leaf_ppn >= lo && leaf_ppn < hi
+                        })
+                    );
 
                 let new_pte = if is_user
                     && !crate::mm::page_alloc::is_foreign_user_frame(

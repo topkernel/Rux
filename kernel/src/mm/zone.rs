@@ -294,6 +294,17 @@ impl Zone {
         self.free_pages.load(Ordering::Acquire)
     }
 
+    /// Add n to the free-page counter (pcp cache bookkeeping, INV-PCP-2:
+    /// free_pages counts buddy-list frames AND pcp-cached frames).
+    pub fn free_pages_add(&self, n: usize) {
+        self.free_pages.fetch_add(n, Ordering::Release);
+    }
+
+    /// Subtract n from the free-page counter (pcp cache bookkeeping).
+    pub fn free_pages_sub(&self, n: usize) {
+        self.free_pages.fetch_sub(n, Ordering::Release);
+    }
+
     /// Set managed pages (boot-time only): the count of pages actually
     /// handed to the buddy (span minus reserved/hole pages), mirroring
     /// Linux zone->managed_pages vs spanned_pages.

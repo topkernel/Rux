@@ -509,6 +509,10 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // runs in the incoming task's own frozen frame with its own regs, so
     // the check validates whichever task actually returns to user.)
     if unsafe { (*regs).user_mode() } {
+        // Return-to-user is a quiescent state (rcu.rs): report it here so
+        // syscall-heavy CPUs complete grace periods without waiting for
+        // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
+        crate::sync::rcu::rcu_note_context_switch();
         crate::dfx::leakorigin::check_user_return();
     }
 }
