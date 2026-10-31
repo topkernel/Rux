@@ -544,3 +544,16 @@ ph1 (tap v1, last-wins sites, 374 user-return lines all pid 568 — the
   rate gate + exact sites landed after), ph2 (exact sites: the site
   distribution table), ph3 (convoy fix: the -47%/-31% numbers),
   ph4 (drain split + ACQUIRE-DIVERGENT live).
+
+### FINAL TREE VERDICT (14d04456, pushed)
+ph6 (record-only divergence, 900s, same recipe): the best boot of the
+session — at the matched <=600s window vs ph2/ph3: PREEMPT-HEAL
+187->114->38, UNDERFLOW 53->57->25, WAKE-STRANDED 233->138->31,
+DEADLOCK 0, SLOW-TXN med 1970ms (n=15, full window), appspawn at 5.2s,
+serial live to 900s. ph5/ph5b (the two boots carrying the live
+ACQUIRE-DIVERGENT print) BOTH wedged on net::unix::UNIX_TABLE
+(both-CPU DEADLOCK, stranded-0x10000 carriers) — print disabled
+(record-only) in 14d04456; correlation-by-elimination, mechanism
+unproven. make test on the final tree GREEN (ALL TESTS PASSED); x3
+builds rc=0. The ph5/ph5b UNIX_TABLE wedge shape matches the pre-existing
+lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
