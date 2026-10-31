@@ -26,14 +26,20 @@ PIDFILE="$RUN/pa-$TAG-qemu.pid"
 STAMPID="$RUN/pa-$TAG-stamp.pid"
 
 # Userdata: private reflink copy of the source image (first use only).
-# The old tok disk (userdata-tok.img) was lost in the 2026-10-30 disk
-# cleanup; the lineage asset is now run/oh-userdata-cooked-r1.img —
-# one snapshot-OFF first-boot pass over the central-store SEED
-# (userdata.img), required because the raw seed aborts at ~49 s
-# (storage_manager critical-crash reboot chain, oh-launcher lane).
-# Default to the cooked asset when present, else the seed.
+# The old tok master (userdata-tok.img) was lost in the 2026-10-30 disk
+# cleanup, but the lineage survived in this worktree: every historical
+# pa-boot copied the master fresh per tag, so each run/pa-<tag>-
+# userdata.img is tok + exactly one boot. The lane asset is
+# run/oh-userdata-tok109.img (renamed from pa-pa109dbg-userdata.img —
+# the last accepted Tier-1 debug census boot, Oct 29, rc=0).
+# A re-cook from the central-store SEED was tried and is a dead end:
+# the raw seed dies at ~49 s (storage_manager critical-crash reboot,
+# oh-launcher lane) and the cooked resume boot parks forever at
+# StorageDaemon HandleFileCrypt init_main_user with userspace idle
+# (~74K syscalls/780s) — see run/evidence/2026-10-30-pa110-tier1-
+# lineage.txt. Default to the tok109 asset, else the seed.
 UD_DEFAULT="$IMGDIR/userdata.img"
-[ -f "$RUN/oh-userdata-cooked-r1.img" ] && UD_DEFAULT="$RUN/oh-userdata-cooked-r1.img"
+[ -f "$RUN/oh-userdata-tok109.img" ] && UD_DEFAULT="$RUN/oh-userdata-tok109.img"
 UD_SRC="${UD_SRC:-$UD_DEFAULT}"
 UD="$RUN/pa-$TAG-userdata.img"
 if [ ! -f "$UD" ]; then
