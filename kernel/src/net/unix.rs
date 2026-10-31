@@ -2228,10 +2228,13 @@ const READ_BOUNCE: usize = 1024;
 ///   signal returns the partial count when bytes already landed.
 /// - Ancillary data is discarded (unix_file_read's existing contract).
 ///
-/// # Safety
-/// `dst` must be a validated user pointer with `count` writable bytes
-/// (access_ok was checked by the caller).
-pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+/// Safe entry for the syscall capsule layer (framekernel): `dst` may be
+/// ANY address — every store to it goes through the exception-table
+/// copy, so a bad range surfaces as EFAULT instead of a kernel fault.
+/// The historical `# Safety` contract (caller-validated dst) is now
+/// advisory only: it preserves the EFAULT-before-side-effect errno
+/// ordering the read(2) entry points produce.
+pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open.
     let socket = match unsafe { unix_of_file(file) } {
@@ -2305,7 +2308,9 @@ pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
                 }
                 total += n;
                 remaining -= n;
-                user_ptr = user_ptr.add(n);
+                // SAFETY: bounded offset arithmetic — user_ptr + n stays
+                // within the count-wide window that began at dst.
+                user_ptr = unsafe { user_ptr.add(n) };
                 if !matches!(socket.kind, UnixKind::Stream) {
                     break; // one record per read(2)
                 }

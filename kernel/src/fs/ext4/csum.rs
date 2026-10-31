@@ -19,8 +19,13 @@
 //! - seed    = crc32c(0xFFFF_FFFF, s_uuid)
 //!   (e2fsprogs also stores this in s_checksum_seed when the CSUM_SEED
 //!   incompat bit is set; the stored value, when non-zero, wins)
-//! - sb      = crc32c(0xFFFF_FFFF, sb_bytes[0..0x3FC]) & 0xFFFF
-//!             vs u16 at 0x3FC
+//! - sb      = crc32c(0xFFFF_FFFF, sb_bytes[0..0x3FC]) — the FULL 32-bit
+//!             running state stored as le32 at 0x3FC (struct
+//!             ext4_super_block.s_checksum is __le32; e2fsprogs
+//!             calc_sb_csum and the reference kernel's
+//!             ext4_superblock_csum both store cpu_to_le32(crc) with no
+//!             masking). Verified against mke2fs 1.47.2 output: the le32
+//!             at 0x3FC equals the full crc32c bit-for-bit.
 //! - gdt[g]  = crc32c(seed, le32(g), desc[0..30], zeros(2),
 //!                    desc[32..desc_size]) & 0xFFFF vs u16 at desc+30
 //! - inode   = crc32c(seed, le32(ino), raw[100..104] /*generation*/,
@@ -32,7 +37,8 @@
 //! The crc32c here is the RAW running-state update (no init folding, no
 //! final XOR) — exactly crypto crc32c's crc32c(seed, data) as used by
 //! the kernel's ext4_chksum(); the stored values are the running state
-//! truncated to their field widths.
+//! truncated to their field widths (and NOT truncated for the
+//! superblock, which stores the full 32 bits).
 
 // Framekernel layer policy (docs/architecture/framekernel-layers.md):
 // this module must stay Safe Rust.
@@ -82,7 +88,10 @@ pub fn csum_seed(uuid: &[u8; 16], disk_seed: u32) -> u32 {
     }
 }
 
-/// Offset of s_checksum in the on-disk superblock (1020).
+/// Offset of s_checksum in the on-disk superblock (1020). The field is
+/// 4 bytes — the FULL crc32c as le32 (a 16-bit read of it passes on
+/// mkfs images, which is how the write path's low-half-only seal went
+/// unnoticed: e2fsck compares all 32 bits).
 const SB_CSUM_OFF: usize = 0x3FC;
 /// Offset of bg_checksum in an on-disk group descriptor.
 const GD_CSUM_OFF: usize = 30;
@@ -97,13 +106,18 @@ const INO_CSUM_HI_OFF: usize = 130;
 const GOOD_OLD_INODE_SIZE: usize = 128;
 
 /// Verify the superblock checksum. `sb` is the full 1024-byte on-disk
-/// superblock.
+/// superblock; `s_checksum` is the FULL 32-bit crc32c (le32 at 0x3FC).
 pub fn superblock_csum_ok(sb: &[u8]) -> bool {
-    if sb.len() < SB_CSUM_OFF + 2 {
+    if sb.len() < SB_CSUM_OFF + 4 {
         return false;
     }
-    let stored = u16::from_le_bytes([sb[SB_CSUM_OFF], sb[SB_CSUM_OFF + 1]]);
-    stored == (crc32c(0xFFFF_FFFF, &sb[..SB_CSUM_OFF]) & 0xFFFF) as u16
+    let stored = u32::from_le_bytes([
+        sb[SB_CSUM_OFF],
+        sb[SB_CSUM_OFF + 1],
+        sb[SB_CSUM_OFF + 2],
+        sb[SB_CSUM_OFF + 3],
+    ]);
+    stored == crc32c(0xFFFF_FFFF, &sb[..SB_CSUM_OFF])
 }
 
 /// Compute the group descriptor checksum. `desc` is `desc_size` raw
@@ -215,16 +229,19 @@ pub fn group_desc_csum_set(seed: u32, group: u32, desc: &mut [u8]) {
     desc[GD_CSUM_OFF..GD_CSUM_OFF + 2].copy_from_slice(&c.to_le_bytes());
 }
 
-/// Write-path counterpart of `superblock_csum_ok`: store s_checksum
-/// into the full 1024-byte on-disk superblock.
+/// Write-path counterpart of `superblock_csum_ok`: store the FULL
+/// 32-bit s_checksum (le32 at 0x3FC) into the 1024-byte on-disk
+/// superblock. Sealing only the low half leaves [1022..1024) stale —
+/// e2fsck (full 32-bit compare) then refuses the primary superblock and
+/// falls back to a backup with divergent counters (the "superblock
+/// checksum mismatch" cook-lineage failure).
 pub fn superblock_csum_set(sb: &mut [u8]) {
-    if sb.len() < SB_CSUM_OFF + 2 {
+    if sb.len() < SB_CSUM_OFF + 4 {
         return;
     }
-    sb[SB_CSUM_OFF] = 0;
-    sb[SB_CSUM_OFF + 1] = 0;
-    let c = (crc32c(0xFFFF_FFFF, &sb[..SB_CSUM_OFF]) & 0xFFFF) as u16;
-    sb[SB_CSUM_OFF..SB_CSUM_OFF + 2].copy_from_slice(&c.to_le_bytes());
+    sb[SB_CSUM_OFF..SB_CSUM_OFF + 4].copy_from_slice(&[0u8; 4]);
+    let c = crc32c(0xFFFF_FFFF, &sb[..SB_CSUM_OFF]);
+    sb[SB_CSUM_OFF..SB_CSUM_OFF + 4].copy_from_slice(&c.to_le_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +260,21 @@ pub const BG_INODE_BITMAP_CSUM_LO_OFF: usize = 0x1A;
 pub const BG_BLOCK_BITMAP_CSUM_HI_OFF: usize = 0x38;
 pub const BG_INODE_BITMAP_CSUM_HI_OFF: usize = 0x3A;
 
-/// Per-inode seed used by directory and extent checksums: crc32c(fs seed,
-/// le32(ino)) — ext4_i_csum_seed in the reference kernel.
-pub fn inode_csum_seed(seed: u32, ino: u32) -> u32 {
-    crc32c(seed, &ino.to_le_bytes())
+/// Per-inode seed used by directory and extent checksums:
+/// crc32c(crc32c(fs seed, le32(ino)), le32(generation)) — the reference
+/// chain of e2fsprogs' ext2fs_dirent_csum (crc32c_le(seed, &ino_le);
+/// crc32c_le(crc, &generation_le)). Verified bit-for-bit against mke2fs
+/// 1.47.2 dir tails. NOTE: skipping the generation half (the earlier
+/// inode_csum_seed) produced tails e2fsck rejects.
+pub fn dir_csum_seed(seed: u32, ino: u32, generation: u32) -> u32 {
+    crc32c(crc32c(seed, &ino.to_le_bytes()), &generation.to_le_bytes())
 }
+
+/// On-disk size of struct ext4_dir_entry_tail: reserved_zero1 (le32),
+/// rec_len = 12 (le16), reserved_name_len = 0xDE00 (le16), checksum
+/// (le32). The dirent chain must END at block_size - DIR_TAIL_SIZE; the
+/// tail lives inside the last entry's rec_len slack.
+pub const DIR_TAIL_SIZE: usize = 12;
 
 /// Compute a bitmap checksum: crc32c over the first `size` bytes of the
 /// bitmap block (block: clusters_per_group/8; inode: inodes_per_group/8),
@@ -257,45 +284,52 @@ pub fn bitmap_csum(seed: u32, bitmap: &[u8], size: usize) -> u32 {
     crc32c(seed, &bitmap[..size])
 }
 
-/// Directory block tail (struct ext4_dir_tail): 4 reserved-zero bytes +
-/// crc32c(inode seed, block[0..block_len-8]) at the very end. The last
-/// dirent's rec_len covers the tail; the tail itself is never parsed as
-/// an entry.
-pub fn dir_block_csum(inode_seed: u32, block: &[u8]) -> u32 {
-    if block.len() < 8 {
+/// Directory block checksum (struct ext4_dir_entry_tail layout): the
+/// tail is 12 bytes at the block end and the crc covers
+/// block[0..block_len-12], seeded with dir_csum_seed (ino + generation).
+pub fn dir_block_csum(dir_seed: u32, block: &[u8]) -> u32 {
+    if block.len() < DIR_TAIL_SIZE {
         return 0;
     }
-    crc32c(inode_seed, &block[..block.len() - 8])
+    crc32c(dir_seed, &block[..block.len() - DIR_TAIL_SIZE])
 }
 
-/// Set the directory tail on a finalized dir block (block.len() == block
-/// size). Writes det_reserved_zero1=0 and the checksum.
-pub fn dir_block_csum_set(inode_seed: u32, block: &mut [u8]) {
+/// Set the reference-layout directory tail on a finalized dir block
+/// (block.len() == block size): det_reserved_zero1 = 0, det_rec_len =
+/// 12, det_reserved_name_len = 0xDE00, det_checksum. The markers are
+/// what e2fsck's get_dirent_tail requires — a markerless tail reads as
+/// "directory has no checksum" and the block fails verification.
+pub fn dir_block_csum_set(dir_seed: u32, block: &mut [u8]) {
     let n = block.len();
-    if n < 8 {
+    if n < DIR_TAIL_SIZE {
         return;
     }
-    let c = dir_block_csum(inode_seed, block);
-    block[n - 8..n - 4].copy_from_slice(&0u32.to_le_bytes());
-    block[n - 4..n].copy_from_slice(&c.to_le_bytes());
+    let c = dir_block_csum(dir_seed, block);
+    block[n - 12..n - 8].copy_from_slice(&0u32.to_le_bytes()); // reserved_zero1
+    block[n - 8..n - 6].copy_from_slice(&12u16.to_le_bytes()); // det_rec_len
+    block[n - 6..n - 4].copy_from_slice(&0xDE00u16.to_le_bytes()); // name_len marker
+    block[n - 4..n].copy_from_slice(&c.to_le_bytes()); // det_checksum
 }
 
 /// Extent tree block checksum (ext4_extent_tail, 4 bytes at the block
-/// end): crc32c(inode seed, block[0..block_len-4]).
-pub fn extent_block_csum(inode_seed: u32, block: &[u8]) -> u32 {
+/// end): crc32c over block[0..block_len-4], seeded with the SAME
+/// generation-chained per-inode seed as directory blocks
+/// (dir_csum_seed), not the ino-only chain.
+pub fn extent_block_csum(dir_seed: u32, block: &[u8]) -> u32 {
     if block.len() < 4 {
         return 0;
     }
-    crc32c(inode_seed, &block[..block.len() - 4])
+    crc32c(dir_seed, &block[..block.len() - 4])
 }
 
-/// Set the extent tail on a finalized extent tree block.
-pub fn extent_block_csum_set(inode_seed: u32, block: &mut [u8]) {
+/// Set the extent tail on a finalized extent tree block (same
+/// generation-chained seed contract as `dir_block_csum_set`).
+pub fn extent_block_csum_set(dir_seed: u32, block: &mut [u8]) {
     let n = block.len();
     if n < 4 {
         return;
     }
-    let c = extent_block_csum(inode_seed, block);
+    let c = extent_block_csum(dir_seed, block);
     block[n - 4..n].copy_from_slice(&c.to_le_bytes());
 }
 

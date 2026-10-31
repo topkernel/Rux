@@ -6493,6 +6493,48 @@ fn binder_transaction(
         }
     }
 
+    // lb-lane hunt (launcher bring-up): samgr -> client CALLBACK
+    // deliveries. accountmgr (SA 200) creates user 100 — the gate the
+    // launcher spawn waits on — only from OnAddSystemAbility callbacks,
+    // which samgr sends as NEW (non-reply) transactions to the
+    // subscriber's stub. On the lb1 boot none of the three
+    // AddSystemAbilityListener subscriptions (storage/BMS/AMS) ever
+    // fired while direct client->accountmgr queries worked, so the
+    // notification direction is the suspect. This tap rings every
+    // transaction whose SENDER is the latched samgr pid and whose
+    // target is a different process: target pid/tgid, code, oneway
+    // bit, txn id — the send-side twin of SLRD's read-side audit, for
+    // the callback direction.
+    {
+        let samgr_pid = binder_sareg_samgr_pid();
+        if samgr_pid != 0
+            && !reply
+            && proc.pid as u32 == samgr_pid
+            && target.pid as u32 != samgr_pid
+        {
+            static SACB_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={}",
+                    txn.id,
+                    tr.code,
+                    tr.flags,
+                    if tr.flags & TF_ONE_WAY != 0 { " ONEWAY" } else { "" },
+                    comm,
+                    target.pid,
+                    crate::process::current_pid(),
+                    data_size
+                );
+            }
+        }
+    }
+
     // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
     // IAbilityManager interface token on the sender's parcel head,
     // latch the AMS node id + foundation pid on first sight, and ring

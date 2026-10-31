@@ -6,19 +6,21 @@ perf-audit lane's accepted measurements on main@257698a5 (pa38 battery,
 pb1/pa-series, census streaks) — refresh the whole table at once when a new
 main lands, do not cherry-pick rows.
 
-> **Tier-1 vehicle exception (2026-10-30, aarch64 merge b238ebd1)**: the
-> Tier-1 rows are measured on the OH image set (updater/system/vendor/
-> chip_prod/ramdisk/userdata), which was removed in the 101 GB disk
-> cleanup and no longer exists on this host — pa-boot.sh cannot start,
-> so the syscall-volume, census, and per-op rows had no vehicle for
-> this merge. Written justification per policy: (a) this merge's
-> deltas on the baseline platforms' compiled paths are nil — every
-> shared-file change is a per-arch constant (wake floor, ELF machine
-> IDs), a cfg-gated arm, or a print on a failure-only path; (b) the
-> empirical cover is the Tier-2 pbench run on this merge's bzImage
-> (medians vs the pb1 anchor below) plus the merge's riscv64 quiet
-> smoke (tick + zero-panic). Re-bank the full Tier-1 battery when the
-> image set is rebuilt.
+> **Tier-1 vehicle restored (2026-10-31, perf-audit lane)**: the OH
+> image set is back — 7 read-only seed images in the central store
+> `/home/william/rux-images/oh/`, symlinked into `run/oh-img/` and
+> booted snapshot=on + file.locking=off. The userdata LINEAGE is not
+> the seed: the seed boot deterministically dies at ~49 s
+> (storage_manager 4-strike critical crash → ExecReboot → deliberate
+> sysrq panic), and a one-pass cooked copy parks in StorageDaemon
+> HandleFileCrypt init_main_user — the tok lineage cannot be re-cooked
+> on current main. The lineage was instead rescued from this lane's own
+> history: pa-boot.sh always copied the userdata source fresh per tag,
+> so `run/oh-userdata-tok109.img` (the state after the last accepted
+> Tier-1 debug census boot, Oct 29) is the lineage asset. Full evidence:
+> `run/evidence/2026-10-30-pa110-tier1-lineage.txt`. Tier-1 was re-banked
+> from this lineage on main@82059759 (pa112tok/pa113tok below); the
+> 2026-10-30 vehicle exception for the aarch64 merge is closed.
 
 ## Tier 1 — quiet syscost boot (KVM, q35, smp2/4G, syscost=1, 780s window)
 
@@ -26,7 +28,7 @@ main lands, do not cherry-pick rows.
 |---|---|---|
 | TERM-DESCHED census | 8 | 6–10 |
 | WAKE-REFUSED census | 32 | 28–36 |
-| WAKE-STRANDED | 0–7 organic (~1–1.5s) | no 1001ms-grid class |
+| WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s | no 1001ms-grid class |
 | tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
 | total syscall volume (780s boot) | ~107.5M (pa50main, 2026-10-25) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — re-banked 2026-10-25 from the pa50main quiet-window run (PURE main ddb3ed01, x86_64 debug, load1=0/qemus=1 at launch, all other enforced rows PASS); the old 136M seed was the pa38 boot at host load ~5.5 with the app phase running 81 ABC restarts (a deeper workload mix) — superseded. Pace-coupling stands: pa41gate (leg 32) proved a flat −35% pace deficit under 14–19 foreign QEMUs (77.1M, per-op costs held); pa46main at load1 11–17 read 93.2M. Enforce only in a load-gated window (load1 ≤9, qemus ≤8 — run/pa50-rebank.sh gate) |
@@ -86,7 +88,12 @@ marginally faster. Verdict: anchor drift, not a regression; the merge
 passes its tier, and the append cell re-banks here: **p6_append
 (debug class) = 637-656 µs family**. The other fs-family cells keep
 their pb1 anchors until a full debug-class re-bank board runs; the
-drift direction is improvement on every one of them.
+drift direction is improvement on every one of them. That re-bank
+board ran 2026-10-31 (pa112pb battery + the pa113pb quiet rerun —
+see the 2026-10-31 whole-table refresh below): debug-class fs
+families now read from there, and at load1 8-10 they sit +5-6%
+(metadata cells) to +38% (write_fsync, load-coupled) over these
+merge-board families.
 
 Refreshed cells from the pa91 chain (census+REST boot on the leg-52
 stack pre-CFS-fix; med-of-2 pbench boards at load1 13-15, strong class)
@@ -113,6 +120,82 @@ next main-class board (pa94 chain armed).
 | p5a_pipe / p5c3 / p5e | 2.1-2.3 / 4.9 / 4.4-4.5 | 2.17-2.24 / 4.35 / 3.92-4.12 (pa91q) | strong, loaded |
 | p6_stat / getdents | 15.2-16.1 / 599-615 | 15.7 / 570-570 (pa91q) | strong, loaded |
 
+## Whole-table refresh (2026-10-31, main@82059759 — Tier-1 re-banked on the rescued tok109 lineage)
+
+First Tier-1 battery since the image cleanup, closing the aarch64
+merge's vehicle exception. Vehicle: pa-boot.sh 780 s KVM q35 smp2/4G,
+syscost=1 dfx=wwcensus, kernel = main@82059759 x86_64 debug bzImage
+(md5 c800ffe3710b07b8), userdata lineage = tok109 asset (see the
+note above). Two boots, each with its own recorded load window
+(run/pa112tok-window.log, run/pa113tok-window.log):
+
+| metric | pa50main anchor (2026-10-25, load1=0/qemus=1) | pa112tok (load1 3.5–9.8, 2–5 qemus) | pa113tok (load1 3.5–10.1, up to 6 qemus) | verdict vs anchor |
+|---|---|---|---|---|
+| TERM / REFUSED census | 8 / 32 | 8 / 32 | 8 / 32 | exact, unchanged |
+| WAKE-STRANDED | (no strand band then) | 23 organic, max 32.3 s | 31 organic, max 101 s | no 1001 ms grid class (one 1002 ms one-off in pa113; organic 1–2 s family dominates; pa109dbg read 28/max 107 s — the old "0–7 organic" text was stale) |
+| tick rate per CPU | ≥99.5 class | 100.00 / 99.67 | 99.58 / 100.00 | in band, sustained |
+| panics / new OOM | 0 / 0 | 0 / 0 | 0 / 0 | clean |
+| syscall volume (t=720 s) | 107.5M | 97.5M | 92.4M | inside the adjudicated 85–107M swing family (pa86 87.4M … pa50main 107.5M); load-coupled, NOT a regression — pa113's window carried load1 ≤10.1 + 6 foreign QEMUs, and no quieter enforcement window existed on this host day |
+| clock_gettime avg | 3 µs (n=45.5M) | 3 µs (n=40.9M) | 3 µs (n=38.8M) | same class |
+| nanosleep avg | 203 ms (n=26.9k) | 198 ms (n=24.2k) | 188 ms (n=25.8k) | within ±20%, better direction |
+| GRQ avg hold (sched.rs REST site) | no instrument then | 3451 ns (n=24.3M) | 5367 ns (n=18.8M) | pa112's quiet-window read is BELOW the 4080 ns floor; the rerun-once boot (pa113, loadier window) reads back inside 4080–7320 ns. Reading is load-coupled: same kernel+lineage+instrument spans 3.4–5.4 µs across the two windows. In-band at standard enforcement windows; the 3.4 µs quiet floor is the improvement side, not a regression. Gate band unchanged pending a genuinely quiet (pa50main-class) window. |
+| small_alloc REST share | 9.2% (old) / 1.1–1.2% family | 0.9% (14.6 s) | 1.1% (17.4 s) | in family, ≤10% band |
+| get_file REST site (file.rs:1032) | (pa91: 94.5M / 31.2 s / 330 ns) | 96.9M / 26.3 s / 271 ns | 92.4M / 26.2 s / 283 ns | improved vs pa91 (avg −15%, tot −16%) |
+
+Row provenance: run/perf-gate-pa112tok-parse.txt, run/perf-gate-pa113tok-parse.txt, gate verdicts run/pa112tok-gate-parse.txt / run/pa113tok-gate-parse.txt. Both boots rc=0 at the 780 s horizon, 0 panics, 0 OOM, census 8/32 exact, strands organic.
+
+vs the 2026-10-25 pa50main anchor, stated plainly: no enforced Tier-1
+row regressed. Census is exact (8/32). Per-op rows are same-class
+(clock 3 µs, nanosleep family 188–198 ms, anchor 203 ms). Volume reads
+8–14% below the 107.5M quiet anchor but inside the adjudicated
+load-coupled swing family — neither 2026-10-31 window was pa50main-quiet
+(load1=0 does not exist on this host day; both windows peaked >9 with
+multiple foreign QEMUs). The aarch64 merge's shared-file deltas (per-arch
+constants, cfg-gated arms, failure-only prints) are consistent with the
+Tier-1 rows being flat.
+
+### Tier-2 debug-class fs-family battery (2026-10-31, pa112pb1/pa112pb2 + pa113pb rerun)
+
+Same kernel as the Tier-1 rows (main@82059759 debug bzImage, md5
+c800ffe3710b07b8), pbench_boot defaults (q35 TCG thread=multi, smp2,
+2G, usbless minimal rootfs), two sequential boards plus the mandated
+quiet-window rerun board. Load windows: board 1 at load1=8 with 10
+foreign QEMUs, board 2 at load1=10 with 10-11, rerun gate-opened at
+load1=5/qemus=7 (run/pa113pb-quiet.log). Comparison families: the
+aarch64-merge boards (same commit 82059759, debug, run at
+foreign_qemus=1; serial work/pbench-main-merge-aarch64{,-r2}-serial.log,
+med-of-2). Medians only; p99 is host-noise-dominated (board 2's
+mkdrmdir p99 hit 7.1 s mid-contention).
+
+| cell | pa112pb1 (load1=8, 10 qemus) | pa112pb2 (load1=10, 10-11 qemus) | pa113pb rerun (gate-open 5/7, drift 9-10) | pa114pb (gate-open 5/5, close 5/3) | merge family (foreign_qemus=1) | pa114pb delta vs family top | verdict |
+|---|---|---|---|---|---|---|---|
+| p6_stat | 209.8 | 210.2 | 210.5 | 200.9 | 197.3–198.6 | +1.2% | in ±20% |
+| p6_openclose | 527.2 | 525.6 | 525.1 | 512.9 | 502.8–503.3 | +2% | in ±20% |
+| p6_getdents | 5507 | 5762 | 5608 | 5439 | 5300–5327 | +2% | in ±20% |
+| p6_read_cached | 558.1 | 559.7 | 558.6 | 546.8 | 531.4–533.5 | +2.5% | in ±20% |
+| p6_write_fsync | 17324 | 16838 | 15852 | 13920 | 12155–12432 | +12% | in ±20% at the quiet window — monotone window chain |
+| p6_append | 714.5 | 702.3 | 723.0 | 657.2 | 637.0–649.2 | +1.2% | in ±20% |
+| p6_mkdrmdir | 22097 | 27375 | 23523 | 22814 | 20248–20748 | +10% | in ±20% |
+| p6_unlink | 1161 | 1228 | 1177 | 1141 | 1087–1094 | +4% | in ±20% |
+
+Adjudication (final, four boards + the merge family): every fs cell
+converges MONOTONICALLY toward the merge-board family as the window
+quiets — write_fsync 17324/16838 (load1 8-10, 10-11 qemus) → 15852
+(5→9, 7-9 qemus) → 13920 (load1 5, 5→3 foreign qemus) vs family
+12155–12432 at foreign_qemus=1; append 714/702/723/657 vs 637–649;
+stat 209.8–210.5 → 200.9 vs 197.3–198.6. Same commit (82059759,
+debug class) on every board. Verdict: host-window coupling, NOT a
+kernel regression — the quietest window available (3 foreign QEMUs by
+close) lands all eight cells inside ±20% of the merge families
+(write_fsync +12%, append +1%, everything else +1-10%). Practical
+consequence for the gate: p6_write_fsync (and to a lesser degree
+append/mkdrmdir) must be judged with a recorded load window — at
+load1 8-10 with ~10 foreign QEMUs it reads +27-40% over the
+merge-quiet family with the same kernel; the merge-class 12.2-12.4 ms
+family is reachable only near foreign_qemus≈1, which did not occur on
+this host day until the tail of the battery. All boards: PBENCH DONE
+rc=0, zero panics.
+
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
 | domain | metric | baseline (accepted) | band |
@@ -120,7 +203,7 @@ next main-class board (pa94 chain armed).
 | alloc/reclaim | small_alloc global class-lock sections/boot | 19.7M (pa20, post-magazine) | ≤25M |
 | alloc/reclaim | small_alloc REST wall (share of machine) | 133.2s ≈ 9.2% | ≤10% |
 | alloc/reclaim | reclaim slowpath on standard boots | drct=0 class | no emergence |
-| scheduling | GRQ average hold | 5.1–6.1 µs flat | ±20% |
+| scheduling | GRQ average hold | 3.4–5.4 µs window-spanned on main@82059759 (pa112tok quiet-window 3451 ns, pa113tok loadier-window 5367 ns; older family 6.3–7.0 µs at load1 9–15) | 4080–7320 ns gate band (env GRQ_AVG_NS_MIN/MAX); quiet-window floor 3.4 µs is improvement-side, band re-bank pending a pa50main-class (load1≈0) window |
 | scheduling | context-switch half-rt (pbench P2) | pb1 column | ±20% |
 | scheduling | census TERM/REFUSED | 8 / 32 | 8±2 / 32±4 |
 | filesystem | stat / mkdir+rmdir / unlink / write+fsync medians (pbench P6) | pb1 column | ±20% or better |

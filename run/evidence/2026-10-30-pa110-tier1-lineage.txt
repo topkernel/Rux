@@ -1,0 +1,62 @@
+Tier-1 lineage re-bank — userdata lineage verdict (2026-10-30, lane perf-audit)
+===============================================================================
+
+Kernel: run/pa110-main-dbg-bzImage (main@82059759, x86_64 debug class,
+        md5 c800ffe3710b07b847f00f71d7287d88; built in this worktree,
+        BUILD_RC=0, run/build-pa110-x86-debug.log). Same class as the
+        pa50main anchor (PURE main ddb3ed01, x86_64 debug).
+
+Images: central store /home/william/rux-images/oh/ (7 seed images,
+        READ-ONLY). run/oh-img/* symlinks point there directly; RO
+        drives ride snapshot=on + file.locking=off.
+
+ATTEMPT 1 — seed userdata directly (tag pa110seed, KVM q35 smp2/4G,
+           syscost=1 dfx=wwcensus): FAILED as a Tier-1 vehicle.
+  t=+48.467s  ServiceReap error critical service crashed storage_manager 4
+              (4th strike; storage_daemon never sends its AddSystemAbility
+              registration — oh-launcher lane's open bug; 20x
+              "check storage daemon status" polls before giving up)
+  t=+48.5s    ExecReboot panic -> StopAllServices -> sync -> umount
+  t=+49.128s  Kernel panic (sysrq 'c' — deliberate crash)
+  Zero SYSCOST dumps (first dump is t=60s); census at death read
+  TERM=8 / REFUSED=33. The seed cannot carry a 780s window on current
+  main. Verdict: lineage change REQUIRED.
+
+COOKING (tok-equivalent recipe):
+  Private copy of the SEED userdata.img (store md5
+  ae9cde56be0b683fe5a6b32ca6aa97f6, 1395130368 B) booted snapshot-OFF
+  once through OH's own first-boot pass. The pass formats the userdata
+  partition out to its table end (image grows 1.40G -> 2.65G) and ends
+  in OH's synced shutdown (stopAllServices 798ms -> sync -> umount),
+  so all first-boot state is flushed.
+  Asset: run/oh-userdata-cooked-r1.img
+         md5 1f2d0e7f2ebe7b36e0fbf31088deff17, 2652766208 B
+  (Never committed to git; worktree-local lane asset.)
+
+ATTEMPT 2 — cooked copy (tag pa111cook, same kernel/flags, 780s):
+  STABLE BUT NOT THE ANCHOR WORKLOAD CLASS. storage_manager survives
+  (0 ServiceReap strikes), 0 panics, ticks sustained — but the boot
+  PARKS at t=38.95s in StorageDaemon HandleFileCrypt
+  "fscrypt cmd: init_main_user" (the r1 pass was killed mid-provision
+  by the seed boot's own panic, leaving fscrypt state half-built; the
+  resume boot deadlocks in it). Zero kmsg after t=60s; total syscall
+  volume 74,151 (vs the ~100M anchor class) with clock_gettime n=9488,
+  nanosleep n=423 avg 1.76s, GRQ site n=1.03e9 (idle-loop class).
+  Census read TERM=8 / REFUSED=6. Verdict: the one-pass re-cook recipe
+  cannot rebuild the tok lineage on current main — the first boot
+  deterministically dies at 49 s (see attempt 1) before provisioning
+  completes. Cooked asset run/oh-userdata-cooked-r1.img retired.
+
+LINEAGE RESCUE — the tok lineage was NOT lost after all: pa-boot.sh
+  copies the userdata source fresh per tag, so every historical
+  run/pa-<tag>-userdata.img in this worktree is tok-master + exactly
+  one boot, and those private copies survived the disk cleanup.
+  Lane asset: run/oh-userdata-tok109.img (renamed from
+  pa-pa109dbg-userdata.img; 4294967296 B,
+  md5 5309b2edde9be253ea06084f0578bc6e) — the state after the last
+  accepted Tier-1 debug census boot (pa109dbg, 2026-10-29, rc=0,
+  volume 97.6M, census 8/32, GRQ 5947ns).
+
+ATTEMPT 3 — tok109 lineage (tag pa112tok, same kernel/flags, 780s):
+  see run/perf-gate-pa112tok-parse.txt for the battery rows and
+  run/pa112tok-window.log for the load-window provenance.

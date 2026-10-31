@@ -958,6 +958,14 @@ pub fn rust_main_tail() -> ! {
         // (start_secondaries emits its own structured status row.)
         arch::smp::start_secondaries();
 
+        // aarch64: drop boot.S's early TTBR0 identity window now that
+        // every core is high-VA (the secondary stubs were the last
+        // physical-PC consumers). From here a low-address kernel
+        // usercopy faults → exception-table fixup → -EFAULT, instead of
+        // reading flash through the identity map.
+        #[cfg(feature = "aarch64")]
+        arch::mm::teardown_early_identity_map();
+
         // Initialize ksoftirqd per-CPU threads (must be after start_secondaries
         // because wake_up sends IPIs to target CPUs, which must be online).
         {

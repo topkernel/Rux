@@ -2868,7 +2868,12 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicUsize::new(0);
         static LAST_TGID: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
-        if ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
+        // oh-svc T1 abort-reason tap (known-gap 4): the dump walks the
+        // exec-VMA map and scans the user stack — gated behind
+        // dfx=ohhunt so ordinary userspace aborts (glibc assertions in
+        // LTP runs included) cost nothing.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+            && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
             && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
             && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
         {

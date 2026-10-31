@@ -325,8 +325,12 @@ _start:
 // TPIDR_EL1 = index (smp::cpu_id protocol), per-cpu boot stack (physical,
 // identity-mapped), restore the boot core's saved TTBR1/TCR/MAIR, MMU on
 // against the static identity map (TTBR0 = idmap_l0 — the early identity
-// tables are image .bss and stay live for exactly this purpose), convert
-// the stack to its high VA, branch to secondary_cpu_entry (Rust).
+// tables are image .bss and serve exactly this bring-up window), convert
+// the stack to its high VA, branch to secondary_cpu_entry (Rust). The
+// identity window is torn down on the boot core once every core is up
+// (mmu_init::teardown_early_identity_map) — secondary_cpu_entry installs
+// the high-VA VBAR before reporting itself started, so nothing on a
+// started core needs a low VA anymore.
 // ============================================================================
 .global secondary_start
 .type secondary_start, %function

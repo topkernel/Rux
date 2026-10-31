@@ -533,20 +533,27 @@ pub fn start_secondaries() {
 /// context_id; TPIDR_EL1 is already set by the stub).
 #[no_mangle]
 pub extern "C" fn secondary_cpu_entry(cpu: usize) -> ! {
+    // Install the high-VA vector table BEFORE marking this CPU started:
+    // the stub parked VBAR_EL1 at the table's PHYSICAL address (fetched
+    // through the early identity map). cpu_started(n) must imply "n no
+    // longer needs any low VA" — mmu_init::teardown_early_identity_map()
+    // runs on the boot core right after start_secondaries() and relies
+    // on exactly that invariant (a started-but-late core would fault on
+    // its own bad-vector park otherwise).
+    crate::arch::trap::init();
+
     // Mark this CPU as started so the boot CPU's start_secondaries()
     // spin-wait can detect us and proceed.
     mark_cpu_started(cpu);
 
-    // Set up trap handling, then configure THIS cpu's GIC bank and
-    // unmask DAIF BEFORE the boot-complete wait: the wait parks in wfi,
-    // and a halted core whose pending interrupt is masked never wakes to
-    // re-evaluate the loop condition — the secondary parked there for
-    // the whole boot (invisible while the GICD_CTLR bug kept every
-    // interrupt line deasserted). With the CPU interface up and DAIF
-    // clear, the armed vtimer (and the boot cpu's completion kick)
-    // break the wfi properly and the timer's early-boot guard makes the
-    // pre-init ticks harmless.
-    crate::arch::trap::init();
+    // Configure THIS cpu's GIC bank and unmask DAIF BEFORE the
+    // boot-complete wait: the wait parks in wfi, and a halted core whose
+    // pending interrupt is masked never wakes to re-evaluate the loop
+    // condition — the secondary parked there for the whole boot
+    // (invisible while the GICD_CTLR bug kept every interrupt line
+    // deasserted). With the CPU interface up and DAIF clear, the armed
+    // vtimer (and the boot cpu's completion kick) break the wfi properly
+    // and the timer's early-boot guard makes the pre-init ticks harmless.
     crate::arch::trap::enable_external_interrupt();
     crate::arch::trap::enable_timer_interrupt();
 

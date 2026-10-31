@@ -1,0 +1,21 @@
+perf-gate: tiers=[1] tag=pa112tok kernel=none secs=780
+== Tier 1: quiet syscost boot (run/pa-pa112tok-stamped.log) ==
+PASS  kernel panics                      0                            band: = 0
+PASS  OOM lines                          0                            band: = 0
+PASS  census TERM-DESCHED                8                            band: 8 +-2
+PASS  census WAKE-REFUSED                32                           band: 32 +-4
+INFO  census WAKE-STRANDED (organic)     22                           band: no 1001ms grid class
+PASS tick rate /CPU cpu0=100.00/s, cpu1=99.67/s min 99.5
+PASS  syscall volume                     97526716                     band: 107500000 +-10%
+PASS clock_gettime avg 3us n=40863127 t=720s 3-5us
+PASS nanosleep avg 197890us n=24209 t=720s <=244ms (pa50main 203ms +-20%)
+== Domains: guarded hot paths (run/pa-pa112tok-stamped.log) ==
+FAIL GRQ avg hold 3451ns n=24322650 4080-7320ns
+PASS small_alloc REST share 0.9% (14598ms) <=10%
+SKIP  buffer-cache hit rate              not in this build            band: needs cache-stats instrument
+SKIP  fsw sync-write classes             not in this build            band: needs fsw=1 boot
+(full syscost dump: run/perf-gate-pa112tok-parse.txt)
+
+perf-gate done: see verdicts above (PASS/FAIL/SKIP/INFO per metric).
+FAIL does not auto-block: apply the rerun-once rule, then weigh against
+docs/development/perf-gate-baseline.md.

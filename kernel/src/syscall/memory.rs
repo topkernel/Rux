@@ -926,14 +926,20 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 let Some((phys, len)) =
                                     crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
-                                    crate::pr_warn!(
-                                        "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
-                                        fd,
-                                        offset,
-                                        actual_length,
-                                        crate::drivers::drm::is_prime_file(&file),
-                                        crate::drivers::drm::is_drm_file(&file)
-                                    );
+                                    // oh-svc T1 attribution tap (known-gap 4):
+                                    // dfx=ohhunt gates it.
+                                    if crate::dfx::switches::enabled(
+                                        crate::dfx::switches::DfxSwitch::OhHunt,
+                                    ) {
+                                        crate::pr_warn!(
+                                            "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
+                                            fd,
+                                            offset,
+                                            actual_length,
+                                            crate::drivers::drm::is_prime_file(&file),
+                                            crate::drivers::drm::is_drm_file(&file)
+                                        );
+                                    }
                                     return mmap_error::EINVAL;
                                 };
                                 // ATOMIC RESERVE first (b91 corruption fix —
@@ -953,13 +959,18 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // oh-svc T1: this ENOMEM was SILENT — the
                                     // llvmpipe displaytarget_map failure class
                                     // (assert jit_tex->base) needs the
-                                    // attribution. Budgeted.
+                                    // attribution. Budgeted + gated behind
+                                    // dfx=ohhunt (known-gap 4).
                                     Err(e) => {
                                         static PEMAP_N: core::sync::atomic::AtomicU32 =
                                             core::sync::atomic::AtomicU32::new(0);
                                         let n =
                                             PEMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                                        if n < 20 {
+                                        if n < 20
+                                            && crate::dfx::switches::enabled(
+                                                crate::dfx::switches::DfxSwitch::OhHunt,
+                                            )
+                                        {
                                             crate::pr_warn!(
                                                 "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",
                                                 crate::process::current_pid(),

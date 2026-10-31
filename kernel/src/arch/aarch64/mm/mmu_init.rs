@@ -39,6 +39,14 @@ extern "C" {
     static kern_l0: PageTable;
 }
 
+/// boot.S's early TTBR0 identity root (idmap_l0 → idmap_l1, phys
+/// [0, 2GB)) — torn down by [`teardown_early_identity_map`] once every
+/// core runs high-VA.
+extern "C" {
+    static idmap_l0: PageTable;
+    static idmap_l1: PageTable;
+}
+
 /// Adopt boot.S's early TTBR1 root into ROOT_PAGE_TABLE and switch
 /// TTBR1_EL1 to it.
 ///
@@ -738,10 +746,84 @@ pub fn init() {
         KERNEL_MAP.page_offset = PAGE_OFFSET;
 
         // Install the fixmap (UART) so console output survives the
-        // switch off the early identity window
+        // switch off the early identity window (see
+        // teardown_early_identity_map — the consumer-side half of this
+        // comment, kept here since the fixmap is the prerequisite)
         fixmap::init_uart_fixmap();
 
         MMU_INITIALIZED.store(true, Ordering::Release);
+    }
+}
+
+/// Tear down boot.S's early TTBR0 identity window (phys [0, 2GB)).
+///
+/// Consumer audit (the registered leftover this closes — before it ran,
+/// a low-address kernel usercopy read flash instead of faulting):
+/// - boot.S: the post-MMU EARLY_PUTC pair ('M', 'J') writes the UART at
+///   its identity VA, both before rust_main. The secondary stub is the
+///   LAST physical-PC consumer — it fetches and stacks through the
+///   identity map until it branches to secondary_cpu_entry, and that
+///   core has called trap::init() BEFORE marking itself started (see
+///   secondary_cpu_entry), so cpu_started(n) ⇒ n needs no low VAs.
+/// - trap vector park: VBAR_EL1 was repointed at the linked high VA by
+///   trap::init() on the boot core (rust_main, before mm::init) and on
+///   every secondary (secondary_cpu_entry).
+/// - console: putchar uses the fixmap UART VA (init above); the GIC and
+///   every other MMIO consumer goes through the kernel-half alias.
+///
+/// Must therefore run AFTER `arch::smp::start_secondaries()`. A core
+/// whose PSCI CPU_ON succeeded but never reached secondary_cpu_entry
+/// within start_secondaries' bounded wait is already treated as wedged
+/// there; tearing down regardless is the documented trade.
+///
+/// Mirrors the riscv64/x86_64 state (no identity window, low user VAs
+/// unmapped): zero the idmap L0/L1 entries, park this core's TTBR0 on
+/// the kernel root (the same switch a context switch to a kernel thread
+/// performs — get_current_satp() then reports the kernel root, so the
+/// first schedule needs no extra TTBR0 write), and broadcast the TLB
+/// invalidation so cores that walked through the window as secondaries
+/// drop their cached low-VA translations too.
+pub fn teardown_early_identity_map() {
+    unsafe {
+        // 1. Kill the table contents: L0[0] (the [0, 512GB) subtree
+        //    pointer — the whole identity window) and both L1 blocks
+        //    (phys 0 device, phys 1GB RAM).
+        let l0 = (&raw const idmap_l0) as *mut PageTable;
+        let l1 = (&raw const idmap_l1) as *mut PageTable;
+        // SAFETY: image .bss tables, written once here from the boot core
+        // after every consumer is gone; volatile so the stores are not
+        // reordered away against the barrier below.
+        (*l0).set(0, PageTableEntry::new());
+        (*l1).set(0, PageTableEntry::new());
+        (*l1).set(1, PageTableEntry::new());
+
+        // 2. Make the zeroing visible before anyone can observe it.
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+
+        // 3. Park this core's TTBR0 on the kernel root, ASID 0 — the
+        //    exact state context_switch installs for a kernel thread
+        //    (ROOT_PAGE_TABLE's low L0 slots are all zero, so user VAs
+        //    fault at level 0). The ASID lives in TTBR0[63:48]
+        //    (TCR_EL1.A1 = 0; CONTEXTIDR does not tag entries — see
+        //    context.rs switch_mm), and root_pa carries ASID 0.
+        let root_pa = root_page_table_ppn() << PAGE_SHIFT;
+        core::arch::asm!(
+            "msr ttbr0_el1, {t}",
+            "isb",
+            t = in(reg) root_pa,
+            options(nostack)
+        );
+
+        // 4. Broadcast invalidation (inner-shareable): the boot core and
+        //    every secondary stub fetched through ASID-0 identity
+        //    translations; vmalle1is clears both halves on every PE and
+        //    they refill from the live tables (one-time boot cost).
+        core::arch::asm!(
+            "tlbi vmalle1is",
+            "dsb sy",
+            "isb",
+            options(nostack, preserves_flags)
+        );
     }
 }
 

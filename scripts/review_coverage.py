@@ -61,7 +61,7 @@ STATUS = {
     "kernel/src/dfx/sbi_debug.rs": ("part", "raw SBI printers"),
     "kernel/src/dfx/scribble.rs": ("part", "task scribble hunter"),
     "kernel/src/dfx/softlockup.rs": ("part", "soft lockup detector"),
-    "kernel/src/dfx/switches.rs": ("done", "switch table refactored to one macro"),
+    "kernel/src/dfx/switches.rs": ("done", "switch table refactored to one macro; cr2: ohhunt switch added (95094dd2)"),
     "kernel/src/dfx/syscost.rs": ("part", "per-syscall cost table"),
     "kernel/src/dfx/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/dfx/taskdump.rs": ("part", "task dump format"),
@@ -69,7 +69,7 @@ STATUS = {
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
-    "kernel/src/drivers/drm/mod.rs": ("todo", ""),
+    "kernel/src/drivers/drm/mod.rs": ("part", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated"),
     "kernel/src/drivers/gpu/*": ("todo", ""),
     "kernel/src/drivers/input/*": ("todo", ""),
     "kernel/src/drivers/intc/*": ("todo", ""),
@@ -96,8 +96,8 @@ STATUS = {
     "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions"),
     "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
-    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount"),
-    "kernel/src/fs/ext4/namei.rs": ("todo", ""),
+    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites"),
+    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending"),
     "kernel/src/fs/fifo.rs": ("todo", ""),
     "kernel/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）"),
     "kernel/src/fs/inode.rs": ("part", "read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）"),
@@ -156,9 +156,9 @@ STATUS = {
     "kernel/src/ipc/binder.rs": ("part", "ioctl numbers, dispatch, mmap 区的 VMA 记账（e32cdfef）"),
     "kernel/src/ipc/mod.rs": ("todo", ""),
     "kernel/src/ipc/posix_mq.rs": ("part", "open/unlink/send/receive；绝对超时已修（e47b155a）"),
-    "kernel/src/ipc/sysv_msg.rs": ("part", "msgsnd/msgrcv"),
-    "kernel/src/ipc/sysv_sem.rs": ("part", "semtimedop timeout"),
-    "kernel/src/ipc/sysv_shm.rs": ("part", "IPC_RMID, attach/detach"),
+    "kernel/src/ipc/sysv_msg.rs": ("part", "msgsnd/msgrcv; cr2: msgrcv selection semantics spot-check (msgtyp 0/+/− branches, MSG_EXCEPT, MSG_COPY ordinals, E2BIG-before-removal) — conforms"),
+    "kernel/src/ipc/sysv_sem.rs": ("part", "semtimedop timeout; cr2: semget/semctl contract spot-check (EEXIST precedence, nsems==0 create-only, ENOENT bare lookup, SETVAL/SETALL ordering) — conforms"),
+    "kernel/src/ipc/sysv_shm.rs": ("part", "IPC_RMID, attach/detach; cr2: shmget size paths + SHM_LOCK cap spot-check — conforms"),
     "kernel/src/ipc/util.rs": ("done", "idr allocation, permission checks"),
     "kernel/src/main.rs": ("part", "boot sequence, panic handler, layout constants"),
     "kernel/src/mm/buddy_allocator.rs": ("part", "heap allocator, dealloc dispatch"),
@@ -170,7 +170,7 @@ STATUS = {
     "kernel/src/mm/page_alloc.rs": ("part", "分配快路径、OOM 判定、直接回收闸门、free 的各路防护"),
     "kernel/src/mm/page_desc.rs": ("fixed", "stale Page.mapping/index field-contract docs corrected (mapping is the cache eviction key, never rmap slot 0); Chinese comment translated"),
     "kernel/src/mm/pglist.rs": ("todo", ""),
-    "kernel/src/mm/rmap.rs": ("done", "read end to end (mm review): no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice"),
+    "kernel/src/mm/rmap.rs": ("done", "read end to end (mm review); cr2: try_to_unmap_inner FD-1 reroute re-read (VMA lock discipline + broadcast shootdown arms) — clean. Original note: no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice"),
     "kernel/src/mm/slab.rs": ("todo", ""),
     "kernel/src/mm/small_alloc.rs": ("part", "size classes、每 CPU magazine、alloc/free 的快慢路径与 D-7 护栏"),
     "kernel/src/mm/vdso.rs": ("part", "per-arch e_machine arm + ELF header emit reviewed; clock_gettime payload unchanged"),
@@ -216,8 +216,8 @@ STATUS = {
     "kernel/src/sync/spinlock.rs": ("todo", ""),
     "kernel/src/syscall/dispatch.rs": ("todo", ""),
     "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync"),
-    "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验"),
-    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）"),
+    "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验; cr2: drm/prime ioctl dispatch region + ohhunt tap gating (95094dd2)"),
+    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; cr2: drm GEM mmap region + ohhunt tap gating (95094dd2)"),
     "kernel/src/syscall/misc.rs": ("part", "timerfd 族已对齐 v6.6（sys_timerfd_settime 契约已修 4e1f6110）；epoll/poll/eventfd/signalfd 未读"),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("todo", ""),
@@ -260,7 +260,7 @@ STATUS = {
     "kernel/src/arch/riscv64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/exception.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/riscv64/mm/mm_ops.rs": ("part", "COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）"),
+    "kernel/src/arch/riscv64/mm/mm_ops.rs": ("part", "COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）; cr2: FD-1 leaf primitives (leaf_pte_replace/install, pte_flag_bits) reviewed — Sv39 walk shape, expect_pfn re-validation, 0x3FF flag mask all correct"),
     "kernel/src/arch/riscv64/mm/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/page_fault.rs": ("fixed", "R-SC-RV64: file-fault path re-derived (vma_start, file, effective_size) in 4 separately locked lookups (shared-alias site took TWO back-to-back vma_read acquisitions) - mismatched generations could pair one file with another VMA's start and pin a foreign file's cache page; single entry-time snapshot ported from the x86_64 twin (3 finds + up to 4 pin-table lookups per file fault -> 1) + devfs live-size (b74) parity"),
     "kernel/src/arch/riscv64/mm/pagetable.rs": ("todo", ""),
@@ -280,7 +280,7 @@ STATUS = {
     "kernel/src/arch/x86_64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/exception.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/x86_64/mm/mm_ops.rs": ("part", "mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（与 riscv64 同构，e32cdfef）"),
+    "kernel/src/arch/x86_64/mm/mm_ops.rs": ("part", "mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（与 riscv64 同构，e32cdfef）; cr2: FD-1 leaf primitives reviewed — 4-level walk (39/30/21/12) with correct root-not-leaf handling, re-validation, flag mask correct"),
     "kernel/src/arch/x86_64/mm/mod.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/page_fault.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/pagetable.rs": ("todo", ""),
@@ -331,9 +331,9 @@ STATUS = {
     "kernel/src/fs/devfs/registry.rs": ("todo", ""),
     "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1); this review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every platform)"),
     "kernel/src/fs/ext4/allocator.rs": ("part", "geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending"),
-    "kernel/src/fs/ext4/csum.rs": ("todo", ""),
+    "kernel/src/fs/ext4/csum.rs": ("fixed", "read end to end (cr2): crc32c + all six checksum classes; 3 write-path divergences vs e2fsprogs fixed (a6b01fd9) — sb le32 full-crc seal, 12-byte dir tail with markers + generation-chained seed + blocksize-12 span, extent seed contract; proven with the run/cr2-csum-harness e2fsck oracle (reseal bit-identical, dirfix clean)"),
     "kernel/src/fs/ext4/indirect.rs": ("todo", ""),
-    "kernel/src/fs/ext4/superblock.rs": ("todo", ""),
+    "kernel/src/fs/ext4/superblock.rs": ("part", "cr2: Ext4GroupDesc/Ext4SuperBlock field layout vs on-disk offsets (write_group_descriptor RMW fix)"),
     "kernel/src/fs/fs_struct.rs": ("todo", ""),
     "kernel/src/fs/io_completion.rs": ("todo", ""),
     "kernel/src/fs/jbd2/journal.rs": ("todo", ""),
@@ -351,7 +351,7 @@ STATUS = {
     "kernel/src/initrd.rs": ("todo", ""),
     "kernel/src/list.rs": ("todo", ""),
     "kernel/src/mm/allocator.rs": ("todo", ""),
-    "kernel/src/mm/compact.rs": ("todo", ""),
+    "kernel/src/mm/compact.rs": ("part", "cr2: remap_page FD-1 reroute through leaf_pte_install reviewed (migration window + Migrating-flag wait) — clean"),
     "kernel/src/mm/hugepage.rs": ("todo", ""),
     "kernel/src/mm/kswapd.rs": ("todo", ""),
     "kernel/src/mm/layout.rs": ("todo", ""),
@@ -360,7 +360,7 @@ STATUS = {
     "kernel/src/mm/oom_kill.rs": ("todo", ""),
     "kernel/src/mm/page.rs": ("todo", ""),
     "kernel/src/mm/pagemap.rs": ("todo", ""),
-    "kernel/src/mm/swap.rs": ("todo", ""),
+    "kernel/src/mm/swap.rs": ("part", "cr2: entry-encoding section (swap bit 62 / migration bit 61 signatures, type/offset codec, pending-write tracking) — internally consistent, clean"),
     "kernel/src/mm/vmemmap.rs": ("todo", ""),
     "kernel/src/net/arp.rs": ("todo", ""),
     "kernel/src/net/buffer.rs": ("todo", ""),
@@ -640,6 +640,27 @@ BUGS = [
      "returned early keeping the OLD interval and the stale expiration count (timerfd_setup() "
      "sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the "
      "arming call ran even for total_nsec == 0, arming a dead timer slot."),
+    ("a6b01fd9", "kernel/src/fs/ext4/csum.rs, kernel/src/fs/ext4/namei.rs",
+     "cr2 review of the review-sprint delta (82059759..40e925fd). Three metadata_csum "
+     "WRITE-path divergences vs e2fsprogs, all e2fsck-proven with a host harness that "
+     "compiles the kernel's own csum.rs against real mke2fs images: (1) s_checksum is "
+     "the FULL 32-bit crc32c (le32 at 0x3FC) — we sealed only the low u16, leaving "
+     "[1022..1024) stale; a u16 read passes on mkfs images, which hid it (e2fsck "
+     "compares all 32 bits and refused the primary sb). (2) the dir tail is 12 bytes "
+     "(0, rec_len=12, name_len=0xDE00, csum) over a blocksize-12 span with the seed "
+     "crc32c(crc32c(seed,ino),generation) — we wrote an 8-byte markerless tail with an "
+     "ino-only seed over blocksize-8; dir_block_seal now normalizes the dirent chain "
+     "to end at blocksize-12 and the three entry-space sites reserve the tail. (3) "
+     "write_group_descriptor serialized the whole in-memory (mount-time-view) "
+     "Ext4GroupDesc over the disk descriptor, reverting freshly written bitmap "
+     "checksums and counter updates — now a read-modify-write of the free-inode "
+     "fields. Bitmap/inode/GD formulas verified correct as-is."),
+    ("95094dd2", "kernel/src/dfx/switches.rs, kernel/src/syscall/io.rs, kernel/src/syscall/memory.rs, kernel/src/drivers/drm/mod.rs, kernel/src/signal.rs",
+     "Known-gap-4 sweep: the oh-lane hunt instruments (MAP_DUMB + failing-ioctl traces, "
+     "drm mmap resolve/placement prints — one unbudgeted — the prime-import "
+     "compose-content probe walking the whole GEM per import, and the SIGABRT "
+     "first-raise dump) moved behind a new dfx=ohhunt switch, off by default; "
+     "standard and perf-gate boots pay nothing."),
 ]
 
 MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
