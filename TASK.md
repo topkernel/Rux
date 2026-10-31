@@ -466,118 +466,94 @@ Raw-log re-derivation of all three boots:
    ability_manager_service.cpp:9596 (StartUser -> CheckUserParam ->
    OnStartUserDone on ANY failure).
 
-## SEVENTH-SUCCESSOR SESSION (2026-11-01, branch @ fe7dee8a+) — decode CORRECTED; kernel semantics audited clean
-The sixth-successor decode's engine is WRONG in one load-bearing detail, and the
-kernel-side audit closes most of the rest. Facts (OH source at
-/home/william/workspace/oh-robot, reference binder.c v5.10 at /tmp/binder-510.c):
-1. **A kernel BR_DEAD_REPLY does NOT death-mark an IPCObjectProxy.**
-   SendRequestInner marks only on `status == ERR_DEAD_OBJECT`, and ERR_DEAD_OBJECT
-   (c_utils errors.h, BASE_ERR_OFFSET=0) is **+32**. The kernel read-side DEAD
-   arrives as the raw cmd 0x7205 (OnDeadOrFailedReply sets error=cmd); the
-   write-side ioctl errno arrives as -32. Neither equals +32, so a FAILED SEND
-   NEVER MARKS. The ONLY binder-proxy mark is **SendObituary**, reached only from
-   OnBinderDied (a DELIVERED BR_DEAD_BINDER whose cookie is the IPCObjectProxy
-   pointer — armed with cookie=proxy in RegisterBinderDeathRecipient).
-2. SendObituary also notifies recipients → OsAccountDeathRecipient::OnRemoteDied →
-   ResetOsAccountProxy → proxy_=nullptr → self-heal on next GetOsAccountProxy.
-   PERMANENT poison therefore needs the notice dropped (OnBinderDied's refcount
-   legs: "Invalid proxy object" / "failed to increment strong reference count" —
-   both now HILOG-tapped) or recipients already consumed (a SECOND obituary on
-   the same proxy). Kernel cannot produce the second notice: descs
-   (next_desc) and proc ids (NEXT_PROC_ID) are monotonic, no reuse; the
-   arm/clear/DONE state machine and the phase guard match the reference
-   (including DEAD_BINDER_AND_CLEAR via clear_pending).
-3. **Any failing IsOsAccountExists yields 2097193**: AMS's wrapper is
-   `(errCode == 0) && isExist` — proxy null (ERR_ACCOUNT_COMMON_GET_PROXY), send
-   error (raw 0x7205), or isExist=false ALL collapse to "userId not exist".
-   The "silent fast-fail" on lb44/45/46 may be the mark OR a null proxy whose
-   ACCOUNT_LOGE ("failed to get os account service") was dropped by hilog flood
-   — "no line" no longer proves proxy non-null.
-4. lb44 mark-window forensics (fail 266.819-820, 1 ms, ZERO kernel traffic,
-   ripple budget FRESH — window opened 266.818): foundation=864, accountmgr=956
-   (SA 200 registered 178.175, alive at fail). Deaths in the window: usb_host
-   crash loop x4 (SIGSEGV+KOT-KILL; refs held by pid 334, NOT foundation),
-   distributeddata(885) CLEAN EXIT at 258.48 — foundation held 7 refs → 7 dd
-   notices (dd cookies only). lb45: fail 208.830; el5_filekey_manager(311)
-   SIGKILLed 153.95, foundation(912) held 2 refs; accountmgr(990) alive.
-   NO accountmgr death on either boot → the osaccount proxy's own ref was never
-   death-noticed → the silent fail is most likely the NULL-PROXY leg or a
-   failed samgr GetSystemAbility, NOT a death-marked osaccount proxy.
-5. Kernel vs reference audit: BR constants match OH sys_binder.h
-   (BR_FAILED_REPLY nr=17, NOT upstream's 16); no-ctxmgr → BR_DEAD_REPLY matches
-   the reference (2937); thread/proc release, DRS equivalents, notice queueing,
-   arm-on-dead-node immediate queue, ref-0/0 dropping queued notice — all match.
-   Routing: top-level sync → proc todo (survives worker death), nested →
-   originator thread todo — same as reference. Our extra divergence:
-   binder_task_died reaps threads at task exit (reference leaks them; senders
-   hang instead of getting DEAD) — aggressive but reference-equivalent per call.
-6. lb49: samgr itself died once (musl ld.so "Error relocating /system/bin/samgr:
-   _ZN4OHOS3QOS12SetThreadQosE..." — same flake on lb3/lb4) and init did NOT
-   restart it → 90x why=4-no-ctxmgr BR_DEAD_REPLY fail+retry (NOT a poison;
-   callers retry) until boot end. lb50: slow-variant dud (15 SAs at 634s,
-   console silent ~15min).
-7. lb51 (running): release kernel + system-lb2.img + fresh /data + dfx=ams46 with
-   the full net (SENDFAIL/DRS/WERR/ARM+ARMdup/notices at WARN + HILOG verdict
-   keys). It decides between: (a) osaccount send fails kernel-side (SENDFAIL/
-   DRS/WERR name the leg), (b) proxy null (samgr leg), (c) notice-mark (ARM map
-   + notice name the desc/owner).
+## PREEMPT-HUNT SESSION (2026-11-01 02:00-07:00, branch preempt-hunt @ 1607f62e+)
+The phantom preempt-count producer is NAMED: two faces, one dominant.
 
-### lb53/lb54 (seventh successor): the full engine, named with timestamps
-lb53/lb54 ran the pre-merge evidence kernel (branch `evidence-premerge` =
-33d007fe + SENDFAIL + the death-event net + lockless prints — PUSHED; it
-boots clean where post-merge release wedges). lb54 (healthy boot, fast
-variant, full net armed) landed the fail moment:
-- 133.9  accountmgr #1 (pid 949) registers SA 200 (insert SA:200_53).
-- 264.39 OH's own watchdog group-suicide: accountmgr main thread KSIG9s its
-  group members, members kill back (OS_DfxWatchdog / OS_IPC workers — the
-  same KOT-KILL family as the usb_host crash loop). THREAD-DIED-SERVICING
-  shows a worker died servicing a call. accountmgr exits with signal 11.
-- 264.45-69 the kernel delivers ~20 armed death notices (pids 464,480,514,
-  545,585,602,693,717,718,891,902 desc 16+17...) — samgr rm DeadSA:200_63,
-  re-inserts SA:200_64 (on-demand profile) at 264.617, restart spawns 1073.
-- 289.18 lockstatus_100 SET; 289.277 restarted accountmgr (1073, alive,
-  SA-200 profile present) sends StartUser(100) code-46.
-- 289.280 startUser print → 289.281 "userId not exist": 1 ms, ZERO kernel
-  traffic (ripple fresh-opened; R-FAIL/SENDFAIL silent) = the osaccount leg
-  completed locally: OsAccount::proxy_ non-null and death-marked OR null
-  with its ACCOUNT_LOGE dropped by hilog flood. Either way the mark/reset
-  cycle of 264.47 did not leave a usable proxy at the decision moment.
-- 289.284 OnStartUserDone(100, 2097193) → rollback → launcher never spawns.
+### Face A (DOMINANT, killed): the preempt-disabled SPIN-WAIT convoy
+1. Instrument chain (commits 88dd4b82→bd4410ff): outermost 0->1 acquire
+   shadow + exact caller-site attribution (#[track_caller] threaded
+   through Spinlock/RwSpinlock acquire paths via preempt_count_add_at)
+   + live ACQUIRE-DIVERGENT report + multiplicative slot hash (the old
+   XOR mixes aliased task structs 0x1000000/0x2080000 apart — ph2's 40
+   "splits" were hash collisions; ph3 with the Fibonacci hash: 1).
+2. ph2 evidence (system-lb.img + userdata-fresh2.img, dfx=leakhunt,
+   wwcensus, debug kernel, 1200s): 320 tick-heals, 109 underflows, 321
+   strands. The >2s "phantom" incumbents name SHORT-section locks
+   (dentry children/vfsmount, unix dgram_peer/recv_queue, inode icache,
+   mm vma_files) — because preempt_disable runs BEFORE the TTAS spin,
+   a waiter's whole 0->1 booking covers the SPIN. Behind any holder
+   running a multi-second section (unix stream drain memcpy under
+   recv_queue, build_path under an fs_struct read guard, mm unmap under
+   the pte lock — the rmap_alt_remove rip), every waiter monopolized
+   its own CPU preempt-off for the whole hold: the pc=1 WAKE-STRANDED
+   incumbents, the 2s-heal stripping LIVE spin bookings, the post-heal
+   SpinlockGuard::drop underflows (31+/boot), the kpreempt deadlock.
+3. FIX (5f0537a8): Spinlock::lock and RwSpinlock::read/write now wait
+   PREEMPTIBLY at the outermost depth in task context (TTAS with
+   preempt on, disable only around the acquiring CAS, schedule() to the
+   holder after a 20k budget); nested/IRQ callers keep the legacy
+   preempt-off spin (mid-nesting schedule = the LTP r2 WEDGE family).
+   RwSpinlock::read waits on has_writer() only. Also fixes the if-let
+   temporary-extension guard in FsStruct::get_cwd/get_root (the #1
+   origin family, 46 lines/boot). Holder side: unix stream drain now
+   copies OUTSIDE recv_queue (1607f62e; the memcpy was a named >2s
+   origin and user-page faults nested the fault path under the lock).
+4. VERIFICATION (ph3 vs ph2, full 1200s boots): tick-heals 320->171
+   (-47%), strands 321->221 (-31%), underflows 109->96, panics 6->2,
+   SLOW-TXN median exec 5780ms->2250ms (count 32->57: fewer forever-
+   wedged txns means more complete past the threshold). make test
+   riscv64 GREEN (1198/0); x3 builds rc=0 (x86_64/riscv64/aarch64).
+   ph4 (drain split + live divergence) REGRESSED vs ph3 (heals 281,
+   WAKE-HEAL 26, underflow 136, SLOW-TXN med 7970ms) AND carried an
+   exact-fit semantic divergence (it popped one segment beyond the
+   buffer, draining its fds without delivering its data) — REVERTED in
+   bf53ba41. The holder-side drain bounding needs a per-segment
+   pop/drop/relock shape (no heap Vec, no over-pop), not the batch
+   shape; future work. ph3's numbers are the branch's verification.
 
-ENGINE SUMMARY (supersedes the sixth's death-marked-cached-proxy story as
-the PRIMARY engine): OH's OS_DfxWatchdog/IPC-check group-suicides services
-(accountmgr, usb_host, ...) when our slow kernel makes workers exceed the
-check window; the one-shot StartUser/CheckUserParam decision then races the
-restart + SA re-registration (GetSystemAbility on the re-inserted on-demand
-profile answers null until the live SA loads). The kernel-side binder death
-machinery did everything correctly (notices delivered before SIGCHLD,
-single-queue, correct cookies). The fix that gets pixels is the perf wall
-(SLOW-TXN exec 15-41s, watchdog windows) — perf lanes' domain. The samgr
-reloc flake ("Error relocating /system/bin/samgr: OHOS::QOS::SetThreadQos")
-also kills boots outright ~1-in-N (lb3/lb4/lb49) — worth a look (ld.so under
-our mmap/page-fault paths).
+### Face B (residual, ~4 user-return phantoms/boot): the lying sched slot
+- The definitive phantom: LEAK-ORIGIN user-return pc=1 (a +1 at user
+  return can never be a live guard). Exact osites: dentry.rs:370/395
+  (vfsmount/mountpoint locks), always omis=1 — the acquire ran while
+  tp named the victim but the CPU's sched slot named ANOTHER task
+  (oslot recorded; live ACQUIRE-DIVERGENT lines show slotpid).
+- ph4 live data: divergent acquires spread across MANY short-section
+  sites (dentry/unix/syscall) — the producer is the SLOT lying (naming
+  a task that is not executing), not any one lock. Windows that leave
+  slot != tp: pick-publish (sched.rs:2515) -> tp-swap tail on prev;
+  the R56c lying-idle-slot heal; abort paths repair via
+  republish_current_after_abort (verified present). NEXT HUNT: freeze
+  on a live divergent acquire with slotpid, walk WHICH machinery wrote
+  that slot last (slot_tag_write tags exist: SLOT_W_SCHED_PICK,
+  SLOT_W_R56C — add a tag read to the divergence report).
+- WAKE-HEAL/CLAIM-SWEEP/2s-tick-heal remain symptom treatment for this
+  face; they are what converts a lying-slot window into a stripped
+  guard + underflow.
 
-### WEDGE REGRESSION (blocks all post-merge release boots) — for the coordinator
-RELEASE builds of the post-merge tree (dd94e441.. = perf-sched/perf-ipc/
-perf-mm/oh-launcher merges) wedge in the early SA storm (first DEADLOCK
-print 5-10s, SA inserts stall ~15, console silent by ~800s): lb48, lb50,
-lb51, lb52 (4/4 wedged). Control boots: lb44 (release, PRE-merge tree)
-clean; lb47b (DEBUG, post-merge) clean; lb49 (release, post-merge, samgr
-died at 39s so the SA storm never ran) clean. The DEADLOCK prints name
-waiters in world_lock()/unix_send() on binder::WORLD / net::unix::UNIX_TABLE.
-Prime suspects among the merged commits: 977adb51 (sched: dispatch wakes to
-idle CPUs; gate wakeup preemption), e1e7d8f9 (unix single-copy send),
-e22f72a8 (x86_64 low-MMIO ioremap), 6cd3c9b8 (futex exit residency). NOT
-the ams46 taps (lb52 wedged at 6.4s before any tap fired; all WORLD-held
-taps are now lockless ConsoleWriter anyway). Until fixed, OH boots must use
-`evidence-premerge` (or pre-merge main).
+### kpreempt=1 verdict (stretch NOT taken)
+Still blocked: 171 tick-heals/boot remain (mm unmap loops under the pte
+lock are the biggest residue — the rmap_alt_remove incumbent family).
+Every heal strips a possibly-live guard; with the IRQ-exit hook armed
+that means preempting a holder mid-critical-section = the lb19b
+DEADLOCK shape. Prerequisite unchanged: bound the unmap-loop holds
+(drop/reacquire the pte lock every N pages) or make the heal holder-
+aware. The convoy fix removed the WAITER-side blockers only.
 
-### Artifacts this session
-- Branch oh-launcher @ 83310953 (pushed through 457f0987 + this file):
-  lb48 death-event net (fe7dee8a), lockless-under-WORLD conversion
-  (83310953), decode-correction docs.
-- Branch evidence-premerge (local + pushed): 33d007fe + SENDFAIL + net +
-  lockless — THE bootable release kernel for OH boots until the wedge is
-  fixed. Boots lb53/lb54 used it (bzImage in target/.../release/).
-- Boots lb49-lb54 logs + shots in run/ (lb54 = the decisive evidence boot).
-- x3 builds rc=0 (x86_64/riscv64/aarch64); make test on the oh-launcher tree.
+### Boots this session
+ph1 (tap v1, last-wins sites, 374 user-return lines all pid 568 — the
+  rate gate + exact sites landed after), ph2 (exact sites: the site
+  distribution table), ph3 (convoy fix: the -47%/-31% numbers),
+  ph4 (drain split + ACQUIRE-DIVERGENT live).
+
+### FINAL TREE VERDICT (14d04456, pushed)
+ph6 (record-only divergence, 900s, same recipe): the best boot of the
+session — at the matched <=600s window vs ph2/ph3: PREEMPT-HEAL
+187->114->38, UNDERFLOW 53->57->25, WAKE-STRANDED 233->138->31,
+DEADLOCK 0, SLOW-TXN med 1970ms (n=15, full window), appspawn at 5.2s,
+serial live to 900s. ph5/ph5b (the two boots carrying the live
+ACQUIRE-DIVERGENT print) BOTH wedged on net::unix::UNIX_TABLE
+(both-CPU DEADLOCK, stranded-0x10000 carriers) — print disabled
+(record-only) in 14d04456; correlation-by-elimination, mechanism
+unproven. make test on the final tree GREEN (ALL TESTS PASSED); x3
+builds rc=0. The ph5/ph5b UNIX_TABLE wedge shape matches the pre-existing
+lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.

@@ -85,6 +85,15 @@ struct LoSlot {
     /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
     /// (tp vs slot divergence — the stale-tp / mid-switch window family).
     omis: AtomicU32,
+    /// When omis=1: the task pointer the sched slot named at acquire
+    /// time (0 = unreadable). Identifies WHICH window the divergent
+    /// booking ran in (preempt-hunt).
+    oslot: AtomicUsize,
+    /// jiffies of the last user-return report for this slot
+    /// (preempt-hunt rate gate: one stuck +1 re-reports on every guard
+    /// re-acquire; 50-jiffy spacing keeps the episode signature without
+    /// flooding the budget).
+    urrep_jif: AtomicU64,
 }
 
 static TABLE: [LoSlot; SLOTS] = {
@@ -102,6 +111,8 @@ static TABLE: [LoSlot; SLOTS] = {
         ojif: AtomicU64::new(0),
         ocpu: AtomicU32::new(0),
         omis: AtomicU32::new(0),
+        oslot: AtomicUsize::new(0),
+        urrep_jif: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -109,7 +120,12 @@ static TABLE: [LoSlot; SLOTS] = {
 #[inline]
 fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
     let a = task as usize;
-    &TABLE[(a >> 6 ^ a >> 12) & SLOT_MASK]
+    // preempt-hunt: XOR-of-shifts mixes alias — for every shift set there
+    // are address strides (observed live: 0x1000000, then 0x2080000)
+    // whose contributions XOR to zero, making distinct task structs share
+    // slots (bogus ACQUIRE-PAIR-SPLITs, shadowed records). Fibonacci
+    // multiplication: no constant stride aliases.
+    &TABLE[(a.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 53) & SLOT_MASK]
 }
 
 /// Record a PREEMPT_OFFSET acquire (last wins). Called from
@@ -153,11 +169,149 @@ pub fn note_acquire(
                         as *const *mut crate::process::Task
                 ) as usize
             };
-            (slot_task != task as usize) as u32
+            if slot_task != task as usize {
+                slot.oslot.store(slot_task, Ordering::Release);
+                // ph5/ph5b verdict (2/2 boots wedged vs ph3's clean 1200s
+                // with this print's absence as the only tree delta): the
+                // LIVE print from inside the acquire path is wedged-boot
+                // correlated — record-only now. The data still surfaces
+                // at adjudication time (oslot= on the ORIGIN lines).
+                report_acquire_divergent(task, loc, cpu, slot_task);
+                1
+            } else {
+                0
+            }
         } else {
             2
         };
         slot.omis.store(mis, Ordering::Release);
+    }
+}
+
+/// Live report of a divergent outermost acquire (preempt-hunt). DISABLED
+/// (record-only): ph5/ph5b — the only boots carrying this print — both
+/// wedged (UNIX_TABLE both-CPU deadlock at 18s/90s) while ph3, without
+/// it, completed 1200s cleanly; by elimination the print from inside
+/// the acquire path (it fires between the count read and the booking,
+/// from any context a lock acquire can run in) is wedge-correlated. The
+/// oslot record + ORIGIN lines at adjudication time carry the same
+/// data. The body is kept behind this switch for one gated re-trial.
+static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
+
+#[allow(unsafe_code)]
+fn report_acquire_divergent(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cpu: u32,
+    slot_task: usize,
+) {
+    if !DIVERGENT_PRINT.load(Ordering::Relaxed) {
+        let _ = (task, loc, cpu, slot_task);
+        return;
+    }
+    static N: AtomicU32 = AtomicU32::new(60);
+    let b = N.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
+    // current on this CPU (pinned by execution), `slot_task` was this
+    // CPU's slot content moments before (same discipline as the s14
+    // IRQ-PAIR report).
+    unsafe {
+        let pid = (*task).pid();
+        let pc = (*task).preempt_count();
+        let slot_pid = if slot_task >= 0x80000000 {
+            (*(slot_task as *mut crate::process::Task)).pid()
+        } else {
+            0
+        };
+        for &c in b"\nACQUIRE-DIVERGENT pid=" {
+            putchar(c);
+        }
+        let mut v = pid as u64;
+        let mut buf = [0u8; 12];
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" pc=0x" {
+            putchar(c);
+        }
+        let mut x = pc as u32 as u64;
+        for sh in (0..8).rev() {
+            let d = ((x >> (sh * 4)) & 0xF) as u8;
+            putchar(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        }
+        for &c in b" cpu=" {
+            putchar(c);
+        }
+        let mut v = cpu as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" site=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        let mut v = loc.line() as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" slotpid=" {
+            putchar(c);
+        }
+        let mut v = slot_pid as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        putchar(b'\n');
     }
 }
 
@@ -282,6 +436,12 @@ pub fn note_hardirq_acquire(
 /// User-mode return tripwire. Call at the trap-handler tail when the
 /// frame returns to userspace: preempt_count MUST be 0 there. Direct
 /// console, latched per episode, budgeted.
+///
+/// preempt-hunt rate gate: a task carrying a stuck +1 re-acquires inner
+/// guards constantly (every lock it touches re-arms the episode latch),
+/// which flooded the shared budget within seconds (374 lines for one
+/// carrier in the first 20s of ph1). Space reports 50 jiffies apart per
+/// task and give the face its own budget.
 pub fn check_user_return() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -301,6 +461,12 @@ pub fn check_user_return() {
     if slot.reported.swap(true, Ordering::AcqRel) {
         return;
     }
+    let now = crate::drivers::timer::get_jiffies();
+    let last = slot.urrep_jif.load(Ordering::Acquire);
+    if now.wrapping_sub(last) < 50 {
+        return;
+    }
+    slot.urrep_jif.store(now, Ordering::Release);
     emit(b"\nLEAK-ORIGIN user-return", task, pc);
 }
 
@@ -454,6 +620,16 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
             putchar(c);
         }
         putd(mis as u64);
+        let osl = slot.oslot.load(Ordering::Acquire);
+        if osl != 0 {
+            for &c in b" oslot=0x" {
+                putchar(c);
+            }
+            for sh in (0..16).rev() {
+                let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            }
+        }
     }
     for &c in b" oage_jif=" {
         putchar(c);
@@ -581,6 +757,16 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
                 putchar(c);
             }
             put_i64(slot.omis.load(Ordering::Acquire) as i64);
+            let osl = slot.oslot.load(Ordering::Acquire);
+            if osl != 0 {
+                for &c in b" oslot=0x" {
+                    putchar(c);
+                }
+                for sh in (0..16).rev() {
+                    let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
         }
     }
     putchar(b'\n');

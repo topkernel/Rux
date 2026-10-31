@@ -287,11 +287,70 @@ impl<T> Spinlock<T> {
 
     /// Preempt disable + lock.
     /// Guard drop: unlock + preempt enable.
+    /// track_caller: leakorigin's outermost-acquire shadow records the
+    /// LOCK CALLER's site (preempt-hunt), not this helper's line.
+    ///
+    /// preempt-hunt (bounded preemptible wait): the old body ran
+    /// preempt_disable BEFORE the TTAS spin, so a waiter contending a
+    /// lock whose holder ran a multi-second section (OH boots:
+    /// recv_queue drains, mm unmap loops, dentry path builds) kept its
+    /// OWN CPU monopolized with preemption disabled for the whole spin —
+    /// the pc=1 "incumbent" family (WAKE-STRANDED h0), the 2s tick-heal
+    /// stripping a LIVE spin booking (then the guard's Drop
+    /// PREEMPT-UNDERFLOWed), and the kpreempt deadlock face. When the
+    /// caller is in task context at the outermost preempt depth, wait
+    /// PREEMPTIBLY — TTAS on is_locked with preemption enabled, preempt
+    /// disabled only around the acquiring CAS — and hand the CPU to the
+    /// holder after a spin budget. Nested or interrupt-context callers
+    /// keep the legacy preempt-off acquire: scheduling mid-nesting would
+    /// strand the outer section's waiters (the LTP r2 WEDGE family).
     #[inline]
+    #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
+        // Outermost-in-task-context test BEFORE our own disable books +1.
+        // Brackets (hardirq/softirq/NMI) restore the count on exit, so a
+        // load here is stable modulo our own call. No current task (early
+        // boot, secondary harts in the WFI loop) means no schedule() is
+        // possible either — keep the legacy acquire.
+        let pc0 = crate::interrupt::preempt::preempt_count();
+        let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
+            && (pc0
+                & (crate::interrupt::preempt::HARDIRQ_MASK
+                    | crate::interrupt::preempt::SOFTIRQ_MASK
+                    | crate::interrupt::preempt::NMI_MASK))
+                == 0
+            && crate::sched::current().is_some();
         preempt_disable();
-        self.raw.lock();
-        SpinlockGuard { lock: self }
+        if self.raw.try_lock() {
+            return SpinlockGuard { lock: self };
+        }
+        if !yieldable {
+            // Nested / IRQ context: legacy acquire — preempt stays
+            // disabled across the TTAS spin (no schedule point is legal
+            // here; the caller's outer section depends on it).
+            self.raw.lock();
+            return SpinlockGuard { lock: self };
+        }
+        // Contended at the outermost depth: preemptible bounded wait.
+        preempt_enable();
+        const SPIN_BUDGET: u32 = 20_000;
+        loop {
+            let mut spins: u32 = 0;
+            while self.raw.is_locked() && spins < SPIN_BUDGET {
+                spins = spins.wrapping_add(1);
+                core::hint::spin_loop();
+            }
+            preempt_disable();
+            if self.raw.try_lock() {
+                return SpinlockGuard { lock: self };
+            }
+            preempt_enable();
+            // Lock still held (or raced away between the TTAS probe and
+            // the CAS): hand the CPU over — the schedule() may run the
+            // holder here. We hold nothing at this point, so switching
+            // away is always safe.
+            crate::sched::schedule();
+        }
     }
 
     /// Bounded-spin + yield acquire for COARSE, long-held global locks
@@ -311,6 +370,7 @@ impl<T> Spinlock<T> {
     ///
     /// NOT for IRQ context or short critical sections — schedule() from
     /// interrupt context is illegal; use plain lock()/lock_irq() there.
+    #[track_caller]
     pub fn lock_fair(&self) -> SpinlockGuard<'_, T> {
         const FAIR_SPIN_BUDGET: u32 = 1_000_000;
         loop {
@@ -340,7 +400,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irq(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -351,7 +411,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irqsave(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -368,8 +428,9 @@ impl<T> Spinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockGuard { lock: self })
         } else {
@@ -382,7 +443,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn try_lock_irqsave(&self) -> Option<SpinlockIrqGuard<'_, T>> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockIrqGuard { lock: self, flags })
         } else {
@@ -564,8 +625,20 @@ impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
 #[inline]
 #[track_caller]
 fn preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add(
+    crate::interrupt::preempt::preempt_count_add_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
+    );
+}
+
+/// As `preempt_disable`, booking the CALLER-of-the-lock's location (the
+/// #[track_caller] lock helpers forward their own caller down so the
+/// leakorigin shadow names the real acquire site).
+#[inline]
+fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
+    crate::interrupt::preempt::preempt_count_add_at(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+        loc,
     );
 }
 
