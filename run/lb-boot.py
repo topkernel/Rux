@@ -30,14 +30,14 @@ def drive(path, i):
 DISKS = (drive("run/oh-img/updater.img", 0) + drive(SYSIMG, 1)
          + drive("run/oh-img/vendor.img", 2) + drive("run/oh-img/sys_prod.img", 3)
          + drive("run/oh-img/chip_prod.img", 4) + drive("run/userdata-fresh.img", 5))
-APPEND = ("ip=dhcp loglevel=7 console=ttyS0,115200 init=init root=/dev/ram0 rw "
+APPEND = ("ip=dhcp loglevel=" + os.environ.get("LOGLEVEL", "7") + " console=ttyS0,115200 init=init root=/dev/ram0 rw "
           "ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio "
           "ohos.boot.sn=01234567890 "
           "ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required "
           "ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required" + EXTRA)
 
 cmd = ["qemu-system-x86_64", "-M", "q35", "-accel", "kvm", "-cpu", "max",
-       "-m", "4G", "-smp", "2", "-snapshot", "-display", "none", "-vga", "none",
+       "-m", "4G", "-smp", os.environ.get("SMP", "2"), "-snapshot", "-display", "none", "-vga", "none",
        "-device", "virtio-gpu-pci,id=ohgpu,xres=720,yres=1280",
        "-serial", "stdio", "-monitor", f"unix:{MON},server=on,wait=off",
        "-kernel", KERNEL,
