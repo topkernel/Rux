@@ -1959,35 +1959,24 @@ pub fn unix_recv(
                 }
                 seg
             } {
-                let mut files = Vec::new();
-                let mut cred: Option<UnixCred> = None;
-                let mut src: Option<Arc<str>> = None;
-                let mut copied = 0usize;
-                let mut orig_total = 0usize;
-                // Drain this segment (and any following ones) into buf.
+                // preempt-hunt (holder-side hold split): the drain used to
+                // copy every segment into the USER buffer while holding
+                // recv_queue — a multi-second preempt-disabled section on
+                // big transfers (a named >2s tick-heal origin at this
+                // line, unix.rs:1890, on the ph3 OH boot; a user-page
+                // fault inside the copy nests the whole fault path under
+                // the socket lock). Pop the segments under the lock
+                // (metadata only), copy OUTSIDE it, and re-queue the
+                // remainder under a fresh short hold. Post-conditions are
+                // unchanged: first-touch fds, charge accounting, the
+                // full-buffer remainder semantics.
+                let mut local: alloc::vec::Vec<UnixSeg> = alloc::vec::Vec::new();
+                let mut local_bytes = 0usize;
                 loop {
-                    orig_total += seg.data.len();
-                    let take = seg.data.len().min(buf.len() - copied);
-                    buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
-                    copied += take;
-                    files.extend(seg.files.drain(..));
-                    if cred.is_none() {
-                        cred = seg.cred.take();
-                    }
-                    if let Some(s) = seg.src.take() {
-                        src = Some(s);
-                    }
-                    if copied >= buf.len() {
-                        // Keep the remainder (fds cleared — they were
-                        // delivered with this recv, first-touch semantics)
-                        // for the next recv.
-                        if take < seg.data.len() {
-                            seg.data.drain(..take);
-                            let rest = seg_charge(seg.data.len());
-                            seg.charge = rest;
-                            q.charge += rest;
-                            q.segs.push_front(seg);
-                        }
+                    local_bytes += seg.data.len();
+                    let overflow = local_bytes > buf.len();
+                    local.push(seg);
+                    if overflow {
                         break;
                     }
                     match {
@@ -2002,6 +1991,41 @@ pub fn unix_recv(
                     }
                 }
                 drop(q);
+                // Copy phase — no locks held.
+                let mut files = Vec::new();
+                let mut cred: Option<UnixCred> = None;
+                let mut src: Option<Arc<str>> = None;
+                let mut copied = 0usize;
+                let mut orig_total = 0usize;
+                let mut remainder: Option<UnixSeg> = None;
+                for mut seg in local.into_iter() {
+                    orig_total += seg.data.len();
+                    let take = seg.data.len().min(buf.len() - copied);
+                    buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
+                    copied += take;
+                    files.extend(seg.files.drain(..));
+                    if cred.is_none() {
+                        cred = seg.cred.take();
+                    }
+                    if let Some(s) = seg.src.take() {
+                        src = Some(s);
+                    }
+                    if take < seg.data.len() {
+                        // Buffer full inside this segment: keep the
+                        // remainder (fds cleared — first-touch) for the
+                        // next recv.
+                        seg.data.drain(..take);
+                        remainder = Some(seg);
+                        break;
+                    }
+                }
+                if let Some(mut seg) = remainder {
+                    let rest = seg_charge(seg.data.len());
+                    seg.charge = rest;
+                    let mut q = sock.recv_queue.lock();
+                    q.charge += rest;
+                    q.segs.push_front(seg);
+                }
                 // sc209 (leg 14): arrival half of the PCTL param tap (see
                 // the send side in unix_send). When pid 1 (begetd, which
                 // hosts the param service) reads a stream segment that
