@@ -1648,7 +1648,9 @@ impl TcpSocket {
                 }
                 // Process FIN (may accompany data)
                 if tcp_hdr.fin() {
-                    self.handle_fin_recv(tx)?;
+                    let fin_seq =
+                        TcpSeq::from_be(tcp_hdr.seq).wrapping_add(data.len() as u32);
+                    self.handle_fin_recv(fin_seq, tx)?;
                 }
             }
             TcpState::TCP_FIN_WAIT1 => {
@@ -1658,7 +1660,9 @@ impl TcpSocket {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
                     valid_ack = self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
                 }
-                if tcp_hdr.fin() && valid_ack {
+                let fin_seq =
+                    TcpSeq::from_be(tcp_hdr.seq).wrapping_add(data.len() as u32);
+                if tcp_hdr.fin() && valid_ack && fin_seq == self.rcv_nxt {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     let _ = self.send_ack(tx);
@@ -1672,9 +1676,11 @@ impl TcpSocket {
                         self.handle_data_recv(tcp_hdr, data, tx)?;
                     }
                     if tcp_hdr.fin() {
-                        self.handle_fin_recv(tx)?;
+                        let fin_seq =
+                            TcpSeq::from_be(tcp_hdr.seq).wrapping_add(data.len() as u32);
+                        self.handle_fin_recv(fin_seq, tx)?;
                     }
-                } else if tcp_hdr.fin() {
+                } else if tcp_hdr.fin() && fin_seq == self.rcv_nxt {
                     // FIN without ACK -> CLOSING
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     let _ = self.send_ack(tx);
@@ -1693,7 +1699,9 @@ impl TcpSocket {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
                 if tcp_hdr.fin() {
-                    self.handle_fin_recv(tx)?;
+                    let fin_seq =
+                        TcpSeq::from_be(tcp_hdr.seq).wrapping_add(data.len() as u32);
+                    self.handle_fin_recv(fin_seq, tx)?;
                 }
             }
             TcpState::TCP_TIME_WAIT => {
@@ -1736,6 +1744,14 @@ impl TcpSocket {
                 }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
+                }
+                // Review finding 2: a retransmitted FIN here (our ACK of
+                // it was lost) used to be ignored — no ACK back, the peer
+                // exhausted its FIN retransmissions and aborted with an
+                // RST, killing a connection whose data was already
+                // delivered. Re-ACK the duplicate.
+                if tcp_hdr.fin() {
+                    let _ = self.send_ack(tx);
                 }
             }
             _ => {
@@ -1942,7 +1958,23 @@ impl TcpSocket {
     }
 
     /// Handle received FIN packet
-    fn handle_fin_recv(&mut self, tx: &mut TcpTxBatch) -> Result<(), ()> {
+    fn handle_fin_recv(&mut self, fin_seq: TcpSeq, tx: &mut TcpTxBatch) -> Result<(), ()> {
+        // RFC 793 §3.9 (review finding 2): the FIN is processed only when
+        // it sits EXACTLY at rcv_nxt. A FIN past rcv_nxt (out-of-order)
+        // must NOT advance rcv_nxt — the bytes it would swallow were
+        // never received, and every later ACK would be wrong (permanent
+        // stream corruption). A FIN one behind rcv_nxt is a RETRANSMITTED
+        // FIN: re-ACK it so the peer can finish its close.
+        if fin_seq == self.rcv_nxt.wrapping_sub(1) {
+            // Duplicate FIN (already consumed): re-ACK, no state churn.
+            let _ = self.send_ack(tx);
+            return Ok(());
+        }
+        if fin_seq != self.rcv_nxt {
+            // Out-of-window / out-of-order FIN: drop silently; the peer
+            // retransmits with the right filler data first.
+            return Ok(());
+        }
         // Update receive sequence number (FIN occupies one sequence number)
         self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
 
@@ -2431,7 +2463,14 @@ impl TcpSocket {
             // out-of-order segment. Count it; three in a row fire fast
             // retransmit (the dead path before this fix).
             self.congestion.on_dup_ack(ack, self.snd_nxt, self.mss);
-            if self.congestion.dup_ack_count >= 3 {
+            // RFC 5681 §3.2 (review finding 3): fast retransmit fires ONCE
+            // at recovery entry (dup_ack_count == 3); further duplicate
+            // ACKs only inflate cwnd until a new ACK exits recovery. The
+            // old >= 3 test re-emitted a full MSS on every duplicate —
+            // a one-in-one-MSS-out amplification under reordering or a
+            // forged dup-ACK flood.
+            if self.congestion.dup_ack_count == 3 {
+                self.congestion.recover_seq = self.snd_nxt;
                 self.fast_retransmit(tx);
             }
         }
@@ -2446,17 +2485,40 @@ impl TcpSocket {
     fn remove_acked_segments(&mut self, ack: TcpSeq) -> Option<u64> {
         let mut last_tx_time: Option<u64> = None;
         // Drain segments that are fully covered by the ACK.
-        while let Some(seg) = self.retrans_queue.front() {
-            let seg_end = seg.seq.wrapping_add(seg.len as u32);
+        loop {
+            // Snapshot the front segment's header (immutable borrow), so
+            // the trim below can take front_mut for the partial case.
+            let (front_seq, front_len, front_retries, front_tx_time) = {
+                let Some(seg) = self.retrans_queue.front() else {
+                    break;
+                };
+                (seg.seq, seg.len, seg.retries, seg.tx_time)
+            };
+            let seg_end = front_seq.wrapping_add(front_len as u32);
             // Sequence comparison: seg_end before (or equal to) ack
-            if ((seg_end as i32) - (ack as i32)) <= 0 {
-                if seg.retries == 0 {
-                    last_tx_time = Some(seg.tx_time); // Karn: only never-retransmitted
+            if ((seg_end as i32) - (ack as i32)) > 0 {
+                // Partial ACK (review finding 4): ack lands INSIDE the
+                // front segment. Trim the covered head — snd_una already
+                // advanced past it, and leaving it whole made the next
+                // RTO re-emit already-ACKed bytes and let the eventual
+                // remainder-ACK sample the stale tx_time. Mirrors the
+                // reference tcp_trim_head.
+                if ack != front_seq {
+                    let covered = (ack as i32) - (front_seq as i32);
+                    if covered > 0 && (covered as usize) < front_len {
+                        if let Some(seg) = self.retrans_queue.front_mut() {
+                            seg.data.drain(..covered as usize);
+                            seg.seq = ack;
+                            seg.len -= covered as usize;
+                        }
+                    }
                 }
-                self.retrans_queue.pop_front();
-            } else {
                 break;
             }
+            if front_retries == 0 {
+                last_tx_time = Some(front_tx_time); // Karn: only never-retransmitted
+            }
+            self.retrans_queue.pop_front();
         }
         last_tx_time
     }
@@ -2478,11 +2540,19 @@ impl TcpSocket {
     /// retransmit-timer path's `seg.data.clone()`, both allocated and
     /// spun on virtio completion under TCP_TABLE_LOCK).
     fn fast_retransmit(&mut self, tx: &mut TcpTxBatch) {
-        if let Some(seg) = self.retrans_queue.front() {
-            // Retransmit earliest segment — with ITS starting sequence
-            // number, not snd_nxt (R32-B5).
-            let _ = self.tx_segment(tx, seg.seq, &seg.data);
-        }
+        // Snapshot + mark: Karn (review finding 4) — the retransmitted
+        // segment's ACK carries ambiguous RTT signal and must never be
+        // sampled (remove_acked_segments filters on retries == 0). The
+        // stale tx_time used to stay, underestimating RTO into
+        // spurious-retransmit loops.
+        let (seg_seq, seg_data) = {
+            let Some(seg) = self.retrans_queue.front_mut() else {
+                return;
+            };
+            seg.retries += 1;
+            (seg.seq, seg.data.clone())
+        };
+        let _ = self.tx_segment(tx, seg_seq, &seg_data);
     }
 
     /// W3: zero-window persist probe (RFC 793 persist state, minimal).
