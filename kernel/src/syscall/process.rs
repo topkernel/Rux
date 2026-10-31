@@ -5212,7 +5212,11 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         );
     }
     if let Some(fs) = current.fs_arc() {
-        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry.clone());
+        // The root now comes from a pivot: setns(CLONE_NEWNS) into a
+        // non-pivoted namespace must reset it (beget pivots into its
+        // sandbox, then jumps back to the default ns).
+        fs.set_root_is_pivot(true);
         // Record put_old for the post-pivot cleanup umount2 (Linux leaves
         // the old root MOUNTED at put_old; our jail-style pivot stacks
         // nothing, so the matching umount2(MNT_DETACH) consumes the marker
@@ -5279,8 +5283,12 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             fs_type: old_root_entry.fs_type,
             flags: old_root_entry.flags,
         });
-        // Update the namespace root anchor.
-        *ns.root.lock() = crate::fs::vfs::get_vfs_root();
+        // Update the namespace root anchor: this namespace's root is now
+        // the PIVOT TARGET dentry (the field's reserved purpose). setns
+        // into this namespace re-anchors entering tasks onto it; setns
+        // OUT (to a non-pivoted ns) resets pivoted tasks to the global
+        // root.
+        *ns.root.lock() = root_dentry.or_else(crate::fs::vfs::get_vfs_root);
     }
 
     crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);

@@ -694,7 +694,13 @@ pub unsafe fn copy_namespaces(parent: *mut Task, child: *mut Task, flags: u64) -
             Some(p) => p.mounts.lock().clone(),
             None => init_mnt_ns().mounts.lock().clone(),
         };
-        child.ns_mount = Some(Arc::new(MountNamespace::new(alloc_ns_inum(), table)));
+        let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), table));
+        // Inherit the parent's pivot anchor: CLONE_NEWNS inside a pivoted
+        // ns keeps the same view (the copy sees the same ns root).
+        if let Some(p) = parent.ns_mount.as_ref() {
+            *ns.root.lock() = p.root.lock().clone();
+        }
+        child.ns_mount = Some(ns);
     } else {
         child.ns_mount = parent.ns_mount.clone();
     }
@@ -774,7 +780,15 @@ pub fn unshare_namespaces(flags: u64) -> Result<(), i32> {
         }
         if nsflags & CLONE_NEWNS != 0 {
             let table = task_mnt_table_of(task);
-            task.ns_mount = Some(Arc::new(MountNamespace::new(alloc_ns_inum(), table)));
+            let old_root = task
+                .ns_mount
+                .as_ref()
+                .map(|p| p.root.lock().clone())
+                .unwrap_or_else(|| crate::fs::vfs::get_vfs_root());
+            let ns = Arc::new(MountNamespace::new(alloc_ns_inum(), table));
+            // Inherit the previous ns's pivot anchor (see the clone site).
+            *ns.root.lock() = old_root;
+            task.ns_mount = Some(ns);
         }
         if nsflags & CLONE_NEWPID != 0 {
             // The caller itself stays where it is; only future children are
@@ -1013,6 +1027,22 @@ fn ns_file_content(handle: &NsRef) -> Vec<u8> {
 /// link target. Returns an fd whose inode ino is the ns inum and whose
 /// read() returns "<kind>:[<inum>]\n".
 pub fn open_ns_file(pid: u32, kind: NsKind, flags: u32) -> Result<usize, i32> {
+    let file = build_ns_file(pid, kind, flags)?;
+    // SAFETY: installs the returned Arc<File> into the caller's fd table.
+    unsafe {
+        crate::fs::file::get_file_fd_install(file)
+            .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
+    }
+}
+
+/// Build the ns descriptor File for (pid, kind) without installing an fd
+/// (the generic VFS open path — file_open on a resolved ns magic link —
+/// installs it into the caller's table itself).
+pub fn build_ns_file(
+    pid: u32,
+    kind: NsKind,
+    flags: u32,
+) -> Result<Arc<crate::fs::File>, i32> {
     let handle = crate::process::find_task_by_pid(pid)
         .map(|t| task_ns_handle(t, kind))
         .ok_or(crate::errno::Errno::NoSuchProcess.as_neg_i32())?;
@@ -1040,8 +1070,7 @@ pub fn open_ns_file(pid: u32, kind: NsKind, flags: u32) -> Result<usize, i32> {
         // Keep the namespace alive for the fd's lifetime.
         ns_fd_register(handle);
 
-        crate::fs::file::get_file_fd_install(file)
-            .ok_or(crate::errno::Errno::TooManyOpenFiles.as_neg_i32())
+        Ok(file)
     }
 }
 
@@ -1166,7 +1195,10 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
     // current() yields &mut Task: ns slot writes need no unsafe.
     match handle {
         NsRef::Uts(ns) => task.ns_uts = Some(ns),
-        NsRef::Mnt(ns) => task.ns_mount = Some(ns),
+        NsRef::Mnt(ns) => {
+            task.ns_mount = Some(ns.clone());
+            reanchor_root_for_mnt_ns(task, &ns);
+        }
         NsRef::Net(ns) => task.ns_net = Some(ns),
         NsRef::Ipc(ns) => task.ns_ipc = Some(ns),
         NsRef::User(ns) => task.ns_user = Some(ns),
@@ -1176,4 +1208,73 @@ pub fn setns(fd: i32, nstype: u64) -> Result<(), i32> {
         }
     }
     Ok(())
+}
+
+/// setns(CLONE_NEWNS) root re-anchoring — the pivot_root counterpart.
+///
+/// Reference behavior: switching mount namespaces revalidates the task's
+/// fs->root/cwd against the NEW namespace's mount tree; when the root is
+/// not reachable there it is reset to the new ns's root. Rux has one
+/// global dentry tree, so the ns "root" is the pivot anchor recorded by
+/// sys_pivot_root (a dentry distinct from the global root ⇔ this ns was
+/// pivoted). Two directions matter for OH beget's sandbox model:
+///  - EnterDefaultNamespace: a task pivoted into the sandbox jumps back
+///    to the real "/" (init does this right after `make sandbox ...`;
+///    without it init stays jailed → mkdir /storage/media ENOENT →
+///    StartUser(100) never runs → no launcher).
+///  - EnterSandbox: a task entering the pivoted sandbox ns gets the
+///    sandbox root as its "/" (every /system/bin service child).
+/// A plain-chrooted (non-pivot) task keeps its jail across setns —
+/// chroot is fs state, not namespace state.
+fn reanchor_root_for_mnt_ns(task: &mut Task, ns: &Arc<MountNamespace>) {
+    let Some(fs) = task.fs_arc() else { return };
+    let global_root = crate::fs::vfs::get_vfs_root();
+    let ns_root = ns
+        .root
+        .lock()
+        .clone()
+        .or_else(|| global_root.clone());
+    // Pivoted ⇔ the ns root anchor is not the global VFS root.
+    let ns_is_pivoted = match (&ns_root, &global_root) {
+        (Some(n), Some(g)) => !Arc::ptr_eq(n, g),
+        // No global root recorded (pre-boot): treat as non-pivoted.
+        (Some(_), None) => false,
+        (None, _) => false,
+    };
+
+    if ns_is_pivoted {
+        let pivot_root = ns_root.unwrap();
+        let same_root = fs
+            .root_dentry()
+            .map(|rd| Arc::ptr_eq(&rd, &pivot_root))
+            .unwrap_or(false);
+        if !same_root {
+            let path = pivot_root.build_path();
+            fs.set_root_with_dentry(path.as_bytes(), Some(pivot_root));
+            fs.set_root_is_pivot(true);
+            // cwd outside the new root resets to it (pivot discipline).
+            let cwd = task.get_cwd();
+            let cwd_norm = crate::fs::path::path_normalize(
+                core::str::from_utf8(&cwd).unwrap_or("/"),
+            );
+            if cwd_norm != "/" && !cwd_norm.starts_with(path.as_str()) {
+                fs.set_cwd(b"/");
+            }
+            crate::pr_info!(
+                "setns-mnt: pid {} re-anchored into pivoted ns root '{}'",
+                task.pid(),
+                path
+            );
+        }
+    } else if fs.root_is_pivot() {
+        // Leaving a pivoted ns for a non-pivoted one: root back to "/".
+        if let Some(g) = global_root.as_ref() {
+            fs.set_root_with_dentry(b"/", Some(g.clone()));
+            fs.set_root_is_pivot(false);
+            crate::pr_info!(
+                "setns-mnt: pid {} pivoted root reset to '/' (default ns)",
+                task.pid()
+            );
+        }
+    }
 }
