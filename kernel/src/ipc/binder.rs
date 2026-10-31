@@ -6668,16 +6668,24 @@ fn binder_transaction(
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
+                    // leg-30B6: the sender's euid — CheckUserParam
+                    // rejects the call unless GetCallingUid() reads
+                    // 3058 (accountmgr); this prints the kernel-side
+                    // truth at enqueue.
+                    let euid = crate::sched::current()
+                        .map(|t| unsafe { (*t).cred().euid })
+                        .unwrap_or(0);
                     let hex: alloc::string::String = hb[..48]
                         .iter()
                         .map(|b| alloc::format!("{:02x}", b))
                         .collect();
                     crate::pr_warn!(
-                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' flags={:#x} dlen={} parcel={}",
+                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' euid={} flags={:#x} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
                         thread.tid,
                         comm,
+                        euid,
                         tr.flags,
                         data_size,
                         hex
@@ -6707,8 +6715,26 @@ fn binder_transaction(
                             .map(|c| core::str::from_utf8(c).unwrap_or(""))
                             .unwrap_or("")
                             .trim_end_matches('\0');
+                        // leg-30B6: parcel head — the OnStartUserDone
+                        // callback's errcode rides in this buffer (after
+                        // the IUserCallback token); without it the
+                        // fast-fail shape can't name its error.
+                        let mut rb = [0u8; 40];
+                        let hex: alloc::string::String = if tr.data_buffer != 0
+                            && unsafe {
+                                crate::arch::uaccess::copy_from_user(
+                                    rb.as_mut_ptr(),
+                                    tr.data_buffer as *const u8,
+                                    rb.len(),
+                                ) == 0
+                            }
+                        {
+                            rb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+                        } else {
+                            alloc::string::String::from("-")
+                        };
                         crate::pr_warn!(
-                            "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={}",
+                            "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={} parcel={}",
                             txn.id,
                             proc.pid,
                             thread.tid,
@@ -6716,7 +6742,8 @@ fn binder_transaction(
                             target.pid,
                             tr.code,
                             tr.flags & TF_ONE_WAY != 0,
-                            data_size
+                            data_size,
+                            hex
                         );
                     }
                 }
