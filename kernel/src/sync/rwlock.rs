@@ -123,6 +123,15 @@ impl RawRwSpinlock {
     pub fn is_locked(&self) -> bool {
         self.state.load(Ordering::Acquire) != 0
     }
+
+    /// A writer holds (or is acquiring) — readers may still enter.
+    /// Used by the preemptible read-wait path (preempt-hunt): a reader
+    /// only ever blocks on the writer bit, so waiting for full
+    /// `is_locked() == false` would stall behind unrelated readers.
+    #[inline]
+    pub fn has_writer(&self) -> bool {
+        self.state.load(Ordering::Acquire) & WRITER_BIT != 0
+    }
 }
 
 // ==================== Generic RwSpinlock<T> ====================
@@ -160,22 +169,93 @@ impl<T> RwSpinlock<T> {
     /// Guard drop: read unlock + preempt enable.
     /// track_caller: leakorigin's outermost-acquire shadow records the
     /// LOCK CALLER's site (preempt-hunt), not this helper's line.
+    ///
+    /// preempt-hunt (bounded preemptible wait — the twin of
+    /// Spinlock::lock's): a reader contending a writer that runs a
+    /// multi-second section used to spin preempt-disabled for the whole
+    /// hold (the pc=1 incumbent family; the tick-heal then stripped a
+    /// LIVE spin booking and the guard's Drop underflowed). At the
+    /// outermost depth in task context, wait preemptibly and yield to
+    /// the writer after a spin budget; nested/IRQ callers keep the
+    /// legacy preempt-off acquire.
     #[inline]
     #[track_caller]
     pub fn read(&self) -> RwSpinlockReadGuard<'_, T> {
+        let pc0 = crate::interrupt::preempt::preempt_count();
+        let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
+            && (pc0
+                & (crate::interrupt::preempt::HARDIRQ_MASK
+                    | crate::interrupt::preempt::SOFTIRQ_MASK
+                    | crate::interrupt::preempt::NMI_MASK))
+                == 0
+            && crate::sched::current().is_some();
         preempt_disable_at(core::panic::Location::caller());
-        self.raw.read();
-        RwSpinlockReadGuard { lock: self }
+        if self.raw.try_read() {
+            return RwSpinlockReadGuard { lock: self };
+        }
+        if !yieldable {
+            self.raw.read();
+            return RwSpinlockReadGuard { lock: self };
+        }
+        preempt_enable();
+        const SPIN_BUDGET: u32 = 20_000;
+        loop {
+            // Only a WRITER blocks a reader — do not wait for unrelated
+            // readers to drain (a reader-heavy lock would otherwise
+            // livelock the yield loop).
+            let mut spins: u32 = 0;
+            while self.raw.has_writer() && spins < SPIN_BUDGET {
+                spins = spins.wrapping_add(1);
+                core::hint::spin_loop();
+            }
+            preempt_disable();
+            if self.raw.try_read() {
+                return RwSpinlockReadGuard { lock: self };
+            }
+            preempt_enable();
+            // Writer still holds (or a racing reader/writer slipped in):
+            // hand the CPU over — we hold nothing, so switching is safe.
+            crate::sched::schedule();
+        }
     }
 
     /// Preempt disable + write lock.
     /// Guard drop: write unlock + preempt enable.
+    /// Same preemptible-wait discipline as `read` (see there).
     #[inline]
     #[track_caller]
     pub fn write(&self) -> RwSpinlockWriteGuard<'_, T> {
+        let pc0 = crate::interrupt::preempt::preempt_count();
+        let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
+            && (pc0
+                & (crate::interrupt::preempt::HARDIRQ_MASK
+                    | crate::interrupt::preempt::SOFTIRQ_MASK
+                    | crate::interrupt::preempt::NMI_MASK))
+                == 0
+            && crate::sched::current().is_some();
         preempt_disable_at(core::panic::Location::caller());
-        self.raw.write();
-        RwSpinlockWriteGuard { lock: self }
+        if self.raw.try_write() {
+            return RwSpinlockWriteGuard { lock: self };
+        }
+        if !yieldable {
+            self.raw.write();
+            return RwSpinlockWriteGuard { lock: self };
+        }
+        preempt_enable();
+        const SPIN_BUDGET: u32 = 20_000;
+        loop {
+            let mut spins: u32 = 0;
+            while self.raw.is_locked() && spins < SPIN_BUDGET {
+                spins = spins.wrapping_add(1);
+                core::hint::spin_loop();
+            }
+            preempt_disable();
+            if self.raw.try_write() {
+                return RwSpinlockWriteGuard { lock: self };
+            }
+            preempt_enable();
+            crate::sched::schedule();
+        }
     }
 
     /// Save IRQ + preempt disable + read lock.
