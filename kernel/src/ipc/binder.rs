@@ -3730,7 +3730,7 @@ pub fn ams46_audit() {
                                 ))
                                     as *const crate::arch::riscv64::pt_regs::PtRegs;
                                 // SAFETY: entry-frame read of this task's stack.
-                                unsafe { ((*regs).a7, (*regs).epc, (*regs).regs[0]) }
+                                unsafe { ((*regs).a7, (*regs).epc, (*regs).a0) }
                             }
                             #[cfg(feature = "aarch64")]
                             {
