@@ -1018,3 +1018,56 @@ openclose 21.7 vs 0.371 (58x), read_cached 24.2 vs 0.541 (45x),
 mkdrmdir 233 vs 7.2 (32x), unlink 47.9 vs 1.70 (28x), stat 5.0 vs
 0.230 (22x) — next targets, in that order (all path-walk/icache
 shaped).
+
+## G2 (FIXED): p6_openclose 57x -> 23x — close(2) scanned the whole fdtable for epoll instances on EVERY last-reference close
+
+Decomposition (ocprobe + a temporary cmdline-gated in-kernel stage
+profiler, ocprof=1; run/pg2-ocprof*.out):
+
+| stage (KVM avg) | us |
+|---|---|
+| resolve_user_path + shortcut gates | 1.26 |
+| file_open total | 3.84 |
+|   — path_lookup | 2.72 |
+|   — post-lookup gates (DAC/lease/...) | 0.17 |
+|   — File::new + wiring | 0.40 |
+|   — fdtable install | 0.39 |
+| sys_close total | 10.64 |
+|   — fdtable close_fd (incl. File::drop) | 1.67 |
+|   — File::drop's 5 registry calls (flock/ofd/lease/oasync/inotify) | 0.42 combined |
+|   — **epoll_purge_closed_fd** | **8.87** |
+
+Root cause: sys_close's epoll purge (the R20-era phantom-wakeup fix)
+calls FdTable::for_each_file to find epoll instances held by the closer
+— and for_each_file polled ALL 1024 lock-free slots under the fdtable
+entry irq-lock on every call. A task with no epoll instance at all
+(the overwhelmingly common case) paid the full ~8.9 us scan on the
+last-reference close of every file: open+close 21 us vs the reference
+0.371.
+
+Fix: FdTableEntry gained `open_bits` — a 16-word occupancy bitmap
+maintained inside the SAME entry-lock sections that publish/clear the
+slots (install_fd / close_fd / dup2_fd / fork_from copy). for_each_file
+now walks the bitmap and visits only present slots. Exact by
+construction (no approximation gate to get wrong); the empty-table case
+— the hot one — is 16 word loads instead of 1024 atomic polls. fork/
+exec/drop keep their one-shot full passes (cold paths, unchanged).
+
+Numbers (pbench KVM, same rig; base = main@dd94e441, fix = this branch):
+- p6_openclose med 21.089 -> 8.706 us (2.4x; reference 0.371 — 23x left)
+- p6_read_cached med 23.494 -> 10.830 us (2.2x; reference 0.541 — 20x)
+- ocprobe hot-file open+close 20.07 -> 7.57 us; open+read+close 23.06
+  -> 11.09 us.
+- Board flat: p1_null 0.34->0.35, p2 1.24->1.31, p6_stat 4.93->4.83,
+  p6_unlink 52.7->47.3, p6_getdents 528->512, fork rows ~1.00x.
+  p6_write_fsync (1.10x) and p6_mkdrmdir (1.12x) sit inside their
+  established run-to-run noise bands (write_fsync med ranged 8.5-9.9ms
+  across fix-kernel runs; mkdrmdir 224-233us; both rows carry 20-47ms
+  p99 tails from the journal/IO scheduler, host-load sensitive).
+- delalloc semantics battery re-run on this build: 11/11 PASS.
+- make test 1198/1198; x3 builds rc=0 (x86_64 + riscv64 x2).
+
+Remaining in the row (next levers, filed): resolve_user_path's String
+(1.26us — an alloc + copy per open), path_lookup 2.72us (dcache walk
+cost vs the reference's 0.23us whole-stat), close 1.67us (drain +
+registries). G3 (read_cached 20x) shares all of these.
