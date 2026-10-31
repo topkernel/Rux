@@ -1091,15 +1091,6 @@ struct OAsyncEntry {
 static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
     crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
 
-/// Live entries in PIPE_OASYNC (perf-ipc): maintained inside the registry
-/// lock's critical sections only, so a Relaxed load of 0 proves the list
-/// is empty — the read/write hot paths skip the GLOBAL registry lock
-/// entirely when no pipe on the box uses O_ASYNC (the always case; only
-/// LTP fcntl31-style consumers register). Same contract as the waitqueue
-/// `waiters` count and the epoll shard counts.
-static PIPE_OASYNC_N: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
 /// Refresh (or remove) this description's O_ASYNC registration after an
 /// fcntl touched f_owner/f_signum/O_ASYNC. No-op for non-pipe files.
 /// `fd` is the owner's descriptor number (carried in the SIGIO siginfo).
@@ -1137,16 +1128,12 @@ pub fn oasync_register_pipe(file: &File, fd: i32) {
             owner_fd: fd,
         });
     }
-    // In-section count (see PIPE_OASYNC_N).
-    PIPE_OASYNC_N.store(reg.len(), core::sync::atomic::Ordering::Release);
 }
 
 /// Drop a dying description's registration (File::drop).
 pub fn oasync_unregister_file(file_id: u64) {
     let mut reg = PIPE_OASYNC.lock();
     reg.retain(|e| e.file_id != file_id);
-    // In-section count (see PIPE_OASYNC_N).
-    PIPE_OASYNC_N.store(reg.len(), core::sync::atomic::Ordering::Release);
 }
 
 /// Send the configured signal to an owner: process (1), process group
@@ -1185,12 +1172,6 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, f
 /// Notify O_ASYNC owners on `pipe_addr`: readable events signal read-end
 /// owners, writable events signal write-end owners.
 fn oasync_notify(pipe_addr: usize, readable: bool) {
-    // Lock-free empty fast path (perf-ipc): with no O_ASYNC
-    // registration on the box — the default — every pipe read/write
-    // paid this global lock acquisition for an empty Vec scan.
-    if PIPE_OASYNC_N.load(core::sync::atomic::Ordering::Acquire) == 0 {
-        return;
-    }
     // siginfo constants (asm-generic/siginfo.h + poll.h): POLL_IN=1,
     // POLL_OUT=2; band bits POLLIN|POLLRDNORM (read) and
     // POLLOUT|POLLWRNORM (write).
