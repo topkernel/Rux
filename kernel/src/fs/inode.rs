@@ -829,9 +829,20 @@ unsafe impl Sync for InodeCache {}
 static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);
 
 /// Initialize Inode cache
+///
+/// (perf-syscall lane) The init check used to take the global ICACHE
+/// spinlock on EVERY lookup — this runs once per boot, so a lock-free
+/// done-flag fronts it. On the walk path icache_lookup is called per
+/// component; the saved lock pair was pure overhead after boot.
+static ICACHE_INIT_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 fn icache_init() {
+    if ICACHE_INIT_DONE.load(Ordering::Acquire) {
+        return;
+    }
     let mut cache = ICACHE.lock();
     if cache.is_some() {
+        ICACHE_INIT_DONE.store(true, Ordering::Release);
         return;  // Already initialized
     }
 
@@ -851,6 +862,16 @@ fn icache_init() {
         global_time: AtomicU64::new(1),
         stats: InodeCacheStats::new(),
     });
+    ICACHE_INIT_DONE.store(true, Ordering::Release);
+}
+
+/// (perf-syscall lane) Hit/miss counters are diagnostics; the fetch_adds
+/// ran on every lookup of every walk component. Armed on demand (the
+/// LRU time updates stay unconditional — eviction order is functional).
+static ICACHE_STATS_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+pub fn icache_stats_arm(on: bool) {
+    ICACHE_STATS_ARMED.store(on, Ordering::Relaxed);
 }
 
 /// Calculate hash value
@@ -893,15 +914,19 @@ pub fn icache_lookup(ino: Ino, fs_id: u64) -> Option<Arc<Inode>> {
             let current_time = cache_inner.global_time.fetch_add(1, Ordering::Relaxed);
             bucket.access_time.store(current_time, Ordering::Relaxed);
 
-            // Record hit
-            cache_inner.stats.record_hit();
+            // Record hit (diagnostics only — armed on demand)
+            if ICACHE_STATS_ARMED.load(Ordering::Relaxed) {
+                cache_inner.stats.record_hit();
+            }
 
             return Some(inode.clone());
         }
     }
 
-    // Record miss
-    cache_inner.stats.record_miss();
+    // Record miss (diagnostics only — armed on demand)
+    if ICACHE_STATS_ARMED.load(Ordering::Relaxed) {
+        cache_inner.stats.record_miss();
+    }
 
     None
 }
