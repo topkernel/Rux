@@ -407,27 +407,30 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
         read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
     };
 
-    // Write descriptor (only the low 32 bytes that Ext4GroupDesc covers;
-    // the high 32 bytes in the 64-bit on-disk descriptor are preserved from
-    // the block_data we just read).
-    let gd_ptr: *const Ext4GroupDesc = &gd;
-    // SAFETY: gd is a stack-local Ext4GroupDesc; reinterpreting as bytes is safe for #[repr(C)].
-    let gd_bytes = unsafe {
-        core::slice::from_raw_parts(
-            gd_ptr as *const u8,
-            core::mem::size_of::<Ext4GroupDesc>()
-        )
-    };
+    // Publish ONLY the fields this module owns — the free-inode counts
+    // — with a read-modify-write of the on-disk descriptor (cr2 review).
+    // The previous implementation serialized the WHOLE in-memory
+    // Ext4GroupDesc over the slot. The in-memory copy is a mount-time
+    // view: set_bitmap_csum_in_gd and the allocator's free-block counter
+    // updates write the DISK copy directly (never the in-memory struct),
+    // so the full-struct overlay reverted a freshly written bitmap
+    // checksum (and stale free-block counters) moments after it landed —
+    // the image stayed kernel-self-consistent (the next mount verifies
+    // only bg_checksum) but e2fsck, which recomputes bitmap checksums,
+    // reported mismatches on every group that had seen an inode
+    // alloc/free.
     let offset = desc_offset * fs.desc_size as usize;
-    // Write at most desc_size bytes: descriptors sit at desc_size stride,
-    // so writing the full 64-byte struct over a 32-byte descriptor table
-    // clobbered the NEXT group's descriptor — and the last descriptor in
-    // the block overflowed the slice outright (review EXT4-H4).
-    let write_len = core::cmp::min(fs.desc_size as usize, gd_bytes.len());
-    if offset + write_len > block_data.len() {
+    let desc_size = fs.desc_size as usize;
+    if offset + desc_size > block_data.len() {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    block_data[offset..offset + write_len].copy_from_slice(&gd_bytes[..write_len]);
+    block_data[offset + 14..offset + 16]
+        .copy_from_slice(&gd.bg_free_inodes_count_lo.to_le_bytes());
+    // bg_free_inodes_count_hi (64-bit descriptors only).
+    if desc_size >= 0x2E + 2 {
+        block_data[offset + 0x2E..offset + 0x30]
+            .copy_from_slice(&gd.bg_free_inodes_count_hi.to_le_bytes());
+    }
 
     // metadata_csum: this descriptor was just rewritten — re-seal its
     // bg_checksum over the final content (the read path verifies it at
@@ -517,6 +520,16 @@ fn ext4_add_entry_locked(
     let block_size = fs.block_size as usize;
     let dir_size = dir.i_size as usize;
 
+    // metadata_csum dir blocks reserve the final 12 bytes of every block
+    // for the checksum tail (struct ext4_dir_entry_tail); entry placement
+    // must stay short of it (reference geometry: the dirent chain ends at
+    // block_size - tail_reserve).
+    let tail_reserve = if fs.metadata_csum {
+        super::csum::DIR_TAIL_SIZE
+    } else {
+        0
+    };
+
     // Calculate number of blocks
     let num_blocks = if block_size > 0 {
         (dir_size + block_size - 1) / block_size
@@ -545,15 +558,28 @@ fn ext4_add_entry_locked(
             data
         };
 
-        // Try to find space in this block
-        if let Some(offset) = find_entry_space(&block_data, name.len(), block_size) {
+        // Try to find space in this block. metadata_csum blocks reserve
+        // the final 12 bytes for the dir tail; entry placement must stay
+        // short of it. (Declared before the loop — the fresh-block path
+        // below shares it.)
+        if let Some(offset) =
+            find_entry_space(&block_data, name.len(), block_size, tail_reserve)
+        {
             // Found space, create entry. add_entry_to_block now reports
             // "no space" (Err) when the selected slot cannot host the
             // entry (e.g. a live entry whose slack is exactly the used
             // length); on that, try the NEXT block instead of returning
             // a success that never linked anything (oh-svc cook bug).
             let mut new_block = block_data.clone();
-            match add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size) {
+            match add_entry_to_block(
+                &mut new_block,
+                offset,
+                name,
+                new_ino,
+                file_type,
+                block_size,
+                tail_reserve,
+            ) {
                 Ok(()) => {
                     // metadata_csum: finalize the dir block's checksum tail.
                     dir_block_seal(fs, dir_ino, &mut new_block);
@@ -582,7 +608,7 @@ fn ext4_add_entry_locked(
 
     // Create new block with entry
     let mut new_block = alloc::vec![0u8; block_size];
-    create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
+    create_initial_entry(&mut new_block, name, new_ino, file_type, block_size, tail_reserve);
     // metadata_csum: finalize the fresh dir block's checksum tail.
     dir_block_seal(fs, dir_ino, &mut new_block);
 
@@ -600,15 +626,59 @@ fn ext4_add_entry_locked(
 }
 
 /// metadata_csum: finalize a directory block with its checksum tail
-/// (struct ext4_dir_tail at the very end — det_reserved_zero1=0 plus
-/// crc32c over the inode-seeded block). The last dirent's rec_len covers
-/// the tail by construction (every entry chain ends at the block edge).
+/// (struct ext4_dir_entry_tail, 12 bytes at the block end). Reference
+/// geometry (cr2 review, verified against mke2fs 1.47.2 + e2fsck):
+///
+/// - the dirent chain must END at block_size - 12; the tail lives inside
+///   the last entry's rec_len slack. Chains that end past that (blocks
+///   written by the earlier 8-byte-tail model, fresh blocks whose first
+///   entry claims the whole block) are normalized here by truncating the
+///   last entry to end at the tail — the truncated bytes were slack or
+///   the old tail, never live entry data;
+/// - the checksum seed chains i_generation after the inode number
+///   (e2fsprogs ext2fs_dirent_csum: crc32c(crc32c(seed, ino), gen)) —
+///   the ino-only seed produced tails e2fsck rejects;
+/// - the tail carries the markers det_rec_len=12 / det_name_len=0xDE00
+///   that get_dirent_tail requires — markerless tails read as "no
+///   checksum".
+///
 /// Call on every finalized dir block immediately before its write.
 pub(crate) fn dir_block_seal(fs: &Ext4FileSystem, dir_ino: u32, block_data: &mut [u8]) {
-    if fs.metadata_csum {
-        let seed = super::csum::inode_csum_seed(fs.csum_seed, dir_ino);
-        super::csum::dir_block_csum_set(seed, block_data);
+    if !fs.metadata_csum {
+        return;
     }
+    let n = block_data.len();
+    if n < super::csum::DIR_TAIL_SIZE + 8 {
+        return;
+    }
+    let tail_start = n - super::csum::DIR_TAIL_SIZE;
+
+    // Normalize the chain to end at tail_start. Walk rec_len links over
+    // the whole block; entries never legitimately cross tail_start.
+    let mut off = 0usize;
+    let mut last = 0usize;
+    while off + 8 <= n {
+        let rec = u16::from_le_bytes([block_data[off + 4], block_data[off + 5]]) as usize;
+        if rec < 8 || off + rec > n {
+            break;
+        }
+        last = off;
+        off += rec;
+    }
+    if off != tail_start && last < tail_start && tail_start - last >= 8 {
+        let rec = (tail_start - last) as u16;
+        block_data[last + 4..last + 6].copy_from_slice(&rec.to_le_bytes());
+    }
+
+    // Seed = crc32c(crc32c(fs seed, dir ino), i_generation) — read the
+    // generation from the on-disk inode (e2fsck seeds with the stored
+    // value, which is 0 for freshly created inodes but bumped on inode
+    // reuse by the reference kernel).
+    let generation = super::inode::read_inode(fs, dir_ino)
+        .map(|i| i.i_generation)
+        .unwrap_or(0);
+    let seed = super::csum::dir_csum_seed(fs.csum_seed, dir_ino, generation);
+    super::csum::dir_block_csum_set(seed, block_data);
 }
 
 /// Serializes directory-entry mutations (add / delete / rename).
@@ -660,8 +730,13 @@ fn name_chunks_eq(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Option<usize> {
-    let mut offset = 0;
+fn find_entry_space(
+    block_data: &[u8],
+    name_len: usize,
+    block_size: usize,
+    tail_reserve: usize,
+) -> Option<usize> {
+    let mut offset = 0usize;
     let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
 
     while offset + 8 <= block_size {
@@ -689,13 +764,15 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         if ino == 0 {
             // Deleted entry — can reuse if large enough
             if rec_len >= required_len {
-                // metadata_csum dir blocks reserve the final 8 bytes for
-                // the checksum tail (struct ext4_dir_tail), covered by
-                // the last entry's rec_len. A deleted slot whose span
+                // metadata_csum dir blocks reserve the final 12 bytes for
+                // the checksum tail (struct ext4_dir_entry_tail), covered
+                // by the last entry's rec_len. A deleted slot whose span
                 // reaches the block end can only host the new entry when
                 // the entry's own span stays short of the tail — and the
                 // tail is re-derived by dir_block_seal after the write.
-                if offset + required_len as usize <= block_size - 8 {
+                // (The old 8-byte reserve let a short entry land with its
+                // name bytes inside the 12-byte tail region.)
+                if offset + required_len as usize <= block_size - tail_reserve {
                     return Some(offset);
                 }
                 return None;
@@ -740,7 +817,13 @@ fn add_entry_to_block(
     ino: u32,
     file_type: u8,
     block_size: usize,
+    tail_reserve: usize,
 ) -> Result<(), i32> {
+    // Entries may never place bytes inside the reserved tail region
+    // (metadata_csum: last 12 bytes; 0 otherwise). Slots selected by
+    // find_entry_space already respect this; the bound here also covers
+    // legacy-geometry blocks whose last entry spans into the region.
+    let usable_end = block_size - tail_reserve;
     let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]) as usize;
     let slot_ino = u32::from_le_bytes([
         block_data[offset],
@@ -751,7 +834,7 @@ fn add_entry_to_block(
 
     // Space the new entry itself needs (4-byte aligned, min 8).
     let required_len = (8 + name.len() + 3) & !3;
-    if required_len > block_size || offset + required_len > block_size {
+    if required_len > block_size || offset + required_len > usable_end {
         return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
@@ -774,7 +857,7 @@ fn add_entry_to_block(
         (offset + used_len, rec_len - used_len)
     };
 
-    if new_offset + new_rec_len > block_size {
+    if new_offset + new_rec_len > usable_end {
         return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
@@ -901,9 +984,16 @@ fn create_initial_entry(
     ino: u32,
     file_type: u8,
     block_size: usize,
+    tail_reserve: usize,
 ) {
     let _entry_len = ((8 + name.len() + 3) & !3) as u16;
-    let rec_len = block_size as u16;
+    // The first (and only) entry covers the dirent area. With
+    // metadata_csum the final 12 bytes belong to the dir tail
+    // (reference geometry: chain ends at block_size - tail_reserve).
+    // dir_block_seal's normalization also enforces this, but building
+    // the block correctly up front keeps the chain well-formed before
+    // the seal walk runs.
+    let rec_len = (block_size - tail_reserve) as u16;
 
     // Write inode number
     let ino_bytes = ino.to_le_bytes();
