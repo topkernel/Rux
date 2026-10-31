@@ -95,6 +95,7 @@ macro_rules! dfx_switch_table {
             ExecCost => "execcost",
             ThPark => "thpark",
             RipSample => "ripsample",
+            OhHunt => "ohhunt",
         }
     };
 }
@@ -427,9 +428,20 @@ pub enum DfxSwitch {
     /// tasks (page-bucketed histogram + utime/stime split), reported
     /// every 60 s from the tick path. OFF by default.
     RipSample,
+    /// OH graphics hunt taps (oh-svc/oh-launcher lanes, known-gap 4):
+    /// the drm ioctl traces in sys_ioctl (MAP_DUMB / ioctl-fail /
+    /// foreign-prime-import), the drm mmap placement/resolve attribution
+    /// in sys_mmap, the prime-import compose-content probe (a full
+    /// buffer scan per import — pure diagnostic output) and the
+    /// SIGABRT first-raise dump (exec-VMA map + stack scan). All hunt
+    /// instrumentation for the render_service abort / black-screen
+    /// campaigns; they add per-ioctl/per-import/per-abort cost and
+    /// pollute the structured boot table. OFF by default — enable with
+    /// `dfx=ohhunt` when the graphics lanes are hunting.
+    OhHunt,
 }
 
-const SWITCH_COUNT: usize = 47;
+const SWITCH_COUNT: usize = 48;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -517,6 +529,7 @@ impl DfxSwitch {
             DfxSwitch::ThPark => 44,
             DfxSwitch::RipSample => 45,
             DfxSwitch::DbFileTrace => 46,
+            DfxSwitch::OhHunt => 47,
         }
     }
 

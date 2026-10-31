@@ -1123,8 +1123,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 // fires exactly when the kms sw winsys's MAP_DUMB or its
                 // node mmap fails inside RS while the same chain works in
                 // isolation (glmprobe). Trace the MAP_DUMB requests and
-                // every failing drm ioctl — small budgets, no dfx gate.
-                if request == 0xc010_64b3 {
+                // every failing drm ioctl. Gated behind dfx=ohhunt
+                // (known-gap 4: hunt taps off the hot path by default).
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                    && request == 0xc010_64b3
+                {
                     // struct drm_mode_map_dumb: handle@0 (read via uaccess;
                     // a bad arg just reports 0 — the trace is diagnostic).
                     let mut hbuf = [0u8; 4];
@@ -1148,7 +1151,9 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                         );
                     }
                 }
-                if ret < 0 {
+                if ret < 0
+                    && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                {
                     static IOCTLFAIL_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = IOCTLFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

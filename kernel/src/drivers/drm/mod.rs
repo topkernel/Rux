@@ -467,6 +467,10 @@ pub fn is_prime_import_request(request: u32) -> bool {
 /// error EGL_SUCCESS", zero kernel ioctls). io.rs calls this when it
 /// sees a prime-import request number on a non-DRM fd (or a dead fd).
 pub fn trace_foreign_prime_ioctl(request: u32, fd: i32, err: i32) {
+    // Hunt tap (known-gap 4): dfx=ohhunt gates it off the default path.
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt) {
+        return;
+    }
     if !is_prime_import_request(request) {
         return;
     }
@@ -1824,54 +1828,58 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
     // Compose-content probe: layer-texture imports carry the CLIENT's
     // finished frame (the producer drew before queueing) — non-zero
     // content here means the client rendered; zero means its rendering
-    // never reached the buffer.
+    // never reached the buffer. Hunt tap (known-gap 4): the probe walks
+    // the WHOLE buffer (up to 3.7MB of volatile reads per import) —
+    // gated behind dfx=ohhunt so standard boots pay nothing.
     static IMPORT_TRACE_N: AtomicU32 = AtomicU32::new(0);
-    let it = IMPORT_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    if it < 24 || it % 20 == 0 {
-        let mut nz: usize = 0;
-        let mut clear: usize = 0;
-        let mut samples = [0u32; 3];
-        // SAFETY: gem.kva..gem.kva+size is the object's backing; every
-        // sample offset below is clamped into that range (the fixed
-        // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
-        // an imported smaller buffer made the unclamped reads walk past the
-        // allocation).
-        unsafe {
-            let base = gem.kva as *const u32;
-            let words = gem.size / 4;
-            for i in 0..words {
-                let v = base.add(i).read_volatile();
-                if v != 0 {
-                    nz += 1;
-                    if v == 0xff00_0000 {
-                        clear += 1;
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt) {
+        let it = IMPORT_TRACE_N.fetch_add(1, Ordering::Relaxed);
+        if it < 24 || it % 20 == 0 {
+            let mut nz: usize = 0;
+            let mut clear: usize = 0;
+            let mut samples = [0u32; 3];
+            // SAFETY: gem.kva..gem.kva+size is the object's backing; every
+            // sample offset below is clamped into that range (the fixed
+            // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
+            // an imported smaller buffer made the unclamped reads walk past the
+            // allocation).
+            unsafe {
+                let base = gem.kva as *const u32;
+                let words = gem.size / 4;
+                for i in 0..words {
+                    let v = base.add(i).read_volatile();
+                    if v != 0 {
+                        nz += 1;
+                        if v == 0xff00_0000 {
+                            clear += 1;
+                        }
                     }
                 }
+                let row_words = 983040 / 1280; // pitch/4 for these buffers
+                let s = |off: usize| -> u32 {
+                    if off < words {
+                        base.add(off).read_volatile()
+                    } else {
+                        0
+                    }
+                };
+                samples[0] = s(row_words * 640 + 360);
+                samples[1] = s(row_words * 640 + 200);
+                samples[2] = s(row_words * 300 + 360);
             }
-            let row_words = 983040 / 1280; // pitch/4 for these buffers
-            let s = |off: usize| -> u32 {
-                if off < words {
-                    base.add(off).read_volatile()
-                } else {
-                    0
-                }
-            };
-            samples[0] = s(row_words * 640 + 360);
-            samples[1] = s(row_words * 640 + 200);
-            samples[2] = s(row_words * 300 + 360);
+            crate::pr_warn!(
+                "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
+                it,
+                crate::process::current_pid(),
+                prime_fd,
+                gem.id,
+                nz,
+                clear,
+                samples[0],
+                samples[1],
+                samples[2]
+            );
         }
-        crate::pr_warn!(
-            "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
-            it,
-            crate::process::current_pid(),
-            prime_fd,
-            gem.id,
-            nz,
-            clear,
-            samples[0],
-            samples[1],
-            samples[2]
-        );
     }
 
     // Re-register under the gem's id if the handle side was already
