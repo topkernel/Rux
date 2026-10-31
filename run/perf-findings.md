@@ -148,6 +148,50 @@ with distinct mmaps of one shm object).
   after ~1.5 ticks). Separate lane (timer/hres), but it is the other
   half of "woken task waits for the next tick".
 
+## F6. Full-battery KVM A/B — the remaining-gap map (for other lanes)
+
+Reference vs ours (ours = default-on kernel, kp=1 arm), same probe,
+KVM, medians (boot pair psrefk2 / psfull1):
+
+  row                    ref      ours    ours/ref
+  p1_null              0.040     0.080     2.0x
+  p1_clock             0.070     0.190     2.7x
+  p2_ctxsw             0.085     0.175     2.1x
+  p3a_fault_anon       4.669     0.010     we WIN (eager mapping)
+  p3b_fault_cow        0.671     2.314     3.5x
+  p3c_fault_file       0.090     0.010     we WIN
+  p4_fork_exit        12.964   633.680    48.9x   <- mm lane (known)
+  p4_fork_exec        26.139  1006.735    38.5x   <- mm lane
+  p5a_pipe             0.170     0.341     2.0x
+  p5b/p5c socket family 0.12-0.19  1.96-2.30  12-19x  <- ipc lane
+  p5d_rt_read/recv     0.24-0.28  0.63-0.67  2.3-2.8x
+  p6_stat              0.230     3.687    16.0x   <- fs lane
+  p6_openclose         0.371     5.140    13.9x   <- fs lane
+  p6_read_cached       0.531     5.691    10.7x   <- fs lane
+  p6_append            0.411    62.416   151.9x   <- fs lane
+  p6_mkdrmdir          7.745 14028.371  1811.3x   <- fs lane (the single
+                                                      worst row anywhere)
+  p6_unlink            1.924    11.151     5.8x
+  p6_write_fsync    9329.493 14864.057     1.6x   (I/O-bound both)
+  p7_sleep1ms         17.089  1089.354    63.8x   <- timer lane (1ms
+                                                      sleeps return ~1
+                                                      tick late)
+  p2f_futex_* (quiet) 18.0      7.3      0.41x   <- this lane: we now
+                                                    WIN the futex rows
+  p2h_futex_uhog       6.2       9.1      1.45x
+
+(The full-battery p2g rows have no hog — the hog file only exists in
+p2fonly mode; use the dedicated psrefk1/psruxk1-k4 boots for khog
+verdicts. Single-boot medians on a multi-lane host; treat ±25% as
+noise per the lane protocol.)
+
+Note for the sched lane's open charter items: p2_ctxsw at 2.1x
+reference (0.175 vs 0.085us KVM) is a fixed ~90ns syscall-entry/
+switch tax, not a scheduling defect; the GRQ hold-time dissection
+(5.1-6.1us census band) remains merge-gate territory — nothing in this
+lane's A/B points at the pick path as a wake-latency contributor once
+kernel preemption is on.
+
 ## Artifact map
 
 - run/ps-pbench — the probe binary used on BOTH kernels (md5-identical
