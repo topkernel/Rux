@@ -6717,9 +6717,10 @@ fn binder_transaction(
                             .trim_end_matches('\0');
                         // leg-30B6: parcel head — the OnStartUserDone
                         // callback's errcode rides in this buffer (after
-                        // the IUserCallback token); without it the
-                        // fast-fail shape can't name its error.
-                        let mut rb = [0u8; 40];
+                        // the IUserCallback token: 8B header + u32 len +
+                        // 46B UTF-16 + int32 userId + int32 errcode =
+                        // 68 bytes total); 80 covers it whole.
+                        let mut rb = [0u8; 80];
                         let hex: alloc::string::String = if tr.data_buffer != 0
                             && unsafe {
                                 crate::arch::uaccess::copy_from_user(
