@@ -94,7 +94,14 @@ impl FsStruct {
     /// mountpoint back-edges, and the rebuild picks the new location
     /// up — Linux derives paths the same way, from (vfsmnt, dentry)).
     pub fn get_cwd(&self) -> alloc::vec::Vec<u8> {
-        if let Some(d) = self.cwd_dentry.read().clone() {
+        // preempt-hunt: bind the clone BEFORE the if-let. The scrutinee's
+        // read guard is a temporary that lives through the whole block,
+        // so build_path() (a walk to the dentry root) used to run with
+        // the rwlock guard — and its preempt-disable — held. fs_struct
+        // sites were the #1 >2s incumbent family on the ph2 OH boot
+        // (46 tick-heal origins at this file's sites).
+        let d = self.cwd_dentry.read().clone();
+        if let Some(d) = d {
             return d.build_path().into_bytes();
         }
         self.cwd.read().clone()
@@ -132,7 +139,10 @@ impl FsStruct {
     /// when not chrooted). Self-heals from the root dentry when one
     /// is recorded (same rationale as get_cwd()).
     pub fn get_root(&self) -> alloc::vec::Vec<u8> {
-        if let Some(d) = self.root_dentry.read().clone() {
+        // Same if-let temporary-extension fix as get_cwd (preempt-hunt):
+        // build_path() runs without the read guard.
+        let d = self.root_dentry.read().clone();
+        if let Some(d) = d {
             return d.build_path().into_bytes();
         }
         self.root.read().clone()
