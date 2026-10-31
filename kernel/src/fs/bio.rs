@@ -1926,6 +1926,39 @@ static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
 /// scans of every scoped flush) without bound. The creator pays — it is
 /// the task generating the backlog.
 const PUB_HIGH_WATER: usize = 2048;
+
+/// Op-boundary batch threshold (the fab0e029 prescription: records batch
+/// per transaction window). With the per-mkdir scoped drain deleted, the
+/// queue legitimately grows between durability points; this bounds it far
+/// below PUB_HIGH_WATER so that (a) an out-of-band writer that hits a
+/// constrained block (eviction victim, journal write-through) is
+/// constrained by at most this many records' worth of dirty blocks, and
+/// (b) the O(queue) snapshot scan of any scoped flush stays trivial.
+/// The entry op whose record crosses the line pays ONE ordered whole-queue
+/// drain (flush_publications) — amortized over PUB_BATCH operations, not
+/// per operation. 64: small enough that a constraint flush's residual
+/// I/O is a handful of unique blocks, large enough that the drain cost
+/// amortizes below 1 block-write per op.
+const PUB_BATCH: usize = 64;
+
+/// Op-boundary publication batch drain: called at every ext4 journal-stop
+/// bracket close (all entry mutations funnel through ext4_journal_stop).
+/// O(1) queue-length check; drains only when the batch threshold is
+/// crossed. See PUB_BATCH.
+pub fn publication_batch_drain() {
+    let over = {
+        let pend = PENDING_PUBLICATIONS.lock();
+        !pend.is_empty() && pend.len() >= PUB_BATCH
+    };
+    if over {
+        crate::dfx::fsw::note_pub_batch();
+        // Whole queue, append order (pre -> entry -> post per record).
+        // No ext4 locks are held by this path (PENDING is a leaf lock;
+        // the I/O runs lock-free), so this cannot deadlock against the
+        // caller's ENTRY_MUTEX/BIG_LOCK.
+        let _ = flush_publications();
+    }
+}
 /// Batches per high-water drain (each batch is one full ordered pass; see
 /// flush_publications_bounded). Leftover records stay pending, ordered.
 const PUB_HIWAT_BATCHES: u32 = 2;

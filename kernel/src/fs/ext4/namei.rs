@@ -1213,24 +1213,21 @@ fn ext4_mkdir_no_journal(
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
-    // Best-effort publication of THIS mkdir's own deferred entry record
-    // (per-cookie scoped flush: the new inode's table/bitmap blocks,
-    // then the directory entry block). NOT fatal to the syscall. The old
-    // whole-cache sync_buffers here made every mkdir pay the WORLD's
-    // dirty buffers plus the global publication backlog — the
-    // storage-daemon D-state family under provisioning churn (leg-29A
-    // adjudication). Foreign records and unrelated dirty blocks ride the
-    // buffer-cache write-back as on any write-back mount; the per-block
-    // guards keep their ordering whenever they do reach disk. Foreign
-    // devices are never touched, so the r8 mkdtemp ENXIO storm shape
-    // (mkdir inheriting a dead loop device's writeback error) cannot
-    // recur here either.
-    if let Err(e) = bio::flush_publications_scoped() {
-        crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
-    }
-    // Leg-55: counted even on the flushed path — the lazy-variant
-    // follow-up reads this against the phase mix (the flush is a
-    // fixed cost per mkdir; see the reversal note in the ledger).
+    // Per-op publication of THIS mkdir's deferred entry record is GONE
+    // (perf, the e3c1ec35/fab0e029 saga resolved by batching): the scoped
+    // drain here cost 5-8 synchronous block round trips at EVERY mkdir
+    // return — p6_mkdrmdir 15.5-30ms vs the reference kernel's ~150us
+    // (pa85: journal/no-journal arms flat, the drain owned the cost; the
+    // drain's only product was durability POSIX does not promise — entry
+    // durability belongs to fsync(dirfd)). Ordering is NOT lost: the
+    // records stay queued with their H1/H2 guards enforced at every
+    // out-of-band write (sync_dirty_buffer, eviction Phase 4, journal
+    // write-through), and the queue is kept short by the op-boundary
+    // batch drain (bio::publication_batch_drain, PUB_BATCH=64) that
+    // every entry op pays amortized instead of per-op — the fab0e029
+    // lesson: deleting this drain WITHOUT the batch bound pushed the
+    // deferred bill onto the next constrained writer (unlink 100x).
+    // Durability points remain fsync/sync(2)/eviction/commit.
     crate::dfx::fsw::note_pub_lazy();
 
     Ok(new_ino)

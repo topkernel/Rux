@@ -16,7 +16,7 @@
 //! Dump format (stable, grep-able; two compact lines, emitted at :30 past
 //! each minute to avoid the console-emit race with syscost's dump — pa28):
 //! ```text
-//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
+//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pb2=<batch drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
 //! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
 //! ```
 //!
@@ -77,6 +77,10 @@ pub static PUB_HIWAT: AtomicU64 = AtomicU64::new(0);
 /// Leg-55: mkdirs counted at the scoped-flush point (the lazy-variant
 /// follow-up reads this against the phase mix).
 pub static PUB_LAZY: AtomicU64 = AtomicU64::new(0);
+/// Op-boundary batched drains (publication_batch_drain past PUB_BATCH) —
+/// the amortized creator-paid drain that keeps the queue short now that
+/// per-mkdir scoped drains are gone.
+pub static PUB_BATCH_DRAINS: AtomicU64 = AtomicU64::new(0);
 /// Maximum pending-publication queue length observed.
 pub static PUB_QMAX: AtomicU64 = AtomicU64::new(0);
 
@@ -217,6 +221,10 @@ pub fn note_pub_cstr() {
 #[inline]
 pub fn note_pub_hiwat() {
     bump!(PUB_HIWAT);
+}
+#[inline]
+pub fn note_pub_batch() {
+    bump!(PUB_BATCH_DRAINS);
 }
 #[inline]
 pub fn note_pub_lazy() {
@@ -365,14 +373,14 @@ pub fn dump() {
         // pair had to guess the split: read 31765|408 vs 70770|0).
         // 0cd29a75 merge: main's scoped-publication counters (ps/pc/ph/pm)
         // carried in alongside; slot count unchanged.
-        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pm={} pl={} lvl={} es={}",
+        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pb2={} pm={} pl={} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),
         v(&EVICT), v(&EVICT_DIRTY), v(&SYNC_ALL),
         v(&PUB_FLUSH), v(&PUB_RECORDS),
         v(&PUB_SCOPED), v(&PUB_SCOPED_RECORDS),
-        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_QMAX), v(&PUB_LAZY),
+        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_BATCH_DRAINS), v(&PUB_QMAX), v(&PUB_LAZY),
         crate::printk::get_console_loglevel(),
         crate::printk::console_emit_skipped(),
     );

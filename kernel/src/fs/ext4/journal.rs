@@ -202,7 +202,16 @@ pub fn ext4_journal_start(fs: &Ext4FileSystem, nblocks: i32) -> Result<jbd2::Han
 
 /// Stop a journal transaction (commits synchronously)
 pub fn ext4_journal_stop(handle: &mut jbd2::Handle) -> Result<(), i32> {
-    jbd2::jbd2_journal_stop(handle)
+    let r = jbd2::jbd2_journal_stop(handle);
+    // Op-boundary publication batch drain (the fab0e029 prescription):
+    // every entry mutation (mkdir/create/mknod/rmdir/unlink/rename) closes
+    // its bracket here, so this is the "transaction window" boundary where
+    // deferred publication records batch. O(1) unless the queue crossed
+    // PUB_BATCH, in which case this op pays ONE ordered drain — amortized
+    // creator-paid write-back instead of either per-op scoped drains
+    // (mkdir 15-30ms) or unbounded deferral (unlink constrained 100x).
+    bio::publication_batch_drain();
+    r
 }
 
 /// Get write access to a buffer within a transaction
