@@ -1,0 +1,45 @@
+r20 isolation-rerun verdicts (strict 2x rule, one test per boot)
+=================================================================
+Kernel: af36f8ce (ltp-r20 branch = main@82059759 + virtio device-ID fix)
+Scan: 2026-10-31 11:28-13:20 CST, .ltp/scanlogs-r20/ kept this round.
+Evidence: .ltp/diag/iso20-summary.txt, per-boot logs .ltp/diag/iso20-<t>-<a|b>.log
+
+Lost rows (all four in the chunk@100 contended window, 2026-10-31 11:31-11:53):
+  epoll_wait05  PASS->CRASH(137)   iso 2/2 PASS     -> FLAKE (host-starved window)
+  execve02      PASS->CRASH(137)   iso 2/2 PASS     -> FLAKE
+  execve03      PASS->CRASH(137)   iso 2/2 PASS     -> FLAKE
+  execve05      PASS->CRASH(137)   iso 2/2 PASS     -> FLAKE
+  Mechanism (serial evidence chunk0100-a1.log): each victim held EXT4-BIGLOCK
+  15-40 s (held=1470j..3998j) with VW-EXT4LOCK async-deadline prints and
+  "io_completion: recovered by final kick/drain" around it; ltpscan's 30 s
+  SIGTERM then SIGKILL produced rc=137. A long-lived task (pid 301) was
+  blocked >120 s behind the same lock. One contended boot; every loss is
+  inside it. Zero of the four reproduce in isolation => 0 real regressions.
+
+Worsened-class rows (already non-PASS in r19; no PASS lost):
+  execve04    FAIL->CRASH   iso 2/2 PASS   -> REAL GAIN (e66cfb4d ETXTBSY fix in base)
+  execveat01  FAIL->TIMEOUT iso 2/2 rc=1   -> standing FAIL (same as r19)
+  execveat02  FAIL->CRASH   iso 2/2 rc=1   -> standing FAIL
+  execveat03  TCONF->POISON iso 2/2 rc=32  -> standing TCONF
+  epoll-ltp   POISON->TIMEOUT iso 143/noRES -> standing long-test artifact
+  mallocstress FAIL->POISON iso rc=2/137   -> standing FAIL
+  proc01      FAIL->POISON  iso 2/2 rc=2   -> standing FAIL
+  ftest07     POISON->POISON iso 2/2 rc=1  -> REAL standing FAIL, FIRST strictly
+              adjudicated this round (joins the zzprobe4 ftest zeros family)
+  fsconfig01    TCONF->POISON iso 2/2 rc=32 -> standing TCONF
+  init_module01 TCONF->POISON iso 2/2 rc=32 -> standing TCONF
+  cve-2017-17052 POISON->POISON iso 0/2 RES -> standing boot-wedge (kills its
+                boot inside 120 s; same class as r19)
+  shmat1        POISON->POISON iso 0/2 RES -> standing boot-wedge
+
+Gained rows (14): classification by origin class in r19
+  flake/POISON/TIMEOUT recoveries (11): creat05, fork10, fsx-linux,
+    getrusage04, waitpid08, open04, open14, openat03, fcntl34, mkdir09,
+    shmctl05
+  from r19 FAIL (3, verified 2/2 PASS this round): fork09, memfd_create02,
+    rmdir03 (see ISO20-gain rows appended to iso20-summary.txt)
+
+Bottom line: r20 = 1028/1869 (+10 vs r19). 0 real regressions; strictly
+adjudicated real movement = +4 PASS-class (execve04 + fork09 +
+memfd_create02 + rmdir03) and 1 confirmed standing FAIL unmasked from the
+POISON pool (ftest07).

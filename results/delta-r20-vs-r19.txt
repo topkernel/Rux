@@ -1,0 +1,41 @@
+old PASS=1018 new PASS=1028
+gained (14):
+  + creat05: TIMEOUT -> PASS
+  + fcntl34: POISON -> PASS
+  + fork09: FAIL -> PASS
+  + fork10: TIMEOUT -> PASS
+  + fsx-linux: FAIL -> PASS
+  + getrusage04: FAIL -> PASS
+  + memfd_create02: FAIL -> PASS
+  + mkdir09: POISON -> PASS
+  + open04: TIMEOUT -> PASS
+  + open14: TIMEOUT -> PASS
+  + openat03: TIMEOUT -> PASS
+  + rmdir03: FAIL -> PASS
+  + shmctl05: POISON -> PASS
+  + waitpid08: FAIL -> PASS
+lost (4):
+  - epoll_wait05: PASS -> CRASH
+  - execve02: PASS -> CRASH
+  - execve03: PASS -> CRASH
+  - execve05: PASS -> CRASH
+non-PASS class changes:
+  ~ dio_read: CRASH -> FAIL
+  ~ epoll-ltp: POISON -> TIMEOUT
+  ~ execve04: FAIL -> CRASH
+  ~ execveat01: FAIL -> TIMEOUT
+  ~ execveat02: FAIL -> CRASH
+  ~ execveat03: TCONF -> POISON
+  ~ fsconfig01: TCONF -> POISON
+  ~ ftest02: CRASH -> FAIL
+  ~ ftest03: CRASH -> FAIL
+  ~ futex_cmp_requeue01: POISON -> FAIL
+  ~ getcpu01: CRASH -> FAIL
+  ~ init_module01: TCONF -> POISON
+  ~ kill10: CRASH -> FAIL
+  ~ mallocstress: FAIL -> POISON
+  ~ mmap3: CRASH -> FAIL
+  ~ mmstress: TIMEOUT -> CRASH
+  ~ nice05: CRASH -> FAIL
+  ~ proc01: FAIL -> POISON
+  ~ select02: TCONF -> FAIL
