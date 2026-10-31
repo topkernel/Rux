@@ -1863,3 +1863,114 @@ caa3b832 dfx(scmtap) relay tap; ce322b38 KERN_ERR; 4002dcd6 TXERR
 tap; f5646935 PLAINREAD tap; 3d22366f Inhibit probe; 03f406c3 musl
 toolchain rebuild (+idle arg fix); 80b7b6fe auth probes tarball;
 be5b2709 THE FIX (fstat S_IFSOCK).
+
+## Session 22 — THE GREETER LOGIN PROMPT IS ON SCREEN (2026-11-01, gdmr74)
+
+Succession: predecessor died ~25 min in (quota); their 2 commits
+(0d4a5050 tee probe + e66d7830) were merged. Their gdmr73 boot (r66
+tee image) had ALREADY named the failing component — this leg read
+it, root-caused, fixed, and verified.
+
+### gdmr73 harvest (no new boot needed)
+- The tee probe worked: the greeter shell's own stderr (tee'd to
+  /tmp/gshell.log, tailer-dumped) shows the death is NOT fontconfig
+  (the .cache-7 files build fine, "[pango] FcInit" was a red
+  herring): "Unset XDG_SESSION_ID, getCurrentSessionProxy() called
+  outside a user session. Asking logind directly." then
+  "Gjs-CRITICAL: JS ERROR: TypeError: this._userProxy.Display is
+  null at loginManager.js:111:41" → "Execution of main.js threw an
+  exception" → exit 1 → gdm greeter loop (the "Oh no" screen).
+- gnome-shell 42.9 source (fetched): LoginManagerSystemd's
+  constructor builds this._userProxy on
+  /org/freedesktop/login1/user/self; getCurrentSessionProxy line 111
+  destructures `this._userProxy.Display` with NO null guard. Display
+  is null iff the GDBus proxy cached ZERO properties iff the
+  construction-time GetAll failed.
+- gdmr73's own sd-bus debug (SYSTEMD_LOG_LEVEL=debug on logind) had
+  the smoking gun: every "Got message ... path=/org/freedesktop/
+  login1/user/self ... member=GetAll" is followed by "Failed to
+  process message ...: No medium found" — ENOMEDIUM.
+
+### Root cause (systemd 249.11 source, aliyun orig tarball)
+user_object_find("self") → manager_get_user_from_creds(UID_INVALID)
+→ get_sender_user → sd_bus_query_sender_creds(OWNER_UID|AUGMENT) →
+bus-creds.c cg_pid_get_path() → cg_unified_cached() →
+statfs("/sys/fs/cgroup") == SYSFS_MAGIC → **-ENOMEDIUM ("No
+filesystem is currently mounted on /sys/fs/cgroup")**. The ENOMEDIUM
+aborts the whole creds query → user/self dispatch fails → error
+reply → proxy property-less → Display null → JS TypeError.
+OWNER_UID resolution needs BOTH a mounted cgroup2 (statfs magic)
+AND a /proc/<pid>/cgroup "0::<path>" line whose path carries a
+"user-<uid>.slice" component (cg_path_get_owner_uid parser).
+
+### Fix (kernel + image)
+1. KERNEL (9bd18f83): generate_cgroup in fs/procfs/pid.rs — with a
+   cgroup2 hierarchy mounted, each task now reports a per-task
+   user-slice path: pid 1 → "0::/init.scope" (cg_get_root_path
+   strips it → shift root "/"), every other task →
+   "0::/user.slice/user-<euid>.slice/user@<euid>.service". The
+   fabricated dirs do NOT exist in the hierarchy, so cg_kill against
+   them is an ENOENT no-op (cg_kill_items treats it as empty) — the
+   r17b udevd root-sweep storm cannot recur, and no task names the
+   root group either.
+2. IMAGE r67 (runit.c, rides the worktree per test/**/*.c policy;
+   52300b70 documents it in gdm-repack): gdm-mode runit now does
+   mount("cgroup2","/sys/fs/cgroup","cgroup2") BEFORE
+   udevd/logind/gdm3 — the kernel's full cgroup2 fs exists behind
+   mount(2) (U1b); statfs then reports CGROUP2_SUPER_MAGIC and
+   cg_unified_cached() takes the unified path. PID1 mounting it
+   matches the reference shape (systemd mounts it itself).
+3. Probes: ground-truth cycle dumps /proc/1/cgroup +
+   /proc/self/cgroup + the hierarchy, and probes login1 user/_120
+   and user/self Display (root caller → expected business error,
+   never ENOMEDIUM).
+
+### gdmr74 verification boot (kernel 9bd18f83 + image r67, smp2/2G,
+### 932s, zero input)
+- "[runit] cgroup2 mounted /sys/fs/cgroup" first try.
+- /proc cgroup paths exactly as designed; user-_120 Display rc=0
+  (3 cycles); user-self rc=256 (root, "not logged in" — ENOMEDIUM
+  count in the whole serial: 0; gdmr73 had dozens).
+- The stock greeter chain runs END TO END: udevd coldplug → logind
+  → gdm3 → PAM (pam_limits/pam_systemd "Asking logind to create
+  session: uid=120 ... class=greeter") → CreateSession reply with
+  session_fd → gdm-x-session → dbus-run-session → gnome-session
+  (autostart walk, full gsd family, ibus) → gnome-shell.bin pid 600
+  ALIVE the whole boot ("App org.gnome.Shell.desktop registered",
+  "GdmDisplay: session registered: yes", "session c1 found,
+  activating").
+- ZERO shell exits (0 "exited with code"), zero Oh-no/failed-dialog
+  markers, zero panics/SIGDEATH/OOM.
+- **SCREEN: the gdm login prompt** — dark greeter background
+  (#202020, 97.5%), white clock text top-center (y 11-17), centered
+  blue login box x 468-802 y 348-422 (dead center of 1280x800) with
+  a text line inside (ink 696, y 379-395) that OCRs as the username
+  row ("Rux Login User"). M4_screen_lit @270s, nonblack 1.0000,
+  frame composition IDENTICAL at 450s and 930s (held the whole
+  window — a live login screen, not a splash).
+- Evidence: runs/gnome-gnome-gdmr74/ (note the doubled tag prefix;
+  fire.py prepends gnome- itself), shots + serial; PNG copies
+  run/gdm74-greeter-450s.png, run/gdm74-greeter-final-930s.png,
+  run/gdm74-greeter-loginbox-3x.png.
+
+### Gates
+riscv64 build rc=0 (build-gdmr74.log); x86_64 rc=0
+(build-gdmr74-x86.log); aarch64 fresh .config rc=0
+(build-gdmr74-aa64.log); riscv make test green (maketest-gdmr74.log
+— verdict below). Kernel diff vs main: procfs/pid.rs
+(generate_cgroup) ONLY.
+
+### Open items for the next leg
+- Log IN (type the password, Enter) — the ladder's next rung: user
+  rux session → user gnome-shell → desktop. QMP keyprobe/clickprobe
+  exist; the greeter entry needs click-to-focus then 'r','u','x',
+  'ret'.
+- The greeter's stderr channel (/var/log/gdm3/:0-greeter.log never
+  appears; the env-dump wrapper's output is lost the same way) —
+  cosmetic forensics gap only.
+- XDG_SESSION_ID still does not reach the greeter program env (the
+  shell logs "Unset XDG_SESSION_ID"); with user/self fixed this is
+  now harmless, but a faithful PAM-env transfer would take the
+  direct session-proxy branch instead.
+- M2/M3 serial milestone patterns are session-mode strings; they
+  never fire in gdm mode (fire.py pattern gap, known).
