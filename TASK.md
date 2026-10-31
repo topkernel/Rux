@@ -261,6 +261,24 @@ chain, fully proven on boot lb10 (serial run/oh-lb10-serial.log, shots oh-lb10-s
 (smp2 default; do NOT smp4). Markers + kill traces visible, tap flood demoted.
 test/rootfs.img must exist for `make test` (copy from the main repo if missing).
 
+### The userId-0 launcher hole (OH-side, decoded on lb10/lb14 — for whoever kills it next)
+- The launcher start that creates the ability RECORD uses **userId 0** (lb10:
+  first "AppMS: [AMSI1640]userId: 0, bundleName: com.ohos.launcher" at 310.5s,
+  BEFORE foundation's watchdog death; the record's user stays 0 forever, so every
+  later BMS query is 8521220 = NOT_EXIST and ABCM's restart loop can never
+  succeed — "restart ability" x134, no com.ohos.launcher process EVER spawns).
+- userId 0 traces to the foreground user never being set:
+  GetForegroundOsAccountLocalId fails 249x (foregroundAccountMap_ empty —
+  the activation chain had not reached the foreground-set step when the start
+  was issued). On the reference kernel the whole activation completes in
+  ~10s so the ordering holds; Rux's account phase takes 300-800s and the
+  start races ahead of it.
+- Candidate kills (UNTESTED): (a) make the boot faster (see the perf suspects
+  above); (b) image-side: patch/param OH so the launcher start waits for
+  account activation; (c) kernel-side DFX: none needed — the chain is healthy.
+- systemui DOES spawn from StartUser (m.ohos.systemui, lb10 441s; it later
+  THREAD_BLOCK_6S but survives) — only the launcher start is mis-usered.
+
 ### PERF CENSUS (syscost=1 boot sysc1, dumps at t=60/120/180/240s) — handoff
 for the perf lane (guarded domains: sched + fs + ipc; raw log:
 run/oh-sysc1-serial.log in THIS worktree):
