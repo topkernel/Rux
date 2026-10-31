@@ -37,8 +37,8 @@ fi
 
 ( sleep 28
   printf '/ltp/run.sh\n'
-  sleep 90
-) | timeout -k 5 150 qemu-system-aarch64 \
+  sleep 560
+) | timeout -k 5 640 qemu-system-aarch64 \
     -M virt,gic-version=3 -cpu cortex-a72 -accel tcg,thread=multi \
     -m 1G -smp 2 -nographic -no-reboot \
     -kernel "$KERNEL" \

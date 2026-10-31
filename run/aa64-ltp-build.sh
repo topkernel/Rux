@@ -77,7 +77,10 @@ echo "[ltp-aa64] $built static binaries staged under $STAGE"
 # Runner script the serial-fed shell executes.
 cat > "$STAGE/run.sh" << 'EOF'
 #!/bin/sh
-# aarch64 LTP smoke subset (serial-fed)
+# aarch64 LTP smoke subset (serial-fed). TCG slowness: the tst_test
+# fork-loop tests need 30-60s each, so the toybox cap is 90s and the
+# framework timeout gets LTP_TIMEOUT_MUL headroom.
+export LTP_TIMEOUT_MUL=4
 P=0; F=0
 for t in getpid01 getpid02 fork01 write01 write05 read01 read02 open01 open02 \
          close01 close02 pipe01 pipe02 mkdir01 pipe02 rmdir01 unlink01 unlink05 \
@@ -85,7 +88,7 @@ for t in getpid01 getpid02 fork01 write01 write05 read01 read02 open01 open02 \
          nanosleep01 nanosleep02 wait01 wait02 exit01 getuid01 geteuid01 \
          getgid01 getegid01 getppid01; do
     if [ -x "/ltp/$t" ]; then
-        if timeout 10 "/ltp/$t" >/dev/null 2>&1; then
+        if timeout 90 "/ltp/$t" >/dev/null 2>&1; then
             echo "LTPSMK PASS $t"; P=$((P+1))
         else
             echo "LTPSMK FAIL $t rc=$?"; F=$((F+1))
