@@ -326,6 +326,21 @@ impl<'a> BlockAllocator<'a> {
         for bit in block_offset as usize..end_bit {
             bitmap[bit / 8] &= !(1 << (bit % 8));
         }
+        // Forget the freed blocks' dirty buffers AND jbd2 registrations
+        // BEFORE the bitmap write: the freed content is dead — a dirty
+        // buffer left behind is dead data that the next publication drain
+        // / eviction / commit writes to disk synchronously (the P6
+        // mkdrmdir floor: one fresh dir block per mkdir, freed by the
+        // paired rmdir, then written out by the ordered drain anyway),
+        // and a leftover registration makes a later commit re-READ the
+        // dead block from disk and write the stale bytes back (the
+        // revoke-threshold slow commits). Pinned or clean buffers are
+        // skipped inside (bio::drop_freed_block_forgotten). Crash
+        // ordering is carried by the bitmap/GD/SB deferred writes and
+        // the revoke records, not by the dead content.
+        for i in 0..len as u64 {
+            crate::fs::bio::drop_freed_block_forgotten(self.fs.device, start + i);
+        }
         self.write_block_bitmap(block_bitmap_block, &bitmap)?;
 
         {
