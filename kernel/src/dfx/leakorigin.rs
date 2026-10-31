@@ -120,12 +120,12 @@ static TABLE: [LoSlot; SLOTS] = {
 #[inline]
 fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
     let a = task as usize;
-    // preempt-hunt: the old (a >> 6 ^ a >> 12) mix aliased every pair of
-    // task structs one 16MB stride apart (Task allocation observed at
-    // exactly 0x1000000 strides on x86_64 — bits above 12 were identical,
-    // so distinct tasks shared slots and produced bogus
-    // ACQUIRE-PAIR-SPLITs and shadowed records). Fold bits 6..27.
-    &TABLE[(a >> 6 ^ a >> 13 ^ a >> 19 ^ a >> 25) & SLOT_MASK]
+    // preempt-hunt: XOR-of-shifts mixes alias — for every shift set there
+    // are address strides (observed live: 0x1000000, then 0x2080000)
+    // whose contributions XOR to zero, making distinct task structs share
+    // slots (bogus ACQUIRE-PAIR-SPLITs, shadowed records). Fibonacci
+    // multiplication: no constant stride aliases.
+    &TABLE[(a.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 53) & SLOT_MASK]
 }
 
 /// Record a PREEMPT_OFFSET acquire (last wins). Called from
