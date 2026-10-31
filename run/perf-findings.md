@@ -1071,3 +1071,41 @@ Remaining in the row (next levers, filed): resolve_user_path's String
 (1.26us — an alloc + copy per open), path_lookup 2.72us (dcache walk
 cost vs the reference's 0.23us whole-stat), close 1.67us (drain +
 registries). G3 (read_cached 20x) shares all of these.
+
+## G3a (LANDED): jbd2 transaction dirty-buffer set was a linear-scan Vec — O(set^2) per lazy-commit batch
+
+The fsw counters on a 16k-op metadata workload (mkdir/rmdir/creat/
+unlink loops, test/metaanat.c, fsw=1) showed J_DEDUP_ITERS = 3.18M
+over 14k journal ops (~227 scan iterations per registration, growing
+with batch position): every jbd2_journal_get_write_access /
+get_create_access / dirty_metadata call deduped by scanning
+t_dirty_buffers linearly UNDER the transaction spinlock, and the
+lazy-commit batch grows to LAZY_COMMIT_MAX_BUFFERS (1024).
+
+Fix: Transaction::t_dirty_buffers is now a BTreeMap<u64,
+TxnBufferKind> — O(log n) membership/insert, O(log n) kind flips
+(dirty_metadata's Created->Live), O(log n) forget. Commit iterates in
+block order (dedup guarantees each block appears once; replay applies
+whole blocks, so order carries no semantic weight). All eight call
+sites updated; commit's mem::take + Created-filter unchanged in shape.
+
+Numbers (same rig, fsw=1 A/B, run/pg3-metaanat*.out):
+- J_DEDUP_ITERS: 3,177,281 -> 64,047 per identical workload (50x; the
+  remainder is the one probe note per registration).
+- v_mkdir_rmdir med 113.1 -> 96.3 us (p10 88.3 -> 84.0)
+- v_mkdir_only med 170.4 -> 155.0 (p10 77.5 -> 64.3)
+- v_unlink med 21.6 -> 20.3 (p10 21.2 -> 20.1)
+- Full battery: p6_mkdrmdir 206.6 -> 205.4 (flat — the battery's
+  mkdir+rmdir shape interleaves a file create, diluting the win),
+  p6_unlink 52.7 -> 46.0, board regression scan clean (>1.25x: none).
+
+What is LEFT in mkdir/rmdir (~50 us + ~40 us kernel bracket): the
+per-metadata-block buffer machinery — each op does ~6.5 bread calls
+(buffer-cache hits), ~1.6 write_inode, ~1.1 big-lock acquisitions, and
+the rmdir phases split evenly (find+empty 12 us, entry delete 12,
+inode rewrites 6, free_inode 13, free_blocks 11 — avg per op, commit
+outliers excluded). That is the next lane's shape: a per-op metadata
+write-path cost, not a journal-commit cost (commits batch already).
+
+Instrument: test/metaanat.c (mkdir/rmdir/creat-unlink loops + idle
+past two fsw dump boundaries; cmdline fsw=1).
