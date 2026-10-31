@@ -1928,18 +1928,28 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                     }
                 }
                 if !deaths.is_empty() {
+                    // lb51: the notice lines print under WORLD — use the
+                    // lockless writer and a budget (a big proc death
+                    // carries dozens of armed refs across holder procs;
+                    // see the DRS tap note). Collected (desc, cookie)
+                    // pairs print AFTER the qim borrow ends.
+                    static NOTICE_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let mut printed = Vec::new();
+                    if NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                        printed = deaths.clone();
+                    }
+                    for (desc, cookie) in printed {
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        use core::fmt::Write as _;
+                        let _ = writeln!(
+                            w,
+                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
+                            q.pid, desc, cookie, proc.pid
+                        );
+                    }
                     let qim = pm(world, &q).im();
                     for (desc, cookie) in deaths {
-                        // lb48: WARN so the notice survives LOGLEVEL=6
-                        // boots (was pr_info, invisible in the sixth
-                        // successor's taps).
-                        crate::pr_warn!(
-                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
-                            q.pid,
-                            desc,
-                            cookie,
-                            proc.pid
-                        );
                         qim.todo.push_back(Work::DeadBinder { desc, cookie });
                     }
                     wake_targets.push(q.clone());
@@ -2131,7 +2141,16 @@ unsafe fn dead_reply_to_sender(
     if ams46_on() {
         static DRS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         if DRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
-            crate::pr_warn!(
+            // lb51: WORLD is held here — a printk-path WARN under a
+            // backpressured console held the global binder lock past the
+            // 2 s watchdog (DEADLOCK prints named lock=..., the WORLD
+            // symbol) and wedged lb48/lb50/lb51. All death-event taps
+            // that run under WORLD print through the lockless batched
+            // ConsoleWriter instead (same discipline as SLOW-TXN).
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            use core::fmt::Write as _;
+            let _ = writeln!(
+                w,
                 "AMS46-DRS dying pid{} txn{} code{:#x} from pid{} tid{}",
                 dying.pid,
                 txn.id,
@@ -2720,16 +2739,26 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                 if matches!(d.phase, DeathPhase::Armed) {
                                     d.phase = DeathPhase::Queued;
                                     // lb48: the child-node death notice
-                                    // (reg_tgid exit path) — same WARN
-                                    // class as the proc-exit notice.
-                                    crate::pr_warn!(
-                                        "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
-                                        q.pid,
-                                        r.desc,
-                                        d.cookie,
-                                        owner.pid,
-                                        tgid
-                                    );
+                                    // (reg_tgid exit path) — same class as
+                                    // the proc-exit notice. lb51: lockless
+                                    // writer + budget (under WORLD).
+                                    static CNOTICE_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if CNOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 120
+                                    {
+                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        use core::fmt::Write as _;
+                                        let _ = writeln!(
+                                            w,
+                                            "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
+                                            q.pid,
+                                            r.desc,
+                                            d.cookie,
+                                            owner.pid,
+                                            tgid
+                                        );
+                                    }
                                     qim.im().todo.push_back(Work::DeadBinder {
                                         desc: r.desc,
                                         cookie: d.cookie,
@@ -5884,7 +5913,10 @@ fn binder_thread_write(
                                             .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                             .map(|q| q.pid)
                                             .unwrap_or(0);
-                                        crate::pr_warn!(
+                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        use core::fmt::Write as _;
+                                        let _ = writeln!(
+                                            w,
                                             "AMS46-ARM dup pid={} desc={} cookie={:#x} owner={} phase={:?}",
                                             proc.pid,
                                             target,
@@ -5916,6 +5948,7 @@ fn binder_thread_write(
                                 // whole budget on the boot-start arm storm
                                 // (240 gone by ~35 s), dark exactly over the
                                 // account phase the map exists for.
+                                // lb51: lockless writer (under WORLD).
                                 let j = crate::drivers::timer::get_jiffies();
                                 if j >= 1000
                                     && ARM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
@@ -5927,7 +5960,10 @@ fn binder_thread_write(
                                         .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                         .map(|q| q.pid)
                                         .unwrap_or(0);
-                                    crate::pr_warn!(
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
                                         "AMS46-ARM pid={} desc={} cookie={:#x} owner={} nodedead={}",
                                         proc.pid,
                                         target,
