@@ -87,6 +87,7 @@ STATUS = {
     "kernel/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/src/fs/cgroup.rs": ("todo", ""),
     "kernel/src/fs/char_dev.rs": ("todo", ""),
+    "kernel/src/fs/vt.rs": ("todo", ""),
     "kernel/src/fs/debugfs.rs": ("done", "written by this review (debugfs)"),
     "kernel/src/fs/dentry.rs": ("part", "per-directory locking"),
     "kernel/src/fs/devfs/mod.rs": ("todo", ""),
