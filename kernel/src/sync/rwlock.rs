@@ -158,9 +158,12 @@ impl<T> RwSpinlock<T> {
 
     /// Preempt disable + read lock.
     /// Guard drop: read unlock + preempt enable.
+    /// track_caller: leakorigin's outermost-acquire shadow records the
+    /// LOCK CALLER's site (preempt-hunt), not this helper's line.
     #[inline]
+    #[track_caller]
     pub fn read(&self) -> RwSpinlockReadGuard<'_, T> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.read();
         RwSpinlockReadGuard { lock: self }
     }
@@ -168,8 +171,9 @@ impl<T> RwSpinlock<T> {
     /// Preempt disable + write lock.
     /// Guard drop: write unlock + preempt enable.
     #[inline]
+    #[track_caller]
     pub fn write(&self) -> RwSpinlockWriteGuard<'_, T> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.write();
         RwSpinlockWriteGuard { lock: self }
     }
@@ -180,7 +184,7 @@ impl<T> RwSpinlock<T> {
     #[track_caller]
     pub fn read_irqsave(&self) -> RwSpinlockIrqReadGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.read();
         RwSpinlockIrqReadGuard { lock: self, flags }
     }
@@ -191,7 +195,7 @@ impl<T> RwSpinlock<T> {
     #[track_caller]
     pub fn write_irqsave(&self) -> RwSpinlockIrqWriteGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.write();
         RwSpinlockIrqWriteGuard { lock: self, flags }
     }
@@ -217,8 +221,9 @@ impl<T> RwSpinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_read(&self) -> Option<RwSpinlockReadGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_read() {
             Some(RwSpinlockReadGuard { lock: self })
         } else {
@@ -228,8 +233,9 @@ impl<T> RwSpinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_write(&self) -> Option<RwSpinlockWriteGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_write() {
             Some(RwSpinlockWriteGuard { lock: self })
         } else {
@@ -446,9 +452,22 @@ impl<T: ?Sized> Drop for RwSpinlockBhWriteGuard<'_, T> {
 // ==================== Inline helpers ====================
 
 #[inline]
+#[track_caller]
 fn preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add(
+    crate::interrupt::preempt::preempt_count_add_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
+    );
+}
+
+/// As `preempt_disable`, booking the caller-of-the-lock's location (the
+/// #[track_caller] lock helpers forward their own caller down so the
+/// leakorigin shadow names the real acquire site; preempt-hunt).
+#[inline]
+fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
+    crate::interrupt::preempt::preempt_count_add_at(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+        loc,
     );
 }
 

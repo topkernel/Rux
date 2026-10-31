@@ -85,6 +85,15 @@ struct LoSlot {
     /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
     /// (tp vs slot divergence — the stale-tp / mid-switch window family).
     omis: AtomicU32,
+    /// When omis=1: the task pointer the sched slot named at acquire
+    /// time (0 = unreadable). Identifies WHICH window the divergent
+    /// booking ran in (preempt-hunt).
+    oslot: AtomicUsize,
+    /// jiffies of the last user-return report for this slot
+    /// (preempt-hunt rate gate: one stuck +1 re-reports on every guard
+    /// re-acquire; 50-jiffy spacing keeps the episode signature without
+    /// flooding the budget).
+    urrep_jif: AtomicU64,
 }
 
 static TABLE: [LoSlot; SLOTS] = {
@@ -102,6 +111,8 @@ static TABLE: [LoSlot; SLOTS] = {
         ojif: AtomicU64::new(0),
         ocpu: AtomicU32::new(0),
         omis: AtomicU32::new(0),
+        oslot: AtomicUsize::new(0),
+        urrep_jif: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -109,7 +120,12 @@ static TABLE: [LoSlot; SLOTS] = {
 #[inline]
 fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
     let a = task as usize;
-    &TABLE[(a >> 6 ^ a >> 12) & SLOT_MASK]
+    // preempt-hunt: the old (a >> 6 ^ a >> 12) mix aliased every pair of
+    // task structs one 16MB stride apart (Task allocation observed at
+    // exactly 0x1000000 strides on x86_64 — bits above 12 were identical,
+    // so distinct tasks shared slots and produced bogus
+    // ACQUIRE-PAIR-SPLITs and shadowed records). Fold bits 6..27.
+    &TABLE[(a >> 6 ^ a >> 13 ^ a >> 19 ^ a >> 25) & SLOT_MASK]
 }
 
 /// Record a PREEMPT_OFFSET acquire (last wins). Called from
@@ -153,7 +169,12 @@ pub fn note_acquire(
                         as *const *mut crate::process::Task
                 ) as usize
             };
-            (slot_task != task as usize) as u32
+            if slot_task != task as usize {
+                slot.oslot.store(slot_task, Ordering::Release);
+                1
+            } else {
+                0
+            }
         } else {
             2
         };
@@ -282,6 +303,12 @@ pub fn note_hardirq_acquire(
 /// User-mode return tripwire. Call at the trap-handler tail when the
 /// frame returns to userspace: preempt_count MUST be 0 there. Direct
 /// console, latched per episode, budgeted.
+///
+/// preempt-hunt rate gate: a task carrying a stuck +1 re-acquires inner
+/// guards constantly (every lock it touches re-arms the episode latch),
+/// which flooded the shared budget within seconds (374 lines for one
+/// carrier in the first 20s of ph1). Space reports 50 jiffies apart per
+/// task and give the face its own budget.
 pub fn check_user_return() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -301,6 +328,12 @@ pub fn check_user_return() {
     if slot.reported.swap(true, Ordering::AcqRel) {
         return;
     }
+    let now = crate::drivers::timer::get_jiffies();
+    let last = slot.urrep_jif.load(Ordering::Acquire);
+    if now.wrapping_sub(last) < 50 {
+        return;
+    }
+    slot.urrep_jif.store(now, Ordering::Release);
     emit(b"\nLEAK-ORIGIN user-return", task, pc);
 }
 
@@ -454,6 +487,16 @@ pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
             putchar(c);
         }
         putd(mis as u64);
+        let osl = slot.oslot.load(Ordering::Acquire);
+        if osl != 0 {
+            for &c in b" oslot=0x" {
+                putchar(c);
+            }
+            for sh in (0..16).rev() {
+                let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            }
+        }
     }
     for &c in b" oage_jif=" {
         putchar(c);
@@ -581,6 +624,16 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
                 putchar(c);
             }
             put_i64(slot.omis.load(Ordering::Acquire) as i64);
+            let osl = slot.oslot.load(Ordering::Acquire);
+            if osl != 0 {
+                for &c in b" oslot=0x" {
+                    putchar(c);
+                }
+                for sh in (0..16).rev() {
+                    let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
         }
     }
     putchar(b'\n');
