@@ -525,3 +525,112 @@ lb20 (running at write time): full 2400s, current branch.
   userId-0 launcher hole (see above) — image-side or perf-side; (3) once a
   boot keeps foundation alive through activation, the launcher should spawn
   (systemui already does) and the GL/scanout chain is proven.
+
+## FOURTH-SUCCESSOR SESSION (2026-10-31 17:00-18:xx, branch oh-launcher @ 49df47b8+)
+Base c23045fe + this session. THE WALL WAS MOSTLY A MISSING /data.
+
+### THE BIG FINDING — every boot from lb16 through lb26 ran WITHOUT /data
+1. a6b01fd9 (main, cr2 csum review, 11:49) tightened superblock_csum_ok
+   from a 16-bit to the FULL 32-bit compare (correct per e2fsprogs).
+2. run/userdata-fresh.img (cooked 08:26 by the PRE-fix kernel whose sb
+   sealer wrote only the low u16, snapshot=on ever since so it looked
+   pristine) fails the new check: stored le32 0x4e8183c6 vs computed
+   0x5b8283c6 — low 16 bits match (why lb1-lb15 mounted it), high 16
+   are the stale old-seal. Verified on-host with a crc32c recompute.
+3. Effect: EVERY boot lb16..lb26 (the whole third-successor campaign,
+   INCLUDING lb20/lb21) logged `mount[10] vdf -> /data: -5` x3 +
+   "ext4: superblock checksum invalid". /data never mounted; the
+   distributed cluster (softbus LNN store, distributeddata RDBs,
+   accountmgr osaccount DB) ran on an unmounted read-only empty /data.
+   The "softbus starvation wall" was largely SOFTBUS HAVING NO DATABASE
+   DIRECTORY — its LNN init can never finish, so every device_manager
+   LNN query burned its 5.24s timeout (x102 on lb20).
+4. FIX (this session): run/userdata-fresh2.img = fresh mke2fs 16G ext4
+   (T3 recipe; sb csum passes the full-32-bit check bit-for-bit) +
+   USERDATA env in lb-boot.py. NEVER boot the old userdata-fresh.img
+   again on a post-a6b01fd9 kernel — recook instead.
+
+### lb27 PROOF (release kernel + fresh /data; the healthiest boot ever)
+- /data mounts rc=0 first try; no dsoftbus mkdirfails.
+- SetBundleQuota for /data/app/el2/100/base/com.ohos.launcher @138s;
+  StorageDaemon StartUser(100) COMPLETES in 64ms @237s;
+  startup.appspawn.lockstatus_100 SET; USER_ADDED + USER_UNLOCKED fire;
+  bootevent.bms.main.bundles.ready @237.9s; wms.fullscreen.ready TRUE;
+  ZERO device_manager code-3 timeout chains (lb20: 102); 8521220 GONE
+  (the userId-0 hole closed itself once /data existed); SLOW-TXN total
+  18/boot. The account ACTIVATION completes.
+- NOT yet landed: the AMS launcher START (no AMSI1640, no
+  com.ohos.launcher process, screen still the frozen logo md5
+  06b933b4 through 911s). bootevent.account.ready is watched (pid 1
+  msgId 26) but never SET — find what sets it on the reference kernel.
+- lb28 (dfx=ams46): StartUser oneway LATCHED (node=12710 pid=876
+  foundation @283s) — this boot's SA-load phase ran the slow samgr
+  code-7 family again (29-75s exec), unlock not reached by 663s.
+  Boot-to-boot variance in the huks/account keygen path decides it.
+
+### Scheduler work landed (commits 49df47b8 + 0fa06de4 + bb82cac2)
+1. CLAIM-SWEEP (fair.rs claim_sweep + scheduler_tick hook): the pick-side
+   stale-claim heal was ORDER-DEPENDENT (walks stop at the first allowed
+   leftmost; a mid-tree victim with frozen vruntime is never examined —
+   lb20's pid 724 lost 579s between resets). Once per 100 jiffies one
+   CPU sweeps the whole timeline under the GRQ with the pick-side
+   adjudication: {on_cpu=false, claim!=-1} owned by no slot/switch-out
+   -> reset claim; linked+on_cpu orphaned-mark shape (ownerless +
+   50-jiffy exec-frozen orphan-watch confirm) -> full-qword release.
+   Census line (dfx=wwcensus) names pids of both classes. lb22-lb25
+   validated: zero false heals (every oncpu sighting was owner-backed);
+   no cluster thread was ever stale-claimed on those boots — the claim
+   stranding class was NOT the softbus killer (the missing /data was).
+2. tfdcensus (dfx=tfdcensus): windowed TFDC tap (first 16 calls per 5s
+   window). Storm callers named: companion_device (42), useriam (20),
+   time_service (10), OS_IPC workers, usb_host. Entry point 4 CLOSED
+   (naming); the storm is fd-churn COST, not a timerfd leak — timeouts
+   expire on schedule.
+3. TXN-HANG lens (lb24, dfx=txnhunt+poolcensus): binder delivery is
+   CLEAN (zero queued todo across the whole boot; no stuck inbound
+   sync txn into softbus). The 30-55s waits are userspace-INTERNAL
+   futex waits inside executing handlers (accountmgr tid 976 sys=202
+   FUTEX_WAIT 31s; foundation main thread 55s; nested BWR reads 50s) —
+   exec-class compute/condition waits, NOT kernel scheduling strands.
+4. leakhunt (lb25, dfx=leakhunt): the phantom base-bit (+1) acquire
+   sites on the carriers (pids 318/512/537/601): spinlock.rs:292,
+   mm/slab.rs:628, mm/small_alloc.rs:283, mm/buddy_allocator.rs:857,
+   sync/rwlock.rs — the ALLOCATOR-lock family. Producer still at large
+   (r83hunt territory; the wild-write/replayed-acquire split unknown).
+5. Release kernel: target/x86_64-unknown-none/release/bzImage
+   (build-release target) boots the image fine — 6x wake throughput,
+   appfwk.ready 132-169s (debug: 217-328s). Same wall without /data
+   (lb26), clean with it (lb27) — proves the wall was not compute.
+   NOTE: release strand tail exists (stranded=70, strand_max=24s class
+   on lb27) — worth one syscost look before relying on release boots.
+
+### FIFTH-SUCCESSOR ENTRY POINTS (in order)
+1. THE LAUNCHER START: boot release kernel + USERDATA=run/userdata-
+   fresh2.img + dfx=ams46,txnhunt; watch AMSI1640/SwitchToUser/appspawn
+   spawn of com.ohos.launcher after lockstatus_100. Variance: lb27-class
+   boots unlock at ~237s; lb28-class get stuck in the samgr code-7 30s
+   exec family — if an ams46 boot shows the StartUser oneway delivered
+   but not executed (the walled-draw shape the arsenal was built for),
+   that print names the drop site.
+2. bootevent.account.ready is never SET (only watched): compare with the
+   reference kernel (14.4s boot) which service/param job sets it; likely
+   an init condition job that depends on a service which is slow/dead.
+3. The re-leak producer (unchanged): allocator-lock acquire sites above;
+   r83hunt + leakhunt together on one boot.
+4. Perf-gate note for the coordinator: this session's sched changes
+   (CLAIM-SWEEP = once-per-second GRQ-held timeline walk) are Tier-2
+   guarded-domain (sched/); needs syscost + pbench gate before any
+   merge to main.
+
+### Boot inventory this session
+lb22 (dfx=wwcensus,schedtrace, debug): claim sweep live, 17 pick-side
+  resets, cluster threads never stale-claimed; timeout loop present.
+lb23 (+full sweep): softbus pid 731 REPLIES code-8 in 2.6s (not silent);
+  TFDC windowed census first data; timeout loop still present (no /data).
+lb24 (poolcensus+txnhunt): TXN-HANG futex-wait picture; no queued todo.
+lb25 (leakhunt+futextrace): phantom acquire sites named; no key-mismatch
+  prints (no lost futex wakes observed).
+lb26 (RELEASE kernel, no /data): same wall → wall is not compute.
+lb27 (release + fresh /data): MILESTONE boot — see above.
+lb28 (release + fresh /data + ams46): slow SA-load variant, evidence in
+  run/oh-lb28-serial.log.
