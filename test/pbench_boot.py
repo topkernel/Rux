@@ -47,7 +47,7 @@ def foreign_qemus():
 def build_probe(out, src=None):
     if src is None:
         src = os.path.join(HERE, "pbench.c")
-    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-o", out, src]
+    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-pthread", "-o", out, src]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("[build] compile failed: %s" % r.stderr)
@@ -107,6 +107,11 @@ def main():
                     help="stage the pbench_p3d wrapper (sets P3D=1 in the "
                          "probe's env then execs it) — enables the P3d "
                          "concurrent-fault contention row (ledger 8.10.27)")
+    ap.add_argument("--p2f", action="store_true",
+                    help="stage the pbench_p2f wrapper (boots init=/test/"
+                         "pbench_p2f -> probe argv 'p2fonly': just the "
+                         "futex wake->run battery — quiet + kernel-hog + "
+                         "user-hog regimes, perf-sched lane)")
     ap.add_argument("--nojournal", action="store_true",
                     help="F4 arm-1 (leg 44): mkfs the probe rootfs WITHOUT "
                          "has_journal so the fs rows run the no-journal "
@@ -156,6 +161,11 @@ def main():
         if not build_probe(arm, src=os.path.join(HERE, "pbench_p3d_arm.c")):
             return 2
         init_path = "/test/pbench_p3d"
+    if args.p2f:
+        arm = os.path.join(WORK, "pbench_p2f")
+        if not build_probe(arm, src=os.path.join(HERE, "pbench_p2f_arm.c")):
+            return 2
+        init_path = "/test/pbench_p2f"
     if args.long_p5:
         # leg 46: stage the wrapper as an extra image file and boot it
         # (the probe itself is still staged — the wrapper execve's it).
