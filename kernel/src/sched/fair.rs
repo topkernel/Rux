@@ -1503,11 +1503,7 @@ impl CfsRunQueue {
             // the whole strand window. Armed only under dfx=schedtrace.
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
                 note_pick_skip(task, skip_reason as u8);
-            }            // Not allowed — remove temporarily and stash (the entity's
-            // recorded key stays valid: the re-insert below uses the same
-            // key, so linkage-through-key remains exact across the stash
-            // window, all under this one GRQ hold).
-            self.timeline_remove(&key);
+            }
             // Not allowed — remove temporarily and stash (the entity's
             // recorded key stays valid: the re-insert below uses the same
             // key, so linkage-through-key remains exact across the stash

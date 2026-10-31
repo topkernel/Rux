@@ -292,6 +292,17 @@ fn mark_inode_used(
         write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
     }
 
+    // metadata_csum: refresh the inode bitmap csum in the group
+    // descriptor (same discipline as the allocator's write_inode_bitmap;
+    // this site bypasses the allocator helpers).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::allocator::group_of_bitmap(fs, bitmap_block, true) {
+            let _ = super::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
+    }
+
     Ok(())
 }
 
@@ -360,6 +371,12 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // the ghost-empty-file publication order is untouched.
         // Persistence happens at the standing drain points (fsync /
         // sync_buffers, eviction of the dirty buffer).
+        // metadata_csum: re-seal the superblock checksum (see the
+        // allocator's update_superblock_free_blocks).
+        if fs.metadata_csum {
+            let data: &mut [u8] = &mut (*bh).b_data;
+            super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
+        }
         (*bh).set_state_bit(BufferState::BH_Dirty);
         bio::brelse(bh);
     }
@@ -411,6 +428,17 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
     block_data[offset..offset + write_len].copy_from_slice(&gd_bytes[..write_len]);
+
+    // metadata_csum: this descriptor was just rewritten — re-seal its
+    // bg_checksum over the final content (the read path verifies it at
+    // every mount; the cook lineage boots writable /data persistently).
+    if fs.metadata_csum {
+        super::csum::group_desc_csum_set(
+            fs.csum_seed,
+            group,
+            &mut block_data[offset..offset + fs.desc_size as usize],
+        );
+    }
 
     // Write back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
@@ -519,19 +547,30 @@ fn ext4_add_entry_locked(
 
         // Try to find space in this block
         if let Some(offset) = find_entry_space(&block_data, name.len(), block_size) {
-            // Found space, create entry
+            // Found space, create entry. add_entry_to_block now reports
+            // "no space" (Err) when the selected slot cannot host the
+            // entry (e.g. a live entry whose slack is exactly the used
+            // length); on that, try the NEXT block instead of returning
+            // a success that never linked anything (oh-svc cook bug).
             let mut new_block = block_data.clone();
-            add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
+            match add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size) {
+                Ok(()) => {
+                    // metadata_csum: finalize the dir block's checksum tail.
+                    dir_block_seal(fs, dir_ino, &mut new_block);
+                    // Write block back — ORDERED: everything this entry publishes
+                    // (the new inode's table block, bitmaps, data blocks) is
+                    // persisted BEFORE the entry block itself.
+                    // SAFETY: same contract as write_block_from_vec.
+                    unsafe {
+                        write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    }
 
-            // Write block back — ORDERED: everything this entry publishes
-            // (the new inode's table block, bitmaps, data blocks) is
-            // persisted BEFORE the entry block itself.
-            // SAFETY: same contract as write_block_from_vec.
-            unsafe {
-                write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Fall through to the next block / fresh allocation.
+                }
             }
-
-            return Ok(());
         }
     }
 
@@ -544,6 +583,8 @@ fn ext4_add_entry_locked(
     // Create new block with entry
     let mut new_block = alloc::vec![0u8; block_size];
     create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
+    // metadata_csum: finalize the fresh dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut new_block);
 
     // Write new block — ORDERED (see the in-place path above): the freshly
     // allocated block's bitmap bit persists before the entry that names it.
@@ -556,6 +597,18 @@ fn ext4_add_entry_locked(
     add_block_to_inode(fs, dir_ino, &dir, new_block_nr)?;
 
     Ok(())
+}
+
+/// metadata_csum: finalize a directory block with its checksum tail
+/// (struct ext4_dir_tail at the very end — det_reserved_zero1=0 plus
+/// crc32c over the inode-seeded block). The last dirent's rec_len covers
+/// the tail by construction (every entry chain ends at the block edge).
+/// Call on every finalized dir block immediately before its write.
+pub(crate) fn dir_block_seal(fs: &Ext4FileSystem, dir_ino: u32, block_data: &mut [u8]) {
+    if fs.metadata_csum {
+        let seed = super::csum::inode_csum_seed(fs.csum_seed, dir_ino);
+        super::csum::dir_block_csum_set(seed, block_data);
+    }
 }
 
 /// Serializes directory-entry mutations (add / delete / rename).
@@ -636,7 +689,16 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         if ino == 0 {
             // Deleted entry — can reuse if large enough
             if rec_len >= required_len {
-                return Some(offset);
+                // metadata_csum dir blocks reserve the final 8 bytes for
+                // the checksum tail (struct ext4_dir_tail), covered by
+                // the last entry's rec_len. A deleted slot whose span
+                // reaches the block end can only host the new entry when
+                // the entry's own span stays short of the tail — and the
+                // tail is re-derived by dir_block_seal after the write.
+                if offset + required_len as usize <= block_size - 8 {
+                    return Some(offset);
+                }
+                return None;
             }
         } else {
             let name_len_entry = block_data[offset + 6] as usize;
@@ -655,42 +717,84 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
 }
 
 /// Add entry to directory block at given offset
+///
+/// Returns Err(ENOSPC-shaped) when the slot cannot host the entry, so the
+/// caller can fall through to the next block / a fresh block instead of
+/// reporting a successful link that was never written.
+///
+/// Deleted-slot reuse (oh-svc cook lineage bug, 2026-10-31): when
+/// find_entry_space hands us an inode-0 slot (an unlinked entry — e.g.
+/// slots cleared by host-side e2fsck on the cooked userdata image), the
+/// slot's full rec_len is free space; the stale name_len of the dead
+/// entry is NOT a live prefix. The old code always treated the slot as a
+/// live entry: with rec_len == used_len(stale name_len) it took the
+/// early `return` WITHOUT writing anything, while the caller still
+/// returned Ok(()) — mkdir "succeeded", the allocated inode was never
+/// linked, and every later lookup of the name saw the dead entry and
+/// failed with ENOENT (the whole OH first-boot /data population
+/// silently no-oped).
 fn add_entry_to_block(
     block_data: &mut [u8],
     offset: usize,
     name: &[u8],
     ino: u32,
     file_type: u8,
-    _block_size: usize,
-) {
-    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
-    let existing_name_len = block_data[offset + 6] as usize;
-    let used_len = ((8 + existing_name_len + 3) & !3) as u16;
+    block_size: usize,
+) -> Result<(), i32> {
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]) as usize;
+    let slot_ino = u32::from_le_bytes([
+        block_data[offset],
+        block_data[offset + 1],
+        block_data[offset + 2],
+        block_data[offset + 3],
+    ]);
 
-    // Safety: ensure rec_len > used_len before subtracting
-    if rec_len <= used_len {
-        return;
+    // Space the new entry itself needs (4-byte aligned, min 8).
+    let required_len = (8 + name.len() + 3) & !3;
+    if required_len > block_size || offset + required_len > block_size {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
-    // Calculate new entry length
-    let new_rec_len = rec_len - used_len;
+    let (new_offset, new_rec_len) = if slot_ino == 0 {
+        // Deleted entry: the WHOLE rec_len is free. Replace in place.
+        (offset, rec_len)
+    } else {
+        // Live entry: split off its slack.
+        let existing_name_len = block_data[offset + 6] as usize;
+        let used_len = (8 + existing_name_len + 3) & !3;
+        if rec_len <= used_len || rec_len - used_len < required_len {
+            // find_entry_space should never select such a slot for a live
+            // entry; if it does, report no-space instead of a silent no-op.
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+        // Shrink the existing entry to its used length.
+        let used_bytes = (used_len as u16).to_le_bytes();
+        block_data[offset + 4] = used_bytes[0];
+        block_data[offset + 5] = used_bytes[1];
+        (offset + used_len, rec_len - used_len)
+    };
 
-    // Update existing entry's record length
-    let used_bytes = used_len.to_le_bytes();
-    block_data[offset + 4] = used_bytes[0];
-    block_data[offset + 5] = used_bytes[1];
+    if new_offset + new_rec_len > block_size {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
 
-    // Create new entry after existing
-    let new_offset = offset + used_len as usize;
+    // If the slack after the new entry can host another header, leave it
+    // as a free (inode-0) tail entry like ext4 does; otherwise fold the
+    // remainder into the new entry's rec_len.
+    let write_rec_len = if new_rec_len - required_len >= 8 {
+        required_len
+    } else {
+        new_rec_len
+    };
 
     // Write inode number
     let ino_bytes = ino.to_le_bytes();
     block_data[new_offset..new_offset + 4].copy_from_slice(&ino_bytes);
 
     // Write record length
-    let new_rec_bytes = new_rec_len.to_le_bytes();
-    block_data[new_offset + 4] = new_rec_bytes[0];
-    block_data[new_offset + 5] = new_rec_bytes[1];
+    let rec_bytes = (write_rec_len as u16).to_le_bytes();
+    block_data[new_offset + 4] = rec_bytes[0];
+    block_data[new_offset + 5] = rec_bytes[1];
 
     // Write name length
     block_data[new_offset + 6] = name.len() as u8;
@@ -700,6 +804,20 @@ fn add_entry_to_block(
 
     // Write name
     block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+
+    // Free tail entry for the remainder, if any.
+    let tail_offset = new_offset + write_rec_len;
+    if new_rec_len > write_rec_len {
+        let tail_rec = (new_rec_len - write_rec_len) as u16;
+        let tail_bytes = tail_rec.to_le_bytes();
+        block_data[tail_offset..tail_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        block_data[tail_offset + 4] = tail_bytes[0];
+        block_data[tail_offset + 5] = tail_bytes[1];
+        block_data[tail_offset + 6] = 0;
+        block_data[tail_offset + 7] = 0;
+    }
+
+    Ok(())
 }
 
 /// Crash-safe ordering for directory-entry writes (deferred form).
@@ -945,6 +1063,9 @@ fn ext4_mkdir_no_journal(
     let dotdot_entry = create_dotdot_entry(dir_ino, dotdot_rec_len);
     block_data[dotdot_offset..dotdot_offset + 8].copy_from_slice(&dotdot_entry);
     block_data[dotdot_offset + 8..dotdot_offset + 11].copy_from_slice(b"..\0");
+
+    // metadata_csum: finalize the fresh dir block's checksum tail.
+    dir_block_seal(fs, new_ino, &mut block_data);
 
     // Write directory block
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
@@ -1529,6 +1650,9 @@ fn ext4_delete_entry_locked(
     // Clear the entry (set inode to 0)
     block_data[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
 
+    // metadata_csum: finalize the dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut block_data);
+
     // Write block back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
@@ -2054,6 +2178,15 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
         write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
     }
 
+    // metadata_csum: refresh the inode bitmap csum (see mark_inode_used).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::allocator::group_of_bitmap(fs, bitmap_block as u64, true) {
+            let _ = super::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
+    }
+
     // Update group descriptor
     update_group_descriptor_inodes(fs, group, 1)?;
 
@@ -2453,6 +2586,9 @@ fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Resu
     block_data[dotdot_offset + 1] = new_parent_bytes[1];
     block_data[dotdot_offset + 2] = new_parent_bytes[2];
     block_data[dotdot_offset + 3] = new_parent_bytes[3];
+
+    // metadata_csum: finalize the dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut block_data);
 
     // Write block back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.

@@ -149,3 +149,21 @@ run/**/*.started
 # fleet evidence logs are lane-local scratch (untracked 2026-10-29)
 run/fleet/logs/*.wedge
 run/fleet/sweep-latest.txt
+
+# disk images and extracted guest trees never live in the repo
+# (central store: /home/william/rux-images/ — symlink locally if needed)
+run/oh-img
+run/oh-x/
+run/oh-syms/
+run/fleet/bin/
+run/**/*.wedge
+run/**/*.wedgetail
+run/**/*.path
+
+# C sources are tarball-packed, not tracked (stats policy 2026-10-31);
+# scripts/extract-probes.sh restores them on demand
+toolchain/x86_64-rux-linux-musl/
+test/**/*.c
+run/*.c
+run/oh-x/
+userspace/tests/smoke_test/*.c

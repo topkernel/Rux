@@ -1117,7 +1117,52 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if crate::drivers::drm::is_drm_file(&file) {
-                return crate::drivers::drm::drm_ioctl(request, arg);
+                let ret = crate::drivers::drm::drm_ioctl(request, arg);
+                // oh-svc T1: name the llvmpipe displaytarget_map failure —
+                // the render_service assert (jit_tex->base, lp_setup.c:1072)
+                // fires exactly when the kms sw winsys's MAP_DUMB or its
+                // node mmap fails inside RS while the same chain works in
+                // isolation (glmprobe). Trace the MAP_DUMB requests and
+                // every failing drm ioctl — small budgets, no dfx gate.
+                if request == 0xc010_64b3 {
+                    // struct drm_mode_map_dumb: handle@0 (read via uaccess;
+                    // a bad arg just reports 0 — the trace is diagnostic).
+                    let mut hbuf = [0u8; 4];
+                    let uncopied =
+                        unsafe { crate::arch::uaccess::copy_from_user(hbuf.as_mut_ptr(), arg as *const u8, 4) };
+                    let handle = if uncopied == 0 {
+                        u32::from_le_bytes(hbuf)
+                    } else {
+                        0
+                    };
+                    static MAPDUMB_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = MAPDUMB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 64 {
+                        crate::pr_warn!(
+                            "drm: MAP_DUMB pid={} fd={} handle={:#x} ret={}",
+                            crate::process::current_pid(),
+                            fd,
+                            handle,
+                            ret
+                        );
+                    }
+                }
+                if ret < 0 {
+                    static IOCTLFAIL_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = IOCTLFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 40 {
+                        crate::pr_warn!(
+                            "drm: ioctl-fail req={:#x} pid={} fd={} ret={}",
+                            request,
+                            crate::process::current_pid(),
+                            fd,
+                            ret
+                        );
+                    }
+                }
+                return ret;
             }
             if crate::drivers::drm::is_prime_file(&file) {
                 if let Some(ret) = crate::drivers::drm::prime_file_ioctl(&file, request, arg) {
@@ -1175,6 +1220,20 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if let Some(ret) = crate::fs::pty::pty_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
+    // VT-layer ioctls (/dev/tty0../dev/ttyN: VT_OPENQRY/ACTIVATE/
+    // WAITACTIVE/SETMODE/GETMODE/GETSTATE/RELDISP + the KD_* family —
+    // gdm-session-worker's new-vt protocol, Xorg's VT takeover, logind
+    // TakeControl): dispatch on the File's ops identity (evdev/pty
+    // pattern). Non-VT files or unhandled requests return None.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::fs::vt::vt_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }
@@ -1578,6 +1637,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             }
             0
         }
+        // TIOCSCTTY - Make this fd the controlling terminal (0x540E).
+        // gdm-session-worker's session child does setsid() then
+        // ioctl(STDIN, TIOCSCTTY, 0) — the tty is the session VT.
+        // Controlling-terminal bookkeeping (SIGHUP delivery, TTY job
+        // control) is not modeled yet; accepting the request matches the
+        // observable contract for every current caller (the worker only
+        // logs on failure).
+        0x540E => 0,
         // TIOCGPGRP - Get foreground process group (0x540F)
         0x540F => {
             if arg == 0 {

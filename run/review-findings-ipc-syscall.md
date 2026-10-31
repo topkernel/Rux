@@ -1,0 +1,128 @@
+# Review findings — ipc-syscall lane (rv-ipc-syscall)
+
+Date: 2026-10-30/31. Scope: `kernel/src/ipc/**` + `kernel/src/syscall/**`.
+Focus per charter: errno mapping vs man pages, copy_*_user EFAULT
+semantics, retry/restart conventions. Reference sources used:
+ipc/{util,sem,msg,shm,mqueue}.c from kernel.org (master + v6.1 spot
+checks), man7 semop(2)/mq pages, LTP sources (semget01/02, semctl06,
+msgsnd02, msgctl03/12, shmat01, ioprio_set01/get01), in-repo r19 LTP
+results (`/home/william/rux-agents/ltp-r20/.ltp/results-r19.txt`).
+
+Gates per fix: [1] reference contract re-derived from source, [2] in-tree
+tests green, [3] no upper-layer breakage (LTP families that pass today
+stay passing by construction — every change checked against the r19
+pass/fail list and the specific LTP test sources).
+
+## FIXED (7 commits on rv-ipc-syscall, pushed)
+
+1. `ipc/util.rs` alloc(): existing-object permission demand now derived
+   from the get flags ((flg>>6)|(flg>>3)|flg)&7 = reference ipcperms().
+   Old hardcoded 06 made read-only gets (msgget(key,0444) on a 0444
+   queue) fail EACCES. [1] ipc/util.c:553-572 [2] make test green [3]
+   root-run LTP unaffected (capability bypass).
+2. `ipc/sysv_sem.rs` semget: nsems==0 is EINVAL only on the create path;
+   existing key ignores nsems (idiom semget(key,0,0) was broken); EEXIST
+   takes precedence over the nsems comparison; bare lookup of a missing
+   key → ENOENT (not EINVAL). [1] ipc/sem.c newary/ipcget_public [2][3]
+   semget01/02 shapes verified against LTP sources.
+3. `ipc/sysv_sem.rs` semctl: out-of-range sem_num for GETVAL/SETVAL/
+   GETNCNT/GETZCNT is EINVAL (not EFBIG — EFBIG is semop-only); SETVAL
+   checks val range first (ERANGE before id/semnum) and needs W only;
+   SETALL needs W only and now copies+validates the WHOLE user array
+   before storing any element (partial-application bug); semtimedop
+   expired deadline → EAGAIN (reference: `if (timed_out) error =
+   -EAGAIN`; man semop(2) documents EAGAIN — ETIMEDOUT never appears
+   there); all-zero (wait-for-zero) semop needs only read permission;
+   SEM_STAT_ANY drops the CAP_SYS_ADMIN gate (reference semctl_stat is
+   audit-only for STAT_ANY). [1] ipc/sem.c semctl_main/semctl_setval/
+   __do_semtimedop [2][3] r19: semctl01-07, semop01-05 PASS — no shape
+   they exercise changed.
+4. `ipc/sysv_msg.rs`: msgget ENOSPC only on the create path (bare lookup
+   → ENOENT); msgsnd unreadable msgp head → EFAULT (was silently EINVAL
+   via mtype=0); msgctl IPC_SET stores msg_qbytes unconditionally (0 is
+   legal — was silently ignored); msgrcv E2BIG check BEFORE unlink (no
+   rtime/lrpid update, no remove/reinsert churn); MSG_COPY validated
+   (EINVAL unless IPC_NOWAIT, EINVAL with MSG_EXCEPT) and honors
+   MSG_NOERROR; MSG_STAT_ANY drops CAP_SYS_ADMIN gate. [1] msg.c
+   do_msgsnd/do_msgrcv/msgctl_stat/msgctl_down [2][3] msgsnd02's EFAULT
+   case is a NULL pointer (passes either way); negative-msgtyp selection
+   re-derived from find_msg/testmsg — Rux's pick-lowest-type was already
+   correct (false alarm retracted before touching it).
+5. `ipc/sysv_shm.rs`: capacity checks (SHMMNI/SHMALL/SHMMIN/ctlmax/
+   hugetlb) apply only when a NEW segment is created (existing key
+   resolved even with a full table; missing key without IPC_CREAT →
+   ENOENT; EEXIST precedence; shmget(key,0,0) on existing → id);
+   IPC_INFO returns ipc_get_maxidx clamped ≥0 (was count()); added the
+   missing SHM_STAT_ANY (15) arm (no perm/cap check, audit-only);
+   shmat demands X permission for SHM_EXEC and rejects NULL+SHM_REMAP
+   with EINVAL. [1] shm.c newseg/shm_more_checks/do_shmat/shmctl_stat
+   [2][3] shmget01-03/shmat01-02 shapes verified vs LTP sources.
+6. `ipc/posix_mq.rs`: mq_open attr validation (mq_maxmsg/mq_msgsize must
+   be positive → EINVAL; was silently replaced with defaults);
+   per-access-mode open permission check (O_RDWR with only one mode
+   granted was accepted); mq_getsetattr rejects mq_flags bits outside
+   O_NONBLOCK with EINVAL. [1] mqueue.c mqueue_get_inode/mq_getsetattr
+   [2][3] mq_open01's 10 cases don't pass bad attrs expecting success.
+7. `syscall/{process,misc,time}.rs` + `process/{task,fork}.rs`:
+   - ioprio_set/get now store/read a per-task ioprio (inherited across
+     fork) with reference validation (which check; NONE level 0; RT
+     CAP_SYS_ADMIN + level<8; BE level<8; ESRCH resolution) — LTP
+     ioprio_set01 currently fails the set-then-get class check.
+   - Four EFAULT fixes (ppoll timeout, pselect6 timeout, setrlimit
+     struct rlimit, timer_create struct sigevent): unreadable-but-in-range
+     user memory read as zeros — ppoll/pselect6 returned immediately
+     with 0 ready fds, setrlimit clamped the limit to 0, timer_create
+     built a default SIGALRM timer. Reference contract for all four is
+     EFAULT on the failed copy.
+
+Build/test evidence: `make build`, `PLATFORM=x86_64`, `PLATFORM=aarch64`
+rc=0 after each commit group (aarch64 dtb_blob.S regenerated by the
+build is restored, not committed). `make test` (guest unit suite) green
+in three runs: 1189/1189, 1188/1188, 1183/1183 — the count varies with
+boot timing (SMP self-registering cases), failures 0 in every run.
+
+## FILED (verified, not fixed in this lane — scope/risk)
+
+- sbrk01 FAIL (r19): sbrk(8192) → ENOMEM. sys_brk itself matches the
+  reference one-page-gap refusal; the failure needs an mmap placement
+  landing adjacent to the break so growth is refused. Owner: mm/ lane
+  (find_free_area placement), guarded domain.
+- remap_file_pages01 SIGSEGV (r19): only identity remaps are emulated;
+  the non-linear case needs real unmap+re-map-at-offset work. memory.rs
+  surface, mm/-heavy.
+- name_to_handle_at01 FAIL (r19): EOPNOTSUPP — no export_ops
+  implementation on ext4/tmpfs. Feature gap, fs/ lane.
+- memfd_create01 seal case FAIL (r19): F_GET_SEALS returned 0 after
+  F_ADD_SEALS(F_SEAL_SEAL) although fs/memfd.rs has full seal plumbing
+  (numbers verified: F_ADD_SEALS=1033/F_GET_SEALS=1034 are correct per
+  asm-generic). Needs a live repro; fs/ lane (memfd.rs + vfs.rs fcntl
+  dispatch).
+- semctl06 FAIL (r19): kids exit 1 inside the SEM_UNDO stress — semop
+  failing under load; needs live triage of the blocking wake path.
+- shmctl05 POISON (r19): RMID/last-detach race kills the guest; the
+  R/F-comment minefield around nattch/deferred free is exactly this.
+- msg_comm FAIL (r19): SysV IPC namespace isolation missing (single
+  global namespace) — feature.
+- network.rs get_user_usize(): unreadable msghdr/iovec fields read as 0
+  (documented in-repo compromise); reference copy_msghdr_from_user is
+  EFAULT. Refactor touches the IPC perf-guarded socket paths — network
+  lane owns it.
+- riscv_hwprobe pair key get_user().unwrap_or(u64::MAX) — bad key array
+  element reads as MAX instead of EFAULT. Cosmetic (no known caller).
+
+## FALSE-POSITIVE / RETRACTED
+
+- msgrcv negative msgtyp selection "not lowest-type-first": re-derived
+  reference find_msg SEARCH_LESSEQUAL (threshold-tightening walk) — the
+  Rux implementation already picks the earliest of the strictly-lowest
+  type; identical outcomes in every case I enumerated. No change.
+- x86_compat "missing 78 gettimeofday": x86_64 NR 78 is getdents (old
+  struct), gettimeofday is 96 and IS translated. NR 37/205 gaps
+  (alarm/set_thread_area) are legacy paths no modern libc issues.
+- dispatch.rs unknown-syscall `println!` per call: debuggability choice,
+  performance-neutral for implemented calls; left alone.
+- binder SET_MAX_THREADS EINVAL-vs-EFAULT on a bad pointer: reference
+  sources rate-limited during the review; untestable by LTP; binder is
+  OH-image ABI owned by other lanes. Left as-is.
+- access_token.rs `ebadf()` helper actually returns EFAULT (misleading
+  name, correct behavior); cosmetic only.

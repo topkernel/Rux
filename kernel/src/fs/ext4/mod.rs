@@ -273,35 +273,32 @@ impl Ext4FileSystem {
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
-                // We mount read-write and do not maintain ANY metadata
-                // checksums or cluster geometry — accepting these features
-                // would write checksum-invalid or cluster-misaligned
-                // metadata. metadata_csum mounts READ-ONLY with full
-                // read-path verification (csum.rs — OH Phase 1: the OH
-                // system/vendor images are mkfs'd with metadata_csum);
-                // bigalloc stays rejected outright.
+                // We mount read-write and maintain ALL metadata checksum
+                // classes (csum.rs: superblock/group-descriptor/inode are
+                // re-sealed by the *_csum_set wiring; bitmap csums,
+                // directory tails and extent tails are sealed at their
+                // write sites — oh-svc 2026-10-31). metadata_csum mounts
+                // READ-WRITE with full read-path verification (csum.rs —
+                // the OH system/vendor images are mkfs'd with
+                // metadata_csum); bigalloc stays rejected outright.
                 //
-                // OH bring-up policy (sys_prod/userdata): those images
-                // are also metadata_csum and OH's fstab mounts them rw.
-                // Refusing with ENODEV stalled the second-stage boot
-                // (sys_prod carries libdrm.so for the display composer
-                // backend). Downgrade the mount to read-only with a
-                // loud warning instead — readers work, writers get EROFS.
-                if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
-                    crate::pr_warn!(
-                        "ext4: metadata_csum rw mount downgraded to read-only (OH bring-up policy)"
-                    );
-                    self.read_only = true;
-                }
+                // History (OH bring-up): this used to DOWNGRADE every rw
+                // metadata_csum mount to read-only because the write path
+                // did not maintain checksums. OH's fstab mounts /data rw;
+                // the downgrade made that mount fail (EIO from the
+                // geometry guard upstream) and the entire first-boot
+                // /data cascade — native token file, persist params,
+                // el1/el2 service dirs — ran against an unmounted /data
+                // on every boot.
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
                     bio::brelse(sb_bh);
                     return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
                 }
 
-                // metadata_csum read-path setup (ro mounts only — gated
-                // above): compute the fs seed and verify the superblock
-                // checksum before trusting anything else in it.
+                // metadata_csum read-path setup: compute the fs seed and
+                // verify the superblock checksum before trusting anything
+                // else in it.
                 if ro_compat & features::ro_compat::METADATA_CSUM != 0 {
                     self.metadata_csum = true;
                     self.csum_seed = csum::csum_seed(
@@ -591,6 +588,24 @@ impl Ext4FileSystem {
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_dir_lookup(blocks.len());
 
+            // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
+            // whose block list is absurdly large means a corrupt inode
+            // (i_size/extent garbage) turned lookup into a multi-minute
+            // bread+parse loop that monopolizes the CPU under the bucket
+            // locks. Name the inode before we enter the loop so the boot
+            // log pinpoints which directory went bad. A real directory of
+            // 1024+ blocks (4MiB of dirents) never exists in these images.
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LOOKUP dir ino={} size={} blocks={} blocks_field={} name={:?}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks,
+                    name
+                );
+            }
+
             for block in blocks.iter() {
                 if *block == 0 {
                     continue;
@@ -619,7 +634,15 @@ impl Ext4FileSystem {
 
                     let entry_name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        // Non-UTF8 (corrupt/binary) name: SKIP the entry but
+                        // still advance — a bare `continue` here retried the
+                        // SAME offset forever and livelocked the walker (the
+                        // OH userdata carries such entries; two vCPUs spun
+                        // in from_bytes with no serial output).
+                        Err(_) => {
+                            offset += entry.rec_len as usize;
+                            continue;
+                        }
                     };
 
                     if entry_name == name {
@@ -653,6 +676,16 @@ impl Ext4FileSystem {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
             crate::dfx::fsw::note_list_dir();
+            // Pathology probe — see the twin in lookup().
+            if blocks.len() > 1024 {
+                crate::pr_err!(
+                    "ext4: PATHOLOGICAL DIR LIST dir ino={} size={} blocks={} blocks_field={}",
+                    dir.ino,
+                    dir.size,
+                    blocks.len(),
+                    dir.blocks
+                );
+            }
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -683,7 +716,12 @@ impl Ext4FileSystem {
                     // Skip . and ..
                     let name = match core::str::from_utf8(&entry.name[..entry.name_len as usize]) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        // Non-UTF8 name: skip but ADVANCE (see lookup — a
+                        // bare continue livelocked on the same offset).
+                        Err(_) => {
+                            offset += entry.rec_len as usize;
+                            continue;
+                        }
                     };
                     if name != "." && name != ".." {
                         entries.push(entry.clone());
@@ -1780,6 +1818,8 @@ fn add_dir_entry(
                     // Reuse this entry
                     let entry_data = &mut data[offset..offset + entry_size];
                     create_dir_entry(entry_data, ino, name, file_type, rec_len as u16);
+                    // metadata_csum: refresh the block's dir tail.
+                    super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                     (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                     let sync_res = bio::sync_dirty_buffer(bh);
                     bio::brelse(bh);
@@ -1818,6 +1858,8 @@ fn add_dir_entry(
                 let entry_data = &mut data[offset..offset + entry_size];
                 create_dir_entry(entry_data, ino, name, file_type, remaining as u16);
 
+                // metadata_csum: refresh the block's dir tail.
+                super::ext4::namei::dir_block_seal(fs, parent.ino, data);
                 (*bh).set_state_bit(bio::BufferState::BH_Dirty);
                 let sync_res = bio::sync_dirty_buffer(bh);
                 bio::brelse(bh);
@@ -1877,6 +1919,8 @@ fn append_dir_block(
         let data = &mut (*bh).b_data;
         create_dir_entry(data, ino, name, file_type, block_size as u16);
 
+        // metadata_csum: refresh the block's dir tail.
+        super::ext4::namei::dir_block_seal(fs, parent_ino, data);
         (*bh).set_state_bit(bio::BufferState::BH_Dirty);
         let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
@@ -2034,16 +2078,20 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
 
-    // Session 25 (MAP_SHARED writeback): on a SHRINK, flush dirty
+    // Session 25 (MAP_SHARED writeback): on a size change, flush dirty
     // page-cache frames BEFORE the big lock and the new size commit. The
     // flush takes EXT4_BIG_LOCK internally (ext4_write_at_core), so it
     // cannot run inside this function's own critical section. Flush-then-
     // cut: a dirty page straddling the new EOF writes its full content
     // first, then the cut removes the tail (Linux writeback-then-
-    // truncate). A grow needs nothing — dirty pages sit below the old
-    // size. Stores racing after the flush are discarded by the
-    // invalidate below (POSIX: stores at truncate are undefined).
-    if attr == setattr_attr::ATTR_SIZE && arg1 < inode.get_size() {
+    // truncate). A GROW used to skip this while the success tail still
+    // called invalidate_inode on the WHOLE cache — dirty frames below the
+    // old size (unflushed MAP_SHARED stores) were freed by the
+    // invalidate, silently dropping the stores. Flush for every
+    // ATTR_SIZE: the flush iterates dirty entries only, so a no-dirty
+    // call costs nothing. Stores racing after the flush are discarded by
+    // the invalidate below (POSIX: stores at truncate are undefined).
+    if attr == setattr_attr::ATTR_SIZE {
         crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
     }
 
@@ -2198,10 +2246,21 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                                 ext4_inode.block[i] = 0;
                             }
                         } else {
-                            // Indirect blocks - use ext4_get_block to check, then free
                             match indirect::ext4_get_block(fs, &ext4_inode.block, i as u64) {
                                 Ok(block_num) if block_num != 0 => {
                                     let _ = allocator.free_block(block_num);
+                                    // Clear the freed block's indirect slot: a
+                                    // stale pointer outlives the free, and after
+                                    // a later grow the hole range would resolve
+                                    // to the old physical blocks — which the
+                                    // allocator may have reused — serving
+                                    // foreign bytes for reads and writing
+                                    // through dead mappings (the reference
+                                    // kernel clears each pointer as it frees,
+                                    // ext4_free_branches).
+                                    let _ = indirect::clear_indirect_entry(
+                                        fs, &ext4_inode.block, i as u64,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -3414,8 +3473,27 @@ pub fn mount_loop_instance(
     // Superblock/group/inode-table bootstrap; a non-ext image (missing
     // magic — e.g. unformatted loop) fails here.
     fs.init()?;
-    // No journal on ext2 scratch images; a journaled ext4 image would be
-    // replayed by its own mkfs/umount cycle — skip replay on purpose.
+    // Dirty-journal replay for rw mounts (OH userdata lineage): those
+    // images boot with s_start != 0 (an unclean shutdown froze mid-
+    // transaction). Building allocator state on the half-applied result
+    // and then writing would corrupt the live metadata. ext2 scratch
+    // images and clean journals take the no-op path inside init_journal
+    // (s_start == 0 skips recovery); read-only mounts skip entirely —
+    // replay WRITES, and ro is how system/vendor/sys_prod mount.
+    //
+    // After the one-shot replay the journal handle is DROPPED:
+    // subsequent metadata writes keep this driver's direct-write
+    // discipline (buffer-cache dirty + inline sync), which the
+    // allocator's F4 notes and the journal-revocation comments are
+    // built around. The next mount sees the clean journal superblock
+    // the replay wrote (write_clean_sb: s_start = 0), so this stays
+    // idempotent across boots.
+    if !fs.read_only {
+        if let Err(e) = fs.init_journal() {
+            crate::pr_debug!("ext4: loop-instance journal init failed: {}", e);
+        }
+        fs.journal = None;
+    }
     let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };

@@ -1516,12 +1516,13 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
             match ext4_file_read(fs, ext4_inode, offset, buf) {
                 Ok(read_bytes) => {
                     file.set_pos(offset + read_bytes as u64);
-                    if read_bytes > 0 {
-                        crate::fs::inotify::notify_file(
-                            file,
-                            crate::fs::inotify::inotify_events::IN_ACCESS,
-                        );
-                    }
+                    // No IN_ACCESS here: this runs as ops.read behind
+                    // File::read, whose wrapper owns the notify. Op-level
+                    // self-notify double-fired the event (hidden by the
+                    // inotify last-event merge, but a duplicate surfaced
+                    // whenever another watcher event interleaved — review
+                    // CR-3). Only the read(2) FAST path below self-notifies
+                    // (it bypasses File::read entirely).
                     read_bytes as isize
                 }
                 Err(e) => e as isize,
@@ -2226,15 +2227,16 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
         // mmap-fault arm). Advisory volatile write, no disk I/O.
         let mut atime_pending = false;
 
+        // No IN_ACCESS in either arm: this runs as ops.read_at behind
+        // File::read_at, whose native-op arm owns the notify. The
+        // op-level self-notify double-fired the event — masked by the
+        // inotify last-event merge except when another watcher event
+        // interleaved between the two fires (review CR-3).
         let ret = if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
             match ext4_file_read(fs, ext4_inode, offset, buf) {
                 Ok(read_bytes) => {
                     if read_bytes > 0 {
                         atime_pending = true;
-                        crate::fs::inotify::notify_file(
-                            file,
-                            crate::fs::inotify::inotify_events::IN_ACCESS,
-                        );
                     }
                     read_bytes as isize
                 }
@@ -2246,10 +2248,6 @@ fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isiz
                 Ok(read_bytes) => {
                     if read_bytes > 0 {
                         atime_pending = true;
-                        crate::fs::inotify::notify_file(
-                            file,
-                            crate::fs::inotify::inotify_events::IN_ACCESS,
-                        );
                     }
                     read_bytes as isize
                 }

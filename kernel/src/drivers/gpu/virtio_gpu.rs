@@ -178,7 +178,6 @@ impl VirtioGpuDevice {
     /// Initialize VirtIO device
     fn init_virtio(&mut self) -> Option<()> {
         let common_cfg = self.pci.common_cfg_bar + self.pci.common_cfg_offset as u64;
-        let notify_base = self.pci.notify_cfg_bar + self.pci.notify_cfg_offset as u64;
         let isr_base = self.pci.isr_cfg_bar + self.pci.isr_cfg_offset as u64;
 
         // Step 1: Reset device
@@ -259,14 +258,21 @@ impl VirtioGpuDevice {
             return None;
         }
 
-        // According to VirtIO 1.0 specification, notification address offset needs to be multiplied by 2
-        // because notify_off_multiplier is in 16-bit units
-        let notify_offset = (CTRL_QUEUE as u64) * (self.pci.notify_off_multiplier as u64) * 2;
-
+        // Notify address per VirtIO 1.0 spec 4.1.4.4:
+        //   notify_cap.bar_base + notify_cap.offset
+        //                 + queue_notify_off * notify_off_multiplier
+        // read through get_notify_addr (it selects the queue and reads the
+        // queue's own queue_notify_off register). The old inline
+        // `queue_index * multiplier * 2` used the queue INDEX instead of
+        // queue_notify_off AND scaled the multiplier — which is already in
+        // bytes — a second time (the same "notify ×2" review BUG fixed in
+        // VirtIOPCI::get_notify_addr). It only worked because QEMU sets
+        // multiplier = 0; any device with a real multiplier hit the wrong
+        // doorbell.
         let queue = VirtQueue::new(
             queue_size,
             CTRL_QUEUE,
-            notify_base + notify_offset,
+            self.pci.get_notify_addr(CTRL_QUEUE),
             isr_base,
             isr_base + 4,
         )?;
@@ -821,7 +827,16 @@ impl VirtioGpuDevice {
             loop {
                 fence(Ordering::SeqCst);
                 let used = &*queue.used;
-                if used.idx as usize >= idx + 1 {
+                // Wrap-safe completion check: vring indices are free-running
+                // u16 counters. Entry state is used.idx == idx (the cmd_lock
+                // spans the previous command's wait, so everything submitted
+                // before us has completed), so "advanced past our snapshot"
+                // is exactly `used.idx != idx`. The old `>= idx + 1`
+                // comparison broke at the 65536th command: idx = 0xFFFF can
+                // never satisfy `used.idx >= 0x10000`, so EVERY command from
+                // the wrap on timed out after 10 s — a long GUI session
+                // (2-3 commands per flip) reaches the wrap in hours.
+                if used.idx != idx as u16 {
                     completed = true;
                     break;
                 }
@@ -845,10 +860,19 @@ impl VirtioGpuDevice {
             }
         }
 
-        // SAFETY: io_buf was allocated above with io_layout; the chain is
-        // complete (or timed out) by this point, so the device no longer
-        // accesses the block.
-        unsafe { dealloc(io_buf, io_layout) };
+        // R21-N2 discipline (the virtio-blk timeout rule): on completion the
+        // staging block is freed; on TIMEOUT it is deliberately LEAKED — the
+        // chain is still submitted and the device may DMA its response into
+        // the block arbitrarily late. Freeing a still-DMA-targeted heap block
+        // hands a late device write to whatever reallocates it (the wandering
+        // corruption class). The leak is one 32-224 byte block per dead-
+        // device timeout, and the next command's poll consumes the late
+        // used-ring entry with a zeroed response, which callers reject.
+        if completed {
+            // SAFETY: io_buf was allocated above with io_layout; the chain is
+            // complete, so the device no longer accesses the block.
+            unsafe { dealloc(io_buf, io_layout) };
+        }
 
         if completed {
             Some(())

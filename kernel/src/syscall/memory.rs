@@ -950,7 +950,26 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     map_flags & map::MAP_FIXED,
                                 ) {
                                     Ok(v) => v.as_usize(),
-                                    Err(_) => return mmap_error::ENOMEM,
+                                    // oh-svc T1: this ENOMEM was SILENT — the
+                                    // llvmpipe displaytarget_map failure class
+                                    // (assert jit_tex->base) needs the
+                                    // attribution. Budgeted.
+                                    Err(e) => {
+                                        static PEMAP_N: core::sync::atomic::AtomicU32 =
+                                            core::sync::atomic::AtomicU32::new(0);
+                                        let n =
+                                            PEMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                        if n < 20 {
+                                            crate::pr_warn!(
+                                                "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",
+                                                crate::process::current_pid(),
+                                                fd,
+                                                actual_length,
+                                                e as i32
+                                            );
+                                        }
+                                        return mmap_error::ENOMEM;
+                                    }
                                 };
                                 let root = address_space.root_ppn();
                                 // SAFETY: root is the task's page-table

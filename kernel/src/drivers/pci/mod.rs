@@ -426,17 +426,25 @@ pub mod vendor {
 
 /// VirtIO device IDs (PCI)
 ///
-/// Modern (virtio 1.0) IDs per the PCI device-ID table: 0x1040 net,
-/// 0x1041 block, 0x1042 balloon, ... 0x1050 GPU, 0x1052 input. The two
-/// modern IDs here were previously swapped (net=0x1041/blk=0x1042) —
-/// harmless on MMIO/legacy transports, but on aarch64 GPEX the devices
-/// are modern-only, so the net probe bound the BLOCK device (0x1041)
-/// and the blk probe matched a balloon ID and found nothing.
+/// Transitional devices keep the legacy IDs (net 0x1000, blk 0x1001).
+/// Modern (virtio 1.0, non-transitional) devices carry 0x1040 + the
+/// virtio device id: net=1 -> 0x1041, blk=2 -> 0x1042, balloon=5 ->
+/// 0x1045, gpu=16 -> 0x1050, input=18 -> 0x1052. Verified against the
+/// transport itself: QEMU `info pci` reports a
+/// `virtio-blk-pci,disable-legacy=on` device as 1af4:1042 and a plain
+/// transitional one as 1af4:1001.
+///
+/// A 2026-10-30 commit (04e23b45) shifted these to net=0x1040/
+/// blk=0x1041 on the belief that 0x1040 is the net id; 0x1040 is the
+/// (reserved, id-0) base, so the shift made every modern-only block
+/// device (0x1042) invisible to the probe — a riscv64 boot with
+/// `virtio-blk-pci,disable-legacy=on` lost its root disk (init: /bin/sh
+/// not found) and a modern-only net device would have bound as BLK.
 pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
-    pub const VIRTIO_NET_MODERN: u16 = 0x1040;
+    pub const VIRTIO_NET_MODERN: u16 = 0x1041;
     pub const VIRTIO_BLK: u16 = 0x1001;
-    pub const VIRTIO_BLK_MODERN: u16 = 0x1041;
+    pub const VIRTIO_BLK_MODERN: u16 = 0x1042;
     pub const VIRTIO_GPU: u16 = 0x1050;
     pub const VIRTIO_INPUT: u16 = 0x1052;
 }

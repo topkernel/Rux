@@ -1564,6 +1564,28 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Validate id per idtype (reference kernel_waitid): P_PID wants a
+    // positive pid, P_PGID a non-negative pgid — anything else is
+    // EINVAL, not "no such child" ECHILD.
+    if idtype == 1 && id <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if idtype == 2 && id < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // U1c pid-namespace semantics parity with sys_wait4: a P_PID target
+    // is interpreted in the CALLER's pid namespace (identity in init ns).
+    // do_waitid compares against global child pids.
+    let wait_id: i32 = if idtype == 1 {
+        match crate::process::ns::resolve_vpid(id as u32) {
+            Some(g) => g as i32,
+            None => return -(errno::ECHILD as i64),
+        }
+    } else {
+        id
+    };
+
     // Validate infop pointer
     if infop.is_null() {
         return -(errno::EFAULT as i64);
@@ -1572,7 +1594,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    match crate::process::exit::do_waitid(idtype, id, infop, options) {
+    match crate::process::exit::do_waitid(idtype, wait_id, infop, options) {
         // Ok(false) = WNOHANG, no event: Linux returns 0 and leaves
         // infop untouched (the old -EAGAIN broke every poll loop).
         Ok(_) => 0,
@@ -5318,9 +5340,22 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: rlim_ptr validated with access_ok; get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let rlim_cur = unsafe { crate::arch::uaccess::get_user(rlim_ptr).unwrap_or(0) };
-    let rlim_max = unsafe { crate::arch::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
+    // exception-table copy path (SUM=0 safe). An unreadable struct must
+    // be EFAULT — the old unwrap_or(0) read it as {0, 0} and silently
+    // clamped the limit to zero instead of failing (reference
+    // do_prlimit: copy_from_user of struct rlimit fails with EFAULT).
+    let rlim_cur = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
+    let rlim_max = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr.add(1)) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
@@ -6037,28 +6072,81 @@ pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
 /// - args[2]: ioprio - I/O priority class + value
+///
+/// Validation mirrors the reference block/ioprio.c: class NONE requires
+/// level 0; RT additionally requires CAP_SYS_ADMIN (not CAP_SYS_NICE);
+/// RT and BE levels are 0..IOPRIO_BE_NR-1 (7). The value is stored per
+/// task (inherited across fork) so ioprio_get reads it back — the old
+/// accept-and-ignore made every set-then-get probe read class NONE
+/// (LTP ioprio_set01).
 pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
-    let _which = args[0] as i32;
-    let _who = args[1] as i32;
+    let which = args[0] as i32;
+    let who = args[1] as i32;
     let ioprio = args[2] as i32;
 
-    // IOPRIO_CLASS_SHIFT = 13
-    // Class bits: who << 13 | data
-    let class = (ioprio >> 13) & 0x7;
+    const PRIO_PROCESS: i32 = 0;
+    const PRIO_PGRP: i32 = 1;
+    const PRIO_USER: i32 = 2;
+    const IOPRIO_CLASS_NONE: i32 = 0;
+    const IOPRIO_CLASS_RT: i32 = 1;
+    const IOPRIO_CLASS_BE: i32 = 2;
+    const IOPRIO_CLASS_IDLE: i32 = 3;
+    const IOPRIO_BE_NR: i32 = 8;
 
-    // IOPRIO_CLASS_NONE = 0, IOPRIO_CLASS_RT = 1, IOPRIO_CLASS_BE = 2, IOPRIO_CLASS_IDLE = 3
-    if class > 3 {
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         return -(errno::EINVAL as i64);
     }
 
-    // CAP_SYS_NICE required to set RT or idle class
-    if class == 1 || class == 3 {
-        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-            return -(errno::EPERM as i64);
+    let class = (ioprio >> 13) & 0x7;
+    let data = ioprio & 0x1fff;
+    match class {
+        IOPRIO_CLASS_NONE => {
+            if data != 0 {
+                return -(errno::EINVAL as i64);
+            }
         }
+        IOPRIO_CLASS_RT => {
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EPERM as i64);
+            }
+            if data < 0 || data >= IOPRIO_BE_NR {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        IOPRIO_CLASS_BE => {
+            if data < 0 || data >= IOPRIO_BE_NR {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        IOPRIO_CLASS_IDLE => {}
+        _ => return -(errno::EINVAL as i64),
     }
 
-    // Accept and ignore — no I/O priority storage yet
+    // Target resolution. PRIO_PROCESS resolves the pid exactly; the
+    // group/user selectors are approximated by the calling task when
+    // who == 0 (no pid/uid enumeration here) and report ESRCH for a
+    // named foreign target — the reference sets/queries every matching
+    // task, but nothing in LTP or the images selects a foreign pgrp/user.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let target_pid = if who == 0 {
+        current.pid() as i32
+    } else if which == PRIO_PROCESS {
+        who
+    } else {
+        return -(errno::ESRCH as i64);
+    };
+    let task = if target_pid as u32 == current.pid() {
+        current
+    } else {
+        match crate::process::find_task_by_pid(target_pid as u32) {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        }
+    };
+    task.set_ioprio(ioprio);
     0
 }
 
@@ -6067,11 +6155,42 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
+///
+/// Returns the stored per-task value ((class << 13) | level; the
+/// default 0 = IOPRIO_CLASS_NONE level 0 — the reference reports
+/// task_struct::ioprio the same way).
 pub fn sys_ioprio_get(args: SyscallArgs) -> i64 {
-    let _which = args[0] as i32;
-    let _who = args[1] as i32;
-    // Default I/O priority: IOPRIO_PRIO_VALUE(IO_PRIO_CLASS_BE, 0) = 0
-    0
+    let which = args[0] as i32;
+    let who = args[1] as i32;
+
+    const PRIO_PROCESS: i32 = 0;
+    const PRIO_PGRP: i32 = 1;
+    const PRIO_USER: i32 = 2;
+
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
+        return -(errno::EINVAL as i64);
+    }
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let target_pid = if who == 0 {
+        current.pid() as i32
+    } else if which == PRIO_PROCESS {
+        who
+    } else {
+        return -(errno::ESRCH as i64);
+    };
+    let task = if target_pid as u32 == current.pid() {
+        current
+    } else {
+        match crate::process::find_task_by_pid(target_pid as u32) {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        }
+    };
+    task.ioprio() as i64
 }
 
 /// sys_quotactl - Disk quota operations

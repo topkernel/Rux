@@ -839,6 +839,7 @@ pub fn file_is_tty(file: &crate::fs::file::File) -> bool {
                 )
                 || core::ptr::eq(ops as *const _, &crate::fs::pty::PTMX_OPS as *const _)
                 || core::ptr::eq(ops as *const _, &crate::fs::pty::PTY_SLAVE_OPS as *const _)
+                || core::ptr::eq(ops as *const _, &crate::fs::vt::VTDEV_OPS as *const _)
         }
         None => false,
     }

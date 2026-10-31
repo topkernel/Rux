@@ -1076,12 +1076,22 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
         }
         // struct sigevent { sigval sigev_value, int sigev_signo, int sigev_notify, ... }
         // SAFETY: sigevent_ptr validated with access_ok(64); get_user goes
-        // through the exception-table copy path (SUM=0 safe).
+        // through the exception-table copy path (SUM=0 safe). An unreadable
+        // struct must be EFAULT — the old unwrap_or(0) read it as
+        // {signo=0, notify=SIGEV_SIGNAL} and created a default timer
+        // instead of failing (reference timer_create: copy_from_user of
+        // the sigevent fails with EFAULT).
         unsafe {
             let p = sigevent_ptr as *const i32;
             // sigev_value is 8 bytes (union), then sigev_signo at offset 8
-            let signo = crate::arch::uaccess::get_user(p.add(2)).unwrap_or(0);
-            let notify = crate::arch::uaccess::get_user(p.add(3)).unwrap_or(0);
+            let signo = match crate::arch::uaccess::get_user(p.add(2)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
+            let notify = match crate::arch::uaccess::get_user(p.add(3)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
             if signo > 0 && signo <= 64 {
                 sigev_signo = signo;
             }

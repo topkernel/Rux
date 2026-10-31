@@ -1,9 +1,0 @@
-#!/bin/sh
-# riscv64-musl-gcc — wrapper recreating the musl cross toolchain driver
-# (the worktree toolchain symlink lost its bin/; the musl install under
-# devfs-grow still has a full include/ + lib/). Real compiler stays the
-# Ubuntu riscv64-linux-gnu-gcc; musl provides headers/startfiles/libc.
-# Integer-only probes need no soft-fp pin; fleet riscv64 boots enable
-# zbb/zba/zbs/zcb so Ubuntu libgcc members are executable anyway.
-exec riscv64-linux-gnu-gcc "$@" \
-  -specs /home/william/rux-agents/wwh-main-kernel/run/fleet/bin/riscv64-musl.specs

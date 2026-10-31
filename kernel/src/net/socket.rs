@@ -679,8 +679,16 @@ impl Socket {
     ) -> Result<usize, i32> {
         match self.sock_type {
             SocketType::Tcp => {
+                // A nonblocking connect() returned EINPROGRESS and NOTHING
+                // promotes the VFS state when the handshake later completes
+                // (the protocol slot goes ESTABLISHED on its own). `Connecting`
+                // must therefore fall through and let the protocol layer
+                // decide — an ESTABLISHED slot sends, a SYN_SENT slot maps to
+                // EAGAIN (reference tcp_sendmsg: sk_stream_wait_connect).
+                // EPIPE stays reserved for the never-connected / shut-down
+                // socket, where it is correct.
                 let state = *self.state.lock();
-                if state != SocketState::Connected {
+                if state != SocketState::Connected && state != SocketState::Connecting {
                     return Err(-32); // EPIPE
                 }
                 // SAFETY: tcp_fd is only written once during socket creation and
@@ -724,26 +732,39 @@ impl Socket {
                 let ret = {
                     let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                     match crate::net::tcp::tcp_socket_get(tcp_fd) {
-                        Some(socket) => match socket.send(buf, &mut tx) {
-                            Ok(len) => Ok(len),
-                            Err(()) => {
-                                // W3 error mapping: surface the protocol's
-                                // pending error (RST/ICMP abort, retransmit
-                                // exhaustion), and EAGAIN while the
-                                // handshake is still in flight so blocking
-                                // writers wait for establishment instead of
-                                // losing the data to a bogus EIO.
-                                if socket.pending_error != 0 {
-                                    Err(-socket.pending_error)
-                                } else if socket.state == crate::net::tcp::TcpState::TCP_SYN_SENT
-                                    || socket.state == crate::net::tcp::TcpState::TCP_SYN_RECV
-                                {
-                                    Err(-11) // EAGAIN — connect() in progress
-                                } else {
-                                    Err(-5) // EIO
+                        Some(socket) => {
+                            // Nonblocking-connect completion: promote the
+                            // VFS state once the protocol slot is established
+                            // (idempotent; nothing else transitions out of
+                            // Connecting). Makes a repeated connect() report
+                            // EISCONN and lets SO_ERROR views settle, like the
+                            // reference whose sk_state lives in the protocol.
+                            if socket.state == crate::net::tcp::TcpState::TCP_ESTABLISHED {
+                                *self.state.lock() = SocketState::Connected;
+                            }
+                            match socket.send(buf, &mut tx) {
+                                Ok(len) => Ok(len),
+                                Err(()) => {
+                                    // W3 error mapping: surface the protocol's
+                                    // pending error (RST/ICMP abort, retransmit
+                                    // exhaustion), and EAGAIN while the
+                                    // handshake is still in flight so blocking
+                                    // writers wait for establishment instead of
+                                    // losing the data to a bogus EIO.
+                                    if socket.pending_error != 0 {
+                                        Err(-socket.pending_error)
+                                    } else if socket.state
+                                        == crate::net::tcp::TcpState::TCP_SYN_SENT
+                                        || socket.state
+                                            == crate::net::tcp::TcpState::TCP_SYN_RECV
+                                    {
+                                        Err(-11) // EAGAIN — connect() in progress
+                                    } else {
+                                        Err(-5) // EIO
+                                    }
                                 }
                             }
-                        },
+                        }
                         None => Err(-9), // EBADF
                     }
                 };
@@ -1518,9 +1539,25 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
     }
 
     if events & POLLOUT != 0 {
-        let state = *socket.state.lock();
-        if state == SocketState::Connected {
-            ready |= POLLOUT | POLLWRNORM;
+        match socket.sock_type {
+            // UDP: always writable — reference datagram_poll reports
+            // POLLOUT unconditionally (a datagram send never blocks; a
+            // too-large one is an immediate EMSGSIZE). The old VFS-state
+            // gate never reported POLLOUT for an UNCONNECTED
+            // (sendto-style) UDP socket.
+            SocketType::Udp => ready |= POLLOUT | POLLWRNORM,
+            // TCP: ask the protocol slot, not the VFS state — a
+            // nonblocking connect's completion never transitions the VFS
+            // state out of Connecting (see Socket::send), so a socket
+            // whose slot is ESTABLISHED must already report writable.
+            // Terminal states stay writable so the pending error returns
+            // immediately instead of the poller sleeping forever.
+            SocketType::Tcp => {
+                let tfd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+                if tfd < 0 || crate::net::tcp::tcp_send_ready(tfd) {
+                    ready |= POLLOUT | POLLWRNORM;
+                }
+            }
         }
     }
 

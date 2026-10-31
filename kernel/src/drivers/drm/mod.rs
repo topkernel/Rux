@@ -428,6 +428,10 @@ const DRM_IOCTL_SET_MASTER: u32 = ioc(0, 0x1e, 0);
 const DRM_IOCTL_DROP_MASTER: u32 = ioc(0, 0x1f, 0);
 const DRM_IOCTL_AUTH_MAGIC: u32 = ioc(1, 0x11, 4);
 const DRM_IOCTL_GEM_CLOSE: u32 = ioc(1, 0x09, 4);
+/// Upstream libdrm's drm_gem_close passes drm_gem_close (8 bytes:
+/// handle + pad), not a bare u32 — accept both encodings (the
+/// 4-byte one predates the ABI audit; real clients send 8).
+const DRM_IOCTL_GEM_CLOSE_8B: u32 = ioc(1, 0x09, 8);
 const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
 /// Same ioctl with the CORRECT upstream size: struct drm_prime_handle
 /// is 12 bytes (handle, flags, fd — no pad). The 16-byte constant above
@@ -497,6 +501,15 @@ const DRM_IOCTL_MODE_GETPROPBLOB: u32 = ioc(3, 0xac, 16);
 const DRM_IOCTL_MODE_ADDFB: u32 = ioc(3, 0xae, 28);
 const DRM_IOCTL_MODE_RMFB: u32 = ioc(3, 0xaf, 4);
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = ioc(3, 0xb0, 24);
+// Upstream-libdrm encodings of the same two ioctls: libdrm builds
+// MODE_RMFB with _IOR (dir=2) and MODE_PAGE_FLIP with _IOW (dir=1),
+// while the table above used IOWR (dir=3) for both — a real libdrm
+// client (drmModeRmFB / drmModePageFlip) would take ENOTTY (proven by
+// the scanpaint painter: _IOW-encoded PAGE_FLIP returned ENOTTY until
+// the painter switched to the dir-3 form). Accept both encodings; the
+// dir-3 forms stay for whatever the baked-in image still sends.
+const DRM_IOCTL_MODE_RMFB_LIBDRM: u32 = ioc(2, 0xaf, 4);
+const DRM_IOCTL_MODE_PAGE_FLIP_LIBDRM: u32 = ioc(1, 0xb0, 24);
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = ioc(3, 0xb2, 32);
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = ioc(3, 0xb3, 16);
 const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = ioc(3, 0xb4, 4);
@@ -972,7 +985,7 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
             // displays. Single-client DRM: accept every auth.
             0
         }
-        DRM_IOCTL_GEM_CLOSE => gem_close(rdu32_or(arg)),
+        DRM_IOCTL_GEM_CLOSE | DRM_IOCTL_GEM_CLOSE_8B => gem_close(rdu32_or(arg)),
         DRM_IOCTL_PRIME_HANDLE_TO_FD => prime_handle_to_fd(arg, 16),
         DRM_IOCTL_PRIME_HANDLE_TO_FD_12 => prime_handle_to_fd(arg, 12),
         DRM_IOCTL_PRIME_FD_TO_HANDLE => prime_fd_to_handle(arg, 16),
@@ -989,8 +1002,8 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
         DRM_IOCTL_MODE_GETPROPBLOB => get_prop_blob(arg),
         DRM_IOCTL_MODE_ADDFB => addfb(arg),
         DRM_IOCTL_MODE_ADDFB2 => addfb2(arg),
-        DRM_IOCTL_MODE_RMFB => rmfb(rdu32_or(arg)),
-        DRM_IOCTL_MODE_PAGE_FLIP => page_flip(arg),
+        DRM_IOCTL_MODE_RMFB | DRM_IOCTL_MODE_RMFB_LIBDRM => rmfb(rdu32_or(arg)),
+        DRM_IOCTL_MODE_PAGE_FLIP | DRM_IOCTL_MODE_PAGE_FLIP_LIBDRM => page_flip(arg),
         DRM_IOCTL_MODE_CREATE_DUMB => create_dumb(arg),
         DRM_IOCTL_MODE_MAP_DUMB => map_dumb(arg),
         DRM_IOCTL_MODE_DESTROY_DUMB => gem_close(rdu32_or(arg)),
@@ -1682,9 +1695,23 @@ fn gem_close(handle: u32) -> i64 {
     if handle == 0 {
         return -22;
     }
+    // Reference drm_gem_handle_create gives each open file its own
+    // handle namespace: an exporter's GEM_CLOSE only removes ITS file's
+    // handle and the object lives while any other file's handle (or the
+    // prime import) keeps a reference. This kernel's table is global, so
+    // the faithful proxy is reference-count-shaped: when another holder
+    // still has a clone (RS's cached EGLImage resolves through this
+    // entry), keep the entry — removing it unconditionally left the
+    // compositor's next MAP_DUMB of handle 1003 with a dead key and
+    // Mesa's llvmpipe assert-aborted render_service on every first
+    // composition (oh-svc lane, boot oh-glm5). The entry goes away when
+    // the caller's close is the last reference.
     let taken = {
         let mut st = DRM_STATE.lock_irqsave();
-        st.gems.remove(&handle)
+        match st.gems.get(&handle) {
+            Some(gem) if Arc::strong_count(gem) > 1 => None, // still referenced elsewhere
+            _ => st.gems.remove(&handle),
+        }
     };
     match taken {
         // Drop OUTSIDE the state lock: GemObject::drop runs virtio
@@ -1804,10 +1831,15 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
         let mut nz: usize = 0;
         let mut clear: usize = 0;
         let mut samples = [0u32; 3];
-        // SAFETY: gem.kva..gem.kva+size is the object's backing.
+        // SAFETY: gem.kva..gem.kva+size is the object's backing; every
+        // sample offset below is clamped into that range (the fixed
+        // 720p/3072-pitch sample geometry only fits full-size frame GEMs —
+        // an imported smaller buffer made the unclamped reads walk past the
+        // allocation).
         unsafe {
             let base = gem.kva as *const u32;
-            for i in 0..gem.size / 4 {
+            let words = gem.size / 4;
+            for i in 0..words {
                 let v = base.add(i).read_volatile();
                 if v != 0 {
                     nz += 1;
@@ -1817,9 +1849,16 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
                 }
             }
             let row_words = 983040 / 1280; // pitch/4 for these buffers
-            samples[0] = base.add(row_words * 640 + 360).read_volatile();
-            samples[1] = base.add(row_words * 640 + 200).read_volatile();
-            samples[2] = base.add(row_words * 300 + 360).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(row_words * 640 + 360);
+            samples[1] = s(row_words * 640 + 200);
+            samples[2] = s(row_words * 300 + 360);
         }
         crate::pr_warn!(
             "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
@@ -1995,8 +2034,10 @@ fn present_fb(fb_id: u32) -> i64 {
         let mut nz: usize = 0;
         let mut paint: usize = 0;
         let mut samples = [0u32; 4];
-        // SAFETY: gem.kva..gem.kva+size is the object's own backing
-        // store; word-aligned reads stay inside the allocation.
+        // SAFETY: gem.kva..gem.kva+size is the object's own backing store;
+        // word-aligned reads stay inside the allocation (sample offsets are
+        // clamped to words — the fixed 720-wide sample geometry only fits
+        // full-size frame GEMs).
         unsafe {
             let base = gem.kva as *const u32;
             let words = gem.size / 4;
@@ -2019,10 +2060,17 @@ fn present_fb(fb_id: u32) -> i64 {
             }
             let mid_row = (height as usize / 2) * row_words;
             let last_row = (height as usize - 1).saturating_mul(row_words);
-            samples[0] = base.add(720 / 4).read_volatile();
-            samples[1] = base.add(row_words + 720 / 4).read_volatile();
-            samples[2] = base.add(mid_row + (width as usize / 2)).read_volatile();
-            samples[3] = base.add(last_row + 720 / 4).read_volatile();
+            let s = |off: usize| -> u32 {
+                if off < words {
+                    base.add(off).read_volatile()
+                } else {
+                    0
+                }
+            };
+            samples[0] = s(720 / 4);
+            samples[1] = s(row_words + 720 / 4);
+            samples[2] = s(mid_row + (width as usize / 2));
+            samples[3] = s(last_row + 720 / 4);
         }
         crate::pr_warn!(
             "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
@@ -2041,49 +2089,14 @@ fn present_fb(fb_id: u32) -> i64 {
         );
     }
 
-    // Scanout-binding oracle (compose-content): every composer buffer so
-    // far carries ONLY the RS clear color (nz==clear, paint==0) — a black
-    // screen is then expected even with a perfect binding, which makes
-    // the black screen uninformative about the binding itself. To
-    // separate content from binding, the kernel paints a known banded
-    // checker through kva into the flipped GEM right before the flip's
-    // host transfer: if the pattern reaches the screen, kva==phys and
-    // the whole scanout chain is proven for the composer's own imported
-    // buffers; if the screen stays black, the binding (not content) is
-    // the bug. Painted on flips 1..=60 and every 5th after (any
-    // screendump in any inter-flip gap then catches it); the composer
-    // re-clears its buffers on reuse, so the probe self-erases.
-    if (1..=60).contains(&ft) || ft % 5 == 0 {
-        let row_words = (pitch / 4) as usize;
-        // SAFETY: writes stay in the visible columns of the GEM's own
-        // backing (width*4 <= pitch, row_words*height*4 <= size).
-        unsafe {
-            let base = gem.kva as *mut u32;
-            for row in 0..height as usize {
-                let rowp = base.add(row * row_words);
-                let band = row * 4 / height as usize;
-                let c = match band {
-                    0 => 0xff_d0_30_30, // red
-                    1 => 0xff_30_d0_30, // green
-                    2 => 0xff_30_30_d0, // blue
-                    _ => 0xff_f0_f0_f0, // white
-                };
-                for col in 0..width as usize {
-                    let v = if (row / 16 + col / 16 + ft as usize) % 8 == 0 {
-                        !c | 0xff00_0000
-                    } else {
-                        c
-                    };
-                    rowp.add(col).write_volatile(v);
-                }
-            }
-        }
-        crate::pr_warn!(
-            "drm: oracle#{} painted gem={} (banded checker via kva)",
-            ft,
-            gem.id
-        );
-    }
+    // (The scanout-binding oracle that used to live here painted a banded
+    // checkerboard into the flipped GEM through kva before the host
+    // transfer — on flips 1..=60 and EVERY 5th flip thereafter, with no
+    // upper bound. It was bring-up tooling for the compose-content hunt,
+    // but as permanent code it overwrote the composer's real frame content
+    // with probe patterns on a cadence, corrupting every long-running
+    // desktop session. Removed; the read-only nz/paint counters above keep
+    // the content-vs-binding diagnosis without touching the buffer.)
 
     // Resource geometry: the GEM's real row pitch. Gralloc allocates
     // FB buffers width-aligned to 64 pixels (720 content on a 768-pixel

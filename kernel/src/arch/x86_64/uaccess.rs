@@ -144,14 +144,32 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
 /// Copy user → kernel. Returns the number of bytes NOT copied.
 ///
+/// On failure the uncopied tail of `to` is zero-filled, matching the
+/// riscv64 twin and the reference copy_from_user: callers (e.g. msgsnd,
+/// semtimedop) historically consumed the buffer even on failure, and
+/// leaving previous kernel heap contents in it is an information leak
+/// (review SEC, the riscv64 twin's fix — the x86 port had been left
+/// behind).
+///
 /// # Safety
 /// `to` must be writable for `n` bytes; `from` is validated by access_ok.
 pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if !access_ok(from as usize, n) {
+        // Zero the whole kernel buffer: callers that proceed with a
+        // failed copy must never see stale kernel heap contents.
+        core::ptr::write_bytes(to, 0, n);
         return n;
     }
     // SAFETY: exception-table copy (see copy_to_user).
-    unsafe { __x64_copy_from_user(to, from, n) }
+    let uncopied = unsafe { __x64_copy_from_user(to, from, n) };
+    if uncopied > 0 {
+        // Zero-fill the uncopied tail (reference semantics): the kernel
+        // buffer must never keep stale contents past the point the user
+        // copy reached.
+        let copied = n - uncopied;
+        core::ptr::write_bytes(to.add(copied), 0, uncopied);
+    }
+    uncopied
 }
 
 /// Zero user memory. Returns the number of bytes NOT cleared.
@@ -311,7 +329,10 @@ pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
 
 /// Write one value to user memory.
 ///
-/// Routes through the exception-table copy core (see get_user).
+/// Routes through [`copy_to_user`] (the riscv64 twin's shape) so a fault
+/// on a COW/demand page gets the resolve-and-retry instead of a bare
+/// short copy: a put_user onto a valid but not-yet-writable user page
+/// must succeed, not report EFAULT.
 ///
 /// # Safety
 /// `to` is validated by access_ok only in this phase.
@@ -325,7 +346,7 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
     // SAFETY: source is a size-of-T kernel stack slot; the destination
     // write faults into the extable fixup which returns a short count.
     let uncopied =
-        unsafe { __x64_copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
+        unsafe { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
 
     uncopied == 0
 }

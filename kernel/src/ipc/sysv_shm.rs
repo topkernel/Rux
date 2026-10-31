@@ -245,46 +245,64 @@ pub fn sys_shmget(args: [u64; 6]) -> i64 {
     let size = args[1] as u64;
     let shmflg = args[2] as i32;
 
-    // Validate size against an existing segment FIRST (per Linux
-    // shm_more_checks): a found key only requires size <= existing segsz.
+    // Existing-segment path (reference ipcget_public + shm_more_checks):
+    // IPC_EXCL → EEXIST first, then the "size larger than the segment"
+    // EINVAL. A found key ignores SHMMIN/ctlmax/capacity — semget's twin
+    // fix: the old unconditional checks made shmget(key, 0, 0) on an
+    // existing segment fail EINVAL and let a full table preempt the lookup
+    // with ENOSPC.
+    let mut found_existing = false;
     if key != 0 {
         if let Some(existing_idx) = SHM_IDS.find_by_key(key) {
+            if shmflg & IPC_EXCL != 0 {
+                return -(errno::EEXIST as i64);
+            }
             let slots = SHM_IDS.slots.lock();
             if let Some(ref entry) = slots[existing_idx] {
                 if size > entry.inner.segsz {
                     return -(errno::EINVAL as i64);
                 }
             }
+            found_existing = true;
+        } else if shmflg & IPC_CREAT == 0 {
+            // Bare lookup on a nonexistent key: ENOENT (alloc would also
+            // answer it, but only after the limit checks below run).
+            return -(errno::ENOENT as i64);
         }
     }
 
-    // New-segment limits (Linux newseg()): SHMMIN <= size <= shm_ctlmax.
-    // The sysctl values are live (LTP shmget02 lowers shmmax to 8192 and
-    // expects sizes above it to fail EINVAL).
-    if size < SHMMIN || size > shm_ctlmax() {
-        return -(errno::EINVAL as i64);
-    }
+    // Remaining checks apply only when a NEW segment is created
+    // (IPC_PRIVATE, or key not found with IPC_CREAT).
+    if !found_existing {
+        // New-segment limits (reference newseg()): SHMMIN <= size <=
+        // shm_ctlmax. The sysctl values are live (LTP shmget02 lowers
+        // shmmax to 8192 and expects sizes above it to fail EINVAL).
+        if size < SHMMIN || size > shm_ctlmax() {
+            return -(errno::EINVAL as i64);
+        }
 
-    // SHM_HUGETLB (0o4000) has no backing here — a kernel without hugetlb
-    // configured rejects the flag (LTP shmget02's final cases expect
-    // EINVAL when CONFIG_HUGETLBFS is off).
-    if shmflg & 0o4000 != 0 {
-        return -(errno::EINVAL as i64);
-    }
+        // SHM_HUGETLB (0o4000) has no backing here — a kernel without hugetlb
+        // configured rejects the flag (LTP shmget02's final cases expect
+        // EINVAL when CONFIG_HUGETLBFS is off).
+        if shmflg & 0o4000 != 0 {
+            return -(errno::EINVAL as i64);
+        }
 
-    // Capacity: SHMMNI ids / SHMALL pages system-wide (ENOSPC past either;
-    // shmget03 fills to SHMMNI and expects ENOSPC on the next shmget).
-    // The id limit counts LIVE slots (Some && !deleted), not the cached
-    // count atomic: IPC_RMID'd-but-still-attached entries hold a slot
-    // (Linux counts them against SHMMNI too), while the atomic can drift
-    // from teardown paths — a false ENOSPC at 255/256 broke shmget03's
-    // setup loop after any earlier shm test ran in the same boot.
-    if shm_live_ids() >= shm_ctlni() {
-        return -(errno::ENOSPC as i64);
-    }
-    let new_pages = (size + 4095) / 4096;
-    if shm_total_pages() + new_pages > shm_ctlall() {
-        return -(errno::ENOSPC as i64);
+        // Capacity: SHMMNI ids / SHMALL pages system-wide (ENOSPC past either;
+        // shmget03 fills to SHMMNI and expects ENOSPC on the next shmget).
+        // The id limit counts LIVE slots (Some && !deleted), not the cached
+        // count atomic: IPC_RMID'd-but-still-attached entries hold a slot
+        // (the reference kernel counts them against SHMMNI too), while the
+        // atomic can drift from teardown paths — a false ENOSPC at 255/256
+        // broke shmget03's setup loop after any earlier shm test ran in the
+        // same boot.
+        if shm_live_ids() >= shm_ctlni() {
+            return -(errno::ENOSPC as i64);
+        }
+        let new_pages = (size + 4095) / 4096;
+        if shm_total_pages() + new_pages > shm_ctlall() {
+            return -(errno::ENOSPC as i64);
+        }
     }
 
     // The segment keeps the REQUESTED size (IPC_STAT's shm_segsz must
@@ -309,12 +327,13 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
     let cmd = args[1] as i32;
     let buf = args[2];
 
-    // Index-addressed / id-ignoring commands: IPC_INFO(3), SHM_STAT(13) and
-    // SHM_INFO(14) treat the first argument as a raw slot index or ignore
-    // it — they must bypass the id lookup (the old unconditional gate made
-    // shmctl(0, IPC_INFO) fail EINVAL before dispatch, LTP shmctl03).
+    // Index-addressed / id-ignoring commands: IPC_INFO(3), SHM_STAT(13),
+    // SHM_INFO(14) and SHM_STAT_ANY(15) treat the first argument as a raw
+    // slot index or ignore it — they must bypass the id lookup (the old
+    // unconditional gate made shmctl(0, IPC_INFO) fail EINVAL before
+    // dispatch, LTP shmctl03).
     match cmd {
-        IPC_INFO | 13 | 14 => {}
+        IPC_INFO | 13 | 14 | 15 => {}
         _ => {
             let _ = match SHM_IDS.find(shmid) {
                 Some(i) => i,
@@ -494,8 +513,12 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, 1u64) };
             let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, shm_ctlni()) };
             let _ = unsafe { put_user(buf_ptr.add(24) as *mut u64, 4096u64) };
-            let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, shm_ctlall()) };
-            SHM_IDS.count() as i64
+    let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, shm_ctlall()) };
+    // Return: highest used slot index (reference shmctl_ipc_info returns
+    // ipc_get_maxidx, clamped to >= 0 when the table is empty). The old
+    // count() return could undershoot maxidx after an RMID left holes,
+    // cutting a caller's index scan short of live segments.
+    shm_max_idx().max(0) as i64
         }
         11 => {
             // SHM_LOCK — requires CAP_IPC_LOCK (per Linux). Sets the
@@ -627,6 +650,63 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // -1 when empty — LTP shmctl01 scans 0..=max_idx with SHM_STAT.
             shm_max_idx() as i64
         }
+        15 => {
+            // SHM_STAT_ANY (uapi 15) — SHM_STAT addressed by raw index
+            // WITHOUT the S_IRUGO check and WITHOUT a capability check
+            // (reference shmctl_stat: STAT_ANY only audits; it mirrors
+            // /proc/sysvipc visibility for checkpoint/restore).
+            let raw_idx = shmid as usize;
+            let buf_ptr = buf as *mut ShmidDsUapi;
+            if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<ShmidDsUapi>()) {
+                return -(errno::EFAULT as i64);
+            }
+            if raw_idx >= 256 {
+                return -(errno::EINVAL as i64);
+            }
+            let mut ds = ShmidDsUapi {
+                shm_perm: IpcPermUapi::default(),
+                shm_segsz: 0,
+                shm_atime: 0,
+                shm_dtime: 0,
+                shm_ctime: 0,
+                shm_cpid: 0,
+                shm_lpid: 0,
+                shm_nattch: 0,
+                __unused4: 0,
+                __unused5: 0,
+            };
+            let result_id: i32;
+            {
+                let slots = SHM_IDS.slots.lock();
+                if let Some(ref entry) = slots[raw_idx] {
+                    if entry.deleted {
+                        return -(errno::EINVAL as i64);
+                    }
+                    ds.shm_perm = entry.inner.perm.to_uapi();
+                    ds.shm_segsz = entry.inner.segsz;
+                    ds.shm_atime = entry.inner.shm_atime.load(Ordering::Relaxed);
+                    ds.shm_dtime = entry.inner.shm_dtime.load(Ordering::Relaxed);
+                    ds.shm_ctime = entry.inner.shm_ctime.load(Ordering::Relaxed);
+                    ds.shm_cpid = entry.inner.cpid.load(Ordering::Relaxed);
+                    ds.shm_lpid = entry.inner.lpid.load(Ordering::Relaxed);
+                    ds.shm_nattch = entry.inner.nattch.load(Ordering::Relaxed) as u64;
+                    result_id = super::util::ipc_build_id(raw_idx, entry.inner.perm.seq);
+                } else {
+                    return -(errno::EINVAL as i64);
+                }
+            }
+            // SAFETY: buf_ptr was null-checked and access_ok-validated for
+            // size_of::<ShmidDsUapi>() above; ds is a stack-local copy of the
+            // segment metadata.
+            unsafe {
+                copy_to_user(
+                    buf_ptr as *mut u8,
+                    &ds as *const ShmidDsUapi as *const u8,
+                    core::mem::size_of::<ShmidDsUapi>(),
+                );
+            }
+            result_id as i64
+        }
         _ => -(errno::EINVAL as i64),
     }
 }
@@ -691,8 +771,20 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     let shmflg = args[2] as i32;
 
     let shm_readonly = (shmflg & 0o10000) != 0; // SHM_RDONLY
+    let shm_exec = (shmflg & 0o100000) != 0; // SHM_EXEC
 
-    let idx = match SHM_IDS.find_with_perms(shmid, if shm_readonly { 0o4 } else { 0o6 }) {
+    // Reference do_shmat access modes: SHM_RDONLY → S_IRUGO, otherwise
+    // S_IRUGO|S_IWUGO, plus S_IXUGO when SHM_EXEC is set. The old check
+    // ignored SHM_EXEC entirely, letting exec-requested attaches succeed
+    // without the X permission bit.
+    let desired = if shm_readonly {
+        0o4
+    } else if shm_exec {
+        0o7
+    } else {
+        0o6
+    };
+    let idx = match SHM_IDS.find_with_perms(shmid, desired) {
         Ok(i) => i,
         Err(e) => return e as i64,
     };
@@ -761,6 +853,11 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             resolved
         }
     } else {
+        // Reference do_shmat: SHM_REMAP is meaningless without a caller
+        // address — EINVAL, never a kernel-picked placement.
+        if shmflg & super::SHM_REMAP != 0 {
+            return -(errno::EINVAL as i64);
+        }
         // Linux do_shmat: the kernel-chosen address comes from
         // get_unmapped_area — the SAME placement the mmap syscall uses
         // (a gap scan inside the mmap region). The old private downward
