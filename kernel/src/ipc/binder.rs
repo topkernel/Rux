@@ -439,7 +439,7 @@ struct RefDeath {
     clear_pending: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum DeathPhase {
     Armed,
     Queued,
@@ -1930,7 +1930,10 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                 if !deaths.is_empty() {
                     let qim = pm(world, &q).im();
                     for (desc, cookie) in deaths {
-                        crate::pr_info!(
+                        // lb48: WARN so the notice survives LOGLEVEL=6
+                        // boots (was pr_info, invisible in the sixth
+                        // successor's taps).
+                        crate::pr_warn!(
                             "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
                             q.pid,
                             desc,
@@ -2119,6 +2122,25 @@ unsafe fn dead_reply_to_sender(
     let Some(fp) = &txn.from_proc else {
         return wakes;
     };
+    // lb48 DRS tap: this is the ONLY BR_DEAD_REPLY producer that bypasses
+    // binder_transaction's sendfail shadow — a sync sender whose
+    // transaction was queued or in-flight on a thread/proc that went
+    // away. The sender's userspace maps the reply through
+    // OnDeadOrFailedReply; if the ioctl layer ever surfaces it as -32 it
+    // death-marks the proxy. Name every delivery.
+    if ams46_on() {
+        static DRS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if DRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+            crate::pr_warn!(
+                "AMS46-DRS dying pid{} txn{} code{:#x} from pid{} tid{}",
+                dying.pid,
+                txn.id,
+                txn.code,
+                fp.pid,
+                txn.from_tid.unwrap_or(0)
+            );
+        }
+    }
     let same = Arc::ptr_eq(fp, dying);
     let mut delivered = false;
     if let Some(ftid) = txn.from_tid {
@@ -2697,6 +2719,17 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                             if let Some(d) = r.death.as_mut() {
                                 if matches!(d.phase, DeathPhase::Armed) {
                                     d.phase = DeathPhase::Queued;
+                                    // lb48: the child-node death notice
+                                    // (reg_tgid exit path) — same WARN
+                                    // class as the proc-exit notice.
+                                    crate::pr_warn!(
+                                        "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
+                                        q.pid,
+                                        r.desc,
+                                        d.cookie,
+                                        owner.pid,
+                                        tgid
+                                    );
                                     qim.im().todo.push_back(Work::DeadBinder {
                                         desc: r.desc,
                                         cookie: d.cookie,
@@ -5019,6 +5052,27 @@ fn binder_ioctl_write_read(
             &mut bwr.write_consumed,
         );
         if ret < 0 {
+            // lb48 WERR tap: a negative ioctl return reaches userspace as
+            // -errno through WriteBinder; errno 32 (EPIPE) is exactly
+            // ERR_DEAD_OBJECT (-32), the ONLY value that death-marks an
+            // IPCObjectProxy from a send. Every negative write-side
+            // return is named so the -32 moment, if it ever happens, is
+            // attributed to its pid/tid/first-command.
+            if ams46_on() {
+                static WERR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if WERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+                    let first = get_user_at::<u32>(bwr.write_buffer, 0).unwrap_or(0xFFFF_FFFF);
+                    crate::pr_warn!(
+                        "AMS46-WERR pid={} tid={} rc={} firstcmd={:#x} wcons={}",
+                        proc.pid,
+                        thread.tid,
+                        ret,
+                        first,
+                        bwr.write_consumed
+                    );
+                }
+            }
             bwr.read_consumed = 0;
             // SAFETY: 48-byte copy back to the same location.
             unsafe {
@@ -5811,6 +5865,35 @@ fn binder_thread_write(
                         };
                         if request {
                             if pim.refs[ridx].death.is_some() {
+                                // lb48 ARM tap: a re-arm while a death
+                                // record still occupies the slot is the
+                                // silent-drop shape — userspace believes
+                                // the recipient attached, the kernel
+                                // never notifies. Named at WARN because
+                                // it is the one arm outcome with no
+                                // other visibility.
+                                if ams46_on() {
+                                    static ARM_DUP_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if ARM_DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 120
+                                    {
+                                        let owner = world
+                                            .procs
+                                            .iter()
+                                            .find(|q| q.id == pim.refs[ridx].node.proc_id)
+                                            .map(|q| q.pid)
+                                            .unwrap_or(0);
+                                        crate::pr_warn!(
+                                            "AMS46-ARM dup pid={} desc={} cookie={:#x} owner={} phase={:?}",
+                                            proc.pid,
+                                            target,
+                                            cookie,
+                                            owner,
+                                            pim.refs[ridx].death.as_ref().map(|d| d.phase)
+                                        );
+                                    }
+                                }
                                 drop(w);
                                 crate::pr_info!(
                                     "binder: pid {} BC_REQUEST_DEATH_NOTIFICATION already set (desc {})",
@@ -5820,6 +5903,40 @@ fn binder_thread_write(
                                 continue;
                             }
                             let already_dead = node_is_dead(world, &pim.refs[ridx].node);
+                            // lb48 ARM tap: desc -> node-owner map at arm
+                            // time. The death notice for a desc is only
+                            // interpretable against this table: a notice
+                            // whose desc was armed against owner X tells
+                            // us which userspace proxy (the cookie) the
+                            // framework expected to die with X.
+                            if ams46_on() {
+                                static ARM_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                // lb49: skip the first ~100 s — lb48 spent the
+                                // whole budget on the boot-start arm storm
+                                // (240 gone by ~35 s), dark exactly over the
+                                // account phase the map exists for.
+                                let j = crate::drivers::timer::get_jiffies();
+                                if j >= 1000
+                                    && ARM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 240
+                                {
+                                    let owner = world
+                                        .procs
+                                        .iter()
+                                        .find(|q| q.id == pim.refs[ridx].node.proc_id)
+                                        .map(|q| q.pid)
+                                        .unwrap_or(0);
+                                    crate::pr_warn!(
+                                        "AMS46-ARM pid={} desc={} cookie={:#x} owner={} nodedead={}",
+                                        proc.pid,
+                                        target,
+                                        cookie,
+                                        owner,
+                                        already_dead
+                                    );
+                                }
+                            }
                             pim.refs[ridx].death = Some(RefDeath {
                                 cookie,
                                 phase: if already_dead { DeathPhase::Queued } else { DeathPhase::Armed },
