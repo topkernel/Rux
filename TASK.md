@@ -634,3 +634,17 @@ lb26 (RELEASE kernel, no /data): same wall → wall is not compute.
 lb27 (release + fresh /data): MILESTONE boot — see above.
 lb28 (release + fresh /data + ams46): slow SA-load variant, evidence in
   run/oh-lb28-serial.log.
+
+### lb29 addendum (clean-config retry, release + fresh /data + wwcensus)
+Slow variant: unlock at 746s (lockstatus_100 set), USER_UNLOCKED events
+fire 806-821s, NO accountmgr reset this time — and STILL no launcher:
+AMSI1640 never prints, and com.ohos.systemui NEVER SPAWNS either (0
+mentions; lb10-era boots DID spawn systemui from StartUser). So the
+post-unlock gate is upstream of both ability launches: foundation
+receives the StartUser(100) oneway (lb28's AMS46 latch @283s) but the
+SwitchToUser/user-start ability chain never executes inside foundation
+on these boots — the ams46 walled-draw family. Fifth successor: get an
+ams46 boot through a 237s-class unlock (lb27 config luck) and read the
+AMS46 read/free/retire + census lines for node 12xxx — they name
+whether the oneway is parked in the async slot, read and dropped, or
+racing a dead reader.
