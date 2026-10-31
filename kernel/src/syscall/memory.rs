@@ -1639,20 +1639,27 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
-                    .iter()
-                    .map(|v| (v.start().as_usize(), v.end().as_usize()))
-                    .collect();
-                spans.sort_unstable();
+                // Perf review 2026-10-31: the coverage walk used to
+                // collect EVERY VMA of the mm into a Vec and sort it
+                // under the write lock — a heap allocation plus an
+                // O(n log n) sort per mprotect, starving every
+                // concurrent fault on the mm — and the BTreeMap order
+                // is already sorted, so the sort never did anything.
+                // Walk the tree directly, bounded to the target span:
+                // no allocation, no sort, early exit at the span end.
                 let mut cursor = addr;
-                for (s, e) in &spans {
-                    if *e <= cursor {
+                for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                    let (s, e) = (v.start().as_usize(), v.end().as_usize());
+                    if s >= addr + length {
+                        break; // past the span; covered so far is final
+                    }
+                    if e <= cursor {
                         continue;
                     }
-                    if *s > cursor {
+                    if s > cursor {
                         break; // gap at `cursor`
                     }
-                    cursor = *e;
+                    cursor = e;
                     if cursor >= addr + length {
                         break;
                     }
