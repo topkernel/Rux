@@ -191,7 +191,7 @@ done
 # CreateSession — logind then owns sessions/c1 + users/120, which
 # gdm-manager's RegisterDisplay lookup reads (see gdm-repack.sh).
 grep -q 'pam_systemd' "$ROOT/etc/pam.d/common-session" || \
-    sed -i '/^session[[:space:]]*required[[:space:]]*pam_unix.so/a session\toptional\tpam_systemd.so' \
+    sed -i '/^session[[:space:]]*required[[:space:]]*pam_unix.so/a session\toptional\tpam_systemd.so debug' \
         "$ROOT/etc/pam.d/common-session"
 grep pam_systemd "$ROOT/etc/pam.d/common-session" | sed 's/^/   /'
 echo "-- /etc/pam.d/gdm-password as booted:"

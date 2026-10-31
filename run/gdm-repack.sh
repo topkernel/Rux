@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r57"
+NEXT="r64"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
@@ -69,7 +69,7 @@ if [ -f "$DEB" ]; then
     # run here) — stock Ubuntu's line goes into common-session, right
     # after pam_unix:
     grep -q 'pam_systemd' "$ROOT/etc/pam.d/common-session" || \
-        sed -i '/^session[[:space:]]*required[[:space:]]*pam_unix.so/a session\toptional\tpam_systemd.so' \
+        sed -i '/^session[[:space:]]*required[[:space:]]*pam_unix.so/a session\toptional\tpam_systemd.so debug' \
             "$ROOT/etc/pam.d/common-session"
 else
     echo "warn: libpam-systemd deb missing — greeter session will use the stale sd-login bridge" >&2
