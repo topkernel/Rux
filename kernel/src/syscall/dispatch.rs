@@ -311,15 +311,23 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // only 2048 entries, so a parked waiter's record is overwritten
     // within milliseconds under system-wide traffic; the taskdump's
     // lastsys= field reads the per-task latch.
-    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
-    if let Some(cur) = crate::sched::current() {
-        use core::sync::atomic::Ordering::Relaxed;
-        // SAFETY: cur is the running task.
-        unsafe {
-            (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
-            (*cur).last_syscall_a0.store(args[0], Relaxed);
-            (*cur).last_syscall_a1.store(args[1], Relaxed);
+    // (perf-syscall lane) Both the ring record and this SECOND latch
+    // (post-translate numbers) are hunt instrumentation — 12 atomics
+    // per syscall — and now sit behind dfx=sysforensic. The
+    // pre-translate latch above stays always-on: it is what makes a
+    // parked task's taskdump show the syscall it is parked IN, and it
+    // costs 3 stores.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+        SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+        if let Some(cur) = crate::sched::current() {
+            use core::sync::atomic::Ordering::Relaxed;
+            // SAFETY: cur is the running task.
+            unsafe {
+                (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
+                (*cur).last_syscall_a0.store(args[0], Relaxed);
+                (*cur).last_syscall_a1.store(args[1], Relaxed);
+            }
         }
     }
 
@@ -748,6 +756,27 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     }
 
     syscall_set_return_value(regs, result);
+
+    // STEPTRACE (dfx=steptrace): one line per syscall return. Left
+    // ungated this flooded the emulated UART (2.7GB per OH boot) and the
+    // printing alone slowed services enough to lose races — see the
+    // switch catalog note in dfx/switches.rs.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
+            crate::process::current_pid(), syscall_no, result,
+            if result < 0 { "error" } else { "ok" });
+    }
+
+    // (perf-syscall lane) Everything from here to the end of the
+    // function — the FORENSIC ring exit record, the per-task
+    // last_calls/init_calls/birth rings, the fail-tail ring and the
+    // sc-series comm-gated hooks (appioctl/applog/appconn/prctl-einval/
+    // missstat/openmiss) — is hunt instrumentation costing ~15 atomics
+    // plus comm scans on EVERY syscall. Gated behind dfx=sysforensic;
+    // quiet boots pay one atomic load.
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+        return;
+    }
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
@@ -1209,15 +1238,5 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
                 );
             }
         }
-    }
-
-    // STEPTRACE (dfx=steptrace): one line per syscall return. Left
-    // ungated this flooded the emulated UART (2.7GB per OH boot) and the
-    // printing alone slowed services enough to lose races — see the
-    // switch catalog note in dfx/switches.rs.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
-        crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
-            crate::process::current_pid(), syscall_no, result,
-            if result < 0 { "error" } else { "ok" });
     }
 }

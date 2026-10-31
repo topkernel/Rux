@@ -98,6 +98,7 @@ macro_rules! dfx_switch_table {
             OhHunt => "ohhunt",
             TfdCensus => "tfdcensus",
             ScmTap => "scmtap",
+            SysForensic => "sysforensic",
         }
     };
 }
@@ -458,9 +459,21 @@ pub enum DfxSwitch {
     /// fd dies between logind → dbus-daemon → pam (the "Session c1
     /// logged out" milliseconds-after-create shape). OFF by default.
     ScmTap,
+    /// dfx=sysforensic (perf-syscall lane): per-syscall forensic
+    /// instrumentation — the SYSCALL_RING entry/exit records (NOVMA
+    /// crash replay), the post-translate LASTSYS latch, the per-task
+    /// last_calls/init_calls/birth_calls rings, the fail-tail ring and
+    /// the sc-series comm-gated hooks (appioctl/applog/appconn/
+    /// prctl-einval/missstat/openmiss). Together these cost a dozen
+    /// atomics plus comm scans on EVERY syscall; they exist for hunt
+    /// boots only. The pre-translate LASTSYS latch at dispatch entry
+    /// stays always-on (taskdump's lastsys= field reads it; 3 stores).
+    /// OFF by default — boot with dfx=sysforensic when a hunt needs
+    /// the rings or the comm-gated prints.
+    SysForensic,
 }
 
-const SWITCH_COUNT: usize = 50;
+const SWITCH_COUNT: usize = 51;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -551,6 +564,7 @@ impl DfxSwitch {
             DfxSwitch::OhHunt => 47,
             DfxSwitch::TfdCensus => 48,
             DfxSwitch::ScmTap => 49,
+            DfxSwitch::SysForensic => 50,
 
         }
     }
