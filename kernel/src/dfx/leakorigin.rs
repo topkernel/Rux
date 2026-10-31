@@ -171,6 +171,11 @@ pub fn note_acquire(
             };
             if slot_task != task as usize {
                 slot.oslot.store(slot_task, Ordering::Release);
+                // ph5/ph5b verdict (2/2 boots wedged vs ph3's clean 1200s
+                // with this print's absence as the only tree delta): the
+                // LIVE print from inside the acquire path is wedged-boot
+                // correlated — record-only now. The data still surfaces
+                // at adjudication time (oslot= on the ORIGIN lines).
                 report_acquire_divergent(task, loc, cpu, slot_task);
                 1
             } else {
@@ -183,12 +188,16 @@ pub fn note_acquire(
     }
 }
 
-/// Live report of a divergent outermost acquire (preempt-hunt): the
-/// 0->1 booked on `task` (what tp names, i.e. the executing context)
-/// while this CPU's sched slot names `slot_task`. Printed AT the acquire
-/// moment (not later, from a healed/underflowed state) so the producing
-/// context is observed live: which site, which count fields, which task
-/// the slot held. Budgeted 60/boot.
+/// Live report of a divergent outermost acquire (preempt-hunt). DISABLED
+/// (record-only): ph5/ph5b — the only boots carrying this print — both
+/// wedged (UNIX_TABLE both-CPU deadlock at 18s/90s) while ph3, without
+/// it, completed 1200s cleanly; by elimination the print from inside
+/// the acquire path (it fires between the count read and the booking,
+/// from any context a lock acquire can run in) is wedge-correlated. The
+/// oslot record + ORIGIN lines at adjudication time carry the same
+/// data. The body is kept behind this switch for one gated re-trial.
+static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
+
 #[allow(unsafe_code)]
 fn report_acquire_divergent(
     task: *mut crate::process::Task,
@@ -196,6 +205,10 @@ fn report_acquire_divergent(
     cpu: u32,
     slot_task: usize,
 ) {
+    if !DIVERGENT_PRINT.load(Ordering::Relaxed) {
+        let _ = (task, loc, cpu, slot_task);
+        return;
+    }
     static N: AtomicU32 = AtomicU32::new(60);
     let b = N.load(Ordering::Acquire);
     if b == 0 {
