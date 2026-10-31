@@ -1663,3 +1663,120 @@ is the instrument if the greeter still does not launch.
   ~06:37), v2quiet (yield check fixed to match watch*, to ~10:38),
   gdm-evidence (to ~13:12). If watch2 expires unquiet again, re-arm
   per the standing debt pattern.
+
+## Session 20 — gdm chain to the LAST domino (2026-10-31, r51-r64)
+
+Lane: feature/gnome-bringup (worktree gnome-bringup). Merged main
+40e925fd (fast-forward; lane commits d58c1dd9/5dda1b73 were already in
+main). x86_64 + aarch64 builds rc=0; riscv make test ALL PASS.
+
+### The domino chain this session (each verified in serial evidence):
+
+1. KERNEL sysfs: boot_vga=1 on the DRM PCI function (4744bfe0).
+   gdm's udev_is_settled reads boot_vga on the card's PCI parent;
+   without it every boot idled ~61s in the "secondary PCI graphics
+   adapter" retry loop before the graphics-check timeout. Now:
+   "Found primary PCI graphics adapter, proceeding" immediately.
+2. IMAGE: /etc/X11/xorg.conf = the fbdev config (41e0af7f family).
+   gdm's [server-X0] -config flag is ROOT-ONLY in Xorg; the uid-120
+   greeter Xorg silently ignored it, autoconfig picked modesetting ->
+   glamor -> gbm -> deterministic SIGSEGV in libgbm's DRI-driver
+   loader (gdmr50, every ~2 min cycle). With the system xorg.conf the
+   greeter Xorg runs FBDEV+shadow — the proven pixels path.
+3. IMAGE: libpam-systemd (jammy 249.11) + 'session optional
+   pam_systemd.so debug' in common-session. The gdmr46 sd-login
+   bridge was retired (logind owns /run/systemd/users/120 and its
+   UserNew/user_start/UserRemoved churn clobbered the bridge every
+   attempt — gdmr51). pam_systemd + a real CreateSession is the stock
+   path.
+4. KERNEL sysfs: /sys/class/tty/tty0/active (live from fs::vt)
+   (fe23f64b). logind v249 seat_has_vts() == seat0 && console_active_fd
+   >= 0; without the attr CreateSession is rejected ("Seat has no VTs
+   but VT number not 0"). The gdmr26-era fear (logind wedge) is dead:
+   the VT layer now carries the whole console path ("Preallocating
+   VTs...", "VT changed to 1").
+5. IMAGE: systemd1shim — a ~300-line GLib daemon owning
+   org.freedesktop.systemd1 (test/ubuntu-gnome/systemd1shim.c, built
+   cross against the image glib; headers in work/glibdev-riscv64).
+   logind's CreateSession starts the session scope via
+   StartTransientUnit; with the name unowned, dbus activation failed
+   ("Launch helper exited with unknown return code 1") and no logind
+   session could exist. The shim answers Subscribe/StartUnit/
+   StartTransientUnit (+ unit job semantics: reply job path, then
+   JobRemoved(uoss,'done') 500ms later), GetEnvironment,
+   Properties.Environment, ListUnits. Reply path MUST be a REGISTERED
+   GDBus object (g_dbus_method_invocation_return_value) — a message
+   filter + send_message got its method_returns REJECTED by dbus-daemon
+   ("requested_reply=0") and pam_systemd timed out (gdmr56). runit
+   SUPERVISES it (connection watchdog + respawn) because of (7).
+6. STATE AFTER r59: "New session c1 of user gdm", CreateSession
+   replies arrive ("Sending reply about created session ... vtnr=1"),
+   RegisterDisplay no longer errors at the session lookup — the chain
+   now dies at ONE remaining kernel/userspace seam:
+7. THE REMAINING BLOCKER (r62-r64): the greeter session dies
+   INSTANTLY of a session-fifo EOF — logind logs "Session c1 logged
+   out. Waiting for processes to exit." milliseconds after the create
+   reply (session_stop_scope's abandon branch), the session file goes
+   STATE=closing, and gdm-manager's register check ("Session 'c1' is
+   not active or online") rejects -> gdm-x-session exit 70 loop.
+   Root-cause elimination so far:
+   - SCM_RIGHTS over AF_UNIX stream: WORKS (boot probes SCMFDS ok,
+     SCMTRANSIT ok — sender-closes-immediately transit included).
+   - fifo poll semantics: CORRECT (FIFOPOLL: no HUP with a live
+     writer; HUP only via is_write_closed).
+   - kernel send-side ancillary parking holds the Arc<File> refs in
+     the queued segment (net/unix.rs) — refs survive sender close.
+   - pam_systemd v249 (source checked) keeps the received fd
+     (F_DUPFD_CLOEXEC + pam_set_data).
+   - SECOND symptom, likely the same seam: once per boot, long-lived
+     bus connections DROP while their processes live (logind AND the
+     shim; names vanish, dbus-daemon re-activates login1 — up to 20
+     logind banners/boot; later greeter attempts fail with "Connection
+     timed out" and systemd1 activation errors). No process exits, no
+     kill storm (EXITGRP/KSIG forensics clean), no OOM.
+   NEXT HUNT DIRECTIONS (for the successor):
+   a. pam_systemd debug is ON in the image now (common-session
+      "pam_systemd.so debug") — the "Reply from logind: ...
+      session_fd=N" line will show whether the fd reaches pam (-1 =
+      lost in the dbus-daemon relay). The r64 dumps did not capture
+      that window before the session ended; keep grepping.
+   b. Watch the dbus-daemon's fd relay specifically: logind sends the
+      reply WITH fd to the daemon; the daemon must re-send with fd to
+      pam. Enable DBUS_VERBOSE? not shipped; instrument the kernel
+      recv/send cmsg paths with a dfx-gated tap for pid=dbus-daemon.
+   c. The connection-drop class: correlate with the first fd-carrying
+      message; suspect our unix socket's SCM delivery corrupting the
+      DAEMON's internal state (e.g., a cmsg written past the control
+      buffer, MSG_CTRUNC misreport) — the daemon then closes the
+      connection. A kernel-side tap on recvmsg for the daemon pid
+      (control buffer addresses + returned controllen) would settle it.
+   d. If (a) shows session_fd=N arriving at pam, the fifo EOF source
+      is the DBUS relay dropping the fd — then compare against stock
+      dbus-daemon behavior with a standalone repro (two gdbus peers
+      passing a fifo fd through the system bus).
+
+### Chain state on the last boot (gdmr64):
+udevd coldplug OK (udev db tags master-of-seat) -> logind owns login1,
+seat0 CanGraphical=yes (probe rc=0 with the CORRECT object path
+/org/freedesktop/login1/seat/seat0 — the old flat path was a probe
+bug) -> gdm3 settles immediately (boot_vga) -> PAM chain green ->
+CreateSession -> scope job "done" -> reply with session fd -> [session
+fifo EOFs here] -> gdm-manager rejects ('not active or online') ->
+gdm-x-session exit 70 -> 10s retry loop. Xorg (fbdev) itself is
+healthy all boot. Screen still black because gnome-shell never starts.
+
+### Commits this session (all pushed to feature/gnome-bringup):
+6d90800c charter; 4744bfe0 boot_vga; 7b24c43b seat-path probe;
+image: 41e0af7f shim v1 (+xorg.conf), [a0a58a14-era purge restored
+gdm-img/gdm-repack locally]; fe23f64b tty0/active; shim fixes
+(StartTransientUnit, registered-object replies, supervision, /var/log/
+gdm3, sd-login state dumps); fd/fifo probes in runit.
+
+### Registered-blocker verdicts (charter):
+1. "devfs symlink CanGraphical" — SUPERSEDED: CanGraphical passes since
+   r50 (udev db + logind seat); the operative gates were boot_vga and
+   the seat bus-object path (both fixed).
+2. netlink multicast — RESOLVED (session 17/18 fixes; udevd+logind run
+   the full coldplug/monitor path on current main).
+3. console-VT — the VT layer (fs/vt.rs, gdmr28-48 era) + tty0/active
+   (this session) carry logind's whole VT-controller path; no wedge.
