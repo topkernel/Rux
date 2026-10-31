@@ -378,6 +378,146 @@ Small commits, English, NEVER "Linux". x3 builds rc=0 before push. Push: origin/
   collapse point moves boot-to-boot ⇒ generic load collapse, not one bug.
   Screen stays the frozen logo frame (md5 06b933b4) on every lb1x boot.
 - x3 builds re-verified rc=0 after the tap demotions; make test green
+
+## THIRD-SUCCESSOR SESSION (2026-10-31 15:2x-17h, branch oh-launcher @ beb59243+)
+Base: main e8cc17ec merged FIRST (the branch was 67 commits behind and did NOT
+carry the samgr lane's rotation-proof PREEMPT-HEAL c354069a+047dbb7d — every
+lb1x boot ran WITHOUT it; that alone explains lb13/14/15's zero heals).
+
+### Landed (all pushed)
+1. merge main e8cc17ec (rotation-proof heal, 2s bound, cumulative bar).
+2. **WAKE-HEAL** (sched.rs, wake_up_enqueue_opt tail): a task about to be
+   woken, GRQ held, owned by no CPU slot (verified), not mid-switch-out
+   (with 50-jiffy stale-marker confirmation — a stale SWITCHING_OUT entry
+   was the silent forever-skip for the carrier tasks), not PF_EXITING,
+   carries NO legal guard by construction (sc265's conviction) → its
+   phantom preempt_count is zeroed AT WAKE so the monopoly never forms.
+   Skip-reason census: `why=e/s/c` budgeted 60; heal report budgeted 300.
+   lb18 measured: fires 268/boot, strands 13 (vs 21-36 before), lb20
+   early: 0 strands/34s. ALL observed skips are why=c (task in its own
+   slot — legit pre-sleep window OR lying busy slot; the lying-slot
+   adjudication needs the frozen-exec-clock check, NOT done).
+3. **tick-heal now sets need_resched** after clearing base bits (the zero
+   alone left the incumbent running to user-return — sc267).
+4. **kpreempt=1 cmdline arm of the IRQ-exit kernel-preempt hook**
+   (trap.rs, default OFF, syscost-style cmdline verdict cache).
+
+### VERDICTS (evidence in run/oh-lb19b-serial.log)
+- **kpreempt is NEGATIVE in the current tree**: DEADLOCK spinlock-stuck
+  prints on BOTH cpus from 54s, strands EXPLODED to 40. Mechanism: the
+  2s tick-heal false-heals REAL guards held >2s (holders are themselves
+  collapse victims) → preemptible() lies → the hook preempts a lock
+  holder mid-critical-section → the DEADLOCK lock 0xffff88807d2876d0 is
+  the same slab-region instance the underflow drops name every boot.
+  Full kernel preemption needs the false-heal problem solved first.
+- **The leak is a steady-state ENGINE, not one-off**: lb17 tail shows the
+  same pids (0x13e/0x219/0x24c/0x425 = OS_IPC worker threads, e.g. pid
+  318 = first OS_IPC worker after key_enable) re-healed every ~200ms
+  with was=0x10001, underflow at spinlock.rs:461/rwlock.rs:457 drops
+  (lock instances 0xffff88807d28a2d0/0xffff88807df62290 heap/slab
+  region — per-inode/per-socket Spinlock family per sc73), re-leak
+  immediately. Producer remains the double-run/wild-write family.
+- The lock at 0xffff88807d2876d0: slab-region heap object embedding a
+  Spinlock (inode.state / socket state family), deterministic address
+  across boots, contended by both CPUs for seconds at a time.
+- SLOW-TXN exec times up to 41.7s (device_manager code 14 during the
+  install stream) — exec-time class, not queue-time: the SERVER thread
+  itself runs 41s (crypto+syscalls under the collapse), same family as
+  the deviceauth 129s / asset_service 135s census stalls.
+
+### lb20 ENDGAME (read before next boot) — the wedge is now NAMED
+lb20 (full 2400s, WAKE-HEAL + need_resched insurance): the healthiest boot
+yet, AND the account-chain wedge is now a concrete starvation cascade:
+1. accountmgr SA LOADED for the first time ever ("SAFWK: StartSystemAbilityTask
+   accountmgr SA:200 init finished, 252 ms" @221.9s, pid 976; SACB callbacks
+   DELIVERED to tid 976 x16 @268-311s — the samgr->client direction works).
+2. softbus_server (pid 724) registered @228.8s then went SILENT — its worker
+   never answers. Its pick claim was reset once (STALE-CLAIM-RESET by_cpu=0
+   pid=724 @841.7s) with no recovery. This is the R85 "linked but starved /
+   pick-skip wedge" family (orphaned on_cpu mark / stale claim), NOT a leak.
+3. Consequence cascade, live in the log: device_manager (pid 568) code-3
+   handler waits ~5.24s (softbus LNN timeout) PER CALL, x102 SLOW-TXNs from
+   distributeddata's DB_TaskExecutor in a 5.75s retry loop; 104 stale-binder-
+   buffer reclaims of pid 568 (its own waiters' reply buffers age out);
+   distributed account queries (SAREG code=4 ohos.account.f...) spam accountmgr
+   x dozens/second from 355s on; bootevent.account.ready never SET (the
+   param_watcher wait at 211s hangs); useriam watchdog-killed at 641s (own
+   OS_DfxWatchdog) and restarts (687->1064->1135); screen stays md5 06b933b4.
+4. NO PARKED-LEAK on any softbus thread; last WAKE-STRANDED at 315s (pid 318
+   behind incumbents pid 684 pc=0x102 and pid 1 pc=1) — the strand/heal
+   machinery QUIETED after 315s. The final state is a stable starvation
+   equilibrium, not a collapse in progress.
+### Session close (third successor, 2026-10-31 ~17:50) — LADDER POSITION
+Ladder 1 (foundation survives) NOT yet held; the wall moved from "generic
+collapse" to ONE concrete cluster. Facts at close:
+- lb21 (dfx=wwcensus, same kernel): strand volume COLLAPSED to 6/boot
+  (strand_max 10.4s; lb15/16 class was 17-36) — the heal stack (rotation-
+  proof 2s tick heal + WAKE-HEAL + need_resched insurance) works. All my
+  QEMUs are dead; screen md5 06b933b4 (frozen logo) on lb20/lb21.
+- accountmgr SA loads (both boots); samgr->client callbacks work; the
+  remaining wall is the softbus/device_manager/accountmgr distributed-
+  cluster handshake: every call in that cluster runs multi-second (5.25s
+  device_manager timeouts on lb20; softbus->accountmgr code-14 SLOW-TXNs
+  on lb21), so activation never lands inside the watchdog windows.
+- Stale-claim resets keep regenerating (lb20: pids 497x2/457; lb21: 532x2/
+  584/1092) — the phantom-mark producer is alive but bounded.
+- Branch oh-launcher pushed through 7c850d6d + TASK commits; x3 builds
+  rc=0 (x86_64/riscv64/aarch64); make test ALL PASSED twice (lb18/lb21
+  maketest logs) on the final tree.
+
+### FOURTH-SUCCESSOR ENTRY POINTS (in order)
+1. The softbus starvation (lb20 evidence above): first boot with
+   `dfx=wwcensus` (lb21's recipe), watch pid 7xx softbus_server threads'
+   W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT lines + the PICK-SKIP reason
+   codes in fair.rs's pick decision legs. If a softbus worker is linked-
+   but-skipped with why=on_cpu, the R85 stale_oncpu heal's relink leg is
+   the fix site (it fired STALE-CLAIM-RESET on 724 at 841s on lb20 without
+   recovering the task).
+2. The re-leak engine (unchanged): OS_IPC worker carriers re-acquire
+   phantom +1 every ~200ms (lb17 tail); drops underflow at spinlock.rs:461/
+   rwlock.rs:457 with heap lock instances in the slab region
+   (0xffff88807d28a2d0/0xffff88807df62290/0xffff88807d2876d0 — the last
+   one DEADLOCKED both cpus under kpreempt). Root remains the double-run/
+   wild-write family (sc265/266/73 convictions; r83hunt is the tool).
+3. kpreempt=1 is armed-but-NEGATIVE until guards-held->2s disappear
+   (the false-heal preempts real lock holders; lb19b DEADLOCK proof).
+   Prerequisite: cond_resched at lock-free boundaries of the long kernel
+   loops (fork copy / exit unmap / rmap batches) OR the producer fix.
+4. timerfd_create storm caller still unnamed (4k/s; the 10-line TFDC
+   budget only caught boot-start callers: bluetooth/audio).
+=> OH-side note: even with accountmgr up, the DISTRIBUTED account path
+   (ohos.account.foreign/distributed) drags device_manager/softbus into the
+   critical path at boot. The hmdfs-disable image edit killed hmdfs, but
+   distributeddata's device_manager dependency remains. If the kernel
+   starvation is fixed, this chain should complete on its own.
+
+### Boot inventory this session
+lb16 (merged heal): anim.ready 221s, distributeddata watchdog-killed
+  (OS_DfxIpcCheck KOT-KILL 15 members) at 260s, wedge same class.
+lb17 (+WAKE-HEAL v1 silent): anim.ready 254s; console stalled ~300s;
+  steady re-leak engine first captured. NOTE: lb17's "launcher.ready
+  marker" was a FALSE match on "launcher.ready not set" — lb-boot.py now
+  rejects "not set" lines.
+lb18 (+skip census +stale-marker confirm): anim.ready 226s, heals 268,
+  strands 13, accountmgr started 303s, killed at 650s mid-account-phase.
+lb19/lb19b (kpreempt=1): the DEADLOCK verdict above (killed early).
+lb20 (running at write time): full 2400s, current branch.
+
+### Successor entry points (in order)
+1. lb20's endgame: did the account phase complete / foundation survive /
+   launcher spawn? (watch AccountMgrService / ActivateDefaultOsAccount /
+   StartUser / AMSI1640 userId / appspawn com.ohos.launcher).
+2. The remaining strand class is why=c lying busy slots: add the
+   frozen-exec-clock adjudication (W3-FROZEN-EXEC-SLOT machinery) to the
+   WAKE-HEAL's curr_on skip — a slot naming a task whose sum_exec_runtime
+   is frozen for 200ms+ while its state is SLEEPING is lying.
+3. The per-op wall (26x): syscall wall-times include wait-behind-
+   incumbents; after the monopoly fixes the residue is COW/fault cost
+   (rmap 28% of kernel ticks) + the timerfd_create storm (4k/s caller
+   STILL unnamed — bump the TFDC budget behind a dfx switch and boot once).
+4. The false-heal vs kpreempt dependency: real guards held >2s exist;
+   bounding them (cond_resched at lock-free boundaries of fork copy /
+   exit unmap / rmap batch loops) is the prerequisite for arming kpreempt.
   (1096/1096); branch pushed through fa31bfb3.
 - Successor entry points, in order: (1) the stranded-wake/preempt-count hunt
   (WAKE-STRANDED 1-2.6s at pc=1-2 + PARKED-LEAK pc=1 prints — leak suspects,

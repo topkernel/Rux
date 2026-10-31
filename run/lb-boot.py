@@ -12,6 +12,8 @@ SECS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 SYSIMG = sys.argv[3] if len(sys.argv) > 3 else "run/oh-img/system.img"
 KERNEL = sys.argv[4] if len(sys.argv) > 4 else "target/x86_64-unknown-none/debug/bzImage"
 EXTRA = sys.argv[5] if len(sys.argv) > 5 else ""   # extra kernel cmdline (e.g. "syscost=1")
+if EXTRA and not EXTRA.startswith(" "):
+    EXTRA = " " + EXTRA
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
@@ -97,7 +99,10 @@ while True:
         text = line.decode("utf-8", "replace")
         log.write(f"[{stamp:9.3f}] {text}\n")
         for mk in MARKERS:
-            if mk in text and mk not in seen:
+            # "not set" bootevent warnings are the negative of the event —
+            # a bare substring match turned lb17's "launcher.ready not set"
+            # WARNING into a false marker.
+            if mk in text and "not set" not in text and mk not in seen:
                 seen[mk] = stamp
                 log.write(f"[{stamp:9.3f}] ===MARKER {mk}===\n")
                 log.flush()
