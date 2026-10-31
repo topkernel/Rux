@@ -441,7 +441,7 @@ pub mod vendor {
 /// the PCI blk probe found zero devices, root fell back, no init
 /// loadable). GPEX (aarch64) devices are transitional (0x1000/0x1001)
 /// and are unaffected by the modern entries.
->>>>>>> origin/ltp-r20pub mod virtio_device {
+pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
     pub const VIRTIO_NET_MODERN: u16 = 0x1041;
     pub const VIRTIO_BLK: u16 = 0x1001;
