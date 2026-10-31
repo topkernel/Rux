@@ -930,15 +930,14 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
 pub fn sys_dup(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
-                Ok(newfd) => newfd as i64,
-                Err(e) => e as i64,
-            },
-            None => -errno::EBADF as i64,
-        }
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
+            Ok(newfd) => newfd as i64,
+            Err(e) => e as i64,
+        },
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -947,17 +946,16 @@ pub fn sys_dup2(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => {
-                match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => fd as i64,
-                    None => -errno::EBADF as i64,
-                }
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => {
+            match fdtable.dup2_fd(oldfd, newfd) {
+                Some(fd) => fd as i64,
+                None => -errno::EBADF as i64,
             }
-            None => -errno::EBADF as i64,
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -978,23 +976,22 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => {
-                match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => {
-                        // dup3 O_CLOEXEC applies to the NEW descriptor only
-                        if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
-                            fdtable.set_fd_cloexec(fd, true);
-                        }
-                        fd as i64
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => {
+            match fdtable.dup2_fd(oldfd, newfd) {
+                Some(fd) => {
+                    // dup3 O_CLOEXEC applies to the NEW descriptor only
+                    if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+                        fdtable.set_fd_cloexec(fd, true);
                     }
-                    None => -errno::EBADF as i64,
+                    fd as i64
                 }
+                None => -errno::EBADF as i64,
             }
-            None => -errno::EBADF as i64,
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1744,12 +1741,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
 /// fd of the description closes. Conflicting requests block unless
 /// LOCK_NB, in which case -EWOULDBLOCK (-EAGAIN) is returned.
 pub fn sys_flock(args: SyscallArgs) -> i64 {
-    use crate::fs::file::get_file_fd;
-
     let fd = args[0] as usize;
     let operation = args[1] as i32;
 
-    let file = match unsafe { get_file_fd(fd) } {
+    let file = match crate::fs::file::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
