@@ -639,3 +639,92 @@ discipline leaks (never frees) buffers the device may still DMA into.
 and buffer-cache hit rate >= baseline; the exthunt read-side probes
 (rd_serve/rd_batch/rd_hit/READHOLE) adjudicate serve-truth when a
 read-corruption family appears.
+
+---
+
+## D-13: Batched metadata publication + discard-on-free (ext4 write path)
+
+**Design.** Two write-path stances, landed with the perf-fs sprint
+(2f219478, 1debc2b1, 39975867). (1) Publication records — the
+crash-ordering layer over deferred metadata writes — batch per
+transaction window: `bio::publication_batch_drain` fires at every
+`ext4_journal_stop` bracket close only when the pending queue crossed
+PUB_BATCH=64, instead of each entry mutation paying a scoped ordered
+drain of its own records at op return. (2) Freed blocks are FORGOTTEN:
+`free_block_run` drops each freed block's dirty unreferenced
+buffer-cache entry without writing it and removes its jbd2 registration
+(`jbd2_journal_forget`) so no later commit re-reads and rewrites the
+dead content. Alongside, `getblk_overwrite` serves full-block metadata
+rewrites without the disk read the old `bread` paid (the reference
+never reads a block it is about to fully rewrite).
+
+**Advantage.** p6_mkdrmdir med 29796 us -> 3742 us (publication
+batching) -> 2107 us (discard-on-free), p99 54 ms -> 16.4 ms, against
+the reference kernel's 153 us -> within ~14x on the shared
+syscall/lookup floor (p6_stat 15 us vs reference 0.23 us is that floor,
+not the fs). Dead directory blocks from create/delete churn are never
+synchronously written; the revoke-threshold slow commits stop
+round-tripping stale bytes through the journal area.
+
+**Compatibility evidence.** POSIX never promised per-op directory
+durability — that belongs to fsync(dirfd); Rux's durability points
+(fsync/sync(2)/eviction/commit) and the H1/H2 out-of-band constraint
+guards are unchanged. Crash ordering rides the bitmap/GD/SB deferred
+writes plus revoke records. The forget stance mirrors the reference's
+own EXT4_FREE_BLOCKS_FORGET semantics; clean/pinned freed buffers are
+left in place. Fresh directory blocks are fully initialized in-memory
+(zeroed Vec + entry + csum tail) and written via the full-block path,
+so the skipped read can never leak prior-life bytes. `make test` and
+the pbench P6 battery green on both arms (journal / no-journal).
+
+**Known cost.** Up to PUB_BATCH records' worth of dirty metadata in
+flight between durability points — an out-of-band writer hitting a
+constrained block pays a constraint flush bounded by that many
+records' blocks. A pinned-or-clean freed buffer survives the forget
+and is written later (dead data to a free block: harmless to the
+bitmap truth, not optimal). discard-on-free does not TRIM the device.
+
+**Guard.** Perf-gate filesystem hot paths domain: pbench fs rows
+(mkdir+rmdir/unlink medians) within band; fsw counters pb2/pm (batch
+drains, queue max) and FSW3 db= (drops) watch the queue length and
+drop volume; the buffer-cache hit-rate floor catches over-dropping.
+
+---
+
+## D-14: Measured-wait wakeup-preemption gate (CFS)
+
+**Design.** On a wake that found no idle CPU, the busy-CPU
+need_resched poke runs only when the wakee's measured wait —
+sched_clock minus its last pick stamp — is at least one
+SCHED_LATENCY_NS window (6 ms); a wakee that last ran within the
+window is left to the slice/handoff machinery (977adb51). The
+mainstream kernel gates wakeup preemption on a vruntime-credit
+comparison (check_preempt_curr / wakeup granularity). Rux's vruntime
+floor-on-enqueue and place-on-wake adjustments would make that raw
+comparison pass on every wake of a ping-pong receiver, re-creating a
+preempt dance per record.
+
+**Advantage.** Kills the per-record preempt dance on same-CPU
+sender/receiver pairs: a 74-byte unix-stream record cost ~275 us of
+wake/preempt/switch dance against the reference's ~2.5 us; the idle
+steering + gate brought the p5 socket family 10-18x. Senders run
+unmolested at trap exit while receivers drain in parallel on idle
+CPUs.
+
+**Compatibility evidence.** Scheduling policy only — no ABI surface.
+A wakee older than one latency window keeps immediate wakeup
+preemption (the starvation/latency case the mechanism exists for);
+sub-window wakees are picked at the incumbent's next scheduling point
+(slice end, cond_resched, lock slowpath), which is the same batching
+the reference applies to wakeup-granularity-immune pairs. LTP
+sched-family green; pbench P2/P5 rows in band; census TERM/REFUSED
+bands unchanged.
+
+**Known cost.** Wake latency for sub-6 ms ping-pong receivers is
+bounded by slice expiry rather than immediate preemption; the exec_start
+approximation (last pick stamp) slightly overestimates the true wait
+for tasks whose producers hold the CPU across their pick.
+
+**Guard.** Perf-gate scheduling domain: pbench P2 context-switch and
+P5 IPC medians within band; census (TERM 8±2 / REFUSED 32±4); the
+ipcdisc battery's drain-shape discriminators.

@@ -31,6 +31,39 @@ Coordinator assignment (sprint-delta review 82059759..40e925fd) executed in full
   build (.incbin carries the building worktree's absolute path) — if you
   build aarch64, `git checkout --` it before committing anything.
 
+## Session 2026-11-01 (cr3) — sprint-delta review d608a9b7..main DONE
+Coordinator assignment (perf-sprint batch) executed in full:
+ext4 perf family, LAPIC one-shot, console batched TX, sysforensic
+gating, WAKE-HEAL/CLAIM-SWEEP (three-gated vs the sc265/sc267
+convictions), SSIE, binder death-notification delta, fstat-socket +
+SA_RESTORER + arm64 open-flag, identity-map drop. VERDICT: no
+functional regression in the batch. Fixed: dup `let limit` pairs in
+both arch strncpy_from_user twins. Added: register D-13 (batched
+publication + discard-on-free) and D-14 (measured-wait wake-preempt
+gate) — the sprint landed its divergences without register entries.
+Ledger: run/review-findings-cr3.md (three-gate arguments per family,
+residual risks named). Verification: x3 builds + make verify 1104/1104
++ riscv make test ALL PASSED (logs run/cr3-*.log).
+NOTE: the cr3 reviewer died on a quota cap before committing; the
+successor re-verified the load-bearing verdicts independently (WAKE-
+HEAL structural pillars re-read in sched.rs/preempt.rs; ext4
+getblk_overwrite/drop_block/publication drains re-checked in
+bio.rs/namei.rs; SSIE + fstat-socket commits re-read), covered the
+5bf31528..1134d002 delta (leakorigin outermost tap — PASS, gated +
+budgeted; 2 gdm image scripts — no kernel surface), and closed the
+leakorigin.rs coverage gap (read end to end, ledger todo -> done).
+All committed in one review commit on feature/code-review.
+
+Key adjudications future sessions should reuse:
+- WAKE-HEAL soundness is STRUCTURAL (not just sc265 statistics):
+  __schedule refuses to park pc!=0 tasks, and the GRQ guard is
+  released BEFORE context_switch — so a parked no-CPU task with pc!=0
+  is phantom 100%. CLAIM-SWEEP heals ownership marks, NOT preempt
+  counts.
+- discard-on-free pinned-buffer residual + the pre-existing
+  page-cache-vs-free ordering race: named in the cr3 ledger, fs-lane
+  follow-up material.
+
 ## Priorities NEXT session
 1. The aarch64 campaign's SHARED-code surface (unchanged from previous
    charter, still not covered): syscall/x86_compat.rs (x86->generic
