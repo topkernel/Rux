@@ -191,17 +191,21 @@ pub struct TcpHdr {
 
 impl TcpHdr {
     /// Create TCP header from byte slice
-    pub fn from_bytes(data: &[u8]) -> Option<&'static Self> {
+    ///
+    /// Review finding 8: the frame path hands this a buffer at an
+    /// ETHERNET_HEADER + IHL*4 offset — 2 mod 4 — so forming a `&TcpHdr`
+    /// over it was a MISALIGNED reference (UB on the u32 fields; a legal
+    /// miscompilation target under LTO). Parse into a bytewise-local
+    /// header via read_unaligned and return that (Copy type, no pinning
+    /// needed by any caller — they only read fields).
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < TCP_MIN_HLEN {
             return None;
         }
 
-        // SAFETY: data has at least TCP_MIN_HLEN bytes; the resulting reference
-        // lifetime is 'static because it aliases the skb data which lives until
-        // the packet is freed (longer than any per-function borrow).
-        unsafe {
-            Some(&*(data.as_ptr() as *const TcpHdr))
-        }
+        // SAFETY: data has at least TCP_MIN_HLEN bytes; unaligned read of
+        // a Copy POD header, no reference formed.
+        unsafe { Some(core::ptr::read_unaligned(data.as_ptr() as *const TcpHdr)) }
     }
 
     /// Get data offset (in 32-bit words)
@@ -1111,6 +1115,15 @@ pub struct TcpSocket {
     /// is transmitted; serviced at the tail of tx_packets.
     pub fin_pending: bool,
 
+    /// Window-update sequencing (review finding 9, RFC 793 §3.9): the
+    /// window is adopted only when the carrying segment is newer than the
+    /// last one that set it — SEG.SEQ > SND.WL1, or equal SEG.SEQ with
+    /// SEG.ACK >= SND.WL2. Without this, a reordered old ACK (w=0)
+    /// retracted the send window and stalled the sender until a persist
+    /// probe.
+    pub snd_wl1: TcpSeq,
+    pub snd_wl2: TcpSeq,
+
     // === Sliding window ===
     /// Send window (advertised by peer)
     pub snd_wnd: u16,
@@ -1212,6 +1225,8 @@ impl TcpSocket {
             recv_buffer: alloc::collections::VecDeque::new(),
             retrans_queue: alloc::collections::VecDeque::new(),
             fin_pending: false,
+            snd_wl1: 0,
+            snd_wl2: 0,
             user_refs: core::sync::atomic::AtomicU32::new(0),
             orphaned: false,
             pending_error: 0,
@@ -1640,7 +1655,13 @@ impl TcpSocket {
                 // Process ACK first (updates snd_una, snd_wnd, cwnd, rtt)
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
+                    self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    );
                 }
                 // Process data (may accompany FIN)
                 if !data.is_empty() {
@@ -1658,7 +1679,13 @@ impl TcpSocket {
                 let mut valid_ack = false;
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    valid_ack = self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
+                    valid_ack = self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    );
                 }
                 let fin_seq =
                     TcpSeq::from_be(tcp_hdr.seq).wrapping_add(data.len() as u32);
@@ -1693,7 +1720,13 @@ impl TcpSocket {
                 // Waiting for FIN from remote
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
+                    self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    );
                 }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
@@ -1721,7 +1754,13 @@ impl TcpSocket {
                 // Simultaneous close: waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num, has_data, tcp_hdr.window(), tx) {
+                    if self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    ) {
                         self.state = TcpState::TCP_TIME_WAIT;
                         self.start_timewait_timer();
                     }
@@ -1731,7 +1770,13 @@ impl TcpSocket {
                 // Waiting for ACK of our FIN
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    if self.process_ack(ack_num, has_data, tcp_hdr.window(), tx) {
+                    if self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    ) {
                         self.state = TcpState::TCP_CLOSE;
                     }
                 }
@@ -1740,7 +1785,13 @@ impl TcpSocket {
                 // Remote sent FIN, waiting for application to close
                 if tcp_hdr.ack() {
                     let ack_num = TcpSeq::from_be(tcp_hdr.ack_seq);
-                    self.process_ack(ack_num, has_data, tcp_hdr.window(), tx);
+                    self.process_ack(
+                        ack_num,
+                        TcpSeq::from_be(tcp_hdr.seq),
+                        has_data,
+                        tcp_hdr.window(),
+                        tx,
+                    );
                 }
                 if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
@@ -1899,18 +1950,37 @@ impl TcpSocket {
             // alloc_error_handler (panic → wfi holding TCP_TABLE_LOCK, the
             // R34 wedge); dropping an OOO segment is TCP-legal (the peer
             // retransmits after the dup-ACK).
-            let mut seg_data = alloc::vec::Vec::new();
-            if seg_data.try_reserve_exact(data.len()).is_err()
+            // Review finding 10 (memory DoS): the OOO queue used to grow
+            // without bound — a peer retransmitting the same
+            // out-of-order segment N times inserted N copies, and the
+            // advertised RCV.WND never accounted for OOO bytes, so
+            // nothing throttled it. Two caps, both TCP-legal (drop +
+            // dup-ACK; the peer retransmits):
+            //  - trim bytes already below rcv_nxt (duplicates of
+            //    delivered data — the old code buffered them anyway),
+            //  - drop when OOO bytes would exceed the advertised
+            //    receive window.
+            let ooo_bytes: usize = self.ooo_queue.iter().map(|o| o.data.len()).sum();
+            let lo = if seq.wrapping_add(data.len() as u32) <= self.rcv_nxt {
+                // Entirely below the window: pure duplicate.
+                0
+            } else {
+                data.len()
+                    - ((self.rcv_nxt.wrapping_sub(seq)) as usize).min(data.len())
+            };
+            if lo == 0
+                || ooo_bytes + (data.len() - lo) > self.rcv_wnd as usize
                 || self.ooo_queue.try_reserve(1).is_err()
             {
-                // Do not ACK buffered-but-dropped bytes — same rationale
-                // as the in-order arm above. (The ooo_queue deque-chunk
-                // growth is also an under-lock allocation — R35.)
                 return Ok(());
             }
-            seg_data.extend_from_slice(data);
+            let mut seg_data = alloc::vec::Vec::new();
+            if seg_data.try_reserve_exact(data.len() - lo).is_err() {
+                return Ok(());
+            }
+            seg_data.extend_from_slice(&data[lo..]);
             self.ooo_queue.push_back(TcpOooSeg {
-                seq,
+                seq: seq.wrapping_add(lo as u32),
                 data: seg_data,
             });
 
@@ -2386,7 +2456,14 @@ impl TcpSocket {
     /// W3: `has_data` tells whether the carrying segment had a payload
     /// (dup-ACK detection per RFC 5681 needs a PURE ack); `window` is the
     /// peer's advertised window in this segment.
-    pub fn process_ack(&mut self, ack: TcpSeq, has_data: bool, window: u16, tx: &mut TcpTxBatch) -> bool {
+    pub fn process_ack(
+        &mut self,
+        ack: TcpSeq,
+        seg_seq: TcpSeq,
+        has_data: bool,
+        window: u16,
+        tx: &mut TcpTxBatch,
+    ) -> bool {
         // Check ACK sequence number
         if self.seq_before(ack, self.snd_una) {
             // Old ACK below snd_una — STALE, not a duplicate ACK. (The old
@@ -2410,7 +2487,20 @@ impl TcpSocket {
         // P2 window scale: the 16-bit field carries window >> shift when
         // the peer offered WS in its SYN — reconstruct the true size
         // (saturating at the u16 storage).
-        self.snd_wnd = ((window as u32) << self.peer_wscale).min(u16::MAX as u32) as u16;
+        // Review finding 9 (RFC 793 window-update test): adopt the
+        // advertisement only from a segment newer than the previous
+        // window-setter. A reordered duplicate (old SEG.SEQ) must not
+        // retract the window — the old code adopted on every acceptable
+        // ACK, so a late w=0 retransmit stalled the sender until the
+        // persist probe.
+        let wl_acceptable = self.seq_before(self.snd_wl1, seg_seq)
+            || (self.snd_wl1 == seg_seq && !self.seq_before(ack, self.snd_wl2));
+        if wl_acceptable {
+            self.snd_wnd =
+                ((window as u32) << self.peer_wscale).min(u16::MAX as u32) as u16;
+            self.snd_wl1 = seg_seq;
+            self.snd_wl2 = ack;
+        }
 
         // Calculate acknowledged bytes
         let acked_bytes = ack.wrapping_sub(self.snd_una);
@@ -2854,7 +2944,7 @@ impl TcpConnectionManager {
             }
         }
 
-        tcp_trace_in(tcp_hdr, skb, dest_port);
+        tcp_trace_in(&tcp_hdr, skb, dest_port);
 
         let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
         let mut listen_parent: Option<i32> = None;
@@ -2924,7 +3014,7 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(tcp_hdr, payload, tx);
+                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -2960,7 +3050,7 @@ impl TcpConnectionManager {
                     new_socket.parent_fd = Some(parent);
                     // State machine drives itself from LISTEN: SYN →
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
-                    let _ = new_socket.handle_packet(tcp_hdr, &[], tx);
+                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -3043,7 +3133,7 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(tcp_hdr, payload, tx);
+                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -3075,7 +3165,7 @@ impl TcpConnectionManager {
                     new_socket.remote_ip6 = *src6;
                     new_socket.state = TcpState::TCP_LISTEN;
                     new_socket.parent_fd = Some(parent);
-                    let _ = new_socket.handle_packet(tcp_hdr, &[], tx);
+                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -3299,6 +3389,18 @@ pub fn tcp_socket_get(fd: i32) -> Option<&'static mut TcpSocket> {
     unsafe {
         TCP_SOCKET_TABLE.get_mut(fd as usize)
     }
+}
+
+/// Locked snapshot of a socket's connection outcome (review finding 7):
+/// `(state, pending_error)` read under TCP_TABLE_LOCK. The RX softirq and
+/// the timer tick mutate these fields under the same lock on other CPUs —
+/// reading them through the unlocked `tcp_socket_get` handle was a data
+/// race (UB) and could miss a transition or a recorded errno.
+pub fn tcp_connect_snapshot(fd: i32) -> Option<(TcpState, i32)> {
+    let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: shared read under the table lock.
+    unsafe { (*&raw const TCP_SOCKET_TABLE).get(fd as usize) }
+        .map(|ts| (ts.state, ts.pending_error))
 }
 
 /// Bind socket to port
@@ -4107,7 +4209,7 @@ fn tcp_payload_slice(skb: &SkBuff, header_len: usize) -> Option<&'static [u8]> {
     unsafe { Some(core::slice::from_raw_parts(skb.data.add(header_len), payload_len)) }
 }
 
-pub fn tcp_parse_packet(skb: &SkBuff) -> Option<&'static TcpHdr> {
+pub fn tcp_parse_packet(skb: &SkBuff) -> Option<TcpHdr> {
     // SAFETY: skb.data and skb.len describe a valid byte range in the skb buffer.
     let data = unsafe { core::slice::from_raw_parts(skb.data, skb.len as usize) };
 
@@ -4286,7 +4388,7 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     };
     {
         let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
-        if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), tcp_hdr, payload) != 0 {
+        if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), &tcp_hdr, payload) != 0 {
             TCP_RX_CSUM_ERRORS.fetch_add(1, Ordering::Relaxed);
             return Ok(()); // silently drop (counted)
         }
@@ -4315,7 +4417,7 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                 // No matching connection found — send RST (RFC 793 §3.9).
                 // R35: recorded into `tx` and emitted after the lock drops.
                 if !tcp_hdr.rst() && dest_ip != 0xFFFFFFFF {
-                    let _ = tcp_send_reset(src_ip, dest_ip, tcp_hdr, &mut tx);
+                    let _ = tcp_send_reset(src_ip, dest_ip, &tcp_hdr, &mut tx);
                 }
             }
         }
@@ -4462,7 +4564,7 @@ pub fn tcp_rcv6(
             Ok(w) => wake = w,
             Err(()) => {
                 if !tcp_hdr.rst() && !crate::net::ipv6::is_multicast(dest6) {
-                    let _ = tcp_send_reset6(src6, dest6, tcp_hdr, &mut tx);
+                    let _ = tcp_send_reset6(src6, dest6, &tcp_hdr, &mut tx);
                 }
             }
         }
