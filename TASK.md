@@ -521,3 +521,63 @@ kernel-side audit closes most of the rest. Facts (OH source at
    keys). It decides between: (a) osaccount send fails kernel-side (SENDFAIL/
    DRS/WERR name the leg), (b) proxy null (samgr leg), (c) notice-mark (ARM map
    + notice name the desc/owner).
+
+### lb53/lb54 (seventh successor): the full engine, named with timestamps
+lb53/lb54 ran the pre-merge evidence kernel (branch `evidence-premerge` =
+33d007fe + SENDFAIL + the death-event net + lockless prints — PUSHED; it
+boots clean where post-merge release wedges). lb54 (healthy boot, fast
+variant, full net armed) landed the fail moment:
+- 133.9  accountmgr #1 (pid 949) registers SA 200 (insert SA:200_53).
+- 264.39 OH's own watchdog group-suicide: accountmgr main thread KSIG9s its
+  group members, members kill back (OS_DfxWatchdog / OS_IPC workers — the
+  same KOT-KILL family as the usb_host crash loop). THREAD-DIED-SERVICING
+  shows a worker died servicing a call. accountmgr exits with signal 11.
+- 264.45-69 the kernel delivers ~20 armed death notices (pids 464,480,514,
+  545,585,602,693,717,718,891,902 desc 16+17...) — samgr rm DeadSA:200_63,
+  re-inserts SA:200_64 (on-demand profile) at 264.617, restart spawns 1073.
+- 289.18 lockstatus_100 SET; 289.277 restarted accountmgr (1073, alive,
+  SA-200 profile present) sends StartUser(100) code-46.
+- 289.280 startUser print → 289.281 "userId not exist": 1 ms, ZERO kernel
+  traffic (ripple fresh-opened; R-FAIL/SENDFAIL silent) = the osaccount leg
+  completed locally: OsAccount::proxy_ non-null and death-marked OR null
+  with its ACCOUNT_LOGE dropped by hilog flood. Either way the mark/reset
+  cycle of 264.47 did not leave a usable proxy at the decision moment.
+- 289.284 OnStartUserDone(100, 2097193) → rollback → launcher never spawns.
+
+ENGINE SUMMARY (supersedes the sixth's death-marked-cached-proxy story as
+the PRIMARY engine): OH's OS_DfxWatchdog/IPC-check group-suicides services
+(accountmgr, usb_host, ...) when our slow kernel makes workers exceed the
+check window; the one-shot StartUser/CheckUserParam decision then races the
+restart + SA re-registration (GetSystemAbility on the re-inserted on-demand
+profile answers null until the live SA loads). The kernel-side binder death
+machinery did everything correctly (notices delivered before SIGCHLD,
+single-queue, correct cookies). The fix that gets pixels is the perf wall
+(SLOW-TXN exec 15-41s, watchdog windows) — perf lanes' domain. The samgr
+reloc flake ("Error relocating /system/bin/samgr: OHOS::QOS::SetThreadQos")
+also kills boots outright ~1-in-N (lb3/lb4/lb49) — worth a look (ld.so under
+our mmap/page-fault paths).
+
+### WEDGE REGRESSION (blocks all post-merge release boots) — for the coordinator
+RELEASE builds of the post-merge tree (dd94e441.. = perf-sched/perf-ipc/
+perf-mm/oh-launcher merges) wedge in the early SA storm (first DEADLOCK
+print 5-10s, SA inserts stall ~15, console silent by ~800s): lb48, lb50,
+lb51, lb52 (4/4 wedged). Control boots: lb44 (release, PRE-merge tree)
+clean; lb47b (DEBUG, post-merge) clean; lb49 (release, post-merge, samgr
+died at 39s so the SA storm never ran) clean. The DEADLOCK prints name
+waiters in world_lock()/unix_send() on binder::WORLD / net::unix::UNIX_TABLE.
+Prime suspects among the merged commits: 977adb51 (sched: dispatch wakes to
+idle CPUs; gate wakeup preemption), e1e7d8f9 (unix single-copy send),
+e22f72a8 (x86_64 low-MMIO ioremap), 6cd3c9b8 (futex exit residency). NOT
+the ams46 taps (lb52 wedged at 6.4s before any tap fired; all WORLD-held
+taps are now lockless ConsoleWriter anyway). Until fixed, OH boots must use
+`evidence-premerge` (or pre-merge main).
+
+### Artifacts this session
+- Branch oh-launcher @ 83310953 (pushed through 457f0987 + this file):
+  lb48 death-event net (fe7dee8a), lockless-under-WORLD conversion
+  (83310953), decode-correction docs.
+- Branch evidence-premerge (local + pushed): 33d007fe + SENDFAIL + net +
+  lockless — THE bootable release kernel for OH boots until the wedge is
+  fixed. Boots lb53/lb54 used it (bzImage in target/.../release/).
+- Boots lb49-lb54 logs + shots in run/ (lb54 = the decisive evidence boot).
+- x3 builds rc=0 (x86_64/riscv64/aarch64); make test on the oh-launcher tree.
