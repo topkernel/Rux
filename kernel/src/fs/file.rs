@@ -365,6 +365,17 @@ impl File {
         unsafe { *self.ops.get() }
     }
 
+    /// Get the backing inode of this open file description, if it has one.
+    ///
+    /// Same cell discipline as get_ops: the inode cell is written at
+    /// open/creation time before the File is published to an fd table and
+    /// is not mutated afterwards.
+    pub fn get_inode(&self) -> Option<&Arc<Inode>> {
+        // SAFETY: no write to the cell after publication (see doc), so a
+        // shared read through the shared &self borrow is race-free.
+        unsafe { &*self.inode.get() }.as_ref()
+    }
+
     /// Set private data
     pub fn set_private_data(&self, data: *mut u8) {
         unsafe { *self.private_data.get() = Some(data); }
@@ -693,6 +704,40 @@ impl File {
             }
             _ => -29, // ESPIPE
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Slice-typed I/O entries (framekernel capsule boundary)
+    //
+    // Identical dispatch to the raw-pointer read/write/read_at/write_at
+    // above; the only difference is that the buffer bounds ride the type
+    // system, so `#![forbid(unsafe_code)]` syscall files can call them.
+    // -------------------------------------------------------------------------
+
+    /// Slice-typed read(2) dispatch (see read()).
+    pub fn read_slice(&self, buf: &mut [u8]) -> isize {
+        // SAFETY: the mutable slice guarantees buf.len() writable bytes —
+        // exactly the (buf, count) contract read() requires.
+        unsafe { self.read(buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed write(2) dispatch (see write()).
+    pub fn write_slice(&self, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes —
+        // exactly the (buf, count) contract write() requires.
+        unsafe { self.write(buf.as_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed pread(2) dispatch (see read_at()).
+    pub fn read_at_slice(&self, offset: u64, buf: &mut [u8]) -> isize {
+        // SAFETY: the mutable slice guarantees buf.len() writable bytes.
+        unsafe { self.read_at(offset, buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed pwrite(2) dispatch (see write_at()).
+    pub fn write_at_slice(&self, offset: u64, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes.
+        unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
     }
 
     /// Close file
@@ -1435,9 +1480,37 @@ pub fn set_cloexec_fd(fd: usize, on: bool) {
     }
 }
 
+/// Allocate an UNINITIALIZED staging buffer for read/write chunking (the
+/// syscall capsule layer's bounded transfer staging, SYSA-C1).
+///
+/// The buffer is always fully overwritten before it is read (file layers
+/// fill exactly the bytes they return; the user copy-in fills before
+/// write dispatch), so the previous `vec![0u8; n]` paid a useless memset
+/// per syscall — 4KB+ of zeroing on every read(2)/write(2) hot path
+/// (file, pipe, tty) that showed up directly in throughput under TCG
+/// (review SYSA-C1 fix in Wave 2R).
+pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::with_capacity(n);
+    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer
+    // is filled by the caller before any read of its contents (see doc).
+    unsafe { v.set_len(n); }
+    v
+}
+
 pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     use crate::sched;
     sched::get_current_fdtable()?.get_file(fd)
+}
+
+/// Safe-typed fd lookup for the framekernel capsule boundary: identical
+/// to get_file_fd. That fn's `unsafe` marker is historical — its body is
+/// two safe calls (get_current_fdtable + FdTable::get_file) — so the
+/// syscall layer takes this entry instead; raw callers migrate here as
+/// their files convert to `#![forbid(unsafe_code)]`.
+pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
+    // SAFETY: vacuous contract — get_file_fd's body calls only safe
+    // functions (see doc).
+    unsafe { get_file_fd(fd) }
 }
 
 pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {

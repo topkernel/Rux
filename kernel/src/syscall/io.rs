@@ -6,11 +6,20 @@
 //!
 //! Includes: read, write,writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// the syscall layer is the capsule boundary — validate/translate user
+// args at entry (arch::uaccess_safe + access_ok), run on kernel-owned
+// types after. This module must stay Safe Rust: the user-memory
+// mechanics live in arch/uaccess_safe.rs (Framework), the slice-typed
+// dispatch and fd/inode getters live in fs/file.rs.
+#![forbid(unsafe_code)]
+
 use super::*;
 use core::sync::atomic::Ordering;
 
 /// iovec structure (for writev/readv)
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Iovec{
     iov_base: *const u8,
     iov_len: usize,
@@ -28,22 +37,6 @@ pub use crate::arch::uaccess::MAX_RW_COUNT;
 /// MAX_RW_COUNT (2GB) still exceeded the 32MB heap and panicked the kernel
 /// on `read(fd, buf, 0x4000_0000)` (review SYSA-C1 fix in Wave 2R).
 pub const RW_CHUNK: usize = 64 * 1024;
-
-/// Allocate an UNINITIALIZED staging buffer for read/write chunking.
-///
-/// The buffer is always fully overwritten before it is read (file layers
-/// fill exactly the bytes they return; copy_from_user fills before write
-/// dispatch), so the previous `vec![0u8; n]` paid a useless memset per
-/// syscall — 4KB+ of zeroing on every read(2)/write(2) hot path (file,
-/// pipe, tty) that showed up directly in throughput under TCG.
-#[inline]
-fn alloc_uninit_buf(n: usize) -> alloc::vec::Vec<u8> {
-    let mut v = alloc::vec::Vec::with_capacity(n);
-    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer is
-    // filled by the caller before any read of its contents (see doc).
-    unsafe { v.set_len(n); }
-    v
-}
 
 /// Clamp a user-supplied transfer length to MAX_RW_COUNT.
 #[inline]
@@ -92,7 +85,7 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     // (comm, path) of EAGAIN reads once per comm.
     let ret = sys_read_inner(args);
     if (ret == -11 || ret == 0) && crate::dfx::syscost::on() {
-        if let Some(file) = unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(args[0] as usize) {
             if ret == -11 {
                 crate::dfx::syscost::note_read_eagain(&file);
             } else {
@@ -113,13 +106,12 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
 }
 
 fn sys_read_inner(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *mut u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
 
     // Check if buffer address is in valid user space using access_ok
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
 
@@ -128,12 +120,9 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // SAFETY: get_file_fd returns valid File or None; kernel_buf is a fresh allocation.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => read_file_core(fd, &file, buf, count),
-            None => -errno::EBADF as i64,
-        }
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => read_file_core(fd, &file, buf, count),
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -144,10 +133,9 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
 /// volume decomposes into 2-5x amplification of exactly this shape).
 /// `fd` rides along for the dfx census attribution.
 ///
-/// SAFETY: buf..buf+count must be access_ok-validated by the caller
-/// (same contract the sys_read path had at its lookup point).
-fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: *mut u8, count: usize) -> i64 {
-    unsafe {
+/// The user window `buf..buf+count` must be access_ok-validated by the
+/// caller (same contract the sys_read path had at its lookup point).
+fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
     // Linux: reading from an O_WRONLY-only descriptor fails with
     // EBADF (the fd is "not open for reading") — LTP read03.
     let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
@@ -166,7 +154,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     // staging below costs an alloc + 2 copies per op; on pipes
     // that was ~half the per-syscall time under TCG.
     if crate::fs::pipe::is_pipe_file(&file) {
-        let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+        let n = crate::fs::pipe::pipe_read_user(&file, buf as *mut u8, count) as i64;
         // perf-audit (pa9): positive-read census — which fd
         // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
         // not /dev/kmsg, not EOF, not EAGAIN).
@@ -184,10 +172,9 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     // cross-process class; the dispatch itself was proven free
     // (p5d control row), so only the staging goes.
     if crate::net::unix::is_unix_file(&file) {
-        // SAFETY: buf was access_ok-validated against count at
-        // sys_read entry (same contract as the pipe path).
-        let n =
-            unsafe { crate::net::unix::unix_read_user(&file, buf, count) } as i64;
+        // buf was access_ok-validated against count at sys_read entry
+        // (same contract as the pipe path).
+        let n = crate::net::unix::unix_read_user(&file, buf as *mut u8, count) as i64;
         if n > 0 {
             crate::dfx::syscost::note_read_data(&file, n as usize, fd);
         }
@@ -199,7 +186,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
         && crate::fs::ext4::file::is_ext4_file(&file)
     {
-        let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+        let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf as *mut u8, count) as i64;
         if n > 0 {
             crate::dfx::syscost::note_read_data(&file, n as usize, fd);
         }
@@ -215,7 +202,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     // bytes it returns before copy_to_user reads them, so
     // zero-filling the buffer was a 4KB memset per read(2) —
     // measurable on every hot path (file, pipe, tty).
-    let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
@@ -224,7 +211,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         if chunk == 0 {
             break;
         }
-        let result = file.read(kernel_buf.as_mut_ptr(), chunk);
+        let result = file.read_slice(&mut kernel_buf[..chunk]);
         if result < 0 {
             if total > 0 {
                 crate::dfx::syscost::note_read_data(&file, total, fd);
@@ -242,19 +229,18 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
             break;
         }
         let n = result as usize;
-        // SAFETY: user_ptr stays within the access_ok-validated
+        // user_ptr stays within the access_ok-validated
         // [buf, buf+count) window; exception-table copy.
-        let uncopied = crate::arch::uaccess::copy_to_user(
+        let uncopied = crate::arch::uaccess_safe::copy_out(
             user_ptr,
-            kernel_buf.as_ptr(),
-            n,
+            &kernel_buf[..n],
         );
         if uncopied > 0 {
             return if total > 0 { total as i64 } else { -errno::EFAULT as i64 };
         }
         total += n;
         remaining -= n;
-        user_ptr = user_ptr.add(n);
+        user_ptr = user_ptr.wrapping_add(n);
         if n < chunk {
             break; // short read: EOF or nothing more available now
         }
@@ -263,7 +249,6 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         crate::dfx::syscost::note_read_data(&file, total, fd);
     }
     total as i64
-    }
 }
 
 /// sys_pread64 - Read from file descriptor at a given offset
@@ -279,9 +264,8 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
 ///
 /// - RISC-V: 67
 pub fn sys_pread64(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *mut u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
     let offset = args[3] as i64;
 
@@ -290,24 +274,22 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
     // Check buffer accessibility
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
     if count == 0 {
         return 0;
     }
 
-    // SAFETY: get_file_fd returns valid File or None; kernel_buf is fresh allocation.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => {
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => {
                 // RACE fix (review批次1): pread must not touch the shared fd
                 // position — the old get_pos/set_pos/restore dance corrupted
                 // concurrent reads on other threads sharing the fd. Use the
                 // position-invariant read_at() instead.
                 // Chunked (SYSA-C1): bounded staging buffer, sequential
                 // offset advance; short read ends the loop.
-                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+                let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
                 let mut total: usize = 0;
                 let mut err: i32 = 0;
                 let mut user_ptr = buf;
@@ -318,7 +300,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     if chunk == 0 {
                         break;
                     }
-                    let result = file.read_at(cur_off, kernel_buf.as_mut_ptr(), chunk);
+                    let result = file.read_at_slice(cur_off, &mut kernel_buf[..chunk]);
                     if result <= 0 {
                         if result < 0 && total == 0 {
                             err = result as i32;
@@ -326,11 +308,10 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                         break;
                     }
                     let n = result as usize;
-                    // SAFETY: within the validated [buf, buf+count) window.
-                    let uncopied = crate::arch::uaccess::copy_to_user(
+                    // Within the validated [buf, buf+count) window.
+                    let uncopied = crate::arch::uaccess_safe::copy_out(
                         user_ptr,
-                        kernel_buf.as_ptr(),
-                        n,
+                        &kernel_buf[..n],
                     );
                     if uncopied > 0 {
                         if total == 0 {
@@ -340,7 +321,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     }
                     total += n;
                     remaining -= n;
-                    user_ptr = user_ptr.add(n);
+                    user_ptr = user_ptr.wrapping_add(n);
                     cur_off += n as u64;
                     if n < chunk {
                         break;
@@ -353,8 +334,7 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
                     err as i64
                 }
             }
-            None => -errno::EBADF as i64
-        }
+            None => -errno::EBADF as i64,
     }
 }
 
@@ -368,13 +348,12 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of bytes written on success, negative error code on failure
 pub fn sys_write(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *const u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
 
     // Check if buffer address is in valid user space using access_ok
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
 
@@ -401,7 +380,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
             [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
         static WTRACE_TAG: [core::sync::atomic::AtomicU32; WTRACE_SLOTS] =
             [const { core::sync::atomic::AtomicU32::new(0) }; WTRACE_SLOTS];
-        let pid = unsafe { crate::process::current_pid() };
+        let pid = crate::process::current_pid();
         if pid >= 313 {
             let slot = (pid as usize) % WTRACE_SLOTS;
             let tag = WTRACE_TAG[slot].load(core::sync::atomic::Ordering::Relaxed);
@@ -418,10 +397,8 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 // stream mid-dictionary and the frames read as pure noise).
                 let len = core::cmp::min(count, 480);
                 let mut kb = [0u8; 480];
-                // SAFETY: buf/count validated by access_ok above.
-                let uncopied = unsafe {
-                    crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
-                };
+                // buf/count validated by access_ok above.
+                let uncopied = crate::arch::uaccess_safe::copy_in(&mut kb[..len], buf);
                 if uncopied == 0 {
                     // Hex prefix (exact bytes, first 192) for offline
                     // zlib decoding of compressed hilog frames, plus a
@@ -467,7 +444,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         const STDERR_DUMP_N: usize = 200;
         static STDERR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        let pid = unsafe { crate::process::current_pid() };
+        let pid = crate::process::current_pid();
         // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
         // hilog-adapter and selinux-restorecon loops reprint the same
         // line forever and would eat the whole budget on the first
@@ -491,11 +468,9 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         if n < STDERR_DUMP_N && pid >= 300 {
             let len = core::cmp::min(count, 160);
             let mut kb = [0u8; 160];
-            // SAFETY: buf/count validated by access_ok above; kb is a
-            // local 160-byte buffer and len <= 160.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
-            };
+            // buf/count validated by access_ok above; the copy target is
+            // exactly the len-sized head of the local 160-byte buffer.
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut kb[..len], buf);
             if uncopied == 0 {
                 let text = kb[..len]
                     .iter()
@@ -541,12 +516,11 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         }
     }
 
-    // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => write_file_core(fd, &file, buf, count),
-            None => -errno::EBADF as i64,
-        }
+    // get_file_fd_safe: fdtable read only; the Arc is dropped at function
+    // exit. User pointers validated above.
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => write_file_core(fd, &file, buf, count),
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -555,9 +529,9 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 /// paid one fdtable lookup per iovec through sys_write). `fd` rides
 /// along for the console fast-path check and the dfx stashes.
 ///
-/// SAFETY: buf..buf+count must be access_ok-validated by the caller.
-fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: *const u8, count: usize) -> i64 {
-    unsafe {
+/// The user window `buf..buf+count` must be access_ok-validated by the
+/// caller.
+fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
     // Linux: writing to a read-only (O_RDONLY) descriptor fails
     // with EBADF (the fd is "not open for writing") — LTP
     // write03/write04.
@@ -589,10 +563,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         while remaining > 0 {
             let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
 
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                kernel_buf.as_mut_ptr(),
+            let uncopied = crate::arch::uaccess_safe::copy_in(
+                &mut kernel_buf[..to_copy],
                 user_ptr,
-                to_copy
             );
 
             if uncopied > 0 {
@@ -619,7 +592,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
 
             total_written += to_copy;
             remaining -= to_copy;
-            user_ptr = user_ptr.add(to_copy);
+            user_ptr = user_ptr.wrapping_add(to_copy);
         }
         return total_written as i64;
     }
@@ -642,13 +615,13 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // Pipe fast path: transfer directly user↔ring (see the
     // matching branch in sys_read).
     if crate::fs::pipe::is_pipe_file(&file) {
-        return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
+        return crate::fs::pipe::pipe_write_user(&file, buf as *const u8, count) as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write
     // ends the loop and returns what was accepted (POSIX
     // partial-write semantics).
-    let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
@@ -658,10 +631,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         if chunk == 0 {
             break;
         }
-        let uncopied = crate::arch::uaccess::copy_from_user(
-            kernel_buf.as_mut_ptr(),
+        let uncopied = crate::arch::uaccess_safe::copy_in(
+            &mut kernel_buf[..chunk],
             user_ptr,
-            chunk,
         );
         if uncopied > 0 {
             if total == 0 {
@@ -669,7 +641,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
             }
             break;
         }
-        let result = file.write(kernel_buf.as_ptr(), chunk);
+        let result = file.write_slice(&kernel_buf[..chunk]);
         if result <= 0 {
             if result < 0 && total == 0 {
                 first_err = result as i32;
@@ -679,7 +651,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         let n = result as usize;
         total += n;
         remaining -= n;
-        user_ptr = user_ptr.add(n);
+        user_ptr = user_ptr.wrapping_add(n);
         if n < chunk {
             break; // short write: destination full / non-blocking
         }
@@ -688,7 +660,6 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         total as i64
     } else {
         first_err as i64
-    }
     }
 }
 
@@ -710,7 +681,7 @@ fn iov_len_sanity(len: usize) -> Result<(), i64> {
 /// Validate an iovec array header shared by readv/writev/preadv/pwritev:
 /// IOV_MAX bound, overflow-safe size computation, and user-range check.
 /// Returns Ok(size) of the array or the (negative errno) error.
-fn check_iov_array(iov_ptr: *const Iovec, iovcnt: usize) -> Result<usize, i64> {
+fn check_iov_array(iov_addr: usize, iovcnt: usize) -> Result<usize, i64> {
     if iovcnt == 0 {
         return Ok(0);
     }
@@ -720,7 +691,7 @@ fn check_iov_array(iov_ptr: *const Iovec, iovcnt: usize) -> Result<usize, i64> {
     let iov_size = core::mem::size_of::<Iovec>()
         .checked_mul(iovcnt)
         .ok_or(-(errno::EINVAL as i64))?;
-    if !crate::arch::uaccess::access_ok(iov_ptr as usize, iov_size) {
+    if !crate::arch::uaccess::access_ok(iov_addr, iov_size) {
         return Err(-(errno::EFAULT as i64));
     }
     Ok(iov_size)
@@ -737,11 +708,11 @@ fn check_iov_array(iov_ptr: *const Iovec, iovcnt: usize) -> Result<usize, i64> {
 /// Returns total bytes written on success, negative error code on failure
 pub fn sys_writev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
@@ -750,8 +721,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // second one on the gathered dgram path, and one PER IOVEC through
     // sys_write on the stream path (perf-report 8.10.22). EBADF moves to
     // the head, the errno the first iov's sys_write used to produce.
-    // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    // fdtable read only; the Arc is dropped at function exit.
+    let file = match crate::fs::file::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -777,50 +748,44 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // EMSGSIZE).
             const GATHER_MAX_TOTAL: usize = RW_CHUNK.saturating_mul(4);
             let mut gathered: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            // SAFETY: the iovec array was range-checked by check_iov_array;
-            // each entry's buffer is validated with access_ok before copy.
-            unsafe {
-                for i in 0..iovcnt {
-                    let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        &mut iov as *mut Iovec as *mut u8,
-                        iov_ptr.add(i) as *const u8,
-                        core::mem::size_of::<Iovec>(),
-                    );
-                    if uncopied > 0 {
-                        return -errno::EFAULT as i64;
-                    }
-                    let base = iov.iov_base as usize;
-                    let len = iov.iov_len;
-                    if let Err(e) = iov_len_sanity(len) {
-                        return e;
-                    }
-                    if base == 0 || len == 0 {
-                        continue;
-                    }
-                    if !crate::arch::uaccess::access_ok(base, len) {
-                        return -errno::EFAULT as i64;
-                    }
-                    if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
-                        return -errno::EMSGSIZE as i64;
-                    }
-                    let start = gathered.len();
-                    gathered.resize(start + len, 0);
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        gathered.as_mut_ptr().add(start),
-                        base as *const u8,
-                        len,
-                    );
-                    if uncopied > 0 {
-                        return -errno::EFAULT as i64;
-                    }
+            // The iovec array was range-checked by check_iov_array; each
+            // entry's buffer is validated with access_ok before copy.
+            for i in 0..iovcnt {
+                // Read the iovec entry through the exception-table copy.
+                let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+                    iov_addr + i * core::mem::size_of::<Iovec>(),
+                ) else {
+                    return -errno::EFAULT as i64;
+                };
+                let base = iov.iov_base as usize;
+                let len = iov.iov_len;
+                if let Err(e) = iov_len_sanity(len) {
+                    return e;
+                }
+                if base == 0 || len == 0 {
+                    continue;
+                }
+                if !crate::arch::uaccess::access_ok(base, len) {
+                    return -errno::EFAULT as i64;
+                }
+                if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
+                    return -errno::EMSGSIZE as i64;
+                }
+                let start = gathered.len();
+                gathered.resize(start + len, 0);
+                let uncopied = crate::arch::uaccess_safe::copy_in(
+                    &mut gathered[start..start + len],
+                    base,
+                );
+                if uncopied > 0 {
+                    return -errno::EFAULT as i64;
                 }
             }
             if gathered.is_empty() {
                 return 0;
             }
             // Leg-52 lever A: write through the file resolved at the head
-            // (the gathered buffer is a kernel slice, so file.write needs
+            // (the gathered buffer is a kernel slice, so the write needs
             // no user copy).
             // O_RDONLY writev fails EBADF like write (write03/04 parity;
             // the stream path below inherits the check from
@@ -830,59 +795,49 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             if mode == crate::fs::file::FileFlags::O_RDONLY {
                 return -errno::EBADF as i64;
             }
-            // SAFETY: `gathered` is a kernel slice of exactly len bytes.
-            return unsafe { file.write(gathered.as_ptr(), gathered.len()) as i64 };
+            return file.write_slice(&gathered) as i64;
         }
     }
 
     let mut total_written: isize = 0;
     let mut has_valid_iov = false;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        // Read the iovec entry through the exception-table copy.
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            // Use copy_from_user to safely read iov structure
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
 
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+        if let Err(e) = iov_len_sanity(len) {
+            return e;
+        }
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
+        // Skip iov with NULL base
+        if base == 0 {
+            continue;
+        }
 
-            if let Err(e) = iov_len_sanity(len) {
-                return e;
-            }
+        // Check each iov buffer using access_ok
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            // Leg-52 lever A: one lookup per writev, not per iovec.
+            let result = write_file_core(fd, &file, base, len);
 
-            // Skip iov with NULL base
-            if base == 0 {
-                continue;
-            }
-
-            // Check each iov buffer using access_ok
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                // Leg-52 lever A: one lookup per writev, not per iovec.
-                let result = write_file_core(fd, &file, iov.iov_base as *const u8, len);
-
-                if result < 0 {
-                    if total_written == 0 {
-                        return result;
-                    }
-                    break;
+            if result < 0 {
+                if total_written == 0 {
+                    return result;
                 }
-                total_written += result as isize;
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+                break;
             }
+            total_written += result as isize;
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -904,19 +859,18 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
 /// Returns total bytes read on success, negative error code on failure
 pub fn sys_readv(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
     // Leg-52 lever A: one fdtable lookup per readv (was one per iovec
     // through sys_read). EBADF at the head matches the errno the first
     // iov's sys_read used to produce.
-    // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    let file = match crate::fs::file::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -924,61 +878,52 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
     let mut total_read: isize = 0;
     let mut has_valid_iov = false;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        // Read the iovec entry through the exception-table copy.
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            // Use copy_from_user to safely read iov structure
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
 
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+        if let Err(e) = iov_len_sanity(len) {
+            return e;
+        }
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
+        // Skip iov with NULL base
+        if base == 0 {
+            continue;
+        }
 
-            if let Err(e) = iov_len_sanity(len) {
-                return e;
-            }
+        // Check each iov buffer using access_ok
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            // Leg-52 lever A: one lookup per readv, not per iovec.
+            let result = read_file_core(fd, &file, base, len);
 
-            // Skip iov with NULL base
-            if base == 0 {
-                continue;
-            }
-
-            // Check each iov buffer using access_ok
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                // Leg-52 lever A: one lookup per readv, not per iovec.
-                let result = read_file_core(fd, &file, iov.iov_base as *mut u8, len);
-
-                if result < 0 {
-                    if total_read == 0 {
-                        return result;
-                    }
-                    break;
+            if result < 0 {
+                if total_read == 0 {
+                    return result;
                 }
-                total_read += result as isize;
-                if result == 0 {
-                    break; // EOF
-                }
-                // Short read: for pipes this means the buffered data was
-                // exhausted — return the batch now instead of blocking on
-                // the next iov (Linux readv never blocks after a partial
-                // fill; review批次1 "readv/writev pipe 一次拿可用").
-                if (result as usize) < len {
-                    break;
-                }
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+                break;
             }
+            total_read += result as isize;
+            if result == 0 {
+                break; // EOF
+            }
+            // Short read: for pipes this means the buffered data was
+            // exhausted — return the batch now instead of blocking on
+            // the next iov (Linux readv never blocks after a partial
+            // fill; review批次1 "readv/writev pipe 一次拿可用").
+            if (result as usize) < len {
+                break;
+            }
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -993,15 +938,14 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
 pub fn sys_dup(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
-                Ok(newfd) => newfd as i64,
-                Err(e) => e as i64,
-            },
-            None => -errno::EBADF as i64,
-        }
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => match fdtable.dup_fd_strict(oldfd) {
+            Ok(newfd) => newfd as i64,
+            Err(e) => e as i64,
+        },
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1010,17 +954,16 @@ pub fn sys_dup2(args: SyscallArgs) -> i64 {
     let oldfd = args[0] as usize;
     let newfd = args[1] as usize;
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => {
-                match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => fd as i64,
-                    None => -errno::EBADF as i64,
-                }
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => {
+            match fdtable.dup2_fd(oldfd, newfd) {
+                Some(fd) => fd as i64,
+                None => -errno::EBADF as i64,
             }
-            None => -errno::EBADF as i64,
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1041,23 +984,22 @@ pub fn sys_dup3(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
 
-    // SAFETY: get_current_fdtable returns a valid fdtable reference for the current task.
-    unsafe {
-        match crate::sched::get_current_fdtable() {
-            Some(fdtable) => {
-                match fdtable.dup2_fd(oldfd, newfd) {
-                    Some(fd) => {
-                        // dup3 O_CLOEXEC applies to the NEW descriptor only
-                        if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
-                            fdtable.set_fd_cloexec(fd, true);
-                        }
-                        fd as i64
+    // get_current_fdtable returns a valid fdtable reference for the
+    // current task (a safe fn — the old unsafe wrapper was vestigial).
+    match crate::sched::get_current_fdtable() {
+        Some(fdtable) => {
+            match fdtable.dup2_fd(oldfd, newfd) {
+                Some(fd) => {
+                    // dup3 O_CLOEXEC applies to the NEW descriptor only
+                    if (flags & crate::fs::file::FileFlags::O_CLOEXEC) != 0 {
+                        fdtable.set_fd_cloexec(fd, true);
                     }
-                    None => -errno::EBADF as i64,
+                    fd as i64
                 }
+                None => -errno::EBADF as i64,
             }
-            None => -errno::EBADF as i64,
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1082,14 +1024,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // Linux fdget() gate: an ioctl on an fd that is not open fails with
     // EBADF before the request is even looked at (LTP sockioctl01 uses
     // fd=1025 with SIOCATMARK and expects EBADF, not ENOTTY).
-    if fd < 0 || unsafe { crate::fs::file::get_file_fd(fd as usize) }.is_none() {
+    if fd < 0 || crate::fs::file::get_file_fd_safe(fd as usize).is_none() {
         return -errno::EBADF as i64;
     }
 
     // O_PATH descriptors permit no ioctls either (Linux empty-fops; LTP
     // open13: ioctl(FIGETBSZ) on an O_PATH fd is EBADF).
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
                 return -errno::EBADF as i64;
             }
@@ -1103,7 +1045,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // return ENOTTY there, so udesk fell back to a default 640x480 mode
     // and died past-EOF on the resulting wrong-size mapping.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if crate::drivers::gpu::fbdev::is_fb_file(&file) {
                 return crate::drivers::gpu::fbdev_ioctl(request, arg) as i64;
             }
@@ -1115,7 +1057,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // (drmPrimeHandleToFD exports) carry their own ops table — only
     // DMA_BUF_IOCTL_SYNC reaches them.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if crate::drivers::drm::is_drm_file(&file) {
                 let ret = crate::drivers::drm::drm_ioctl(request, arg);
                 // oh-svc T1: name the llvmpipe displaytarget_map failure —
@@ -1190,7 +1132,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // its own version/size checks.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1209,7 +1151,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // aborted its device probe.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::input::evdev::evdev_file_ioctl(&file, request, arg)
             {
                 return ret;
@@ -1223,7 +1165,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // below — the terminal state must follow the fd, not the system.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::fs::pty::pty_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1249,7 +1191,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // the File's ops identity (losetup / LTP tst_acquire_device).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1261,7 +1203,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // ops identity (evdev/loop pattern). Non-firing softdog.
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::watchdog::watchdog_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1273,7 +1215,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // buffer management; port plan §6 item 2).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) = crate::drivers::ashmem::ashmem_file_ioctl(&file, request, arg) {
                 return ret;
             }
@@ -1285,7 +1227,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // port plan §6 item 3).
     // SAFETY: get_file_fd returns a valid Arc<File> or None.
     if fd >= 0 {
-        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        if let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) {
             if let Some(ret) =
                 crate::drivers::access_tokenid::tokenid_file_ioctl(&file, request, arg)
             {
@@ -1305,14 +1247,12 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         use crate::fs::inode::{
             FS_APPEND_FL, FS_FL_USER_MODIFIABLE, FS_FL_USER_VISIBLE, FS_IMMUTABLE_FL,
         };
-        // SAFETY: get_file_fd returns a valid Arc<File> or None; the fd
+        // get_file_fd_safe returns a valid Arc<File> or None; the fd
         // existence was already validated above.
-        let Some(file) = (unsafe { crate::fs::file::get_file_fd(fd as usize) }) else {
+        let Some(file) = crate::fs::file::get_file_fd_safe(fd as usize) else {
             return -errno::EBADF as i64;
         };
-        // SAFETY: inode cell written once at open time; read-only here.
-        let inode_opt = unsafe { &*file.inode.get() };
-        let Some(inode) = inode_opt.as_ref() else {
+        let Some(inode) = file.get_inode() else {
             return -errno::ENOTTY as i64;
         };
         if !inode.mode.is_regular_file() && !inode.mode.is_directory() {
@@ -1324,22 +1264,15 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         if request == FS_IOC_GETFLAGS {
             let flags =
                 inode.ioc_flags.load(core::sync::atomic::Ordering::Acquire) & FS_FL_USER_VISIBLE;
-            // SAFETY: arg validated non-null, 4-byte writable.
-            if !unsafe {
-                crate::arch::uaccess::put_user(
-                    arg as *mut u32,
-                    flags,
-                )
-            } {
+            // arg validated non-null, 4-byte writable.
+            if !crate::arch::uaccess_safe::write_user(arg, flags) {
                 return -errno::EFAULT as i64;
             }
             return 0;
         }
         // FS_IOC_SETFLAGS
-        // SAFETY: arg validated non-null, 4-byte readable.
-        let Some(new_flags) = (unsafe {
-            crate::arch::uaccess::get_user(arg as *const u32)
-        }) else {
+        // arg validated non-null, 4-byte readable.
+        let Some(new_flags) = crate::arch::uaccess_safe::read_user::<u32>(arg) else {
             return -errno::EFAULT as i64;
         };
         if new_flags & !FS_FL_USER_MODIFIABLE != 0 {
@@ -1363,38 +1296,9 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         inode.ioc_flags.store(merged, core::sync::atomic::Ordering::Release);
         // ext4: persist into the on-disk i_flags so the flags survive an
         // icache eviction (the VFS copy is reseeded from disk at iget).
-        if core::ptr::eq(
-            inode.ops.unwrap_or(&crate::fs::ext4::EXT4_INODE_OPS) as *const _,
-            &crate::fs::ext4::EXT4_INODE_OPS as *const _,
-        ) {
-            let _guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
-            if let Some(fs_ptr) = inode.private_data {
-                let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
-                // SAFETY: private_data holds the Ext4FileSystem for
-                // EXT4_INODE_OPS inodes.
-                unsafe {
-                    if let Ok(mut on_disk) =
-                        crate::fs::ext4::inode::read_inode(&*fs, inode.ino as u32)
-                    {
-                        on_disk.i_flags = (on_disk.i_flags & !FS_FL_USER_MODIFIABLE)
-                            | (merged & FS_FL_USER_MODIFIABLE);
-                        if crate::fs::ext4::inode::write_inode_disk(
-                            &*fs,
-                            inode.ino as u32,
-                            &on_disk,
-                        )
-                        .is_ok()
-                        {
-                            // Keep the VFS-cached Ext4Inode copy in sync.
-                            if let Some(sb) = inode.sb {
-                                let cached = &mut *(sb as *mut crate::fs::ext4::inode::Ext4Inode);
-                                cached.flags = on_disk.i_flags;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // The ops-identity gate and EXT4_BIG_LOCK discipline live in the
+        // ext4-owned entry (framekernel: fs internals behind a typed fn).
+        crate::fs::ext4::inode::persist_ioc_flags(inode, merged);
         return 0;
     }
 
@@ -1405,7 +1309,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         // Linux checks the fd BEFORE the request: an ioctl on a nonexistent
         // fd is EBADF, not ENOTTY (LTP sockioctl01 "bad file descriptor").
         let file_opt = if fd >= 0 {
-            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            crate::fs::file::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1449,7 +1353,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     // data, so the answer is always 0).
     if request == 0x8905 {
         let file_opt = if fd >= 0 {
-            unsafe { crate::fs::file::get_file_fd(fd as usize) }
+            crate::fs::file::get_file_fd_safe(fd as usize)
         } else {
             None
         };
@@ -1485,10 +1389,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                     if !is_inet {
                         return Some(true); // AF_UNIX: no datagram distinction
                     }
-                    // SAFETY: private_data holds an Arc<Socket> for
-                    // SOCKET_OPS files, installed at socket creation.
-                    let ptr = unsafe { *file.private_data.get() }? as *const crate::net::socket::Socket;
-                    Some(unsafe { (*ptr).sock_type == crate::net::socket::SocketType::Tcp })
+                    // The socket type carried by the INET socket file
+                    // (net-owned typed entry; a file with no installed
+                    // private_data counts as stream, as before).
+                    Some(
+                        crate::net::socket::inet_socket_type(file)
+                            .map(|st| st == crate::net::socket::SocketType::Tcp)
+                            .unwrap_or(true),
+                    )
                 })
                 .unwrap_or(true);
             if !is_stream {
@@ -1498,8 +1406,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         if arg == 0 || !crate::arch::uaccess::access_ok(arg, 4) {
             return -errno::EFAULT as i64;
         }
-        // SAFETY: arg validated non-null with access_ok(4).
-        if !unsafe { crate::arch::uaccess::put_user(arg as *mut i32, 0i32) } {
+        // arg validated non-null with access_ok(4).
+        if !crate::arch::uaccess_safe::write_user(arg, 0i32) {
             return -errno::EFAULT as i64;
         }
         return 0;
@@ -1522,7 +1430,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         0x5401..=0x540F | 0x5410 | 0x5413 | 0x5414)
         || (request & 0xFF00) == 0x5400 && !matches!(request, 0x541B | 0x5421)
     {
-        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+        match crate::fs::file::get_file_fd_safe(fd as usize) {
             None => return -errno::EBADF as i64,
             Some(file) => {
                 if !crate::fs::tty::file_is_tty(&file) {
@@ -1553,14 +1461,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             crate::fs::tty::termios_to_kernel_bytes(&tio, &mut termios_buf);
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(36); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    termios_buf.as_ptr(),
-                    crate::fs::tty::TERMIOS_KERNEL_SIZE
-                )
-            };
+            // (arg validated with access_ok(36) above).
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &termios_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1575,17 +1477,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             if !crate::arch::uaccess::access_ok(arg, crate::fs::tty::TERMIOS_KERNEL_SIZE) {
                 return -errno::EFAULT as i64;
             }
-            // Read termios structure from user space using copy_from_user
+            // Read termios structure from user space using copy_in
             // (kernel-ABI 36-byte layout, c_cc[19]).
-            // SAFETY: arg validated with access_ok(36); copy_from_user safely reads from user.
+            // (arg validated with access_ok(36) above.)
             let mut termios_buf = [0u8; crate::fs::tty::TERMIOS_KERNEL_SIZE];
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    termios_buf.as_mut_ptr(),
-                    arg as *const u8,
-                    crate::fs::tty::TERMIOS_KERNEL_SIZE
-                )
-            };
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut termios_buf, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1610,14 +1506,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             let console_tty = crate::fs::tty::console();
             let mut kbuf = [0u8; 17]; // struct termio: 4x u16 + c_line + c_cc[8]
             if set {
-                // SAFETY: arg validated with access_ok(17); copy_from_user safely reads from user.
-                if unsafe {
-                    crate::arch::uaccess::copy_from_user(
-                        kbuf.as_mut_ptr(),
-                        arg as *const u8,
-                        17
-                    )
-                } > 0 {
+                // (arg validated with access_ok(17) above.)
+                if crate::arch::uaccess_safe::copy_in(&mut kbuf, arg) > 0 {
                     return -errno::EFAULT as i64;
                 }
                 let base = console_tty.get_termios();
@@ -1629,14 +1519,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             } else {
                 let tio = console_tty.get_termios();
                 crate::fs::tty::termios_to_termio_bytes(&tio, &mut kbuf);
-                // SAFETY: arg validated with access_ok(17); copy_to_user handles user writes.
-                if unsafe {
-                    crate::arch::uaccess::copy_to_user(
-                        arg as *mut u8,
-                        kbuf.as_ptr(),
-                        17
-                    )
-                } > 0 {
+                // (arg validated with access_ok(17) above.)
+                if crate::arch::uaccess_safe::copy_out(arg, &kbuf) > 0 {
                     return -errno::EFAULT as i64;
                 }
             }
@@ -1672,14 +1556,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 pgid
             };
             let pgid_bytes = (pgid as u32).to_le_bytes();
-            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    pgid_bytes.as_ptr(),
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &pgid_bytes);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1694,14 +1572,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut pgid_bytes = [0u8; 4];
-            // SAFETY: arg validated with access_ok(4); copy_from_user safely reads from user.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    pgid_bytes.as_mut_ptr(),
-                    arg as *const u8,
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut pgid_bytes, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1725,14 +1597,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             let winsize_buf = crate::fs::tty::console().get_winsize().to_le_bytes();
 
             // Copy to user space with SUM bit properly set
-            // SAFETY: arg validated with access_ok(8); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    winsize_buf.as_ptr(),
-                    8
-                )
-            };
+            // (arg validated with access_ok(8) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &winsize_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1747,14 +1613,8 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut kbuf = [0u8; 8];
-            // SAFETY: arg validated with access_ok(8); copy_from_user safely reads from user.
-            if unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    kbuf.as_mut_ptr(),
-                    arg as *const u8,
-                    8
-                )
-            } > 0 {
+            // (arg validated with access_ok(8) above.)
+            if crate::arch::uaccess_safe::copy_in(&mut kbuf, arg) > 0 {
                 return -errno::EFAULT as i64;
             }
             let ws = crate::fs::tty::WinSize::from_le_bytes(&kbuf);
@@ -1776,30 +1636,22 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
             // Real readable count (review批次1: previously hard-coded 0):
             // pipes report their buffered bytes; regular files report
             // size - position; other objects report 0.
-            let readable: i32 = unsafe {
-                crate::fs::file::get_file_fd(fd as usize)
-                    .map(|file| {
-                        if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
-                            n as i32
-                        } else if let Some(inode) = (&*file.inode.get()).as_ref() {
-                            let size = inode.get_size();
-                            let pos = file.get_pos();
-                            if size > pos { (size - pos) as i32 } else { 0 }
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0)
-            };
+            let readable: i32 = crate::fs::file::get_file_fd_safe(fd as usize)
+                .map(|file| {
+                    if let Some(n) = crate::fs::pipe::pipe_fionread(&file) {
+                        n as i32
+                    } else if let Some(inode) = file.get_inode() {
+                        let size = inode.get_size();
+                        let pos = file.get_pos();
+                        if size > pos { (size - pos) as i32 } else { 0 }
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
             let result_buf: [u8; 4] = readable.to_le_bytes();
-            // SAFETY: arg validated with access_ok(4); copy_to_user handles user writes.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_to_user(
-                    arg as *mut u8,
-                    result_buf.as_ptr(),
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_out(arg, &result_buf);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
@@ -1816,20 +1668,13 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 return -errno::EFAULT as i64;
             }
             let mut flag_buf = [0u8; 4];
-            // SAFETY: arg validated with access_ok(4); copy_from_user handles user reads.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    flag_buf.as_mut_ptr(),
-                    arg as *const u8,
-                    4
-                )
-            };
+            // (arg validated with access_ok(4) above.)
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut flag_buf, arg);
             if uncopied > 0 {
                 return -errno::EFAULT as i64;
             }
             let on = i32::from_le_bytes(flag_buf) != 0;
-            // SAFETY: get_file_fd returns valid File or None.
-            let file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+            let file = crate::fs::file::get_file_fd_safe(fd as usize);
             match file {
                 Some(file) => {
                     use crate::fs::file::FileFlags;
@@ -1879,12 +1724,10 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
 /// fd of the description closes. Conflicting requests block unless
 /// LOCK_NB, in which case -EWOULDBLOCK (-EAGAIN) is returned.
 pub fn sys_flock(args: SyscallArgs) -> i64 {
-    use crate::fs::file::get_file_fd;
-
     let fd = args[0] as usize;
     let operation = args[1] as i32;
 
-    let file = match unsafe { get_file_fd(fd) } {
+    let file = match crate::fs::file::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -1908,9 +1751,8 @@ pub fn sys_flock(args: SyscallArgs) -> i64 {
 ///
 /// - RISC-V: 68
 pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *const u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
     let offset = args[3] as i64;
 
@@ -1919,69 +1761,65 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
     // Check buffer accessibility
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
     if count == 0 {
         return 0;
     }
 
-    // SAFETY: get_file_fd returns valid File or None; kernel_buf is fresh allocation.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => {
-                // RACE fix (review批次1): use the position-invariant
-                // write_at() — the old set_pos/restore dance corrupted the
-                // shared fd position under concurrent I/O.
-                // Chunked (SYSA-C1): bounded staging, sequential offset
-                // advance; partial chunk write ends the loop.
-                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
-                let mut total: usize = 0;
-                let mut err: i32 = 0;
-                let mut user_ptr = buf;
-                let mut remaining = count;
-                let mut cur_off = offset as u64;
-                loop {
-                    let chunk = remaining.min(RW_CHUNK);
-                    if chunk == 0 {
-                        break;
-                    }
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        kernel_buf.as_mut_ptr(),
-                        user_ptr,
-                        chunk,
-                    );
-                    if uncopied > 0 {
-                        if total == 0 {
-                            err = -errno::EFAULT as i32;
-                        }
-                        break;
-                    }
-                    let result = file.write_at(cur_off, kernel_buf.as_ptr(), chunk);
-                    if result <= 0 {
-                        if result < 0 && total == 0 {
-                            err = result as i32;
-                        }
-                        break;
-                    }
-                    let n = result as usize;
-                    total += n;
-                    remaining -= n;
-                    user_ptr = user_ptr.add(n);
-                    cur_off += n as u64;
-                    if n < chunk {
-                        break;
-                    }
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => {
+            // RACE fix (review批次1): use the position-invariant
+            // write_at() — the old set_pos/restore dance corrupted the
+            // shared fd position under concurrent I/O.
+            // Chunked (SYSA-C1): bounded staging, sequential offset
+            // advance; partial chunk write ends the loop.
+            let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+            let mut total: usize = 0;
+            let mut err: i32 = 0;
+            let mut user_ptr = buf;
+            let mut remaining = count;
+            let mut cur_off = offset as u64;
+            loop {
+                let chunk = remaining.min(RW_CHUNK);
+                if chunk == 0 {
+                    break;
                 }
-
-                if total > 0 {
-                    total as i64
-                } else {
-                    err as i64
+                let uncopied = crate::arch::uaccess_safe::copy_in(
+                    &mut kernel_buf[..chunk],
+                    user_ptr,
+                );
+                if uncopied > 0 {
+                    if total == 0 {
+                        err = -errno::EFAULT as i32;
+                    }
+                    break;
+                }
+                let result = file.write_at_slice(cur_off, &kernel_buf[..chunk]);
+                if result <= 0 {
+                    if result < 0 && total == 0 {
+                        err = result as i32;
+                    }
+                    break;
+                }
+                let n = result as usize;
+                total += n;
+                remaining -= n;
+                user_ptr = user_ptr.wrapping_add(n);
+                cur_off += n as u64;
+                if n < chunk {
+                    break;
                 }
             }
-            None => -errno::EBADF as i64
+
+            if total > 0 {
+                total as i64
+            } else {
+                err as i64
+            }
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1990,14 +1828,14 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
 /// - RISC-V: 69
 pub fn sys_preadv(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
     // On riscv64 the offset is a single 64-bit register (arg[3]).
     // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
     let offset = args[3] as u64 as u128;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
@@ -2011,41 +1849,34 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
     // iov re-read the SAME offset — preadv(N iovs) returned N copies).
     let mut cur_off: u64 = offset as u64;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
-            if let Err(e) = iov_len_sanity(len) { return e; }
-            if base == 0 { continue; }
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                let pread_args = [fd as u64, iov.iov_base as u64, len as u64, cur_off, 0, 0];
-                let result = sys_pread64(pread_args);
-                if result < 0 {
-                    if total_read == 0 { return result; }
-                    break;
-                }
-                cur_off = cur_off.saturating_add(result as u64);
-                total_read += result as isize;
-                // Short read ends the vector (EOF / pipe drained).
-                if (result as usize) < len {
-                    break;
-                }
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
+        if let Err(e) = iov_len_sanity(len) { return e; }
+        if base == 0 { continue; }
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            let pread_args = [fd as u64, base as u64, len as u64, cur_off, 0, 0];
+            let result = sys_pread64(pread_args);
+            if result < 0 {
+                if total_read == 0 { return result; }
+                break;
             }
+            cur_off = cur_off.saturating_add(result as u64);
+            total_read += result as isize;
+            // Short read ends the vector (EOF / pipe drained).
+            if (result as usize) < len {
+                break;
+            }
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -2061,14 +1892,14 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
 /// - RISC-V: 70
 pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
     // On riscv64 the offset is a single 64-bit register (arg[3]).
     // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
     let offset = args[3] as u64 as u128;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
@@ -2082,41 +1913,35 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     // wrote over the SAME offset).
     let mut cur_off: u64 = offset as u64;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        // Read the iovec entry through the exception-table copy.
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
-            if let Err(e) = iov_len_sanity(len) { return e; }
-            if base == 0 { continue; }
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                let pwrite_args = [fd as u64, iov.iov_base as u64, len as u64, cur_off, 0, 0];
-                let result = sys_pwrite64(pwrite_args);
-                if result < 0 {
-                    if total_written == 0 { return result; }
-                    break;
-                }
-                cur_off = cur_off.saturating_add(result as u64);
-                total_written += result as isize;
-                // Short write ends the vector.
-                if (result as usize) < len {
-                    break;
-                }
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
+        if let Err(e) = iov_len_sanity(len) { return e; }
+        if base == 0 { continue; }
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            let pwrite_args = [fd as u64, base as u64, len as u64, cur_off, 0, 0];
+            let result = sys_pwrite64(pwrite_args);
+            if result < 0 {
+                if total_written == 0 { return result; }
+                break;
             }
+            cur_off = cur_off.saturating_add(result as u64);
+            total_written += result as isize;
+            // Short write ends the vector.
+            if (result as usize) < len {
+                break;
+            }
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -2130,15 +1955,15 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 /// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> i64 {
 
-    let pipefd = args[0] as *mut i32;
+    let pipefd = args[0] as usize;
     let flags = args[1] as u32;
 
     // Check pointer using access_ok
-    if pipefd.is_null() {
+    if pipefd == 0 {
         return -errno::EFAULT as i64;
     }
 
-    if !crate::arch::uaccess::access_ok(pipefd as usize, 8) {  // 2 * sizeof(int)
+    if !crate::arch::uaccess::access_ok(pipefd, 8) {  // 2 * sizeof(int)
         return -errno::EFAULT as i64;
     }
 
@@ -2222,15 +2047,12 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
         fdtable.set_fd_cloexec(write_fd, true);
     }
 
-    // Write fd pair to userspace via copy_to_user (fault-safe)
+    // Write fd pair to userspace via the exception-table copy (fault-safe)
     let fds: [i32; 2] = [read_fd as i32, write_fd as i32];
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            pipefd as *mut u8,
-            fds.as_ptr() as *const u8,
-            core::mem::size_of::<[i32; 2]>(),
-        )
-    };
+    let mut fds_bytes = [0u8; 8];
+    fds_bytes[0..4].copy_from_slice(&fds[0].to_le_bytes());
+    fds_bytes[4..8].copy_from_slice(&fds[1].to_le_bytes());
+    let uncopied = crate::arch::uaccess_safe::copy_out(pipefd, &fds_bytes);
     if uncopied != 0 {
         fdtable.close_fd(read_fd as usize);
         fdtable.close_fd(write_fd as usize);
@@ -2250,56 +2072,50 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
 /// - args[5]: flags - SPLICE_F_MOVE, SPLICE_F_NONBLOCK, etc.
 pub fn sys_splice(args: SyscallArgs) -> i64 {
     let fd_in = args[0] as i32;
-    let off_in = args[1] as *mut i64;
+    let off_in = args[1] as usize;
     let fd_out = args[2] as i32;
-    let off_out = args[3] as *mut i64;
+    let off_out = args[3] as usize;
     let len = args[4] as usize;
     let _flags = args[5] as u32;
 
     if len == 0 { return 0; }
-
-    use crate::fs::get_file_fd;
 
     // Read the caller-provided offsets through the exception-table copy
     // path — bare dereferences of user pointers fault the kernel (review批次1).
     // A non-NULL offset drives position-invariant I/O and must NOT disturb
     // the fd's own position (Linux semantics).
     let mut in_off: Option<u64> = None;
-    if !off_in.is_null() {
-        if !crate::arch::uaccess::access_ok(off_in as usize, 8) {
+    if off_in != 0 {
+        if !crate::arch::uaccess::access_ok(off_in, 8) {
             return -errno::EFAULT as i64;
         }
-        let mut v: i64 = 0;
-        // SAFETY: off_in validated with access_ok(8); copies 8 bytes to a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut v as *mut i64 as *mut u8, off_in as *const u8, 8) } > 0 {
+        // (off_in validated with access_ok(8) above.)
+        let Some(v) = crate::arch::uaccess_safe::read_user::<i64>(off_in) else {
             return -errno::EFAULT as i64;
-        }
+        };
         if v < 0 { return -errno::EINVAL as i64; }
         in_off = Some(v as u64);
     }
     let mut out_off: Option<u64> = None;
-    if !off_out.is_null() {
-        if !crate::arch::uaccess::access_ok(off_out as usize, 8) {
+    if off_out != 0 {
+        if !crate::arch::uaccess::access_ok(off_out, 8) {
             return -errno::EFAULT as i64;
         }
-        let mut v: i64 = 0;
-        // SAFETY: off_out validated with access_ok(8); copies 8 bytes to a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut v as *mut i64 as *mut u8, off_out as *const u8, 8) } > 0 {
+        // (off_out validated with access_ok(8) above.)
+        let Some(v) = crate::arch::uaccess_safe::read_user::<i64>(off_out) else {
             return -errno::EFAULT as i64;
-        }
+        };
         if v < 0 { return -errno::EINVAL as i64; }
         out_off = Some(v as u64);
     }
 
-    // SAFETY: get_file_fd returns valid File or None; offsets already read into kernel memory.
-    unsafe {
-        let in_file = match get_file_fd(fd_in as usize) {
+    // Offsets already read into kernel memory.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(fd_out as usize) {
+        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2310,7 +2126,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
         // Linux do_splice(): one of the two ends must be a pipe.
         if ipipe.is_some() && opipe.is_some() {
             // pipe → pipe
-            if !off_in.is_null() || !off_out.is_null() {
+            if off_in != 0 || off_out != 0 {
                 return -errno::ESPIPE as i64;
             }
             if core::ptr::eq(ipipe.unwrap() as *const _, opipe.unwrap() as *const _) {
@@ -2322,7 +2138,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let mut buf = alloc::vec![0u8; chunk];
                 // Consume from the input pipe (File::read carries the
                 // blocking/EOF semantics of pipe_file_read).
-                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                let n = in_file.read_slice(&mut buf[..chunk]);
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
                     break;
@@ -2331,7 +2147,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 // blocks until written; EPIPE propagates).
                 let mut w = 0usize;
                 while w < n as usize {
-                    let r = out_file.write(buf.as_ptr().add(w), n as usize - w);
+                    let r = out_file.write_slice(&buf[w..n as usize]);
                     if r <= 0 {
                         if r < 0 && total == 0 && w == 0 { return r as i64; }
                         // Reader died mid-transfer: report what moved.
@@ -2348,7 +2164,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 
         if let Some(_pipe) = ipipe {
             // pipe → file (Linux ipipe branch).
-            if !off_in.is_null() {
+            if off_in != 0 {
                 return -errno::ESPIPE as i64;
             }
             if in_file.flags().is_writeonly() {
@@ -2366,7 +2182,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             while total < len {
                 let chunk = core::cmp::min(len - total, 8192);
                 let mut buf = alloc::vec![0u8; chunk];
-                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                let n = in_file.read_slice(&mut buf[..chunk]);
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
                     break; // EOF
@@ -2375,9 +2191,9 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let mut written = 0usize;
                 while written < n {
                     let w = match out_off {
-                        Some(off) => out_file.write_at(off + total as u64 + written as u64,
-                                                       buf.as_ptr().add(written), n - written),
-                        None => out_file.write(buf.as_ptr().add(written), n - written),
+                        Some(off) => out_file.write_at_slice(off + total as u64 + written as u64,
+                                                       &buf[written..n]),
+                        None => out_file.write_slice(&buf[written..n]),
                     };
                     if w <= 0 {
                         if total + written > 0 {
@@ -2401,7 +2217,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 
         if let Some(_pipe) = opipe {
             // file → pipe (Linux opipe branch).
-            if !off_out.is_null() {
+            if off_out != 0 {
                 return -errno::ESPIPE as i64;
             }
             if in_file.flags().is_writeonly() {
@@ -2419,7 +2235,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             if in_file.flags().bits() & O_PATH_RISCV != 0 {
                 return -errno::EBADF as i64;
             }
-            if let Some(inode) = (*in_file.inode.get()).as_ref() {
+            if let Some(inode) = in_file.get_inode() {
                 if inode.mode.is_directory() {
                     return -errno::EBADF as i64;
                 }
@@ -2438,8 +2254,8 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let chunk = core::cmp::min(len - total, 8192);
                 let mut buf = alloc::vec![0u8; chunk];
                 let n = match in_off {
-                    Some(off) => in_file.read_at(off, buf.as_mut_ptr(), chunk),
-                    None => in_file.read(buf.as_mut_ptr(), chunk),
+                    Some(off) => in_file.read_at_slice(off, &mut buf[..chunk]),
+                    None => in_file.read_slice(&mut buf[..chunk]),
                 };
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
@@ -2448,7 +2264,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let n = n as usize;
                 let mut written = 0usize;
                 while written < n {
-                    let w = out_file.write(buf.as_ptr().add(written), n - written);
+                    let w = out_file.write_slice(&buf[written..n]);
                     if w <= 0 {
                         if total + written > 0 {
                             return writeback_and_return(
@@ -2471,29 +2287,26 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 }
 
 /// Publish the consumed offsets (splice off_in/off_out contract) and return
-/// the byte count. SAFETY: both pointers were access_ok(8)-validated by the
-/// caller before any copy.
-unsafe fn writeback_and_return(
-    off_in: *mut i64,
+/// the byte count. Both addresses were access_ok(8)-validated by the caller
+/// before any copy; the stores go through the exception-table copy, so a
+/// racing unmap surfaces as EFAULT, never a kernel fault.
+fn writeback_and_return(
+    off_in: usize,
     in_off: Option<u64>,
-    off_out: *mut i64,
+    off_out: usize,
     out_off: Option<u64>,
     ret: i64,
 ) -> i64 {
-    if !off_in.is_null() {
+    if off_in != 0 {
         if let Some(off) = in_off {
-            let v = off as i64;
-            if crate::arch::uaccess::copy_to_user(
-                off_in as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+            if crate::arch::uaccess_safe::copy_out(off_in, &(off as i64).to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
     }
-    if !off_out.is_null() {
+    if off_out != 0 {
         if let Some(off) = out_off {
-            let v = off as i64;
-            if crate::arch::uaccess::copy_to_user(
-                off_out as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+            if crate::arch::uaccess_safe::copy_out(off_out, &(off as i64).to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
@@ -2529,14 +2342,13 @@ pub fn sys_tee(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
 
-    use crate::fs::get_file_fd;
-    // SAFETY: get_file_fd returns valid File references for the fds.
-    unsafe {
-        let in_file = match get_file_fd(fd_in as usize) {
+    // get_file_fd_safe returns valid File references for the fds.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(fd_out as usize) {
+        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2579,7 +2391,7 @@ pub fn sys_tee(args: SyscallArgs) -> i64 {
 /// - args[3]: flags - SPLICE_F_MOVE/NONBLOCK/MORE/GIFT
 pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
-    let iov_ptr = args[1] as *const u8;
+    let iov_addr = args[1] as usize;
     let nr_segs = args[2] as usize;
     let flags = args[3] as u32;
 
@@ -2597,20 +2409,17 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     if nr_segs > IOV_MAX {
         return -errno::EINVAL as i64;
     }
-    if iov_ptr.is_null() {
+    if iov_addr == 0 {
         return -errno::EFAULT as i64;
     }
-    if !crate::arch::uaccess::access_ok(iov_ptr as usize, nr_segs * 16) {
+    if !crate::arch::uaccess::access_ok(iov_addr, nr_segs * 16) {
         return -errno::EFAULT as i64;
     }
 
     // Copy the iovec array in (16 bytes per entry on LP64).
     let mut raw = alloc::vec![0u8; nr_segs * 16];
-    // SAFETY: iov_ptr validated with access_ok above; exception-table copy.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), iov_ptr, nr_segs * 16)
-    } != 0
-    {
+    // (iov_addr validated with access_ok above; exception-table copy.)
+    if crate::arch::uaccess_safe::copy_in(&mut raw, iov_addr) != 0 {
         return -errno::EFAULT as i64;
     }
     let mut iovs: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::with_capacity(nr_segs);
@@ -2630,8 +2439,7 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     }
 
     // fd must be a pipe (Linux get_pipe_info failure → EBADF).
-    // SAFETY: get_file_fd returns a valid Arc<File> or None.
-    let file = match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+    let file = match crate::fs::file::get_file_fd_safe(fd as usize) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -2665,10 +2473,9 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
 ///
 /// - RISC-V: 40
 pub fn sys_sendfile(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let out_fd = args[0] as usize;
     let in_fd = args[1] as usize;
-    let offset_ptr = args[2] as *mut i64;
+    let offset_ptr = args[2] as usize;
     let count = args[3] as usize;
 
     // Validate count
@@ -2679,30 +2486,27 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
     // Validate offset pointer and read its value through the exception-table
     // copy path (review批次1: bare dereference of a user pointer).
     let mut saved_offset: i64 = 0;
-    if !offset_ptr.is_null() {
-        if !crate::arch::uaccess::access_ok(offset_ptr as usize, core::mem::size_of::<i64>()) {
+    if offset_ptr != 0 {
+        if !crate::arch::uaccess::access_ok(offset_ptr, core::mem::size_of::<i64>()) {
             return -errno::EFAULT as i64;
         }
-        // SAFETY: offset_ptr validated with access_ok(8); copies into a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut saved_offset as *mut i64 as *mut u8,
-            offset_ptr as *const u8,
-            core::mem::size_of::<i64>(),
-        ) } > 0 {
-            return -errno::EFAULT as i64;
+        // (offset_ptr validated with access_ok(8) above.)
+        match crate::arch::uaccess_safe::read_user::<i64>(offset_ptr) {
+            Some(v) => saved_offset = v,
+            None => return -errno::EFAULT as i64,
         }
         if saved_offset < 0 {
             return -errno::EINVAL as i64;
         }
     }
 
-    // SAFETY: get_file_fd returns valid File or None; offset already read into kernel memory.
-    unsafe {
-        let in_file = match get_file_fd(in_fd) {
+    // Offset already read into kernel memory.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(in_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(out_fd) {
+        let out_file = match crate::fs::file::get_file_fd_safe(out_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2710,7 +2514,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
         // With a non-NULL offset, sendfile(2) reads from that offset and
         // leaves the fd's own position untouched (the old code set_pos'd the
         // shared position mid-transfer and only restored it on success).
-        let use_offset = !offset_ptr.is_null();
+        let use_offset = offset_ptr != 0;
         let mut cur_off = saved_offset as u64;
 
         // Transfer data in chunks
@@ -2727,9 +2531,9 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
             }
 
             let n_read = if use_offset {
-                in_file.read_at(cur_off, tmp_buf.as_mut_ptr(), to_read)
+                in_file.read_at_slice(cur_off, &mut tmp_buf[..to_read])
             } else {
-                in_file.read(tmp_buf.as_mut_ptr(), to_read)
+                in_file.read_slice(&mut tmp_buf[..to_read])
             };
             if n_read <= 0 {
                 break;
@@ -2738,16 +2542,15 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
 
             let mut written: usize = 0;
             while written < n_read {
-                let n_write = out_file.write(tmp_buf.as_ptr().add(written), n_read - written);
+                let n_write = out_file.write_slice(&tmp_buf[written..n_read]);
                 if n_write <= 0 {
                     // Publish progress through the caller's offset before bailing.
                     if use_offset && total_transferred + written > 0 {
                         let v = (cur_off + written as u64) as i64;
-                        // SAFETY: offset_ptr validated with access_ok(8) above.
-                        crate::arch::uaccess::copy_to_user(
-                            offset_ptr as *mut u8,
-                            &v as *const i64 as *const u8,
-                            core::mem::size_of::<i64>(),
+                        // (offset_ptr validated with access_ok(8) above.)
+                        crate::arch::uaccess_safe::copy_out(
+                            offset_ptr,
+                            &v.to_le_bytes(),
                         );
                     }
                     // Linux do_sendfile: an error on the FIRST write attempt
@@ -2766,15 +2569,11 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
             remaining -= written;
         }
 
-        // Update offset through copy_to_user (fd position untouched)
+        // Update offset through the exception-table copy (fd position untouched)
         if use_offset {
             let v = cur_off as i64;
-            // SAFETY: offset_ptr validated with access_ok(8) above.
-            if crate::arch::uaccess::copy_to_user(
-                offset_ptr as *mut u8,
-                &v as *const i64 as *const u8,
-                core::mem::size_of::<i64>(),
-            ) > 0 {
+            // (offset_ptr validated with access_ok(8) above.)
+            if crate::arch::uaccess_safe::copy_out(offset_ptr, &v.to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
