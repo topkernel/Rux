@@ -1592,6 +1592,54 @@ pub fn unix_send(
                 // window (screen create → llvmpipe init → verdict);
                 // skipping them keeps the budget for the verdict lines.
                 let flood = s.contains("procname = gl");
+                // leg-30B5: the StartUser/SwitchToUser user-start chain
+                // cohort at WARN (visible at loglevel 6, unlike the GL
+                // cohort's pr_debug): BMS's ImplicitQueryInfoByPriority
+                // verdicts ("user is not existed" = GetUserId rejected
+                // user 100; "can't find target AbilityInfo" = the isBoot
+                // retry ladder's spin reason), accountmgr's adapter
+                // results, and AMS's own handler narration. Rare lines
+                // concentrated in the post-unlock window — own budget.
+                const AMS_KEYS: [&str; 28] = [
+                    "SwitchToUser",
+                    "startUser in service",
+                    "highest priority ability",
+                    "user is not existed",
+                    "invalid userId",
+                    "userId not exist",
+                    "CreateNewUser user",
+                    "CreateNewUser end",
+                    "bundle size:",
+                    "wait complete",
+                    "AbilityManagerAdapter",
+                    "in call back",
+                    "StartUser current",
+                    "low-mem mode",
+                    "foregroundUserId:",
+                    "not supported!",
+                    "failed to get os account",
+                    "os account proxy",
+                    "Get samgr failed",
+                    "account iface_cast",
+                    "failed to get account",
+                    "can't find target",
+                    "IsOsAccountExists path",
+                    "SendRequest",
+                    "work thread",
+                    "find target AbilityInfo",
+                    "create user:",
+                    "permission verification failed, not account",
+                ];
+                let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
+                if ams_family {
+                    static AMS_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = AMS_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 600 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("HILOG-AMS[{}] {}{}", n, p, s);
+                    }
+                }
                 // Decoded line is "<tag>: <content>" — prefix-match the
                 // tag so "OHOS::RS" (which contains ':') still works.
                 let interesting = TAGS.iter().any(|t| {

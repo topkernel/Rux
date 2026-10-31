@@ -1001,6 +1001,21 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 
 static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5 RIPPLE (fifth successor): lb30 proved the code-46 oneway is
+// ENQ'd, READ by foundation's main thread, and BC_FREE'd 8 ms later —
+// kernel delivery clean, yet no ability ever spawns. The next question
+// is what foundation DID in that window: OnStartUserDone back to the
+// sender (every early-return path calls it), the BMS launcher query, or
+// an appspawn Schedule hop. At the READ of the traced txn we latch
+// jiffies + the sender pid; for the next 120 s the ENQ hook prints every
+// transaction whose sender OR receiver is the foundation proc or the
+// StartUser sender proc. What is ABSENT names the dead leg.
+static AMS46_T0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_SENDER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5: the thread that READ the traced code-46 (for the
+// THREAD-SNAPSHOT leg of the audit — its in-flight syscall + ring).
+static AMS46_READER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_RIP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -3672,6 +3687,95 @@ pub fn ams46_audit() {
     if !found {
         return;
     }
+    // leg-30B5 THREAD-SNAPSHOT: lb32 showed the code-46 READ by
+    // foundation's main thread, its IsOsAccountExists reply returned,
+    // then the thread went dark with the async slot held forever and
+    // zero follow-up binder traffic — stuck in pure userspace inside
+    // the StartUser handler. The reader task's in-flight syscall
+    // (kernel-stack entry frame) + syscall-nr ring names the shape:
+    // nanosleep poll loop (the isBoot BMS retry ladder), a futex park,
+    // or live compute.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let rtid = AMS46_READER.load(Relaxed);
+        if rtid != 0 {
+            static SNAP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SNAP_N.fetch_add(1, Relaxed);
+            if n < 40 && (n % 2) == 0 {
+                let tk = unsafe { crate::sched::find_task_by_pid(rtid) };
+                if tk.is_null() {
+                    crate::pr_warn!("AMS46-T j={} tid={} GONE", now / 100, rtid);
+                } else {
+                    // SAFETY: diagnostic reads of the task's own fields
+                    // and mapped kernel stack (sleep_snapshot contract).
+                    let t = unsafe { &*tk };
+                    let state = t.state().bits() as u64;
+                    let (sys, rip, a0) = match t.kernel_stack_top_checked() {
+                        None => (0u64, 0u64, 0u64),
+                        Some(top) => {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi) }
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).a7, (*regs).epc, (*regs).a0) }
+                            }
+                            #[cfg(feature = "aarch64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe {
+                                    ((*regs).syscallno, (*regs).pc, (*regs).regs[0])
+                                }
+                            }
+                        }
+                    };
+                    use core::fmt::Write;
+                    let mut s = alloc::string::String::new();
+                    const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                    let cur = t.last_calls_cur.load(Relaxed);
+                    let mut shown = 0usize;
+                    for k in 0..RL {
+                        // newest first
+                        let i = (cur + RL - k) % RL;
+                        let v = t.last_calls[i].load(Relaxed);
+                        if v != 0 {
+                            let _ = write!(s, " {}", v & 0xffff);
+                            shown += 1;
+                            if shown >= 16 {
+                                break;
+                            }
+                        }
+                    }
+                    crate::pr_warn!(
+                        "AMS46-T j={} tid={} state={:#x} sys={} rip={:#x} a0={:#x} calls:{}",
+                        now / 100,
+                        rtid,
+                        state,
+                        sys,
+                        rip,
+                        a0,
+                        s
+                    );
+                }
+            }
+        }
+    }
     if async_held || parked > 0 || todo_d > 0 {
         static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         if CEN_N.fetch_add(1, Relaxed) < 240 {
@@ -5209,6 +5313,38 @@ fn binder_thread_write(
                         tr.data_size,
                         tr.offsets_size
                     );
+                    // leg-30B6: inside the ripple window, a FAILED send
+                    // from foundation (or the StartUser sender) at WARN —
+                    // the fast-fail shape's IsExistOsAccount made zero
+                    // successful calls; if the lookup was attempted and
+                    // failed at our send layer, this names it (the
+                    // pr_info above is invisible at loglevel 6).
+                    if ams46_on() {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let t0 = AMS46_T0.load(Relaxed);
+                        if t0 != 0 {
+                            let now_j = crate::drivers::timer::get_jiffies() as u32;
+                            if now_j.wrapping_sub(t0)
+                                < (crate::config::KERNEL_HZ as u32).saturating_mul(120)
+                            {
+                                let tp = AMS46_TPID.load(Relaxed);
+                                let sp = AMS46_SENDER.load(Relaxed);
+                                if proc.pid == tp || proc.pid == sp {
+                                    static RF_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if RF_N.fetch_add(1, Relaxed) < 64 {
+                                        crate::pr_warn!(
+                                            "AMS46-R-FAIL pid{} code={:#x} BR={:#x} {}",
+                                            proc.pid,
+                                            tr.code,
+                                            err_cmd,
+                                            if reply { "reply" } else { "txn" }
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Linux stops processing write commands and queues the
                     // error as thread work for the following read.
                     let w = world_lock();
@@ -6564,20 +6700,85 @@ fn binder_transaction(
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
+                    // leg-30B6: the sender's euid — CheckUserParam
+                    // rejects the call unless GetCallingUid() reads
+                    // 3058 (accountmgr); this prints the kernel-side
+                    // truth at enqueue.
+                    let euid = crate::sched::current()
+                        .map(|t| unsafe { (*t).cred().euid })
+                        .unwrap_or(0);
                     let hex: alloc::string::String = hb[..48]
                         .iter()
                         .map(|b| alloc::format!("{:02x}", b))
                         .collect();
                     crate::pr_warn!(
-                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' flags={:#x} dlen={} parcel={}",
+                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' euid={} flags={:#x} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
                         thread.tid,
                         comm,
+                        euid,
                         tr.flags,
                         data_size,
                         hex
                     );
+                }
+            }
+        }
+    }
+
+    // leg-30B5 RIPPLE (dfx=ams46): inside the 120 s window after the
+    // traced code-46 was READ, print every transaction whose sender or
+    // receiver is the foundation proc (AMS46_TPID) or the StartUser
+    // sender proc (AMS46_SENDER). Budget 640; zero lines outside the
+    // window.
+    if ams46_on() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let t0 = AMS46_T0.load(Relaxed);
+        if t0 != 0 {
+            let now_j = crate::drivers::timer::get_jiffies() as u32;
+            if now_j.wrapping_sub(t0) < (crate::config::KERNEL_HZ as u32).saturating_mul(120) {
+                let tp = AMS46_TPID.load(Relaxed);
+                let sp = AMS46_SENDER.load(Relaxed);
+                if proc.pid == tp || proc.pid == sp || target.pid == tp || target.pid == sp {
+                    if AMS46_RIP_N.fetch_add(1, Relaxed) < 640 {
+                        let rcomm = crate::sched::current()
+                            .map(|t| unsafe { (*t).comm() })
+                            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                            .unwrap_or("")
+                            .trim_end_matches('\0');
+                        // leg-30B6: parcel head — the OnStartUserDone
+                        // callback's errcode rides in this buffer (after
+                        // the IUserCallback token: 8B header + u32 len +
+                        // 46B UTF-16 + int32 userId + int32 errcode =
+                        // 68 bytes total); 80 covers it whole.
+                        let mut rb = [0u8; 80];
+                        let hex: alloc::string::String = if tr.data_buffer != 0
+                            && unsafe {
+                                crate::arch::uaccess::copy_from_user(
+                                    rb.as_mut_ptr(),
+                                    tr.data_buffer as *const u8,
+                                    rb.len(),
+                                ) == 0
+                            }
+                        {
+                            rb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+                        } else {
+                            alloc::string::String::from("-")
+                        };
+                        crate::pr_warn!(
+                            "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={} parcel={}",
+                            txn.id,
+                            proc.pid,
+                            thread.tid,
+                            rcomm,
+                            target.pid,
+                            tr.code,
+                            tr.flags & TF_ONE_WAY != 0,
+                            data_size,
+                            hex
+                        );
+                    }
                 }
             }
         }
@@ -7831,6 +8032,32 @@ fn binder_thread_read(
                                     t.code,
                                     is_reply
                                 );
+                                // leg-30B5 RIPPLE: open the 120 s
+                                // follow-window at the traced code-46's
+                                // kernel delivery; latch the sender proc
+                                // and the reading thread.
+                                if AMS46_T0.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                    AMS46_T0.store(
+                                        crate::drivers::timer::get_jiffies() as u32,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    let fp = t
+                                        .from_proc
+                                        .as_ref()
+                                        .map(|p| p.pid)
+                                        .unwrap_or(0);
+                                    AMS46_SENDER.store(fp, core::sync::atomic::Ordering::Relaxed);
+                                    AMS46_READER.store(
+                                        thread.tid,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    crate::pr_warn!(
+                                        "AMS46 RIPPLE window open (foundation={} sender={} reader={})",
+                                        AMS46_TPID.load(core::sync::atomic::Ordering::Relaxed),
+                                        fp,
+                                        thread.tid
+                                    );
+                                }
                             }
                             // sc262 (leg-23): SLTX read-side — an
                             // app-family child's thread picked this
