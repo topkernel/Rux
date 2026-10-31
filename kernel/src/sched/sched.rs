@@ -4401,13 +4401,13 @@ pub fn scheduler_tick() {
         // ~27K picks/s) — kept it permanently reset: PREEMPT-HEAL fired
         // ZERO times in 380 s while carriers held base counts for the
         // whole boot and pid 1 stranded up to 48 s. A per-task window
-        // survives migration and rotation; an observation gap (>
-        // LEAK_GAP_JIFFIES without a tick seeing this task hold a
-        // count) starts a fresh window, preserving the 200-consecutive-
-        // samples statistical bar (every real guard section is
-        // microseconds — a336568f's evidence).
+        // survives migration and rotation, and the 200-observation bar
+        // is CUMULATIVE across leak episodes (sc42: carriers whose
+        // counts flip leak→drain→re-leak starve any consecutive-samples
+        // bar exactly like the per-CPU window did) — every real guard
+        // section is microseconds, so the bar keeps a five-order margin
+        // under any continuity shape (a336568f's evidence).
         const LEAK_SLOTS: usize = 16;
-        const LEAK_GAP_JIFFIES: u64 = 50;
         struct LeakWin {
             task: core::sync::atomic::AtomicU64,
             first: core::sync::atomic::AtomicU64,
@@ -4457,17 +4457,22 @@ pub fn scheduler_tick() {
                     } else {
                         0
                     };
-                    let prev_last = if same {
-                        w.last.load(core::sync::atomic::Ordering::Relaxed)
-                    } else {
-                        0
-                    };
-                    // Continuity: a gap means the count may have drained
-                    // between observations — the 200-sample bar must
-                    // restart, not accumulate across episodes.
-                    if t0 == 0
-                        || now.wrapping_sub(prev_last) > LEAK_GAP_JIFFIES
-                    {
+                    // Cumulative bar (sc42 refinement): the window
+                    // accumulates across EPISODES, not consecutive
+                    // samples — sc42 showed carrier 319's count flips
+                    // (leak, drain via pick-zero, re-leak) with clean
+                    // gaps long enough that any consecutive-samples bar
+                    // starves exactly like the per-CPU window did, while
+                    // each episode still stranded pid 1. The statistical
+                    // argument survives the relaxation: every real guard
+                    // section is microseconds, so 200 tick observations
+                    // of this task holding a base count — under ANY
+                    // continuity shape — is still five orders of
+                    // magnitude beyond a legitimate holder, and a false
+                    // heal's later guard drop underflow-clamps at zero
+                    // and REPORTS (sub_preempt_count_at) instead of
+                    // silently poisoning.
+                    if t0 == 0 {
                         t0 = now;
                     }
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
