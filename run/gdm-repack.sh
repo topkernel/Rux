@@ -107,7 +107,8 @@ EOF
     chmod 0755 "$ROOT/usr/bin/gnome-shell"
 fi
 
-echo "== gdm-theme.gresource (update-alternatives gap)"# gnome-shell-common's postinst installs gdm-theme.gresource via
+echo "== gdm-theme.gresource (update-alternatives gap)"
+# gnome-shell-common's postinst installs gdm-theme.gresource via
 # update-alternatives -> gnome-shell-theme.gresource (priority 10).
 # dpkg-deb -x never runs postinst, so the link is absent and
 # gnome-shell's reloadThemeResource (main.js:497) ENOENTs -> shell
