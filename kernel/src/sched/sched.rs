@@ -4156,6 +4156,16 @@ pub fn wake_up_enqueue_opt(
                         }
                         ph(pc as u32 as u64);
                         putchar(b'\n');
+                        // preempt-hunt (2026-11-01): name the acquire
+                        // site whose 1->0 release never ran — the
+                        // outermost-acquire tap. This is the producer's
+                        // home site, printed at the moment the phantom
+                        // count is adjudicated (still the direct-console
+                        // discipline: GRQ held).
+                        crate::dfx::leakorigin::report_outermost(
+                            b"WAKE-HEAL-ORIGIN",
+                            task,
+                        );
                     }
                 } else {
                     // Skip-reason census (budgeted): names which guard

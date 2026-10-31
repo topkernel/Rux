@@ -3909,6 +3909,19 @@ fn preempt_underflow_report(
         ph(site as u32);
     }
     putchar(b'\n');
+    // preempt-hunt (2026-11-01): the outermost-acquire record for this
+    // task names the acquire whose 1->0 release this clamp adjudicates —
+    // for a post-heal underflow that is the REAL guard the heal zeroed
+    // (a guard held across a scheduler point); for a booking split it is
+    // the phantom's home site. Rate-gate already passed above.
+    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(task) = crate::sched::current() {
+            crate::dfx::leakorigin::report_outermost(
+                b"UNDERFLOW-ORIGIN",
+                task as *mut Task,
+            );
+        }
+    }
 }
 
 impl Task {
@@ -4042,6 +4055,14 @@ impl Task {
         loc: &'static core::panic::Location<'static>,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        // Outermost base release (base field 1->0): clear the
+        // leakorigin outermost-acquire record (preempt-hunt tap). One
+        // relaxed load + compare when the probe is off.
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
@@ -4059,6 +4080,11 @@ impl Task {
         site: usize,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
