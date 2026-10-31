@@ -504,18 +504,21 @@ impl Socket {
                     let mut established = false;
                     let mut refused = 0u32;
                     for _ in 0..8 {
-                        let done = crate::net::tcp::tcp_socket_get(tcp_fd)
-                            .map(|ts| {
-                                if ts.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                        // Review finding 7: state/errno are mutated under
+                        // TCP_TABLE_LOCK on other CPUs — read them through
+                        // the locked snapshot, not the unlocked handle.
+                        let done = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                            .map(|(st, err)| {
+                                if st == crate::net::tcp::TcpState::TCP_CLOSE {
                                     // RST in SYN_SENT (no listener on the
                                     // loopback target) records ECONNREFUSED —
                                     // surface it, connect() must not report
                                     // success for a refused connection (LTP
                                     // connect01 "connection refused").
-                                    refused = ts.pending_error as u32;
+                                    refused = err as u32;
                                 }
-                                ts.state == crate::net::tcp::TcpState::TCP_ESTABLISHED
-                                    || ts.state == crate::net::tcp::TcpState::TCP_CLOSE
+                                st == crate::net::tcp::TcpState::TCP_ESTABLISHED
+                                    || st == crate::net::tcp::TcpState::TCP_CLOSE
                             })
                             .unwrap_or(true);
                         if done {
@@ -555,8 +558,8 @@ impl Socket {
                             // Drain the loopback backlog ourselves: with
                             // this task asleep nothing else polls.
                             crate::net::ethernet::ethernet_poll();
-                            let resolved = crate::net::tcp::tcp_socket_get(tcp_fd)
-                                .map(|ts| match ts.state {
+                            let resolved = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                .map(|(st, _)| match st {
                                     crate::net::tcp::TcpState::TCP_ESTABLISHED => {
                                         Some(true)
                                     }
@@ -574,8 +577,8 @@ impl Socket {
                                     // CLOSED: refused (111) or SYN-retry
                                     // exhaustion (ETIMEDOUT 110) — take the
                                     // protocol's errno.
-                                    let err = crate::net::tcp::tcp_socket_get(tcp_fd)
-                                        .map(|ts| ts.pending_error)
+                                    let err = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                        .map(|(_, err)| err)
                                         .filter(|e| *e != 0)
                                         .unwrap_or(110) as i32;
                                     *self.state.lock() = SocketState::Unconnected;
@@ -1178,9 +1181,9 @@ fn socket_accept_ready(socket: &Socket) -> bool {
 fn socket_connect_ready(socket: &Socket) -> bool {
     let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
     if fd < 0 { return true; }
-    crate::net::tcp::tcp_socket_get(fd)
-        .map(|ts| !matches!(
-            ts.state,
+    crate::net::tcp::tcp_connect_snapshot(fd)
+        .map(|(st, _)| !matches!(
+            st,
             crate::net::tcp::TcpState::TCP_SYN_SENT
                 | crate::net::tcp::TcpState::TCP_SYN_RECV))
         .unwrap_or(true)
