@@ -873,6 +873,16 @@ struct FdTableEntry {
     /// FdTable::slots — a lock-free AtomicPtr array the read path never
     /// takes the entry lock for. This struct now holds only metadata.)
     cloexec_bits: [u64; MAX_FDS / 64],
+    /// Occupancy bitmap (perf-gaps G2, 2026-11): one bit per slot,
+    /// maintained inside the SAME entry-lock sections that publish or
+    /// clear the slot itself (install_fd / close_fd / dup2_fd / fork_from)
+    /// — never read outside the entry lock, where it is exact by
+    /// construction. Full-table walkers (`for_each_file`, the close-time
+    /// epoll purge) iterate these 16 words instead of polling 1024
+    /// lock-free slots: epoll_purge_closed_fd's scan was measured at
+    /// ~8.9 us per close under KVM — nearly the whole p6_openclose gap —
+    /// and it runs on the last-reference close of EVERY file.
+    open_bits: [u64; MAX_FDS / 64],
     next_fd: usize,
     count: usize,
 }
@@ -947,6 +957,7 @@ impl FdTable {
             entry: crate::sync::spinlock::Spinlock::new(Box::new(
                 FdTableEntry {
                     cloexec_bits: [0; MAX_FDS / 64],
+                    open_bits: [0; MAX_FDS / 64],
                     next_fd: 0,
                     count: 0,
                 },
@@ -984,6 +995,7 @@ impl FdTable {
         {
             let mut ce = child.entry.lock_irqsave();
             ce.cloexec_bits = g.cloexec_bits;
+            ce.open_bits = g.open_bits;
             ce.count = g.count;
             ce.next_fd = g.next_fd;
         }
@@ -1063,6 +1075,7 @@ impl FdTable {
         // number (regression round 5, MED: closed CLOEXEC fds leaked the
         // bit to the next file that reused the number).
         entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        entry.open_bits[fd / 64] |= 1u64 << (fd % 64);
         entry.count += 1;
         Ok(())
     }
@@ -1140,19 +1153,30 @@ impl FdTable {
     /// where possible, and must NOT call back into FdTable mutators.
     pub fn for_each_file(&self, mut f: impl FnMut(usize, &Arc<File>)) {
         let entry = self.entry.lock_irqsave();
-        // Slots are stable under the entry lock (every writer serializes
-        // there), so each non-null pointer still has its table reference;
-        // present it through a temporary owning clone.
-        for (fd, slot) in self.slots.iter().enumerate() {
-            let p = slot.0.load(Ordering::Acquire);
-            if !p.is_null() {
-                // SAFETY: published by a writer; the table's reference is
-                // held by the slot for the duration of our lock.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    let file = Arc::from_raw(p);
-                    f(fd, &file);
-                    drop(file);
+        // Occupancy bitmap walk (perf-gaps G2): open_bits is exact under
+        // the entry lock (every publisher/clearer updates it inside the
+        // same critical section), so iterate its 16 words and visit only
+        // present slots — the old 1024-slot poll was ~9 us under KVM and
+        // sat on the close path of every last-reference file (the epoll
+        // purge scan).
+        for (word_idx, &bits) in entry.open_bits.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let fd = word_idx * 64 + bits.trailing_zeros() as usize;
+                bits &= !(1u64 << (fd % 64));
+                // Slots are stable under the entry lock (every writer
+                // serializes there), so the pointer still has its table
+                // reference; present it through a temporary owning clone.
+                let p = self.slots[fd].0.load(Ordering::Acquire);
+                if !p.is_null() {
+                    // SAFETY: published by a writer; the table's reference
+                    // is held by the slot for the duration of our lock.
+                    unsafe {
+                        Arc::increment_strong_count(p);
+                        let file = Arc::from_raw(p);
+                        f(fd, &file);
+                        drop(file);
+                    }
                 }
             }
         }
@@ -1198,6 +1222,7 @@ impl FdTable {
             if fd < entry.next_fd {
                 entry.next_fd = fd;
             }
+            entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
             Some(unsafe { Arc::from_raw(p) })
         };
         if let Some(file) = removed {
@@ -1395,6 +1420,7 @@ impl FdTable {
             // install_fd already cleared the stale bit only when the slot
             // was empty, so clear it here unconditionally.
             entry.cloexec_bits[newfd / 64] &= !(1u64 << (newfd % 64));
+            entry.open_bits[newfd / 64] |= 1u64 << (newfd % 64);
             entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
             entry.count += 1;
             if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
