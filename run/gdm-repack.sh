@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r55"
+NEXT="r57"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
