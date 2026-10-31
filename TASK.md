@@ -503,7 +503,13 @@ The phantom preempt-count producer is NAMED: two faces, one dominant.
    SLOW-TXN median exec 5780ms->2250ms (count 32->57: fewer forever-
    wedged txns means more complete past the threshold). make test
    riscv64 GREEN (1198/0); x3 builds rc=0 (x86_64/riscv64/aarch64).
-   ph4 (drain split + live divergence) running at write time.
+   ph4 (drain split + live divergence) REGRESSED vs ph3 (heals 281,
+   WAKE-HEAL 26, underflow 136, SLOW-TXN med 7970ms) AND carried an
+   exact-fit semantic divergence (it popped one segment beyond the
+   buffer, draining its fds without delivering its data) — REVERTED in
+   bf53ba41. The holder-side drain bounding needs a per-segment
+   pop/drop/relock shape (no heap Vec, no over-pop), not the batch
+   shape; future work. ph3's numbers are the branch's verification.
 
 ### Face B (residual, ~4 user-return phantoms/boot): the lying sched slot
 - The definitive phantom: LEAK-ORIGIN user-return pc=1 (a +1 at user
