@@ -207,7 +207,7 @@ fn try_expand_stack(
     // Map under the PTE-modify lock, kept across the rmap setup (twin
     // round-6 MED protocol), with the R7-C3 re-check against a CLONE_VM
     // sibling that won the race.
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
     // SAFETY: read-only walk under the lock.
     if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }.is_some() {
         drop(_pte_guard);
@@ -310,7 +310,7 @@ fn protnone_represent(
     // Re-present under the PTE section, re-checking the marker (R7-C3
     // discipline: the leaf may have moved under us between the
     // lock-free walk and the section).
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = pte_lock_for(addr_space).lock_irqsave();
     // SAFETY: read-only walk on the mm's root.
     let Some((_ppn, now)) = (unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits()) }) else {
         return MmFaultResult::PermissionDenied;

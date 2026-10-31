@@ -61,11 +61,7 @@ pub struct SemInfoUapi {
 pub struct SemidDsUapi {
     pub sem_perm: IpcPermUapi,
     pub sem_otime: i64,
-    #[cfg(feature = "x86_64")]
-    pub sem_otime_high: u64,
     pub sem_ctime: i64,
-    #[cfg(feature = "x86_64")]
-    pub sem_ctime_high: u64,
     pub sem_nsems: u64,
     pub __unused3: u64,
     pub __unused4: u64,
@@ -280,11 +276,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_otime_high: 0,
                 sem_ctime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,
@@ -338,11 +330,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_otime_high: 0,
                 sem_ctime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,
@@ -640,11 +628,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_otime_high: 0,
                 sem_ctime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,
@@ -700,11 +684,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             let mut ds = SemidDsUapi {
                 sem_perm: IpcPermUapi::default(),
                 sem_otime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_otime_high: 0,
                 sem_ctime: 0,
-                #[cfg(feature = "x86_64")]
-                sem_ctime_high: 0,
                 sem_nsems: 0,
                 __unused3: 0,
                 __unused4: 0,
