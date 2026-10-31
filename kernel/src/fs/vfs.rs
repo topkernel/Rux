@@ -1899,6 +1899,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
 
         // Look up child in dentry tree
+        // (perf-syscall lane) the hit arm's inode is hoisted so the
+        // symlink check below does not re-take the dentry inode lock.
+        let mut hit_inode: Option<alloc::sync::Arc<crate::fs::inode::Inode>> = None;
         let child = match current.lookup_child(component) {
             Some(c) => {
                 // Negative dentry — file known not to exist
@@ -1945,13 +1948,16 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 // already holds — a no-op replace that still took the
                 // inode spinlock and churned the Arc refcount on every
                 // walk of every cached component.
-                if let Some(ref cached_inode) = c.get_inode() {
+                let mut cur = c.get_inode();
+                if let Some(ref cached_inode) = cur {
                     if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
                         if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
-                            c.set_inode(fresh);
+                            c.set_inode(alloc::sync::Arc::clone(&fresh));
+                            cur = Some(fresh);
                         }
                     }
                 }
+                hit_inode = cur;
                 crate::dfx::fsw::note_walk_hit();
                 c
             }
@@ -2034,8 +2040,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
 
-                    // Add to icache
-                    crate::fs::inode::icache_add(child_inode);
+                    // Add to icache (clone: the symlink-check hint below
+                    // still needs the Arc)
+                    crate::fs::inode::icache_add(child_inode.clone());
 
                     // Move to child, follow mount, follow symlink
                     let hopped = d.get_mount().is_some();
@@ -2053,11 +2060,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     }
                     // Respect LOOKUP_NOFOLLOW on the final component here as
                     // well — lstat must not depend on dentry cache state.
+                    // (perf-syscall lane) the fresh inode is in hand — no
+                    // mount hop means current IS the child we iget'd.
                     let is_last = ci == components.len() - 1;
                     if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
                         // Don't follow symlink on the final component
                     } else {
-                        current = follow_symlink(current, &components, &mut symlink_depth)?;
+                        let hint = if hopped { None } else { Some(&child_inode) };
+                        current =
+                            follow_symlink_hinted(current, hint, &components, &mut symlink_depth)?;
                     }
                     continue;
                 }
@@ -2079,11 +2090,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             ));
         }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
+        // (perf-syscall lane) no mount hop: current is the child whose
+        // inode the hit arm already fetched.
         let is_last = ci == components.len() - 1;
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
             // Don't follow symlink on the final component
         } else {
-            current = follow_symlink(current, &components, &mut symlink_depth)?;
+            let hint = if hopped { None } else { hit_inode.as_ref() };
+            current =
+                follow_symlink_hinted(current, hint, &components, &mut symlink_depth)?;
         }
     }
 
@@ -2134,10 +2149,28 @@ fn follow_symlink(
     remaining: &Vec<&str>,
     depth: &mut usize,
 ) -> Result<alloc::sync::Arc<Dentry>, i32> {
-    let inode = match dentry.get_inode() {
+    follow_symlink_hinted(dentry, None, remaining, depth)
+}
+
+/// (perf-syscall lane) Same walk with the caller's pre-fetched inode:
+/// both walk loops already hold the child's Arc (the dcache-hit arm's
+/// icache refresh / the iget arm's fresh inode), and re-reading it here
+/// cost one dentry-inode spinlock + Arc clone per component on the
+/// no-symlink fast path (the overwhelmingly common case).
+fn follow_symlink_hinted(
+    dentry: alloc::sync::Arc<Dentry>,
+    inode_hint: Option<&alloc::sync::Arc<crate::fs::inode::Inode>>,
+    remaining: &Vec<&str>,
+    depth: &mut usize,
+) -> Result<alloc::sync::Arc<Dentry>, i32> {
+    let inode_owned: alloc::sync::Arc<crate::fs::inode::Inode> = match inode_hint.cloned() {
         Some(i) => i,
-        None => return Ok(dentry),
+        None => match dentry.get_inode() {
+            Some(i) => i,
+            None => return Ok(dentry),
+        },
     };
+    let inode = &inode_owned;
 
     if !inode.mode.is_symlink() {
         return Ok(dentry);
@@ -2361,9 +2394,11 @@ fn follow_symlink(
                     d.set_inode(child_inode.clone());
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
-                    crate::fs::inode::icache_add(child_inode);
+                    crate::fs::inode::icache_add(child_inode.clone());
+                    let hopped = d.get_mount().is_some();
                     current = follow_mount(d);
-                    current = follow_symlink(current, remaining, depth)?;
+                    let hint = if hopped { None } else { Some(&child_inode) };
+                    current = follow_symlink_hinted(current, hint, remaining, depth)?;
                     continue;
                 }
             }
