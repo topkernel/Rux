@@ -1444,6 +1444,15 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
+    // 1.1 Re-arm the LAPIC timer BEFORE anything below can switch tasks
+    // or block: once x86_64 arms one-shot mode (set_next_trigger via
+    // apic::timer_arm_oneshot, perf lane pd), a tick that fails to
+    // re-arm leaves this CPU tick-less forever. Grid-glued to the next
+    // nominal tick, pulled earlier by any due hres deadline. No-op
+    // while the timebase is not precise (periodic tick still running)
+    // and on the PIT fallback path.
+    crate::drivers::timer::set_next_trigger();
+
     // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
     // timekeeper (offset-only forward steps, clamped; see
     // x86_64::resync_tsc_against_hpet).

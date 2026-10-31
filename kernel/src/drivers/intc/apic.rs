@@ -278,6 +278,50 @@ pub fn timer_mask() {
     }
 }
 
+/// Arm the LAPIC timer on this CPU in ONE-SHOT mode to fire at an
+/// absolute nominal-domain deadline (TIMER_CLOCK_FREQ_HZ ticks).
+///
+/// Perf lane pd (2026-10-31): the periodic-only timer made every
+/// high-resolution deadline (nanosleep/clock_nanosleep hres entries)
+/// wait for the next 10 ms grid tick — on SMP the sleeper woke at the
+/// FIRST of either CPU's ticks (pbench p7_sleep1ms med 1103 µs vs the
+/// reference kernel's 16.6 µs, 66x). The riscv64 twin arms
+/// min(next grid tick, earliest hres) via SBI set_timer; this is the
+/// x86_64 mirror: `set_next_trigger()` computes that deadline and this
+/// function programs it. After the switch, EVERY LOCAL_TIMER IRQ must
+/// re-arm (`set_next_trigger()` from the tick handler) or this CPU's
+/// tick stops entirely — a one-shot LAPIC fires once and stays quiet.
+///
+/// The deadline is in the read_time() (nominal 10 MHz) domain; the
+/// calibrated CCR decrement rate converts it to an initial count. A
+/// deadline at or before "now" clamps to the minimum count (fires
+/// immediately; the Hrtimer softirq sweep then delivers the expiry).
+/// Returns true when armed (APIC ready + calibration ran).
+pub fn timer_arm_oneshot(deadline_nominal: u64) -> bool {
+    if !READY.load(Ordering::Acquire) {
+        return false;
+    }
+    let freq = LAPIC_TIMER_FREQ.load(Ordering::Acquire);
+    if freq == 0 {
+        return false; // calibration never ran: caller keeps periodic
+    }
+    let now = crate::drivers::timer::read_time();
+    let delta = deadline_nominal.saturating_sub(now).max(1);
+    // counts = delta_seconds x freq, in u128 (delta up to a grid tick is
+    // tiny, but a far-future hres deadline must not wrap).
+    let counts = ((delta as u128) * (freq as u128)
+        / crate::config::TIMER_CLOCK_FREQ_HZ as u128) as u64;
+    let counts = counts.clamp(1, u32::MAX as u64) as u32;
+    // Mode write then initial count: writing TMICT (re)starts the count.
+    // The divide register stays programmed (ignored in x2APIC; harmless
+    // in xAPIC — LAPIC_TIMER_FREQ was calibrated with it armed).
+    reg_write(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV, TIMER_DIV_16 as u32);
+    let lvt = LOCAL_TIMER_VECTOR as u32; // mode bits [18:17] = 0: one-shot
+    reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
+    reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, counts);
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Delay (post-calibration)
 // ---------------------------------------------------------------------------

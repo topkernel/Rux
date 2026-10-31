@@ -107,17 +107,24 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     // the IRQ-off windows shrink from whole-buffer to sub-chunk (the
     // per-byte putc stall bound lives in console.rs). Byte dropping on
     // TX_STALLED is unchanged (putc latches and drops per its budget).
+    //
+    // Perf lane pd (2026-10-31): the chunk body now goes through
+    // Uart::puts_batch — ONE bounded THRE wait + ONE `rep outsb` string
+    // IO per 16 bytes (x86_64) instead of one LSR poll + one THR write
+    // PER BYTE. The per-byte form cost 2 port-IO exits per byte under
+    // KVM (the OH serial log's 0.36-0.93 ms/line, 25% of both CPUs
+    // during boot; printk's emit path already batches — leg-54 item C —
+    // while this, the 60%-of-volume userspace /dev/console path, did
+    // not). riscv64/aarch64 puts_batch keeps per-byte MMIO stores, so
+    // the change there only removes the per-byte lock traffic shape
+    // (the lock was already per-chunk).
     const UART_TX_CHUNK: usize = 32;
     let mut idx = 0usize;
     while idx < slice.len() {
         let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
         {
             let uart = console::lock();
-            let mut i = idx;
-            while i < end {
-                uart.putc(slice[i]);
-                i += 1;
-            }
+            uart.puts_batch(&slice[idx..end]);
         }
         idx = end;
         // leg-32B (WAKE-STRANDED strand family): a console burst is
