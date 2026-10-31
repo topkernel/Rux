@@ -1195,6 +1195,37 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
             }
             root.clear_children();
             mnt.root.rehome_children_into(&root);
+            // lb-lane hunt (switch_root): the moved-in mounts must stay
+            // reachable — post-switch mkdir /storage/media and /mnt/* on
+            // lb3-lb6 say they are NOT (ENOENT/EROFS). Dump the new root's
+            // children with mount bits right after the rehome.
+            {
+                let kids: Vec<(String, bool, bool)> = root
+                    .children
+                    .lock()
+                    .iter()
+                    .map(|(n, d)| {
+                        (
+                            n.clone(),
+                            d.vfsmount.lock().is_some(),
+                            d.get_inode().is_some(),
+                        )
+                    })
+                    .collect();
+                let shown: alloc::string::String = kids
+                    .iter()
+                    .map(|(n, m, i)| {
+                        alloc::format!("{}{}{}", n, if *m { "(M)" } else { "" }, if *i { "" } else { "(noino)" })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                crate::pr_warn!(
+                    "SWROOT-CHILDREN ({}): {} | src-root-children-now: {}",
+                    kids.len(),
+                    shown,
+                    mnt.root.children.lock().len()
+                );
+            }
             // sc181: rehoming reparented every mountpoint dentry under
             // the moved root — all cached chains changed wholesale.
             mount_index_rebuild(&mut state);
@@ -1636,6 +1667,50 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         && !sbx_noise(&normalized)
         && !sbx_noise(pathname);
     let mut trail = String::new();
+
+    // lb-lane hunt (switch_root /storage invisibility): pid 1's
+    // mkdir('/storage/media') gets ENOENT although the moved tmpfs is
+    // confirmed attached at the VFS root's "storage" child
+    // (SWROOT-CHILDREN). The failure exits before the final-dentry
+    // probe, so record the walk's starting identity instead: VFS-root
+    // vs task-root (chroot) dentry pointers and the root's view of
+    // "storage"/"mnt" — the divergence the errnos point at.
+    if normalized == "/storage/media" || normalized == "/mnt/sandbox" {
+        static WALKPRB_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+            let (vfs_root_ptr, vfs_root_has_storage, vfs_root_has_mnt) = {
+                let st = VFS_STATE.lock();
+                let r = st.root_dentry.clone();
+                match r {
+                    Some(r) => (
+                        Arc::as_ptr(&r) as usize,
+                        r.lookup_child("storage")
+                            .map(|c| c.vfsmount.lock().is_some())
+                            .unwrap_or(false),
+                        r.lookup_child("mnt")
+                            .map(|c| c.vfsmount.lock().is_some())
+                            .unwrap_or(false),
+                    ),
+                    None => (0, false, false),
+                }
+            };
+            let task_root_ptr = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .and_then(|fs| fs.root_dentry())
+                .map(|d| Arc::as_ptr(&d) as usize)
+                .unwrap_or(0);
+            crate::pr_warn!(
+                "WALKPROBE '{}' vfsroot={:#x} taskroot={:#x} procroot='{}' vfsroot-storage-mount={} vfsroot-mnt-mount={}",
+                normalized,
+                vfs_root_ptr,
+                task_root_ptr,
+                get_process_root(),
+                vfs_root_has_storage,
+                vfs_root_has_mnt
+            );
+        }
+    }
 
     // Get VFS root dentry
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
