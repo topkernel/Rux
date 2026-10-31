@@ -6,6 +6,14 @@
 //!
 //! Includes: read, write,writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// the syscall layer is the capsule boundary — validate/translate user
+// args at entry (arch::uaccess_safe + access_ok), run on kernel-owned
+// types after. This module must stay Safe Rust: the user-memory
+// mechanics live in arch/uaccess_safe.rs (Framework), the slice-typed
+// dispatch and fd/inode getters live in fs/file.rs.
+#![forbid(unsafe_code)]
+
 use super::*;
 use core::sync::atomic::Ordering;
 
