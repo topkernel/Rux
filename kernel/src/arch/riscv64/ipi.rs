@@ -485,3 +485,33 @@ pub fn init() {
     // Register PLIC IRQ handlers
     register_irq_handlers();
 }
+
+/// Per-hart SSIE enable for secondary harts (perf-sched lane, 2026-10-31).
+///
+/// `init()` above runs ONCE on the boot hart (main.rs) — but `sie` is a
+/// PER-HART CSR that boot.S explicitly zeroes on every hart's entry, and
+/// `secondary_cpu_entry` re-enabled only STIE (timer) and SEIE
+/// (external). Secondary harts therefore ran with software interrupts
+/// MASKED FOREVER: every reschedule/call-function/TLB-flush IPI sent to
+/// them sat in sip.SSIP pending-but-disabled, the handler never ran,
+/// need_resched was never set by the IPI, and a woken task waited for
+/// the target's next 10 ms timer tick (whose own scheduler work is what
+/// finally ran it). Measured with the pbench p2f futex battery
+/// (riscv64 strong, TCG virt SMP2, waiter pinned to hart 1):
+///   quiet futex wake->run med 9118us (49% of wakes clustered at the
+///     10 ms tick; p99 10009us) with the pin moved to hart 0 (no
+///     cross-hart IPI needed): 24us — 377x, proving the IPI loss.
+///   user-hog incumbent: 9952us -> 18.7us expected (samecpu measured).
+/// TLB-flush IPIs to secondaries were silently never executing either
+/// (fire-and-forget, no completion wait) — a standing TLB-staleness
+/// hazard this also removes.
+pub fn per_hart_enable_ssoftware() {
+    // SAFETY: plain per-hart CSR bit set; idempotent, callable from any
+    // point of secondary bring-up with no concurrent sie access.
+    unsafe {
+        core::arch::asm!(
+            "csrsi sie, 2",  // Set bit 1 (SSIE = 0x2)
+            options(nomem, nostack)
+        );
+    }
+}
