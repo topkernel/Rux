@@ -4578,18 +4578,20 @@ pub fn scheduler_tick() {
                 .is_ok()
         {
             let g = grq().lock_irqsave();
-            let (linked, stale_reset, owned_claim, oncpu_marked) =
+            let (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids) =
                 g.cfs_rq.claim_sweep(cpu_id);
             drop(g);
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
                 && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
             {
                 crate::pr_info!(
-                    "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={}",
+                    "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={} oncpu_pids={:?} owned_pids={:?}",
                     linked,
                     stale_reset,
                     owned_claim,
-                    oncpu_marked
+                    oncpu_marked,
+                    oncpu_pids,
+                    owned_pids
                 );
             }
         }
