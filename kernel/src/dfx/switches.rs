@@ -449,9 +449,6 @@ pub enum DfxSwitch {
     /// every boot phase names its storm caller. Purely diagnostic; OFF
     /// by default.
     TfdCensus,
-}
-
-const SWITCH_COUNT: usize = 50;
     /// dfx=scmtap (gdm session-fifo hunt, session 21): SCM_RIGHTS relay
     /// tap — one line per unix sendmsg that attaches fds (TX), per
     /// recvmsg that installs them (RX with the new fd numbers), per
@@ -463,7 +460,7 @@ const SWITCH_COUNT: usize = 50;
     ScmTap,
 }
 
-
+const SWITCH_COUNT: usize = 50;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
