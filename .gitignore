@@ -167,3 +167,13 @@ test/**/*.c
 run/*.c
 run/oh-x/
 userspace/tests/smoke_test/*.c
+
+# aa64-ltp lane scratch (LTP cross-build staging, DTB backups)
+run/ltp-aa64/
+run/virt.dtb.orig
+run/*.log
+run/build-config-aa64.bak
+run/qemu-virt.dtb
+run/a64-ltpsmoke.img
+run/listrun-feed.sh
+run/odprobe*

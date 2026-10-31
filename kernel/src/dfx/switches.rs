@@ -98,6 +98,7 @@ macro_rules! dfx_switch_table {
             OhHunt => "ohhunt",
             TfdCensus => "tfdcensus",
             ScmTap => "scmtap",
+            SigTrace => "sigtrace",
         }
     };
 }
@@ -460,7 +461,17 @@ pub enum DfxSwitch {
     ScmTap,
 }
 
-const SWITCH_COUNT: usize = 50;
+const SWITCH_COUNT: usize = 5;
+    /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
+    /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
+    /// handler, restorer, pc) and one per restore_sigcontext_aarch64
+    /// (pid, frame_addr, restored pc/sp/x29). For hunting the LTP
+    /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
+    /// default.
+    SigTrace,
+}
+
+const SWITCH_COUNT: usize = 5;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -551,7 +562,7 @@ impl DfxSwitch {
             DfxSwitch::OhHunt => 47,
             DfxSwitch::TfdCensus => 48,
             DfxSwitch::ScmTap => 49,
-
+            DfxSwitch::SigTrace => 48,
         }
     }
 

@@ -61,7 +61,9 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     let mode = args[3] as u32;
 
     const O_CREAT: u32 = 0o00000100;
-    const O_DIRECTORY: u32 = 0o00200000;
+    // Arch-dependent bit (arm64 uapi 040000 vs x86/asm-generic 0200000)
+    // — use the shared table, not a literal.
+    const O_DIRECTORY: u32 = crate::fs::file::FileFlags::O_DIRECTORY;
     const O_CLOEXEC: u32 = 0o02000000;
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {

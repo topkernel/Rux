@@ -36,9 +36,29 @@ impl FileFlags {
     pub const O_APPEND: u32 = 0o00002000;
     pub const O_NONBLOCK: u32 = 0o00004000;
     pub const O_DSYNC: u32 = 0o00010000;
+    // O_DIRECT/O_LARGEFILE/O_DIRECTORY/O_NOFOLLOW are arch-dependent:
+    // x86_64 and the plain asm-generic table (riscv64) share one set,
+    // but the arm64 uapi/asm/fcntl.h overrides all four with the
+    // AArch32-compat bit positions (O_DIRECTORY 040000, O_NOFOLLOW
+    // 0100000, O_DIRECT 0200000, O_LARGEFILE 0400000). With the x86
+    // values on aarch64, O_DIRECT and O_DIRECTORY are effectively
+    // SWAPPED — LTP read02's open(O_RDWR|O_DIRECT)=0x10002 hit the
+    // O_DIRECTORY bit and returned ENOTDIR on a regular file.
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECT: u32 = 0o00200000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_DIRECT: u32 = 0o00040000;
+    #[cfg(feature = "aarch64")]
+    pub const O_LARGEFILE: u32 = 0o00400000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_LARGEFILE: u32 = 0o00100000;
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECTORY: u32 = 0o00040000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_DIRECTORY: u32 = 0o00200000;
+    #[cfg(feature = "aarch64")]
+    pub const O_NOFOLLOW: u32 = 0o00100000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_NOFOLLOW: u32 = 0o00400000;
     pub const O_NOATIME: u32 = 0o01000000;
     pub const O_CLOEXEC: u32 = 0o02000000;
