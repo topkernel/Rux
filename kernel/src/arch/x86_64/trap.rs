@@ -1189,11 +1189,45 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     //   86 s / 29 heals). With the hook OFF the same leaks self-bound at
     //   user-mode boundaries (~2.6 s, sc69) and the heals bound the rest.
     // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
-    // stay as the safety net either way. Flip to true only after the
-    // producer is fixed.
-    const PREEMPT_HOOK_ENABLED: bool = false;
-    if !PREEMPT_HOOK_ENABLED {
-        return;
+    // stay as the safety net either way.
+    //
+    // kpreempt=1 (cmdline, 2026-10-31 launcher perf wall): runtime arm of
+    // the same hook, for A/B boots. The sc70-era amplification predates
+    // the WAKE-HEAL (parked phantom counts now zeroed at wake before the
+    // monopoly can form) and the rotation-proof 2 s tick heal; the OH
+    // census pins the master boot multiplier on tick-quantized futex
+    // wake→run latency (every IPC handoff waits for the incumbent's next
+    // preempt point — syscall return at best), which only this hook (on
+    // the wake IPI's irq-exit) can collapse. The verdict-cache discipline
+    // mirrors syscost::on(): never cache a verdict before the cmdline
+    // exists (the first vector can fire pre-cmdline::init).
+    static KP_ARMED: core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(0);
+    match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            match crate::cmdline::get_cmdline() {
+                None => return, // cmdline not parsed yet: stay disarmed
+                Some(_) => {
+                    let v = if crate::cmdline::get_param("kpreempt")
+                        .as_deref()
+                        == Some("1")
+                    {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
+                    if v == 2 {
+                        crate::pr_info!(
+                            "sched: kernel-preempt armed by cmdline (cpu={})",
+                            crate::arch::cpu_id()
+                        );
+                    }
+                }
+            }
+        }
+        1 => return, // cmdline says off
+        _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule
     // handles a null prev, but there is nothing to preempt either way.
