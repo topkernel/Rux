@@ -269,6 +269,15 @@ pub extern "C" fn secondary_cpu_entry(hart_id: usize) -> ! {
     // Enable external interrupts (sie.SEIE) for this hart
     crate::arch::trap::enable_external_interrupt();
 
+    // Enable software interrupts (sie.SSIE) for this hart — the IPI
+    // path. boot.S zeroes sie on EVERY hart and ipi::init() only sets
+    // SSIE on the boot hart; without this the secondary hart ran with
+    // all IPIs masked (resched/TLB-flush/call-function sat pending
+    // forever; wakes resolved only at the next 10ms timer tick — the
+    // tick-quantized futex wake->run the perf-sched lane measured at
+    // 9118us med where a same-hart wake takes 24us). See
+    // ipi::per_hart_enable_ssoftware for the full evidence.
+    crate::arch::ipi::per_hart_enable_ssoftware();
 
     // Enter scheduler idle loop (timer interrupts enabled inside the loop)
     crate::sched::cpu_idle_loop();
