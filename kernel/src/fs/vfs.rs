@@ -4117,7 +4117,10 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if accmode != FileFlags::O_RDONLY {
                 return Err(errno::Errno::IsADirectory.as_neg_i32());
             }
-            return file_opendir(filename, flags | 0o00200000);
+            return file_opendir(
+                filename,
+                flags | crate::fs::file::FileFlags::O_DIRECTORY,
+            );
         }
 
         // Device nodes with no bound driver: Linux fails the open with
