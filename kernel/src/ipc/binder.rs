@@ -5313,6 +5313,38 @@ fn binder_thread_write(
                         tr.data_size,
                         tr.offsets_size
                     );
+                    // leg-30B6: inside the ripple window, a FAILED send
+                    // from foundation (or the StartUser sender) at WARN —
+                    // the fast-fail shape's IsExistOsAccount made zero
+                    // successful calls; if the lookup was attempted and
+                    // failed at our send layer, this names it (the
+                    // pr_info above is invisible at loglevel 6).
+                    if ams46_on() {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let t0 = AMS46_T0.load(Relaxed);
+                        if t0 != 0 {
+                            let now_j = crate::drivers::timer::get_jiffies() as u32;
+                            if now_j.wrapping_sub(t0)
+                                < (crate::config::KERNEL_HZ as u32).saturating_mul(120)
+                            {
+                                let tp = AMS46_TPID.load(Relaxed);
+                                let sp = AMS46_SENDER.load(Relaxed);
+                                if proc.pid == tp || proc.pid == sp {
+                                    static RF_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if RF_N.fetch_add(1, Relaxed) < 64 {
+                                        crate::pr_warn!(
+                                            "AMS46-R-FAIL pid{} code={:#x} BR={:#x} {}",
+                                            proc.pid,
+                                            tr.code,
+                                            err_cmd,
+                                            if reply { "reply" } else { "txn" }
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Linux stops processing write commands and queues the
                     // error as thread work for the following read.
                     let w = world_lock();
