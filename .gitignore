@@ -159,3 +159,11 @@ run/fleet/bin/
 run/**/*.wedge
 run/**/*.wedgetail
 run/**/*.path
+
+# C sources are tarball-packed, not tracked (stats policy 2026-10-31);
+# scripts/extract-probes.sh restores them on demand
+toolchain/x86_64-rux-linux-musl/
+test/**/*.c
+run/*.c
+run/oh-x/
+userspace/tests/smoke_test/*.c

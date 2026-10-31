@@ -133,6 +133,10 @@ ORIG_ARGS=("$@")
 ROOT="${RUX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$ROOT"
 
+# C probe sources are tarball-packed, not git-tracked; make sure they
+# exist before any leg tries to compile them (idempotent).
+[ -x scripts/extract-probes.sh ] && ./scripts/extract-probes.sh >/dev/null 2>&1 || true
+
 SUITE_ROOT="$ROOT/run/suite"
 KERNEL_DEFAULT="$ROOT/target/riscv64gc-unknown-none-elf/debug/rux"
 X86_KERNEL="$ROOT/target/x86_64-unknown-none/debug/bzImage"
