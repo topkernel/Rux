@@ -4276,6 +4276,15 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 if crate::fs::pipe::pipe_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
+                // Sockets (all families) install inode-less Files too;
+                // they must stat as S_IFSOCK or clients that probe the
+                // fd shape give up capabilities — sd-bus's
+                // sd_is_socket() decides unix-fd NEGOTIATION on it
+                // (gdmr71 session-fifo hunt: without this every
+                // fd-carrying sd-bus send returned EOPNOTSUPP).
+                if crate::net::socket::socket_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
                 if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }

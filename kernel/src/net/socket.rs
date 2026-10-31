@@ -1583,6 +1583,62 @@ pub static SOCKET_OPS: FileOps = FileOps::builder()
     .poll(socket_file_poll)
     .build();
 
+/// Pseudo-device id for sockfs-style stat identities (the pipe analog:
+/// PIPE_STAT_DEV). Sockets created by socket(2)/accept(2) have no VFS
+/// inode, so fstat(2) needs the anonymous-file branch of
+/// fs::vfs::file_stat to answer for them — Linux stats sockets on
+/// sockfs with mode S_IFSOCK|0777 and a distinct st_ino.
+pub const SOCK_STAT_DEV: u64 = 0x736f_636b_7300_0001;
+
+/// fstat(2) on an anonymous socket File: report S_IFSOCK.
+///
+/// Every socket family installs its File without an inode (unix,
+/// netlink, raw, and the AF_INET SOCKET_OPS here), so file_stat's
+/// no-inode branch dispatches here. Returning None lets non-socket
+/// Files fall through to the next helper.
+///
+/// Without this, fstat(socketfd) failed with EBADF — and sd-bus's
+/// sd_is_socket() probe (fstat + S_ISSOCK + SO_DOMAIN) then returned
+/// <= 0, so bus_socket_start_auth() cleared accept_fd BEFORE the auth
+/// write: the client never sent NEGOTIATE_UNIX_FD, the daemon never
+/// answered AGREE_UNIX_FD, can_fds stayed false, and EVERY fd-carrying
+/// sd-bus send returned -EOPNOTSUPP. On this image that killed gdm at
+/// the last seam: logind's CreateSession reply (session fifo fd) was
+/// refused silently from the JobRemoved match callback — pam timed
+/// out ("Connection timed out"), the fifo's only writer closed, and
+/// logind logged "Session c1 logged out" milliseconds after the
+/// create (gdmr64-r71, session-21 hunt).
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    let is_socket = core::ptr::eq(ops as *const _, &SOCKET_OPS as *const _)
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::unix::UNIX_SOCKET_OPS as *const _,
+        )
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::netlink::NETLINK_OPS as *const _,
+        )
+        || core::ptr::eq(ops as *const _, &crate::net::raw::RAW_OPS as *const _);
+    if !is_socket {
+        return None;
+    }
+    stat.st_dev = SOCK_STAT_DEV;
+    // Distinct identity per file description (Linux: one sockfs inode
+    // per socket); file_id is the kernel's unique description id.
+    stat.st_ino = file.file_id;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 4096;
+    stat.set_socket();
+    stat.st_mode |= 0o777;
+    Some(0)
+}
+
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)
 // ============================================================================
