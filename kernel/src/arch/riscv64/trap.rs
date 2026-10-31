@@ -348,6 +348,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                         else if cs_entry != tp_entry { "pre" } else { "in" },
                         epc_ctx);
                 }
+                // Kernel-preempt hook AFTER the bracket diagnostics so the
+                // leak print describes the pre-preemption state.
+                irq_exit_maybe_preempt_kernel(regs_ref);
             }
 
             // Software interrupt (IPI)
@@ -358,6 +361,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
+                irq_exit_maybe_preempt_kernel(regs_ref);
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
                 let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
                     as usize;
@@ -515,6 +519,97 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         crate::sync::rcu::rcu_note_context_switch();
         crate::dfx::leakorigin::check_user_return();
     }
+}
+
+/// riscv64 twin of the x86_64 IRQ-exit kernel-preempt hook
+/// (trap.rs there, same name): after the timer or IPI handler and its
+/// irq_exit(), a KERNEL-mode incumbent whose need_resched is set gets
+/// schedule()d out instead of running until its next syscall return.
+/// Without this, every wake behind a kernel-executing CPU is quantized
+/// by the incumbent's syscall length (measured on the x86_64 twin with
+/// the pbench p2f futex battery: TCG 5608us vs reference 86us; KVM
+/// 163us vs 8.2us; hook collapses both to parity — see the x86_64
+/// comment for the full table and the sc70-era leak-amplification
+/// history that kept this OFF until WAKE-HEAL bounded it).
+///
+/// Guards, all mirroring the x86_64 twin:
+/// - kpreempt=1 arms / kpreempt=0 disarms / absent = arch default OFF
+///   on riscv64 (this twin is not yet stable — see the verdict-cache
+///   comment below; the x86_64 twin defaults ON with its battery).
+/// - user-origin frames are skipped: ret_from_exception's asm loop
+///   owns user preemption.
+/// - preempt_count != 0 (spinlock/bh/RCU held) refuses the switch.
+/// - TIF_IN_SCHED refuses re-entry (a tick inside __schedule's tail).
+/// - SIE discipline (R53 form-B): the asm kernel path twin does
+///   `csrsi sstatus,2` before asm_schedule and `csrci sstatus,2`
+///   after; __schedule returns with SIE per R54's syscall-caller
+///   contract, so the hook re-disables before unwinding the handler.
+fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
+    use crate::process::task::task_flags::TaskFlags;
+    static KP_ARMED: core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(0);
+    match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            match crate::cmdline::get_cmdline() {
+                None => return, // cmdline not parsed yet: stay disarmed
+                Some(_) => {
+                    // Same cmdline contract as the x86_64 twin:
+                    // kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes
+                    // the arch default. riscv64 default: OFF — this
+                    // twin's first A/B (pbench p2f, 2026-10-31) hit the
+                    // pick-machinery corruption the asm comments warn
+                    // about (R46/R49 phantom-heal cascade into an idle-
+                    // task user-frame KERNPANIC ~30s into the quiet
+                    // regime) while the x86_64 twin, whose guards were
+                    // tuned through sc65-sc73, runs the same battery
+                    // clean. Stabilize against the R53/R84/R85 asm
+                    // families first (the .Lcheck_resched_kernel dead
+                    // path documents the missing frame discipline), then
+                    // flip this default with battery + soak numbers.
+                    let v = if crate::cmdline::get_param("kpreempt")
+                        .as_deref()
+                        == Some("1")
+                    {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
+                    if v == 2 {
+                        crate::pr_info!(
+                            "sched: kernel-preempt armed by cmdline (cpu={})",
+                            crate::arch::cpu_id()
+                        );
+                    }
+                }
+            }
+        }
+        1 => return, // disarmed (default; kpreempt=0)
+        _ => {}
+    }
+    // Early-boot secondaries have no current task: nothing to preempt.
+    let cur = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    if regs.user_mode() {
+        return; // user path: ret_from_exception asm owns preemption
+    }
+    if !crate::sched::need_resched() {
+        return;
+    }
+    if !crate::interrupt::preempt::preemptible() {
+        return; // holds a lock / bh / RCU / nested IRQ
+    }
+    if cur.test_ti_flag(TaskFlags::TIF_IN_SCHED.bits()) {
+        return;
+    }
+    // Enable around schedule() like the asm twin (preempt_schedule_irq
+    // discipline); re-disable after so the remaining handler frames and
+    // the sret ritual run SIE=0 (R53 form-B window).
+    crate::arch::cpu::restore_irq(true);
+    crate::sched::schedule();
+    crate::arch::cpu::restore_irq(false);
 }
 
 /// Handle timer interrupt

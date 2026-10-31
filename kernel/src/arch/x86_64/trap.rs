@@ -1191,8 +1191,11 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
     // stay as the safety net either way.
     //
-    // kpreempt (cmdline): runtime arm of this hook. Armed by DEFAULT
-    // (2026-10-31 perf-sched lane); pass kpreempt=0 to disarm.
+    // kpreempt (cmdline): runtime arm of this hook. Same contract on
+    // every arch: kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes the
+    // arch default. x86_64 default: ON (perf-sched lane, 2026-10-31);
+    // the riscv64 twin defaults OFF until its frame discipline is
+    // stabilized (see its comment).
     //
     // The sc70-era amplification verdict (hook ON + preempt_count leaks
     // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
