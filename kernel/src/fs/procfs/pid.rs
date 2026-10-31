@@ -185,25 +185,63 @@ pub fn generate_comm(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/cgroup content (U2).
 ///
-/// When a cgroup2 hierarchy is mounted, every task lives in its root
-/// group — exactly what Linux reports for a v2-only system:
-/// `0::/\n` (one line per hierarchy; here just the unified one).
+/// When NO cgroup2 hierarchy is mounted the file is EMPTY — reference
+/// kernels list mounted hierarchies only, and systemd's
+/// cg_pid_get_path() translates the empty read into -ENOMEDIUM
+/// ("cgroup2 not mounted").
 ///
-/// When NO hierarchy is mounted the file is EMPTY — reference kernels
-/// list mounted hierarchies only, and systemd's cg_pid_get_path()
-/// translates the empty read into -ENOMEDIUM ("cgroup2 not mounted").
-/// Fabricating "0::/" without a mount (gdm bring-up r17b storm) made
-/// udevd — spawned by pid 1 with sd_booted()>0 — record the ROOT
-/// cgroup as its own, and its on_post() idle cleanup then cg_kill()ed
-/// every pid the root cgroup.procs listed: the whole daemon set died
-/// by SIGKILL from the udevd daemon itself, PID 1 included (discarded
-/// there by the init-delivery protection).
-pub fn generate_cgroup(_pid: u64) -> Vec<u8> {
-    if crate::fs::cgroup::cgroup2_mounted() {
-        b"0::/\n".to_vec()
-    } else {
-        Vec::new()
+/// When the hierarchy is mounted, each task reports a per-task user
+/// slice path (`/user.slice/user-<uid>.slice/user@<uid>.service`)
+/// instead of the root group. Two reasons (gdm bring-up r74):
+///
+/// 1. sd-bus creds AUGMENTATION (systemd 249 bus-creds.c): every
+///    SD_BUS_CREDS_OWNER_UID query — logind's
+///    /org/freedesktop/login1/user/self dispatch, which the gdm
+///    greeter's gnome-shell needs to build its LoginManager proxy —
+///    resolves the owner uid by parsing the task's cgroup path
+///    (cg_path_get_owner_uid wants a `user-<uid>.slice` component).
+///    The bare "0::/" root path does not parse; before this fix the
+///    user/self GetAll died of -ENOMEDIUM at cg_unified_cached()
+///    instead (statfs on the unmounted /sys/fs/cgroup) — gnome-shell
+///    then crashed with "this._userProxy.Display is null"
+///    (loginManager.js:111) and gdm looped the greeter forever.
+///
+/// 2. udevd storm immunity (gdm bring-up r17b): with "0::/" for
+///    every task, udevd (sd_booted()>0) recorded the ROOT cgroup as
+///    its own and its idle cleanup cg_kill()ed the whole root
+///    cgroup.procs list — the silent mass-kill storm. The fabricated
+///    per-task directories do NOT exist in the hierarchy, so any
+///    cg_kill() against them hits cgroup.procs ENOENT, which
+///    cg_kill_items() treats as an empty group (no-op). No task ever
+///    names the root group either, so nothing sweeps it.
+///
+/// PID 1 reports `/init.scope`: cg_get_root_path() strips that suffix
+/// so every other task's path shifts against "/" (the reference
+/// layout for a systemd-managed box; the strip keeps the arithmetic
+/// correct with runit as PID 1 too).
+pub fn generate_cgroup(pid: u64) -> Vec<u8> {
+    if !crate::fs::cgroup::cgroup2_mounted() {
+        return Vec::new();
     }
+    if pid == 1 {
+        return b"0::/init.scope\n".to_vec();
+    }
+    // Effective uid of the task (0 for kernel threads / lookup races).
+    let mut pinned;
+    let task = if crate::process::current_pid() as u64 == pid {
+        crate::process::current_task()
+    } else {
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(g) => g,
+            None => return b"0::/user.slice/user-0.slice/user@0.service\n".to_vec(),
+        };
+        Some(pinned.get())
+    };
+    let euid = match task {
+        Some(t) => t.cred().euid,
+        None => 0,
+    };
+    alloc::format!("0::/user.slice/user-{euid}.slice/user@{euid}.service\n").into_bytes()
 }
 
 /// Generate /proc/[pid]/status content
