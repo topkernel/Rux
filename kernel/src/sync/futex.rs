@@ -811,6 +811,17 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Update chain head.
         *head = Some(waiter_idx);
 
+        // Residency flag (see Task::futex_wait_enqueued): linked into the
+        // chain here, cleared by every unlink/free path — do_exit's
+        // futex_cleanup gates its 512-bucket scan on it. We still hold the
+        // bucket lock; the flag is only read by this task's own exit path,
+        // so a plain store suffices.
+        unsafe {
+            (*current)
+                .futex_wait_enqueued
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+
         // C8 wake-ordering invariant (sleeper side): in order — (1) our
         // waiter entry (task pointer, the flag the waker polls) is linked
         // into the bucket chain, (2) the task state is stored as
@@ -926,6 +937,13 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     // Woken: the waker unlinked us from the chain and left the
                     // slot for us to free.
                     *slot = None;
+                    // Residency flag (see Task::futex_wait_enqueued): the
+                    // waker's unlink left the flag set for us to clear here.
+                    unsafe {
+                        (*current)
+                            .futex_wait_enqueued
+                            .store(false, core::sync::atomic::Ordering::Release);
+                    }
                 }
             }
         }
@@ -943,7 +961,18 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
     if *head == Some(target_idx) {
         let next = {
             let slot = WAITER_POOL[target_idx].lock_irqsave();
-            slot.as_ref().and_then(|w| w.next)
+            let n = slot.as_ref().and_then(|w| w.next);
+            // Residency flag: this unlink takes the waiter out of every
+            // chain (see Task::futex_wait_enqueued).
+            if let Some(w) = slot.as_ref() {
+                if !w.task.is_null() {
+                    unsafe {
+                        (*w.task).futex_wait_enqueued
+                            .store(false, core::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+            n
         };
         *head = next;
         free_waiter(target_idx);
@@ -960,7 +989,16 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         if next == Some(target_idx) {
             let target_next = {
                 let target_slot = WAITER_POOL[target_idx].lock_irqsave();
-                target_slot.as_ref().and_then(|w| w.next)
+                let n = target_slot.as_ref().and_then(|w| w.next);
+                if let Some(w) = target_slot.as_ref() {
+                    if !w.task.is_null() {
+                        unsafe {
+                            (*w.task).futex_wait_enqueued
+                                .store(false, core::sync::atomic::Ordering::Release);
+                        }
+                    }
+                }
+                n
             };
             {
                 let mut slot = WAITER_POOL[idx].lock_irqsave();
@@ -983,6 +1021,19 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
 /// continue exiting) and frees all its waiter slots.
 pub fn futex_cleanup(task: *mut Task) {
     if task.is_null() {
+        return;
+    }
+
+    // Fast path (perf-mm lane, 2026-10-31): the residency flag is clear
+    // unless this task died with a waiter entry still linked (kill raced
+    // the sleeper-side unlink). The common exit — never parked on a
+    // futex, or the wait returned and unlinked itself — skips the whole
+    // 512-bucket scan (one lock_irqsave pair per bucket per exit, the
+    // dominant cost of the exit "rest" block: measured ~50-80us of the
+    // ~90us block under TCG).
+    // SAFETY: do_exit calls this in the task's own context; no other CPU
+    // stores the flag for this task concurrently.
+    if !unsafe { (*task).futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) } {
         return;
     }
 
@@ -1032,6 +1083,13 @@ pub fn futex_cleanup(task: *mut Task) {
     // target never re-sleeps: do_exit calls this after the task's last
     // schedule(), so there is no sleeper-side poll that a reordered wake
     // could strand.
+    // Residency flag: the scan above removed every chained entry of this
+    // task — the flag is now false for good (this is the task's own exit
+    // context; no new wait can start).
+    // SAFETY: same context argument as the load above.
+    unsafe {
+        (*task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+    }
     Task::wake_up(task);
 }
 

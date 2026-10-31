@@ -982,6 +982,14 @@ pub struct Task {
     pub sigmask_restore: u64,
     pub sigmask_restore_valid: bool,
 
+    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
+    /// this task's waiter entry is linked into a futex bucket chain,
+    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
+    /// the 512-bucket hash ONLY when this is set — the common task (never
+    /// parked on a futex at its last schedule, or one whose sleeper-side
+    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
+    pub futex_wait_enqueued: AtomicBool,
+
     /// Scheduling policy
     policy: SchedPolicy,
 
@@ -1556,6 +1564,7 @@ impl Task {
             pid,
             sigmask_restore: 0,
             sigmask_restore_valid: false,
+            futex_wait_enqueued: AtomicBool::new(false),
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
@@ -2285,6 +2294,17 @@ impl Task {
             (ptr as usize + offset_of!(Task, init_calls))
                 as *mut [AtomicU32; INIT_CALLS_LEN],
             [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
+        );
+        // Futex residency flag (perf-mm lane, sc130-pattern twin): without
+        // this init, a fork-allocated Task read the recycled heap page's
+        // stale bit — every exit then took futex_cleanup's full 512-bucket
+        // scan (measured: all 64/64 exits of a fork+exec loop flagged,
+        // diag4/diag5 counters; the -at-construction init in Task::new
+        // covers only first construction).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, futex_wait_enqueued))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
