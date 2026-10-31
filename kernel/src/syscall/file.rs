@@ -4195,6 +4195,11 @@ pub fn sys_fdatasync(args: SyscallArgs) -> i64 {
 ///
 /// # Arguments: none
 pub fn sys_sync(_args: SyscallArgs) -> i64 {
+    // Delayed allocation (2026-11): buffered write(2) leaves data ONLY in
+    // dirty page-cache frames — drain them into the ext4 write path (and
+    // thus the buffer cache) BEFORE syncing the buffer cache, or sync(2)
+    // would persist nothing of every un-fsynced write.
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // And persist the disk's volatile cache (see sys_fsync).
@@ -4900,6 +4905,28 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
         .unwrap_or(false);
     if !is_regular {
         return -(errno::ESPIPE as i64);
+    }
+
+    // Delayed allocation (2026-11): WRITE/WAIT_AFTER must persist buffered
+    // writes of [offset, offset+nbytes). Flush the range's dirty
+    // page-cache frames through the ext4 write path for ext4 inodes (the
+    // ops-pointer gate mirrors sys_fsync — never reinterpret another
+    // filesystem's private_data as an Ext4FileSystem).
+    if nbytes > 0 {
+        // SAFETY: inode is written once at open; reading it races no
+        // writer.
+        if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+            let is_ext4 = inode.ops.is_some_and(|o| core::ptr::eq(
+                o as *const _,
+                &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+            ));
+            if is_ext4 {
+                let ps = crate::mm::PAGE_SIZE as i64;
+                let first = (offset / ps) as u64;
+                let last = ((offset + nbytes - 1) / ps) as u64;
+                crate::fs::ext4::file::ext4_flush_dirty_inode(inode, first, last);
+            }
+        }
     }
 
     // Simplified: sync all buffers

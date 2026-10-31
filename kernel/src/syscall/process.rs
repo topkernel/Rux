@@ -6064,7 +6064,9 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: fd - file descriptor
 pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
-    // Flush all buffer cache (simplified: sync everything)
+    // Delayed allocation (2026-11): dirty page-cache frames first (see
+    // sys_sync), then the buffer cache (simplified: sync everything).
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
     let _ = crate::fs::bio::sync_buffers();
     0
 }
