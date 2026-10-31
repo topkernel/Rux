@@ -17,7 +17,7 @@ ROOT="$WORK/gnome-root-gdm"
 # Image-store rule (2026-10-30): real image bytes live in the central
 # store; the worktree only keeps a symlink.
 STORE="/home/william/rux-images/ubuntu"
-NEXT="r65"
+NEXT="r66"
 IMG="$STORE/gnome-gdm-${NEXT}.img"
 ln -sfn "$IMG" "$WORK/gnome-gdm-${NEXT}.img"
 
@@ -83,6 +83,29 @@ echo "== /var/log/gdm3 (gdm3 LogDir — greeter stderr evidence)"
 # diagnostic surface).
 mkdir -p "$ROOT/var/log/gdm3"
 chmod 0755 "$ROOT/var/log/gdm3"
+
+echo "== gnome-shell stderr tee (gdmr73: the greeter shell exits 1 silently)"
+# gdm3 daemonizes with stdio on /dev/null, so the whole greeter chain
+# (gdm-x-session -> dbus-run-session -> gnome-session -> gnome-shell)
+# inherits /dev/null and the shell's own exit(1) reason (gdmr72: main
+# thread exits code 1 with the [pango] FcInit worker still alive — a
+# JS-init failure shape) is unrecoverable. gdm's own greeter logs
+# (/var/log/gdm3/:0-greeter.log, greeter.log) never appear on this
+# image. Wrap the binary with a dash tee to /tmp/gshell.log; runit's
+# monitor tailer dumps it every cycle. Idempotent: skips when
+# gnome-shell.bin is already in place.
+if [ ! -f "$ROOT/usr/bin/gnome-shell.bin" ]; then
+    mv "$ROOT/usr/bin/gnome-shell" "$ROOT/usr/bin/gnome-shell.bin"
+    cat > "$ROOT/usr/bin/gnome-shell" <<'EOF'
+#!/bin/sh
+# stderr tee wrapper (gdmr73 forensics) — real binary is gnome-shell.bin
+{
+    echo "== wrapper: args='$*' mode=${GNOME_SHELL_SESSION_MODE:-unset} display=${DISPLAY:-unset}"
+    exec /usr/bin/gnome-shell.bin "$@"
+} >> /tmp/gshell.log 2>&1
+EOF
+    chmod 0755 "$ROOT/usr/bin/gnome-shell"
+fi
 
 echo "== gdm-theme.gresource (update-alternatives gap)"
 # gnome-shell-common's postinst installs gdm-theme.gresource via
