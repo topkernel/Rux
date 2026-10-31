@@ -101,24 +101,67 @@ open and is now more user-visible. kpreempt=0 is the escape hatch.
 Gates: riscv64 `make test` ALL TESTS PASSED (1198); x86_64 debug +
 release-opt(strong) + aarch64 builds rc=0.
 
-## F3. riscv64 / aarch64 have NO kernel-preempt hook at all (FILED)
+## F3. riscv64: secondary harts never enabled SSIE — every IPI masked,
+##       every cross-hart wake tick-quantized (FIXED — the headline)
 
-The x86_64 hook (trap.rs irq_exit_maybe_preempt_kernel) has no twin:
-- riscv64: the asm kernel-path resched check (.Lcheck_resched_kernel)
-  is deliberately dead — its `ld` load straddles ti_preempt_count into
-  ti_kernel_sp's low half so the bnez is almost always taken. The Rust
-  dispatch (trap.rs Cause::SupervisorSoft/Timer branches, after
-  irq_exit()) is the natural twin site; needs the same guards
-  (cmdline-arm verdict cache, user-frame skip, preemptible(),
-  TIF_IN_SCHED recursion guard, SIE re-disable after schedule() per
-  the R53 form-B note — mirror the asm `csrci sstatus,2`).
-- aarch64: same gap, unexamined.
+After the x86_64 work, porting the battery to riscv64 (primary
+platform, GNOME target) reproduced the charter's signature on a QUIET
+two-CPU boot:
 
-This matters most on riscv64 (the GNOME/OH primary platform): the
-measured x86_64 mechanism transfers 1:1. Not implemented here: the
-pbench A/B rig is x86_64-only (no riscv64 musl toolchain in-tree;
-glibc-static + a riscv64 boot driver is the build-out needed to give
-such a change numbers, per the no-numbers-no-merge rule).
+  riscv64 strong, TCG virt SMP2, pbench p2f (waiter pinned hart 1):
+    quiet futex wake->run med 9118us — 49% of wakes clustered at the
+      10ms tick (p99 10009us); rt row shows exactly one tick-stall per
+      roundtrip
+    user-hog incumbent w2r med 9952us (96% at the tick)
+    kernel-hog (pread4M, hogcal 1669us) w2r med 1447us (syscall-length)
+    PROOF OF MECHANISM: pin BOTH threads to hart 0 (no cross-hart IPI
+      needed) — quiet w2r med 24.2us, khog 25.2us, uhog 18.7us. The
+      wake path was never slow; the cross-hart IPI never took effect.
+
+ROOT CAUSE: `ipi::init()` sets sie.SSIE once, on the boot hart only
+(main.rs). sie is per-hart, boot.S zeroes it on every hart, and
+`secondary_cpu_entry` re-enabled only STIE + SEIE. Every secondary hart
+ran with software interrupts masked forever: resched/call-function/
+TLB-flush IPIs sat in sip.SSIP pending-but-disabled; the wake's
+need_resched was never set by the IPI; the target ran the waiter only
+when its 10ms timer tick's own scheduler work preempted the incumbent.
+(TLB-flush IPIs to secondaries were silently never executing either —
+fire-and-forget, a standing TLB-staleness hazard.)
+
+FIX: one `csrsi sie,2` per secondary bring-up (ipi::
+per_hart_enable_ssoftware from secondary_cpu_entry). Commit 94c8dcec.
+
+  after (same rig, hook off):  quiet 35.0us (was 9118 = 255x)
+                               uhog  33.2us (was 9952 = 300x)
+                               khog 1438us (unchanged — see F2' below)
+  stability: make test ALL TESTS PASSED; full P1-P7 battery on riscv64
+  boots rc=0 zero panics; reproduced across two boots (35.7/35.0).
+
+## F3b. riscv64 kernel-preempt twin: implemented, default OFF (FILED)
+
+The riscv64 twin of the x86_64 kernel-preempt hook is in the tree
+(commit 9f5ebc50, armed by kpreempt=1, default off). Armed, its first
+battery hit the pick-machinery corruption the .Lcheck_resched_kernel
+asm comments warn about (R46/R49/R56 phantom-heal cascade into an
+idle-task user-frame KERNPANIC ~30s into the quiet regime). The x86_64
+twin runs the same battery clean (its guards were tuned through
+sc65-sc73). Stabilizing the riscv twin requires the R53/R84/R85
+trap-frame work, not scheduler changes. Prize once stable: the khog
+(syscall-quantized) wake, med 1438us today vs x86_64's 23us TCG /
+9.5us KVM with the hook.
+
+## F3c. riscv64 probe ecosystem notes (for future lanes)
+
+- Ubuntu glibc-static is unusable on this kernel: unconditional RVV
+  code + sstatus.VS never enabled -> every vector insn SIGILLs.
+  toolchain/build-musl.sh builds a scalar riscv64 musl that works
+  (pbench links it via -nostdlib).
+- rdcycle traps in U-mode under QEMU's direct-S-boot (mcounteren
+  state); rdtime is the legal U-mode counter (vDSO uses it).
+- pbench_boot_rv.py carries both workarounds; the cmdline contract for
+  kpreempt is uniform across arches now (=1 arms, =0 disarms, absent =
+  arch default: ON for x86_64, OFF for riscv64).
+
 
 ## F4. Shared futex keys are raw VAs — no page identity (FILED)
 
