@@ -1594,12 +1594,13 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 15] = [
+                const AMS_KEYS: [&str; 22] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
                     "user is not existed",
                     "invalid userId",
+                    "userId not exist",
                     "CreateNewUser user",
                     "CreateNewUser end",
                     "bundle size:",
@@ -1610,6 +1611,12 @@ pub fn unix_send(
                     "low-mem mode",
                     "foregroundUserId:",
                     "not supported!",
+                    "failed to get os account",
+                    "os account proxy",
+                    "Get samgr failed",
+                    "account iface_cast",
+                    "failed to get account",
+                    "permission verification failed, not account",
                 ];
                 let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
                 if ams_family {
