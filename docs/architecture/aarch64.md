@@ -42,9 +42,15 @@ FPEN is set — NEON traps otherwise).
   *address-size* abort (DFSC=2 — not a translation fault; the
   distinction cost a debugging day).
 - The early TTBR0 identity window (phys [0, 2 GB)) built by boot.S is
-  **not yet torn down** after boot — registered leftover; low-address
-  kernel usercopies read flash instead of faulting (one unit test is
-  SKIP-gated on it).
+  torn down after SMP start (`arch::mm::teardown_early_identity_map`,
+  called from `rust_main_tail` right after `start_secondaries` — the
+  secondary stubs are the last physical-PC consumers, and
+  `secondary_cpu_entry` installs the high-VA VBAR *before* reporting
+  itself started, so cpu_started(n) ⇒ core n needs no low VAs).
+  Low-address kernel usercopies fault into the exception-table fixup →
+  -EFAULT like on riscv64/x86_64; the boot core's TTBR0 parks on the
+  kernel root (kernel-thread parity) and a broadcast `vmalle1is`
+  clears every core's cached identity translations.
 
 ## Interrupts (GICv3)
 
@@ -105,9 +111,11 @@ the MMIO alias), CPU interface by system registers. Notes that bit us:
 
 ## Diagnostics on this port
 
-- printk is **not routed** to the PL011 console path yet — only
-  `print_status` table lines and `dfx::backtrace::ConsoleWriter` raw
-  writes appear on serial; `pr_info` output is dropped.
+- printk is routed to the PL011 (`console.rs` `puts_batch` aarch64
+  arm: per-byte DR stores at the fixmap VA — the same contract as
+  `putc`); `pr_info` and friends appear on serial from early boot on.
+  No recursion hazard: IMSC arms only RX and receive-timeout, so the
+  console's own DR writes never raise a serial IRQ.
 - `dfx=` boot flags are unusable (the EL2 trampoline clobbers the DTB
   pointer x0 before cmdline parsing; the cmdline falls back to the
   default string) — compile-time features gate the probes instead.
@@ -119,8 +127,14 @@ the MMIO alias), CPU interface by system registers. Notes that bit us:
 
 ## Registered leftovers
 
-Early identity-window teardown; printk→PL011 routing; kernel-spawned
-init argv[0] uses the resolved path (workaround: name the init binary
-so its basename is the applet name); a 1-of-9 boot flake with a trap
-frame just past the linear-map end (kernel stack top question —
-`aa64-fork/run/fix2.log`); LTP-on-aarch64 not started.
+A 1-of-9 boot flake with a trap frame just past the linear-map end
+(kernel stack top question — `aa64-fork/run/fix2.log`); LTP-on-aarch64
+not started (groundwork in this lane's `run/`: cross-build +
+serial-fed smoke subset).
+
+Landed since the port merge: early identity-window teardown (SMP-start
+gated), printk→PL011 routing, kernel-started init argv[0] keeps the
+candidate path — verified on the shared image: `$0` and
+/proc/1/cmdline both report `/bin/sh` (the arg/env bounds land via
+exec's setup_argv/setup_envp; /proc/[pid]/cmdline|environ read through
+the arch-neutral PageTableWalker).

@@ -418,6 +418,30 @@ impl Uart {
                 }
             }
         }
+        #[cfg(feature = "aarch64")]
+        {
+            // PL011 batched TX: one DR store per byte, no FR/TXFF poll —
+            // QEMU's pl011 model sinks DR writes synchronously (the TX
+            // FIFO it models affects RX-side backpressure, and putc above
+            // already writes DR unpolled). uart_virt_addr() is the fixmap
+            // VA once mmu_init installs it, the identity physical address
+            // before that (both valid data-register addresses, same
+            // contract as putc). No recursion concern: IMSC arms only the
+            // RX and receive-timeout interrupts, so the console's own DR
+            // writes never raise a serial IRQ, and printk-side
+            // re-entrancy is covered by the per-CPU IN_PRINTK guard.
+            unsafe {
+                let addr = uart_virt_addr();
+                for &b in bytes {
+                    asm!(
+                        "str w1, [x0]",
+                        in("x0") addr,
+                        in("w1") b as u32,
+                        options(nostack, nomem)
+                    );
+                }
+            }
+        }
         #[cfg(feature = "x86_64")]
         {
             const FIFO_BURST: usize = 16;
