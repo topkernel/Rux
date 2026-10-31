@@ -369,3 +369,19 @@ Small commits, English, NEVER "Linux". x3 builds rc=0 before push. Push: origin/
    (known-gap 3 may still hold) and the next blocker. After the fix boots clean, remove or
    gate the T1 traces (io.rs/memory.rs) before any perf-gate merge (see known-gap 4).
 3. DONE (fresh lineage + csum write path + token OK). 4. With the sibling: bootanimation/launcher pixels.
+
+### Session close (2026-10-31 ~16:30)
+- lb15 (quiet smp2, same kernel): fastest boot yet — bootanimation.ready 212s,
+  finished 226s, appfwk.ready 217s, StartUser(100) 146ms, appspawn
+  lockstatus_100 set — but the account SA never loaded (no AccountMgrService
+  lines at all by 1838s): the wedge moved EARLIER into the scan phase. The
+  collapse point moves boot-to-boot ⇒ generic load collapse, not one bug.
+  Screen stays the frozen logo frame (md5 06b933b4) on every lb1x boot.
+- x3 builds re-verified rc=0 after the tap demotions; make test green
+  (1096/1096); branch pushed through fa31bfb3.
+- Successor entry points, in order: (1) the stranded-wake/preempt-count hunt
+  (WAKE-STRANDED 1-2.6s at pc=1-2 + PARKED-LEAK pc=1 prints — leak suspects,
+  needs a preempt-count origin shadow like the leakorigin hook); (2) the
+  userId-0 launcher hole (see above) — image-side or perf-side; (3) once a
+  boot keeps foundation alive through activation, the launcher should spawn
+  (systemui already does) and the GL/scanout chain is proven.
