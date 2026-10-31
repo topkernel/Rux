@@ -192,6 +192,44 @@ the local_hmdfs option) → StartUser should return E_OK.
    deliveries to accountmgr appear right after subscription on good
    boots.)
 
+### SWITCH_ROOT MOUNT HUNT (lb3-lb9, final state of this session)
+The hmdfs image fix was necessary but NOT sufficient. The next layer:
+- Kernel-confirmed (lb4-lb9, mkdirfail widened): pid 1's mkdir
+  '/mnt/sandbox/system/vendor' -> EROFS at ~4.6s and mkdir
+  '/storage/media' -> ENOENT at ~9.8s; storage_daemon (pid 324)
+  StartUser(100) mkdirs '/storage/media/100*' fail -2 the same way
+  (kernel errno), so StartUser fails → UnlockUser 13600721 → no AMS
+  StartUser(100) → no launcher, on EVERY boot regardless of the
+  accountmgr-callback race.
+- OH switch_root mechanics (lb6 MSMOVE map): first-stage init mounts
+  tmpfs on /mnt,/mnt/data,/storage (ramdisk root, ~1.1s), MS_MOVEs
+  /dev,/proc,/sys,/run,/mnt,/mnt/data,/storage into /usr/*, then
+  MS_MOVEs /usr onto / and chroots. All 8 moves now print (MSMOVE tap;
+  MS_MOVE returns before the generic mount tap, which hid them before).
+  /proc/mounts ORDER decides parent-before-child; lb5's boot had the
+  bad order and the /mnt/data move failed err=2 (mnt-precheck-fail
+  would now name it); lb6+ had the good order.
+- PROVEN CORRECT (SWROOT-CHILDREN + WALKPROBE taps, lb7/lb9): after the
+  /usr→/ overlay the VFS root's children are dev/mnt/proc/run/storage/
+  sys, ALL with (M) mounts; task root == VFS root (same pointer),
+  procroot '/', vfsroot-storage-mount=true vfsroot-mnt-mount=true AT
+  THE MOMENT of the failing walk.
+- STILL BROKEN: the per-component resolution inside path_lookup /
+  lookup_parent_dir for 'mnt'/'storage' lands on the read-only ext4
+  inode instead of crossing the mount. NEXT PROBE: inside path_lookup's
+  component loop, for components named mnt/storage at depth 1, print
+  lookup_child ptr + has-mount + follow_mount result (inode ptr/fstype)
+  + the parent-vpath the mkdir actually used (vfs_mkdir stage trace).
+  Suspects: VfsPath/dentry identity mismatch between the walk and
+  file_mkdir's parent, or the mount's root dentry inode being swapped
+  by the root overlay (root.set_inode(inode) mutates the ROOT dentry's
+  inode — mnt.root's dentry is the same object as the pre-overlay /usr
+  mount root; check whether the moved mounts' roots got their inodes
+  clobbered by rehome/set_inode interplay).
+- ALSO still open (independent): the accountmgr OnAddSystemAbility
+  race (bad boots: lb1/lb4-style, zero ABCM retries, no user creation;
+  good boots: sysc1/lb2/lb3/lb5). SACB tap in place to catch the loss.
+
 ### PERF CENSUS (syscost=1 boot sysc1, dumps at t=60/120/180/240s) — handoff
 for the perf lane (guarded domains: sched + fs + ipc; raw log:
 run/oh-sysc1-serial.log in THIS worktree):
