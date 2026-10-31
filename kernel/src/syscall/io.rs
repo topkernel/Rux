@@ -30,22 +30,6 @@ pub use crate::arch::uaccess::MAX_RW_COUNT;
 /// on `read(fd, buf, 0x4000_0000)` (review SYSA-C1 fix in Wave 2R).
 pub const RW_CHUNK: usize = 64 * 1024;
 
-/// Allocate an UNINITIALIZED staging buffer for read/write chunking.
-///
-/// The buffer is always fully overwritten before it is read (file layers
-/// fill exactly the bytes they return; copy_from_user fills before write
-/// dispatch), so the previous `vec![0u8; n]` paid a useless memset per
-/// syscall — 4KB+ of zeroing on every read(2)/write(2) hot path (file,
-/// pipe, tty) that showed up directly in throughput under TCG.
-#[inline]
-fn alloc_uninit_buf(n: usize) -> alloc::vec::Vec<u8> {
-    let mut v = alloc::vec::Vec::with_capacity(n);
-    // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer is
-    // filled by the caller before any read of its contents (see doc).
-    unsafe { v.set_len(n); }
-    v
-}
-
 /// Clamp a user-supplied transfer length to MAX_RW_COUNT.
 #[inline]
 pub fn clamp_rw_count(count: usize) -> usize {
@@ -356,13 +340,12 @@ pub fn sys_pread64(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of bytes written on success, negative error code on failure
 pub fn sys_write(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *const u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
 
     // Check if buffer address is in valid user space using access_ok
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
 
@@ -389,7 +372,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
             [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
         static WTRACE_TAG: [core::sync::atomic::AtomicU32; WTRACE_SLOTS] =
             [const { core::sync::atomic::AtomicU32::new(0) }; WTRACE_SLOTS];
-        let pid = unsafe { crate::process::current_pid() };
+        let pid = crate::process::current_pid();
         if pid >= 313 {
             let slot = (pid as usize) % WTRACE_SLOTS;
             let tag = WTRACE_TAG[slot].load(core::sync::atomic::Ordering::Relaxed);
@@ -406,10 +389,8 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 // stream mid-dictionary and the frames read as pure noise).
                 let len = core::cmp::min(count, 480);
                 let mut kb = [0u8; 480];
-                // SAFETY: buf/count validated by access_ok above.
-                let uncopied = unsafe {
-                    crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
-                };
+                // buf/count validated by access_ok above.
+                let uncopied = crate::arch::uaccess_safe::copy_in(&mut kb[..len], buf);
                 if uncopied == 0 {
                     // Hex prefix (exact bytes, first 192) for offline
                     // zlib decoding of compressed hilog frames, plus a
@@ -455,7 +436,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         const STDERR_DUMP_N: usize = 200;
         static STDERR_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        let pid = unsafe { crate::process::current_pid() };
+        let pid = crate::process::current_pid();
         // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
         // hilog-adapter and selinux-restorecon loops reprint the same
         // line forever and would eat the whole budget on the first
@@ -479,11 +460,9 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         if n < STDERR_DUMP_N && pid >= 300 {
             let len = core::cmp::min(count, 160);
             let mut kb = [0u8; 160];
-            // SAFETY: buf/count validated by access_ok above; kb is a
-            // local 160-byte buffer and len <= 160.
-            let uncopied = unsafe {
-                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
-            };
+            // buf/count validated by access_ok above; the copy target is
+            // exactly the len-sized head of the local 160-byte buffer.
+            let uncopied = crate::arch::uaccess_safe::copy_in(&mut kb[..len], buf);
             if uncopied == 0 {
                 let text = kb[..len]
                     .iter()
@@ -529,12 +508,11 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         }
     }
 
-    // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => write_file_core(fd, &file, buf, count),
-            None => -errno::EBADF as i64,
-        }
+    // get_file_fd_safe: fdtable read only; the Arc is dropped at function
+    // exit. User pointers validated above.
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => write_file_core(fd, &file, buf, count),
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -543,9 +521,9 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 /// paid one fdtable lookup per iovec through sys_write). `fd` rides
 /// along for the console fast-path check and the dfx stashes.
 ///
-/// SAFETY: buf..buf+count must be access_ok-validated by the caller.
-fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: *const u8, count: usize) -> i64 {
-    unsafe {
+/// The user window `buf..buf+count` must be access_ok-validated by the
+/// caller.
+fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
     // Linux: writing to a read-only (O_RDONLY) descriptor fails
     // with EBADF (the fd is "not open for writing") — LTP
     // write03/write04.
@@ -577,10 +555,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         while remaining > 0 {
             let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
 
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                kernel_buf.as_mut_ptr(),
+            let uncopied = crate::arch::uaccess_safe::copy_in(
+                &mut kernel_buf[..to_copy],
                 user_ptr,
-                to_copy
             );
 
             if uncopied > 0 {
@@ -607,7 +584,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
 
             total_written += to_copy;
             remaining -= to_copy;
-            user_ptr = user_ptr.add(to_copy);
+            user_ptr = user_ptr.wrapping_add(to_copy);
         }
         return total_written as i64;
     }
@@ -630,13 +607,13 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // Pipe fast path: transfer directly user↔ring (see the
     // matching branch in sys_read).
     if crate::fs::pipe::is_pipe_file(&file) {
-        return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
+        return crate::fs::pipe::pipe_write_user(&file, buf as *const u8, count) as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write
     // ends the loop and returns what was accepted (POSIX
     // partial-write semantics).
-    let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+    let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
     let mut total: usize = 0;
     let mut user_ptr = buf;
     let mut remaining = count;
@@ -646,10 +623,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         if chunk == 0 {
             break;
         }
-        let uncopied = crate::arch::uaccess::copy_from_user(
-            kernel_buf.as_mut_ptr(),
+        let uncopied = crate::arch::uaccess_safe::copy_in(
+            &mut kernel_buf[..chunk],
             user_ptr,
-            chunk,
         );
         if uncopied > 0 {
             if total == 0 {
@@ -657,7 +633,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
             }
             break;
         }
-        let result = file.write(kernel_buf.as_ptr(), chunk);
+        let result = file.write_slice(&kernel_buf[..chunk]);
         if result <= 0 {
             if result < 0 && total == 0 {
                 first_err = result as i32;
@@ -667,7 +643,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         let n = result as usize;
         total += n;
         remaining -= n;
-        user_ptr = user_ptr.add(n);
+        user_ptr = user_ptr.wrapping_add(n);
         if n < chunk {
             break; // short write: destination full / non-blocking
         }
@@ -676,7 +652,6 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         total as i64
     } else {
         first_err as i64
-    }
     }
 }
 
@@ -725,11 +700,11 @@ fn check_iov_array(iov_addr: usize, iovcnt: usize) -> Result<usize, i64> {
 /// Returns total bytes written on success, negative error code on failure
 pub fn sys_writev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr as usize, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
@@ -738,8 +713,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // second one on the gathered dgram path, and one PER IOVEC through
     // sys_write on the stream path (perf-report 8.10.22). EBADF moves to
     // the head, the errno the first iov's sys_write used to produce.
-    // SAFETY: fdtable read only; the Arc is dropped at function exit.
-    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+    // fdtable read only; the Arc is dropped at function exit.
+    let file = match crate::fs::file::get_file_fd_safe(fd) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -765,50 +740,44 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // EMSGSIZE).
             const GATHER_MAX_TOTAL: usize = RW_CHUNK.saturating_mul(4);
             let mut gathered: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            // SAFETY: the iovec array was range-checked by check_iov_array;
-            // each entry's buffer is validated with access_ok before copy.
-            unsafe {
-                for i in 0..iovcnt {
-                    let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        &mut iov as *mut Iovec as *mut u8,
-                        iov_ptr.add(i) as *const u8,
-                        core::mem::size_of::<Iovec>(),
-                    );
-                    if uncopied > 0 {
-                        return -errno::EFAULT as i64;
-                    }
-                    let base = iov.iov_base as usize;
-                    let len = iov.iov_len;
-                    if let Err(e) = iov_len_sanity(len) {
-                        return e;
-                    }
-                    if base == 0 || len == 0 {
-                        continue;
-                    }
-                    if !crate::arch::uaccess::access_ok(base, len) {
-                        return -errno::EFAULT as i64;
-                    }
-                    if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
-                        return -errno::EMSGSIZE as i64;
-                    }
-                    let start = gathered.len();
-                    gathered.resize(start + len, 0);
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        gathered.as_mut_ptr().add(start),
-                        base as *const u8,
-                        len,
-                    );
-                    if uncopied > 0 {
-                        return -errno::EFAULT as i64;
-                    }
+            // The iovec array was range-checked by check_iov_array; each
+            // entry's buffer is validated with access_ok before copy.
+            for i in 0..iovcnt {
+                // Read the iovec entry through the exception-table copy.
+                let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+                    iov_addr + i * core::mem::size_of::<Iovec>(),
+                ) else {
+                    return -errno::EFAULT as i64;
+                };
+                let base = iov.iov_base as usize;
+                let len = iov.iov_len;
+                if let Err(e) = iov_len_sanity(len) {
+                    return e;
+                }
+                if base == 0 || len == 0 {
+                    continue;
+                }
+                if !crate::arch::uaccess::access_ok(base, len) {
+                    return -errno::EFAULT as i64;
+                }
+                if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
+                    return -errno::EMSGSIZE as i64;
+                }
+                let start = gathered.len();
+                gathered.resize(start + len, 0);
+                let uncopied = crate::arch::uaccess_safe::copy_in(
+                    &mut gathered[start..start + len],
+                    base,
+                );
+                if uncopied > 0 {
+                    return -errno::EFAULT as i64;
                 }
             }
             if gathered.is_empty() {
                 return 0;
             }
             // Leg-52 lever A: write through the file resolved at the head
-            // (the gathered buffer is a kernel slice, so file.write needs
+            // (the gathered buffer is a kernel slice, so the write needs
             // no user copy).
             // O_RDONLY writev fails EBADF like write (write03/04 parity;
             // the stream path below inherits the check from
@@ -818,59 +787,49 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             if mode == crate::fs::file::FileFlags::O_RDONLY {
                 return -errno::EBADF as i64;
             }
-            // SAFETY: `gathered` is a kernel slice of exactly len bytes.
-            return unsafe { file.write(gathered.as_ptr(), gathered.len()) as i64 };
+            return file.write_slice(&gathered) as i64;
         }
     }
 
     let mut total_written: isize = 0;
     let mut has_valid_iov = false;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        // Read the iovec entry through the exception-table copy.
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            // Use copy_from_user to safely read iov structure
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
 
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+        if let Err(e) = iov_len_sanity(len) {
+            return e;
+        }
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
+        // Skip iov with NULL base
+        if base == 0 {
+            continue;
+        }
 
-            if let Err(e) = iov_len_sanity(len) {
-                return e;
-            }
+        // Check each iov buffer using access_ok
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            // Leg-52 lever A: one lookup per writev, not per iovec.
+            let result = write_file_core(fd, &file, base, len);
 
-            // Skip iov with NULL base
-            if base == 0 {
-                continue;
-            }
-
-            // Check each iov buffer using access_ok
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                // Leg-52 lever A: one lookup per writev, not per iovec.
-                let result = write_file_core(fd, &file, iov.iov_base as *const u8, len);
-
-                if result < 0 {
-                    if total_written == 0 {
-                        return result;
-                    }
-                    break;
+            if result < 0 {
+                if total_written == 0 {
+                    return result;
                 }
-                total_written += result as isize;
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+                break;
             }
+            total_written += result as isize;
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 
@@ -1814,9 +1773,8 @@ pub fn sys_flock(args: SyscallArgs) -> i64 {
 ///
 /// - RISC-V: 68
 pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let fd = args[0] as usize;
-    let buf = args[1] as *const u8;
+    let buf = args[1] as usize;
     let count = clamp_rw_count(args[2] as usize);
     let offset = args[3] as i64;
 
@@ -1825,69 +1783,65 @@ pub fn sys_pwrite64(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
     // Check buffer accessibility
-    if !crate::arch::uaccess::access_ok(buf as usize, count) {
+    if !crate::arch::uaccess::access_ok(buf, count) {
         return -errno::EFAULT as i64;
     }
     if count == 0 {
         return 0;
     }
 
-    // SAFETY: get_file_fd returns valid File or None; kernel_buf is fresh allocation.
-    unsafe {
-        match get_file_fd(fd) {
-            Some(file) => {
-                // RACE fix (review批次1): use the position-invariant
-                // write_at() — the old set_pos/restore dance corrupted the
-                // shared fd position under concurrent I/O.
-                // Chunked (SYSA-C1): bounded staging, sequential offset
-                // advance; partial chunk write ends the loop.
-                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
-                let mut total: usize = 0;
-                let mut err: i32 = 0;
-                let mut user_ptr = buf;
-                let mut remaining = count;
-                let mut cur_off = offset as u64;
-                loop {
-                    let chunk = remaining.min(RW_CHUNK);
-                    if chunk == 0 {
-                        break;
-                    }
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        kernel_buf.as_mut_ptr(),
-                        user_ptr,
-                        chunk,
-                    );
-                    if uncopied > 0 {
-                        if total == 0 {
-                            err = -errno::EFAULT as i32;
-                        }
-                        break;
-                    }
-                    let result = file.write_at(cur_off, kernel_buf.as_ptr(), chunk);
-                    if result <= 0 {
-                        if result < 0 && total == 0 {
-                            err = result as i32;
-                        }
-                        break;
-                    }
-                    let n = result as usize;
-                    total += n;
-                    remaining -= n;
-                    user_ptr = user_ptr.add(n);
-                    cur_off += n as u64;
-                    if n < chunk {
-                        break;
-                    }
+    match crate::fs::file::get_file_fd_safe(fd) {
+        Some(file) => {
+            // RACE fix (review批次1): use the position-invariant
+            // write_at() — the old set_pos/restore dance corrupted the
+            // shared fd position under concurrent I/O.
+            // Chunked (SYSA-C1): bounded staging, sequential offset
+            // advance; partial chunk write ends the loop.
+            let mut kernel_buf = crate::fs::file::alloc_staging_buf(count.min(RW_CHUNK));
+            let mut total: usize = 0;
+            let mut err: i32 = 0;
+            let mut user_ptr = buf;
+            let mut remaining = count;
+            let mut cur_off = offset as u64;
+            loop {
+                let chunk = remaining.min(RW_CHUNK);
+                if chunk == 0 {
+                    break;
                 }
-
-                if total > 0 {
-                    total as i64
-                } else {
-                    err as i64
+                let uncopied = crate::arch::uaccess_safe::copy_in(
+                    &mut kernel_buf[..chunk],
+                    user_ptr,
+                );
+                if uncopied > 0 {
+                    if total == 0 {
+                        err = -errno::EFAULT as i32;
+                    }
+                    break;
+                }
+                let result = file.write_at_slice(cur_off, &kernel_buf[..chunk]);
+                if result <= 0 {
+                    if result < 0 && total == 0 {
+                        err = result as i32;
+                    }
+                    break;
+                }
+                let n = result as usize;
+                total += n;
+                remaining -= n;
+                user_ptr = user_ptr.wrapping_add(n);
+                cur_off += n as u64;
+                if n < chunk {
+                    break;
                 }
             }
-            None => -errno::EBADF as i64
+
+            if total > 0 {
+                total as i64
+            } else {
+                err as i64
+            }
         }
+        None => -errno::EBADF as i64,
     }
 }
 
@@ -1960,14 +1914,14 @@ pub fn sys_preadv(args: SyscallArgs) -> i64 {
 /// - RISC-V: 70
 pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
-    let iov_ptr = args[1] as *const Iovec;
+    let iov_addr = args[1] as usize;
     let iovcnt = args[2] as usize;
     // On riscv64 the offset is a single 64-bit register (arg[3]).
     // arg[4] is unused garbage — do NOT combine it into a 128-bit offset.
     let offset = args[3] as u64 as u128;
 
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
-    if let Err(e) = check_iov_array(iov_ptr as usize, iovcnt) {
+    if let Err(e) = check_iov_array(iov_addr, iovcnt) {
         return e;
     }
 
@@ -1981,41 +1935,35 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
     // wrote over the SAME offset).
     let mut cur_off: u64 = offset as u64;
 
-    // SAFETY: iov_ptr validated with access_ok; each iov buffer validated before use.
-    unsafe {
-        for i in 0..iovcnt {
-            let iov_ptr_i = iov_ptr.add(i);
-            let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
-            let uncopied = crate::arch::uaccess::copy_from_user(
-                &mut iov as *mut Iovec as *mut u8,
-                iov_ptr_i as *const u8,
-                core::mem::size_of::<Iovec>()
-            );
-            if uncopied > 0 {
-                return -errno::EFAULT as i64;
-            }
+    // iov array validated with access_ok; each iov buffer validated before use.
+    for i in 0..iovcnt {
+        // Read the iovec entry through the exception-table copy.
+        let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+            iov_addr + i * core::mem::size_of::<Iovec>(),
+        ) else {
+            return -errno::EFAULT as i64;
+        };
 
-            let base = iov.iov_base as usize;
-            let len = iov.iov_len;
-            if let Err(e) = iov_len_sanity(len) { return e; }
-            if base == 0 { continue; }
-            if len > 0 && crate::arch::uaccess::access_ok(base, len) {
-                has_valid_iov = true;
-                let pwrite_args = [fd as u64, iov.iov_base as u64, len as u64, cur_off, 0, 0];
-                let result = sys_pwrite64(pwrite_args);
-                if result < 0 {
-                    if total_written == 0 { return result; }
-                    break;
-                }
-                cur_off = cur_off.saturating_add(result as u64);
-                total_written += result as isize;
-                // Short write ends the vector.
-                if (result as usize) < len {
-                    break;
-                }
-            } else if len > 0 {
-                return -errno::EFAULT as i64;
+        let base = iov.iov_base as usize;
+        let len = iov.iov_len;
+        if let Err(e) = iov_len_sanity(len) { return e; }
+        if base == 0 { continue; }
+        if len > 0 && crate::arch::uaccess::access_ok(base, len) {
+            has_valid_iov = true;
+            let pwrite_args = [fd as u64, base as u64, len as u64, cur_off, 0, 0];
+            let result = sys_pwrite64(pwrite_args);
+            if result < 0 {
+                if total_written == 0 { return result; }
+                break;
             }
+            cur_off = cur_off.saturating_add(result as u64);
+            total_written += result as isize;
+            // Short write ends the vector.
+            if (result as usize) < len {
+                break;
+            }
+        } else if len > 0 {
+            return -errno::EFAULT as i64;
         }
     }
 

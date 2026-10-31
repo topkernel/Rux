@@ -710,10 +710,23 @@ impl File {
         unsafe { self.read(buf.as_mut_ptr(), buf.len()) }
     }
 
+    /// Slice-typed write(2) dispatch (see write()).
+    pub fn write_slice(&self, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes —
+        // exactly the (buf, count) contract write() requires.
+        unsafe { self.write(buf.as_ptr(), buf.len()) }
+    }
+
     /// Slice-typed pread(2) dispatch (see read_at()).
     pub fn read_at_slice(&self, offset: u64, buf: &mut [u8]) -> isize {
         // SAFETY: the mutable slice guarantees buf.len() writable bytes.
         unsafe { self.read_at(offset, buf.as_mut_ptr(), buf.len()) }
+    }
+
+    /// Slice-typed pwrite(2) dispatch (see write_at()).
+    pub fn write_at_slice(&self, offset: u64, buf: &[u8]) -> isize {
+        // SAFETY: the shared slice guarantees buf.len() readable bytes.
+        unsafe { self.write_at(offset, buf.as_ptr(), buf.len()) }
     }
 
     /// Close file
