@@ -1,0 +1,21 @@
+perf-gate: tiers=[1] tag=pa113tok kernel=none secs=780
+== Tier 1: quiet syscost boot (run/pa-pa113tok-stamped.log) ==
+PASS  kernel panics                      0                            band: = 0
+PASS  OOM lines                          0                            band: = 0
+PASS  census TERM-DESCHED                8                            band: 8 +-2
+PASS  census WAKE-REFUSED                32                           band: 32 +-4
+INFO  census WAKE-STRANDED (organic)     31                           band: no 1001ms grid class
+PASS tick rate /CPU cpu0=99.58/s, cpu1=100.00/s min 99.5
+FAIL  syscall volume                     92419257                     band: 107500000 +-10%  [boot-depth-sensitive RERUN-ONCE-RULE: rerun in isolation before calling a regression.]
+PASS clock_gettime avg 3us n=38814194 t=720s 3-5us
+PASS nanosleep avg 188334us n=25803 t=720s <=244ms (pa50main 203ms +-20%)
+== Domains: guarded hot paths (run/pa-pa113tok-stamped.log) ==
+PASS GRQ avg hold 5367ns n=18800663 4080-7320ns
+PASS small_alloc REST share 1.1% (17410ms) <=10%
+SKIP  buffer-cache hit rate              not in this build            band: needs cache-stats instrument
+SKIP  fsw sync-write classes             not in this build            band: needs fsw=1 boot
+(full syscost dump: run/perf-gate-pa113tok-parse.txt)
+
+perf-gate done: see verdicts above (PASS/FAIL/SKIP/INFO per metric).
+FAIL does not auto-block: apply the rerun-once rule, then weigh against
+docs/development/perf-gate-baseline.md.
