@@ -80,6 +80,35 @@ pub fn test_mmap_syscalls() {
     // Should return error (ENOMEM or EINVAL)
     test_assert!(result != 0, "sys_mprotect invalid address returns error");
 
+    // Test 8b: sys_mprotect INTERIOR range — the musl pthread-stack
+    // shape (mmap PROT_NONE whole, mprotect RW past a one-page guard).
+    // Regression guard (perf-sched lane, 2026-10-31): the bounded
+    // coverage walk once skips the VMA CONTAINING addr, so any range
+    // not starting exactly at a VMA start failed ENOMEM — pthread_create
+    // broke for every threaded musl binary.
+    {
+        const PAGE: u64 = 4096;
+        let base = sys_mmap([0, 3 * PAGE, 0x0, 0x22, !0u64, 0]); // PROT_NONE
+        if base > 0 && base != -1 {
+            // whole-VMA upgrade must work (control)
+            let whole = sys_mprotect([base as u64, 3 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(whole == 0, "sys_mprotect whole-VMA RW succeeds");
+            // interior range: pages [1,3) of the same VMA
+            let interior = sys_mprotect([(base as u64) + PAGE, 2 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(interior == 0, "sys_mprotect interior range succeeds");
+            // interior range with a left guard hole stays RW on the rest
+            // (page 0 was PROT_NONE; upgrading [1,3) must not touch it)
+            let interior_mid = sys_mprotect([(base as u64) + 2 * PAGE, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(interior_mid == 0, "sys_mprotect last-page downgrade succeeds");
+            // unmapped gap inside the range must fail (ENOMEM)
+            let unmapped = sys_mprotect([base as u64 + 3 * PAGE + 16 * PAGE, PAGE, 0x3, 0, 0, 0]);
+            test_assert!(unmapped == -12, "sys_mprotect unmapped range returns ENOMEM");
+            let _ = sys_munmap([base as u64, 3 * PAGE, 0, 0, 0, 0]);
+        } else {
+            test_skip("sys_mprotect interior", "no VMA context in test");
+        }
+    }
+
     // Test 9: Multiple mmap calls return different addresses
     let a1 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);
     let a2 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);

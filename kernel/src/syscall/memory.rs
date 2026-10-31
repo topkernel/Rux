@@ -1647,7 +1647,23 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // is already sorted, so the sort never did anything.
                 // Walk the tree directly, bounded to the target span:
                 // no allocation, no sort, early exit at the span end.
+                //
+                // Regression fix (perf-sched lane, same day): the
+                // bounded walk MUST be seeded with the VMA CONTAINING
+                // addr. iter_after only yields VMAs with start >= addr,
+                // so without the seed every mprotect that starts INSIDE
+                // a VMA (not exactly at its start) saw a phantom gap at
+                // `addr` and failed ENOMEM — which is exactly musl
+                // pthread_create's stack construction (mmap PROT_NONE,
+                // then mprotect(base+guard, stack, RW)): every threaded
+                // musl static binary broke (pthread_create -> EAGAIN,
+                // errno ENOMEM). find() is the O(log n) containing-VMA
+                // lookup; a None leaves cursor at addr and the walk
+                // still fails with the correct ENOMEM for a real gap.
                 let mut cursor = addr;
+                if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                    cursor = v.end().as_usize();
+                }
                 for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
                     let (s, e) = (v.start().as_usize(), v.end().as_usize());
                     if s >= addr + length {
