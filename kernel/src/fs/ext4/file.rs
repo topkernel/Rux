@@ -1740,18 +1740,28 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
 
         // Route-1: defer the write on journal-less images unless the
         // description demands write-return durability.
-        let defer_unjournaled = file.flags().bits()
+        let durability = file.flags().bits()
             & (crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC)
-            == 0;
+                | crate::fs::file::FileFlags::O_DSYNC
+                | crate::fs::file::FileFlags::O_DIRECT);
+        // Delayed allocation (perf-gaps 2026-11): plain buffered writes
+        // (no O_SYNC/O_DSYNC/O_DIRECT) take the page-cache fast path —
+        // write(2) copies into (dirty) frames and defers allocation +
+        // journaling to the writeback points; see ext4_buffered_write.
         // SAFETY: fs/inode resolution above; buf is the caller's slice.
-        let written = unsafe {
+        let written = if durability == 0
+            && inode.mode.is_regular_file()
+            && !fs.read_only
+        {
+            ext4_buffered_write(fs, inode, offset, buf)
+        } else {
             ext4_write_at_core(
                 fs,
                 ext4_ino,
                 Some(inode),
                 offset,
-                defer_unjournaled,
+                durability & (crate::fs::file::FileFlags::O_SYNC
+                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
                 buf,
                 0,
             )
@@ -1790,21 +1800,29 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
         None => return errno::Errno::IOError.as_neg_i32() as isize,
     };
     let data = core::slice::from_raw_parts(buf, count);
+    // Same routing as write(2): plain buffered writes take the
+    // delayed-allocation page-cache path (pwrite/mmap-writeback flushes
+    // still come through ext4_write_at_core directly).
     // SAFETY: fs/inode resolution above; data is the caller's buffer.
-    let defer_unjournaled = file.flags().bits()
-            & (crate::fs::file::FileFlags::O_SYNC
-                | crate::fs::file::FileFlags::O_DSYNC)
-            == 0;
+    let durability = file.flags().bits()
+        & (crate::fs::file::FileFlags::O_SYNC
+            | crate::fs::file::FileFlags::O_DSYNC
+            | crate::fs::file::FileFlags::O_DIRECT);
     unsafe {
-        ext4_write_at_core(
-            &*fs_ptr,
-            inode.ino as u32,
-            Some(inode),
-            offset,
-            defer_unjournaled,
-            data,
-            0,
-        )
+        if durability == 0 && inode.mode.is_regular_file() && !(*fs_ptr).read_only {
+            ext4_buffered_write(&*fs_ptr, inode, offset, data)
+        } else {
+            ext4_write_at_core(
+                &*fs_ptr,
+                inode.ino as u32,
+                Some(inode),
+                offset,
+                durability & (crate::fs::file::FileFlags::O_SYNC
+                    | crate::fs::file::FileFlags::O_DSYNC) == 0,
+                data,
+                0,
+            )
+        }
     }
 }
 
@@ -1823,6 +1841,256 @@ pub fn ext4_kernel_write_at(
     unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, true, buf, 0) }
 }
 
+/// Buffered (delayed-allocation) write for regular files — the reference
+/// kernel's write(2) shape (perf-gaps 2026-11, the p6_append 301x gap).
+///
+/// The old path (still taken for O_SYNC/O_DSYNC/O_DIRECT and as the
+/// per-page fallback here) runs the full write-through machinery per
+/// write(2): journal start, disk-fresh inode read, block allocation,
+/// bitmap/extent/inode rewrites and a SYNCHRONOUS journal commit at stop
+/// — the measured ~88µs append class, vs the reference's 0.39µs: the
+/// reference does delayed allocation, where write(2) only
+/// 1. copies the user bytes into page-cache frames (creating them
+///     zero-based for fresh tail pages),
+/// 2. extends the in-memory size,
+/// and defers ALL block allocation + metadata journaling to the
+/// writeback points that already exist: fsync/msync
+/// (ext4_flush_dirty_inode → ext4_write_at_core per page), truncate
+/// (flush-then-cut, ext4_setattr), direct-reclaim writeback
+/// (shrink_reclaim) and the P1 shutdown flush.
+///
+/// Size protocol (two views, one authority):
+/// - `Inode.size` (atomic) is the monotonic reservation watermark. An
+///   appending write reserves [size, size+len) with one CAS, so
+///   concurrent appends on different open descriptions land at disjoint
+///   offsets exactly like the reference's inode-lock serialization.
+/// - the sb-boxed Ext4Inode copy (what every reader bounds reads by, and
+///   what stat serves) is published LAST, under the ext4 big lock, only
+///   after the data sits in frames — data-before-size, so a racing
+///   reader never observes an extended EOF over missing bytes. The
+///   write-through refresh paths hold the same big lock, so the
+///   read-modify-write max() here cannot tear against them.
+///
+/// Correctness notes:
+/// - dirty frames are born dirty (`insert_dirty`) — no clean window an
+///   eviction could exploit to drop a returned write;
+/// - a partial page whose base may live on disk is filled through the
+///   normal read machinery (big lock, coherence rules) before the copy;
+/// - a lost insert race (duplicate) or a stale-pinned orphan entry falls
+///   back to the write-through core for that page after bounded rounds;
+/// - crash class: identical to the reference — a write(2) that returned
+///   without a following fsync/sync is not durable.
+unsafe fn ext4_buffered_write(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::inode::Inode,
+    offset: u64,
+    buf: &[u8],
+) -> isize {
+    use core::sync::atomic::Ordering;
+
+    if buf.is_empty() {
+        return 0;
+    }
+    let sb_ptr = match inode.sb {
+        Some(p) => p as *mut super::inode::Ext4Inode,
+        None => return errno::Errno::IOError.as_neg_i32() as isize,
+    };
+    let sbi = &*sb_ptr;
+    let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
+    let ino = inode.ino as u64;
+    let cache = page_cache::get_page_cache();
+    let ps = crate::mm::PAGE_SIZE as u64;
+    let psu = crate::mm::PAGE_SIZE;
+
+    // 1) Resolve + reserve the range.
+    let mut offset = offset;
+    let end = match offset.checked_add(buf.len() as u64) {
+        Some(e) if offset != u64::MAX => e,
+        _ => {
+            if offset == u64::MAX {
+                // O_APPEND: CAS-reserve [size, size+len).
+                loop {
+                    let cur = inode.size.load(Ordering::Acquire);
+                    let new_end = match cur.checked_add(buf.len() as u64) {
+                        Some(v) => v,
+                        None => {
+                            return errno::Errno::FileTooLarge.as_neg_i32() as isize
+                        }
+                    };
+                    match inode.size.compare_exchange(
+                        cur,
+                        new_end,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            offset = cur;
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                offset + buf.len() as u64
+            } else {
+                // Explicit offset beyond the representable range.
+                return errno::Errno::FileTooLarge.as_neg_i32() as isize;
+            }
+        }
+    };
+    let published_end = end;
+    if offset != u64::MAX && end > inode.size.load(Ordering::Acquire) {
+        // Explicit-offset write extending the file: raise the watermark
+        // (monotonic CAS — never regresses a concurrent append).
+        let mut cur = inode.size.load(Ordering::Acquire);
+        while end > cur {
+            match inode
+                .size
+                .compare_exchange(cur, end, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
+        }
+    }
+
+    // Pre-write published size: pages starting below it may carry disk
+    // content (partial-page fills read them); above it the base is zeros.
+    let base_size = sbi.get_size();
+
+    let first_idx = offset / ps;
+    let last_idx = (offset + buf.len() as u64 - 1) / ps;
+    let mut copied: usize = 0;
+
+    for idx in first_idx..=last_idx {
+        let page_off = if idx == first_idx {
+            (offset % ps) as usize
+        } else {
+            0
+        };
+        let buf_start = if idx == first_idx {
+            0
+        } else {
+            (idx * ps - offset) as usize
+        };
+        let in_page_avail = psu - page_off;
+        let want = core::cmp::min(buf.len() - buf_start, in_page_avail);
+        let src = &buf[buf_start..buf_start + want];
+        let file_off = idx * ps + page_off as u64;
+        let full_page = page_off == 0 && want == psu;
+
+        let mut filled_once = false;
+        let mut rounds = 0u32;
+        loop {
+            rounds += 1;
+            // Pin-and-copy fast path (also the retry path after a lost
+            // insert race: the winner's frame carries our bytes after
+            // this copy).
+            if let Some(frame) = cache.get(fs_id, ino, idx) {
+                // SAFETY: frame is a PAGE_SIZE pinned cache frame; the
+                // span [page_off, page_off+want) is inside it by
+                // construction (want <= PAGE_SIZE - page_off).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        frame.add(page_off) as *mut u8,
+                        want,
+                    );
+                }
+                cache.mark_dirty(fs_id, ino, idx);
+                cache.put(fs_id, ino, idx);
+                copied += want;
+                break;
+            }
+            if full_page {
+                // Base content fully replaced: no read-modify-write.
+                if cache.insert_dirty(fs_id, ino, idx, src) {
+                    copied += want;
+                    break;
+                }
+                // Lost the insert race — loop back to pin-and-copy.
+                if rounds > 8 {
+                    break;
+                }
+                continue;
+            }
+            // Partial page. If it may carry disk content, fill it once
+            // through the read machinery (big lock + coherence rules),
+            // then retry the pin-and-copy path.
+            if !filled_once && idx * ps < base_size {
+                filled_once = true;
+                let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+                fill_page_cache_batch(fs, sbi, cache, fs_id, ino, idx, idx + 1);
+                continue;
+            }
+            // Beyond the pre-write EOF (or a hole the fill could not
+            // populate): the uncovered bytes read as zeros — zero-fill
+            // base frame, then copy the covered span through a pin.
+            if cache.insert_dirty(fs_id, ino, idx, &[]) {
+                if let Some(frame) = cache.get(fs_id, ino, idx) {
+                    // SAFETY: as above.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src.as_ptr(),
+                            frame.add(page_off) as *mut u8,
+                            want,
+                        );
+                    }
+                    cache.put(fs_id, ino, idx);
+                    copied += want;
+                    break;
+                }
+                // Racing invalidation between insert and pin: fall
+                // through to the bounded retry.
+            }
+            if rounds > 8 {
+                break;
+            }
+        }
+
+        if copied < buf_start + want {
+            // Bounded retries exhausted (stale-pinned orphan entry or
+            // pathological insert racing): write this page's span through
+            // the durable write-through core. Allocation + journal commit
+            // happen there; the frames this write already dirtied for
+            // other pages are unaffected (write-through updates frames in
+            // place, writeback_populate_range).
+            // SAFETY: same (fs, ino, inode) discipline as write_vfs.
+            let r = unsafe {
+                ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, 0)
+            };
+            if r < 0 {
+                return if copied > 0 { copied as isize } else { r };
+            }
+            copied = buf_start + r as usize; // r == want on success
+        }
+    }
+
+    // 2) Publish: data is in frames; lift the read bound + timestamps
+    // under the big lock (atomic vs the write-through refresh paths).
+    {
+        let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+        let now = crate::drivers::rtc::wall_secs() as u32;
+        // SAFETY: sb_ptr is the inode's boxed copy, installed at open and
+        // never freed while the inode lives; advisory field, volatile
+        // store (same discipline as the atime update in the read path).
+        unsafe {
+            if published_end > (*sb_ptr).size {
+                core::ptr::write_volatile(&mut (*sb_ptr).size, published_end);
+            }
+            core::ptr::write_volatile(&mut (*sb_ptr).mtime, now);
+            core::ptr::write_volatile(&mut (*sb_ptr).ctime, now);
+        }
+        // Exact-EOF watermark for the revival guard (create_vfs_inode_in):
+        // data is already in the dirty frames, so a later icache eviction +
+        // re-instantiation can recover the byte-exact size. CAS-max inside
+        // PageCache (a plain store could regress a concurrent append's
+        // watermark).
+        cache.note_dirty_eof(fs_id, ino, published_end);
+    }
+
+    copied as isize
+}
+
 /// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
 /// (session 25). Owns the EXT4_BIG_LOCK + journal discipline and the
 /// page-cache WRITE-THROUGH policy: after a successful write the cached
@@ -1839,6 +2107,33 @@ fn refresh_cached_vfs_inode(
     vi: &crate::fs::inode::Inode,
     ext4_inode: &super::inode::Ext4Inode,
 ) {
+    let fresh_size = ext4_inode.get_size();
+    // Delayed-allocation size guard (perf-gaps 2026-11): buffered writes
+    // publish the cached size AHEAD of the disk inode — the dirty
+    // page-cache frames carry the bytes, writeback catches the disk up.
+    // This refresh carries the DISK-FRESH size, which can lag: overwriting
+    // with it while dirty frames still live beyond it would (a) hide the
+    // dirty tail from every reader (reads/stats clamp at the cached size)
+    // and, worse, (b) DROP it at the next flush — ext4_flush_dirty_inode
+    // clamps each page by inode.get_size() and treats past-clamp pages as
+    // truncate discards. Hold the current cached size until writeback
+    // catches up (the final flushed page refreshes with the exact value);
+    // the probe only runs when the fresh size SHRINKS, so the common
+    // write-through path (fresh >= cached) pays nothing.
+    // Truncate is unaffected: setattr writes the cache through
+    // refresh_inode_cache + the explicit ATTR_SIZE store and then
+    // invalidates the whole page-cache entry — the dirty frames are gone,
+    // so this guard sees nothing to hold.
+    let size = if fresh_size < vi.get_size()
+        && vi.private_data.is_some_and(|p| {
+            crate::fs::page_cache::get_page_cache()
+                .dirty_extent_hint(p as u64, vi.ino as u64)
+                .is_some_and(|e| e > fresh_size)
+        }) {
+        vi.get_size()
+    } else {
+        fresh_size
+    };
     // Update cached copy in inode.sb
     if let Some(ptr) = vi.sb {
         // SAFETY: sb is the Box<Ext4Inode> this VFS inode owns (leaked
@@ -1846,13 +2141,13 @@ fn refresh_cached_vfs_inode(
         // the ext4 big lock is held (this runs under EXT4_BIG_LOCK).
         let cached = unsafe { &mut *(ptr as *mut super::inode::Ext4Inode) };
         cached.block = ext4_inode.block;
-        cached.size = ext4_inode.size;
+        cached.size = size;
         cached.blocks = ext4_inode.blocks;
         cached.mtime = ext4_inode.mtime;
         cached.ctime = ext4_inode.ctime;
     }
     // Update cached VFS inode size
-    vi.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
+    vi.size.store(size, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// `inode` is the caller's VFS inode when it has one (the fd paths). A

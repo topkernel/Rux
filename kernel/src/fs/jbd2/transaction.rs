@@ -80,7 +80,7 @@ pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
         t_start_time: 0,
         t_synchronous_commit: false,
         t_need_data_flush: 0,
-        t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
+        t_dirty_buffers: Spinlock::new(alloc::collections::BTreeMap::new()),
         t_revoke_records: Spinlock::new(alloc::vec::Vec::new()),
     };
 
@@ -364,28 +364,24 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
         let blocknr = (*bio_bh).b_blocknr;
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        // Check if already tracked
-        let mut scanned = 0usize;
-        for (existing_nr, _) in dirty_bufs.iter() {
-            scanned += 1;
-            if *existing_nr == blocknr {
-                crate::dfx::fsw::note_j_dedup(scanned);
-                return Ok(()); // Already tracked
-            }
+        // Keyed map (perf-gaps G3): O(log n) membership instead of the
+        // linear already-tracked walk that grew with the lazy-commit
+        // batch (see the field doc on Transaction::t_dirty_buffers).
+        if dirty_bufs.contains_key(&blocknr) {
+            crate::dfx::fsw::note_j_dedup(1);
+            return Ok(()); // Already tracked
         }
-        // fsw: the miss pays the full-set walk (set grows with the
-        // transaction's unique blocks — every fresh block registered).
-        crate::dfx::fsw::note_j_dedup(scanned);
+        crate::dfx::fsw::note_j_dedup(1);
         // R3FIX: no data clone — the commit paths read the live
         // buffer-cache content through the block number (see
         // Transaction::t_dirty_buffers).
-        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Live));
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Live);
     }
 
     Ok(())
 }
 
-/// Get create access to a buffer (for newly allocated blocks)
+/// Get create access for a buffer (for newly allocated blocks)
 ///
 /// Similar to get_write_access but the buffer doesn't have meaningful
 /// prior content, so we don't need to preserve old data.
@@ -400,14 +396,12 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        for (existing_nr, _) in dirty_bufs.iter() {
-            if *existing_nr == blocknr {
-                return Ok(()); // Already tracked
-            }
+        if dirty_bufs.contains_key(&blocknr) {
+            return Ok(()); // Already tracked
         }
         // For create access, the entry carries no data yet (the real
         // bytes arrive via dirty_metadata, which flips the kind to Live).
-        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Created));
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Created);
     }
 
     Ok(())
@@ -431,20 +425,10 @@ pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::
         let blocknr = (*bio_bh).b_blocknr;
 
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        let mut scanned = 0usize;
-        for (existing_nr, existing_kind) in dirty_bufs.iter_mut() {
-            scanned += 1;
-            if *existing_nr == blocknr {
-                *existing_kind = super::journal::TxnBufferKind::Live;
-                crate::dfx::fsw::note_j_dedup(scanned);
-                return Ok(());
-            }
-        }
-        // fsw: miss pays the full-set walk (the set grows with the
-        // transaction's unique blocks — every fresh block registered).
-        crate::dfx::fsw::note_j_dedup(scanned);
-        // Not previously registered via get_write_access — register now
-        dirty_bufs.push((blocknr, super::journal::TxnBufferKind::Live));
+        crate::dfx::fsw::note_j_dedup(1);
+        // Flips a prior Created entry to Live, or registers fresh
+        // (keyed map — no scan; see the field doc on t_dirty_buffers).
+        dirty_bufs.insert(blocknr, super::journal::TxnBufferKind::Live);
     }
 
     Ok(())
@@ -462,7 +446,7 @@ pub fn jbd2_journal_forget(handle: &mut Handle, bio_bh: *mut crate::fs::bio::Buf
     unsafe {
         let blocknr = (*bio_bh).b_blocknr;
         let mut dirty_bufs = txn.t_dirty_buffers.lock();
-        dirty_bufs.retain(|(nr, _)| *nr != blocknr);
+        dirty_bufs.remove(&blocknr);
     }
 
     Ok(())
