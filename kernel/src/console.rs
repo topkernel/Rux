@@ -857,7 +857,15 @@ fn tty_isig_record(c: u8) {
 /// Deliver any ISIG the RX IRQ recorded. Called in TASK context from
 /// check_and_deliver_signals (every return to user) — this is what makes
 /// ^C interrupt a busy foreground task that is not blocked in read().
+/// (perf-syscall lane) Load-first: this runs on EVERY syscall return, and
+/// the unconditional swap was a read-modify-write on shared memory per
+/// return — under MTTCG that takes the exclusive/atomic slow path. The
+/// latch is written only by the RX IRQ (rare), so the load hits zero
+/// almost always; the swap only runs in that rare case.
 pub fn tty_isig_deliver_pending() {
+    if PENDING_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let signo = PENDING_ISIG_SIGNO.swap(0, core::sync::atomic::Ordering::AcqRel);
     if signo != 0 {
         tty_isig_deliver(signo);

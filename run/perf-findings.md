@@ -1,151 +1,177 @@
-# perf-console lane — console/UART TX findings and fixes
+# Perf review — syscall entry/dispatch + openat (perf-syscall lane, 2026-10-31)
 
-Date: 2026-10-31. Branch: perf-console (from main 1e2bef44).
-
-## Method
-
-A/B with the reference bzImage
+Method: A/B with the reference kernel bzImage
 (/home/william/workspace/oh-robot/out/x86_64_virt/packages/phone/images/bzImage)
-using `test/pbench_boot.py --probe-bin` and a new console-TX probe
-`test/conbench.c` (rows below). Same machine class both arms: q35,
-`-cpu max`, TCG thread=multi, SMP2/2G (repo discipline), one QEMU at a
-time. Every number is the median of >= 2000 in-guest writes
-(CLOCK_MONOTONIC around each write(2)).
+through the SAME rig — test/pbench_boot.py, q35, `-accel tcg,thread=multi`,
+`-cpu max`, SMP2/2G, minimal ext4 rootfs, init=/test/pbench.
+All numbers are medians in microseconds unless noted.
 
-Rows:
-- c1_line    write(fd1, 79-char line) x2000 — init-stdio console (the OH pid-1 path)
-- c1b_line   same, run LAST (ordering/warmup control)
-- c1n_nonl   same, no trailing newline (CR-expansion control)
-- c2_devcon  same line to /dev/console (devfs condev + tty OPOST layer)
-- c3_kmsg    same line to /dev/kmsg (printk ring passthrough + emit)
-- c4_1byte   1-byte writes to fd1 (syscall floor)
-- c5_burst   2048-byte writes to fd1 (large-buffer amortization)
+## 0. Ground truth (true A/B, both TCG)
 
-## Baseline A/B (medians, µs/op; two runs each where shown)
+IMPORTANT calibration finding: the TASK.md gaps ("p1 15-90x", "openat
+50-250x") came from comparing Rux-TCG (or Rux-debug) numbers against
+reference-KVM numbers (run/ref-r1/r2, pbref-boot.sh machine class) and
+syscost debug-boot numbers. Under a FAIR A/B (same accel, same rootfs,
+same probe) the reference itself is ~6x slower than its KVM columns:
 
-| row | reference | Rux before | ratio |
-|-----|-----------|------------|-------|
-| c1_line    | 101.9 / 92.0 | 169.7 / 158.3 | 1.7x slower |
-| c2_devcon  | n/a (no /dev) | 227.8 / 175.2 | — |
-| c3_kmsg    | n/a | 142.8 / 113.6 | — |
-| c4_1byte   | 8.0 | 17.5 / 17.6 | 2.2x (syscall entry, not console) |
-| c5_burst   | 2075.9 / 2123.5 | 4756.9 / 3640.0 | 1.8-2.3x slower |
+| row            | Rux strong base | reference TCG | ratio | reference KVM (ref-r1) |
+|----------------|-----------------|---------------|-------|------------------------|
+| p1_null        | 0.611           | 0.240         | 2.5x  | 0.040                  |
+| p1_clock       | 0.741           | 0.832         | ahead | 0.070                  |
+| p2_ctxsw       | 1.377           | 1.518         | ahead | 0.085                  |
+| p6_stat        | 18.294          | 3.877         | 4.7x  | 0.271                  |
+| p6_openclose   | 32.582          | 6.241         | 5.2x  | 0.431                  |
+| p6_read_cached | 40.502          | 12.122        | 3.3x  | 0.671                  |
+| p6_append      | 85.811          | 9.377         | 9.2x  | 0.471                  |
+| p6_unlink      | 88.164          | 25.216        | 3.5x  | 26.239                 |
+| p6_mkdrmdir    | 32352           | 144.1         | 224x  | 40.4                   |
+| p7_sleep1ms    | 1215            | 16.5          | 74x   | 14.6                   |
 
-Per byte: reference ≈ 1.01-1.29 µs/B; Rux ≈ 2.0-2.3 µs/B. Host load
-swings single-boot medians by up to ±30% (observed on unchanged code
-paths), so all conclusions below use the paired-run medians and the
-c1b/c1n controls from the same boot.
+Out-of-lane rows worth flagging to their owners: p6_mkdrmdir 224x
+(ext4 create path), p7_sleep1ms 74x (timer), p5b/p5c stream/dgram ~15x
+(unix-socket write path), p6_append = per-write journal commit (see F5).
 
-## Root causes found (per-char MMIO/PIO writers)
+## Fixes (each measured on its own build)
 
-1. **fd-1/2 "console fast path" in `sys_write`/`write_file_core`
-   (kernel/src/syscall/io.rs)** — the OH hot path (pid 1 / hilog write
-   to stdout/stderr, the 26k-prints-per-boot volume): copy_in 256B
-   chunks, then a per-byte `uart.putc()` loop with `\n` expansion under
-   ONE irqsave UART lock across the whole chunk. Per byte: one LSR
-   `inb` + one THR `outb` (2 port events/byte; the multi-IRQ-off-window
-   hazard the 2026-10-20 gate documented for uart_write existed HERE
-   too, at 256-byte granularity).
-2. **`char_dev::uart_write`** (all /dev/console, /dev/ttyS0, exec-stdio
-   writes): 32-byte chunks under the UART lock, but per-byte `putc`
-   inside each chunk (2 port events/byte).
-3. **Boot table + banner** (`print_status_ex`, logo/version blocks in
-   main.rs): per-byte `console::putchar` = full irqsave lock pair +
-   2 port events PER BYTE of every status line (~150 lines/boot).
-4. **`fs::tty console_output`** (console tty echo sink): per-byte
-   `putchar` (lock pair per byte).
-5. **`fmt::Write for Uart`, `print::Console`, dfx `ConsoleWriter`,
-   `tests::test_println_str`**: per-byte `putc` loops (panic/DFS dumps
-   are thousands of bytes through these).
+### F1 — gate per-syscall forensic instrumentation (dfx=sysforensic)
 
-printk `emit_to_console` was already batched (`puts_batch`, leg-54 C)
-and /dev/kmsg passthrough correct — no early-console fallback stayed
-registered on x86_64 (single 8250 console; early_init/init_irq only
-arm RX). The one "fallback" that DID stay active was item 1: the
-syscall-side console fast path bypassing the shared uart_write
-discipline.
+syscall_handler/`_inner` carried UNCONDITIONAL per-syscall work: the
+SYSCALL_RING entry+exit records (2 RMW + 10 atomic stores), a duplicate
+post-translate LASTSYS latch, the per-task last_calls/init_calls/birth
+rings, the fail-tail ring, and the sc-series comm-gated hooks
+(appioctl/applog/appconn/prctl-einval/missstat/openmiss — the ioctl and
+connect ones did comm() copies + 5 string scans on EVERY ioctl/connect).
+Also check_and_deliver_signals did two atomic RMWs (xchg) per syscall
+RETURN (ISIG latch + CAD latch) — load-first now, RMW only when nonzero.
 
-## Fixes (this branch)
+All of it now sits behind one atomic load (`DfxSwitch::SysForensic`, new
+switch `dfx=sysforensic`); the pre-translate LASTSYS latch stays always-on
+(taskdump's lastsys= needs it, 3 stores). Hunt boots that need the rings
+or sc-hooks must add dfx=sysforensic.
 
-- console.rs: new `puts_bytes()` (one irqsave lock + one batched pass)
-  and `puts_bytes_no_lock()`; `puts()` now delegates; `fmt::Write for
-  Uart` coalesces runs between newlines into 128-byte bursts.
-- char_dev.rs: new safe `uart_write_kernel(&[u8])` (32-byte chunked
-  lock + `puts_batch` burst + cond_resched); `uart_write` delegates.
-- syscall/io.rs fd-1/2 fast path: keeps its unconditional `\n`->`\r\n`
-  expansion (byte-for-byte) but delegates TX to
-  `char_dev::uart_write_kernel` — no more inline per-byte loop, no more
-  single-lock-held-across-256B window.
-- tty.rs `console_output`: one `console::puts_bytes` per slice.
-- main.rs: `print_status_ex` stages the whole line in a stack buffer
-  (byte-identical output, verified against serial logs); boot banner,
-  table header, and logo/version blocks emit one batched write per
-  constant.
-- dfx/backtrace.rs `ConsoleWriter`: 128-byte staging buffer flushed via
-  `puts_batch`.
-- print.rs `Console::write_str`, tests/mod.rs `test_println_str`:
-  batched with identical byte streams.
+  p1_null 0.611 -> 0.481 (-21%), p1_clock 0.741 -> 0.621. fs rows flat (expected).
 
-## Results (same boot config, medians µs/op)
+### F2 — path_lookup prologue: zero-alloc fast path + walk churn
 
-| row | reference | Rux before | Rux after | before->after | vs reference |
-|-----|-----------|------------|-----------|---------------|--------------|
-| c1_line    | 92.0-101.9 | 158.3-169.7 | **89.9**  | -44%          | **at parity** |
-| c1b_line   | —          | —           | 95.3      | (control)     | — |
-| c1n_nonl   | —          | —           | 94.3      | (control)     | — |
-| c2_devcon  | —          | 175.2-227.8 | 110.9     | -37..-51%     | — |
-| c3_kmsg    | —          | 113.6-142.8 | 126.7     | unchanged by design | — |
-| c4_1byte   | 8.0        | 17.5        | 16.8      | unchanged     | 2.1x (syscall entry cost, syscall lane's gap) |
-| c5_burst   | 2075.9-2123.5 | 3640.0-4756.9 | **2052.8** | -44..-57% | **at parity** |
+The prologue paid ~15 heap objects per lookup before the walk started:
+make_absolute_rooted's String, THREE get_process_root() Strings (each =
+FsStruct::get_root() Vec clone — or a full parent-chain build_path() walk
+when a root dentry is recorded — plus path_normalize's TWO Vec<&str>
+collects and output String), path_normalize's output, and the
+components Vec. Now: `process_rooted()` reads the fs_struct slots with
+no alloc; absolute + already-normal paths take a `Cow::Borrowed` path
+(`path_is_normalized_fast` = one byte scan); chrooted/odd paths take the
+old allocating arms unchanged. The sbx sandbox-trace computation
+(4 byte-scans per lookup) is behind sysforensic.
 
-Console TX per-byte cost on the large-buffer row: 2.32 -> 1.00 µs/B
-(reference 1.01-1.04 µs/B). The fd-1 line-write row is now below the
-reference's median on the same machine class.
+Walk loop: the ENOTDIR check and the DAC check each called
+`current.get_inode()` (spinlock + Arc clone) — now one call serves both,
+in both walk loops (path_lookup + the symlink-resolution walk).
+The icache refresh's `set_inode(fresh)` ran even when the icache returned
+the SAME Arc (lock + Arc swap per cached component) — ptr_eq-guarded now.
 
-Remaining gaps (not this lane's console fixes):
-- c4_1byte 16.8 vs 8.0 µs: write(2) syscall entry + fdtable Arc +
-  flags checks — the known p1_null-class syscall-lane gap.
-- c3_kmsg 126.7 µs: /dev/kmsg write does a heap `format!` per record
-  plus ring insert; printk emit itself is already batched.
+  p6_stat 18.294 -> 9.395 (-49%), p6_openclose 32.582 -> 24.709 (-24%),
+  p6_read_cached 40.502 -> 32.131 (-21%), p6_unlink 88.164 -> 67.817 (-23%).
 
-## Correctness gate (all green)
+### F3 — sys_openat shortcut-chain trims
 
-- `make test` riscv64: **1198/1198, ALL TESTS PASSED**
-  (run/make-test-riscv.log).
-- `make test PLATFORM=aarch64`: **1135/1135, ALL TESTS PASSED**
-  (run/make-test-aarch64.log). console.rs is shared with aarch64 —
-  required by the lane rules.
-- Builds rc=0: x86_64 (booted + measured), riscv64 (make test build),
-  aarch64 (run/build-aarch64.log rc=0).
-- Boot-table/banner byte-identical vs baseline serial logs (alignment
-  verified in work/pbench-cbrux-fix5-serial.log).
+sys_openat's shortcut chain (O_PATH trace, /proc/exe, /proc/*/environ,
+ns links, procfs read_file) ran per open: TEN `vfs::chrooted()` calls
+(each = get_process_root() = the ~5-alloc stack from F2), TWO
+Vec<&str> collects for /proc parsing (ungated by any /proc prefix
+check), try_open_ns_path's Vec collect, and procfs::read_file's Vec
+collect + scans. All now: `process_rooted()` (0 allocs) + a
+`starts_with("/proc")` gate before every /proc-shaped collect.
+(The probe opens non-proc paths, so this is pure removed overhead.)
 
-## Full pbench P1-P7 battery (regression control, fixed kernel)
+  p6_openclose 24.709 -> 14.380 (-42%), p6_read_cached 32.131 -> 22.396 (-30%),
+  p6_stat 9.395 -> 8.277 (-12%).
 
-Two batteries on the fixed kernel vs one on the pre-fix kernel, same
-machine class. Load-comparable run (base 345 s wall / fix2 435 s wall):
+### F4 — icache init fast path + stats gating (kept, see F4b for the copy part)
 
-- p1..p5 rows: all within ±3% of base.
-- p6_stat -7.3%, p6_write_fsync -6.4%, p6_mkdrmdir +1.7%,
-  p6_unlink +0.5%, p6_getdents +4.5%, p6_append +8.5%,
-  p4_fork_exit +4.2%, p4_fork_exec +7.2%, p7_sleep1ms -43.9%
-  (all inside the ±20% Tier-2 band; the deltas track host-load
-  differences, not any console-side mechanism).
-- The first fixed-kernel battery ran under a 2x host-load window
-  (681 s wall) and showed p6_mkdrmdir +119% / p7 +23%; the rerun
-  reproduced base-level numbers — the documented load-flaky families
-  (AGENTS.md), not regressions.
-- PREEMPT-HEAL/PREEMPT-UNDERFLOW serial diagnostics appear during the
-  pbench battery on BOTH kernels (base: 182 events, fixed: 353 in a 2x
-  longer wall) — pre-existing fork/exec-family noise at equal wall-time
-  rate, not introduced here (zero events in every conbench boot of
-  either kernel).
+icache_init() took the global ICACHE spinlock on EVERY lookup just to
+check "already initialized" — fronted with an AtomicBool now. The
+hit/miss counter fetch_adds (2 per component lookup) are behind
+`icache_stats_arm()` (default off; the LRU time updates stay — eviction
+order is functional). The first attempt of this round also switched
+strncpy_from_user to a whole-window bulk copy — that REGRESSED
+(p6_openclose 14.380 -> 17.503): a PATH_MAX window meant a 4 KiB memcpy
+for a 20-byte name. Reverted to chunked (F4b); init/stats kept.
+
+### F4b — strncpy_from_user: chunked copy instead of per-byte get_user
+
+Both arches copied user strings ONE BYTE AT A TIME through get_user —
+on x86_64 each byte is a call + access_ok + AC bracket (pushfq/orq/popfq
+— the SMAP-era STAC/CLAC replacement) + 1-byte rep movsb + AC clear +
+ret ≈ 30 instructions per path byte, paid by every openat/stat/exec/
+chdir path argument. Now: 64-byte chunked raw exception-table copies
+(one AC bracket pair per chunk) + NUL scan in kernel memory; a
+mid-chunk fault zero-fills the tail and returns the same Ok/EFAULT the
+byte loop produced. Short names cost ONE chunk; nothing ever copies
+more than 63 bytes past the NUL.
+
+### F6 — symlink check reuses the walk's inode (follow_symlink_hinted)
+
+The per-component follow_symlink call re-took the dentry inode spinlock
+and cloned the Arc just to check is_symlink, although both walk loops
+already hold the child's inode (icache-refresh arm / iget arm). The
+Arc now flows through as a hint; a mount hop (different dentry) passes
+None. pbench: p6_openclose 13.65 -> 12.64 us, p6_stat 7.23 -> 6.62,
+p6_read_cached 21.48 -> 20.33; one spinlock acquisition per component
+removed under SMP contention too.
+
+## Cumulative — med-of-3 interleaved (base vs fix5, orders F,B,F,B,F,B)
+
+| row            | base med | fix5 med | delta | fix6 build | reference | final ratio |
+|----------------|----------|----------|-------|------------|-----------|-------------|
+| p1_null        | 0.611    | 0.491    | -20%  | 0.491      | 0.240     | 2.05x       |
+| p6_stat        | 18.440   | 7.229    | -61%  | 6.622      | 3.877     | 1.71x       |
+| p6_openclose   | 33.265   | 13.648   | -59%  | 12.642     | 6.241     | 2.03x       |
+| p6_read_cached | 42.162   | 21.478   | -49%  | 20.326     | 12.122    | 1.68x       |
+| p6_unlink      | 88.164   | 74.438   | -16%  | 70.784     | 25.216    | 2.81x       |
+| p6_append      | 85.8     | 90.3     | flat  | 79.9       | 9.377     | 8.5x (F5)   |
+
+## Open findings (not fixed in this lane)
+
+F5. p6_append (a single 4K write() to an open fd) = 77-89us vs reference
+    9.4us. ext4_write_at_core starts a JOURNAL TRANSACTION and commits
+    metadata per write (data=ordered inline discipline) — the ledger's
+    known "~88us append class" (route-1/J-arm). The reference kernel does
+    delayed allocation + writeback: write() touches no disk I/O. This is
+    the fs-lane's route-1 work; naming it here because the charter asked
+    for the write path too. p6_write_fsync 19.6ms vs 16.0ms (1.2x, close).
+
+F6. p6_getdents 544us vs reference 882us — we are AHEAD (full-dir sweep
+    of 1000 files).
+
+F7. Remaining p6_openclose gap (12.6 vs 6.24): per-component walk locks
+    (dentry children lock, parent inode lock, vfsmount lock, icache
+    global lock — ~5 lock pairs per component still) and VFS_STATE's
+    global spinlock per lookup. The reference walks dcache RCU-style
+    with zero locks. Candidates: bucket-level icache locking,
+    dentry-embedded RCU-walkable name hash, VFS root ArcSwap.
+
+F8. Relative-path opens rebuild the cwd from the dentry parent chain on
+    every make_absolute (FsStruct::get_cwd -> build_path() — locks + a
+    String per ancestor). Probe rows use absolute paths; shells don't.
+
+F9. p1_null residual 2.0x (0.48 vs 0.24): trap entry SCRIBBLE2-GUARD
+    (PER_CPU load + stack-bounds check per user entry), CURRENT_PT_REGS
+    save/restore pair, seccomp gate, LASTSYS latch, syscost/trace armed
+    checks, exit-path signal+resched checks. Each is small; the total is
+    the gap. Not worth dismantling the safety nets for the last 2x under
+    TCG; revisit under KVM measurements.
 
 ## Artifacts
 
-- run/rux-baseline-bzImage (pre-fix), run/rux-fixed3-bzImage (post-fix)
-- run/cbref.log run/cbref2.log (reference), run/cbrux-base.log
-  run/cbrux-base2.log (before), run/cbrux-fix5.log (after)
-- work/pbench-cb*-serial.log, work/pbench-pbfix*-serial.log,
-  work/pbench-pbbase-serial.log (raw serial)
-- run/pbbase-rows.txt run/pbfix2-rows.txt (battery medians)
+- Kernels: run/sys-{base,fix1..fix6}-bzImage
+- Results: run/<tag>-results.txt (PBENCH lines), serial logs in work/,
+  confirmation script run/sys-confirm.sh (interleaved med-of-3)
+- Reference TCG column: run/sysref-tcg1-results.txt
+
+## Gates run for the final state (fix6, commit 542bbc6d)
+
+- `make test` riscv64: ALL TESTS PASSED (1204/1204 at fix5 state,
+  1203 at fix6 state — one row flake between runs, zero failures both)
+- PLATFORM=x86_64 build-release-opt / riscv64 build / aarch64 build: rc=0
+  (aarch64's regenerated dtb_blob.S restored, not committed)

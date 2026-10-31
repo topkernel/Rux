@@ -1,6 +1,6 @@
-# Perf review: drivers
+# Perf review: syscall
 
-Focus: VIRTIO + TIMER + IRQ — virtio-blk completion latency (virtqueue poll vs IRQ driven; the OH boots run polling), virtio-net RX path, timer framework cost (timerfd storm 4k/s was fd-churn; but timer rearm path?), IRQ entry/exit overhead, softirq dispatch. Hunt: the OH serial log showed UART print 0.36-0.93ms per line = 25% of both CPUs during boot (console subsystem: per-char MMIO writes? THRE pacing holding irqs off? compare reference vga/serial throughput); hilog tap decode cost kernel-side.
+Focus: SYSCALL ENTRY/DISPATCH — p1 null ~4.5µs (reference 50-300ns = 15-90x). Hunt: the dispatch match chain (linear match on u64?), arg marshaling, the LASTSYS/ring instrumentation cost on the hot path (even when disabled — is the write happening?), seccomp gate cost, strace/syscost hooks compiled into the hot path, per-syscall accounting. openat 252µs average (reference ~1-5µs = 50-250x): path lookup walk (per-component dentry alloc? no hash?), namei string ops, permission checks per component. Also read/write single-buffer paths vs reference.
 
 # Perf-review lane rules (binding)
 - Mission: find where Rux is SLOW vs the reference kernel and close the gap. Target: 10x-class improvements on the lagging metrics. The user mandate: every interface metric where we lag the reference must be examined.

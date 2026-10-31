@@ -1128,6 +1128,11 @@ pub mod caps_shape {
 /// Intercept /proc/[pid]/ns/<kind> opens from sys_openat. Returns
 /// Some(fd-or-negative-errno) when the path matched.
 pub fn try_open_ns_path(path: &str, flags: u32) -> Option<i64> {
+    // (perf-syscall lane) prefix gate before the parts Vec — this runs on
+    // EVERY openat (called from sys_openat's shortcut chain).
+    if !path.starts_with("/proc") {
+        return None;
+    }
     let parts: Vec<&str> = path
         .trim_end_matches('/')
         .split('/')

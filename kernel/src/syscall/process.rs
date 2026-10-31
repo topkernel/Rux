@@ -5694,7 +5694,12 @@ pub fn ctrl_alt_del_latch() {
 
 /// Execute any latched Ctrl-Alt-Del. Called in TASK context from
 /// check_and_deliver_signals (every return to user space).
+/// (perf-syscall lane) Load-first for the same reason as the ISIG
+/// latch: one plain load per return instead of an RMW.
 pub fn cad_deliver_pending() {
+    if !PENDING_CAD.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
