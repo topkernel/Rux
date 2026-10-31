@@ -11,6 +11,7 @@ TAG = sys.argv[1] if len(sys.argv) > 1 else "lb1"
 SECS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
 SYSIMG = sys.argv[3] if len(sys.argv) > 3 else "run/oh-img/system.img"
 KERNEL = sys.argv[4] if len(sys.argv) > 4 else "target/x86_64-unknown-none/debug/bzImage"
+EXTRA = sys.argv[5] if len(sys.argv) > 5 else ""   # extra kernel cmdline (e.g. "syscost=1")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
@@ -33,7 +34,7 @@ APPEND = ("ip=dhcp loglevel=7 console=ttyS0,115200 init=init root=/dev/ram0 rw "
           "ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio "
           "ohos.boot.sn=01234567890 "
           "ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required "
-          "ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required")
+          "ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required" + EXTRA)
 
 cmd = ["qemu-system-x86_64", "-M", "q35", "-accel", "kvm", "-cpu", "max",
        "-m", "4G", "-smp", "2", "-snapshot", "-display", "none", "-vga", "none",
