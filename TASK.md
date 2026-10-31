@@ -161,19 +161,36 @@ screen still shows the frozen bootanimation logo at 780s (sysc1 boot).
    group kill. sprux1 markers before that: bootanimation.ready 228s (ref
    kernel: 8.3s; full ref boot to launcher.ready: 14.4s).
 
+### ROOT CAUSE OF THE LAUNCHER NEVER SPAWNING (lb2, 2026-10-31 12:2x)
+mount("hmdfs") → -EINVAL (Rux has no hmdfs filesystem). Chain:
+StorageDaemonProvider::StartUser → MountManager::MountByUser →
+MountFileSystem → MountHmdfs: SupportHmdfs() reads
+const.distributed_file_property.enabled (from
+/system/etc/param/distributed_file.para, =true in the stock image) →
+mount('/data/service/el2/100/hmdfs/account','/mnt/hmdfs/100/account',
+type 'hmdfs') fails → StartUser failed → UnlockUser ends errCode
+13600721 → osaccount NEVER calls AbilityManagerAdapter::StartUser(100)
+→ AMS never starts the launcher root; the Ext/ABCM load-timeout retry
+loop then queries BMS with userId 0 forever (8521220, launcher only
+exists for user 100). The reference OHOS 6.6.101 kernel has CONFIG_HMDFS
+so the same mounts succeed there.
+FIX (image, this lane): run/lb-mkimage.sh builds run/system-lb.img =
+GL-fixed system image with that one param flipped to false →
+SupportHmdfs()=false → LocalMount path = pure BIND mounts of
+/data/service/el2/100/hmdfs/account onto /storage/media/100/local and
+/storage/cloud/100 (see storage_mount_info.json hmdfs-mount nodes with
+the local_hmdfs option) → StartUser should return E_OK.
+(Kernel-side alternative for later: an "hmdfs" fstype alias to bind.)
+
 ### Next steps (in order)
-1. lb2 (RUNNING at time of writing, 1800s, instrumented kernel 773f701e):
-   SACB tap (binder.rs: every non-reply txn sent BY samgr to a foreign
-   proc) + execfail2 tap (any failing execve, budget 48). Watch: does SACB
-   deliver to accountmgr's pid when it subscribes (~250s)? If callbacks
-   ARE sent but OnAddSystemAbility never logs, the loss is between binder
-   enqueue and the safwk work thread (parked oneway?). If NO callback to
-   accountmgr at all, it's samgr-side subscription handling.
-2. If launcher.ready fires: watch shots past 540s for non-logo pixels
-   (ArkUI first frame may take minutes at current perf). Ladder: non-logo
-   pixels → home screen → screenshot + report immediately.
-3. The wedge race (lb1-style) is the launcher-spawn blocker; the PERF
-   census below is the boot-time blocker. Both are live fronts.
+1. lb3 (RUNNING, 1800s, system-lb.img + TFDC kernel): watch ~254s for
+   "SupportHmdfs ... false", LocalMount bind success, StartUser OK, AMS
+   StartUser(100), launcher spawn; then shots past 600s for pixels.
+   TFDC prints name the timerfd_create storm caller. (lb2, same class of
+   boot without the fix, was killed at ~1000s wedged in the ABCM retry
+   loop; its SACB data validated the callback tap: samgr code=1 ONEWAY
+   deliveries to accountmgr appear right after subscription on good
+   boots.)
 
 ### PERF CENSUS (syscost=1 boot sysc1, dumps at t=60/120/180/240s) — handoff
 for the perf lane (guarded domains: sched + fs + ipc; raw log:
@@ -200,13 +217,15 @@ run/oh-sysc1-serial.log in THIS worktree):
 - **hilog socket traffic**: hilogd.server 703k recvfrom in 60s, 5.06M by
   240s (21k/s sustained), recvfrom avg 353µs. Every send pays the kernel
   hilog tap decode. mmi_service 185k recvfrom.
-- **Failed-exec storm**: 111k execve in first 60s, 833k by 240s
-  (accelerating 1.9k→4.3k/s), only ~110 succeeded. ~2 CPUs of kernel work
-  (rmap/page_record_mapping = 28% of kernel-tick rip histogram; slab
-  churn 24M hits; consistent with a fork+failed-exec+exit loop). The
-  execfail2 tap (this branch) names path+comm — early hits were benign
-  init one-shots (hks_compatibility_bin, hmos_cust_*_mount); the storm
-  actor likely starts later (watch lb2's execfail2 lines past ~250s).
+- **timerfd_create storm (nr=281 on x86_64 — NOT execve; execfail2 tap
+  disproved the failed-exec theory, only 4 benign one-shots)**: 111k
+  calls in first 60s, 833k by 240s (accelerating 1.9k→4.3k/s), avg
+  ~1.6-1.9ms each — several CPUs of kernel work (rmap/page_record_mapping
+  = 28% of kernel-tick rip histogram; slab churn 24M hits fit an
+  fd/object create+destroy loop). WHO calls timerfd_create 4k/s is
+  unnamed — next step: a budgeted timerfd_create failure/comm tap, or a
+  per-comm counter in syscost's flood table (it currently only tracks
+  recvmsg-family floods).
 - openat avg 252µs (85k/60s), read avg 1.1ms — fs path/read 5-10x slow;
   secondary next to the above.
 - ticks at t=60s: u/k/i = 512/5130/352 per CPU — 85% kernel mode.
