@@ -1191,16 +1191,29 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
     // stay as the safety net either way.
     //
-    // kpreempt=1 (cmdline, 2026-10-31 launcher perf wall): runtime arm of
-    // the same hook, for A/B boots. The sc70-era amplification predates
-    // the WAKE-HEAL (parked phantom counts now zeroed at wake before the
-    // monopoly can form) and the rotation-proof 2 s tick heal; the OH
-    // census pins the master boot multiplier on tick-quantized futex
-    // wake→run latency (every IPC handoff waits for the incumbent's next
-    // preempt point — syscall return at best), which only this hook (on
-    // the wake IPI's irq-exit) can collapse. The verdict-cache discipline
-    // mirrors syscost::on(): never cache a verdict before the cmdline
-    // exists (the first vector can fire pre-cmdline::init).
+    // kpreempt (cmdline): runtime arm of this hook. Armed by DEFAULT
+    // (2026-10-31 perf-sched lane); pass kpreempt=0 to disarm.
+    //
+    // The sc70-era amplification verdict (hook ON + preempt_count leaks
+    // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
+    // counts zeroed at wake before the monopoly can form) and the
+    // rotation-proof 2s tick heal, so the amplifier's fuel is bounded.
+    //
+    // Default-ON evidence (perf-sched lane, pbench p2f futex battery,
+    // TCG q35 smp2/2G and KVM, kernel = 159111af lineage + mprotect fix):
+    // with a pread(4MB)-cached hog pinned to the woken waiter's CPU (one
+    // syscall = one contiguous kernel stretch; hogcal TCG 5.5ms / KVM
+    // 160us), futex wake->run was syscall-length-quantized:
+    //   TCG: med 5608us (97% of wakes 1-10ms) vs reference 86us = 65x
+    //   KVM: med 163us vs reference 8.2us = 20x
+    // kpreempt=1 collapses it to reference parity (TCG 23us, KVM 9.5us)
+    // and the full P1-P7 battery shows no row moved beyond noise
+    // (KVM kp=0 vs kp=1 back-to-back: all rows within ±5%, p2_ctxsw
+    // 0.18->0.175). Boot beacon delta on the same battery: PREEMPT-HEAL
+    // events went DOWN with the hook on (49 -> 2), zero WAKE-STRANDED.
+    // The verdict-cache discipline mirrors syscost::on(): never cache a
+    // verdict before the cmdline exists (the first vector can fire
+    // pre-cmdline::init).
     static KP_ARMED: core::sync::atomic::AtomicU8 =
         core::sync::atomic::AtomicU8::new(0);
     match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1210,23 +1223,23 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                 Some(_) => {
                     let v = if crate::cmdline::get_param("kpreempt")
                         .as_deref()
-                        == Some("1")
+                        == Some("0")
                     {
-                        2u8
-                    } else {
                         1u8
+                    } else {
+                        2u8
                     };
                     KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
                     if v == 2 {
                         crate::pr_info!(
-                            "sched: kernel-preempt armed by cmdline (cpu={})",
+                            "sched: kernel-preempt armed (cpu={})",
                             crate::arch::cpu_id()
                         );
                     }
                 }
             }
         }
-        1 => return, // cmdline says off
+        1 => return, // cmdline says off (kpreempt=0)
         _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule
