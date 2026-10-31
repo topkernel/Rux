@@ -143,15 +143,30 @@ pub unsafe fn call_rcu(head: *mut RcuHead) {
     );
 }
 
+/// Number of tasks blocked inside `synchronize_rcu()`. When zero — the
+/// overwhelmingly common state — the QS report fast-path below costs one
+/// relaxed load and stops there, keeping the per-syscall tax on the
+/// user-return path at that single load (perf gate: p1/p2 must not move).
+static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);
+
 // ============================================================================
 // Public API: quiescent-state reporting
 // ============================================================================
 
 /// Report a quiescent state for the current CPU.
 ///
-/// Call from: `__schedule()`, `cpu_idle_loop()`, and return-to-user path.
+/// Call from: `__schedule()`, `cpu_idle_loop()`, and the return-to-user
+/// path (the common trap tails). The user-return hookup is what makes
+/// grace periods complete on syscall-heavy CPUs without waiting for
+/// their scheduler tick: before it existed, a CPU spinning in user
+/// syscalls never reported a QS and every `synchronize_rcu()` waiter
+/// (e.g. the MmStruct drop on every process exit) stalled for a full
+/// time slice (~10 ms) — the measured 38x p4_fork_exit gap.
 #[inline]
 pub fn rcu_note_context_switch() {
+    if RCU_WAITERS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < MAX_CPUS {
         let gen = RCU_GEN.load(Ordering::Acquire);
@@ -169,6 +184,10 @@ pub fn rcu_note_context_switch() {
 pub fn synchronize_rcu() {
     let gen = RCU_GEN.load(Ordering::Acquire);
 
+    // Announce the waiter BEFORE snapshotting/reporting so every
+    // user-return from here on reports its QS (see RCU_WAITERS).
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+
     // Report our own quiescent state.
     rcu_note_context_switch();
 
@@ -185,6 +204,7 @@ pub fn synchronize_rcu() {
             }
         }
         if all_qs {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
             return;
         }
         // Yield the CPU instead of busy-spinning.  A bare spin_loop()
