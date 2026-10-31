@@ -171,6 +171,7 @@ pub fn note_acquire(
             };
             if slot_task != task as usize {
                 slot.oslot.store(slot_task, Ordering::Release);
+                report_acquire_divergent(task, loc, cpu, slot_task);
                 1
             } else {
                 0
@@ -179,6 +180,125 @@ pub fn note_acquire(
             2
         };
         slot.omis.store(mis, Ordering::Release);
+    }
+}
+
+/// Live report of a divergent outermost acquire (preempt-hunt): the
+/// 0->1 booked on `task` (what tp names, i.e. the executing context)
+/// while this CPU's sched slot names `slot_task`. Printed AT the acquire
+/// moment (not later, from a healed/underflowed state) so the producing
+/// context is observed live: which site, which count fields, which task
+/// the slot held. Budgeted 60/boot.
+#[allow(unsafe_code)]
+fn report_acquire_divergent(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cpu: u32,
+    slot_task: usize,
+) {
+    static N: AtomicU32 = AtomicU32::new(60);
+    let b = N.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
+    // current on this CPU (pinned by execution), `slot_task` was this
+    // CPU's slot content moments before (same discipline as the s14
+    // IRQ-PAIR report).
+    unsafe {
+        let pid = (*task).pid();
+        let pc = (*task).preempt_count();
+        let slot_pid = if slot_task >= 0x80000000 {
+            (*(slot_task as *mut crate::process::Task)).pid()
+        } else {
+            0
+        };
+        for &c in b"\nACQUIRE-DIVERGENT pid=" {
+            putchar(c);
+        }
+        let mut v = pid as u64;
+        let mut buf = [0u8; 12];
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" pc=0x" {
+            putchar(c);
+        }
+        let mut x = pc as u32 as u64;
+        for sh in (0..8).rev() {
+            let d = ((x >> (sh * 4)) & 0xF) as u8;
+            putchar(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        }
+        for &c in b" cpu=" {
+            putchar(c);
+        }
+        let mut v = cpu as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" site=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        let mut v = loc.line() as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" slotpid=" {
+            putchar(c);
+        }
+        let mut v = slot_pid as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        putchar(b'\n');
     }
 }
 
