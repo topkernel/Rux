@@ -97,3 +97,40 @@ Commits on feature/code-review-perf:
 Noise protocol (validated): back-to-back A/B at equal foreign_qemus;
 med-of-runs for verdicts; void any run at host load >= 4 for
 absolute claims.
+
+## SMAP landed (2026-10-31 evening) — with a QEMU finding
+
+**CR4.SMAP is now ON for x86_64** (arch_init → cpu::enable_smap), with
+the usercopy primitives bracketing their copies with EFLAGS.AC
+set/clear sequences.
+
+Key discovery: the STAC/CLAC encodings (0F 01 CA/CB) take #UD under
+QEMU TCG regardless of CR4.SMAP — bisection proved it (SMAP=0 with the
+instructions still crashed at the first uaccess; main without them
+never crashed; every crash RIP was garbage because the #UD site sits
+outside __ex_table). Replaced with pushfq/orq/popfq AC set-clear
+sequences — architecturally equivalent, works everywhere.
+
+The first-round "signal path raw user-pointer dereference" conclusion
+is WITHDRAWN: it was a STAC #UD artifact, not a real dereference. The
+1194-test suite plus the strong pbench boot run with zero SMAP-VIOL
+beacons — the syscall layer was already fully on uaccess (the audit's
+static finding stands).
+
+Fault-path fix that made the mode sane: do_page_fault's
+kernel_data_fill branch now refuses to demand-fill when CR4.SMAP is on
+and EFLAGS.AC is clear (a raw kernel dereference of a user page used
+to be demand-filled, then the re-executed instruction SMAP-faulted
+again — an unbounded loop that ended in the binder stall-report panic).
+Raw dereferences now route to the exception table: uaccess sites get
+EFAULT, anything else gets a named SMAP-VIOL beacon and an oops.
+
+Verification: x86_64 make test 1193/1194 (only the known
+identity-window prlimit64 row), strong pbench full board DONE rc=0
+with all rows in band (p4_fork_exit 456.6 us, best seen) — SMAP costs
+nothing measurable under TCG.
+
+Remaining: prlimit64 EFAULT needs the PML4[0] identity window out of
+the kernel CR3 (KPTI-shaped work); SMAP makes no difference to it (the
+window is U=0 and STAC windows still read it — only removing the link
+fixes it).

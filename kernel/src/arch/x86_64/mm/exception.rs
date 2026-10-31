@@ -117,6 +117,26 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
         return MmFaultResult::Handled;
     }
 
+    // SMAP audit beacon (perf review 2026-10-31): a no_context fault with
+    // CR4.SMAP on, AC clear and a user-range fault address is a RAW
+    // user-pointer dereference. Name the instruction BEFORE the oops
+    // machinery mangles the context — the audit loop is: run the tests,
+    // read this line, convert the site to uaccess, repeat.
+    if crate::arch::cpu::smap_enabled()
+        && (regs.rflags & (1u64 << 18)) == 0
+        && _fault_addr.bits() < crate::arch::mm::user_addr::USER_END as u64
+    {
+        static SHOWN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SHOWN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::println!(
+                "SMAP-VIOL rip={:#x} addr={:#x} — raw user-pointer dereference (audit)",
+                regs.rip,
+                _fault_addr.bits()
+            );
+        }
+    }
+
     // Cannot handle
     MmFaultResult::KernelPanic
 }
@@ -211,9 +231,22 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // Route kernel EXEC faults straight to the exception table /
         // KernelPanic so the bug is loud and the CPU halts instead of
         // looping.
+        // SMAP violation check (perf review 2026-10-31): with CR4.SMAP
+        // on, a kernel-mode fault on a user-range address whose EFLAGS.AC
+        // is CLEAR is a RAW user-pointer dereference (a STAC window would
+        // have AC set, and hardware would not have faulted on present
+        // U=0 pages at all). Demand-filling those used to loop forever —
+        // fill "succeeds", the instruction re-executes, SMAP faults
+        // again — until the watchdog fired the binder stall report into
+        // a panic. Route them to the exception table instead: uaccess
+        // sites get their EFAULT fixup, raw dereferences get a precise
+        // oops. STAC-window fills (AC=1) keep the normal path.
+        let smap_violation = crate::arch::cpu::smap_enabled()
+            && (regs.rflags & (1u64 << 18)) == 0; // EFLAGS.AC
         let kernel_data_fill = fault_addr.bits()
             < crate::arch::mm::user_addr::USER_END as u64
-            && (access_type & FaultFlags::EXEC) == 0;
+            && (access_type & FaultFlags::EXEC) == 0
+            && !smap_violation;
         if kernel_data_fill {
             let covered = addr_space
                 .vma_read()

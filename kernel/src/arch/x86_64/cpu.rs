@@ -228,6 +228,18 @@ pub fn read_counter() -> u64 {
 /// copy_from_user(VA 1) silently read physical page 1 instead of
 /// returning EFAULT (prlimit64 new_rlim test, 2026-10-31 review).
 #[allow(dead_code)] // pending the kernel-wide user-pointer audit (2026-10-31)
+/// Set by enable_smap(); read by the page-fault path to detect SMAP
+/// violations (kernel-mode access to a U=0 user page outside a STAC
+/// window must not be demand-filled — it must hit the exception table).
+pub static SMAP_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Whether CR4.SMAP is active on this boot.
+pub fn smap_enabled() -> bool {
+    SMAP_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+#[allow(dead_code)]
 pub fn enable_smap() {
     // CPUID leaf 7 subleaf 0, EBX bit 20 = SMAP capability.
     let (_, _, _, d7) = cpuid(7, 0);
@@ -247,6 +259,7 @@ pub fn enable_smap() {
             options(nomem, nostack, att_syntax)
         );
     }
+    SMAP_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
     crate::println!("arch: CR4.SMAP enabled");
 }
 
