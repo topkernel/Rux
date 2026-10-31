@@ -2289,6 +2289,27 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                 }
                 cursor += PAGE_SIZE as usize;
             }
+
+            // Delayed-allocation tail (perf-gaps 2026-11): write_at above
+            // now routes plain writes through the buffered page-cache
+            // path — MS_SYNC semantics demand the dirty frames it left
+            // actually reach the file. Flush the span's page range for
+            // ext4 inodes (same machinery as the PCACHE flush above;
+            // no-op when nothing was dirtied).
+            {
+                // SAFETY: inode cell written at open time, read-only.
+                if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                    let off_lo = v_off + (span_lo - vma_start);
+                    let off_hi = v_off + (span_hi - vma_start);
+                    if off_hi > off_lo {
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(
+                            vinode,
+                            (off_lo / PAGE_SIZE) as u64,
+                            ((off_hi - 1) / PAGE_SIZE) as u64,
+                        );
+                    }
+                }
+            }
         }
     }
 
