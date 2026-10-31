@@ -1146,14 +1146,24 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
             // no errno on the guest side; the sandbox roots live under
             // /mnt and /data, so surface failed mkdirs there on serial.
-            if e != -(17) && (full_path.starts_with("/mnt") || full_path.starts_with("/data")) {
-                crate::pr_info!(
-                    "mkdirfail '{}' mode {:#o}: {} (pid {})",
-                    full_path,
-                    mode,
-                    e,
-                    unsafe { crate::process::current_pid() }
-                );
+            // lb-lane (launcher bring-up): widened to EVERY path —
+            // storage_daemon's MakeDir('/storage/media/100/local') failed
+            // with guest errno 11 (EAGAIN?! tmpfs_mkdir has no such path)
+            // during StartUser(100), so every failed mkdir needs its
+            // kernel-side errno and caller pid on serial. EEXIST stays
+            // filtered (install streams would flood the budget).
+            if e != -(17) {
+                static MKDIRFAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if MKDIRFAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                    crate::pr_info!(
+                        "mkdirfail '{}' mode {:#o}: {} (pid {})",
+                        full_path,
+                        mode,
+                        e,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
             }
             e as i64
         }
