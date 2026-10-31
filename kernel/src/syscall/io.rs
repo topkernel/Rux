@@ -1875,15 +1875,15 @@ pub fn sys_pwritev(args: SyscallArgs) -> i64 {
 /// sys_pipe2 - Create pipe with flags
 pub fn sys_pipe2(args: SyscallArgs) -> i64 {
 
-    let pipefd = args[0] as *mut i32;
+    let pipefd = args[0] as usize;
     let flags = args[1] as u32;
 
     // Check pointer using access_ok
-    if pipefd.is_null() {
+    if pipefd == 0 {
         return -errno::EFAULT as i64;
     }
 
-    if !crate::arch::uaccess::access_ok(pipefd as usize, 8) {  // 2 * sizeof(int)
+    if !crate::arch::uaccess::access_ok(pipefd, 8) {  // 2 * sizeof(int)
         return -errno::EFAULT as i64;
     }
 
@@ -1967,15 +1967,12 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
         fdtable.set_fd_cloexec(write_fd, true);
     }
 
-    // Write fd pair to userspace via copy_to_user (fault-safe)
+    // Write fd pair to userspace via the exception-table copy (fault-safe)
     let fds: [i32; 2] = [read_fd as i32, write_fd as i32];
-    let uncopied = unsafe {
-        crate::arch::uaccess::copy_to_user(
-            pipefd as *mut u8,
-            fds.as_ptr() as *const u8,
-            core::mem::size_of::<[i32; 2]>(),
-        )
-    };
+    let mut fds_bytes = [0u8; 8];
+    fds_bytes[0..4].copy_from_slice(&fds[0].to_le_bytes());
+    fds_bytes[4..8].copy_from_slice(&fds[1].to_le_bytes());
+    let uncopied = crate::arch::uaccess_safe::copy_out(pipefd, &fds_bytes);
     if uncopied != 0 {
         fdtable.close_fd(read_fd as usize);
         fdtable.close_fd(write_fd as usize);
@@ -1995,56 +1992,50 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
 /// - args[5]: flags - SPLICE_F_MOVE, SPLICE_F_NONBLOCK, etc.
 pub fn sys_splice(args: SyscallArgs) -> i64 {
     let fd_in = args[0] as i32;
-    let off_in = args[1] as *mut i64;
+    let off_in = args[1] as usize;
     let fd_out = args[2] as i32;
-    let off_out = args[3] as *mut i64;
+    let off_out = args[3] as usize;
     let len = args[4] as usize;
     let _flags = args[5] as u32;
 
     if len == 0 { return 0; }
-
-    use crate::fs::get_file_fd;
 
     // Read the caller-provided offsets through the exception-table copy
     // path — bare dereferences of user pointers fault the kernel (review批次1).
     // A non-NULL offset drives position-invariant I/O and must NOT disturb
     // the fd's own position (Linux semantics).
     let mut in_off: Option<u64> = None;
-    if !off_in.is_null() {
-        if !crate::arch::uaccess::access_ok(off_in as usize, 8) {
+    if off_in != 0 {
+        if !crate::arch::uaccess::access_ok(off_in, 8) {
             return -errno::EFAULT as i64;
         }
-        let mut v: i64 = 0;
-        // SAFETY: off_in validated with access_ok(8); copies 8 bytes to a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut v as *mut i64 as *mut u8, off_in as *const u8, 8) } > 0 {
+        // (off_in validated with access_ok(8) above.)
+        let Some(v) = crate::arch::uaccess_safe::read_user::<i64>(off_in) else {
             return -errno::EFAULT as i64;
-        }
+        };
         if v < 0 { return -errno::EINVAL as i64; }
         in_off = Some(v as u64);
     }
     let mut out_off: Option<u64> = None;
-    if !off_out.is_null() {
-        if !crate::arch::uaccess::access_ok(off_out as usize, 8) {
+    if off_out != 0 {
+        if !crate::arch::uaccess::access_ok(off_out, 8) {
             return -errno::EFAULT as i64;
         }
-        let mut v: i64 = 0;
-        // SAFETY: off_out validated with access_ok(8); copies 8 bytes to a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut v as *mut i64 as *mut u8, off_out as *const u8, 8) } > 0 {
+        // (off_out validated with access_ok(8) above.)
+        let Some(v) = crate::arch::uaccess_safe::read_user::<i64>(off_out) else {
             return -errno::EFAULT as i64;
-        }
+        };
         if v < 0 { return -errno::EINVAL as i64; }
         out_off = Some(v as u64);
     }
 
-    // SAFETY: get_file_fd returns valid File or None; offsets already read into kernel memory.
-    unsafe {
-        let in_file = match get_file_fd(fd_in as usize) {
+    // Offsets already read into kernel memory.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(fd_out as usize) {
+        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2055,7 +2046,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
         // Linux do_splice(): one of the two ends must be a pipe.
         if ipipe.is_some() && opipe.is_some() {
             // pipe → pipe
-            if !off_in.is_null() || !off_out.is_null() {
+            if off_in != 0 || off_out != 0 {
                 return -errno::ESPIPE as i64;
             }
             if core::ptr::eq(ipipe.unwrap() as *const _, opipe.unwrap() as *const _) {
@@ -2067,7 +2058,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let mut buf = alloc::vec![0u8; chunk];
                 // Consume from the input pipe (File::read carries the
                 // blocking/EOF semantics of pipe_file_read).
-                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                let n = in_file.read_slice(&mut buf[..chunk]);
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
                     break;
@@ -2076,7 +2067,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 // blocks until written; EPIPE propagates).
                 let mut w = 0usize;
                 while w < n as usize {
-                    let r = out_file.write(buf.as_ptr().add(w), n as usize - w);
+                    let r = out_file.write_slice(&buf[w..n as usize]);
                     if r <= 0 {
                         if r < 0 && total == 0 && w == 0 { return r as i64; }
                         // Reader died mid-transfer: report what moved.
@@ -2093,7 +2084,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 
         if let Some(_pipe) = ipipe {
             // pipe → file (Linux ipipe branch).
-            if !off_in.is_null() {
+            if off_in != 0 {
                 return -errno::ESPIPE as i64;
             }
             if in_file.flags().is_writeonly() {
@@ -2111,7 +2102,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             while total < len {
                 let chunk = core::cmp::min(len - total, 8192);
                 let mut buf = alloc::vec![0u8; chunk];
-                let n = in_file.read(buf.as_mut_ptr(), chunk);
+                let n = in_file.read_slice(&mut buf[..chunk]);
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
                     break; // EOF
@@ -2120,9 +2111,9 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let mut written = 0usize;
                 while written < n {
                     let w = match out_off {
-                        Some(off) => out_file.write_at(off + total as u64 + written as u64,
-                                                       buf.as_ptr().add(written), n - written),
-                        None => out_file.write(buf.as_ptr().add(written), n - written),
+                        Some(off) => out_file.write_at_slice(off + total as u64 + written as u64,
+                                                       &buf[written..n]),
+                        None => out_file.write_slice(&buf[written..n]),
                     };
                     if w <= 0 {
                         if total + written > 0 {
@@ -2146,7 +2137,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 
         if let Some(_pipe) = opipe {
             // file → pipe (Linux opipe branch).
-            if !off_out.is_null() {
+            if off_out != 0 {
                 return -errno::ESPIPE as i64;
             }
             if in_file.flags().is_writeonly() {
@@ -2164,7 +2155,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
             if in_file.flags().bits() & O_PATH_RISCV != 0 {
                 return -errno::EBADF as i64;
             }
-            if let Some(inode) = (*in_file.inode.get()).as_ref() {
+            if let Some(inode) = in_file.get_inode() {
                 if inode.mode.is_directory() {
                     return -errno::EBADF as i64;
                 }
@@ -2183,8 +2174,8 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let chunk = core::cmp::min(len - total, 8192);
                 let mut buf = alloc::vec![0u8; chunk];
                 let n = match in_off {
-                    Some(off) => in_file.read_at(off, buf.as_mut_ptr(), chunk),
-                    None => in_file.read(buf.as_mut_ptr(), chunk),
+                    Some(off) => in_file.read_at_slice(off, &mut buf[..chunk]),
+                    None => in_file.read_slice(&mut buf[..chunk]),
                 };
                 if n <= 0 {
                     if n < 0 && total == 0 { return n as i64; }
@@ -2193,7 +2184,7 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
                 let n = n as usize;
                 let mut written = 0usize;
                 while written < n {
-                    let w = out_file.write(buf.as_ptr().add(written), n - written);
+                    let w = out_file.write_slice(&buf[written..n]);
                     if w <= 0 {
                         if total + written > 0 {
                             return writeback_and_return(
@@ -2216,29 +2207,26 @@ pub fn sys_splice(args: SyscallArgs) -> i64 {
 }
 
 /// Publish the consumed offsets (splice off_in/off_out contract) and return
-/// the byte count. SAFETY: both pointers were access_ok(8)-validated by the
-/// caller before any copy.
-unsafe fn writeback_and_return(
-    off_in: *mut i64,
+/// the byte count. Both addresses were access_ok(8)-validated by the caller
+/// before any copy; the stores go through the exception-table copy, so a
+/// racing unmap surfaces as EFAULT, never a kernel fault.
+fn writeback_and_return(
+    off_in: usize,
     in_off: Option<u64>,
-    off_out: *mut i64,
+    off_out: usize,
     out_off: Option<u64>,
     ret: i64,
 ) -> i64 {
-    if !off_in.is_null() {
+    if off_in != 0 {
         if let Some(off) = in_off {
-            let v = off as i64;
-            if crate::arch::uaccess::copy_to_user(
-                off_in as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+            if crate::arch::uaccess_safe::copy_out(off_in, &(off as i64).to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
     }
-    if !off_out.is_null() {
+    if off_out != 0 {
         if let Some(off) = out_off {
-            let v = off as i64;
-            if crate::arch::uaccess::copy_to_user(
-                off_out as *mut u8, &v as *const i64 as *const u8, 8) > 0 {
+            if crate::arch::uaccess_safe::copy_out(off_out, &(off as i64).to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
@@ -2274,14 +2262,13 @@ pub fn sys_tee(args: SyscallArgs) -> i64 {
         return -errno::EINVAL as i64;
     }
 
-    use crate::fs::get_file_fd;
-    // SAFETY: get_file_fd returns valid File references for the fds.
-    unsafe {
-        let in_file = match get_file_fd(fd_in as usize) {
+    // get_file_fd_safe returns valid File references for the fds.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(fd_in as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(fd_out as usize) {
+        let out_file = match crate::fs::file::get_file_fd_safe(fd_out as usize) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2324,7 +2311,7 @@ pub fn sys_tee(args: SyscallArgs) -> i64 {
 /// - args[3]: flags - SPLICE_F_MOVE/NONBLOCK/MORE/GIFT
 pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     let fd = args[0] as i32;
-    let iov_ptr = args[1] as *const u8;
+    let iov_addr = args[1] as usize;
     let nr_segs = args[2] as usize;
     let flags = args[3] as u32;
 
@@ -2342,20 +2329,17 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     if nr_segs > IOV_MAX {
         return -errno::EINVAL as i64;
     }
-    if iov_ptr.is_null() {
+    if iov_addr == 0 {
         return -errno::EFAULT as i64;
     }
-    if !crate::arch::uaccess::access_ok(iov_ptr as usize, nr_segs * 16) {
+    if !crate::arch::uaccess::access_ok(iov_addr, nr_segs * 16) {
         return -errno::EFAULT as i64;
     }
 
     // Copy the iovec array in (16 bytes per entry on LP64).
     let mut raw = alloc::vec![0u8; nr_segs * 16];
-    // SAFETY: iov_ptr validated with access_ok above; exception-table copy.
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), iov_ptr, nr_segs * 16)
-    } != 0
-    {
+    // (iov_addr validated with access_ok above; exception-table copy.)
+    if crate::arch::uaccess_safe::copy_in(&mut raw, iov_addr) != 0 {
         return -errno::EFAULT as i64;
     }
     let mut iovs: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::with_capacity(nr_segs);
@@ -2375,8 +2359,7 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
     }
 
     // fd must be a pipe (Linux get_pipe_info failure → EBADF).
-    // SAFETY: get_file_fd returns a valid Arc<File> or None.
-    let file = match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+    let file = match crate::fs::file::get_file_fd_safe(fd as usize) {
         Some(f) => f,
         None => return -errno::EBADF as i64,
     };
@@ -2410,10 +2393,9 @@ pub fn sys_vmsplice(args: SyscallArgs) -> i64 {
 ///
 /// - RISC-V: 40
 pub fn sys_sendfile(args: SyscallArgs) -> i64 {
-    use crate::fs::get_file_fd;
     let out_fd = args[0] as usize;
     let in_fd = args[1] as usize;
-    let offset_ptr = args[2] as *mut i64;
+    let offset_ptr = args[2] as usize;
     let count = args[3] as usize;
 
     // Validate count
@@ -2424,30 +2406,27 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
     // Validate offset pointer and read its value through the exception-table
     // copy path (review批次1: bare dereference of a user pointer).
     let mut saved_offset: i64 = 0;
-    if !offset_ptr.is_null() {
-        if !crate::arch::uaccess::access_ok(offset_ptr as usize, core::mem::size_of::<i64>()) {
+    if offset_ptr != 0 {
+        if !crate::arch::uaccess::access_ok(offset_ptr, core::mem::size_of::<i64>()) {
             return -errno::EFAULT as i64;
         }
-        // SAFETY: offset_ptr validated with access_ok(8); copies into a stack i64.
-        if unsafe { crate::arch::uaccess::copy_from_user(
-            &mut saved_offset as *mut i64 as *mut u8,
-            offset_ptr as *const u8,
-            core::mem::size_of::<i64>(),
-        ) } > 0 {
-            return -errno::EFAULT as i64;
+        // (offset_ptr validated with access_ok(8) above.)
+        match crate::arch::uaccess_safe::read_user::<i64>(offset_ptr) {
+            Some(v) => saved_offset = v,
+            None => return -errno::EFAULT as i64,
         }
         if saved_offset < 0 {
             return -errno::EINVAL as i64;
         }
     }
 
-    // SAFETY: get_file_fd returns valid File or None; offset already read into kernel memory.
-    unsafe {
-        let in_file = match get_file_fd(in_fd) {
+    // Offset already read into kernel memory.
+    {
+        let in_file = match crate::fs::file::get_file_fd_safe(in_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
-        let out_file = match get_file_fd(out_fd) {
+        let out_file = match crate::fs::file::get_file_fd_safe(out_fd) {
             Some(f) => f,
             None => return -errno::EBADF as i64,
         };
@@ -2455,7 +2434,7 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
         // With a non-NULL offset, sendfile(2) reads from that offset and
         // leaves the fd's own position untouched (the old code set_pos'd the
         // shared position mid-transfer and only restored it on success).
-        let use_offset = !offset_ptr.is_null();
+        let use_offset = offset_ptr != 0;
         let mut cur_off = saved_offset as u64;
 
         // Transfer data in chunks
@@ -2472,9 +2451,9 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
             }
 
             let n_read = if use_offset {
-                in_file.read_at(cur_off, tmp_buf.as_mut_ptr(), to_read)
+                in_file.read_at_slice(cur_off, &mut tmp_buf[..to_read])
             } else {
-                in_file.read(tmp_buf.as_mut_ptr(), to_read)
+                in_file.read_slice(&mut tmp_buf[..to_read])
             };
             if n_read <= 0 {
                 break;
@@ -2483,16 +2462,15 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
 
             let mut written: usize = 0;
             while written < n_read {
-                let n_write = out_file.write(tmp_buf.as_ptr().add(written), n_read - written);
+                let n_write = out_file.write_slice(&tmp_buf[written..n_read]);
                 if n_write <= 0 {
                     // Publish progress through the caller's offset before bailing.
                     if use_offset && total_transferred + written > 0 {
                         let v = (cur_off + written as u64) as i64;
-                        // SAFETY: offset_ptr validated with access_ok(8) above.
-                        crate::arch::uaccess::copy_to_user(
-                            offset_ptr as *mut u8,
-                            &v as *const i64 as *const u8,
-                            core::mem::size_of::<i64>(),
+                        // (offset_ptr validated with access_ok(8) above.)
+                        crate::arch::uaccess_safe::copy_out(
+                            offset_ptr,
+                            &v.to_le_bytes(),
                         );
                     }
                     // Linux do_sendfile: an error on the FIRST write attempt
@@ -2511,15 +2489,11 @@ pub fn sys_sendfile(args: SyscallArgs) -> i64 {
             remaining -= written;
         }
 
-        // Update offset through copy_to_user (fd position untouched)
+        // Update offset through the exception-table copy (fd position untouched)
         if use_offset {
             let v = cur_off as i64;
-            // SAFETY: offset_ptr validated with access_ok(8) above.
-            if crate::arch::uaccess::copy_to_user(
-                offset_ptr as *mut u8,
-                &v as *const i64 as *const u8,
-                core::mem::size_of::<i64>(),
-            ) > 0 {
+            // (offset_ptr validated with access_ok(8) above.)
+            if crate::arch::uaccess_safe::copy_out(offset_ptr, &v.to_le_bytes()) > 0 {
                 return -errno::EFAULT as i64;
             }
         }
