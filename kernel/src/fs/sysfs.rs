@@ -1093,6 +1093,15 @@ pub fn register_drm_device(slot_name: &str) {
         ("subsystem_device", "0x1100\n"),  // QEMU generic subsystem device
         ("class", "0x030000\n"),           // PCI_CLASS_DISPLAY_VGA
         ("revision", "0x00\n"),
+        // boot_vga=1: this function IS the boot display (the kernel's
+        // fb0/console scanout lives on it). Reference kernels export
+        // boot_vga on the firmware-selected display's PCI function and
+        // gdm's seat0 settle check (gdm-local-display-factory
+        // udev_is_settled) reads exactly this sysattr on the DRM card's
+        // PCI parent: without it the adapter looks "secondary" and gdm
+        // idles in its 10 s retry loop until the graphics-check timeout
+        // fires (~60 s per boot on this machine).
+        ("boot_vga", "1\n"),
     ] {
         let val = String::from(v);
         attr_ro(&func, nm, move || val.as_bytes().to_vec());
