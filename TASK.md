@@ -192,43 +192,74 @@ the local_hmdfs option) → StartUser should return E_OK.
    deliveries to accountmgr appear right after subscription on good
    boots.)
 
-### SWITCH_ROOT MOUNT HUNT (lb3-lb9, final state of this session)
-The hmdfs image fix was necessary but NOT sufficient. The next layer:
-- Kernel-confirmed (lb4-lb9, mkdirfail widened): pid 1's mkdir
-  '/mnt/sandbox/system/vendor' -> EROFS at ~4.6s and mkdir
-  '/storage/media' -> ENOENT at ~9.8s; storage_daemon (pid 324)
-  StartUser(100) mkdirs '/storage/media/100*' fail -2 the same way
-  (kernel errno), so StartUser fails → UnlockUser 13600721 → no AMS
-  StartUser(100) → no launcher, on EVERY boot regardless of the
-  accountmgr-callback race.
-- OH switch_root mechanics (lb6 MSMOVE map): first-stage init mounts
-  tmpfs on /mnt,/mnt/data,/storage (ramdisk root, ~1.1s), MS_MOVEs
-  /dev,/proc,/sys,/run,/mnt,/mnt/data,/storage into /usr/*, then
-  MS_MOVEs /usr onto / and chroots. All 8 moves now print (MSMOVE tap;
-  MS_MOVE returns before the generic mount tap, which hid them before).
-  /proc/mounts ORDER decides parent-before-child; lb5's boot had the
-  bad order and the /mnt/data move failed err=2 (mnt-precheck-fail
-  would now name it); lb6+ had the good order.
-- PROVEN CORRECT (SWROOT-CHILDREN + WALKPROBE taps, lb7/lb9): after the
-  /usr→/ overlay the VFS root's children are dev/mnt/proc/run/storage/
-  sys, ALL with (M) mounts; task root == VFS root (same pointer),
-  procroot '/', vfsroot-storage-mount=true vfsroot-mnt-mount=true AT
-  THE MOMENT of the failing walk.
-- STILL BROKEN: the per-component resolution inside path_lookup /
-  lookup_parent_dir for 'mnt'/'storage' lands on the read-only ext4
-  inode instead of crossing the mount. NEXT PROBE: inside path_lookup's
-  component loop, for components named mnt/storage at depth 1, print
-  lookup_child ptr + has-mount + follow_mount result (inode ptr/fstype)
-  + the parent-vpath the mkdir actually used (vfs_mkdir stage trace).
-  Suspects: VfsPath/dentry identity mismatch between the walk and
-  file_mkdir's parent, or the mount's root dentry inode being swapped
-  by the root overlay (root.set_inode(inode) mutates the ROOT dentry's
-  inode — mnt.root's dentry is the same object as the pre-overlay /usr
-  mount root; check whether the moved mounts' roots got their inodes
-  clobbered by rehome/set_inode interplay).
-- ALSO still open (independent): the accountmgr OnAddSystemAbility
-  race (bad boots: lb1/lb4-style, zero ABCM retries, no user creation;
-  good boots: sysc1/lb2/lb3/lb5). SACB tap in place to catch the loss.
+### SWITCH_ROOT MOUNT HUNT — RESOLVED (2026-10-31 15h session, commits a3e6e27e + 88d92fa9 + 261e3325)
+
+The "per-component resolution" theory was WRONG — the mounts were fine. The real
+chain, fully proven on boot lb10 (serial run/oh-lb10-serial.log, shots oh-lb10-shot-*):
+
+1. **The walk never reached the mounts because pid 1 was JAILED.** OH's
+   `make sandbox system` (DoMkSandbox) = InitDefaultNamespace(open
+   /proc/self/ns/mnt) + unshare(CLONE_NEWNS) + PrepareSandbox (the ~30 binds +
+   pivot_root(sandbox, sandbox) + umount2(".", MNT_DETACH)) + **EnterDefaultNamespace
+   (setns back to the pre-pivot ns)**. On Rux ALL THREE legs failed:
+   a. pivot_root is JAIL-style (fs root prefix on the shared dentry tree) —
+      after it, init's root = /mnt/sandbox/system.
+   b. open("/proc/self/ns/mnt") from the jailed task ENOENTed — the ns magic
+      link resolves via the STRING walk ("mnt:[N]" is not a path) and the
+      syscall-layer ns shortcut skips chrooted tasks. So g_defaultNs was -1.
+   c. setns(CLONE_NEWNS) never reset the jail root. Init stayed in the sandbox
+      FOREVER → /storage,/mnt/... resolve inside the sandbox (system-sandbox.json
+      has NO storage bind) → mkdir /storage/media ENOENT → StartUser fail.
+2. **FIXES (a3e6e27e)**: ns magic links are TERMINAL in follow_symlink (like fd
+   links) and file_open builds the ns fd from the (pid,kind) inode — works
+   jailed; MountNamespace.root now records the pivot target; setns(CLONE_NEWNS)
+   re-anchors: pivoted task → non-pivoted ns = root back to "/", entering a
+   pivoted ns = root to the ns pivot root (root_is_pivot flag; plain chroot
+   keeps its jail); CLONE_NEWNS inherits the parent's pivot anchor.
+3. **FIXES (88d92fa9)**: MS_MOVE source walk now crosses mounts on intermediate
+   components (/mnt/data move was ENOENT); vfs_mkdir/mknod/symlink decide EEXIST
+   BEFORE the EROFS guard (reference order) — OH's MakeDirRecursive over the ro
+   /vendor bind needs EEXIST.
+4. **PROVEN on lb10**: setns-mnt taps show pid 1 reset to '/' after BOTH sandbox
+   pivots; chipset sandbox now prepares (it failed at InitSandbox before);
+   service children re-anchor into the sandbox ns; mkdir /storage/media SUCCEEDS;
+   StorageDaemon StartUser(100) completes ("SD_DURATION: START USER: delay time
+   = 106 ms" on lb14); PrepareUserDirs(100) runs; bootanimation plays and
+   finishes; bootevent.appfwk.ready set. Ladder steps 1-3 of the charter: DONE.
+
+### CURRENT BLOCKER (lb10-lb14): the PERF wall + two OH-side holes under it
+- **lb10** (loud, smp2): install stream ok; foundation #1 (pid 976) runs the
+  account phase, launcher start in flight → at 385s foundation is KILLED BY ITS
+  OWN DFX watchdog ('OS_DfxIpcCheck' group-kills 41 threads — IPC stall >6s
+  under the 26x slowdown). Restarted foundation #2's ABCM restore loop queries
+  BMS with **userId 0** (foreground user never set: GetForegroundOsAccountLocalId
+  fails — 249 hits) → 8521220 forever → **the launcher app is NEVER spawned**
+  ("restart ability" x134, no comm='com.ohos.launcher' process ever exists).
+  The userId-0 is OH-side (AMS restart path defaults to foreground user); on the
+  reference kernel foundation never dies so the path never runs.
+- **lb12** (quiet loglevel=3, smp4): WORSE — black screen past 544s. 4 CPUs on
+  the GRQ kernel = contention regression. Do not use smp4 for OH boots.
+- **lb13/lb14** (quiet, smp2): ~1.7-2x faster early (bootanimation.ready 226s
+  vs 240s, finished 236s vs 294s, appfwk.ready 328s vs 401s, StartUser(100)
+  completes at 352s in 106ms). THEN the state-dependent IPC collapse: SLOW-TXN
+  foundation→samgr code 7 grow to 28-30s exec each (lb14 486-855s), WAKE-STRANDED
+  1-2.6s with incumbents at preempt_count 1-2, PARKED-LEAK prints (pids 314/546
+  park with pc=1). account.ready never lands; screen keeps the frozen logo.
+- The quiet-console lever is real but bounded: loglevel=3 kills ~120k tap lines
+  (cow 40k, hilog echoes 39k, MREMAP 15k, FXRS 8k) pre-format; the heavy taps
+  are now pr_debug (261e3325) so LOGLEVEL=6 boots keep [kmsg] markers + kill
+  traces without the flood. lb-boot.py takes SMP= and LOGLEVEL= env now.
+- NEXT for this lane (or perf lane): the post-StartUser stall is the census's
+  "deviceauth 129s / asset_service 135s DATA_SHARE_READY / futex 17→108ms"
+  wall — it is NOT serial tax (quiet boot still collapses). Suspects named by
+  the taps: futex wakes stranded behind preempt_count>0 sections (1-2.6s!),
+  PARKED-LEAK (park with pc=1), samgr 30s serial txns. This is guarded-domain
+  sched work; any fix needs the perf gate before main.
+
+### Boot recipe (current)
+`LOGLEVEL=6 python3 run/lb-boot.py <tag> 2400 run/system-lb.img target/x86_64-unknown-none/debug/bzImage`
+(smp2 default; do NOT smp4). Markers + kill traces visible, tap flood demoted.
+test/rootfs.img must exist for `make test` (copy from the main repo if missing).
 
 ### PERF CENSUS (syscost=1 boot sysc1, dumps at t=60/120/180/240s) — handoff
 for the perf lane (guarded domains: sched + fs + ipc; raw log:
