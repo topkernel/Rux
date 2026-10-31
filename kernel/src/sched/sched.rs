@@ -4393,14 +4393,35 @@ pub fn scheduler_tick() {
     // task + count after 2 s, clear when the count drains. Direct
     // console, rate-gated — this runs from the timer tick.
     {
-        static LEAK_TASK: [core::sync::atomic::AtomicU64;
-            crate::config::MAX_CPUS] =
-            [const { core::sync::atomic::AtomicU64::new(0) };
-                crate::config::MAX_CPUS];
-        static LEAK_SINCE: [core::sync::atomic::AtomicU64;
-            crate::config::MAX_CPUS] =
-            [const { core::sync::atomic::AtomicU64::new(0) };
-                crate::config::MAX_CPUS];
+        // Rotation-proof leak window (sc41, 2026-10-31): the window is
+        // keyed by TASK, not by (cpu, task). The old per-CPU window
+        // reset on every CPU switch, and the sc41 rotation storm —
+        // several leak carriers cycling the CPUs every few ms (census:
+        // activations of 0 ms, incumbents 319/564/601/1348 alternating,
+        // ~27K picks/s) — kept it permanently reset: PREEMPT-HEAL fired
+        // ZERO times in 380 s while carriers held base counts for the
+        // whole boot and pid 1 stranded up to 48 s. A per-task window
+        // survives migration and rotation, and the 200-observation bar
+        // is CUMULATIVE across leak episodes (sc42: carriers whose
+        // counts flip leak→drain→re-leak starve any consecutive-samples
+        // bar exactly like the per-CPU window did) — every real guard
+        // section is microseconds, so the bar keeps a five-order margin
+        // under any continuity shape (a336568f's evidence).
+        const LEAK_SLOTS: usize = 16;
+        struct LeakWin {
+            task: core::sync::atomic::AtomicU64,
+            first: core::sync::atomic::AtomicU64,
+            last: core::sync::atomic::AtomicU64,
+        }
+        static LEAK_WIN: [LeakWin; LEAK_SLOTS] = {
+            #[allow(clippy::declare_interior_mutable_const)]
+            const ZERO: LeakWin = LeakWin {
+                task: core::sync::atomic::AtomicU64::new(0),
+                first: core::sync::atomic::AtomicU64::new(0),
+                last: core::sync::atomic::AtomicU64::new(0),
+            };
+            [ZERO; LEAK_SLOTS]
+        };
         static LEAK_LAST_PRINT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         if cpu_id < crate::config::MAX_CPUS {
@@ -4408,14 +4429,56 @@ pub fn scheduler_tick() {
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
-                let slot = &LEAK_TASK[cpu_id];
-                let since = &LEAK_SINCE[cpu_id];
                 if pc != 0 {
                     let now = crate::drivers::timer::get_jiffies();
-                    let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
-                    if task_word == cur as usize as u64 {
-                        let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
-                        if t0 != 0
+                    let task_word = cur as usize as u64;
+                    // Find-or-claim this task's window slot: first slot
+                    // naming it, else the first empty, else evict the
+                    // least-recently observed. Claim races between two
+                    // CPUs are benign — a lost claim delays one window.
+                    let mut w = &LEAK_WIN[0];
+                    let mut lru_last: u64 = u64::MAX;
+                    for s in LEAK_WIN.iter() {
+                        let t = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                        if t == task_word || t == 0 {
+                            w = s;
+                            break;
+                        }
+                        let l = s.last.load(core::sync::atomic::Ordering::Relaxed);
+                        if l < lru_last {
+                            lru_last = l;
+                            w = s;
+                        }
+                    }
+                    let same = w.task.load(core::sync::atomic::Ordering::Relaxed)
+                        == task_word;
+                    let mut t0 = if same {
+                        w.first.load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        0
+                    };
+                    // Cumulative bar (sc42 refinement): the window
+                    // accumulates across EPISODES, not consecutive
+                    // samples — sc42 showed carrier 319's count flips
+                    // (leak, drain via pick-zero, re-leak) with clean
+                    // gaps long enough that any consecutive-samples bar
+                    // starves exactly like the per-CPU window did, while
+                    // each episode still stranded pid 1. The statistical
+                    // argument survives the relaxation: every real guard
+                    // section is microseconds, so 200 tick observations
+                    // of this task holding a base count — under ANY
+                    // continuity shape — is still five orders of
+                    // magnitude beyond a legitimate holder, and a false
+                    // heal's later guard drop underflow-clamps at zero
+                    // and REPORTS (sub_preempt_count_at) instead of
+                    // silently poisoning.
+                    if t0 == 0 {
+                        t0 = now;
+                    }
+                    w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
+                    w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
+                    w.last.store(now, core::sync::atomic::Ordering::Relaxed);
+                    if t0 != 0
                             && now.wrapping_sub(t0) >= 200
                             // Serial-noise policy: the periodic PREEMPT-LEAK
                             // reporter is a hunt instrument (dfx=wwcensus),
@@ -4508,11 +4571,16 @@ pub fn scheduler_tick() {
                                 crate::dfx::leakorigin::report_incumbent_site(cur);
                             }
                         }
-                        // PREEMPT-HEAL (round 3c): a TASK-context base
-                        // count held for 10 s continuously is a phantom
-                        // — every real guard section is microseconds, and
-                        // the only 10 s holds in task context are the
-                        // unsleepable-monopoly wedges themselves. Zero it
+                        // PREEMPT-HEAL (round 3c, bound 10 s -> 2 s by
+                        // a336568f, rotation-proofed by sc41): a
+                        // TASK-context base count held for 2 s
+                        // continuously is a phantom — every real guard
+                        // section is microseconds, and the only
+                        // multi-second holds in task context are the
+                        // unsleepable-monopoly wedges themselves. The
+                        // sc41 rotation storm proved the per-CPU window
+                        // could never mature; the per-task window above
+                        // now keeps the bar honest. Zero it
                         // (this runs in the tick IRQ on the task's own
                         // CPU, so the task cannot be concurrently inside
                         // a count mutation; other CPUs only ever add via
@@ -4525,7 +4593,7 @@ pub fn scheduler_tick() {
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                        if base != 0 && now.wrapping_sub(t0) >= 200 {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -4544,8 +4612,9 @@ pub fn scheduler_tick() {
                             // Re-arm: next nonzero observation starts a
                             // fresh window instead of re-healing each
                             // tick.
-                            slot.store(0, core::sync::atomic::Ordering::Relaxed);
-                            since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.task.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.first.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.last.store(0, core::sync::atomic::Ordering::Relaxed);
                             use crate::console::putchar_no_lock as putchar;
                             fn ph(v: u64) {
                                 use crate::console::putchar_no_lock as putchar;
@@ -4580,20 +4649,9 @@ pub fn scheduler_tick() {
                             ph(now.wrapping_sub(t0));
                             putchar(b'\n');
                         }
-                    } else {
-                        slot.store(
-                            cur as usize as u64,
-                            core::sync::atomic::Ordering::Relaxed);
-                        since.store(
-                            crate::drivers::timer::get_jiffies(),
-                            core::sync::atomic::Ordering::Relaxed);
                     }
-                } else {
-                    slot.store(0, core::sync::atomic::Ordering::Relaxed);
-                    since.store(0, core::sync::atomic::Ordering::Relaxed);
                 }
             }
-        }
     }
 
     // Kernel-preemption hunt round 3 (2026-10-21, sc69+): sc69 falsified
