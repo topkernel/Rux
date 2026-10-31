@@ -63,25 +63,25 @@ fn who() -> (u32, &'static str) {
 /// TX: `sendmsg` attached `n` fds.
 pub fn tap_tx(n: usize) {
     let (pid, comm) = who();
-    crate::pr_info!("SCMTAP TX pid={}({}) nfds={}", pid, comm, n);
+    crate::pr_err!("SCMTAP TX pid={}({}) nfds={}", pid, comm, n);
 }
 
 /// TX parse failure: the sendmsg returned before queuing anything.
 pub fn tap_tx_err(err: i64) {
     let (pid, comm) = who();
-    crate::pr_info!("SCMTAP TXERR pid={}({}) err={}", pid, comm, err);
+    crate::pr_err!("SCMTAP TXERR pid={}({}) err={}", pid, comm, err);
 }
 
 /// RX: `recvmsg` installed these new fds.
 pub fn tap_rx(new_fds: &[i32]) {
     let (pid, comm) = who();
-    crate::pr_info!("SCMTAP RX pid={}({}) fds={:?}", pid, comm, new_fds);
+    crate::pr_err!("SCMTAP RX pid={}({}) fds={:?}", pid, comm, new_fds);
 }
 
 /// RX failure: the attached fds were closed instead of delivered.
 pub fn tap_rx_drop(reason: &str, n: usize) {
     let (pid, comm) = who();
-    crate::pr_info!(
+    crate::pr_err!(
         "SCMTAP DROP-{} pid={}({}) nfds={}",
         reason,
         pid,
@@ -93,7 +93,7 @@ pub fn tap_rx_drop(reason: &str, n: usize) {
 /// A socket closed with fds still queued in its receive queue.
 pub fn tap_orphan(nfds: usize, segs: usize) {
     let (pid, comm) = who();
-    crate::pr_info!(
+    crate::pr_err!(
         "SCMTAP ORPHAN pid={}({}) nfds={} segs={}",
         pid,
         comm,
@@ -105,7 +105,7 @@ pub fn tap_orphan(nfds: usize, segs: usize) {
 /// The last writer of a fifo closed it — logind's EPOLLHUP moment.
 pub fn tap_fifo_last_writer(fs_id: u64, ino: u64) {
     let (pid, comm) = who();
-    crate::pr_info!(
+    crate::pr_err!(
         "SCMTAP FIFO-LASTWRITER pid={}({}) fifo={}:{}",
         pid,
         comm,
