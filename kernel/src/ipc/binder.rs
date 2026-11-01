@@ -6318,6 +6318,41 @@ fn binder_transaction(
                 target_thread_key = Some((from_proc, from_tid));
                 target_proc = Some(target_thread_key.as_ref().unwrap().0.clone());
                 allows_fd = t.flags & TF_ACCEPT_FDS != 0;
+                // lb61 (ninth successor): name the CLIENT of every poison
+                // reply. The server-side STATUSCODE-REPLY tap cannot see
+                // who receives the 32; this site has the originating txn
+                // (from_proc/from_tid + the ORIGINAL request code), so the
+                // print names the exact proxy that gets death-marked by
+                // IPCObjectProxy::SendRequestInner on the client side.
+                if ams46_on()
+                    && tr.flags & _TF_STATUS_CODE != 0
+                    && tr.data_size >= 4
+                {
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val == 32 {
+                        static P32_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 400 {
+                            let (fproc, ftid) = target_thread_key.as_ref().unwrap();
+                            crate::pr_warn!(
+                                "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
+                                proc.pid,
+                                thread.tid,
+                                fproc.pid,
+                                ftid,
+                                t.code
+                            );
+                        }
+                    }
+                }
                 in_reply_to = Some(t);
             } else if tr.target_handle != 0 {
                 let node = pm(world, proc)
