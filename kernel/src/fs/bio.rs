@@ -2420,77 +2420,79 @@ impl WritePlan {
 /// contributes its entry (H2) — and that entry then pulls its own H1 set.
 /// Converges: every iteration either adds a block or stops.
 ///
-/// Index+worklist closure. One O(mentions) pass maps every entry/post block
-/// of this device to the records mentioning it; a worklist of newly
-/// scheduled blocks then pulls each mention's obligations exactly once —
-/// linear in the mention count. The previous shape rescanned EVERY pending
-/// record against the whole plan every round (O(pend x plan) per round,
-/// O(pend x plan^2) worst case): under the OH image's write churn one
-/// durability point burned 18+ MINUTES of kernel CPU inside this loop
-/// (lb229: distributeddata's OS_IPC_0_912 frozen at push_entry for the
-/// whole 1092s store-load window) — the engine behind the 550-1100s
-/// distributeddata KV loads vs ~40s on a quiet boot. A cond_resched
-/// checkpoint every 64 popped blocks bounds the latency any large closure
-/// adds to the rest of the CPU (the loop body is lock-free, task context).
+/// Round-capped with a conservative fallback — ALLOCATION-FREE on purpose.
+/// The closure is reachable from journal commits and buffer eviction under
+/// spinlocks, so it must not enter the allocator (an earlier index+worklist
+/// version allocated per mention and correlated with whole-boot allocator
+/// class-lock wedges: samgr's workers frozen in RawVec finish_grow for
+/// 293s, lb234/lb235). The unbounded round loop was the original crawl
+/// engine instead: each round rescans every pending record against the
+/// whole plan, and the plan grows a few blocks per round — thousands of
+/// quadratic rounds burned 18+ MINUTES in one durability point (lb229:
+/// distributeddata's OS_IPC_0_912 frozen at push_entry for the whole 1092s
+/// store-load window). Now: at most MAX_ROUNDS cheap rounds, then one
+/// linear conservative pass scheduling EVERY record's pres and entries of
+/// the device (a strict superset of the true closure, same pre->entry
+/// phase discipline) — deep dependency chains cost one linear pass, and
+/// the pathological backlog actually drains. A cond_resched checkpoint
+/// every other round bounds the latency added to the rest of the CPU (the
+/// loop body is lock-free task context).
 fn plan_add_constraints(plan: &mut WritePlan, pend: &[Publication], dev: (u32, u32)) {
-    let mut by_block: alloc::collections::BTreeMap<u64, Vec<usize>> =
-        alloc::collections::BTreeMap::new();
-    for (i, p) in pend.iter().enumerate() {
-        if p.device != dev {
-            continue;
-        }
-        if let Some(e) = p.entry {
-            by_block.entry(e).or_default().push(i);
-        }
-        for &b in &p.post {
-            by_block.entry(b).or_default().push(i);
-        }
-    }
-    let scheduled_len = |pl: &WritePlan| pl.pre.len() + pl.entry.len() + pl.post.len();
-    // Seed with every block already scheduled in any phase (the caller's own
-    // records): H1/H2 trigger on scheduled-ness, not on phase.
-    let mut work: Vec<u64> = plan
-        .pre
-        .iter()
-        .chain(plan.entry.iter())
-        .chain(plan.post.iter())
-        .copied()
-        .collect();
-    let mut batch: u32 = 0;
-    while let Some(b) = work.pop() {
-        batch = batch.wrapping_add(1);
-        if batch % 64 == 0 {
-            crate::sched::cond_resched();
-        }
-        let idxs = match by_block.get(&b) {
-            Some(v) => v,
-            None => continue,
-        };
-        for &i in idxs {
-            let p = &pend[i];
-            // H2: a scheduled block carries this record's frees.
-            if p.post.contains(&b) {
+    const MAX_ROUNDS: usize = 3;
+    for round in 0..MAX_ROUNDS {
+        let mut grew = false;
+        for p in pend {
+            if p.device != dev {
+                continue;
+            }
+            // H2: some block we schedule carries this record's frees.
+            let post_hit = p.post.iter().any(|b| plan.scheduled(*b));
+            if post_hit {
                 if let Some(e) = p.entry {
-                    let before = scheduled_len(plan);
-                    plan.push_entry(e);
-                    if scheduled_len(plan) > before {
-                        work.push(e);
+                    if !plan.scheduled(e) {
+                        plan.push_entry(e);
+                        grew = true;
                     }
                 }
                 // post-only stragglers (entry None) need nothing: the
                 // flush that raced their capture persisted the entry
                 // before the straggler was appended.
             }
-            // H1: a scheduled block IS this record's entry.
-            if p.entry == Some(b) && !plan.scheduled_pre_of(p) {
-                for &pb in &p.pre {
-                    let before = scheduled_len(plan);
-                    plan.push_pre(pb);
-                    if scheduled_len(plan) > before {
-                        work.push(pb);
+            // H1: some block we schedule IS this record's entry.
+            if let Some(e) = p.entry {
+                if plan.scheduled(e) && !plan.scheduled_pre_of(p) {
+                    for &b in &p.pre {
+                        let before = plan.pre.len() + plan.entry.len();
+                        plan.push_pre(b);
+                        if plan.pre.len() + plan.entry.len() > before {
+                            grew = true;
+                        }
                     }
                 }
             }
+        }
+        if !grew {
+            return;
+        }
+        if round % 2 == 1 {
+            crate::sched::cond_resched();
+        }
+    }
+    // Closure not converged within the round cap: the dependency chain is
+    // deep (heavy churn). Schedule EVERY record of the device — a strict
+    // superset of the true closure with the same phase discipline (all
+    // pres, then all entries; posts are only ever written by the owning
+    // flush in the post phase, which now follows every entry). One linear
+    // pass; obligations are force-satisfied early, never late.
+    for p in pend {
+        if p.device != dev {
+            continue;
+        }
+        for &b in &p.pre {
+            plan.push_pre(b);
+        }
+        if let Some(e) = p.entry {
+            plan.push_entry(e);
         }
     }
 }
