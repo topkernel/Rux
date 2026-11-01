@@ -3538,9 +3538,23 @@ pub fn txn_hang_audit() {
         // (the FFRT/IPC worker-exhaustion shape shows as all workers
         // parked as CLIENTS).
         if h.exec_ms >= 20_000 {
-            static HANG_DUMPED: core::sync::atomic::AtomicBool =
-                core::sync::atomic::AtomicBool::new(false);
-            if !HANG_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            // Re-armable once per 600 s (the global one-shot latch spent
+            // itself on an early 20 s samgr txn and went dark exactly when
+            // the real installs hang formed — lb70 lesson).
+            static HANG_DUMP_AT: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now_j = crate::drivers::timer::get_jiffies();
+            let last = HANG_DUMP_AT.load(core::sync::atomic::Ordering::Acquire);
+            if now_j.wrapping_sub(last) >= 60_000
+                && HANG_DUMP_AT
+                    .compare_exchange(
+                        last,
+                        now_j,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
                 crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
                 // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
                 // -> wait_for_used_interruptible, 441 s): capture the

@@ -500,6 +500,68 @@ impl VirtQueue {
                             core::ptr::read_volatile(used_idx_ptr)
                         };
                     }
+                    // lb66 installs hang instrument (2M laps ≈ 40% of the
+                    // poll budget with no completion): one direct-console
+                    // snapshot per call — the poller's own view of the
+                    // rings splits the engine (used advanced past this
+                    // request = delivery loss; chain still at_device =
+                    // submission/kick loss; resp byte stuck at 0xFF with
+                    // the ring drained = descriptor-window reuse).
+                    if _iteration == 2_000_000 {
+                        use crate::console::putchar_no_lock as putchar;
+                        fn pdec(mut v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut buf = [0u8; 20];
+                            let mut n = 0usize;
+                            if v == 0 {
+                                putchar(b'0');
+                                return;
+                            }
+                            while v > 0 && n < buf.len() {
+                                buf[n] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                n += 1;
+                            }
+                            let mut i = n;
+                            while i > 0 {
+                                i -= 1;
+                                putchar(buf[i]);
+                            }
+                        }
+                        for &c in b"\nVW-POLLSTALL slot=" {
+                            putchar(c);
+                        }
+                        pdec(blk_slot as u64);
+                        for &c in b" resp=0x" {
+                            putchar(c);
+                        }
+                        let rv = if resp_status.is_null() {
+                            0xFFu8
+                        } else {
+                            // SAFETY: diagnostic volatile read of the
+                            // caller-owned response byte.
+                            unsafe { core::ptr::read_volatile(resp_status) }
+                        };
+                        pdec(rv as u64);
+                        for &c in b" used=" {
+                            putchar(c);
+                        }
+                        // SAFETY: same idx read as the loop above.
+                        pdec(unsafe {
+                            core::ptr::read_volatile(
+                                (used_ring as usize + 2) as *const u16,
+                            ) as u64
+                        });
+                        for &c in b" prev_used=" {
+                            putchar(c);
+                        }
+                        pdec(prev_used as u64);
+                        for &c in b" pc=0x" {
+                            putchar(c);
+                        }
+                        pdec(crate::interrupt::preempt::preempt_count() as u32 as u64);
+                        putchar(b'\n');
+                    }
                     core::hint::spin_loop();
                     continue;
                 }
