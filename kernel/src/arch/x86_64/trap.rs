@@ -1193,9 +1193,25 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     //
     // kpreempt (cmdline): runtime arm of this hook. Same contract on
     // every arch: kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes the
-    // arch default. x86_64 default: ON (perf-sched lane, 2026-10-31);
-    // the riscv64 twin defaults OFF until its frame discipline is
-    // stabilized (see its comment).
+    // arch default. x86_64 default: OFF (wedge-fix lane, 2026-11-01;
+    // was ON since the perf-sched lane, 2026-10-31). The riscv64 twin
+    // also defaults OFF (frame discipline unstabilized).
+    //
+    // WHY the default went back to OFF: release builds with the hook
+    // armed wedge the OH SA storm (wedge-fix lane, 2026-11-01). At the
+    // perf-sched merge (192bfdce, hook ON by default, release build) the
+    // early SA storm produced 66 both-CPU `DEADLOCK: spinlock stuck`
+    // prints on binder::WORLD with waiters in world_lock(); the SAME
+    // tree booted with `kpreempt=0` shows ZERO deadlock prints and
+    // clean-anchor-level SA progress (SAREG txn 7266 vs clean anchor
+    // 33d007fe's 7213 at 120 s). Same verdict on main tip 4a757d6e
+    // (wfB wedge on binder::WORLD vs wfC clean). The mechanism family
+    // is the documented one below (sc70: hook ON + count leaks =
+    // monopolies) resurfacing under the storm's timing — the hook needs
+    // its own fix before it can be the default again. Re-land
+    // conditions: (1) a release OH SA-storm boot with the hook ON
+    // survives 600 s with zero DEADLOCK prints; (2) the p2f futex
+    // wake->run gains (KVM med 163us -> 9.5us) still hold.
     //
     // The sc70-era amplification verdict (hook ON + preempt_count leaks
     // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
@@ -1226,23 +1242,23 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                 Some(_) => {
                     let v = if crate::cmdline::get_param("kpreempt")
                         .as_deref()
-                        == Some("0")
+                        == Some("1")
                     {
-                        1u8
-                    } else {
                         2u8
+                    } else {
+                        1u8
                     };
                     KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
                     if v == 2 {
                         crate::pr_info!(
-                            "sched: kernel-preempt armed (cpu={})",
+                            "sched: kernel-preempt armed by cmdline (cpu={})",
                             crate::arch::cpu_id()
                         );
                     }
                 }
             }
         }
-        1 => return, // cmdline says off (kpreempt=0)
+        1 => return, // disarmed (cmdline off OR the OFF default; kpreempt=1 arms)
         _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule
