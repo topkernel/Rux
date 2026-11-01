@@ -64,6 +64,10 @@ pub mod metawatch;
 /// Whole-syscall cost table + tick-mode accounting + kernel-rip page
 /// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
 pub mod syscost;
+/// Cached-file read(2) cost anatomy (perf-filerd lane, cmdline
+/// `dfx=filerd`): RDTSC phase counters around the ext4 read fast path,
+/// reported via /proc/filerd; see dfx/filerd.rs.
+pub mod filerd;
 /// pstore-lite: the last panic's record in reserved RAM, re-exposed as
 /// /sys/fs/pstore/console-ramoops-0 after the reboot (Tranche 5); see
 /// dfx/pstore.rs.
@@ -98,6 +102,18 @@ pub mod treehunt;
 /// kernel-stack chain — attributes the leaf of nested-call cascades
 /// (fs stalls behind binder reader exhaustion). See dfx/slowtask.rs.
 pub mod slowtask;
+/// SCM_RIGHTS relay tap (dfx=scmtap, gdm session-fifo hunt): one line
+/// per unix-fd hop/drop plus the fifo last-writer-close line; see
+/// dfx/scmtap.rs.
+pub mod scmtap;
+/// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
+/// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
+/// dfx/forkprof.rs.
+pub mod forkprof;
+/// Lost-park event ring (dfx=lostpark, fix-lostpark lane): last-64
+/// scheduling events around an SMP lost-park wedge, dumped by the
+/// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
+pub mod lostpark;
 
 /// Initialize the DFX subsystem.
 ///

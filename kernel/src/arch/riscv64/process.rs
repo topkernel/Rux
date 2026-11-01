@@ -5,10 +5,12 @@
 
 //! RISC-V process/thread management architecture-specific functions
 //!
-//! Main functions:
-//! - `start_thread`: Start new program with execve
-//! - `copy_thread`: Copy thread state with fork
-//! - `flush_thread`: Clean up thread state
+//! Note: the ACTIVE fork path is the GENERIC copy_thread in
+//! process/fork.rs (frame at Task::pt_regs(), entry via
+//! process::thread_set_entry). The arch copy_thread below is kept for
+//! reference and has no callers; its epc handling matches the live path
+//! (the parent frame's epc is ALREADY past the ecall — trap.rs's
+//! handle_syscall advanced it — so no extra skip here).
 
 use crate::arch::pt_regs::{PtRegs, SR_PIE, SR_FS_INITIAL, SR_FS as SR_FS_MASK};
 use crate::arch::mm::VirtAddr;
@@ -106,9 +108,14 @@ pub unsafe fn copy_thread(
     let child_regs = mem_ptr as *mut PtRegs;
 
     // Copy parent's register state
-    // Note: epc + 4 to skip ecall instruction
+    // The parent frame's epc is ALREADY past the ecall (handle_syscall in
+    // trap.rs advanced it when the trap was taken — by 4 for a 32-bit
+    // ecall, 2 for c.ecall); copying it verbatim, exactly like the live
+    // generic copy_thread in process/fork.rs. The old unconditional +4
+    // here skipped one more instruction in the child (and mis-skipped
+    // compressed ecalls outright).
     core::ptr::write(child_regs, PtRegs {
-        epc: parent_regs.epc + 4,     // Skip ecall instruction
+        epc: parent_regs.epc,          // already past the ecall
         ra: parent_regs.ra,
         sp: parent_regs.sp,           // User stack pointer
         gp: parent_regs.gp,           // Global pointer

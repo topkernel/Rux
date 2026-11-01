@@ -1093,6 +1093,15 @@ pub fn register_drm_device(slot_name: &str) {
         ("subsystem_device", "0x1100\n"),  // QEMU generic subsystem device
         ("class", "0x030000\n"),           // PCI_CLASS_DISPLAY_VGA
         ("revision", "0x00\n"),
+        // boot_vga=1: this function IS the boot display (the kernel's
+        // fb0/console scanout lives on it). Reference kernels export
+        // boot_vga on the firmware-selected display's PCI function and
+        // gdm's seat0 settle check (gdm-local-display-factory
+        // udev_is_settled) reads exactly this sysattr on the DRM card's
+        // PCI parent: without it the adapter looks "secondary" and gdm
+        // idles in its 10 s retry loop until the graphics-check timeout
+        // fires (~60 s per boot on this machine).
+        ("boot_vga", "1\n"),
     ] {
         let val = String::from(v);
         attr_ro(&func, nm, move || val.as_bytes().to_vec());
@@ -1264,8 +1273,35 @@ fn build_tree() -> Arc<KObject> {
     let tty = mk_dir(&class, "tty", KType::Tty);
     add_tty_device(&tty, "console", 5, 1);
     add_tty_device(&tty, "pts", 136, 0);
-    // /sys/class/tty/tty0 — the active VT node tools expect to exist.
-    add_tty_device(&tty, "tty0", 4, 0);
+    // /sys/class/tty/tty0 — the VT master's class node (udev db entry,
+    // dev/uevent attrs) plus the "active" attribute with the CURRENT
+    // VT (Linux shape: "ttyN\n" of the foreground console).
+    //
+    // History: the attribute was deliberately absent from gdmr26 to
+    // gdmr51 — back then the kernel had NO VT layer and logind's
+    // VT-controller startup (console-active watch + SIGRTMIN
+    // VT-switch source + seat_preallocate_vts) wedged before its bus
+    // Hello. With fs/vt.rs now implementing the VT ioctl set the
+    // kernel side is real, and pam_systemd's CreateSession is REJECTED
+    // without this attribute: logind's seat_has_vts() (v249) is
+    // exactly `seat_is_seat0() && console_active_fd >= 0`, and
+    // console_active_fd is the open("/sys/class/tty/tty0/active") fd
+    // from manager_connect_console — absent attr => fd<0 => "Seat has
+    // no VTs but VT number not 0" => no greeter session => gdm-x-
+    // session RegisterDisplay fails ("No display available") and the
+    // greeter exit-loops (gdmr52). Content is live from the VT layer
+    // (fs::vt::active_vt()), which starts at VT 1 (gdm's
+    // GDM_INITIAL_VT).
+    {
+        let dev = mk_dir(&tty, "tty0", KType::Tty);
+        *dev.devno.lock() = Some((4, 0));
+        *dev.devname.lock() = Some(String::from("tty0"));
+        attr_ro(&dev, "dev", || b"4:0\n".to_vec());
+        attr_ro(&dev, "active", || {
+            format!("tty{}\n", crate::fs::vt::active_vt()).into_bytes()
+        });
+        add_uevent_attr(&dev);
+    }
 
     // ---------------- /sys/devices ----------------
     let devices = mk_dir(&root, "devices", KType::Devices);
@@ -2118,10 +2154,23 @@ fn sysfs_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
+/// poll on a sysfs attribute: Linux kernfs attrs are pollable (POLLPRI
+/// on change; EPOLLERR|EPOLLHUP always) — sd-event registers VT-console
+/// watches (/sys/class/tty/tty0/active, logind manager_connect_console)
+/// and epoll_ctl(ADD) EPERMs when the target has no poll op, which
+/// killed logind at startup ("Failed to watch foreground console:
+/// Operation not permitted"). Change notification is not implemented:
+/// the resting state is simply never-ready (0 events), which is also
+/// what an unchanged attribute reports on Linux.
+fn sysfs_file_poll(_file: &crate::fs::File, _events: u16) -> u16 {
+    0
+}
+
 /// SysFS attribute file operations.
 pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(sysfs_file_read)
     .write(sysfs_file_write)
     .lseek(sysfs_file_lseek)
+    .poll(sysfs_file_poll)
     .close(sysfs_file_close)
     .build();

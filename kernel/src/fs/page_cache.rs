@@ -275,6 +275,15 @@ struct InodePageCache {
     /// ext4_flush_dirty_inode machinery.
     fs_id: u64,
     ino: u64,
+    /// Delayed-allocation EOF watermark (2026-11): the highest byte
+    /// offset a buffered write published while its tail pages were still
+    /// dirty. The revival guard needs the EXACT EOF — a page-rounded
+    /// extent would report 4096 for a 1000-byte appended file and hand
+    /// readers three pages of phantom zeros. CAS-max at publish, never
+    /// lowered: a stale-high value is always clamped by the surviving
+    /// dirty extent at read time (`dirty_tail_eof`), and any prefix of
+    /// it that reached writeback is covered by the on-disk size.
+    dirty_eof: core::sync::atomic::AtomicU64,
 }
 
 impl InodePageCache {
@@ -284,6 +293,7 @@ impl InodePageCache {
             lock: Spinlock::new(BTreeMap::new()),
             fs_id,
             ino,
+            dirty_eof: core::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1082,6 +1092,72 @@ impl PageCache {
         drop(entry);
     }
 
+    /// Write-through populate (perf-mm lane, 2026-10-31): the write path's
+    /// coherence twin of `writeback_update_range`. First updates every
+    /// EXISTING entry in the written range (identical semantics), then
+    /// INSERTS the run of pages the write FULLY covers as clean cache
+    /// frames — the reference kernel's buffered-write shape: a file that
+    /// was just written then mmap'd/read faults from the cache instead of
+    /// repopulating through the read machinery on first touch (measured
+    /// pmm-decomp: cold fault 14.1 us/page vs warm 0.94 us/page — a 20x
+    /// class gap on the p3c shape; the reference kernel populates its
+    /// cache at write time, so its "cold" shape is our warm one).
+    ///
+    /// Partially covered pages (the head/tail of an unaligned write) are
+    /// NOT inserted — the uncovered bytes are unknown here; their first
+    /// fault populates through the read path as before. Inserted frames
+    /// are CLEAN (the write already committed these bytes through the
+    /// buffer cache), so the dirty-flush and eviction paths treat them
+    /// exactly like read-cached pages.
+    ///
+    /// The full-page run is contiguous in `data` by construction, so the
+    /// insert goes through `insert_batch` (ONE wlock + ONE per-inode lock
+    /// + power-of-two buddy allocations for the whole run) instead of a
+    /// per-page `insert` — the append/copy rows must not pay a lock round
+    /// trip per page.
+    pub fn writeback_populate_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfn: u64,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        // Existing entries first — same-body update (an inserted page
+        // below carries exactly its slice of `data`, so there is no
+        // second copy for fresh frames).
+        self.writeback_update_range(fs_id, ino, file_off, data, skip_pfn);
+
+        let len = data.len() as u64;
+        let first_index = file_off / PAGE_SIZE as u64;
+        let last_index = (file_off + len - 1) / PAGE_SIZE as u64;
+
+        // The fully covered run is the interior of [first, last]: drop a
+        // partial head and a partial tail.
+        let mut run_first = first_index;
+        if file_off % PAGE_SIZE as u64 != 0 {
+            run_first += 1;
+        }
+        let mut run_last = last_index;
+        if (file_off + len) % PAGE_SIZE as u64 != 0 {
+            run_last = run_last.saturating_sub(1);
+        }
+        if run_first > run_last {
+            return;
+        }
+        let src = (run_first * PAGE_SIZE as u64 - file_off) as usize;
+        let n = ((run_last - run_first + 1) * PAGE_SIZE as u64) as usize;
+        // Bounds are exact: run pages are fully inside [file_off,
+        // file_off+len), so src+n <= data.len().
+        if src + n > data.len() {
+            return;
+        }
+        self.insert_batch(fs_id, ino, run_first, PAGE_SIZE, &data[src..src + n]);
+    }
+
     /// Collect up to `out.len()` dirty pages in [first_index, last_index]
     /// (inclusive), PINNING each (ref++) so its frame cannot be freed
     /// while the caller flushes it OUTSIDE all pcache locks. Fills `out`
@@ -1130,6 +1206,151 @@ impl PageCache {
         };
         drop(entry);
         n
+    }
+
+    /// Highest byte offset covered by a DIRTY entry of this (fs, inode):
+    /// `(max dirty page index + 1) * PAGE_SIZE`. None when no dirty pages.
+    ///
+    /// Buffered-write revival guard (delayed allocation, 2026-11): a VFS
+    /// inode re-instantiated from disk (icache evicted it between a
+    /// buffered write and its writeback) carries the ON-DISK size, which
+    /// lags the dirty frames still living in the cache — reads clamp at
+    /// the stale size and the written bytes vanish until writeback.
+    /// `create_vfs_inode_in` lifts the fresh cached size to at least this
+    /// bound so the frames stay readable (the reference kernel pins a
+    /// dirty inode in its own cache until writeback completes — same
+    /// contract, different mechanism).
+    pub fn dirty_extent_hint(&self, fs_id: u64, ino: u64) -> Option<u64> {
+        let key = cache_key(fs_id, ino);
+        let entry = self.lookup_claimed(key)?;
+        let out = {
+            let g = entry.lock.lock();
+            // BTreeMap iterates in key order: the LAST dirty entry has the
+            // highest index.
+            let last = g.iter().rev().find(|(_, p)| {
+                !p.invalidated && p.dirty.load(Ordering::Acquire)
+            })?;
+            Some((last.0 + 1) * PAGE_SIZE as u64)
+        };
+        drop(entry);
+        out
+    }
+
+    /// Exact EOF of the surviving dirty tail of (fs, inode): None when no
+    /// dirty pages, else `min(dirty_eof, rounded extent of the surviving
+    /// dirty pages)`. The min() makes a stale-high watermark (writeback
+    /// already cleaned the highest pages) safe: the lift never exceeds
+    /// what the surviving frames cover, and any written-back prefix is
+    /// covered by the on-disk size the caller already has.
+    pub fn dirty_tail_eof(&self, fs_id: u64, ino: u64) -> Option<u64> {
+        let key = cache_key(fs_id, ino);
+        let entry = self.lookup_claimed(key)?;
+        let out = {
+            let g = entry.lock.lock();
+            let last = g.iter().rev().find(|(_, p)| {
+                !p.invalidated && p.dirty.load(Ordering::Acquire)
+            })?;
+            let extent = (last.0 + 1) * PAGE_SIZE as u64;
+            Some(core::cmp::min(
+                entry.dirty_eof.load(Ordering::Acquire),
+                extent,
+            ))
+        };
+        drop(entry);
+        out
+    }
+
+    /// Record a buffered-write published EOF (delayed allocation): the
+    /// CAS-max watermark consulted by `dirty_tail_eof` when a VFS inode
+    /// is revived with dirty frames beyond the on-disk size. No-op when
+    /// the inode has no cache entry (nothing dirty to lift later).
+    pub fn note_dirty_eof(&self, fs_id: u64, ino: u64, eof: u64) {
+        let key = cache_key(fs_id, ino);
+        if let Some(entry) = self.lookup_claimed(key) {
+            let mut cur = entry.dirty_eof.load(Ordering::Relaxed);
+            while eof > cur {
+                match entry.dirty_eof.compare_exchange(
+                    cur,
+                    eof,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(c) => cur = c,
+                }
+            }
+            drop(entry);
+        }
+    }
+
+    /// sync(2)/syncfs(2)/shutdown writeback (delayed allocation,
+    /// 2026-11): flush EVERY dirty (fs, inode) entry through the ext4
+    /// write machinery — the buffered-write counterpart of
+    /// `bio::sync_buffers`. Buffered write(2) leaves data ONLY in dirty
+    /// page-cache frames; draining the buffer cache alone would persist
+    /// nothing of them.
+    ///
+    /// Shape: chunked slot-table scan (fixed arrays — no allocation under
+    /// wlock), NO pcache lock held across the flush I/O (R-WRITESTORM-1),
+    /// live inodes resolved via icache_lookup (miss = skip: the frames
+    /// stay dirty and coherent to every reader through the page cache),
+    /// single pass — pages dirtied by a racing writer after their slot
+    /// was scanned remain for the next sync (the reference kernel's
+    /// sync(2) is not a quiescent point either).
+    pub fn flush_all_dirty(&self) {
+        const PASS: usize = 32;
+        let mut work: [(u64, u64); PASS] = [(0, 0); PASS];
+        let mut resume: usize = 0;
+        loop {
+            let mut n = 0usize;
+            {
+                let _w = self.wlock.lock();
+                // SAFETY: wlock excludes removal, so each claimed slot's
+                // reference is stable and the entry is alive.
+                'outer: for si in resume..PC_TABLE_CAP {
+                    let p = self.slots[si].0.load(Ordering::Acquire);
+                    if p.is_null() || p as usize == PC_TOMBSTONE_BITS {
+                        continue;
+                    }
+                    let entry = unsafe { &*p };
+                    let has_dirty = {
+                        let g = entry.lock.lock();
+                        g.iter().any(|(_, pg)| {
+                            !pg.invalidated && pg.dirty.load(Ordering::Acquire)
+                        })
+                    };
+                    if has_dirty {
+                        work[n] = (entry.fs_id, entry.ino);
+                        n += 1;
+                        if n == PASS {
+                            resume = si + 1;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            // Best-effort re-entrancy gate (same one shrink_reclaim
+            // uses): a concurrent reclaim inside our flush's allocations
+            // degrades to clean-only instead of piling a second flush.
+            let guarded = WRITEBACK_GUARD
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+            for i in 0..n {
+                let (fs_id, ino) = work[i];
+                // Liveness: same contract as sys_fsync (the icache Arc
+                // keeps the descriptor alive; private_data fs pointer is
+                // valid while the mount lives). Miss = skip.
+                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                    crate::fs::ext4::file::ext4_flush_dirty_inode(&inode, 0, u64::MAX);
+                }
+            }
+            if guarded {
+                WRITEBACK_GUARD.store(false, Ordering::Release);
+            }
+            if n < PASS {
+                break; // table exhausted
+            }
+        }
     }
 
     /// Complete a flush cycle for entries collected by `collect_dirty_range`:
@@ -1275,6 +1496,40 @@ impl PageCache {
     /// If the page already exists, just leaves it alone (its pin is the
     /// caller's next get).
     pub fn insert(&self, fs_id: u64, ino: u64, page_index: u64, _block_nr: u64, data: &[u8]) {
+        self.insert_ext(fs_id, ino, page_index, _block_nr, data, false);
+    }
+
+    /// Buffered-write insert (delayed allocation, 2026-11): the SAME body
+    /// as `insert` but the entry is born DIRTY. A clean-then-mark_dirty
+    /// sequence has a window where an eviction (another CPU's insert or
+    /// shrink) could reclaim the just-inserted unreferenced clean page
+    /// before the dirty bit lands — silently dropping a write(2) that
+    /// already returned success. Dirty-at-insert removes the window:
+    /// evict_one_locked skips dirty pages by design.
+    ///
+    /// `data` may be EMPTY (zero-fill the whole frame — a fresh tail page
+    /// whose uncovered bytes are hole/beyond-EOF zeros); as with `insert`,
+    /// bytes past `data.len()` are zeroed, so a partial head page is
+    /// materialized by passing only its known prefix... callers that need
+    /// scattered coverage copy through a pinned frame instead (get → copy
+    /// → put, see the buffered-write path).
+    ///
+    /// Returns TRUE when this call installed the frame, FALSE when the
+    /// page was already cached (the caller's data did NOT land — a racing
+    /// writer won the insert; re-loop through get/copy to publish it).
+    pub fn insert_dirty(&self, fs_id: u64, ino: u64, page_index: u64, data: &[u8]) -> bool {
+        self.insert_ext(fs_id, ino, page_index, 0, data, true)
+    }
+
+    fn insert_ext(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        page_index: u64,
+        _block_nr: u64,
+        data: &[u8],
+        dirty: bool,
+    ) -> bool {
         let key = cache_key(fs_id, ino);
 
         // R-WRITESTORM-1: allocate the frame BEFORE taking any pcache
@@ -1289,7 +1544,7 @@ impl PageCache {
         // preceded by EXT4-BIGLOCK-STALL).
         let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
         if phys_addr == 0 {
-            return;
+            return false;
         }
 
         STAT_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -1321,7 +1576,7 @@ impl PageCache {
                 drop(w);
                 self.flush_parked(&mut parked);
                 free_page(phys_addr);
-                return;
+                return false;
             };
 
             // Dedup verdict + install in ONE per-inode hold. A duplicate
@@ -1379,7 +1634,7 @@ impl PageCache {
                         ref_count: AtomicU32::new(0),
                         invalidated: false,
                         released: core::sync::atomic::AtomicBool::new(false),
-                        dirty: core::sync::atomic::AtomicBool::new(false),
+                        dirty: core::sync::atomic::AtomicBool::new(dirty),
                     });
                     self.total_pages.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1390,6 +1645,7 @@ impl PageCache {
             if duplicate {
                 free_page(phys_addr);
             }
+            !duplicate
         }
     }
 
@@ -1452,6 +1708,41 @@ impl PageCache {
                 break;
             }
 
+            // Fill and describe every frame BEFORE any pcache lock (perf
+            // review 2026-10-31): the chunk's memcpy used to run under
+            // wlock + the per-inode lock — up to 64x4 KiB of copying with
+            // both serialization points held, stalling every reader and
+            // every other inserter for the duration. The frames are still
+            // private here (allocated above, not yet published), so the
+            // copy and the descriptor stamping need no lock. A frame whose
+            // index turns out to be a duplicate at insert time pays one
+            // wasted copy (the rare dedup path) and is freed exactly as
+            // the old in-lock order did.
+            for k in 0..got {
+                let phys = phys_buf[k];
+                let pfn = phys / PAGE_SIZE;
+                let page_index = first_index + done as u64 + k as u64;
+                let src_off = (done + k) * block_size;
+                let copy_len = core::cmp::min(PAGE_SIZE, buf.len() - src_off);
+                // SAFETY: phys is a valid page frame from the zone
+                // allocator; the linear mapping covers all RAM.
+                unsafe {
+                    let dst = phys_to_virt_ptr(phys);
+                    core::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), dst, copy_len);
+                }
+                let page_desc = pfn_to_page_mut(pfn);
+                if !page_desc.is_null() {
+                    // SAFETY: pfn came from the zone allocator; its page
+                    // descriptor is valid for the frame's lifetime.
+                    unsafe {
+                        (*page_desc).set_page_type(PageType::PageCache);
+                        (*page_desc).set_flag(PageFlag::UpToDate);
+                        (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
+                        (*page_desc).set_index(page_index as usize);
+                    }
+                }
+            }
+
             // The first-touch Arc allocation stays outside wlock (same
             // R-WRITESTORM-1 rule as insert); dropped unused when the
             // entry already exists.
@@ -1510,27 +1801,15 @@ impl PageCache {
                         // too. The frame was popped from the zone — release
                         // it right away.
                         if g.contains_key(&page_index) {
+                            // Duplicate index: the frame was already filled
+                            // and described in the unlocked stage above —
+                            // release it exactly as the old in-lock order
+                            // did (no clobber, no leak).
                             free_page(phys);
                             continue;
                         }
-                        let src_off = (done + k) * block_size;
-                        let copy_len = core::cmp::min(PAGE_SIZE, buf.len() - src_off);
-                        // SAFETY: phys is a valid page frame from the zone
-                        // allocator; the linear mapping covers all RAM.
-                        unsafe {
-                            let dst = phys_to_virt_ptr(phys);
-                            core::ptr::copy_nonoverlapping(buf.as_ptr().add(src_off), dst, copy_len);
-                        }
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
-                            // SAFETY: pfn came from the zone allocator; its page
-                            // descriptor is valid for the frame's lifetime.
-                            unsafe {
-                                (*page_desc).set_page_type(PageType::PageCache);
-                                (*page_desc).set_flag(PageFlag::UpToDate);
-                                (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
-                                (*page_desc).set_index(page_index as usize);
-                            }
                             lru_batch[lru_n] = page_desc;
                             lru_n += 1;
                         }

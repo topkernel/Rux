@@ -1112,10 +1112,19 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
         -1  // NULL = infinite wait
     } else {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
-        // exception-table copy path (SUM=0 safe).
+        // exception-table copy path (SUM=0 safe). An unreadable page must
+        // be EFAULT — the old unwrap_or(0) turned it into {0,0} and made
+        // ppoll() return immediately instead of failing (reference
+        // do_sys_poll: copy_from_user of the timespec fails with EFAULT).
         unsafe {
-            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = match crate::arch::uaccess::get_user(timeout_ptr) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
+            let tv_nsec = match crate::arch::uaccess::get_user(timeout_ptr.add(1)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
             if tv_nsec >= 1_000_000_000 {
                 // Invalid timespec: match Linux poll_select_set_timeout().
                 return -(errno::EINVAL as i64);
@@ -1164,10 +1173,18 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
         (0i64, false)
     } else {
         // SAFETY: timeout_ptr validated with access_ok; get_user is the
-        // exception-table copy path (SUM=0 safe).
+        // exception-table copy path (SUM=0 safe). An unreadable page must
+        // be EFAULT, not a silent {0,0} timeout (reference core_sys_select
+        // fails the copy_from_user with EFAULT).
         unsafe {
-            let tv_sec = crate::arch::uaccess::get_user(timeout_ptr).unwrap_or(0);
-            let tv_nsec = crate::arch::uaccess::get_user(timeout_ptr.add(1)).unwrap_or(0);
+            let tv_sec = match crate::arch::uaccess::get_user(timeout_ptr) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
+            let tv_nsec = match crate::arch::uaccess::get_user(timeout_ptr.add(1)) {
+                Some(v) => v,
+                None => return -(errno::EFAULT as i64),
+            };
             if tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
                 return -(errno::EINVAL as i64);
             }
@@ -3421,6 +3438,66 @@ fn read_inotify_path(ptr: *const u8, buf: &mut [u8; 4096]) -> Result<alloc::stri
 /// - args[0]: clockid - clock ID (CLOCK_REALTIME=0, CLOCK_MONOTONIC=1)
 /// - args[1]: flags - TFD_CLOEXEC, TFD_NONBLOCK
 pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
+    // lb-lane hunt (syscost census): nr=281 (timerfd_create) ran 111k
+    // times in the first 60 s of an OH boot, accelerating to ~4.3k/s by
+    // t=240 s — several CPUs of kernel work riding the fd-table and
+    // allocator. Name the caller (comm+pid+args+result), budget 60.
+    static TFDC_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    let tfdc_i = TFDC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // dfx=tfdcensus: WINDOWED caller census. The syscost boots show the
+    // storm accelerating 1.9k -> 4.3k/s by t=240s, so a boot-start budget
+    // only ever names bluetooth/audio's one-shots. Behind the switch the
+    // tap prints the first 16 calls of every 500-jiffy window, so the
+    // phase that runs the storm names its caller.
+    let tfdc_log = if crate::dfx::switches::enabled(
+        crate::dfx::switches::DfxSwitch::TfdCensus,
+    ) {
+        static WIN_JIF: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static WIN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let jif = crate::drivers::timer::get_jiffies();
+        let win = WIN_JIF.load(core::sync::atomic::Ordering::Relaxed);
+        if jif.wrapping_sub(win) >= 500
+            && WIN_JIF
+                .compare_exchange(
+                    win,
+                    jif,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            WIN_N.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        WIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+    } else {
+        tfdc_i < 60
+    };
+    if tfdc_log {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        crate::pr_warn!(
+            "TFDC[{}] clockid={} flags={:#x} comm='{}' pid={}",
+            tfdc_i,
+            args[0] as i32,
+            args[1] as i32,
+            comm,
+            crate::process::current_pid()
+        );
+    }
+    let rc = sys_timerfd_create_inner(args);
+    if tfdc_log {
+        crate::pr_warn!("TFDC[{}] -> {}", tfdc_i, rc);
+    }
+    rc
+}
+
+fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
     let clockid = args[0] as i32;
     let flags = args[1] as i32;
 

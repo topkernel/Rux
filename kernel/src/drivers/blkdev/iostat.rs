@@ -23,7 +23,7 @@
 //! so those columns report zero; the read/write/sector/time columns are
 //! real.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

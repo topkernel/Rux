@@ -51,6 +51,14 @@ pub struct FsStruct {
     /// here it just reports success for the matching path once.
     pivot_put_old: RwSpinlock<Option<alloc::vec::Vec<u8>>>,
 
+    /// True when the current root was installed by pivot_root(2) or by
+    /// setns(2) entering a pivoted mount namespace (NOT by plain chroot).
+    /// setns back into a non-pivoted namespace must then reset the root
+    /// to that ns's root — the pivot's whole purpose is to be undone by
+    /// the namespace jump (OH beget: pivot into the sandbox, setns back
+    /// to the default ns for the rest of the boot).
+    root_is_pivot: RwSpinlock<bool>,
+
     /// File creation mask
     umask: AtomicU32,
 }
@@ -64,6 +72,7 @@ impl FsStruct {
             cwd_dentry: RwSpinlock::new(None),
             root_dentry: RwSpinlock::new(None),
             pivot_put_old: RwSpinlock::new(None),
+            root_is_pivot: RwSpinlock::new(false),
             umask: AtomicU32::new(0o022),  // Default umask
         }
     }
@@ -85,7 +94,14 @@ impl FsStruct {
     /// mountpoint back-edges, and the rebuild picks the new location
     /// up — Linux derives paths the same way, from (vfsmnt, dentry)).
     pub fn get_cwd(&self) -> alloc::vec::Vec<u8> {
-        if let Some(d) = self.cwd_dentry.read().clone() {
+        // preempt-hunt: bind the clone BEFORE the if-let. The scrutinee's
+        // read guard is a temporary that lives through the whole block,
+        // so build_path() (a walk to the dentry root) used to run with
+        // the rwlock guard — and its preempt-disable — held. fs_struct
+        // sites were the #1 >2s incumbent family on the ph2 OH boot
+        // (46 tick-heal origins at this file's sites).
+        let d = self.cwd_dentry.read().clone();
+        if let Some(d) = d {
             return d.build_path().into_bytes();
         }
         self.cwd.read().clone()
@@ -123,10 +139,26 @@ impl FsStruct {
     /// when not chrooted). Self-heals from the root dentry when one
     /// is recorded (same rationale as get_cwd()).
     pub fn get_root(&self) -> alloc::vec::Vec<u8> {
-        if let Some(d) = self.root_dentry.read().clone() {
+        // Same if-let temporary-extension fix as get_cwd (preempt-hunt):
+        // build_path() runs without the read guard.
+        let d = self.root_dentry.read().clone();
+        if let Some(d) = d {
             return d.build_path().into_bytes();
         }
         self.root.read().clone()
+    }
+
+    /// Whether the task is chrooted somewhere other than the global
+    /// root — the ALLOCATION-FREE check path_lookup's fast path needs
+    /// (get_root() allocates and, with a recorded root dentry, walks
+    /// the parent chain; calling it per lookup cost ~5 heap objects
+    /// per open). No allocs: read-lock the two slots and compare.
+    pub fn root_is_slash(&self) -> bool {
+        if self.root_dentry.read().is_some() {
+            return false;
+        }
+        let r = self.root.read();
+        r.as_slice() == b"/"
     }
 
     /// Set root directory path (chroot), string only — clears any
@@ -166,6 +198,17 @@ impl FsStruct {
         *self.pivot_put_old.write() = None;
     }
 
+    /// Whether the current root came from pivot_root(2)/setns (see the
+    /// field doc) — drives setns(CLONE_NEWNS) root re-anchoring.
+    pub fn root_is_pivot(&self) -> bool {
+        *self.root_is_pivot.read()
+    }
+
+    /// Set/clear the pivot-root marker (sys_pivot_root, ns::setns).
+    pub fn set_root_is_pivot(&self, v: bool) {
+        *self.root_is_pivot.write() = v;
+    }
+
     /// Copy the full filesystem context (cwd/root strings, cwd/root
     /// dentries) from `other` — fork()'s non-CLONE_FS duplicate. The
     /// old fork path copied only the cwd STRING, so a forked child of
@@ -180,6 +223,8 @@ impl FsStruct {
         *self.cwd_dentry.write() = cd;
         let rd = other.root_dentry.read().clone();
         *self.root_dentry.write() = rd;
+        let rp = *other.root_is_pivot.read();
+        *self.root_is_pivot.write() = rp;
     }
 
     // ==================== Umask Operations ====================

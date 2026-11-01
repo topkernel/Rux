@@ -822,6 +822,53 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// jiffies of this task's most recent task-context base-count DRAIN
+    /// (the outermost guard's 1->0 release — a live lock pair completing).
+    /// phantom-bits (2026-11-01): the tick-side PREEMPT-HEAL's cumulative
+    /// observation bar false-fired on hot lock users (pb3: 887 heals/boot,
+    /// 96% on 4 lock-hot pids, oage_jif=0-1 — a fresh 0->1 acquire inside
+    /// the "2 s hold", i.e. the base drained between ticks and the 100 Hz
+    /// sampler never caught the gaps). Every false heal strips a LIVE
+    /// guard, marks need_resched, and preempts the holder MID-SECTION —
+    /// stranding its lock for every other CPU (the both-CPU
+    /// spin/deadlock amplifier). The heal now requires the base to have
+    /// been nonzero CONTIGUOUSLY: any real 1->0 release stamps this field
+    /// and re-arms the window. Direct zeroings (heal paths) do NOT stamp
+    /// (they bypass sub_preempt_count_at), so genuine phantoms — whose
+    /// +1 never drains — still heal after 2 s.
+    ti_pc_zero_jif: AtomicU64,
+
+    /// jiffies of the most recent tick that observed this task's SOFTIRQ
+    /// field ABSENT (0 = never). Per-field contiguity stamp for the
+    /// tick-side PREEMPT-HEAL: d2381bf9's bar (a PREEMPT-pair completion
+    /// re-arms the window) is the right liveness proof for the base
+    /// preempt field — but it shields a stranded SOFTIRQ bit on a
+    /// lock-hot carrier (the lb64/lb65 OH boots: systemui wedged in
+    /// exit_group at pc=0x100 for 600 s, render_service watchdog at
+    /// 0x100, three 0x10000 incumbents — every CPU monopolized, ZERO
+    /// heals fired, because the carriers keep completing ordinary
+    /// spinlock pairs). A SOFTIRQ field observed PRESENT at 200
+    /// consecutive ticks is phantom by the same five-orders argument
+    /// the heal doctrine uses; only the field's OWN absences re-arm it.
+    ti_pc_sirq_zero_jif: AtomicU64,
+
+    /// Same per-field stamp for the HARDIRQ nesting field: the observer
+    /// tick's own in-flight level is subtracted by the >=2 gate, so one
+    /// phantom hardirq level observed for 200 consecutive ticks heals
+    /// to exactly one kept level (ti_preempt_count_keep_tick_nesting —
+    /// the still-pending irq_exit sub pairs against the kept level).
+    ti_pc_hirq_zero_jif: AtomicU64,
+
+    /// Same per-field stamp for the base PREEMPT field (round 3): the
+    /// pb3 lock-hot false-heal family and the sc42 re-leak carriers are
+    /// both distinguished from true base phantoms by exactly this — a
+    /// legal guard pair is microseconds, so a PREEMPT field observed
+    /// ABSENT at most ticks (fresh stamp) is lock churn, protected; a
+    /// field observed PRESENT at 200 consecutive ticks (stale stamp) is
+    /// a stranded +1. Replaces both the sc42 cumulative window and
+    /// d2381bf9's PREEMPT-pair re-arm in the tick-side heal gate.
+    ti_pc_pirq_zero_jif: AtomicU64,
+
     /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
     /// Per-task storage replaces the old pid-indexed side table — real pids
@@ -981,6 +1028,14 @@ pub struct Task {
     /// by the old mask, so the handler never ran; review syscallb-H-06).
     pub sigmask_restore: u64,
     pub sigmask_restore_valid: bool,
+
+    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
+    /// this task's waiter entry is linked into a futex bucket chain,
+    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
+    /// the 512-bucket hash ONLY when this is set — the common task (never
+    /// parked on a futex at its last schedule, or one whose sleeper-side
+    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
+    pub futex_wait_enqueued: AtomicBool,
 
     /// Scheduling policy
     policy: SchedPolicy,
@@ -1203,6 +1258,12 @@ pub struct Task {
     /// 1000 = maximum priority to be killed (OOM_SCORE_ADJ_MAX)
     /// Follows Linux's signal->oom_score_adj
     oom_score_adj: core::sync::atomic::AtomicI32,
+
+    /// I/O scheduling priority (ioprio_set/ioprio_get, block/ioprio ABI):
+    /// (class << 13) | level; 0 = IOPRIO_CLASS_NONE level 0. Stored per
+    /// task and inherited across fork like the reference kernel's
+    /// task_struct::ioprio (not yet fed into I/O scheduling decisions).
+    ioprio: core::sync::atomic::AtomicI32,
 
     /// Filesystem information (cwd, root, umask)
     ///
@@ -1509,10 +1570,14 @@ impl Task {
             // thread_info style fields
             ti_flags: AtomicU32::new(0),
             ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
+            ti_pc_zero_jif: AtomicU64::new(0),
+            ti_pc_sirq_zero_jif: AtomicU64::new(0),
+            ti_pc_hirq_zero_jif: AtomicU64::new(0),
+            ti_pc_pirq_zero_jif: AtomicU64::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
-            cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
+            cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -1550,6 +1615,7 @@ impl Task {
             pid,
             sigmask_restore: 0,
             sigmask_restore_valid: false,
+            futex_wait_enqueued: AtomicBool::new(false),
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
@@ -1610,6 +1676,7 @@ impl Task {
             vfork_parent: core::sync::atomic::AtomicU64::new(0),
             brk: core::sync::atomic::AtomicU64::new(0),
             oom_score_adj: core::sync::atomic::AtomicI32::new(0),
+            ioprio: core::sync::atomic::AtomicI32::new(0),
             fs: Some(alloc::sync::Arc::new(crate::fs::FsStruct::new())),
             exe_path: Box::from(&b""[..]),
             sem_undo: Spinlock::new(alloc::vec::Vec::new()),
@@ -2279,6 +2346,17 @@ impl Task {
                 as *mut [AtomicU32; INIT_CALLS_LEN],
             [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
         );
+        // Futex residency flag (perf-mm lane, sc130-pattern twin): without
+        // this init, a fork-allocated Task read the recycled heap page's
+        // stale bit — every exit then took futex_cleanup's full 512-bucket
+        // scan (measured: all 64/64 exits of a fork+exec loop flagged,
+        // diag4/diag5 counters; the -at-construction init in Task::new
+        // covers only first construction).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, futex_wait_enqueued))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
             [const { AtomicU64::new(0) }; INIT_CALLS_LEN],
@@ -2327,7 +2405,7 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
-            core::sync::atomic::AtomicU32::new(!0u32),
+            core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
@@ -3074,6 +3152,10 @@ impl Task {
             // through here — filtering only is_sleeping() made them
             // permanently unkillable.
             if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
+                // forkprof (cmdline forkprof=1): waker-side body cost and
+                // the stamp consumed at the wakee's switch-in.
+                let fp = crate::dfx::forkprof::on();
+                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(&*task);
                 let prev_cpu = (*task).ti_cpu();
@@ -3157,8 +3239,44 @@ impl Task {
                     return false;
                 }
 
-                // Set need_resched flag on target CPU and send IPI if cross-CPU
-                crate::sched::resched_cpu(target_cpu as usize);
+                // Dispatch the woken task: prefer an idle CPU within the
+                // wakee's affinity (the reference's select_idle_sibling +
+                // remote-enqueue shape); only when none is idle, set
+                // need_resched on the wakee's previous CPU.
+                //
+                // Why this matters for IPC throughput (perf-ipc lane,
+                // ipcdisc2 timeline evidence): the old unconditional
+                // resched of the previous CPU pokes the WAKER's own (busy)
+                // CPU, which preempts the sender at trap-exit and
+                // serializes sender and receiver into a preempt ping-pong
+                // on one CPU while the other CPU stays parked — a
+                // 74-byte unix-stream record cost ~275 us of dance
+                // (wake 19us + preempt-switch 56us + receiver cycle
+                // 131us + sender cycle 86us) against the reference's
+                // ~2.5 us with the receiver drained concurrently on the
+                // idle CPU. Dispatching the wakee to the idle CPU lets
+                // the sender run unmolested (its trap-exit preempt never
+                // fires — no NEED_RESCHED on its CPU) and the receiver
+                // runs in parallel. The GLOBAL run queue keeps the IPI
+                // advisory: whichever CPU schedules first picks the task,
+                // so a sender that blocks immediately after the wake
+                // (pipe echo, futex handoff) still gets the in-place
+                // handoff from its own schedule().
+                let allowed = (*task).cpus_allowed();
+                match crate::sched::claim_idle_cpu_for(allowed) {
+                    Some(idle_cpu) => {
+                        crate::sched::resched_cpu(idle_cpu);
+                    }
+                    None => {
+                        // No idle CPU: poke a busy CPU only when the wakee
+                        // wins the wakeup-preemption comparison (see
+                        // preempt_check_wake) — the old unconditional
+                        // resched of the previous CPU forced a preempt
+                        // dance per record on same-CPU sender/receiver
+                        // pairs.
+                        crate::sched::preempt_check_wake(task);
+                    }
+                }
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue
@@ -3182,6 +3300,10 @@ impl Task {
                     );
                 }
 
+                if fp {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                }
                 true
             } else {
                 // R46 (B-form phantom — refused-wake mirror of R41/R42):
@@ -3846,6 +3968,19 @@ fn preempt_underflow_report(
         ph(site as u32);
     }
     putchar(b'\n');
+    // preempt-hunt (2026-11-01): the outermost-acquire record for this
+    // task names the acquire whose 1->0 release this clamp adjudicates —
+    // for a post-heal underflow that is the REAL guard the heal zeroed
+    // (a guard held across a scheduler point); for a booking split it is
+    // the phantom's home site. Rate-gate already passed above.
+    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(task) = crate::sched::current() {
+            crate::dfx::leakorigin::report_outermost(
+                b"UNDERFLOW-ORIGIN",
+                task as *mut Task,
+            );
+        }
+    }
 }
 
 impl Task {
@@ -3979,6 +4114,29 @@ impl Task {
         loc: &'static core::panic::Location<'static>,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        // Outermost base release (base field 1->0): clear the
+        // leakorigin outermost-acquire record (preempt-hunt tap). One
+        // relaxed load + compare when the probe is off.
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits: a LIVE outermost pair just completed — stamp
+            // so the tick-side heal window restarts (hot lock users must
+            // not be adjudicated as phantom holders).
+            self.ti_pc_zero_jif.store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        // phantom-bits: softirq field drained to zero — the +0x100
+        // acquire paired; drop the shadow so a later orphan report names
+        // only still-unpaired bookings.
+        if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
+            && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
+        {
+            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
@@ -3996,6 +4154,17 @@ impl Task {
         site: usize,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits: live pair completed — heal window re-arms
+            // (see sub_preempt_count_at).
+            self.ti_pc_zero_jif.store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
@@ -4084,6 +4253,58 @@ impl Task {
         self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
     }
 
+    /// jiffies of the most recent task-context base-count drain
+    /// (phantom-bits contiguity bar for the tick-side heal; 0 = never).
+    #[inline]
+    pub fn ti_pc_zero_jif(&self) -> u64 {
+        self.ti_pc_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// jiffies of the most recent tick observation of the SOFTIRQ field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_sirq_zero_jif(&self) -> u64 {
+        self.ti_pc_sirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the SOFTIRQ-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_sirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_sirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// jiffies of the most recent tick observation of the HARDIRQ field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_hirq_zero_jif(&self) -> u64 {
+        self.ti_pc_hirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the HARDIRQ-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_hirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_hirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// jiffies of the most recent tick observation of the PREEMPT field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif(&self) -> u64 {
+        self.ti_pc_pirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the PREEMPT-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_pirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Set running CPU (thread_info.cpu)
     #[inline]
     pub fn set_ti_cpu(&self, cpu: i32) {
@@ -4095,6 +4316,60 @@ impl Task {
     #[inline]
     pub fn cpus_allowed(&self) -> u32 {
         self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Default affinity for a NEWLY-CREATED task: the mask of CPUs that are
+    /// ONLINE at creation time (Linux: a fresh task inherits the parent's
+    /// cpus_mask, and the boot-time default is the platform's possible set —
+    /// which on a real machine equals the -smp CPU count, never the
+    /// compile-time MAX_CPUS ceiling). Initializing with !0 reported CPUs
+    /// that can never come online (MAX_CPUS=4 on a -smp 2 boot): LTP
+    /// getcpu01/nice05 take the highest bit from sched_getaffinity and pass
+    /// it back to sched_setaffinity, which correctly rejects never-online
+    /// CPUs with EINVAL — the kernel's own view was self-inconsistent.
+    /// Tasks created before SMP bring-up keep the boot-CPU mask (Linux
+    /// early kthreads behave the same way); every userspace task is created
+    /// after start_secondaries() and gets the full online set.
+    pub fn default_cpus_allowed() -> u32 {
+        let online = crate::arch::smp::num_started_cpus().max(1);
+        if online >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << online) - 1
+        }
+    }
+
+    /// Widen the masks of tasks created before SMP bring-up to the now-known
+    /// online set (the Linux sched_cpu_activate/cpuset refresh analogue).
+    /// Called from start_secondaries() once the secondaries are online: at
+    /// that point only kernel-boot tasks and the boot init task exist, none
+    /// of them carrying a USER-requested affinity, so overwriting the
+    /// boot-default masks ({CPU0} from the pre-SMP default, or !0 from the
+    /// idle-task initializer) with the online mask cannot clobber an
+    /// explicit sched_setaffinity. Without this, the boot init task (pid 1,
+    /// created before start_secondaries) kept a CPU0-only mask on every
+    /// -smp>1 boot and every userspace process inherited it.
+    pub fn refresh_default_affinity_to_online() {
+        let online = Self::default_cpus_allowed();
+        let mut visited = 0usize;
+        let mut widened = 0usize;
+        crate::sched::for_each_task(|t| {
+            // SAFETY: for_each_task yields live task pointers.
+            let task = unsafe { &*t };
+            let cur = task.cpus_allowed.load(core::sync::atomic::Ordering::Relaxed);
+            if cur == 1 || cur == u32::MAX {
+                task.cpus_allowed
+                    .store(online, core::sync::atomic::Ordering::Release);
+                widened += 1;
+            }
+            visited += 1;
+        });
+        crate::pr_info!(
+            "affinity: {} of {} task(s) default mask -> {:#x}",
+            widened,
+            visited,
+            online
+        );
     }
 
     /// R12-5: drop a lookup pin; the LAST put frees the slot.
@@ -4596,6 +4871,19 @@ impl Task {
     #[inline]
     pub fn set_oom_score_adj(&self, adj: i32) {
         self.oom_score_adj.store(adj.clamp(-1000, 1000), Ordering::Release);
+    }
+
+    /// Get the stored I/O scheduling priority
+    /// ((class << 13) | level; 0 = NONE/0)
+    #[inline]
+    pub fn ioprio(&self) -> i32 {
+        self.ioprio.load(Ordering::Acquire)
+    }
+
+    /// Set the stored I/O scheduling priority (ioprio_set).
+    #[inline]
+    pub fn set_ioprio(&self, v: i32) {
+        self.ioprio.store(v, Ordering::Release);
     }
 
     /// Check if has file descriptor table

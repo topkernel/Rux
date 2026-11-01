@@ -33,7 +33,7 @@ Rux Kernel Code (~101K lines)
 |---------|--------|-------|-------------|
 | **seL4** (2009-2014) | Isabelle/HOL theorem proving | ~10K lines C | Full functional correctness proof, ~20 person-years |
 | **Ferrocene** (2021-2025) | Toolchain qualification | Rust compiler subset | IEC 61508 SIL 2 certification (Dec 2025) |
-| **Asterinas** (2023-2025) | CONVEROS model checking | Rust framekernel | Model-checked 12 concurrency modules, found 20 bugs |
+| **Asterinas** (2023-2025) | CONVEROS model checking | Rust kernel | Model-checked 12 concurrency modules, found 20 bugs |
 | **Atmosphere** (2024) | Verus functional correctness | Rust kernel components | Mathematical proof-level verification of key algorithms |
 | **RusyFuzz** (2024) | Kernel-level fuzzing | Multiple Rust OS | Fuzzing adapted for crate-based kernels |
 

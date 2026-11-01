@@ -316,6 +316,13 @@ pub struct Pipe {
     read_closed: AtomicUsize,
     /// Write end closed
     write_closed: AtomicUsize,
+    /// FIFO (named pipe) reader open count. Lives ON THE PIPE, not the
+    /// fifo registry entry, so the last-of-direction close decision stays
+    /// correct for fds of a FIFO that was UNLINKED while open (registry
+    /// entry gone). Anonymous pipes never bump these.
+    pub fifo_readers: AtomicUsize,
+    /// FIFO (named pipe) writer open count (see fifo_readers).
+    pub fifo_writers: AtomicUsize,
     /// Read wait queue (for read blocking)
     read_queue: WaitQueueHead,
     /// Write wait queue (for write blocking)
@@ -347,6 +354,8 @@ impl Pipe {
             buffer: Spinlock::new(PipeBuffer::new(cap)),
             read_closed: AtomicUsize::new(0),
             write_closed: AtomicUsize::new(0),
+            fifo_readers: AtomicUsize::new(0),
+            fifo_writers: AtomicUsize::new(0),
             read_queue: WaitQueueHead::new(),
             write_queue: WaitQueueHead::new(),
         }

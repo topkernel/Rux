@@ -34,7 +34,6 @@ use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
-use crate::sync::Mutex;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
@@ -89,19 +88,20 @@ pub const NAME_MAX: usize = 255;
 /// rename of an ancestor between hash and use. ext4 additionally takes
 /// EXT4_BIG_LOCK inside its ops, so mutual exclusion composes.
 ///
-/// This MUST be a sleeping lock (semaphore Mutex), not a Spinlock: the
-/// critical section spans the ext4_*_wrapper callbacks, and those take
-/// EXT4_BIG_LOCK whose lock_fair() sleeps under contention. With a
-/// Spinlock guard pinning preempt_count != 0 across that window, the
-/// sleeper's schedule() is refused by __schedule's preempt discipline and
-/// lock_fair degenerates into a hot retry loop whose dequeue_if_enqueued
-/// hammers the GRQ lock hard enough to starve the other CPU's timer tick
-/// (which needs GRQ with IRQs disabled) — the sendmsg02 early-exec
+/// This MUST be a sleeping lock, not a Spinlock: the critical section
+/// spans the ext4_*_wrapper callbacks, and those take EXT4_BIG_LOCK
+/// whose slowpath parks in block I/O under contention. With a Spinlock
+/// guard pinning preempt_count != 0 across that window, the sleeper's
+/// schedule() is refused by __schedule's preempt discipline and the
+/// acquire degenerates into a hot retry loop whose dequeue_if_enqueued
+/// hammers the GRQ lock hard enough to starve the other CPU's timer
+/// tick (which needs GRQ with IRQs disabled) — the sendmsg02 early-exec
 /// machine-wide stall-quiet wedge (2/2 on main c517099, gdb frozen-state:
-/// pid sendmsg02 preempt=0x2 inside lock_fair's retry, CPU1 spinning on GRQ
-/// in scheduler_tick). All users are syscall-context directory mutators, so
-/// sleeping is legal everywhere this lock is taken.
-pub static VFS_MUTATION_LOCK: Mutex = Mutex::new();
+/// pid sendmsg02 preempt=0x2 inside the contended acquire, CPU1 spinning
+/// on GRQ in scheduler_tick). All users are syscall-context directory
+/// mutators, so sleeping is legal everywhere this lock is taken.
+pub static VFS_MUTATION_LOCK: crate::sync::SleepMutex =
+    crate::sync::SleepMutex::new("VFS-MUTATION", false);
 
 
 impl VfsPath {
@@ -1148,19 +1148,26 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
     // Source: the MOUNTPOINT dentry (not the mounted root) — the walk
     // follows mounts on the way but takes the final component without
     // following, so `from` names the covered dentry that carries the
-    // VfsMountInternal.
+    // VfsMountInternal. Intermediate results must cross their mounts
+    // (path_lookup discipline): resolving /mnt/data descends into the
+    // tmpfs mounted on /mnt BEFORE looking up "data" — the old walk
+    // looked "data" up in the ramdisk's /mnt placeholder and OH's
+    // switch_root MS_MOVE /mnt/data → /usr/mnt/data failed ENOENT
+    // (lb9: switch_root.c:121), stranding that tmpfs.
     let src_child = {
         let vfs_root = VFS_STATE.lock().root_dentry.clone()
             .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
         let comps: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
         let mut current = vfs_root;
         for (i, component) in comps.iter().enumerate() {
-            if i + 1 < comps.len() {
-                current = follow_mount(current);
-            }
-            current = current
+            let child = current
                 .lookup_child(component)
                 .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+            current = if i + 1 < comps.len() {
+                follow_mount(child)
+            } else {
+                child
+            };
         }
         current
     };
@@ -1195,6 +1202,37 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
             }
             root.clear_children();
             mnt.root.rehome_children_into(&root);
+            // lb-lane hunt (switch_root): the moved-in mounts must stay
+            // reachable — post-switch mkdir /storage/media and /mnt/* on
+            // lb3-lb6 say they are NOT (ENOENT/EROFS). Dump the new root's
+            // children with mount bits right after the rehome.
+            {
+                let kids: Vec<(String, bool, bool)> = root
+                    .children
+                    .lock()
+                    .iter()
+                    .map(|(n, d)| {
+                        (
+                            n.clone(),
+                            d.vfsmount.lock().is_some(),
+                            d.get_inode().is_some(),
+                        )
+                    })
+                    .collect();
+                let shown: alloc::string::String = kids
+                    .iter()
+                    .map(|(n, m, i)| {
+                        alloc::format!("{}{}{}", n, if *m { "(M)" } else { "" }, if *i { "" } else { "(noino)" })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                crate::pr_warn!(
+                    "SWROOT-CHILDREN ({}): {} | src-root-children-now: {}",
+                    kids.len(),
+                    shown,
+                    mnt.root.children.lock().len()
+                );
+            }
             // sc181: rehoming reparented every mountpoint dentry under
             // the moved root — all cached chains changed wholesale.
             mount_index_rebuild(&mut state);
@@ -1353,6 +1391,58 @@ pub fn get_process_root() -> String {
 /// Whether the current task runs under a chroot (root != "/").
 pub fn chrooted() -> bool {
     get_process_root() != "/"
+}
+
+/// (perf-syscall lane) The allocation-free chroot probe for
+/// path_lookup's fast path: reads the fs_struct slots directly instead
+/// of materializing the root String (get_root() allocates a Vec and,
+/// with a recorded root dentry, walks the whole parent chain — ~5 heap
+/// objects per call, paid 3x per lookup before this).
+pub fn process_rooted() -> bool {
+    match crate::sched::current() {
+        Some(t) => match unsafe { (*t).fs_arc() } {
+            Some(fs) => !fs.root_is_slash(),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// (perf-syscall lane) Fast normality probe: true when `abs` (an
+/// absolute path) is already in path_normalize's normal form — no
+/// empty components, no "."/".." components, no trailing slash. One
+/// byte scan, no allocations; lets the common clean-absolute-path
+/// lookup skip path_normalize entirely.
+fn path_is_normalized_fast(abs: &str) -> bool {
+    if abs.is_empty() || !abs.starts_with('/') {
+        return false;
+    }
+    if abs == "/" {
+        return true;
+    }
+    if abs.ends_with('/') {
+        return false;
+    }
+    // No empty component (== "//"), no "." or ".." component. Walk
+    // slash-separated segments.
+    let bytes = abs.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // skip the separator
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'/' {
+            i += 1;
+        }
+        let seg = &abs[start..i];
+        if seg.is_empty() {
+            return false; // "//"
+        }
+        if seg == "." || seg == ".." {
+            return false;
+        }
+    }
+    true
 }
 
 /// The current task's cwd AS THE USER SEES IT: relative to the task root
@@ -1626,16 +1716,100 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // interpreted in the CURRENT TASK'S namespace (root prefix), and the
     // normalization floor clamps ".." at that root — a chrooted process
     // cannot lexically climb out of the jail.
-    let abs_path = make_absolute_rooted(pathname);
-    let normalized = normalize_with_root(&abs_path, &get_process_root());
+    // (perf-syscall lane) Root + normalize with ZERO heap objects on
+    // the common shape (not chrooted, absolute already-clean path):
+    // the old sequence paid ~15 allocations per lookup — make_absolute_
+    // rooted's String, THREE get_process_root() Strings (each itself a
+    // Vec clone + path_normalize's two Vec<&str> collects + output
+    // String), and path_normalize's output for the abs path — before
+    // the walk even started. Only chrooted tasks and non-normal paths
+    // take the allocating arms now.
+    let rooted = process_rooted();
+    let abs_owned: Option<String>;
+    let abs_path: &str = if pathname.starts_with('/') {
+        if rooted {
+            abs_owned = Some(make_absolute_rooted(pathname));
+            abs_owned.as_deref().unwrap()
+        } else {
+            pathname
+        }
+    } else {
+        abs_owned = Some(make_absolute(pathname));
+        abs_owned.as_deref().unwrap()
+    };
+    let root_owned: Option<String>;
+    let root_str: &str = if rooted {
+        root_owned = Some(get_process_root());
+        root_owned.as_deref().unwrap()
+    } else {
+        "/"
+    };
+    let norm_owned: Option<String>;
+    let normalized: alloc::borrow::Cow<'_, str> = if rooted || !path_is_normalized_fast(abs_path) {
+        alloc::borrow::Cow::Owned(if rooted {
+            normalize_with_root(abs_path, root_str)
+        } else {
+            path_normalize(abs_path)
+        })
+    } else {
+        alloc::borrow::Cow::Borrowed(abs_path)
+    };
 
     // sc30/sc31 hunt: collect a component-by-component trail for sandbox
     // walks (the topology question — which mount each step lands in — is
-    // exactly what the serial needs to answer).
-    let sbx_tracing = (sbx_want(&normalized) || sbx_want(pathname))
-        && !sbx_noise(&normalized)
+    // exactly what the serial needs to answer). (perf-syscall lane)
+    // Hunt instrumentation — the two sbx_want/sbx_noise byte scans ran
+    // on EVERY lookup in every boot; now only on sysforensic boots.
+    let sbx_tracing = crate::dfx::switches::enabled(
+            crate::dfx::switches::DfxSwitch::SysForensic)
+        && (sbx_want(normalized.as_ref()) || sbx_want(pathname))
+        && !sbx_noise(normalized.as_ref())
         && !sbx_noise(pathname);
     let mut trail = String::new();
+
+    // lb-lane hunt (switch_root /storage invisibility): pid 1's
+    // mkdir('/storage/media') gets ENOENT although the moved tmpfs is
+    // confirmed attached at the VFS root's "storage" child
+    // (SWROOT-CHILDREN). The failure exits before the final-dentry
+    // probe, so record the walk's starting identity instead: VFS-root
+    // vs task-root (chroot) dentry pointers and the root's view of
+    // "storage"/"mnt" — the divergence the errnos point at.
+    if normalized.as_ref() == "/storage/media" || normalized.as_ref() == "/mnt/sandbox" {
+        static WALKPRB_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if WALKPRB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 6 {
+            let (vfs_root_ptr, vfs_root_has_storage, vfs_root_has_mnt) = {
+                let st = VFS_STATE.lock();
+                let r = st.root_dentry.clone();
+                match r {
+                    Some(r) => (
+                        Arc::as_ptr(&r) as usize,
+                        r.lookup_child("storage")
+                            .map(|c| c.vfsmount.lock().is_some())
+                            .unwrap_or(false),
+                        r.lookup_child("mnt")
+                            .map(|c| c.vfsmount.lock().is_some())
+                            .unwrap_or(false),
+                    ),
+                    None => (0, false, false),
+                }
+            };
+            let task_root_ptr = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .and_then(|fs| fs.root_dentry())
+                .map(|d| Arc::as_ptr(&d) as usize)
+                .unwrap_or(0);
+            crate::pr_warn!(
+                "WALKPROBE '{}' vfsroot={:#x} taskroot={:#x} procroot='{}' vfsroot-storage-mount={} vfsroot-mnt-mount={}",
+                normalized,
+                vfs_root_ptr,
+                task_root_ptr,
+                get_process_root(),
+                vfs_root_has_storage,
+                vfs_root_has_mnt
+            );
+        }
+    }
 
     // Get VFS root dentry
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
@@ -1646,13 +1820,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // symlink bases in follow_symlink.
     let mut current = follow_mount(vfs_root.clone());
     let mut symlink_depth: usize = 0;
-    let task_root_dentry: Option<Arc<Dentry>> = {
-        let root = get_process_root();
-        if root == "/" {
-            None
-        } else {
-            dentry_walk_no_symlink(&root)
-        }
+    let task_root_dentry: Option<Arc<Dentry>> = if rooted {
+        dentry_walk_no_symlink(root_str)
+    } else {
+        None
     };
 
     // Split into path components, skip empty ones
@@ -1678,16 +1849,17 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // walk INTO the next component — a regular file / FIFO / device in
         // the middle of a path fails with ENOTDIR, not ENOENT (LTP
         // chmod06 "t_file/tfile_3" expects ENOTDIR).
+        // DAC: search (x) permission is required on every directory we
+        // traverse through (Linux checks MAY_EXEC per component).
+        // (perf-syscall lane) ONE get_inode() serves both checks — it
+        // takes the dentry inode spinlock and clones the Arc, and the
+        // two separate calls doubled that cost on every component of
+        // every walk.
         if let Some(ref cur_inode) = current.get_inode() {
             if !cur_inode.mode.is_directory() {
                 return Err(errno::Errno::NotADirectory.as_neg_i32());
             }
-        }
-
-        // DAC: search (x) permission is required on every directory we
-        // traverse through (Linux checks MAY_EXEC per component).
-        if let Some(ref dir_inode) = current.get_inode() {
-            if !crate::fs::permission::inode_permission(dir_inode, crate::fs::permission::MAY_EXEC) {
+            if !crate::fs::permission::inode_permission(cur_inode, crate::fs::permission::MAY_EXEC) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
             }
         }
@@ -1727,6 +1899,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
 
         // Look up child in dentry tree
+        // (perf-syscall lane) the hit arm's inode is hoisted so the
+        // symlink check below does not re-take the dentry inode lock.
+        let mut hit_inode: Option<alloc::sync::Arc<crate::fs::inode::Inode>> = None;
         let child = match current.lookup_child(component) {
             Some(c) => {
                 // Negative dentry — file known not to exist
@@ -1768,11 +1943,21 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
-                if let Some(ref cached_inode) = c.get_inode() {
+                // (perf-syscall lane) skip the set_inode lock+Arc swap
+                // when the icache hands back the SAME inode the dentry
+                // already holds — a no-op replace that still took the
+                // inode spinlock and churned the Arc refcount on every
+                // walk of every cached component.
+                let mut cur = c.get_inode();
+                if let Some(ref cached_inode) = cur {
                     if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
-                        c.set_inode(fresh);
+                        if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
+                            c.set_inode(alloc::sync::Arc::clone(&fresh));
+                            cur = Some(fresh);
+                        }
                     }
                 }
+                hit_inode = cur;
                 crate::dfx::fsw::note_walk_hit();
                 c
             }
@@ -1855,8 +2040,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
 
-                    // Add to icache
-                    crate::fs::inode::icache_add(child_inode);
+                    // Add to icache (clone: the symlink-check hint below
+                    // still needs the Arc)
+                    crate::fs::inode::icache_add(child_inode.clone());
 
                     // Move to child, follow mount, follow symlink
                     let hopped = d.get_mount().is_some();
@@ -1874,11 +2060,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     }
                     // Respect LOOKUP_NOFOLLOW on the final component here as
                     // well — lstat must not depend on dentry cache state.
+                    // (perf-syscall lane) the fresh inode is in hand — no
+                    // mount hop means current IS the child we iget'd.
                     let is_last = ci == components.len() - 1;
                     if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
                         // Don't follow symlink on the final component
                     } else {
-                        current = follow_symlink(current, &components, &mut symlink_depth)?;
+                        let hint = if hopped { None } else { Some(&child_inode) };
+                        current =
+                            follow_symlink_hinted(current, hint, &components, &mut symlink_depth)?;
                     }
                     continue;
                 }
@@ -1900,11 +2090,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             ));
         }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
+        // (perf-syscall lane) no mount hop: current is the child whose
+        // inode the hit arm already fetched.
         let is_last = ci == components.len() - 1;
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
             // Don't follow symlink on the final component
         } else {
-            current = follow_symlink(current, &components, &mut symlink_depth)?;
+            let hint = if hopped { None } else { hit_inode.as_ref() };
+            current =
+                follow_symlink_hinted(current, hint, &components, &mut symlink_depth)?;
         }
     }
 
@@ -1955,13 +2149,51 @@ fn follow_symlink(
     remaining: &Vec<&str>,
     depth: &mut usize,
 ) -> Result<alloc::sync::Arc<Dentry>, i32> {
-    let inode = match dentry.get_inode() {
+    follow_symlink_hinted(dentry, None, remaining, depth)
+}
+
+/// (perf-syscall lane) Same walk with the caller's pre-fetched inode:
+/// both walk loops already hold the child's Arc (the dcache-hit arm's
+/// icache refresh / the iget arm's fresh inode), and re-reading it here
+/// cost one dentry-inode spinlock + Arc clone per component on the
+/// no-symlink fast path (the overwhelmingly common case).
+fn follow_symlink_hinted(
+    dentry: alloc::sync::Arc<Dentry>,
+    inode_hint: Option<&alloc::sync::Arc<crate::fs::inode::Inode>>,
+    remaining: &Vec<&str>,
+    depth: &mut usize,
+) -> Result<alloc::sync::Arc<Dentry>, i32> {
+    let inode_owned: alloc::sync::Arc<crate::fs::inode::Inode> = match inode_hint.cloned() {
         Some(i) => i,
-        None => return Ok(dentry),
+        None => match dentry.get_inode() {
+            Some(i) => i,
+            None => return Ok(dentry),
+        },
     };
+    let inode = &inode_owned;
 
     if !inode.mode.is_symlink() {
         return Ok(dentry);
+    }
+
+    // /proc/[pid]/ns/<kind> magic link: TERMINAL for path resolution —
+    // the readlink target "<kind>:[<inum>]" is an nsfs identifier, not a
+    // walkable path (Linux nd_jump_link: opening the link yields an nsfd;
+    // walking the string is always wrong). Return the link dentry itself;
+    // file_open recognizes the (pid, kind) inode and builds the ns fd.
+    // Without this, open("/proc/self/ns/mnt") ENOENTs — OH's beget then
+    // loses InitDefaultNamespace/EnterDefaultNamespace and init stays
+    // stuck inside the sandbox after its pivot_root (the lb-lane
+    // /storage-invisibility root cause).
+    if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if crate::fs::procfs::pid::is_valid_pid(pid_val)
+            && rem >= crate::fs::procfs::NS_LINK_INO_OFF
+            && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+        {
+            return Ok(dentry);
+        }
     }
 
     // /proc/[pid]/fd/N magic link: resolution goes straight to the target
@@ -2117,9 +2349,16 @@ fn follow_symlink(
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
+                // (perf-syscall lane) skip the set_inode lock+Arc swap
+                // when the icache hands back the SAME inode the dentry
+                // already holds — a no-op replace that still took the
+                // inode spinlock and churned the Arc refcount on every
+                // walk of every cached component.
                 if let Some(ref cached_inode) = c.get_inode() {
                     if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
-                        c.set_inode(fresh);
+                        if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
+                            c.set_inode(fresh);
+                        }
                     }
                 }
                 c
@@ -2155,9 +2394,11 @@ fn follow_symlink(
                     d.set_inode(child_inode.clone());
                     d.set_parent(current.clone());
                     current.add_child(name.clone(), d.clone());
-                    crate::fs::inode::icache_add(child_inode);
+                    crate::fs::inode::icache_add(child_inode.clone());
+                    let hopped = d.get_mount().is_some();
                     current = follow_mount(d);
-                    current = follow_symlink(current, remaining, depth)?;
+                    let hint = if hopped { None } else { Some(&child_inode) };
+                    current = follow_symlink_hinted(current, hint, remaining, depth)?;
                     continue;
                 }
             }
@@ -2377,8 +2618,6 @@ fn vfs_dir_epoch_bump() {
 /// 1. Resolving the parent directory path
 /// 2. Calling the parent's inode_operations->mkdir
 pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
@@ -2404,6 +2643,13 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
     // mkdir callback, which succeeded.
+    //
+    // EROFS comes AFTER the existence decision (Linux order:
+    // filename_create reports -EEXIST before mnt_want_write can fail
+    // -EROFS): mkdir of an EXISTING name inside a read-only bind returns
+    // EEXIST, not EROFS — OH's sandbox MakeDirRecursive over the ro
+    // /vendor bind treats EEXIST as success (old order aborted the whole
+    // bind chain with EROFS).
     match path_lookup(pathname, LOOKUP_NOFOLLOW) {
         Ok(_) => {
             sbx_mkdir_stage("precheck", -17);
@@ -2421,6 +2667,10 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
             return Err(e);
         }
     }
+
+    // Write-intent guard (mnt_want_write): new names on a MS_RDONLY mount
+    // fail EROFS (LTP needs_rofs family: mkdir03, unlink09, ...).
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = match lookup_parent_dir(pathname) {
         Ok(v) => v,
@@ -2539,18 +2789,20 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
 /// umask is applied by the caller (sys_mknodat), matching
 /// do_mknodat's `mode &= ~current_umask()`.
 pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (do_mknodat resolves through
-    // user_path_create, which fails on an existing name).
+    // user_path_create, which fails on an existing name). EROFS after
+    // the existence decision — same order as vfs_mkdir.
     match path_lookup(pathname, LOOKUP_NOFOLLOW) {
         Ok(_) => return Err(errno::Errno::FileExists.as_neg_i32()),
         Err(e) if e == -(errno::constants::ENOENT) => {}
         Err(e) => return Err(e),
     }
+
+    // Write-intent guard after the existence decision (see vfs_mkdir).
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
     let parent_inode = parent_vpath.inode.as_ref()
@@ -2597,16 +2849,17 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
 
 /// Create symbolic link - unified implementation using inode_operations
 pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
-    check_not_readonly(pathname)?;
-
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
     // EEXIST before any mutation (Linux sys_symlinkat; LTP symlink01
-    // derivatives expect failure when the link name is taken).
+    // derivatives expect failure when the link name is taken). EROFS
+    // after the existence decision — same order as vfs_mkdir.
     if path_lookup(pathname, LOOKUP_NOFOLLOW).is_ok() {
         return Err(errno::Errno::FileExists.as_neg_i32());
     }
+
+    check_not_readonly(pathname)?;
 
     let (parent_vpath, name) = lookup_parent_dir(pathname)?;
 
@@ -3851,6 +4104,40 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 {
                     return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32()); // ELOOP
                 }
+                // /proc/[pid]/ns/<kind> magic link (followed — plain open):
+                // the fd IS the namespace reference (Linux nsfs). The
+                // syscall-layer string shortcut only covers non-chrooted
+                // tasks; the generic walk (used by jailed/pivoted tasks —
+                // OH init after its sandbox pivot) lands here via the
+                // terminal follow_symlink rule.
+                if inode.fs_id == crate::fs::inode::FS_ID_PROCFS
+                    && inode.private_data.is_none()
+                    && inode.mode.is_symlink()
+                {
+                    let pid_val = inode.ino / 10000;
+                    let rem = inode.ino % 10000;
+                    if crate::fs::procfs::pid::is_valid_pid(pid_val)
+                        && rem >= crate::fs::procfs::NS_LINK_INO_OFF
+                        && rem < crate::fs::procfs::NS_LINK_INO_OFF + 6
+                    {
+                        if let Some(kind) =
+                            crate::process::ns::NsKind::from_index(rem - crate::fs::procfs::NS_LINK_INO_OFF)
+                        {
+                            let file = crate::process::ns::build_ns_file(
+                                pid_val as u32,
+                                kind,
+                                flags,
+                            )
+                            .map_err(|e| e)?;
+                            return match get_file_fd_install(file) {
+                                Some(fd) => Ok(fd),
+                                None => {
+                                    Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                                }
+                            };
+                        }
+                    }
+                }
                 // O_PATH on a symlink: install a descriptor-only File on
                 // the link inode (no read/write ops — matches Linux, where
                 // only fstat/fchdir-ish/readlinkat(fd,"") use it).
@@ -3969,7 +4256,10 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if accmode != FileFlags::O_RDONLY {
                 return Err(errno::Errno::IsADirectory.as_neg_i32());
             }
-            return file_opendir(filename, flags | 0o00200000);
+            return file_opendir(
+                filename,
+                flags | crate::fs::file::FileFlags::O_DIRECTORY,
+            );
         }
 
         // Device nodes with no bound driver: Linux fails the open with
@@ -4274,6 +4564,15 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 // (coreutils cat: "input file is output file" on every
                 // `x | cat` pipeline, silently dropping the data).
                 if crate::fs::pipe::pipe_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
+                // Sockets (all families) install inode-less Files too;
+                // they must stat as S_IFSOCK or clients that probe the
+                // fd shape give up capabilities — sd-bus's
+                // sd_is_socket() decides unix-fd NEGOTIATION on it
+                // (gdmr71 session-fifo hunt: without this every
+                // fd-carrying sd-bus send returned EOPNOTSUPP).
+                if crate::net::socket::socket_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
                 if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {

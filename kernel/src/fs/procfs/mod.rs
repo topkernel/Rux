@@ -567,6 +567,9 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
+        // Cached-read cost anatomy (dfx=filerd probe; counters are inert
+        // unless the switch armed them).
+        self.create_dynamic_file("filerd", crate::dfx::filerd::generate);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).
@@ -1061,6 +1064,13 @@ pub fn get_procfs_sb() -> Option<&'static ProcFSSuperBlock> {
 /// Read file from /proc
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
     use crate::process::current_pid;
+
+    // (perf-syscall lane) prefix gate before the components Vec — this
+    // runs on EVERY non-O_DIRECTORY openat (sys_openat's procfs
+    // shortcut chain); non-proc paths must not allocate here.
+    if !path.starts_with("/proc") {
+        return None;
+    }
 
     // Handle /proc/[pid]/xxx paths directly (lookup() doesn't support PID dirs)
     let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();

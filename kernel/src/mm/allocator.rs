@@ -7,7 +7,7 @@
 //! This module re-exports the Buddy System allocator's public interface.
 //! The Buddy System is an efficient memory allocation algorithm that supports O(log n) allocation and deallocation.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

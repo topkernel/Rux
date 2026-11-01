@@ -1,5 +1,12 @@
 # RISC-V 64-bit Architecture Implementation
 
+> **Status (2026-11-01):** the fundamentals here (Sv39 layout, CSR
+> usage, PtRegs, extension gating incl. the later RVV lazy-enable
+> work) remain the reference for the primary port. Sibling
+> architectures: [aarch64.md](aarch64.md); x86_64 specifics live in
+> the arch sources and [memory.md](memory.md) cross-architecture
+> sections.
+
 This document describes RISC-V-specific implementation details in the Rux kernel.
 For boot process, memory layout, and page table management, see their dedicated documents.
 

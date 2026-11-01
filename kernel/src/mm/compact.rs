@@ -327,7 +327,14 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // PTE, so remap_page cannot recover the R/W/X/U flags afterwards, and a
     // walk of the cleared PTE returns None (which used to silently skip the
     // remap entirely — see review MM-C2).
-    let saved_flags_cell = core::cell::Cell::new(0xD7u64); // V|R|W|U|A|D fallback
+    // FD-1: the flag mask is the arch's pte_flag_bits (riscv64 keeps the
+    // historical & 0x3FF; x86_64 also carries NX so a migrated NX mapping
+    // does not widen back to executable; aarch64 carries the descriptor
+    // attribute bits) — the Sv39-only & 0x3FF that used to live here
+    // stripped x86_64's NX on migration.
+    let saved_flags_cell = core::cell::Cell::new(
+        crate::arch::mm::mm_ops::PTE_FLAGS_ANON_DEFAULT,
+    );
     // mm-teardown vs spinlocks: collect the pinned mm Arcs under the
     // pid-hash bucket locks (never dropped there — a last-reference drop
     // runs the schedulable teardown), walk them after. Cell::take: the
@@ -341,7 +348,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
         }
     });
     for mm_arc in flag_mm_pins.take() {
-        if saved_flags_cell.get() != 0xD7 {
+        if saved_flags_cell.get() != crate::arch::mm::mm_ops::PTE_FLAGS_ANON_DEFAULT {
             break;
         }
         // R25-2: the Arc pins the address space (see rmap.rs note) — this
@@ -349,7 +356,7 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
         if let Some((_ppn, bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(
             mm_arc.pgd(), old_vaddr as u64,
         ) {
-            saved_flags_cell.set(bits & 0x3FF);
+            saved_flags_cell.set(crate::arch::mm::mm_ops::pte_flag_bits(bits));
         }
     }
     let saved_pte_flags = saved_flags_cell.get();
@@ -414,6 +421,20 @@ unsafe fn migrate_page_window(
     dst.set_flag(PageFlag::Referenced);
     dst.set_refcount(1);
 
+    // LRU handover (mm-lane review): try_to_unmap_migration only
+    // decrements _mapcount — it does NOT run page_remove_rmap, so src
+    // still carries its Lru flag and lru links from the fault path that
+    // first mapped it. Freeing it to the buddy in that state leaves the
+    // LRU chain running THROUGH a free-list page; when the frame is
+    // re-allocated (clear_all_flags drops the Lru bit but not the
+    // links) and later re-enters an LRU, the stale predecessor link
+    // splices the two chains and the list double-counts the pfn.
+    // Unlink src here, and link dst in its place — the migrated page
+    // keeps its reclaim visibility (same shape as the vmscan swap-out
+    // cleanup).
+    super::lru::page_remove_lru(src);
+    super::lru::page_add_anon_lru(dst);
+
     // Clear src metadata
     // Note: try_to_unmap() only decrements _mapcount, not _refcount.
     // free_pages() will reset refcount to 0 before releasing to buddy.
@@ -475,45 +496,28 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
 
         // Do NOT gate this on PageTableWalker::walk: the PTE was just
         // cleared by try_to_unmap, so a walk returns None and the remap
-        // would be silently skipped (review MM-C2). The manual walk below
-        // only requires the page-table LEVELS to exist; the leaf entry is
+        // would be silently skipped (review MM-C2). leaf_pte_install only
+        // requires the page-table LEVELS to exist; the leaf entry is
         // rebuilt from the saved permission bits.
+        // FD-1: the install (lock, arch leaf encoding, unlock) is the
+        // arch's leaf_pte_install — the manual Sv39 descent that used to
+        // live here indexed the root with the wrong bits on the 4-level
+        // arches and never installed the new mapping (migration always
+        // aborted after freeing the source). TLB flush stays local here;
+        // rmap's try_to_unmap pass already broadcast the shootdown.
         let root_ppn = mm.pgd();
-        let vpn2 = ((old_vaddr >> 30) & 0x1FF) as usize;
-        let vpn1 = ((old_vaddr >> 21) & 0x1FF) as usize;
-        let vpn0 = ((old_vaddr >> 12) & 0x1FF) as usize;
-
-        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-            root_ppn << super::hugepage::PAGE_SHIFT,
-        );
-        let pte2 = (*root_table).get(vpn2);
-        if !pte2.is_valid() {
-            continue;
+        if unsafe {
+            crate::arch::mm::mm_ops::leaf_pte_install(
+                mm,
+                root_ppn,
+                old_vaddr as u64,
+                new_ppn,
+                saved_flags,
+            )
+        } {
+            // Flush TLB for this address
+            crate::mm::flush_tlb_page_local(old_vaddr as u64);
         }
-
-        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-            pte2.ppn() << super::hugepage::PAGE_SHIFT,
-        );
-        let pte1 = (*table1).get(vpn1);
-        if !pte1.is_valid() {
-            continue;
-        }
-
-        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
-            pte1.ppn() << super::hugepage::PAGE_SHIFT,
-        );
-
-        // Rebuild the leaf PTE under the PTE lock (R22-3 — §17.4 close).
-        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
-        let new_pte_bits = (new_ppn << 10) | (saved_flags & 0x3FF) | 0x1 /* V */;
-        (*table0).set(
-            vpn0,
-            crate::arch::mm::pagetable::PageTableEntry::from_bits(new_pte_bits),
-        );
-
-        // Flush TLB for this address
-        crate::mm::flush_tlb_page_local(old_vaddr as u64);
-        drop(_pte_g);
         // vma_mgr dropped here — lock released after PTE update
     }
 }

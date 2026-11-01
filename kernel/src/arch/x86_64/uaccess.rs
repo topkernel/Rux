@@ -30,6 +30,23 @@ use super::mm::memory_layout::user_addr::USER_END;
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 
 // asm copy cores (AT&T syntax — global_asm defaults to Intel on x86).
+//
+// AC bracketing (perf-filerd lane, bw_file_rd 50x-turned-1.5x anatomy):
+// the cores used to set/clear EFLAGS.AC with pushfq + orq/andq on (%rsp)
+// + popfq — a read-modify-write of the full flags word through memory,
+// ~100+ cycles per bracket pair, around EVERY page-sized copy. With 16
+// per-page copies per 64 KiB read(2) that bracket tax alone was a third
+// of the copy phase. Two properties make the fast form safe:
+//   * CR4.SMAP is the ONLY feature that faults user accesses at CPL0
+//     with AC clear — when SMAP_ENABLED is 0 the bracket is dead weight
+//     and is skipped entirely (STAC/CLAC would also #UD on a CPU without
+//     the SMAP CPUID bit, e.g. QEMU's default TCG model).
+//   * When SMAP is on, the SMAP CPUID bit (leaf 7 EBX[20]) implies the
+//     STAC/CLAC instructions exist — 2-cycle flag writes, no memory, no
+//     serialization — so the bracket becomes stac/clac.
+// The fixup label ALSO clears AC (a fault mid-copy lands there with AC
+// still set); with SMAP off both clac sites degrade to plain ret, same
+// as the old pushfq/andq/popfq pair did.
 core::arch::global_asm!(
     r#"
 .section .text.uaccess
@@ -42,17 +59,28 @@ core::arch::global_asm!(
 __x64_copy_to_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
-    jz 2f
-    cld
-1:  rep movsb
+    jz 80f
+    cmpb $0, {smap}(%rip)
+    je 81f
+    stac
+81: cld
+82: rep movsb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 82b
+    .quad 84f
     .popsection
-2:  movq %rcx, %rax          /* rcx == 0 on completion */
-    ret
-3:  movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    movq %rcx, %rax          /* rcx == 0 on completion */
+    cmpb $0, {smap}(%rip)
+    je 83f
+    clac
+83: ret
+84: movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    cmpb $0, {smap}(%rip)
+    je 86f
+    clac
+86: ret
+80: xorl %eax, %eax
     ret
 
 /* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
@@ -62,17 +90,28 @@ __x64_copy_to_user:
 __x64_copy_from_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
-    jz 2f
-    cld
-1:  rep movsb
+    jz 70f
+    cmpb $0, {smap}(%rip)
+    je 71f
+    stac
+71: cld
+72: rep movsb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 72b
+    .quad 74f
     .popsection
-2:  movq %rcx, %rax
-    ret
-3:  movq %rcx, %rax
+    movq %rcx, %rax
+    cmpb $0, {smap}(%rip)
+    je 73f
+    clac
+73: ret
+74: movq %rcx, %rax
+    cmpb $0, {smap}(%rip)
+    je 76f
+    clac
+76: ret
+70: xorl %eax, %eax
     ret
 
 /* __x64_clear_user: rdi = user dst, rsi = n.
@@ -82,21 +121,33 @@ __x64_copy_from_user:
 __x64_clear_user:
     movq %rsi, %rcx
     testq %rcx, %rcx
-    jz 2f
-    xorl %eax, %eax
+    jz 60f
+    cmpb $0, {smap}(%rip)
+    je 61f
+    stac
+61: xorl %eax, %eax
     cld
-1:  rep stosb
+62: rep stosb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 62b
+    .quad 64f
     .popsection
-2:  xorl %eax, %eax
-    ret
-3:  movq %rcx, %rax
+    xorl %eax, %eax           /* rcx == 0 on completion */
+    cmpb $0, {smap}(%rip)
+    je 63f
+    clac
+63: ret
+64: movq %rcx, %rax          /* fault mid-clear: rcx = remaining */
+    cmpb $0, {smap}(%rip)
+    je 66f
+    clac
+66: ret
+60: xorl %eax, %eax
     ret
 "#,
-    options(att_syntax)
+    options(att_syntax),
+    smap = sym super::cpu::SMAP_ENABLED
 );
 
 extern "C" {
@@ -144,14 +195,32 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
 /// Copy user → kernel. Returns the number of bytes NOT copied.
 ///
+/// On failure the uncopied tail of `to` is zero-filled, matching the
+/// riscv64 twin and the reference copy_from_user: callers (e.g. msgsnd,
+/// semtimedop) historically consumed the buffer even on failure, and
+/// leaving previous kernel heap contents in it is an information leak
+/// (review SEC, the riscv64 twin's fix — the x86 port had been left
+/// behind).
+///
 /// # Safety
 /// `to` must be writable for `n` bytes; `from` is validated by access_ok.
 pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     if !access_ok(from as usize, n) {
+        // Zero the whole kernel buffer: callers that proceed with a
+        // failed copy must never see stale kernel heap contents.
+        core::ptr::write_bytes(to, 0, n);
         return n;
     }
     // SAFETY: exception-table copy (see copy_to_user).
-    unsafe { __x64_copy_from_user(to, from, n) }
+    let uncopied = unsafe { __x64_copy_from_user(to, from, n) };
+    if uncopied > 0 {
+        // Zero-fill the uncopied tail (reference semantics): the kernel
+        // buffer must never keep stale contents past the point the user
+        // copy reached.
+        let copied = n - uncopied;
+        core::ptr::write_bytes(to.add(copied), 0, uncopied);
+    }
+    uncopied
 }
 
 /// Zero user memory. Returns the number of bytes NOT cleared.
@@ -311,7 +380,10 @@ pub unsafe fn get_user<T: Copy>(from: *const T) -> Option<T> {
 
 /// Write one value to user memory.
 ///
-/// Routes through the exception-table copy core (see get_user).
+/// Routes through [`copy_to_user`] (the riscv64 twin's shape) so a fault
+/// on a COW/demand page gets the resolve-and-retry instead of a bare
+/// short copy: a put_user onto a valid but not-yet-writable user page
+/// must succeed, not report EFAULT.
 ///
 /// # Safety
 /// `to` is validated by access_ok only in this phase.
@@ -325,7 +397,7 @@ pub unsafe fn put_user<T: Copy>(to: *mut T, value: T) -> bool {
     // SAFETY: source is a size-of-T kernel stack slot; the destination
     // write faults into the extable fixup which returns a short count.
     let uncopied =
-        unsafe { __x64_copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
+        unsafe { copy_to_user(to as *mut u8, &value as *const T as *const u8, size) };
 
     uncopied == 0
 }
@@ -368,25 +440,49 @@ pub fn strncpy_from_user<'a>(
     let limit = core::cmp::min(max_len, buf.len());
     let limit = core::cmp::min(limit, max);
 
-    let mut i = 0;
-    while i < limit {
-        // get_user goes through __x64_copy_from_user (assembly) which has
-        // exception table entries, so page faults are handled safely.
-        // Note: a NUL at index 0 (empty string) is a SUCCESS returning an
-        // empty slice — rejecting it breaks empty-argument execs.
-        match unsafe { get_user(from.add(i)) } {
-            Some(byte) => {
-                buf[i] = byte;
-                if byte == 0 {
-                    break;
-                }
-                i += 1;
-            }
-            None => return Err(-EFAULT),
+    // Note (kept from the byte-loop era): a NUL at index 0 (empty string)
+    // is a SUCCESS returning an empty slice — callers rely on it for
+    // empty-argument execs and openat("") -> ENOENT.
+    // (perf-syscall lane) CHUNKED copy, scanning kernel memory for the
+    // NUL after each chunk. The old byte-at-a-time loop paid one
+    // exception-safe accessor call PER CHARACTER (each with its own AC
+    // bracket on x86_64 after SMAP) — ~30 instructions per path byte on
+    // every openat/stat/exec. Copying the whole `limit` in one shot
+    // regressed instead (a PATH_MAX window of 4 KiB memcpy for a
+    // 20-byte name): chunks of 64 bytes bound both sides — short names
+    // cost ONE chunk, long names never copy more than 63 bytes past
+    // their NUL. A fault mid-chunk leaves the tail zeroed and the scan
+    // either finds the NUL first (the old loop also succeeded there) or
+    // reports EFAULT exactly where the old loop did.
+    const CHUNK: usize = 64;
+    let mut done: usize = 0;
+    while done < limit {
+        let want = core::cmp::min(CHUNK, limit - done);
+        // SAFETY: buf is `limit` bytes; done+want stays inside it. The
+        // raw exception-table copy handles user faults: it returns the
+        // bytes NOT copied of this chunk.
+        let uncopied = unsafe {
+            __x64_copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
+        };
+        let got = want - uncopied;
+        if uncopied > 0 {
+            // SAFETY: zero the never-written tail so the NUL scan below
+            // cannot see stale kernel bytes.
+            unsafe {
+                core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
+            };
         }
+        if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
+            return Ok(&buf[..done + rel]);
+        }
+        if uncopied > 0 {
+            // Faulted with no NUL in the readable window so far.
+            return Err(-EFAULT);
+        }
+        done += want;
     }
-
-    Ok(&buf[..i])
+    // No NUL within `limit` bytes: same shape the old loop returned.
+    Ok(&buf[..limit])
 }
 
 /// Get length of null-terminated string in user space

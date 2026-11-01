@@ -47,7 +47,7 @@ def foreign_qemus():
 def build_probe(out, src=None):
     if src is None:
         src = os.path.join(HERE, "pbench.c")
-    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-o", out, src]
+    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-pthread", "-o", out, src]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("[build] compile failed: %s" % r.stderr)
@@ -107,6 +107,11 @@ def main():
                     help="stage the pbench_p3d wrapper (sets P3D=1 in the "
                          "probe's env then execs it) — enables the P3d "
                          "concurrent-fault contention row (ledger 8.10.27)")
+    ap.add_argument("--p2f", action="store_true",
+                    help="stage the pbench_p2f wrapper (boots init=/test/"
+                         "pbench_p2f -> probe argv 'p2fonly': just the "
+                         "futex wake->run battery — quiet + kernel-hog + "
+                         "user-hog regimes, perf-sched lane)")
     ap.add_argument("--nojournal", action="store_true",
                     help="F4 arm-1 (leg 44): mkfs the probe rootfs WITHOUT "
                          "has_journal so the fs rows run the no-journal "
@@ -126,6 +131,8 @@ def main():
                          "then windows + pinned spread/samecpu variants; "
                          "pin = the serialized-cycle discriminators "
                          "(samecpu read 64K/4K, samecpu recvfrom, spread)")
+    ap.add_argument("--probe-bin", default=None,
+                    help="ship this prebuilt probe as init instead of building pbench.c")
     ap.add_argument("--append-extra", default=None,
                     help="leg 46: extra kernel cmdline tokens appended "
                          "to -append (e.g. 'dfx=wwcensus')")
@@ -136,7 +143,10 @@ def main():
         print("[boot] bzImage missing: %s" % args.bzimage)
         return 2
     probe = os.path.join(WORK, "pbench")
-    if not build_probe(probe):
+    if args.probe_bin:
+        import shutil as _sh
+        _sh.copy(args.probe_bin, probe)
+    elif not build_probe(probe):
         return 2
     img = os.path.join(WORK, "pbench-%s.img" % args.tag)
     arm = None
@@ -151,6 +161,11 @@ def main():
         if not build_probe(arm, src=os.path.join(HERE, "pbench_p3d_arm.c")):
             return 2
         init_path = "/test/pbench_p3d"
+    if args.p2f:
+        arm = os.path.join(WORK, "pbench_p2f")
+        if not build_probe(arm, src=os.path.join(HERE, "pbench_p2f_arm.c")):
+            return 2
+        init_path = "/test/pbench_p2f"
     if args.long_p5:
         # leg 46: stage the wrapper as an extra image file and boot it
         # (the probe itself is still staged — the wrapper execve's it).

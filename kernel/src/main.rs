@@ -46,69 +46,61 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     const FAIL: &[u8] = b"[fail]";
     const DONE: &[u8] = b"[done]";
 
-    unsafe {
-        use crate::console::putchar;
-
-        // Print red start code on failure
-        if success == Some(false) {
-            for &b in RED {
-                putchar(b);
-            }
-        }
-
-        // Print module name + colon (fixed width 16 chars, left-aligned)
-        for b in module.as_bytes() {
-            putchar(*b);
-        }
-        putchar(b':');
-        let module_len = module.len() + 1; // +1 for colon
-        if module_len < 16 {
-            for _ in 0..(16 - module_len) {
-                putchar(b' ');
-            }
-        }
-
-        // Print description (fixed width 32 chars, left-aligned, truncate if too long)
-        // Print 2 spaces first as column separator
-        putchar(b' ');
-        putchar(b' ');
-        let desc_bytes = desc.as_bytes();
-        let desc_len = if desc_bytes.len() > 32 { 32 } else { desc_bytes.len() };
-        for i in 0..desc_len {
-            putchar(desc_bytes[i]);
-        }
-        if desc_len < 32 {
-            for _ in 0..(32 - desc_len) {
-                putchar(b' ');
-            }
-        }
-        // Leave 3 spaces before status column for alignment
-        putchar(b' ');
-        putchar(b' ');
-        putchar(b' ');
-
-        // Print status symbol
-        match success {
-            Some(true) => {
-                for &b in OK { putchar(b); }
-            }
-            Some(false) => {
-                for &b in FAIL { putchar(b); }
-            }
-            None => {
-                for &b in DONE { putchar(b); }
-            }
-        }
-
-        // Print color reset code on failure
-        if success == Some(false) {
-            for &b in RESET {
-                putchar(b);
-            }
-        }
-
-        putchar(b'\n');
+    // Stage the whole line, then ONE batched console write
+    // (perf-console): the old per-byte putchar loop paid a full UART
+    // irqsave lock pair plus per-byte 16550 register traffic on every
+    // one of the ~150 boot-table lines. Widths: 5 (RED) + 16 + 2 + 32
+    // + 3 + 6 (FAIL) + 5 (RESET) + 1 (NL) = 70 max.
+    fn push(line: &mut [u8; 80], n: &mut usize, bytes: &[u8]) {
+        let room = line.len() - *n;
+        let take = bytes.len().min(room);
+        line[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
     }
+    let mut line = [0u8; 80];
+    let mut n = 0usize;
+
+    // Print red start code on failure
+    if success == Some(false) {
+        push(&mut line, &mut n, RED);
+    }
+
+    // Print module name + colon (fixed width 16 chars, left-aligned)
+    push(&mut line, &mut n, module.as_bytes());
+    push(&mut line, &mut n, b":");
+    let module_len = module.len() + 1; // +1 for colon
+    if module_len < 16 {
+        let pad = 16 - module_len;
+        push(&mut line, &mut n, &[b' '; 16][..pad]);
+    }
+
+    // Print description (fixed width 32 chars, left-aligned, truncate if too long)
+    // Print 2 spaces first as column separator
+    push(&mut line, &mut n, b"  ");
+    let desc_bytes = desc.as_bytes();
+    let desc_len = if desc_bytes.len() > 32 { 32 } else { desc_bytes.len() };
+    push(&mut line, &mut n, &desc_bytes[..desc_len]);
+    if desc_len < 32 {
+        let pad = 32 - desc_len;
+        push(&mut line, &mut n, &[b' '; 32][..pad]);
+    }
+    // Leave 3 spaces before status column for alignment
+    push(&mut line, &mut n, b"   ");
+
+    // Print status symbol
+    match success {
+        Some(true) => push(&mut line, &mut n, OK),
+        Some(false) => push(&mut line, &mut n, FAIL),
+        None => push(&mut line, &mut n, DONE),
+    }
+
+    // Print color reset code on failure
+    if success == Some(false) {
+        push(&mut line, &mut n, RESET);
+    }
+
+    push(&mut line, &mut n, b"\n");
+    crate::console::puts_bytes(&line[..n]);
 }
 
 #[cfg(feature = "riscv64")]
@@ -350,29 +342,22 @@ pub fn rust_main_tail() -> ! {
 
     // ========== Heap initialized, format! can be used below ==========
 
-    // Print boot message
-    unsafe {
-        use crate::console::putchar;
-        const YELLOW: &[u8] = b"\x1b[33m";
-        const RESET: &[u8] = b"\x1b[0m";
-        for &b in YELLOW { putchar(b); }
-        const MSG: &[u8] = b"Kernel starting...\n\n";
-        for &b in MSG { putchar(b); }
-        for &b in RESET { putchar(b); }
+    // Print boot message (batched: one console write per constant —
+    // perf-console; identical byte stream to the old per-byte putchar
+    // loop, raw \n, no CR expansion)
+    {
+        crate::console::puts_bytes(b"\x1b[33m");
+        crate::console::puts_bytes(b"Kernel starting...\n\n");
+        crate::console::puts_bytes(b"\x1b[0m");
     }
 
-    // Print table header
-    unsafe {
-        use crate::console::putchar;
-        const CYAN: &[u8] = b"\x1b[36m";
-        const RESET: &[u8] = b"\x1b[0m";
-        for &b in CYAN { putchar(b); }
+    // Print table header (batched, same rationale)
+    {
+        crate::console::puts_bytes(b"\x1b[36m");
         // Module(16) + 2 spaces + Description(32) + 3 spaces + Status
-        const HEADER: &[u8] = b"Module            Description                        Status\n";
-        for &b in HEADER { putchar(b); }
-        const DIVIDER: &[u8] = b"----------------  --------------------------------   --------\n";
-        for &b in DIVIDER { putchar(b); }
-        for &b in RESET { putchar(b); }
+        crate::console::puts_bytes(b"Module            Description                        Status\n");
+        crate::console::puts_bytes(b"----------------  --------------------------------   --------\n");
+        crate::console::puts_bytes(b"\x1b[0m");
     }
 
     print_status("console", "UART ns16550a driver", true);
@@ -627,6 +612,8 @@ pub fn rust_main_tail() -> ! {
         // snapshots the offset) and any file creation; if the device is
         // unreadable the offset stays 0 and the system runs on monotonic
         // boot time (the pre-RTC behaviour).
+        #[cfg(feature = "x86_64")]
+        drivers::rtc::rtc_init_alias();
         drivers::rtc::rtc_init_wall_clock();
 
         // Initialize IRQ framework
@@ -958,6 +945,14 @@ pub fn rust_main_tail() -> ! {
         // (start_secondaries emits its own structured status row.)
         arch::smp::start_secondaries();
 
+        // aarch64: drop boot.S's early TTBR0 identity window now that
+        // every core is high-VA (the secondary stubs were the last
+        // physical-PC consumers). From here a low-address kernel
+        // usercopy faults → exception-table fixup → -EFAULT, instead of
+        // reading flash through the identity map.
+        #[cfg(feature = "aarch64")]
+        arch::mm::teardown_early_identity_map();
+
         // Initialize ksoftirqd per-CPU threads (must be after start_secondaries
         // because wake_up sends IPIs to target CPUs, which must be online).
         {
@@ -1099,6 +1094,16 @@ pub fn rust_main_tail() -> ! {
             } else {
                 // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
+                // phantom-bits: drain pending softirqs before parking.
+                // The irq-exit deferral gate may have left completions
+                // armed for ksoftirqd — which can never run inside a
+                // pure WFI loop (no schedule() ever happens again), so
+                // in-flight block completions stall forever with the
+                // virtio wedge watchdog printing until the wrapper
+                // timeout (the make-test halt-time VW-WEDGE spam).
+                while crate::interrupt::softirq::has_pending_softirqs() {
+                    let _ = crate::interrupt::softirq::__do_softirq();
+                }
                 loop {
                     crate::arch::cpu::wfi();
                 }
@@ -1174,6 +1179,9 @@ pub fn rust_main_tail() -> ! {
 #[cfg(feature = "x86_64")]
 #[no_mangle]
 extern "C" fn boot_stack_continuation() -> ! {
+    // The bootstrap identity map (PML4[0]) has outlived every user —
+    // unlink it before any syscall ever runs.
+    crate::arch::x86_64::mm::mmu_init::drop_bootstrap_identity();
     crate::rust_main_tail()
 }
 
@@ -1326,9 +1334,11 @@ pub extern "C" fn rust_main() -> ! {
     printk::init();
     printk::init_logger();
 
-    // Print boot banner with ASCII art logo
-    unsafe {
-        use crate::console::putchar;
+    // Print boot banner with ASCII art logo (batched TX — perf-console:
+    // the banner is ~400 bytes; the old per-byte putchar loop paid a
+    // UART irqsave lock pair plus per-byte register traffic per byte)
+    {
+        use crate::console::puts_bytes;
 
         // ANSI colors
         const CYAN: &[u8] = b"\x1b[36m";
@@ -1337,8 +1347,8 @@ pub extern "C" fn rust_main() -> ! {
         const RESET: &[u8] = b"\x1b[0m";
 
         // Print logo in cyan bold
-        for &b in CYAN { putchar(b); }
-        for &b in BOLD { putchar(b); }
+        puts_bytes(CYAN);
+        puts_bytes(BOLD);
 
         // ASCII Art Logo - RUX (using UTF-8 block character)
         // Block = 0xE2 0x96 0x88 (3 bytes in UTF-8)
@@ -1348,17 +1358,17 @@ pub extern "C" fn rust_main() -> ! {
         const L4: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88    \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\n";
         const L5: &[u8] = b"\xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88  \xe2\x96\x88\xe2\x96\x88   \xe2\x96\x88\xe2\x96\x88\n";
 
-        for &b in L1 { putchar(b); }
-        for &b in L2 { putchar(b); }
-        for &b in L3 { putchar(b); }
-        for &b in L4 { putchar(b); }
-        for &b in L5 { putchar(b); }
+        puts_bytes(L1);
+        puts_bytes(L2);
+        puts_bytes(L3);
+        puts_bytes(L4);
+        puts_bytes(L5);
 
         // Reset before version info
-        for &b in RESET { putchar(b); }
+        puts_bytes(RESET);
 
         // Print version info
-        for &b in GREEN { putchar(b); }
+        puts_bytes(GREEN);
         // Arch label cfg-gated per build features (see the welcome-message
         // note on why not config::TARGET_PLATFORM); the riscv64 string is
         // unchanged byte-for-byte.
@@ -1368,12 +1378,11 @@ pub extern "C" fn rust_main() -> ! {
         const VERSION: &[u8] = b"  [ AArch64 | POSIX Compatible | v";
         #[cfg(not(any(feature = "x86_64", feature = "aarch64")))]
         const VERSION: &[u8] = b"  [ RISC-V 64-bit | POSIX Compatible | v";
-        for &b in VERSION { putchar(b); }
-        let ver = env!("CARGO_PKG_VERSION");
-        for b in ver.as_bytes() { putchar(*b); }
+        puts_bytes(VERSION);
+        puts_bytes(env!("CARGO_PKG_VERSION").as_bytes());
         const END: &[u8] = b" ]\n\n";
-        for &b in END { putchar(b); }
-        for &b in RESET { putchar(b); }
+        puts_bytes(END);
+        puts_bytes(RESET);
     }
 
     // Initialize trap handling

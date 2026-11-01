@@ -215,6 +215,19 @@ impl GlobalRunQueue {
         Some(cpu)
     }
 
+    /// Claim an idle CPU in `affinity` for a wake dispatch: find one and
+    /// atomically clear its idle bit, so two racing wakes cannot both
+    /// target it. Returns the claimed CPU, or None when no idle CPU is
+    /// available (or the racing claim lost).
+    pub fn claim_idle_cpu(&self, affinity: u32) -> Option<usize> {
+        let cpu = self.find_idle_cpu(affinity)?;
+        if self.clear_idle(cpu) {
+            Some(cpu)
+        } else {
+            None
+        }
+    }
+
     /// Total load across all classes (for informational purposes).
     /// Expose total nr_running for diagnostic use.
     pub fn grq_nr_running() -> usize {
@@ -1048,6 +1061,10 @@ fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
 /// parent, plus the group-wide wait_chldexit wake.
 fn process_deferred_exit_pid(packed: i64) {
     use crate::signal::Signal;
+    // forkprof (cmdline forkprof=1): the notify+wake cost that runs in
+    // the switcher's context after the exiting task is off-CPU.
+    let fp = crate::dfx::forkprof::on();
+    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
     let (parent_pid, child_pid) = unpack_notify(packed);
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
@@ -1088,6 +1105,10 @@ fn process_deferred_exit_pid(packed: i64) {
         // glib's gmain worker) must also observe the child exit.
         unsafe { crate::process::exit::wake_group_chldexit(parent) };
         crate::process::task::Task::task_put(parent);
+    }
+    if fp {
+        crate::dfx::forkprof::add(crate::dfx::forkprof::P_SCHED_NOTIFY, fp_t0);
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SNDNOTIFY_DONE, child_pid);
     }
 }
 
@@ -1241,6 +1262,61 @@ pub fn resched_cpu(cpu: usize) {
             let this_cpu = crate::arch::cpu_id() as usize;
             if this_cpu != cpu {
                 crate::arch::ipi::send_reschedule_ipi(cpu);
+            }
+        }
+    }
+}
+
+/// Claim an idle CPU (within `affinity`) for a wake dispatch (perf-ipc):
+/// the wake path's public entry for idle steering (see
+/// `Task::wake_up_impl`). The claim atomically clears the idle bit so two
+/// racing wakes cannot both dispatch to the same CPU.
+pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
+    grq().claim_idle_cpu(affinity)
+}
+
+/// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke
+/// a CPU only when the wakee actually wins the wakeup-preemption
+/// comparison — the reference's check_preempt_curr semantics. Policy
+/// dispatch mirrors enqueue_task's checks.
+pub fn preempt_check_wake(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: task is validated non-null by the caller (Task::wake_up);
+    // the check fns only read per-CPU current slots and task fields.
+    unsafe {
+        let allowed = (*task).cpus_allowed();
+        match (*task).policy() {
+            SchedPolicy::Fifo | SchedPolicy::Rr => check_rt_preempt(task, allowed),
+            SchedPolicy::Deadline => check_dl_preempt(task, allowed),
+            _ => {
+                // CFS: the vruntime-credit comparison is unusable as a
+                // wakeup gate in this tree — the sleeper-credit clamp
+                // (enqueue floor = min_vruntime − SCHED_LATENCY_NS) and
+                // the place-on-wake adjustments hold a freshly-pinged
+                // peer permanently a few ms of vruntime "behind" its
+                // running producer, so a raw check_cfs_preempt passes on
+                // EVERY wake of a ping-pong receiver and re-creates the
+                // per-record preempt dance (measured: parent +~10 ms
+                // vruntime jumps at requeue clamps, CHG probe 2026-10-31).
+                // Gate on the MEASURED wait instead: a wakee that last ran
+                // within one scheduling-latency window (its producer is
+                // mid-batch — IPC drains, log readers, socket pairs) is
+                // left to the slice/handoff machinery (the reference
+                // batches exactly this way); a wakee that waited a full
+                // latency window or more keeps its immediate preempt
+                // (the starvation/latency case the wakeup preemption
+                // exists for). exec_start holds the last PICK clock; at
+                // wake, sched_clock − exec_start ≈ last run + sleep, and
+                // the last run is µs-to-ms against a 6 ms threshold.
+                let se = (*task).sched_entity();
+                let exec_start = se.exec_start.load(core::sync::atomic::Ordering::Acquire);
+                let waited = crate::sched::fair::sched_clock().saturating_sub(exec_start);
+                if exec_start != 0 && waited < crate::sched::fair::SCHED_LATENCY_NS {
+                    return;
+                }
+                check_cfs_preempt(task, allowed);
             }
         }
     }
@@ -2339,6 +2415,31 @@ unsafe fn __schedule() {
     // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
     // path's final schedule() must always switch away.
     //
+    // LOST-PARK FIX (fix-lostpark lane, 2026-11-01): the refusal used to
+    // trigger on ANY nonzero count — including counts whose ONLY set bits
+    // are the interrupt classes (HARDIRQ/SOFTIRQ/NMI offsets). Those bits
+    // are phantom on a task attempting a VOLUNTARY sleep: no hardirq,
+    // softirq or NMI handler can legally call schedule(), so a sleeper
+    // presenting them carries a leaked bracket (the x86 tick path's
+    // entry/exit imbalance producers; the same class WAKE-HEAL and
+    // PARKED-HEAL already zero on woken/parked targets). Refusing the
+    // park anyway turned the phantom into a permanent unpreemptible
+    // kernel poll loop: with kernel-preemption off, nothing evicts the
+    // spinner, and because the spinner never completes another wait-queue
+    // event, its peer's one-shot wake tokens (returned by W1 when the
+    // wake hit the spinner's RUNNING phase of the oscillation) are never
+    // re-issued — the lmbench lat_sem / ping-pong SMP wedge (satisfiable
+    // parked waiter + peer spinning with both "idle" counters frozen;
+    // repro: run/lostpark-notes.md). The reference kernel treats this
+    // shape as a BUG print ("scheduling while atomic") and SLEEPS THE
+    // TASK ANYWAY — an IRQ-class bit must never prevent a voluntary park.
+    // Adjudicate: on a voluntary sleep (INTERRUPTIBLE/UNINTERRUPTIBLE/
+    // STOPPED — states only the task's own wait path writes), with the
+    // spinlock nest (PREEMPT_MASK) and PREEMPT_ACTIVE both clean, zero
+    // the phantom interrupt bits and allow the park. Every other shape
+    // keeps the original refusal exactly as-is (lock holders, involuntary
+    // switches, terminal states).
+    //
     // NOTE (kernel-preemption round 2): the schedule() recursion guard is
     // TIF_IN_SCHED, a ti_flags bit — NOT a preempt_count bit — so this
     // check needs no masking. (Round 1 used a PREEMPT_ACTIVE count bit;
@@ -2347,9 +2448,67 @@ unsafe fn __schedule() {
     {
         let prev_state = (*prev).state();
         if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
-            (*prev).set_state(TaskState::new(TaskState::RUNNING));
-            crate::sched::dequeue_if_enqueued(&*prev);
-            return;
+            // Adjudicate under a brief IRQ-off window so a tick landing
+            // between the read and the zero cannot erase an in-flight
+            // balanced bracket (its un-paired sub would underflow the
+            // count negative — a new phantom of the opposite sign).
+            let flags = crate::arch::cpu::save_and_disable_irq();
+            let pc = (*prev).preempt_count();
+            let irq_class = pc
+                & (crate::interrupt::preempt::HARDIRQ_MASK
+                    | crate::interrupt::preempt::SOFTIRQ_MASK
+                    | crate::interrupt::preempt::NMI_MASK);
+            let holdout = pc & !irq_class;
+            let voluntary_sleep = prev_state.is_sleeping()
+                || prev_state.contains(TaskState::STOPPED);
+            if !voluntary_sleep || holdout != 0 {
+                crate::arch::cpu::restore_irq(flags);
+                (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                crate::sched::dequeue_if_enqueued(&*prev);
+                return;
+            }
+            // Phantom interrupt bits on a voluntary sleeper: same
+            // medicine WAKE-HEAL administers (full zero — the holdout is
+            // clean, so the whole count IS the phantom).
+            (*prev).ti_preempt_count_zero();
+            crate::arch::cpu::restore_irq(flags);
+            static LPP_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn pdec3(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 {
+                        putchar(b'0');
+                        return;
+                    }
+                    while v > 0 {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    while n > 0 {
+                        n -= 1;
+                        putchar(buf[n]);
+                    }
+                }
+                const M: &[u8] = b"\nLP-PARK-IRQBITS-ZEROED pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                pdec3((*prev).pid() as u64);
+                const M2: &[u8] = b" was_pc=0x";
+                for &b in M2 {
+                    putchar(b);
+                }
+                pdec3(pc as u32 as u64);
+                putchar(b'\n');
+            }
         }
     }
 
@@ -3969,6 +4128,259 @@ pub fn wake_up_enqueue_opt(
         // branch ensure_linked_locked's re-insert already set RUNNING;
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
+        //
+        // WAKE-HEAL (launcher perf wall, 2026-10-31): the OH boots show
+        // the same few service tasks (mmi_service, os_ds_service, OS_IPC
+        // workers) parking with preempt_count==1 and waking back up with
+        // it still set — every wake runs them UNPREEMPTIBLE, so each
+        // kernel-side IPC loop monopolizes its CPU until the user-mode
+        // return (the 1-2.6 s WAKE-STRANDED class; lb13/14/15: strands
+        // with h0/h1 incumbents at pc=1/2). The parkwalk's 4 s PARKED-HEAL
+        // never matures for them because the park/run bursts reset the
+        // window, and the tick-side 2 s PREEMPT-HEAL only bounds the
+        // monopoly after it formed. This closes the cycle at the exact
+        // right point: the task is being woken RIGHT NOW, so it is about
+        // to execute — and a task owned by no CPU slot (verified under
+        // this GRQ hold, which excludes every concurrent pick publish)
+        // holds no legal guard by construction (guards live on the
+        // executing task; the pre-sleep window's task is still in its
+        // CPU's current slot and the mid-switch-out shape still carries
+        // the R63 marker — both skipped below, mirroring the parkwalk
+        // adjudication). sc265 convicted the invariant: ZERO guards are
+        // ever booked on a task current on no CPU. A nonzero count here
+        // is phantom 100%; zeroing it means the woken task runs
+        // preemptible from its first instruction, so the monopoly never
+        // forms at all. Full zero (base + stranded hardirq bits), the
+        // same medicine PARKED-HEAL administers to the same class.
+        {
+            let pc = (*task).preempt_count();
+            if pc != 0 {
+                let exiting = (*task).ti_flags()
+                    & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                        .bits()
+                    != 0;
+                let mut mid_switch = task_is_mid_switch_out(task);
+                // Stale-marker confirmation: a real context switch-out is
+                // microseconds and the marker is cleared on the same CPU
+                // right after the coroutine switch. A marker that names
+                // this task across wake attempts 50+ jiffies apart (same
+                // discipline as orphan_watch_confirm) is a wedged leftover
+                // of an aborted switch — no CPU is saving this context,
+                // the task is parked, and treating the marker as live
+                // would poison every future wake-heal of this task (the
+                // same per-task forever-skip the parkwalk's mid-switch
+                // skip produces). Time-confirm, then ignore.
+                if mid_switch {
+                    const WMS: usize = 8;
+                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
+                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
+                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
+                    let key = task as usize;
+                    let jif = crate::drivers::timer::get_jiffies();
+                    let mut stale = false;
+                    for s in 0..WMS {
+                        let prev = WM_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                        if prev == key {
+                            let prev_jif =
+                                WM_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
+                            if jif.wrapping_sub(prev_jif) >= 50 {
+                                stale = true;
+                            }
+                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        if prev == 0
+                            && WM_TASK[s]
+                                .compare_exchange(
+                                    0,
+                                    key,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    if stale {
+                        mid_switch = false;
+                    }
+                }
+                let mut curr_on = false;
+                if !mid_switch {
+                    for c in 0..MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            curr_on = true;
+                            break;
+                        }
+                    }
+                }
+                if !exiting && !mid_switch && !curr_on {
+                    (*task).ti_preempt_count_zero();
+                    static WH_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if WH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                        // R34 discipline: GRQ is held — direct console,
+                        // no printk/UART lock under GRQ.
+                        use crate::console::putchar_no_lock as putchar;
+                        fn ph(v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            for sh in (0..16).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
+                        }
+                        const M: &[u8] = b"\nWAKE-HEAL pid=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        ph((*task).pid() as u64);
+                        const M2: &[u8] = b" was=";
+                        for &b in M2 {
+                            putchar(b);
+                        }
+                        ph(pc as u32 as u64);
+                        putchar(b'\n');
+                        // preempt-hunt (2026-11-01): name the acquire
+                        // site whose 1->0 release never ran — the
+                        // outermost-acquire tap. This is the producer's
+                        // home site, printed at the moment the phantom
+                        // count is adjudicated (still the direct-console
+                        // discipline: GRQ held).
+                        crate::dfx::leakorigin::report_outermost(
+                            b"WAKE-HEAL-ORIGIN",
+                            task,
+                        );
+                    }
+                } else {
+                    // Skip-reason census (budgeted): names which guard
+                    // ate the heal — without this the zero-fire state is
+                    // indistinguishable between "never reached" and
+                    // "predicate always skips" (the lb17 capture: 21
+                    // PARKED-LEAK, 0 WAKE-HEAL).
+                    static WHS_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if WHS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                        use crate::console::putchar_no_lock as putchar;
+                        fn pdec(mut v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut buf = [0u8; 20];
+                            let mut n = 0;
+                            if v == 0 {
+                                putchar(b'0');
+                                return;
+                            }
+                            while v > 0 {
+                                buf[n] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                n += 1;
+                            }
+                            while n > 0 {
+                                n -= 1;
+                                putchar(buf[n]);
+                            }
+                        }
+                        const M: &[u8] = b"\nWAKE-HEAL-SKIP pid=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        pdec((*task).pid() as u64);
+                        const R1: &[u8] = b" why=";
+                        for &b in R1 {
+                            putchar(b);
+                        }
+                        if exiting {
+                            putchar(b'e');
+                        }
+                        if mid_switch {
+                            putchar(b's');
+                        }
+                        if curr_on {
+                            putchar(b'c');
+                        }
+                        putchar(b'\n');
+                        // Lost-park census tail (dfx=lostpark): when the
+                        // refusal is curr_on AND nothing is runnable
+                        // anywhere, name the lying slot's CPU + writer tag
+                        // and the victim's full ownership word — the
+                        // wedged-park signature (a satisfiable sleeper no
+                        // wake can reach).
+                        if curr_on
+                            && grq_guard.rq_load() == 0
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::LostParkTrace,
+                            )
+                        {
+                            static LPW_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            if LPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                < 96
+                            {
+                                fn pdec2(mut v: u64) {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    let mut buf = [0u8; 20];
+                                    let mut n = 0;
+                                    if v == 0 {
+                                        putchar(b'0');
+                                        return;
+                                    }
+                                    while v > 0 {
+                                        buf[n] = b'0' + (v % 10) as u8;
+                                        v /= 10;
+                                        n += 1;
+                                    }
+                                    while n > 0 {
+                                        n -= 1;
+                                        putchar(buf[n]);
+                                    }
+                                }
+                                const M: &[u8] = b"LP-WAKE-SKIP-EMPTY pid=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                pdec2((*task).pid() as u64);
+                                for c in 0..MAX_CPUS {
+                                    if cpu_state(c).current == task {
+                                        const MC: &[u8] = b" naming_cpu=";
+                                        for &b in MC {
+                                            putchar(b);
+                                        }
+                                        pdec2(c as u64);
+                                        const MW: &[u8] = b" slotw=";
+                                        for &b in MW {
+                                            putchar(b);
+                                        }
+                                        pdec2(
+                                            SLOT_WRITER[c]
+                                                .load(core::sync::atomic::Ordering::Relaxed)
+                                                as u64,
+                                        );
+                                        let bit = grq()
+                                            .idle_cpus
+                                            .load(core::sync::atomic::Ordering::Acquire)
+                                            & (1u32 << c)
+                                            != 0;
+                                        const MI: &[u8] = b" idlebit=";
+                                        for &b in MI {
+                                            putchar(b);
+                                        }
+                                        pdec2(bit as u64);
+                                        break;
+                                    }
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
@@ -4380,6 +4792,55 @@ pub fn scheduler_tick() {
     crate::dfx::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
+    // phantom-bits orphan scan: bits the interrupted task carried INTO
+    // the tick whose release never executed (softirq bit outside any
+    // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
+    crate::interrupt::preempt::tick_orphan_scan(cpu_id);
+
+    // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
+    // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
+    // victim a pick walk EXAMINES, and walks stop at the first allowed
+    // leftmost candidate: a stale-claimed task mid-tree (frozen vruntime
+    // at strike time) is skipped forever without ever being examined —
+    // lb20's softbus_server lost 579s between its two resets, and its
+    // worker threads were never swept at all. Once per 100 jiffies
+    // (1 s), one CPU wins the CAS below and sweeps the whole CFS
+    // timeline under the GRQ with the pick-side adjudication (see
+    // CfsRunQueue::claim_sweep for the protocol-impossibility proof).
+    // Every strike then costs at most ~1 s + normal CFS service latency
+    // instead of a leftmost drift measured in hundreds of seconds —
+    // inside the 5.24 s softbus timeout that gates the
+    // device_manager/accountmgr chain. The census line is wwcensus-only;
+    // the reset report shares the pick-side 2-jiffy print budget.
+    {
+        static SWEEP_LAST: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = SWEEP_LAST.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) >= 100
+            && SWEEP_LAST
+                .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+                .is_ok()
+        {
+            let g = grq().lock_irqsave();
+            let (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids) =
+                g.cfs_rq.claim_sweep(cpu_id);
+            drop(g);
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+                && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
+            {
+                crate::pr_info!(
+                    "CLAIM-CENSUS linked={} reset={} owned_claim={} oncpu={} oncpu_pids={:?} owned_pids={:?}",
+                    linked,
+                    stale_reset,
+                    owned_claim,
+                    oncpu_marked,
+                    oncpu_pids,
+                    owned_pids
+                );
+            }
+        }
+    }
 
     // Kernel-preemption round 2 (2026-10-20): LEAK tripwire. A task whose
     // preempt_count stays nonzero for seconds while it keeps RUNNING in
@@ -4393,14 +4854,35 @@ pub fn scheduler_tick() {
     // task + count after 2 s, clear when the count drains. Direct
     // console, rate-gated — this runs from the timer tick.
     {
-        static LEAK_TASK: [core::sync::atomic::AtomicU64;
-            crate::config::MAX_CPUS] =
-            [const { core::sync::atomic::AtomicU64::new(0) };
-                crate::config::MAX_CPUS];
-        static LEAK_SINCE: [core::sync::atomic::AtomicU64;
-            crate::config::MAX_CPUS] =
-            [const { core::sync::atomic::AtomicU64::new(0) };
-                crate::config::MAX_CPUS];
+        // Rotation-proof leak window (sc41, 2026-10-31): the window is
+        // keyed by TASK, not by (cpu, task). The old per-CPU window
+        // reset on every CPU switch, and the sc41 rotation storm —
+        // several leak carriers cycling the CPUs every few ms (census:
+        // activations of 0 ms, incumbents 319/564/601/1348 alternating,
+        // ~27K picks/s) — kept it permanently reset: PREEMPT-HEAL fired
+        // ZERO times in 380 s while carriers held base counts for the
+        // whole boot and pid 1 stranded up to 48 s. A per-task window
+        // survives migration and rotation, and the 200-observation bar
+        // is CUMULATIVE across leak episodes (sc42: carriers whose
+        // counts flip leak→drain→re-leak starve any consecutive-samples
+        // bar exactly like the per-CPU window did) — every real guard
+        // section is microseconds, so the bar keeps a five-order margin
+        // under any continuity shape (a336568f's evidence).
+        const LEAK_SLOTS: usize = 16;
+        struct LeakWin {
+            task: core::sync::atomic::AtomicU64,
+            first: core::sync::atomic::AtomicU64,
+            last: core::sync::atomic::AtomicU64,
+        }
+        static LEAK_WIN: [LeakWin; LEAK_SLOTS] = {
+            #[allow(clippy::declare_interior_mutable_const)]
+            const ZERO: LeakWin = LeakWin {
+                task: core::sync::atomic::AtomicU64::new(0),
+                first: core::sync::atomic::AtomicU64::new(0),
+                last: core::sync::atomic::AtomicU64::new(0),
+            };
+            [ZERO; LEAK_SLOTS]
+        };
         static LEAK_LAST_PRINT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         if cpu_id < crate::config::MAX_CPUS {
@@ -4408,14 +4890,111 @@ pub fn scheduler_tick() {
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
-                let slot = &LEAK_TASK[cpu_id];
-                let since = &LEAK_SINCE[cpu_id];
+                // Per-field contiguity stamps (phantom-bits round 2/3): a
+                // field's liveness is proven only by its OWN absences —
+                // a field observed PRESENT at 200 consecutive ticks is
+                // phantom (every legal bracket is microseconds, so 2 s of
+                // tick-observed presence is five orders beyond any live
+                // hold), and a field observed ABSENT refreshes its stamp
+                // no matter how hot the OTHER fields churn. Stamped BEFORE
+                // the pc != 0 gate so an entirely-zero count refreshes
+                // every field. Three relaxed stores per tick; only the
+                // task's own CPU writes these.
+                {
+                    let now = crate::drivers::timer::get_jiffies();
+                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0 {
+                        unsafe { (*cur).ti_pc_pirq_zero_jif_stamp(now) };
+                    }
+                    if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0 {
+                        unsafe { (*cur).ti_pc_sirq_zero_jif_stamp(now) };
+                    }
+                    if pc & crate::interrupt::preempt::HARDIRQ_MASK == 0 {
+                        unsafe { (*cur).ti_pc_hirq_zero_jif_stamp(now) };
+                    }
+                }
                 if pc != 0 {
                     let now = crate::drivers::timer::get_jiffies();
-                    let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
-                    if task_word == cur as usize as u64 {
-                        let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
-                        if t0 != 0
+                    let task_word = cur as usize as u64;
+                    // Find-or-claim this task's window slot: first slot
+                    // naming it, else the first empty, else evict the
+                    // least-recently observed. Claim races between two
+                    // CPUs are benign — a lost claim delays one window.
+                    let mut w = &LEAK_WIN[0];
+                    let mut lru_last: u64 = u64::MAX;
+                    for s in LEAK_WIN.iter() {
+                        let t = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                        if t == task_word || t == 0 {
+                            w = s;
+                            break;
+                        }
+                        let l = s.last.load(core::sync::atomic::Ordering::Relaxed);
+                        if l < lru_last {
+                            lru_last = l;
+                            w = s;
+                        }
+                    }
+                    let same = w.task.load(core::sync::atomic::Ordering::Relaxed)
+                        == task_word;
+                    let mut t0 = if same {
+                        w.first.load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        0
+                    };
+                    // Cumulative bar (sc42 refinement): the window
+                    // accumulates across EPISODES, not consecutive
+                    // samples — sc42 showed carrier 319's count flips
+                    // (leak, drain via pick-zero, re-leak) with clean
+                    // gaps long enough that any consecutive-samples bar
+                    // starves exactly like the per-CPU window did, while
+                    // each episode still stranded pid 1. The statistical
+                    // argument survives the relaxation: every real guard
+                    // section is microseconds, so 200 tick observations
+                    // of this task holding a base count — under ANY
+                    // continuity shape — is still five orders of
+                    // magnitude beyond a legitimate holder, and a false
+                    // heal's later guard drop underflow-clamps at zero
+                    // and REPORTS (sub_preempt_count_at) instead of
+                    // silently poisoning.
+                    if t0 == 0 {
+                        t0 = now;
+                    }
+                    // Per-field adjudication (phantom-bits round 3,
+                    // supersedes BOTH bars): the sc42 cumulative window
+                    // and d2381bf9's PREEMPT-pair re-arm were two wrong
+                    // answers to the same question — "has THIS field been
+                    // held continuously?" — asked through a shared
+                    // window that any field's activity (or inactivity)
+                    // answered for all of them. The cumulative bar
+                    // false-healed live softirq windows and guards
+                    // (make-test sgid_mode VW-WEDGE: the window's pending
+                    // bits clear before its handlers run; a heal mid-
+                    // window makes it preemptible, the handler never
+                    // finishes, 29 completions lost, both CPUs idle
+                    // forever — 3112b576 passes the same boot, the only
+                    // delta is the heal policy); the pair-based re-arm
+                    // shielded stranded S/H bits on lock-hot carriers
+                    // (lb61-lb66: ZERO heals, every CPU monopolized).
+                    // The stamps above answer the question per field:
+                    // stale stamp = present at 200 consecutive ticks.
+                    let s_set = pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0;
+                    let p_set = pc & crate::interrupt::preempt::PREEMPT_MASK != 0;
+                    let h_extra =
+                        (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
+                            2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
+                    let stale_200 = |j: u64| j == 0 || now.wrapping_sub(j) >= 200;
+                    let p_stale = p_set && {
+                        stale_200(unsafe { (*cur).ti_pc_pirq_zero_jif() })
+                    };
+                    let s_stale = s_set && {
+                        stale_200(unsafe { (*cur).ti_pc_sirq_zero_jif() })
+                    };
+                    let h_stale = h_extra && {
+                        stale_200(unsafe { (*cur).ti_pc_hirq_zero_jif() })
+                    };
+                    w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
+                    w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
+                    w.last.store(now, core::sync::atomic::Ordering::Relaxed);
+                    if t0 != 0
                             && now.wrapping_sub(t0) >= 200
                             // Serial-noise policy: the periodic PREEMPT-LEAK
                             // reporter is a hunt instrument (dfx=wwcensus),
@@ -4508,11 +5087,16 @@ pub fn scheduler_tick() {
                                 crate::dfx::leakorigin::report_incumbent_site(cur);
                             }
                         }
-                        // PREEMPT-HEAL (round 3c): a TASK-context base
-                        // count held for 10 s continuously is a phantom
-                        // — every real guard section is microseconds, and
-                        // the only 10 s holds in task context are the
-                        // unsleepable-monopoly wedges themselves. Zero it
+                        // PREEMPT-HEAL (round 3c, bound 10 s -> 2 s by
+                        // a336568f, rotation-proofed by sc41): a
+                        // TASK-context base count held for 2 s
+                        // continuously is a phantom — every real guard
+                        // section is microseconds, and the only
+                        // multi-second holds in task context are the
+                        // unsleepable-monopoly wedges themselves. The
+                        // sc41 rotation storm proved the per-CPU window
+                        // could never mature; the per-task window above
+                        // now keeps the bar honest. Zero it
                         // (this runs in the tick IRQ on the task's own
                         // CPU, so the task cannot be concurrently inside
                         // a count mutation; other CPUs only ever add via
@@ -4525,7 +5109,7 @@ pub fn scheduler_tick() {
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                        if base != 0 && (p_stale || s_stale) {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -4538,14 +5122,40 @@ pub fn scheduler_tick() {
                             // PARKED-HEAL below keeps the full zero: a task
                             // current on NO CPU has no in-flight nesting by
                             // definition.
+                            // phantom-bits round 2: when the same count also
+                            // carries stale EXTRA hardirq levels (>= 2 at
+                            // tick, one being the observer's own), collapse
+                            // them to exactly one kept level instead of
+                            // preserving them (clear_base keeps ALL hardirq
+                            // bits, so a 0x10101-style heal used to leave
+                            // the 0x10000 monopoly standing).
                             unsafe {
-                                (*cur).ti_preempt_count_clear_base();
+                                if h_stale {
+                                    (*cur).ti_preempt_count_keep_tick_nesting();
+                                } else {
+                                    (*cur).ti_preempt_count_clear_base();
+                                }
                             }
+                            // "Actually preempt" (launcher perf wall): the
+                            // zero alone leaves the incumbent running —
+                            // the kernel IPC-loop shapes never call
+                            // schedule() and the trap-exit asm gate only
+                            // fires at user-mode return (sc267: the
+                            // leaked incumbents were stranded exactly
+                            // there, the 1-2.6 s self-bound). The flag is
+                            // pure insurance: setting it never forces a
+                            // switch by itself, but every preempt point
+                            // the healed task passes from here on
+                            // (user-return, cond_resched in loops,
+                            // SleepMutex slowpath) now takes it instead of
+                            // waiting for the next tick's slice check.
+                            set_need_resched();
                             // Re-arm: next nonzero observation starts a
                             // fresh window instead of re-healing each
                             // tick.
-                            slot.store(0, core::sync::atomic::Ordering::Relaxed);
-                            since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.task.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.first.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.last.store(0, core::sync::atomic::Ordering::Relaxed);
                             use crate::console::putchar_no_lock as putchar;
                             fn ph(v: u64) {
                                 use crate::console::putchar_no_lock as putchar;
@@ -4579,21 +5189,106 @@ pub fn scheduler_tick() {
                             }
                             ph(now.wrapping_sub(t0));
                             putchar(b'\n');
+                            // preempt-hunt (2026-11-01): the
+                            // outermost-acquire record is guaranteed
+                            // intact here — the incumbent's base never
+                            // returned to 0 since the phantom formed
+                            // (inner pairs are 1->2->1 and do not clear
+                            // it), so this names the acquire whose 1->0
+                            // release is missing / late.
+                            crate::dfx::leakorigin::report_outermost(
+                                b"PREEMPT-HEAL-ORIGIN",
+                                cur,
+                            );
+                            // phantom-bits: when the healed count carried
+                            // the SOFTIRQ bit, name its +0x100 booker
+                            // (the monopolist face — the release never
+                            // executed anywhere: no sub=0x100 underflow
+                            // exists to point at it instead).
+                            if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
+                                crate::dfx::leakorigin::report_softirq_origin(
+                                    b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
                         }
-                    } else {
-                        slot.store(
-                            cur as usize as u64,
-                            core::sync::atomic::Ordering::Relaxed);
-                        since.store(
-                            crate::drivers::timer::get_jiffies(),
-                            core::sync::atomic::Ordering::Relaxed);
+                        // phantom-bits round 2 — the pure-field faces the
+                        // base leg can never reach: base == 0 with a
+                        // stranded SOFTIRQ bit (pc=0x100 at task level) or
+                        // extra HARDIRQ levels (pc=0x10000-phantom shows as
+                        // >= 2 levels at tick, one being the observer's
+                        // own). These monopolize exactly like the base
+                        // face but the old gate (base != 0) skipped them
+                        // by design — the unified keep-exactly-one-level
+                        // form was written for them (task.rs
+                        // ti_preempt_count_keep_tick_nesting) but never
+                        // wired. Same 2 s window, same five-orders
+                        // doctrine: a softirq bracket or hardirq nesting
+                        // held across 200 consecutive ticks is phantom;
+                        // the kept single level pairs the observer's own
+                        // still-pending irq_exit sub.
+                        if base == 0 && h_stale {
+                            unsafe {
+                                (*cur).ti_preempt_count_keep_tick_nesting();
+                            }
+                            set_need_resched();
+                            w.task.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.first.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.last.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPREEMPT-HEAL-FIELD cpu=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(cpu_id as u64);
+                            const M2: &[u8] = b" pid=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).pid() } as u64);
+                            const M3: &[u8] = b" was=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(pc as u32 as u64);
+                            const M4: &[u8] = b" held_jiffies=";
+                            for &b in M4 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(t0));
+                            const M5: &[u8] = b" face=";
+                            for &b in M5 {
+                                putchar(b);
+                            }
+                            putchar(if h_stale { b'H' } else { b'S' });
+                            putchar(b'\n');
+                            if s_stale {
+                                crate::dfx::leakorigin::report_softirq_origin(
+                                    b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
+                            if h_stale {
+                                crate::dfx::leakorigin::report_hardirq_origin(
+                                    b"PREEMPT-HEAL-HARDIRQ",
+                                    cur,
+                                );
+                            }
+                        }
                     }
-                } else {
-                    slot.store(0, core::sync::atomic::Ordering::Relaxed);
-                    since.store(0, core::sync::atomic::Ordering::Relaxed);
                 }
             }
-        }
     }
 
     // Kernel-preemption hunt round 3 (2026-10-21, sc69+): sc69 falsified
@@ -5255,6 +5950,13 @@ pub fn scheduler_tick() {
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
+    // forkprof (cmdline forkprof=1): consume a pending wake stamp —
+    // wake->switch-in is the latency the fork/exit handoff pays.
+    if crate::dfx::forkprof::on() {
+        crate::dfx::forkprof::consume_wake((*next).pid());
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_CTXSW_IN, (*next).pid());
+    }
+
     // Leak-hunt round 3f: __schedule's discipline refuses to switch out
     // any non-dead task with a nonzero preempt_count, so a prev reaching
     // here with a live count means a DISCIPLINE-BYPASSING switch just
@@ -5358,6 +6060,13 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
 #[no_mangle]
 pub extern "C" fn schedule_tail(_prev: *mut Task) {
+    // forkprof: first Rust code in the newborn's frame — splits the
+    // switch machinery (context_switch entry -> here) from the
+    // return-to-user tail (here -> first syscall entry).
+    if crate::dfx::forkprof::trace_on() {
+        let pid = crate::sched::get_current_pid();
+        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
+    }
     // Called after context_switch in the new task's context (ret_from_fork).
     // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
     // per-CPU deferred exit notify stored by the task we replaced would be
@@ -6306,6 +7015,129 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
     });
 }
 
+/// Lost-park idle-lie report (fix-lostpark lane, dfx=lostpark): called
+/// from the idle loop when the CPU's own slot names a real task after
+/// schedule() returned. Rate-limited to one line per CPU per 10 jiffies
+/// with a global budget, direct-console (R34 discipline — the caller may
+/// not hold the GRQ, but the diag path must stay lock-free anyway).
+fn lp_idle_lie_report(cpu: usize) {
+    use crate::console::putchar_no_lock as putchar;
+    static LP_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    static LP_LAST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+    if LP_N.load(core::sync::atomic::Ordering::Relaxed) >= 128 {
+        return;
+    }
+    let jif = crate::drivers::timer::get_jiffies();
+    let last = LP_LAST[cpu.min(MAX_CPUS - 1)].load(core::sync::atomic::Ordering::Relaxed);
+    if jif.wrapping_sub(last) < 10 {
+        return;
+    }
+    if LP_LAST[cpu.min(MAX_CPUS - 1)]
+        .compare_exchange(
+            last,
+            jif,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    LP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    fn phex(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16u32).rev() {
+            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        }
+    }
+    // SAFETY: diagnostic reads of the slot-named task; the slot pins it
+    // as this CPU's published current (it cannot be freed while named).
+    unsafe {
+        let curr = cpu_state(cpu).current;
+        const M: &[u8] = b"\nLP-IDLE-LIE cpu=";
+        for &b in M {
+            putchar(b);
+        }
+        pdec(cpu as u64);
+        const M2: &[u8] = b" slot_pid=";
+        for &b in M2 {
+            putchar(b);
+        }
+        pdec((*curr).pid() as u64);
+        const M3: &[u8] = b" st=0x";
+        for &b in M3 {
+            putchar(b);
+        }
+        phex((*curr).state().bits() as u64);
+        const M4: &[u8] = b" pc=0x";
+        for &b in M4 {
+            putchar(b);
+        }
+        phex((*curr).preempt_count() as u64);
+        const M5: &[u8] = b" oncpu=";
+        for &b in M5 {
+            putchar(b);
+        }
+        pdec((*curr).on_cpu() as u64);
+        let claim = (*curr).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+        const M6: &[u8] = b" cl=";
+        for &b in M6 {
+            putchar(b);
+        }
+        if (claim as i64) < 0 {
+            putchar(b'-');
+        }
+        pdec((claim as i64).unsigned_abs() as u64);
+        const M7: &[u8] = b" pk=";
+        for &b in M7 {
+            putchar(b);
+        }
+        pdec((*curr).pick_state() as u64);
+        const M8: &[u8] = b" onrq=";
+        for &b in M8 {
+            putchar(b);
+        }
+        pdec(task_onrq_flag(curr) as u64);
+        const M9: &[u8] = b" slotw=";
+        for &b in M9 {
+            putchar(b);
+        }
+        pdec(SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed) as u64);
+        const M10: &[u8] = b" wtask=0x";
+        for &b in M10 {
+            putchar(b);
+        }
+        phex(SLOT_WRITER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed));
+        const M11: &[u8] = b" nr=";
+        for &b in M11 {
+            putchar(b);
+        }
+        pdec(GlobalRunQueue::grq_nr_running() as u64);
+        putchar(b'\n');
+    }
+}
+
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
@@ -6450,6 +7282,23 @@ pub fn cpu_idle_loop() -> ! {
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
 
+        // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
+        // CPU just ran schedule() and is about to idle-mark/halt, but its
+        // slot names a REAL task. With an empty global queue that task is
+        // registered-nowhere and "running-nowhere" — every wake of it is
+        // refused by the curr_on scan (the WAKE-HEAL-SKIP why=c family),
+        // so this is exactly the moment the wedge becomes permanent.
+        // Report the victim's ownership word and the SLOT_WRITER tag (the
+        // last writer of the lying slot: 1=pick 2=R56d 3=R56c 4=steal
+        // 5=abort-republish) so the producer is named live.
+        if !is_idle
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            )
+        {
+            lp_idle_lie_report(cpu_id);
+        }
+
         if is_idle {
             grq().mark_idle(cpu_id);
             crate::sync::rcu::rcu_note_context_switch();
@@ -6473,6 +7322,20 @@ pub fn cpu_idle_loop() -> ! {
             WW_IDLE_PHASE[cpu_id].store(3, core::sync::atomic::Ordering::Release);
             if crate::console::uart_has_data() {
                 crate::console::read_waitq().wake_up_one();
+            }
+
+            // Close the IPI-before-halt window for wake dispatches to an
+            // idle CPU (perf-ipc): a resched IPI that lands between the
+            // nr_running recheck above and the halt below is SERVICED but
+            // consumed — the subsequent WFI would sleep with the task
+            // enqueued and the idle bit already cleared by the claim, and
+            // nothing wakes us until the next tick. The IPI handler sets
+            // our NEED_RESCHED flag; honoring it here (the reference's
+            // need_resched-check-before-halt discipline) skips the halt
+            // and the loop's schedule() picks the dispatched task.
+            if need_resched() {
+                grq().clear_idle(cpu_id);
+                continue;
             }
 
             // Enter WFI to halt CPU until next interrupt (timer, UART, IPI).

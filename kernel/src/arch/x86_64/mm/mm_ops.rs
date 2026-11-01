@@ -1174,6 +1174,10 @@ impl MmStruct {
         // per-PTE granularity and simply stays out of the child's
         // snapshot — the race-equivalent outcome POSIX already assigns to
         // mm writers concurrent with fork.
+        // forkprof (cmdline forkprof=1): phase split of the mm fork —
+        // snapshot / COW walk / VMA replay. One relaxed load when off.
+        let fp = crate::dfx::forkprof::on();
+        let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
         let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>) = {
             let parent_vma_guard = self.vma_read();
 
@@ -1203,15 +1207,26 @@ impl MmStruct {
 
             (exempt, snapshot)
         };
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
+            crate::dfx::forkprof::bump(
+                crate::dfx::forkprof::S_FORKS_VMASES,
+                vma_snapshot.len() as u64,
+            );
+        }
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
         // The walk takes the PARENT's per-mm PTE section internally per leaf
         // table and may cond_resched between chunks (launcher wall fix — see
         // the function's own comment for the exclusion argument).
+        let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
         let new_root_ppn = unsafe {
             copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
+        }
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
         // a valid, freshly allocated root page table. space_type and brk are valid by
@@ -1225,6 +1240,7 @@ impl MmStruct {
         {
             // Everything after this point only touches the CHILD's manager
             // (the snapshot was taken before the walk — no parent lock held).
+            let fp_t_replay = if fp { crate::dfx::forkprof::now() } else { 0 };
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
@@ -1261,6 +1277,9 @@ impl MmStruct {
                     let _ = new_vma_mgr.add(new_vma);
                     new_space.add_total_vm(copied_pages);
                 }
+            }
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_REPLAY, fp_t_replay);
             }
         }
 
@@ -1570,6 +1589,136 @@ pub fn pte_lock_for(mm: &crate::mm::mm_struct::MmStruct) -> &crate::mm::mm_struc
 /// 4 mremap copy, 5 ashrem/ashmem pin, 6 brk growth, 7 anon demand fault,
 /// 8 file/shm demand fault, 9 swap-in. 0 = unset.
 pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// ==================== Leaf primitives for shared mm code (FD-1) ====================
+//
+// mm/rmap.rs (try_to_unmap_inner) and mm/compact.rs (remap_page) used to
+// carry Sv39 manual descents of their own — root indexed with bits 38:30
+// — which on this 4-level arch read the WRONG PML4 slot, failed
+// is_valid(), and silently no-oped: swap-out unmap reclaimed nothing and
+// compaction migration always aborted. The walk shape (PML4 → PUD → PMD
+// → PTE, bits 47:39..20:12) and the PTE encoding are arch facts and live
+// here; the shared mm code calls only these three primitives.
+
+/// Permission/flag bits of a 4K leaf PTE — everything except the PFN
+/// field: P|RW|US|PWT|PCD|A|D|PAT|G, the COW/PCACHE software bit 9, and
+/// NX (bit 63 — dropping it would widen a migrated NX mapping back to
+/// executable). This is the exact bit set [`leaf_pte_install`] puts
+/// back.
+#[inline]
+pub fn pte_flag_bits(bits: u64) -> u64 {
+    (bits & 0x3FF) | (bits & PageTableEntry::NX)
+}
+
+/// Default flag bits for an anonymous user page — compaction's fallback
+/// when the pre-unmap walk could not recover the live PTE. Present, RW,
+/// user, accessed, dirty, NX (the demand-fault path's anon default:
+/// exec's per-segment W^X keeps anon data non-exec).
+pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::P | PageTableEntry::RW
+    | PageTableEntry::US | PageTableEntry::A | PageTableEntry::D
+    | PageTableEntry::NX;
+
+/// Replace the 4K leaf PTE at `vaddr` with raw `new_bits` (0 = unmap; a
+/// swap or migration entry — a non-present leaf may carry arbitrary
+/// software bits, the extable/fault path decodes them), under this mm's
+/// PTE lock. The leaf must still be present and map `expect_pfn` (the
+/// R7-C3 re-validation: the caller's lock-free walk may have raced a
+/// concurrent leaf writer). Returns true when the leaf was replaced; the
+/// caller owns the TLB flush.
+///
+/// A large-page leaf at an upper level has no 4K slot to replace —
+/// returns false (anonymous reclaim targets 4K mappings only).
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_replace(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    expect_pfn: u64,
+    new_bits: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: caller guarantees a live root; the walk only reads table
+    // frames reachable from it, and the leaf write goes through the
+    // validated slot.
+    unsafe {
+        let vpn4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let vpn3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte4 = (*root_table).get(vpn4);
+        if !pte4.is_valid() {
+            return false;
+        }
+        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
+        let pte3 = (*table3).get(vpn3);
+        if !pte3.is_valid() || pte3.is_leaf() {
+            return false;
+        }
+        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
+        let pte2 = (*table2).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.ppn() != expect_pfn {
+            return false;
+        }
+        (*table1).set(vpn1, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
+
+/// Rebuild a PRESENT 4K leaf mapping `pfn` at `vaddr` from saved flag
+/// bits ([`pte_flag_bits`] shape), under this mm's PTE lock. The leaf
+/// slot may currently hold a non-present marker (the compaction
+/// migration window) — only the intermediate levels must exist. The
+/// present bit is OR-ed in unconditionally (the saved bits of a live
+/// leaf carry it; the fallback constant does too — belt for the marker
+/// case). Returns true when installed; the caller owns the TLB flush.
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_install(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    pfn: u64,
+    flags: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: see leaf_pte_replace.
+    unsafe {
+        let vpn4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let vpn3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte4 = (*root_table).get(vpn4);
+        if !pte4.is_valid() {
+            return false;
+        }
+        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
+        let pte3 = (*table3).get(vpn3);
+        if !pte3.is_valid() || pte3.is_leaf() {
+            return false;
+        }
+        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
+        let pte2 = (*table2).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let new_bits = (pfn << 12) | pte_flag_bits(flags) | PageTableEntry::P;
+        (*table1).set(vpn1, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
 
 /// Map a user region: `phys_start` pages mapped at `virt_start` in
 /// lockstep over `size` bytes.
@@ -1945,6 +2094,9 @@ pub unsafe fn copy_page_table_cow(
     // across the walk.
     use crate::mm::page_desc::pfn_to_page_mut;
 
+    // forkprof scalars (armed check hoisted out of the PTE loop).
+    let fp_count = crate::dfx::forkprof::on();
+
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
     // riscv64 twin (see its long comment for the failure history).
@@ -2088,6 +2240,9 @@ pub unsafe fn copy_page_table_cow(
 
                         let child_pt_phys = alloc_page_table()?;
                         let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
+                        if fp_count {
+                            crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_TABLES, 1);
+                        }
                         (*child_pmd_ref).set(
                             vpn2,
                             PageTableEntry::from_bits(
@@ -2121,12 +2276,27 @@ pub unsafe fn copy_page_table_cow(
                         | ((vpn3 as u64) << 30)
                         | ((vpn2 as u64) << 21)
                         | ((vpn1 as u64) << 12);
-                    let cow_exempt_leaf = cow_exempt
+                    // Leaf-table fast path (perf review 2026-10-31): when
+                    // this whole 2MB leaf table lies outside every exempt
+                    // region and the framebuffer range, the per-PTE scans
+                    // below cannot match — skip them. One range check per
+                    // table replaces one scan per PTE; tables overlapping
+                    // a region keep the exact per-PTE granularity.
+                    let leaf_base = leaf_va & !0x1F_FFFF;
+                    let leaf_end = leaf_base + 0x20_0000;
+                    let leaf_all_clear = cow_exempt
                         .iter()
-                        .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
-                        || fb_frame_range.map_or(false, |(lo, hi)| {
-                            pte1.ppn() >= lo && pte1.ppn() < hi
+                        .all(|(s, e)| leaf_end <= *s || leaf_base >= *e)
+                        && fb_frame_range.map_or(true, |(lo, hi)| {
+                            leaf_end <= (lo << 12) || leaf_base >= (hi << 12)
                         });
+                    let cow_exempt_leaf = !leaf_all_clear
+                        && (cow_exempt
+                            .iter()
+                            .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
+                            || fb_frame_range.map_or(false, |(lo, hi)| {
+                                pte1.ppn() >= lo && pte1.ppn() < hi
+                            }));
 
                     let new_pte = if is_user
                         && !crate::mm::page_alloc::is_foreign_user_frame(
@@ -2186,6 +2356,11 @@ pub unsafe fn copy_page_table_cow(
                     };
 
                     (*child_pt_ref).set(vpn1, new_pte);
+                    // forkprof scalar: PTEs copied (hoisted armed check —
+                    // one relaxed load when off).
+                    if fp_count {
+                        crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_PTES, 1);
+                    }
                     pte_install_log(
                         child_root_ppn,
                         leaf_va,

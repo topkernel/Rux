@@ -1419,7 +1419,7 @@ MAPPINGS = [
         "skip": [],
         "check_new": False,
     },
-    # ---- Framekernel mappings (uaccess bounds rail) ----
+    # ---- Kernel mappings (uaccess bounds rail) ----
     {
         "name": "arch/uaccess_bounds",
         "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",

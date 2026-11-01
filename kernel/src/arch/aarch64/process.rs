@@ -55,11 +55,15 @@ pub unsafe fn copy_thread(
     }
     let child_regs = mem_ptr as *mut PtRegs;
 
-    // Copy the parent's state; child x0 = 0 (fork return), pc past the
-    // SVC instruction (SVC is 4 bytes on AArch64)
+    // Copy the parent's state; child x0 = 0 (fork return). NO pc advance:
+    // the SVC exception leaves ELR (the frame's pc) at the instruction
+    // AFTER the svc — the architectural return address — so advancing
+    // here would skip one user instruction in the child (the exact bug
+    // family documented in trap.rs handle_syscall; parity with the live
+    // generic copy_thread in process/fork.rs, which copies verbatim).
     let mut frame = *parent_regs;
     frame.regs[0] = 0;
-    frame.pc = parent_regs.pc + 4;
+    frame.pc = parent_regs.pc;
     frame.orig_x0 = 0;
     core::ptr::write(child_regs, frame);
 

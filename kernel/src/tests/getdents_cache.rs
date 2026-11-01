@@ -17,7 +17,7 @@
 //!     and an entry created mid-walk is visible to the SAME stream.
 //! Plus the dot-synthesis helper shape (pure function, no fs).
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

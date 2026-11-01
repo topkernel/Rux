@@ -28,6 +28,39 @@ Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
         +-- Level 2d: dentry cache lock (kernel/src/fs/)
 ```
 
+## Sleeping mutexes (outside the spinlock hierarchy)
+
+`SleepMutex` (kernel/src/sync/mutex.rs) is the coarse-lock primitive
+for locks that may be held across blocking I/O (reference rule 0: such
+a lock is a mutex, never a spinlock). It does not disable preemption
+while held, so it sits OUTSIDE the preempt/spinlock hierarchy above:
+it is taken in task context, its holder may sleep in virtio I/O, and
+its waiters park on a wait queue. Its only spinlock is the internal
+`state` word, held for a few instructions and never across I/O.
+
+Instances and their sanctioned nesting (outer → inner):
+
+```
+VFS_MUTATION_LOCK (fs/vfs.rs) -> EXT4_BIG_LOCK (fs/ext4/mod.rs) -> I/O
+```
+
+Rules (INV-LOCK-8):
+
+1. A SleepMutex must never be taken while holding any spinlock or with
+   preemption disabled — the waiter must be able to call schedule()
+   (interrupt context is forbidden outright).
+2. SleepMutexes may nest inside each other ONLY in the order above
+   (VFS_MUTATION_LOCK before EXT4_BIG_LOCK); both are task-recursive
+   (owner pid + depth), so same-task re-entry is legal.
+3. Spin-family locks (Spinlock/RwSpinlock) NEVER sleep and never call
+   schedule() anywhere in their acquire — sections must stay short by
+   construction. A lock whose holder can block must be a SleepMutex,
+   not a spinlock (the historical yielding-spinlock divergence and its
+   lost-park wedge were exactly this violation; deleted 2026-11,
+   sync-realign lane).
+4. Exit-path hygiene: do_exit force-drops both statics via
+   release_if_owner (RAII never runs through do_exit).
+
 ## Key Nesting Paths
 
 ### Path 1: Spinlock (any variant)
@@ -117,6 +150,7 @@ block-scoped to the two counter updates.
 | INV-LOCK-5 | GRQ nests inside bucket lock, never reverse | futex_wake path, verified by SPIN |
 | INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
 | INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/mm_struct.rs PteLock, arch mm_ops PTE_MODIFY_LOCK |
+| INV-LOCK-8 | SleepMutex (sleeping mutex): never taken with a spinlock held or from IRQ context; nests only VFS_MUTATION_LOCK -> EXT4_BIG_LOCK; spin-family locks never sleep | kernel/src/sync/mutex.rs; see "Sleeping mutexes" above |
 
 ## Typed lock keys (the hierarchy as types, 2026-10)
 

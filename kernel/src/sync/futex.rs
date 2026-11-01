@@ -811,6 +811,17 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // Update chain head.
         *head = Some(waiter_idx);
 
+        // Residency flag (see Task::futex_wait_enqueued): linked into the
+        // chain here, cleared by every unlink/free path — do_exit's
+        // futex_cleanup gates its 512-bucket scan on it. We still hold the
+        // bucket lock; the flag is only read by this task's own exit path,
+        // so a plain store suffices.
+        unsafe {
+            (*current)
+                .futex_wait_enqueued
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+
         // C8 wake-ordering invariant (sleeper side): in order — (1) our
         // waiter entry (task pointer, the flag the waker polls) is linked
         // into the bucket chain, (2) the task state is stored as
@@ -926,6 +937,13 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     // Woken: the waker unlinked us from the chain and left the
                     // slot for us to free.
                     *slot = None;
+                    // Residency flag (see Task::futex_wait_enqueued): the
+                    // waker's unlink left the flag set for us to clear here.
+                    unsafe {
+                        (*current)
+                            .futex_wait_enqueued
+                            .store(false, core::sync::atomic::Ordering::Release);
+                    }
                 }
             }
         }
@@ -943,7 +961,18 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
     if *head == Some(target_idx) {
         let next = {
             let slot = WAITER_POOL[target_idx].lock_irqsave();
-            slot.as_ref().and_then(|w| w.next)
+            let n = slot.as_ref().and_then(|w| w.next);
+            // Residency flag: this unlink takes the waiter out of every
+            // chain (see Task::futex_wait_enqueued).
+            if let Some(w) = slot.as_ref() {
+                if !w.task.is_null() {
+                    unsafe {
+                        (*w.task).futex_wait_enqueued
+                            .store(false, core::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+            n
         };
         *head = next;
         free_waiter(target_idx);
@@ -960,7 +989,16 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         if next == Some(target_idx) {
             let target_next = {
                 let target_slot = WAITER_POOL[target_idx].lock_irqsave();
-                target_slot.as_ref().and_then(|w| w.next)
+                let n = target_slot.as_ref().and_then(|w| w.next);
+                if let Some(w) = target_slot.as_ref() {
+                    if !w.task.is_null() {
+                        unsafe {
+                            (*w.task).futex_wait_enqueued
+                                .store(false, core::sync::atomic::Ordering::Release);
+                        }
+                    }
+                }
+                n
             };
             {
                 let mut slot = WAITER_POOL[idx].lock_irqsave();
@@ -983,6 +1021,19 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
 /// continue exiting) and frees all its waiter slots.
 pub fn futex_cleanup(task: *mut Task) {
     if task.is_null() {
+        return;
+    }
+
+    // Fast path (perf-mm lane, 2026-10-31): the residency flag is clear
+    // unless this task died with a waiter entry still linked (kill raced
+    // the sleeper-side unlink). The common exit — never parked on a
+    // futex, or the wait returned and unlinked itself — skips the whole
+    // 512-bucket scan (one lock_irqsave pair per bucket per exit, the
+    // dominant cost of the exit "rest" block: measured ~50-80us of the
+    // ~90us block under TCG).
+    // SAFETY: do_exit calls this in the task's own context; no other CPU
+    // stores the flag for this task concurrently.
+    if !unsafe { (*task).futex_wait_enqueued.load(core::sync::atomic::Ordering::Acquire) } {
         return;
     }
 
@@ -1032,6 +1083,13 @@ pub fn futex_cleanup(task: *mut Task) {
     // target never re-sleeps: do_exit calls this after the task's last
     // schedule(), so there is no sleeper-side poll that a reordered wake
     // could strand.
+    // Residency flag: the scan above removed every chained entry of this
+    // task — the flag is now false for good (this is the task's own exit
+    // context; no new wait can start).
+    // SAFETY: same context argument as the load above.
+    unsafe {
+        (*task).futex_wait_enqueued.store(false, core::sync::atomic::Ordering::Release);
+    }
     Task::wake_up(task);
 }
 
@@ -1568,6 +1626,16 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // deduped per address so the UART survives: "WAIT-forever preceded by
     // matching WAKEs" vs "no WAKE ever" decides lost-wake vs leaked-reader
     // directly.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): this whole block
+    // runs on EVERY futex syscall. Unlatched, it paid a sched::current +
+    // comm read + utf8 + name compare per op on every boot that never
+    // runs hdf_devmgr; latched (or in the FXDV2 arena window below), it
+    // printed up to 900 lines of HEALTHY churn per OH boot (~0.6 s of
+    // polled-16550 time). The hunt is gated behind dfx=futextrace (the
+    // same switch as the wake-miss scan in futex_wake_in_mm); the
+    // sc184/sc185 hunts re-arm with the flag.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
@@ -2281,9 +2349,21 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // printing ->0 while a waiter sits parked is a lost wake; no WAKE
     // at all after a WAIT is never-sent ((a) or (b) — the paired
     // appclone census in sys_clone separates those). Budget 150 lines.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): STK_PAGE is 3
+    // pages below the stack top of EVERY x86_64 process, so any
+    // main-thread futex on a shallow frame hit this — two pr_warn
+    // lines per op through the polled UART until the 400-op budget
+    // burned (~0.8 s of serial per boot). The census joins the
+    // dfx=futextrace family; the sc118/sc119 hunts re-arm with the
+    // flag.
     {
         const STK_PAGE: usize = 0x7fffffffc000;
-        if uaddr & !0xfff == STK_PAGE {
+        if uaddr & !0xfff == STK_PAGE
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::FutexTrace,
+            )
+        {
             // Budget raised 150 -> 400 for sc119: the page is 3 pages below
             // the stack top of EVERY x86_64 process, so ANY main-thread
             // futex on a shallow frame burns it — appspawn's own main-loop
@@ -2358,7 +2438,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         FUTEX_CMP_REQUEUE => "CMP-REQ",
                         _ => "other",
                     };
-                    crate::pr_warn!(
+                    crate::pr_debug!(
                         "FXRS #{} {} tid {} comm='{}' uaddr={:#x} val={:#x} u2={:#x} v3={:#x} tmo={:#x}",
                         n,
                         cmd,
@@ -2372,7 +2452,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     );
                     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
                     rwfz_op_log(uaddr, op, val, r);
-                    crate::pr_warn!("FXRS #{} -> ret={}", n, r);
+                    crate::pr_debug!("FXRS #{} -> ret={}", n, r);
                     return r;
                 }
             }
@@ -2391,7 +2471,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // first two waits also dump the caller's syscall rings. The timespec
     // is decoded so relative(100s)/absolute(now+100s) deadlines are
     // distinguishable offline.
-    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) && timeout != 0 {
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): condition_variable
+    // wait_for is a hot per-op path for foundation/sa_main threads —
+    // ungated this paid a comm compare per timed WAIT plus up to 240
+    // pr_warn lines per OH boot. The census joins the dfx=futextrace
+    // family; the sc156 hunt re-arms with the flag.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+        && timeout != 0
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+    {
         if let Some(t) = crate::sched::current() {
             let tk = unsafe { &*t };
             let comm = core::str::from_utf8(&tk.comm()[..])

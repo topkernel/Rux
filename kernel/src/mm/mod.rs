@@ -34,14 +34,16 @@ pub mod deferred_free;
 pub mod small_alloc;
 pub mod vdso;
 
-// pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the
-// module had zero live call sites on the alloc/free paths — every
-// allocation went straight to the zone lock — while carrying a
-// `&'static mut` per-CPU array and a next_free-based linkage that would
-// have collided with the zone allocator's OnFreelist discipline had it
-// ever been wired. Deleting it (rather than minimally wiring the free
-// side) keeps the audit surface small; revisit with a proper
-// pageset+list_bulk design if zone-lock contention shows up.
+pub mod pcp;
+
+// pcp.rs history: an earlier per-CPU pages module was removed in wave-6
+// (review 4.6 / batch-4 S3) — it had zero live call sites while carrying
+// a `&'static mut` array and next_free linkage that collided with the
+// OnFreelist discipline. The revisit condition ("if zone-lock contention
+// shows up") is now met: the perf review of 2026-10-31 re-introduced the
+// pageset as mm/pcp.rs with an OnPcp three-state frame lifecycle
+// (INV-PCP-1), zone-counter parity (INV-PCP-2) and irq-off same-CPU
+// exclusivity (INV-PCP-3); see that module's header for the invariants.
 
 pub use page::*;
 pub use page_desc::{Page, PageFlag, PageFlags, PageType, copy_page_contents};

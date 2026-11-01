@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
@@ -82,6 +82,8 @@ pub const MEM_MAJOR: u32 = 1;
 
 /// TTY devices
 pub const TTY_MAJOR: u32 = 4;
+/// TTY auxiliary major (/dev/tty = 5:0, /dev/console = 5:1 — Linux layout).
+pub const TTYAUX_MAJOR: u32 = 5;
 
 /// Parallel ports
 pub const LP_MAJOR: u32 = 6;

@@ -68,7 +68,7 @@ EOS
 # the concrete runtime list (gdm3's own missing libs, named
 # explicitly) and download the gdm3 deb WITHOUT recursion. The final
 # DT_NEEDED check below catches anything the hand list missed.
-PKGS="systemd udev libpam-modules libpam-runtime policykit-1 dconf-cli \
+PKGS="systemd udev libpam-modules libpam-runtime libpam-systemd policykit-1 dconf-cli \
 libgdm1 gir1.2-gdm-1.0 libaudit1 libcanberra-gtk3-0 libcanberra0 \
 libgudev-1.0-0 libkeyutils1 libselinux1 libxdmcp6"
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
@@ -118,6 +118,40 @@ for b in "$ROOT/usr/sbin/gdm3" \
 done
 [ "$MISSING" = 0 ] && echo "   all DT_NEEDED present"
 
+echo "== systemd1shim (gdmr54: org.freedesktop.systemd1 bus owner)"
+# logind's CreateSession starts the session scope through
+# org.freedesktop.systemd1; without the name owned, dbus activation
+# fails ("Launch helper exited with unknown return code 1") and no
+# logind session can exist for the greeter — gdm-x-session's
+# RegisterDisplay then fails and the greeter exit-loops (gdmr53).
+# The shim (test/ubuntu-gnome/systemd1shim.c) owns the name and
+# completes every unit job instantly. Build: cross gcc against the
+# tree's glib + the riscv64 glib headers extracted from the
+# libglib2.0-dev deb into work/glibdev-riscv64 (kept between walks).
+GLIBDEV="$WORK/glibdev-riscv64"
+SHIM="$ROOT/usr/libexec/systemd1shim"
+mkdir -p "$ROOT/usr/libexec"
+if [ -d "$GLIBDEV/usr/include/glib-2.0" ]; then
+    riscv64-linux-gnu-gcc -O2 -Wall -o "$SHIM" \
+        "$WT/test/ubuntu-gnome/systemd1shim.c" \
+        -I"$GLIBDEV/usr/include/glib-2.0" \
+        -I"$GLIBDEV/usr/lib/riscv64-linux-gnu/glib-2.0/include" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libgio-2.0.so" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libgobject-2.0.so" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libglib-2.0.so" \
+        -Wl,-rpath-link,"$ROOT/usr/lib/riscv64-linux-gnu" \
+        -Wl,-rpath-link,"$ROOT/lib/riscv64-linux-gnu" \
+        -L/usr/riscv64-linux-gnu/lib \
+        && cp "$SHIM" "$WORK/gnome-debs-gdm/systemd1shim.bin" 2>/dev/null \
+        || echo "warn: systemd1shim build failed (needs glib headers)" >&2
+    chmod 0755 "$SHIM" 2>/dev/null || true
+elif [ -f "$WORK/gnome-debs-gdm/systemd1shim.bin" ]; then
+    cp "$WORK/gnome-debs-gdm/systemd1shim.bin" "$SHIM"
+    chmod 0755 "$SHIM"
+else
+    echo "warn: no glib headers, no banked shim — greeter needs systemd1" >&2
+fi
+
 echo "== users, groups, shadow, homes"
 # gdm greeter user (uid 120 range like stock adduser) + login user.
 # password for 'rux' is 'rux' (sha512-crypt, fixed salt — reproducible).
@@ -141,7 +175,7 @@ grep -q '^gdm:' "$ROOT/etc/shadow" || echo 'gdm:!:19400:0:99999:7:::' >> "$ROOT/
 grep -q '^rux:' "$ROOT/etc/shadow" || echo "rux:$HASH:19400:0:99999:7:::" >> "$ROOT/etc/shadow"
 install -d -m 0755 "$ROOT/var/lib/gdm" "$ROOT/var/lib/gdm/.config" "$ROOT/home/rux"
 
-echo "== PAM fixup (loginuid)"
+echo "== PAM fixup (loginuid + pam_systemd)"
 # pam_loginuid writes /proc/self/loginuid — absent on Rux. A "required"
 # line would deny every login before the rest of the chain is mapped.
 for f in "$ROOT"/etc/pam.d/gdm-password "$ROOT"/etc/pam.d/gdm-autologin; do
@@ -151,6 +185,15 @@ for f in "$ROOT"/etc/pam.d/gdm-password "$ROOT"/etc/pam.d/gdm-autologin; do
         echo "   trimmed: $(basename "$f")"
     fi
 done
+# pam_systemd (from libpam-systemd, extracted above): stock Ubuntu has
+# it in common-session; dpkg-deb never runs pam-auth-update, so add the
+# line ourselves. It makes the greeter/login PAM sessions call login1
+# CreateSession — logind then owns sessions/c1 + users/120, which
+# gdm-manager's RegisterDisplay lookup reads (see gdm-repack.sh).
+grep -q 'pam_systemd' "$ROOT/etc/pam.d/common-session" || \
+    sed -i '/^session[[:space:]]*required[[:space:]]*pam_unix.so/a session\toptional\tpam_systemd.so debug' \
+        "$ROOT/etc/pam.d/common-session"
+grep pam_systemd "$ROOT/etc/pam.d/common-session" | sed 's/^/   /'
 echo "-- /etc/pam.d/gdm-password as booted:"
 sed 's/^/   /' "$ROOT/etc/pam.d/gdm-password" 2>/dev/null || echo "   (missing)"
 
@@ -176,6 +219,36 @@ EOG
 fi
 echo "-- custom.conf as booted:"
 sed 's/^/   /' "$ROOT/etc/gdm3/custom.conf"
+
+echo "== /var/log/gdm3 (gdm3 LogDir — greeter stderr evidence)"
+# gdm-session-worker writes the greeter's stdout/stderr to
+# <LogDir>/:0-greeter.log; without the directory the open fails and the
+# greeter's own failure messages ("Unable to ..." from gdm-x-session's
+# EX_SOFTWARE exits) go nowhere at all (gdmr55: exit 70 with zero
+# diagnostic surface).
+mkdir -p "$ROOT/var/log/gdm3"
+chmod 0755 "$ROOT/var/log/gdm3"
+
+echo "== gdm-theme.gresource (update-alternatives gap)"
+# gnome-shell-common's postinst installs gdm-theme.gresource via
+# update-alternatives -> gnome-shell-theme.gresource (priority 10).
+# dpkg-deb -x never runs postinst, so the link would be absent and
+# gnome-shell's reloadThemeResource (main.js:497) ENOENTs -> shell
+# exits(1) -> gdm-session re-starts it forever (the gdmr48 loop).
+ln -sfn gnome-shell-theme.gresource \
+    "$ROOT/usr/share/gnome-shell/gdm-theme.gresource"
+
+echo "== /etc/X11/xorg.conf (gdmr51: the greeter Xorg driver choice)"
+# gdm's [server-X0] command passes -config /etc/X11/xorg-fbdev.conf,
+# but the greeter Xorg runs as uid 120 (gdm-x-session) and Xorg only
+# honors an absolute -config path for root — for every other user it
+# silently falls back to autoconfig (gdmr50 Xorg.0.log), which picks
+# modesetting+glamor+gbm on /dev/dri/card0 and crashes in the gbm
+# DRI-driver loader. The SYSTEM default xorg.conf is honored for all
+# users: same proven fbdev+shadow config, now the default.
+if [ -f "$ROOT/etc/X11/xorg-fbdev.conf" ]; then
+    cp "$ROOT/etc/X11/xorg-fbdev.conf" "$ROOT/etc/X11/xorg.conf"
+fi
 
 echo "== gsettings schemas refresh"
 command -v glib-compile-schemas >/dev/null && \

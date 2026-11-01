@@ -788,9 +788,11 @@ fn console_output(_ctx: usize, bytes: &[u8]) {
         crate::printk::ring_stash_console(bytes);
         return;
     }
-    for &b in bytes {
-        crate::console::putchar(b);
-    }
+    // Batched TX (perf-console): one lock acquisition + one batched pass
+    // for the whole slice — the old per-byte putchar paid the full
+    // lock_irqsave pair AND per-byte 16550 register traffic on every
+    // echo/mirror byte.
+    crate::console::puts_bytes(bytes);
 }
 
 /// Whether /dev/console output is diverted to the printk ring (set by the
@@ -839,6 +841,7 @@ pub fn file_is_tty(file: &crate::fs::file::File) -> bool {
                 )
                 || core::ptr::eq(ops as *const _, &crate::fs::pty::PTMX_OPS as *const _)
                 || core::ptr::eq(ops as *const _, &crate::fs::pty::PTY_SLAVE_OPS as *const _)
+                || core::ptr::eq(ops as *const _, &crate::fs::vt::VTDEV_OPS as *const _)
         }
         None => false,
     }

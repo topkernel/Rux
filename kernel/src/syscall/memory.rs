@@ -926,14 +926,20 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 let Some((phys, len)) =
                                     crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
-                                    crate::pr_warn!(
-                                        "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
-                                        fd,
-                                        offset,
-                                        actual_length,
-                                        crate::drivers::drm::is_prime_file(&file),
-                                        crate::drivers::drm::is_drm_file(&file)
-                                    );
+                                    // oh-svc T1 attribution tap (known-gap 4):
+                                    // dfx=ohhunt gates it.
+                                    if crate::dfx::switches::enabled(
+                                        crate::dfx::switches::DfxSwitch::OhHunt,
+                                    ) {
+                                        crate::pr_warn!(
+                                            "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
+                                            fd,
+                                            offset,
+                                            actual_length,
+                                            crate::drivers::drm::is_prime_file(&file),
+                                            crate::drivers::drm::is_drm_file(&file)
+                                        );
+                                    }
                                     return mmap_error::EINVAL;
                                 };
                                 // ATOMIC RESERVE first (b91 corruption fix —
@@ -950,7 +956,31 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     map_flags & map::MAP_FIXED,
                                 ) {
                                     Ok(v) => v.as_usize(),
-                                    Err(_) => return mmap_error::ENOMEM,
+                                    // oh-svc T1: this ENOMEM was SILENT — the
+                                    // llvmpipe displaytarget_map failure class
+                                    // (assert jit_tex->base) needs the
+                                    // attribution. Budgeted + gated behind
+                                    // dfx=ohhunt (known-gap 4).
+                                    Err(e) => {
+                                        static PEMAP_N: core::sync::atomic::AtomicU32 =
+                                            core::sync::atomic::AtomicU32::new(0);
+                                        let n =
+                                            PEMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                        if n < 20
+                                            && crate::dfx::switches::enabled(
+                                                crate::dfx::switches::DfxSwitch::OhHunt,
+                                            )
+                                        {
+                                            crate::pr_warn!(
+                                                "drm: mmap placement-ENOMEM pid={} fd={} len={:#x} err={}",
+                                                crate::process::current_pid(),
+                                                fd,
+                                                actual_length,
+                                                e as i32
+                                            );
+                                        }
+                                        return mmap_error::ENOMEM;
+                                    }
                                 };
                                 let root = address_space.root_ppn();
                                 // SAFETY: root is the task's page-table
@@ -1364,13 +1394,21 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
     // __unmapself) or mallocng group frees — the counterparts of
     // PROTNONE-MAP/MPROTECT-RW above.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): glibc/musl thread
+    // stacks are 8 MiB, so this fired UNGATED on EVERY thread exit —
+    // one pr_info per join at ~0.5 ms of polled-16550 time each. Joins
+    // the dfx=vmap budget family (VmaProbe switch + the shared 600-line
+    // cap); the b91/b92 hunts re-arm with dfx=vmap.
     if length >= 0x8_0000 {
-        crate::pr_info!(
-            "BIGMUNMAP pid {} addr {:#x} len {:#x}",
-            crate::process::current_pid(),
-            addr,
-            length
-        );
+        vmap_budget_line(|| {
+            crate::pr_info!(
+                "BIGMUNMAP pid {} addr {:#x} len {:#x}",
+                crate::process::current_pid(),
+                addr,
+                length
+            );
+        });
     }
 
     // Validate arguments
@@ -1474,15 +1512,24 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // b91-b92 forensics: PROT_WRITE mprotects cover the pthread-stack
     // upgrade (musl maps PROT_NONE, then mprotects RW before clone) AND
     // the reserve-carve pattern (b93: hilogd's 2GB PROT_NONE arena carved
-    // by RW mprotects — the crash memset targets the reserve base). Log
-    // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
+    // by RW mprotects — the crash memset targets the reserve base).
+    // RELRO downgrades are PROT_READ and stay quiet.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): this fired
+    // UNGATED on EVERY writable mprotect — one per thread-stack upgrade
+    // (thread create), malloc arena extension and JIT RW flip, at
+    // ~0.4 ms of polled-16550 time per line. It joins the dfx=vmap
+    // budget family below (VmaProbe switch + shared 600-line cap); the
+    // b91-b93 hunts re-arm with dfx=vmap.
     if prot & 0x2 != 0 {
-        crate::pr_info!(
-            "MPROTECT-RW pid {} addr {:#x} len {:#x}",
-            crate::process::current_pid(),
-            addr,
-            length
-        );
+        vmap_budget_line(|| {
+            crate::pr_info!(
+                "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+                crate::process::current_pid(),
+                addr,
+                length
+            );
+        });
     }
 
     // dfx=vmap (leg-31B): the PROT_NONE mprotect family — guard
@@ -1575,13 +1622,19 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         && v.end().as_usize() - v.start().as_usize() >= 0x10_0000
                 });
                 if hits_big_protnone {
-                    crate::pr_info!(
-                        "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
-                        crate::process::current_pid(),
-                        addr,
-                        length,
-                        prot
-                    );
+                    // Serial-cleanliness (print-audit lane, 2026-11):
+                    // every DSO's RELRO finalize walks this arm; a
+                    // dlopen loop printed one line per load. Joins the
+                    // dfx=vmap budget family.
+                    vmap_budget_line(|| {
+                        crate::pr_info!(
+                            "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
+                            crate::process::current_pid(),
+                            addr,
+                            length,
+                            prot
+                        );
+                    });
                 }
             }
 
@@ -1609,20 +1662,43 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
-                    .iter()
-                    .map(|v| (v.start().as_usize(), v.end().as_usize()))
-                    .collect();
-                spans.sort_unstable();
+                // Perf review 2026-10-31: the coverage walk used to
+                // collect EVERY VMA of the mm into a Vec and sort it
+                // under the write lock — a heap allocation plus an
+                // O(n log n) sort per mprotect, starving every
+                // concurrent fault on the mm — and the BTreeMap order
+                // is already sorted, so the sort never did anything.
+                // Walk the tree directly, bounded to the target span:
+                // no allocation, no sort, early exit at the span end.
+                //
+                // Regression fix (perf-sched lane, same day): the
+                // bounded walk MUST be seeded with the VMA CONTAINING
+                // addr. iter_after only yields VMAs with start >= addr,
+                // so without the seed every mprotect that starts INSIDE
+                // a VMA (not exactly at its start) saw a phantom gap at
+                // `addr` and failed ENOMEM — which is exactly musl
+                // pthread_create's stack construction (mmap PROT_NONE,
+                // then mprotect(base+guard, stack, RW)): every threaded
+                // musl static binary broke (pthread_create -> EAGAIN,
+                // errno ENOMEM). find() is the O(log n) containing-VMA
+                // lookup; a None leaves cursor at addr and the walk
+                // still fails with the correct ENOMEM for a real gap.
                 let mut cursor = addr;
-                for (s, e) in &spans {
-                    if *e <= cursor {
+                if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                    cursor = v.end().as_usize();
+                }
+                for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                    let (s, e) = (v.start().as_usize(), v.end().as_usize());
+                    if s >= addr + length {
+                        break; // past the span; covered so far is final
+                    }
+                    if e <= cursor {
                         continue;
                     }
-                    if *s > cursor {
+                    if s > cursor {
                         break; // gap at `cursor`
                     }
-                    cursor = *e;
+                    cursor = e;
                     if cursor >= addr + length {
                         break;
                     }
@@ -2236,6 +2312,27 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                 }
                 cursor += PAGE_SIZE as usize;
             }
+
+            // Delayed-allocation tail (perf-gaps 2026-11): write_at above
+            // now routes plain writes through the buffered page-cache
+            // path — MS_SYNC semantics demand the dirty frames it left
+            // actually reach the file. Flush the span's page range for
+            // ext4 inodes (same machinery as the PCACHE flush above;
+            // no-op when nothing was dirtied).
+            {
+                // SAFETY: inode cell written at open time, read-only.
+                if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                    let off_lo = v_off + (span_lo - vma_start);
+                    let off_hi = v_off + (span_hi - vma_start);
+                    if off_hi > off_lo {
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(
+                            vinode,
+                            (off_lo / PAGE_SIZE) as u64,
+                            ((off_hi - 1) / PAGE_SIZE) as u64,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2530,7 +2627,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     // first), so a VMA-shape filter can't catch the move — and MREMAP_FIXED
     // is rare outside CFI/JIT moves anyway: always trace it.
     if (flags & MREMAP_FIXED) != 0 {
-        crate::pr_info!(
+        crate::pr_debug!(
             "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
             crate::process::current_pid(),
             old_addr,

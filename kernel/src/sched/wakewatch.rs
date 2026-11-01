@@ -320,6 +320,58 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         // passed a leftmost never-refused candidate (defect).
         ww_msg(b" wtie=");
         ww_u64(slot.wtie.load(Ordering::Acquire));
+        // phantom-bits: any CPU currently inside an __do_softirq window
+        // — the monopolist face (a wedged window is untickable, so the
+        // tick-side probes cannot see it; this census CAN, cross-CPU).
+        // sq=bit=<vector> rst=<restart> pend=<mask> age=<ms> names the
+        // vector class the monopolized CPU is dispatching.
+        for c in 0..crate::config::MAX_CPUS {
+            let win = crate::interrupt::softirq::SOFTIRQ_WIN[c]
+                .load(Ordering::Acquire);
+            if win & (1u64 << 63) == 0 {
+                continue;
+            }
+            let t0 = crate::interrupt::softirq::SOFTIRQ_WIN_T0[c]
+                .load(Ordering::Acquire);
+            let age_ms = crate::drivers::timer::read_time()
+                .saturating_sub(t0)
+                .wrapping_mul(1000)
+                / crate::config::TIMER_CLOCK_FREQ_HZ;
+            // Noise filter: a healthy irq-exit window is bounded at 2 ms
+            // (MAX_SOFTIRQ_TIME_TICKS). Only windows already past 50 ms
+            // are worth a census line — those are the monopolist face.
+            if age_ms < 50 {
+                continue;
+            }
+            ww_msg(b" sq");
+            ww_u64(c as u64);
+            ww_msg(b"=bit:");
+            ww_u64((win >> 48) & 0xFF);
+            ww_msg(b",rst:");
+            ww_u64((win >> 40) & 0xFF);
+            ww_msg(b",pend:0x");
+            // ww_hex-ish for a 16-bit mask
+            let mut pend = win & 0xFFFF;
+            if pend == 0 {
+                ww_msg(b"0");
+            }
+            let mut nib = [0u8; 4];
+            let mut n = 0;
+            while pend > 0 && n < 4 {
+                nib[n] = b'0' + (pend & 0xF) as u8;
+                pend >>= 4;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                let ch = nib[n];
+                // SAFETY: byte write through the console writer.
+                ww_msg(&[ch]);
+            }
+            ww_msg(b",age:");
+            ww_u64(age_ms);
+            ww_msg(b"ms");
+        }
         ww_msg(b"\n");
         // s14: name WHY this victim sat unpicked through the whole
         // strand window — the fair-class refusal history accumulated by
@@ -343,6 +395,20 @@ pub fn heartbeat() {
     let pick_n = PICK_N.load(Ordering::Relaxed);
     let sum_ms = ticks_to_ms(DELTA_SUM_TICKS.load(Ordering::Relaxed));
     let avg = if pick_n > 0 { sum_ms / pick_n } else { 0 };
+    // Lost-park frozen-state detection (fix-lostpark lane): a second with
+    // ZERO wake transitions and an empty global queue while wake activity
+    // existed before is the wedge signature — dump the event ring once so
+    // the final window names the producer.
+    {
+        static LAST_WN: AtomicU64 = AtomicU64::new(0);
+        let last = LAST_WN.swap(wake_n, Ordering::AcqRel);
+        if wake_n > 0
+            && wake_n == last
+            && crate::sched::sched::GlobalRunQueue::grq_nr_running() == 0
+        {
+            crate::dfx::lostpark::dump_once(b"frozen");
+        }
+    }
     crate::pr_info!(
         "WW: wakes={} picks={} avg_run={}ms stranded={} strand_max={}ms",
         wake_n,

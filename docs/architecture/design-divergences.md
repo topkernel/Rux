@@ -130,7 +130,7 @@ pins; the DFX plan's adoption rule requires the macro for new files.
 
 ---
 
-## D-5: tracepoint! declaration macro (T4 event table)
+## D-5: tracepoint! declaration macro (T4 event table)  [superseded by D-15, kept for history]
 
 **Design.** One tracepoints! table row per event derives the static
 row, the typed record function (armed() check inside), and the
@@ -327,7 +327,7 @@ checks the count, the end-of-text coverage and a symbolized backtrace.
 
 ---
 
-## D-4: Single-declaration tracepoint table (tracepoints! macro)
+## D-15: Single-declaration tracepoint table (tracepoints! macro)  [renamed from a duplicated D-4]
 
 **Design.** Every trace event is declared exactly once, as one row in
 the `tracepoints!` table at `kernel/src/trace/mod.rs`: group, name,
@@ -639,3 +639,165 @@ discipline leaks (never frees) buffers the device may still DMA into.
 and buffer-cache hit rate >= baseline; the exthunt read-side probes
 (rd_serve/rd_batch/rd_hit/READHOLE) adjudicate serve-truth when a
 read-corruption family appears.
+
+---
+
+## D-13: Batched metadata publication + discard-on-free (ext4 write path)
+
+**Design.** Two write-path stances, landed with the perf-fs sprint
+(2f219478, 1debc2b1, 39975867). (1) Publication records — the
+crash-ordering layer over deferred metadata writes — batch per
+transaction window: `bio::publication_batch_drain` fires at every
+`ext4_journal_stop` bracket close only when the pending queue crossed
+PUB_BATCH=64, instead of each entry mutation paying a scoped ordered
+drain of its own records at op return. (2) Freed blocks are FORGOTTEN:
+`free_block_run` drops each freed block's dirty unreferenced
+buffer-cache entry without writing it and removes its jbd2 registration
+(`jbd2_journal_forget`) so no later commit re-reads and rewrites the
+dead content. Alongside, `getblk_overwrite` serves full-block metadata
+rewrites without the disk read the old `bread` paid (the reference
+never reads a block it is about to fully rewrite).
+
+**Advantage.** p6_mkdrmdir med 29796 us -> 3742 us (publication
+batching) -> 2107 us (discard-on-free), p99 54 ms -> 16.4 ms, against
+the reference kernel's 153 us -> within ~14x on the shared
+syscall/lookup floor (p6_stat 15 us vs reference 0.23 us is that floor,
+not the fs). Dead directory blocks from create/delete churn are never
+synchronously written; the revoke-threshold slow commits stop
+round-tripping stale bytes through the journal area.
+
+**Compatibility evidence.** POSIX never promised per-op directory
+durability — that belongs to fsync(dirfd); Rux's durability points
+(fsync/sync(2)/eviction/commit) and the H1/H2 out-of-band constraint
+guards are unchanged. Crash ordering rides the bitmap/GD/SB deferred
+writes plus revoke records. The forget stance mirrors the reference's
+own EXT4_FREE_BLOCKS_FORGET semantics; clean/pinned freed buffers are
+left in place. Fresh directory blocks are fully initialized in-memory
+(zeroed Vec + entry + csum tail) and written via the full-block path,
+so the skipped read can never leak prior-life bytes. `make test` and
+the pbench P6 battery green on both arms (journal / no-journal).
+
+**Known cost.** Up to PUB_BATCH records' worth of dirty metadata in
+flight between durability points — an out-of-band writer hitting a
+constrained block pays a constraint flush bounded by that many
+records' blocks. A pinned-or-clean freed buffer survives the forget
+and is written later (dead data to a free block: harmless to the
+bitmap truth, not optimal). discard-on-free does not TRIM the device.
+
+**Guard.** Perf-gate filesystem hot paths domain: pbench fs rows
+(mkdir+rmdir/unlink medians) within band; fsw counters pb2/pm (batch
+drains, queue max) and FSW3 db= (drops) watch the queue length and
+drop volume; the buffer-cache hit-rate floor catches over-dropping.
+
+---
+
+## D-14: Measured-wait wakeup-preemption gate (CFS)
+
+**Design.** On a wake that found no idle CPU, the busy-CPU
+need_resched poke runs only when the wakee's measured wait —
+sched_clock minus its last pick stamp — is at least one
+SCHED_LATENCY_NS window (6 ms); a wakee that last ran within the
+window is left to the slice/handoff machinery (977adb51). The
+mainstream kernel gates wakeup preemption on a vruntime-credit
+comparison (check_preempt_curr / wakeup granularity). Rux's vruntime
+floor-on-enqueue and place-on-wake adjustments would make that raw
+comparison pass on every wake of a ping-pong receiver, re-creating a
+preempt dance per record.
+
+**Advantage.** Kills the per-record preempt dance on same-CPU
+sender/receiver pairs: a 74-byte unix-stream record cost ~275 us of
+wake/preempt/switch dance against the reference's ~2.5 us; the idle
+steering + gate brought the p5 socket family 10-18x. Senders run
+unmolested at trap exit while receivers drain in parallel on idle
+CPUs.
+
+**Compatibility evidence.** Scheduling policy only — no ABI surface.
+A wakee older than one latency window keeps immediate wakeup
+preemption (the starvation/latency case the mechanism exists for);
+sub-window wakees are picked at the incumbent's next scheduling point
+(slice end, cond_resched, lock slowpath), which is the same batching
+the reference applies to wakeup-granularity-immune pairs. LTP
+sched-family green; pbench P2/P5 rows in band; census TERM/REFUSED
+bands unchanged.
+
+**Known cost.** Wake latency for sub-6 ms ping-pong receivers is
+bounded by slice expiry rather than immediate preemption; the exec_start
+approximation (last pick stamp) slightly overestimates the true wait
+for tasks whose producers hold the CPU across their pick.
+
+**Guard.** Perf-gate scheduling domain: pbench P2 context-switch and
+P5 IPC medians within band; census (TERM 8±2 / REFUSED 32±4); the
+ipcdisc battery's drain-shape discriminators.
+---
+
+## D-16: Deferred-free timer ring (wall-clock stand-in for deferred reclamation)
+
+**Design.** Freed `MmStruct`/`Task` blocks enter a global 16384-entry ring
+drained after a 1500 ms wall-clock deadline (`mm/deferred_free.rs`), sized
+by a length-class match, instead of grace-period-based reclamation
+(call_rcu) for these objects. The QSBR RCU (`sync/rcu.rs`) exists and is
+used where readers are enumerable; the mm/task blocks take the ring
+because their borrowers (procfs walkers) are unaccounted `&MmStruct`
+borrows that a quiescent-state discipline cannot see cheaply.
+
+**Advantage.** Reclamation latency is bounded and independent of
+scheduler activity; no reader-side instrumentation on the hot walk paths.
+
+**Compatibility evidence.** The fake-OOM/stale-tree hunt families closed
+under it; full suite green; OH boots unaffected.
+
+**Known cost.** 1500 ms retention per freed block (memory headroom, not
+correctness); the ring is a single global lock — fine at current object
+rates. Revisit: unaccounted borrows → RcuHead on the structures would let
+call_rcu serve them and delete the ring.
+
+**Guard.** meminfo pcp/deferred rows; OOM-forensics census on hunts.
+
+## D-17: Kernel-half device alias arena (no identity MMIO window)
+
+**Design.** Device MMIO is reached exclusively through kernel-half alias
+windows — two static windows plus a dynamic ioremap arena
+(`mmu_init::ioremap_bar_kernel`) — and the bootstrap identity map is
+UNLINKED from the kernel CR3 after the boot-stack switch. The mainstream
+approach keeps an identity window and ioremaps on demand into the vmalloc
+space; here there is no low identity window at all after boot, and BARs
+(including firmware-placed low MMIO like the RTC page at 0x101000) map
+into the arena.
+
+**Advantage.** One MMIO discipline under every CR3 (trap-context MMIO
+under a user page table cannot fault); the uaccess contract has no
+identity hole (copy_from_user at low user addresses faults instead of
+reading physical memory — the prlimit64 EFAULT gap this closed).
+
+**Compatibility evidence.** x86_64 suite 1194/1194 with the window gone
+(including the previously-red EFAULT row); RTC/virtio-mmio/virtio-BAR
+consumers converted and green; OH boots green.
+
+**Known cost.** Arena is bounded (registry slots); a BAR outside every
+window needs an explicit ioremap call at probe time.
+
+**Guard.** PF-NOCTX beacon silent across the suite; SMAP-VIOL beacon
+silent.
+
+## D-18: SMAP enablement with EFLAGS.AC pushfq sequences
+
+**Design.** x86_64 enables CR4.SMAP with the usercopy primitives
+bracketing their copies with pushfq/orq/popfq AC set/clear sequences
+instead of the STAC/CLAC encodings. The semantics are identical (AC gates
+supervisor access to user pages); the pushfq form is chosen because the
+STAC/CLAC encodings take #UD under QEMU TCG regardless of CR4.SMAP
+(bisection-proven 2026-10-31), which would make the KVM-class rig
+unbootable under the emulator fallback.
+
+**Advantage.** Identical default-deny semantics on hardware AND under
+TCG; no acceleration-mode-dependent kernel image.
+
+**Compatibility evidence.** x86_64 suite green with SMAP on and the
+identity window dropped; strong pbench board in band (p4 best-ever
+456µs); zero SMAP-VIOL beacons — the syscall layer is fully on uaccess.
+
+**Known cost.** pushfq/popfq is a few cycles heavier per bracket than
+STAC/CLAC on hardware; measured invisible under the benchmark rigs.
+
+**Guard.** SMAP-VIOL beacon on every boot; the uafault guest probe (11
+syscalls × bad pointer → EFAULT) in the packed probe set.

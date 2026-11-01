@@ -8,7 +8,7 @@
 //! mm/vmstat.c); `fs/procfs/vmstat.rs` renders them in Linux's
 //! key/value format.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

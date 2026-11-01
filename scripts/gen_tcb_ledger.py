@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""TCB ledger generator for the framekernel effort.
+"""TCB ledger generator for the kernel effort.
 
 Counts unsafe usage per module across kernel/src, classifies every file into
-framekernel layers, and reports the headline metric: unsafe tokens OUTSIDE the
+kernel layers, and reports the headline metric: unsafe tokens OUTSIDE the
 Framework layer (i.e. in Service modules that must eventually carry
 #![forbid(unsafe_code)]).
 
@@ -38,7 +38,7 @@ SRC_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # ---------------------------------------------------------------------------
 # Layer classification. Longest matching prefix wins. Unmatched -> service.
-# Keep in sync with docs/architecture/framekernel-layers.md.
+# Keep in sync with docs/architecture/kernel-layers.md.
 # ---------------------------------------------------------------------------
 RULES = [
     ("arch/aarch64/", "unbuilt"),

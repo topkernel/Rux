@@ -30,7 +30,7 @@
 //! measure report zero — which is also what a modern Linux reports for
 //! yld_count/goidle/ttwu on a mostly-idle box.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

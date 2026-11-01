@@ -1,0 +1,51 @@
+--- BEFORE flood counts (whole boot) ---
+MPROTECT-RW: 4000
+BIGMUNMAP: 4000
+TKSIG: 3998
+stkfutex: 0
+FXDV: 0
+FTWAIT: 0
+=== BEFORE iter1
+HPROBE futex_wake 223.0
+HPROBE tgkill_catch 581132.0
+HPROBE mprotect_flip 567790.0
+HPROBE mmap_munmap_1m 564351.0
+HPROBE done
+--- AFTER flood counts (whole boot) ---
+MPROTECT-RW: 0
+BIGMUNMAP: 0
+TKSIG: 0
+stkfutex: 0
+FXDV: 0
+FTWAIT: 0
+=== AFTER iter1
+HPROBE futex_wake 162.0
+HPROBE tgkill_catch 441.0
+HPROBE mprotect_flip 1451.0
+HPROBE mmap_munmap_1m 6235.0
+HPROBE done
+=== BEFORE iter2
+HPROBE futex_wake 117.0
+HPROBE tgkill_catch 580801.0
+HPROBE mprotect_flip 565109.0
+HPROBE mmap_munmap_1m 542629.0
+HPROBE done
+=== AFTER iter2
+HPROBE futex_wake 222.0
+HPROBE tgkill_catch 432.0
+HPROBE mprotect_flip 1411.0
+HPROBE mmap_munmap_1m 6167.0
+HPROBE done
+=== BEFORE iter3
+HPROBE futex_wake 119.0
+HPROBE tgkill_catch 587855.0
+HPROBE mprotect_flip 581561.0
+HPROBE mmap_munmap_1m 555536.0
+HPROBE done
+=== AFTER iter3
+HPROBE futex_wake 218.0
+HPROBE tgkill_catch 443.0
+HPROBE mprotect_flip 1456.0
+HPROBE mmap_munmap_1m 6028.0
+HPROBE done
+done

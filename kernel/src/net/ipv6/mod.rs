@@ -459,12 +459,21 @@ pub fn ipv6_rcv(skb: &mut SkBuff) -> Result<(), ()> {
         None => return Ok(()),
     };
 
+    // RFC 8200: Payload Length counts the bytes AFTER the 40-byte base
+    // header. The trim target is therefore IPV6_HDR_LEN + payload_len
+    // (the reference's pskb_trim(skb, sizeof(ipv6hdr) + payload_len));
+    // the old `skb.len = payload_len` trimmed the base header's own 40
+    // bytes out of the count too, so every inbound packet lost its last
+    // 40 transport bytes (and any transport payload < 40 bytes was
+    // dropped whole at the skb_pull below) — inbound IPv6 never delivered
+    // a correct segment.
     let payload_len = hdr.payload_len() as usize;
-    if payload_len > skb.len as usize {
+    let total_len = payload_len + IPV6_HDR_LEN;
+    if total_len > skb.len as usize {
         return Ok(()); // truncated frame
     }
     // Trim trailing Ethernet padding down to the IP-reported length.
-    skb.len = payload_len as u32;
+    skb.len = total_len as u32;
 
     let src = hdr.saddr();
     let dst = hdr.daddr();

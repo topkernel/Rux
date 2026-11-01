@@ -202,7 +202,7 @@ impl MmStruct {
                     // one leaf-PTE writer left outside PTE_MODIFY_LOCK
                     // (same protocol as the demand-fault paths in
                     // page_fault.rs).
-                    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+                    let _pte_guard = pte_lock_for(self).lock_irqsave();
                     // Re-check under the lock: a racing thread of this mm
                     // (CLONE_VM) may have mapped this address between the
                     // walk above and here; mapping again would orphan the
@@ -778,8 +778,9 @@ impl MmStruct {
 
     /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        // Serialize against fork's table walk and COW faults (PTE lock).
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // Serialize against fork's table walk and COW faults (per-mm PTE
+        // lock; other mms' writers proceed concurrently).
+        let _pte_guard = pte_lock_for(self).lock_irqsave();
         let mut addr = start.as_usize();
         let end = addr + size;
 
@@ -1024,7 +1025,7 @@ impl MmStruct {
             return; // refuse kernel-range rewrites
         }
 
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = pte_lock_for(self).lock_irqsave();
         let mut va = aligned_start;
         while va < end {
             let vpn2 = ((va >> 30) & 0x1FF) as usize;
@@ -1115,7 +1116,11 @@ impl MmStruct {
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // Per-mm section (split mode): the walk mutates only THIS mm's
+        // tables and the child's not-yet-published ones; concurrent COW
+        // faults of this mm take the same per-mm lock. Other mms' writers
+        // are no longer excluded (they never needed to be).
+        let _pte_guard = pte_lock_for(self).lock_irqsave();
         let new_root_ppn = unsafe {
             copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
@@ -1536,9 +1541,13 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 /// exactly the former single-Spinlock whole-domain serialization. The
 /// split-mode (per-mm) migration is an x86_64 change for now; riscv64
 /// follows once its own site audit is done.
-///
-/// Shared mmap-context generation counter (interface parity with x86_64's
-/// MM_CTX — the mremap/IPC paths reference it generically).
+
+/// map_page caller-context marker (advisory, interface parity with
+/// x86_64's MM_CTX): arch-neutral sites (sysv_shm, mremap, the mmap
+/// paths) store a small call-site id before the unchecked map helpers
+/// run. On x86_64 the PTE-OVERWRITE-LIVE tripwire reads it to name the
+/// site; on riscv64 no reader exists yet — the stores stay cheap and
+/// inert.
 pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
@@ -1548,13 +1557,132 @@ pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
 /// every mm maps to the same global epoch section, so arch-neutral
 /// callers compile unchanged against the x86_64 shape.
 #[inline]
-pub fn pte_lock_for(_mm: &crate::mm::mm_struct::MmStruct) -> &'static crate::mm::mm_struct::PteLock {
-    &PTE_GLOBAL_HANDLE
+pub fn pte_lock_for(
+    mm: &crate::mm::mm_struct::MmStruct,
+) -> &crate::mm::mm_struct::PteLock {
+    // Split mode on all arches (perf review 2026-10-31): this mm's own
+    // leaf-PTE writers serialize on the per-mm spin; writers of other
+    // mms run concurrently; the global-mode users (map_user_region,
+    // foreign IPC installs) still hold the epoch EXCLUSIVE and exclude
+    // against everyone. See docs/architecture/lock-ordering.md.
+    mm.pte_lock()
 }
 
 static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =
     crate::mm::mm_struct::PteLock::new();
 
+// ==================== Leaf primitives for shared mm code (FD-1) ====================
+//
+// mm/rmap.rs (try_to_unmap_inner) and mm/compact.rs (remap_page) used to
+// carry Sv39 manual descents of their own — root indexed with bits 38:30,
+// Sv39 PTE encoding — which silently no-oped on the 4-level arches (wrong
+// slot, is_valid() false, unmap/migration aborted, swap-out reclaimed
+// nothing). The walk shape and the PTE encoding are arch facts and live
+// here; the shared mm code calls only these three primitives.
+
+/// Permission/flag bits of a 4K leaf PTE — everything except the PPN
+/// field: V|R|W|X|U|G|A|D plus the COW/PCACHE software bits. This is the
+/// exact bit set [`leaf_pte_install`] puts back.
+#[inline]
+pub fn pte_flag_bits(bits: u64) -> u64 {
+    bits & 0x3FF
+}
+
+/// Default flag bits for an anonymous user page — compaction's fallback
+/// when the pre-unmap walk could not recover the live PTE. Present, RW,
+/// user, accessed, dirty; non-exec (the historical 0xD7 shape).
+pub const PTE_FLAGS_ANON_DEFAULT: u64 = PageTableEntry::V | PageTableEntry::R
+    | PageTableEntry::W | PageTableEntry::U | PageTableEntry::A
+    | PageTableEntry::D;
+
+/// Replace the 4K leaf PTE at `vaddr` with raw `new_bits` (0 = unmap; a
+/// swap or migration entry), under this mm's PTE lock. The leaf must
+/// still be present and map `expect_pfn` — the R7-C3 re-validation: the
+/// caller's lock-free walk may have raced a concurrent leaf writer (COW
+/// break / swap-in / munmap). Returns true when the leaf was replaced;
+/// the caller owns the TLB flush.
+///
+/// A huge-leaf entry at an upper level has no 4K slot to replace —
+/// returns false (anonymous reclaim targets 4K mappings only).
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_replace(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    expect_pfn: u64,
+    new_bits: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: caller guarantees a live root; the walk only reads table
+    // frames reachable from it, and the leaf write goes through the
+    // validated slot.
+    unsafe {
+        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() {
+            return false;
+        }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let pte0 = (*table0).get(vpn0);
+        if !pte0.is_valid() || pte0.ppn() != expect_pfn {
+            return false;
+        }
+        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
+
+/// Rebuild a PRESENT 4K leaf mapping `pfn` at `vaddr` from saved flag
+/// bits ([`pte_flag_bits`] shape), under this mm's PTE lock. The leaf
+/// slot may currently hold a non-present marker (the compaction
+/// migration window) — only the intermediate levels must exist. The
+/// valid bit is OR-ed in unconditionally (the saved bits of a live leaf
+/// carry it; the fallback constant does too — belt for the marker case).
+/// Returns true when installed; the caller owns the TLB flush.
+///
+/// # Safety
+/// `root_ppn` must be a live page-table root of `mm` (pinned by the
+/// caller), and `vaddr` a user address of that mm.
+pub unsafe fn leaf_pte_install(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    vaddr: u64,
+    pfn: u64,
+    flags: u64,
+) -> bool {
+    let _g = pte_lock_for(mm).lock_irqsave();
+    // SAFETY: see leaf_pte_replace.
+    unsafe {
+        let vpn2 = ((vaddr >> 30) & 0x1FF) as usize;
+        let vpn1 = ((vaddr >> 21) & 0x1FF) as usize;
+        let vpn0 = ((vaddr >> 12) & 0x1FF) as usize;
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return false;
+        }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() {
+            return false;
+        }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        let new_bits = (pfn << 10) | (flags & 0x3FF) | PageTableEntry::V;
+        (*table0).set(vpn0, PageTableEntry::from_bits(new_bits));
+    }
+    true
+}
 
 pub unsafe fn map_user_region(
     user_root_ppn: u64,
@@ -2082,12 +2210,28 @@ pub unsafe fn copy_page_table_cow(
                     | ((vpn1 as u64) << 21)
                     | ((vpn0 as u64) << 12);
                 let leaf_ppn = pte0.ppn();
-                let cow_exempt_leaf = cow_exempt
+                // Leaf-table fast path (perf review 2026-10-31; x86 twin):
+                // riscv leaf tables are 2MB — when the whole table lies
+                // outside every exempt region and the framebuffer range,
+                // skip the per-PTE scans. One range check per table
+                // replaces one scan per PTE; overlapping tables keep the
+                // exact per-PTE granularity.
+                let leaf_base = leaf_va & !0x1F_FFFF;
+                let leaf_end = leaf_base + 0x20_0000;
+                let leaf_all_clear = cow_exempt
                     .iter()
-                    .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
-                    || fb_frame_range.map_or(false, |(lo, hi)| {
-                        leaf_ppn >= lo && leaf_ppn < hi
+                    .all(|(s, e)| leaf_end <= *s || leaf_base >= *e)
+                    && fb_frame_range.map_or(true, |(lo, hi)| {
+                        leaf_end <= (lo << 12) || leaf_base >= (hi << 12)
                     });
+                let cow_exempt_leaf = !leaf_all_clear
+                    && (cow_exempt
+                        .iter()
+                        .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
+                        || fb_frame_range.map_or(false, |(lo, hi)| {
+                            leaf_ppn >= lo && leaf_ppn < hi
+                        })
+                    );
 
                 let new_pte = if is_user
                     && !crate::mm::page_alloc::is_foreign_user_frame(

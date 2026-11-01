@@ -1,0 +1,13 @@
+boot 1: clean (shell alive)
+boot 2: clean (shell alive)
+boot 3: clean (shell alive)
+boot 4: clean (shell alive)
+boot 5: clean (shell alive)
+boot 6: clean (shell alive)
+boot 7: clean (shell alive)
+boot 8: clean (shell alive)
+boot 9: clean (shell alive)
+boot 10: clean (shell alive)
+boot 11: clean (shell alive)
+boot 12: clean (shell alive)
+=== flake loop: 12 boots, clean=12 flake=0 other=0 ===

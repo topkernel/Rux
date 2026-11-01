@@ -162,6 +162,42 @@ fn test_ipc_uapi_struct_sizes() {
     test_assert_eq!(core::mem::size_of::<ShmidDsUapi>(), 112, "ShmidDsUapi size == 112");
     test_assert_eq!(core::mem::size_of::<MqAttr>(), 64, "MqAttr size == 64");
     test_assert_eq!(core::mem::size_of::<SemUndoEntry>(), 12, "SemUndoEntry size == 12");
+
+    // semid64_ds field offsets — the 88-byte asm-generic contract
+    // (uapi/asm-generic/sembuf.h) restored on x86_64 by the 2026-10-31
+    // layout fix (commit 44b70b26): the kernel-side _high padding
+    // fields put ctime at 64 where musl reads 56. The offsets are the
+    // ABI — LTP semget01 read nsems where the kernel wrote ctime.
+    test_assert_eq!(
+        core::mem::offset_of!(SemidDsUapi, sem_perm), 0,
+        "SemidDsUapi sem_perm @0"
+    );
+    test_assert_eq!(
+        core::mem::offset_of!(SemidDsUapi, sem_otime), 48,
+        "SemidDsUapi sem_otime @48"
+    );
+    test_assert_eq!(
+        core::mem::offset_of!(SemidDsUapi, sem_ctime), 56,
+        "SemidDsUapi sem_ctime @56"
+    );
+    test_assert_eq!(
+        core::mem::offset_of!(SemidDsUapi, sem_nsems), 64,
+        "SemidDsUapi sem_nsems @64"
+    );
+
+    // The perm header that pins those offsets (asm-generic ipc64_perm:
+    // key/uid/gid/cuid/cgid as u32, mode+seq, padded to 48).
+    test_assert_eq!(
+        core::mem::size_of::<IpcPermUapi>(), 48,
+        "IpcPermUapi size == 48"
+    );
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, key), 0, "IpcPermUapi key @0");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, uid), 4, "IpcPermUapi uid @4");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, gid), 8, "IpcPermUapi gid @8");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, cuid), 12, "IpcPermUapi cuid @12");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, cgid), 16, "IpcPermUapi cgid @16");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, mode), 20, "IpcPermUapi mode @20");
+    test_assert_eq!(core::mem::offset_of!(IpcPermUapi, seq), 24, "IpcPermUapi seq @24");
 }
 
 fn test_sem_buf_layout() {

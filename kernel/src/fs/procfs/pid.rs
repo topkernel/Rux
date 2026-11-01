@@ -185,25 +185,63 @@ pub fn generate_comm(pid: u64) -> Vec<u8> {
 
 /// Generate /proc/[pid]/cgroup content (U2).
 ///
-/// When a cgroup2 hierarchy is mounted, every task lives in its root
-/// group — exactly what Linux reports for a v2-only system:
-/// `0::/\n` (one line per hierarchy; here just the unified one).
+/// When NO cgroup2 hierarchy is mounted the file is EMPTY — reference
+/// kernels list mounted hierarchies only, and systemd's
+/// cg_pid_get_path() translates the empty read into -ENOMEDIUM
+/// ("cgroup2 not mounted").
 ///
-/// When NO hierarchy is mounted the file is EMPTY — reference kernels
-/// list mounted hierarchies only, and systemd's cg_pid_get_path()
-/// translates the empty read into -ENOMEDIUM ("cgroup2 not mounted").
-/// Fabricating "0::/" without a mount (gdm bring-up r17b storm) made
-/// udevd — spawned by pid 1 with sd_booted()>0 — record the ROOT
-/// cgroup as its own, and its on_post() idle cleanup then cg_kill()ed
-/// every pid the root cgroup.procs listed: the whole daemon set died
-/// by SIGKILL from the udevd daemon itself, PID 1 included (discarded
-/// there by the init-delivery protection).
-pub fn generate_cgroup(_pid: u64) -> Vec<u8> {
-    if crate::fs::cgroup::cgroup2_mounted() {
-        b"0::/\n".to_vec()
-    } else {
-        Vec::new()
+/// When the hierarchy is mounted, each task reports a per-task user
+/// slice path (`/user.slice/user-<uid>.slice/user@<uid>.service`)
+/// instead of the root group. Two reasons (gdm bring-up r74):
+///
+/// 1. sd-bus creds AUGMENTATION (systemd 249 bus-creds.c): every
+///    SD_BUS_CREDS_OWNER_UID query — logind's
+///    /org/freedesktop/login1/user/self dispatch, which the gdm
+///    greeter's gnome-shell needs to build its LoginManager proxy —
+///    resolves the owner uid by parsing the task's cgroup path
+///    (cg_path_get_owner_uid wants a `user-<uid>.slice` component).
+///    The bare "0::/" root path does not parse; before this fix the
+///    user/self GetAll died of -ENOMEDIUM at cg_unified_cached()
+///    instead (statfs on the unmounted /sys/fs/cgroup) — gnome-shell
+///    then crashed with "this._userProxy.Display is null"
+///    (loginManager.js:111) and gdm looped the greeter forever.
+///
+/// 2. udevd storm immunity (gdm bring-up r17b): with "0::/" for
+///    every task, udevd (sd_booted()>0) recorded the ROOT cgroup as
+///    its own and its idle cleanup cg_kill()ed the whole root
+///    cgroup.procs list — the silent mass-kill storm. The fabricated
+///    per-task directories do NOT exist in the hierarchy, so any
+///    cg_kill() against them hits cgroup.procs ENOENT, which
+///    cg_kill_items() treats as an empty group (no-op). No task ever
+///    names the root group either, so nothing sweeps it.
+///
+/// PID 1 reports `/init.scope`: cg_get_root_path() strips that suffix
+/// so every other task's path shifts against "/" (the reference
+/// layout for a systemd-managed box; the strip keeps the arithmetic
+/// correct with runit as PID 1 too).
+pub fn generate_cgroup(pid: u64) -> Vec<u8> {
+    if !crate::fs::cgroup::cgroup2_mounted() {
+        return Vec::new();
     }
+    if pid == 1 {
+        return b"0::/init.scope\n".to_vec();
+    }
+    // Effective uid of the task (0 for kernel threads / lookup races).
+    let mut pinned;
+    let task = if crate::process::current_pid() as u64 == pid {
+        crate::process::current_task()
+    } else {
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(g) => g,
+            None => return b"0::/user.slice/user-0.slice/user@0.service\n".to_vec(),
+        };
+        Some(pinned.get())
+    };
+    let euid = match task {
+        Some(t) => t.cred().euid,
+        None => 0,
+    };
+    alloc::format!("0::/user.slice/user-{euid}.slice/user@{euid}.service\n").into_bytes()
 }
 
 /// Generate /proc/[pid]/status content
@@ -470,6 +508,7 @@ fn read_target_user_mm(
     start: usize,
     len: usize,
 ) -> Vec<u8> {
+    use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     let root_ppn = addr_space.root_ppn();
@@ -477,56 +516,29 @@ fn read_target_user_mm(
         return Vec::new();
     }
 
+    // Arch page-table walker (x86_64 PML4 / riscv64 SV39 / aarch64 L4 —
+    // same contract: (ppn, pte) for the page holding `virt`, huge-leaf
+    // offsets folded in). This function USED to hand-roll an SV39 walk,
+    // which on x86_64 read x86 PML4 entries as SV39 PTEs: every
+    // /proc/<pid>/cmdline and /proc/<pid>/environ read of ANOTHER process
+    // came back empty — on the OH image the EGL wrapper's process-name
+    // lookup fgets() failed for every graphics process. Page-granular
+    // copy keeps the arch leaf handling exact for any page-size mix.
     let mut out = Vec::with_capacity(len);
     let mut remaining = len;
     let mut va = start as u64;
 
     while remaining > 0 {
-        // SV39 walk: level-2 → level-1 → level-0
-        let a2 = (root_ppn << 12) + ((va >> 30) & 0x1FF) * 8;
-        // SAFETY: a2 is the physical address of a valid PTE in the target's
-        // level-2 table (page-aligned base + in-table index).
-        let e2 = unsafe { core::ptr::read_volatile(phys_to_virt(PhysAddr::new(a2 as u64)).0 as *const u64) };
-        if e2 & 1 == 0 {
-            break; // unmapped
-        }
-        let mut pte = e2;
-        let mut level = 2u32;
-        loop {
-            let is_leaf = pte & 0xE != 0; // R|W|X
-            if is_leaf || level == 0 {
-                break;
-            }
-            let shift = 12 + 9 * (level - 1);
-            let next_table = ((pte >> 10) & 0xFFF_FFFF_FFFF) << 12;
-            let idx = (va >> shift) & 0x1FF;
-            // SAFETY: next_table is a valid page-table page in the target mm.
-            pte = unsafe {
-                core::ptr::read_volatile(
-                    phys_to_virt(PhysAddr::new(next_table + idx * 8)).0 as *const u64,
-                )
-            };
-            if pte & 1 == 0 {
-                return out; // unmapped
-            }
-            level -= 1;
-        }
-
-        // Compute the physical page base for this virtual page.
-        let (page_phys, page_len) = if level == 0 {
-            (((pte >> 10) & 0xFFF_FFFF_FFFF) << 12, 4096u64)
-        } else {
-            // 2 MiB (or 1 GiB) leaf: lower PPN bits are zero for the base.
-            let shift = 12 + 9 * level;
-            let mask: u64 = !((1u64 << shift) - 1);
-            ((((pte >> 10) & 0xFFF_FFFF_FFFF) << 12) & mask, 1u64 << shift)
+        // SAFETY: root_ppn belongs to the pinned target mm (callers hold
+        // a PinnedTask or are the current task); walk is read-only.
+        let Some((ppn, _pte)) = (unsafe { PageTableWalker::walk(root_ppn, va) }) else {
+            break; // unmapped — truncated content, not a kernel error
         };
-
-        let in_page_off = (va & (page_len - 1)) as usize;
-        let copy = core::cmp::min(remaining, page_len as usize - in_page_off);
-        // SAFETY: page_phys+off is a mapped user page of the target; the
+        let in_page_off = (va & 0xFFF) as usize;
+        let copy = core::cmp::min(remaining, 4096 - in_page_off);
+        // SAFETY: ppn<<12+off is a mapped user page of the target; the
         // kernel linear mapping makes it readable here.
-        let src = phys_to_virt(PhysAddr::new(page_phys + in_page_off as u64)).0 as *const u8;
+        let src = phys_to_virt(PhysAddr::new((ppn << 12) + in_page_off as u64)).0 as *const u8;
         let chunk = unsafe { core::slice::from_raw_parts(src, copy) };
         out.extend_from_slice(chunk);
 

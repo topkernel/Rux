@@ -1,18 +1,9 @@
 name: Kani Symbolic Verification
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'kernel/src/**'
-      - 'kernel/verify/**'
-      - 'scripts/verify_sync_check.py'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'kernel/src/**'
-      - 'kernel/verify/**'
-      - 'scripts/verify_sync_check.py'
+  schedule:
+    - cron: "0 3 * * *"  # nightly, off the per-push path
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +12,7 @@ jobs:
   kani:
     name: Kani (x86_64)
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 

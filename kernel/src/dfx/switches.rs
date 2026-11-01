@@ -31,7 +31,7 @@
 //!   dbus-activation and reparent-safety investigations; they pollute
 //!   the structured boot table, so they are OFF unless requested.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
@@ -58,6 +58,7 @@ macro_rules! dfx_switch_table {
             ScribblePid1 => "scribblepid1",
             ScribbleSweep => "scribblesweep",
             InputTrace => "inputtrace",
+            DbFileTrace => "dbtrace",
             EpollTrace => "epolltrace",
             EpollScan => "epollscan",
             ClaimInject => "claiminject",
@@ -92,6 +93,16 @@ macro_rules! dfx_switch_table {
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
             ExecCost => "execcost",
+            ThPark => "thpark",
+            RipSample => "ripsample",
+            OhHunt => "ohhunt",
+            TfdCensus => "tfdcensus",
+            ScmTap => "scmtap",
+            SigTrace => "sigtrace",
+            SysForensic => "sysforensic",
+            SysRing => "sysring",
+            FilerdProbe => "filerd",
+            LostParkTrace => "lostpark",
         }
     };
 }
@@ -136,6 +147,11 @@ pub enum DfxSwitch {
     /// count. Used to hunt phantom input streams; printing happens on the
     /// event path so it is OFF in production boots.
     InputTrace,
+    /// TEST-ONLY udev-db tracer (gdmr24 hunt; remove before merge):
+    /// tmpfs reads/writes whose payload is shaped like a udev db line
+    /// (I:/G:/Q:/S:/E:/V: prefix) print offset+content, catching the
+    /// "G:\n" splice that breaks sd-device tag loading.
+    DbFileTrace,
     /// epoll delivery trace: every (rate-limited) epoll_wait return prints
     /// pid/comm plus each ready fd's number and event bits — hunts
     /// permanently ready fds that spin epoll_pwait/ppoll callers.
@@ -403,9 +419,86 @@ pub enum DfxSwitch {
     /// the first 64 execs. For decomposing the p4_fork_exec reference
     /// gap; prints only when explicitly enabled. OFF by default.
     ExecCost,
+    /// dfx=thpark (leg-40B family A): user-stack park dump of hung
+    /// binder SERVER threads from the txn-hunt audit — 48 frame words
+    /// above the parked syscall's entry sp, VMA+fileoff+instruction
+    /// bytes for offline symbolize against the image's libraries.
+    /// Names the image-side handler chain that entered a nested sync
+    /// txn (the mutual-ABBA candidate side, sc334B tid472<->841
+    /// shape). Deliberately SEPARATE from ParkDump: that switch also
+    /// arms the freeze-scan full-tgid dumps whose UART volume is the
+    /// known boot-timing dodge amplifier (sc186-188); this one is
+    /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
+    /// OFF by default.
+    ThPark,
+    /// leg-40C perf rider: user-mode rip sampling for launcher-comm
+    /// tasks (page-bucketed histogram + utime/stime split), reported
+    /// every 60 s from the tick path. OFF by default.
+    RipSample,
+    /// OH graphics hunt taps (oh-svc/oh-launcher lanes, known-gap 4):
+    /// the drm ioctl traces in sys_ioctl (MAP_DUMB / ioctl-fail /
+    /// foreign-prime-import), the drm mmap placement/resolve attribution
+    /// in sys_mmap, the prime-import compose-content probe (a full
+    /// buffer scan per import — pure diagnostic output) and the
+    /// SIGABRT first-raise dump (exec-VMA map + stack scan). All hunt
+    /// instrumentation for the render_service abort / black-screen
+    /// campaigns; they add per-ioctl/per-import/per-abort cost and
+    /// pollute the structured boot table. OFF by default — enable with
+    /// `dfx=ohhunt` when the graphics lanes are hunting.
+    OhHunt,
+    /// dfx=tfdcensus (oh-launcher lane): windowed timerfd_create caller
+    /// census — the syscost boots showed a 4k/s timerfd_create storm
+    /// (833k calls by t=240s, several CPUs of kernel work) whose caller
+    /// the boot-start TFDC budget could never name. Behind this switch
+    /// the TFDC tap prints the first 16 calls of every 5s window, so
+    /// every boot phase names its storm caller. Purely diagnostic; OFF
+    /// by default.
+    TfdCensus,
+    /// dfx=scmtap (gdm session-fifo hunt, session 21): SCM_RIGHTS relay
+    /// tap — one line per unix sendmsg that attaches fds (TX), per
+    /// recvmsg that installs them (RX with the new fd numbers), per
+    /// drop (no control room / EFAULT / EMFILE / queue orphaned at
+    /// socket close), plus the fifo last-writer-close line. Answers,
+    /// from the kernel side, where the CreateSession reply's session
+    /// fd dies between logind → dbus-daemon → pam (the "Session c1
+    /// logged out" milliseconds-after-create shape). OFF by default.
+    ScmTap,
+    /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
+    /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
+    /// handler, restorer, pc) and one per restore_sigcontext_aarch64
+    /// (pid, frame_addr, restored pc/sp/x29). For hunting the LTP
+    /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
+    /// default.
+    SigTrace,
+    /// dfx=sysforensic (perf-syscall lane): arms the per-syscall forensic
+    /// instruments the dispatcher carried unconditionally before the perf
+    /// sprint — the SYSCALL_RING double-record, the per-task fail rings,
+    /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
+    /// 12 atomics per syscall for them).
+    SysForensic,
+    /// Forensic SYSCALL_RING (dispatch.rs): the global 2048-entry ring
+    /// of (pid, nr, a0, a1, ret) recorded at syscall ENTRY and EXIT,
+    /// replayed by the KERNPANIC printer and the NOVMA handlers to
+    /// reconstruct the victim's final syscall sequence. Superseded by
+    /// SysForensic (which gates the ring together with the other
+    /// per-syscall instruments); kept as an alias so hunt scripts
+    /// written against `dfx=sysring` keep working.
+    SysRing,
+    /// dfx=filerd (perf-filerd lane): cached-file read(2) cost anatomy —
+    /// RDTSC phase counters (lock/pin/copy/unpin/epilog) around the ext4
+    /// read fast path, reported via /proc/filerd. Built to attribute the
+    /// bw_file_rd 50x lmbench gap; see dfx/filerd.rs.
+    FilerdProbe,
+    /// dfx=lostpark (fix-lostpark lane): SMP lost-park forensics — the
+    /// idle-loop lie detector (a CPU about to idle while its per-CPU
+    /// current slot still names a real task, with the SLOT_WRITER tag
+    /// that names the slot's last writer) plus the wake-skip census for
+    /// wakes refused while nothing is runnable. Rate-limited direct-
+    /// console lines; OFF by default.
+    LostParkTrace,
 }
 
-const SWITCH_COUNT: usize = 44;
+const SWITCH_COUNT: usize = 55;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -490,6 +583,17 @@ impl DfxSwitch {
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
             DfxSwitch::ExecCost => 43,
+            DfxSwitch::ThPark => 44,
+            DfxSwitch::RipSample => 45,
+            DfxSwitch::DbFileTrace => 46,
+            DfxSwitch::OhHunt => 47,
+            DfxSwitch::TfdCensus => 48,
+            DfxSwitch::ScmTap => 49,
+            DfxSwitch::SigTrace => 50,
+            DfxSwitch::SysForensic => 51,
+            DfxSwitch::SysRing => 52,
+            DfxSwitch::FilerdProbe => 53,
+            DfxSwitch::LostParkTrace => 54,
         }
     }
 
@@ -511,12 +615,18 @@ pub fn set(switch: DfxSwitch, on: bool) {
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
     }
+    if let DfxSwitch::FilerdProbe = switch {
+        super::filerd::set_enabled(on);
+    }
     if let DfxSwitch::LeakHunt = switch {
         super::leakorigin::ENABLED.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::Scribble = switch {
         #[cfg(feature = "x86_64")]
-        super::scribble::ENABLED.store(on, Ordering::Relaxed);
+        super::scribble::ENABLED.store(on, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let DfxSwitch::LostParkTrace = switch {
+        super::lostpark::arm();
     }
     if let DfxSwitch::ScribblePark = switch {
         #[cfg(feature = "x86_64")]

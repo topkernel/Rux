@@ -1221,9 +1221,15 @@ fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
 /// (DGRAM sendto). `files` is the SCM_RIGHTS payload (already resolved
 /// from the sender's fd table). `cred` is the SCM_CREDENTIALS triple
 /// (kernel-filled from the sending task).
+///
+/// `data` is OWNED: the successful enqueue moves the Vec straight into
+/// the queued segment (zero further copies). The syscall layer builds
+/// this Vec with the ONE user copy of the payload (perf-ipc: the old
+/// `&[u8]` + `data.to_vec()` at the enqueue made every unix send a
+/// double copy — staged user→kernel, then kernel→segment).
 pub fn unix_send(
     sock: &Arc<UnixSocket>,
-    data: &[u8],
+    data: alloc::vec::Vec<u8>,
     files: Vec<Arc<File>>,
     cred: Option<UnixCred>,
     dest: Option<&UnixAddr>,
@@ -1586,6 +1592,87 @@ pub fn unix_send(
                 // window (screen create → llvmpipe init → verdict);
                 // skipping them keeps the budget for the verdict lines.
                 let flood = s.contains("procname = gl");
+                // leg-30B5: the StartUser/SwitchToUser user-start chain
+                // cohort at WARN (visible at loglevel 6, unlike the GL
+                // cohort's pr_debug): BMS's ImplicitQueryInfoByPriority
+                // verdicts ("user is not existed" = GetUserId rejected
+                // user 100; "can't find target AbilityInfo" = the isBoot
+                // retry ladder's spin reason), accountmgr's adapter
+                // results, and AMS's own handler narration. Rare lines
+                // concentrated in the post-unlock window — own budget.
+                const AMS_KEYS: [&str; 38] = [
+                    "SwitchToUser",
+                    "startUser in service",
+                    "highest priority ability",
+                    "user is not existed",
+                    "invalid userId",
+                    "userId not exist",
+                    "CreateNewUser user",
+                    "CreateNewUser end",
+                    "bundle size:",
+                    "wait complete",
+                    "AbilityManagerAdapter",
+                    "in call back",
+                    "StartUser current",
+                    "low-mem mode",
+                    "foregroundUserId:",
+                    "not supported!",
+                    "failed to get os account",
+                    "os account proxy",
+                    "Get samgr failed",
+                    "account iface_cast",
+                    "failed to get account",
+                    "can't find target",
+                    "IsOsAccountExists path",
+                    // lb47: the ipc-skeleton failure verdicts. The bare
+                    // "SendRequest" key matched the SA_CLIENT success flood
+                    // ("SubscribeSystemAbility SendRequest succeed!") and
+                    // ate the whole 600 budget by ~125 s on lb46 — dark for
+                    // the entire StartUser window. Tightened to the failure
+                    // shapes only: IPCObjectProxy's ZLOGE "failed, handle:"
+                    // (every SendRequest error verdict, includes the
+                    // ERR_DEAD_OBJECT class), the null-invoker ZLOGE, the
+                    // samgr stub-object error, the work-thread pool family,
+                    // and the measured-cost lines.
+                    "failed, handle:",
+                    "invoker is null",
+                    "Invalid samgr stub",
+                    "SendRequestInner cost",
+                    "SendRequest failed",
+                    "SendRequest fail",
+                    "work thread",
+                    "find target AbilityInfo",
+                    "create user:",
+                    "permission verification failed, not account",
+                    // lb48 (seventh successor): the death-mark verdicts.
+                    // A death-marked IPCObjectProxy answers every later
+                    // SendRequest locally with ERR_DEAD_OBJECT (ZLOGD
+                    // only) — the permanent fast-fail engine. These keys
+                    // name every path that marks, un-marks, or rejects
+                    // the mark: WaitForInit's self-heal ("init again"),
+                    // OnBinderDied's address-reject ("Invalid proxy
+                    // object"), the ioctl-level errno verdict ("fail,
+                    // result:" — the ONLY path whose value can be -32 ==
+                    // ERR_DEAD_OBJECT, since a kernel BR_DEAD_REPLY maps
+                    // to +0x7205 which SendRequestInner never compares),
+                    // the parcel-side write failure, and the obituary
+                    // refcount reject.
+                    "init again",
+                    "Invalid proxy object",
+                    "fail, result:",
+                    "WriteTransaction ERROR",
+                    "failed to increment strong reference count",
+                ];
+                let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
+                if ams_family {
+                    static AMS_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = AMS_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 600 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("HILOG-AMS[{}] {}{}", n, p, s);
+                    }
+                }
                 // Decoded line is "<tag>: <content>" — prefix-match the
                 // tag so "OHOS::RS" (which contains ':') still works.
                 let interesting = TAGS.iter().any(|t| {
@@ -1597,7 +1684,7 @@ pub fn unix_send(
                     let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 3000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("hilog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("hilog[{}] {}{}", n, p, s);
                     }
                 }
                 // Spawn-chain tap (launcher hunt, b16): the appspawn ->
@@ -1634,7 +1721,7 @@ pub fn unix_send(
                     // full OH boot's spawn-cohort traffic (~4.5MB serial).
                     if n < 30000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("slog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("slog[{}] {}{}", n, p, s);
                     }
                 }
                 // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
@@ -1663,7 +1750,7 @@ pub fn unix_send(
                     let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 6000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("alog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("alog[{}] {}{}", n, p, s);
                     }
                 }
                 // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
@@ -1688,7 +1775,7 @@ pub fn unix_send(
                     let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 10000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("ilog[{}] {}{}", n, p, s);
+                        crate::pr_debug!("ilog[{}] {}{}", n, p, s);
                     }
                 }
             }
@@ -1750,8 +1837,9 @@ pub fn unix_send(
                 }
                 let charge = seg_charge(data.len());
                 q.charge += charge;
+                let sent_len = data.len();
                 q.segs.push_back(UnixSeg {
-                    data: data.to_vec(),
+                    data,
                     files,
                     cred,
                     src,
@@ -1768,7 +1856,7 @@ pub fn unix_send(
                 if fid != 0 {
                     crate::syscall::misc::epoll_notify_file(fid);
                 }
-                return Ok(data.len());
+                return Ok(sent_len);
             }
         }
 
@@ -2113,6 +2201,24 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Pending children of a dying listener are dropped with their Arcs;
     // their clients see EPIPE on the next send (peer upgrade fails).
     sock.accept_queue.lock().clear();
+    // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
+    // queue at close time are about to be released — the receiver died
+    // (or stopped reading) before the ancillary segment was touched.
+    if crate::dfx::scmtap::enabled() {
+        let q = sock.recv_queue.lock();
+        let mut nfds = 0usize;
+        let mut segs = 0usize;
+        for seg in q.segs.iter() {
+            if !seg.files.is_empty() {
+                segs += 1;
+                nfds += seg.files.len();
+            }
+        }
+        drop(q);
+        if nfds > 0 {
+            crate::dfx::scmtap::tap_orphan(nfds, segs);
+        }
+    }
     // Wake senders blocked on OUR queue and our own waiters.
     sock.wait_queue.wake_up_all();
 }
@@ -2173,7 +2279,72 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
     }
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
-    match unix_send(&socket, buf, Vec::new(), None, None, nonblock, deadline) {
+    // Owned-Vec send (perf-ipc): one copy here (buf is the generic write
+    // path's staging slice); write(2) on a unix socket normally takes the
+    // unix_write_user direct path instead — zero staging.
+    let data = buf.to_vec();
+    match unix_send(&socket, data, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// write(2)/writev fast path for AF_UNIX: build the segment with the ONE
+/// user→kernel copy (no staging buffer, no second copy at the enqueue).
+/// Mirrors pipe_write_user. `src` must be access_ok-validated for `count`
+/// bytes. A faulting source is EFAULT with nothing sent (the generic
+/// staged path's contract).
+pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
+    use crate::arch::uaccess::copy_from_user;
+    // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
+    // private_data holds the UnixSocket Arc installed at open. `count`
+    // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
+    // allocation per call, same heap discipline as the generic staging.
+    let socket = match unsafe { unix_of_file(file) } {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    if *socket.shut_wr.lock() {
+        return -32; // EPIPE
+    }
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+
+    let mut kbuf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if kbuf.try_reserve_exact(count).is_err() {
+        return -12; // ENOMEM
+    }
+    // SAFETY: capacity is exactly count; copy_from_user fills it before
+    // set_len exposes the bytes. A partial copy is EFAULT with nothing
+    // sent — the exact contract the generic staged path had (its staged
+    // copy_in returned EFAULT on a first-chunk fault, no short send).
+    unsafe {
+        let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
+        if uncopied > 0 {
+            return -14; // EFAULT
+        }
+        kbuf.set_len(count);
+    }
+    match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
+        Ok(n) => n as isize,
+        Err(e) => e as isize,
+    }
+}
+
+/// writev(2) gather entry for DGRAM/SEQPACKET unix sockets: hand the
+/// already-gathered kernel buffer to the send engine OWNED (the generic
+/// fallback would route through write_slice → a second copy at the
+/// enqueue). Returns write(2)-style isize.
+pub fn unix_write_slice_owned(file: &File, gathered: alloc::vec::Vec<u8>) -> isize {
+    // SAFETY: dispatcher verified ops identity (unix_file_of_file in
+    // sys_writev) — private_data holds the UnixSocket Arc.
+    let socket = match unsafe { unix_of_file(file) } {
+        Some(s) => s,
+        None => return -9,
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.sndtimeo_deadline();
+    match unix_send(&socket, gathered, Vec::new(), None, None, nonblock, deadline) {
         Ok(n) => n as isize,
         Err(e) => e as isize,
     }
@@ -2228,10 +2399,13 @@ const READ_BOUNCE: usize = 1024;
 ///   signal returns the partial count when bytes already landed.
 /// - Ancillary data is discarded (unix_file_read's existing contract).
 ///
-/// # Safety
-/// `dst` must be a validated user pointer with `count` writable bytes
-/// (access_ok was checked by the caller).
-pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+/// Safe entry for the syscall capsule layer (kernel): `dst` may be
+/// ANY address — every store to it goes through the exception-table
+/// copy, so a bad range surfaces as EFAULT instead of a kernel fault.
+/// The historical `# Safety` contract (caller-validated dst) is now
+/// advisory only: it preserves the EFAULT-before-side-effect errno
+/// ordering the read(2) entry points produce.
+pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open.
     let socket = match unsafe { unix_of_file(file) } {
@@ -2251,6 +2425,9 @@ pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
             Ok(r) => {
                 if r.len == 0 {
                     return 0; // EOF
+                }
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // SAFETY: dst validated with access_ok(count) by the
                 // caller; r.len <= stage <= count.
@@ -2292,6 +2469,15 @@ pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
                 if n == 0 {
                     break; // peer EOF
                 }
+                // scmtap: read(2) cannot report ancillary data — the
+                // queued fds are released here (Linux closes them the
+                // same way). A fd-carrying segment touched by a plain
+                // read is the dbus "message refers to more unix fds
+                // than were sent" corruption shape, so make the loss
+                // visible when hunting (dfx=scmtap).
+                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                }
                 // SAFETY: user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
                 // wrote are read out of the bounce.
@@ -2305,7 +2491,9 @@ pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
                 }
                 total += n;
                 remaining -= n;
-                user_ptr = user_ptr.add(n);
+                // SAFETY: bounded offset arithmetic — user_ptr + n stays
+                // within the count-wide window that began at dst.
+                user_ptr = unsafe { user_ptr.add(n) };
                 if !matches!(socket.kind, UnixKind::Stream) {
                     break; // one record per read(2)
                 }

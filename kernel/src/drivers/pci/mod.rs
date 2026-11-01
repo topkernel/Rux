@@ -426,17 +426,26 @@ pub mod vendor {
 
 /// VirtIO device IDs (PCI)
 ///
-/// Modern (virtio 1.0) IDs per the PCI device-ID table: 0x1040 net,
-/// 0x1041 block, 0x1042 balloon, ... 0x1050 GPU, 0x1052 input. The two
-/// modern IDs here were previously swapped (net=0x1041/blk=0x1042) —
-/// harmless on MMIO/legacy transports, but on aarch64 GPEX the devices
-/// are modern-only, so the net probe bound the BLOCK device (0x1041)
-/// and the blk probe matched a balloon ID and found nothing.
+/// Legacy/transitional devices answer with the 0x1000-series IDs.
+/// Modern (non-transitional, virtio 1.0) devices presented by QEMU
+/// answer `0x1040 + virtio device type`: net=1 -> 0x1041, blk=2 ->
+/// 0x1042, console=3, balloon=5, gpu=16 -> 0x1050, input=18 -> 0x1052.
+/// This is the mapping the reference kernel's virtio_pci driver uses
+/// (device_id = pci DID - 0x1040 for DID >= 0x1040), and it is what
+/// real device models expose: `virtio-blk-pci,disable-legacy=on` on
+/// the virt machine answers PCI 1af4:1042 (verified via the QEMU
+/// monitor `info pci`). The virtio spec appendix lists different IDs
+/// (0x1040 net / 0x1041 blk), but no real device presents those —
+/// setting the constants to the spec table makes every
+/// disable-legacy=on boot lose its disk (observed on main@82059759:
+/// the PCI blk probe found zero devices, root fell back, no init
+/// loadable). GPEX (aarch64) devices are transitional (0x1000/0x1001)
+/// and are unaffected by the modern entries.
 pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
-    pub const VIRTIO_NET_MODERN: u16 = 0x1040;
+    pub const VIRTIO_NET_MODERN: u16 = 0x1041;
     pub const VIRTIO_BLK: u16 = 0x1001;
-    pub const VIRTIO_BLK_MODERN: u16 = 0x1041;
+    pub const VIRTIO_BLK_MODERN: u16 = 0x1042;
     pub const VIRTIO_GPU: u16 = 0x1050;
     pub const VIRTIO_INPUT: u16 = 0x1052;
 }

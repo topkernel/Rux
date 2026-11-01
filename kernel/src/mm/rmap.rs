@@ -394,64 +394,29 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 
                 if let Some((ppn, _pte_bits)) = walk_result {
                     if ppn as usize == target_pfn {
-                        let vpn2 = ((target_vaddr >> 30) & 0x1FF) as usize;
-                        let vpn1 = ((target_vaddr >> 21) & 0x1FF) as usize;
-                        let vpn0 = ((target_vaddr >> 12) & 0x1FF) as usize;
+                        // FD-1: the leaf replace (lock, ppn re-validation,
+                        // raw write, unlock) is the arch's leaf_pte_replace
+                        // — the manual Sv39 descent that used to live here
+                        // indexed the root with the wrong bits on the
+                        // 4-level arches and silently no-oped, so swap-out
+                        // unmap and migration never unmapped anything on
+                        // x86_64/aarch64. TLB flush stays with the caller
+                        // (R10-6: hart-local; the batch shootdown below).
+                        if unsafe {
+                            crate::arch::mm::mm_ops::leaf_pte_replace(
+                                mm,
+                                root_ppn,
+                                target_vaddr as u64,
+                                target_pfn as u64,
+                                swap_entry,
+                            )
+                        } {
+                            crate::mm::flush_tlb_page_local(target_vaddr as u64);
 
-                        let root_table = crate::arch::mm::mmu_init::get_page_table_virt(
-                            root_ppn << crate::arch::mm::PAGE_SHIFT,
-                        );
-                        let pte2 = (*root_table).get(vpn2);
-                        if !pte2.is_valid() { continue; }
-
-                        let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
-                            pte2.ppn() << crate::arch::mm::PAGE_SHIFT,
-                        );
-                        let pte1 = (*table1).get(vpn1);
-                        if !pte1.is_valid() { continue; }
-
-                        let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
-                            pte1.ppn() << crate::arch::mm::PAGE_SHIFT,
-                        );
-
-                        // R22-3 (§17.4 close): leaf-PTE mutation under the
-                        // PTE lock like every other writer (fork-COW/munmap/
-                        // mprotect/fault-map) — was racing them.
-                        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
-
-                        // Re-validate the leaf under the lock (R7-C3 pattern):
-                        // the walk above ran OUTSIDE it, and a concurrent leaf
-                        // writer (COW break / swap-in / munmap) may have
-                        // swapped in a different physical page in between.
-                        // Overwriting blind would zero the NEW page's PTE while
-                        // decrementing THIS page's mapcount. Intermediate
-                        // levels are stable here: page tables are only unlinked
-                        // at mm teardown, excluded by the mm pin above.
-                        let pte0 = (*table0).get(vpn0);
-                        if !pte0.is_valid() || pte0.ppn() as usize != target_pfn {
-                            drop(_pte_g);
-                            continue;
+                            // Decrement mapcount
+                            page.dec_mapcount();
+                            unmapped_count.set(unmapped_count.get() + 1);
                         }
-
-                        // Write new PTE value (0 for unmap, swap_entry for swap-out,
-                        // migration marker during compaction)
-                        (*table0).set(
-                            vpn0,
-                            crate::arch::mm::pagetable::PageTableEntry::from_bits(swap_entry),
-                        );
-
-                        drop(_pte_g);
-                        // R10-6: sfence.vma is HART-LOCAL — a "global" flush
-                        // buys nothing over the per-address one (round-9's
-                        // R9-18 was ineffective by ISA semantics). Keep the
-                        // cheap form; cross-CPU shootdown is issued in batch
-                        // by the unmap/exit callers via IPI (see
-                        // arch::ipi::flush_tlb_others, review 4.10).
-crate::mm::flush_tlb_page_local(target_vaddr as u64);
-
-                        // Decrement mapcount
-                        page.dec_mapcount();
-                        unmapped_count.set(unmapped_count.get() + 1);
                     }
                 }
             }

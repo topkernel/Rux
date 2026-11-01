@@ -1,0 +1,15 @@
+# Ratchet baseline for scripts/hotpath_print_check.py — the number
+# of UN-annotated pr_err/pr_warn/pr_info/pr_notice/println/print
+# sites allowed per hot-path file. Regenerate with --update after
+# removing prints (never after adding one without a review).
+kernel/src/sync/futex.rs 68
+kernel/src/ipc/binder.rs 117
+kernel/src/syscall/process.rs 49
+kernel/src/syscall/file.rs 27
+kernel/src/syscall/memory.rs 21
+kernel/src/mm/page_alloc.rs 24
+kernel/src/mm/pglist.rs 19
+kernel/src/signal.rs 17
+kernel/src/sched/sched.rs 11
+kernel/src/arch/riscv64/trap.rs 23
+kernel/src/arch/x86_64/trap.rs 29

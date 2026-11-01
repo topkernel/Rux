@@ -8,12 +8,12 @@
 //! Provides reusable `dump_stack()`, `dump_regs()`, and `dump_csrs()` APIs
 //! for use by WARN, BUG, softlockup, hung_task, and other DFX modules.
 //!
-//! All output goes directly to UART via `putchar_no_lock` (bypasses printk
-//! ring buffer), making these safe to call from crash/panic contexts.
+//! All output goes directly to UART via the lockless batched writer
+//! (bypasses printk ring buffer), making these safe to call from
+//! crash/panic contexts.
 
 use core::fmt;
 use core::fmt::Write;
-use crate::console::putchar_no_lock;
 
 // ============================================================================
 // ConsoleWriter — lockless UART output for crash/panic contexts
@@ -21,8 +21,9 @@ use crate::console::putchar_no_lock;
 
 /// Lockless console writer that bypasses printk and CONSOLE_LOGLEVEL.
 ///
-/// Uses `putchar_no_lock` directly. Safe to use in panic/OOPS contexts
-/// where normal printk infrastructure may be unavailable or recursive.
+/// Writes staged bytes through the lockless batched TX path. Safe to
+/// use in panic/OOPS contexts where normal printk infrastructure may be
+/// unavailable or recursive.
 pub struct ConsoleWriter {
     /// Whether this writer holds the printk console emit lock (bounded
     /// best-effort acquire in `new()`): keeps diagnostic reports from
@@ -31,18 +32,37 @@ pub struct ConsoleWriter {
     /// e.g. a wedged holder, or this CPU's own interrupted task holds
     /// the lock — output proceeds locklessly exactly as before.
     emit_locked: bool,
+    /// Staged-byte buffer (perf-console): write_str fragments coalesce
+    /// here and flush through ONE batched TX pass per 128 bytes instead
+    /// of one register-IO pair per byte — a softlockup stack dump is
+    /// thousands of bytes through this writer.
+    buf: [u8; 128],
+    len: usize,
 }
 
 impl ConsoleWriter {
     pub fn new() -> Self {
         ConsoleWriter {
             emit_locked: crate::printk::try_console_emit_lock(),
+            buf: [0u8; 128],
+            len: 0,
+        }
+    }
+
+    /// Flush staged bytes through the lockless batched TX path
+    /// (putchar_no_lock's batched sibling — safe in crash contexts).
+    fn flush(&mut self) {
+        if self.len > 0 {
+            let uart = crate::console::Uart::new();
+            uart.puts_batch(&self.buf[..self.len]);
+            self.len = 0;
         }
     }
 }
 
 impl Drop for ConsoleWriter {
     fn drop(&mut self) {
+        self.flush();
         if self.emit_locked {
             crate::printk::console_emit_unlock();
         }
@@ -53,9 +73,21 @@ impl fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
             if b == b'\n' {
-                unsafe { putchar_no_lock(b'\r'); }
+                // Newline expansion (the OPOST discipline of the old
+                // per-byte path) staged as the translated pair.
+                if self.len + 2 > self.buf.len() {
+                    self.flush();
+                }
+                self.buf[self.len] = b'\r';
+                self.buf[self.len + 1] = b'\n';
+                self.len += 2;
+            } else {
+                if self.len == self.buf.len() {
+                    self.flush();
+                }
+                self.buf[self.len] = b;
+                self.len += 1;
             }
-            unsafe { putchar_no_lock(b); }
         }
         Ok(())
     }

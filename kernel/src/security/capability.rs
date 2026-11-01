@@ -7,7 +7,7 @@
 //! Provides the `Cap` type (equivalent to Linux's `kernel_cap_t`) and all 41
 //! `CAP_*` constants matching the Linux UAPI numbering exactly.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

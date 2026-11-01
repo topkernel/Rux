@@ -84,6 +84,13 @@ pub enum PageFlag {
     /// PTEs hold migration-entry markers and the fault path must wait for
     /// the migration to finish instead of installing a zero page.
     Migrating = 1 << 21,
+    /// Page sits in a per-CPU pageset (pcp) cache: refcount 0, NOT on any
+    /// buddy freelist. Together with OnFreelist this keeps every order-0
+    /// frame in one of three mutually exclusive states — buddy freelist
+    /// (OnFreelist), pcp cache (OnPcp), or in use (neither). The pcp
+    /// free path uses this bit as its double-free tripwire, exactly the
+    /// role OnFreelist plays for the buddy (R15-3).
+    OnPcp = 1 << 22,
 }
 
 /// Flag-bit window [18:20] storing the LRU list index (0..NR_LRU_LISTS)

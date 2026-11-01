@@ -152,5 +152,5 @@ make clean && make build            # Clean and rebuild
 - **Architecture**: [design.md](../architecture/design.md) - Design principles
 - **Code Structure**: [structure.md](../architecture/structure.md) - Directory structure
 - **Roadmap**: [roadmap.md](roadmap.md) - Development roadmap
-- **Testing**: [testing.md](../test/testing.md) - Testing guide
+- **Testing**: [Test Reports](../test/README.md) - unit / integration / LTP / lmbench / geekbench / stress / formal
 - **AI Assistant Guide**: [CLAUDE.md](../../CLAUDE.md) - Project overview for AI tools

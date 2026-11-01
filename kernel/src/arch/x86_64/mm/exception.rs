@@ -117,6 +117,25 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
         return MmFaultResult::Handled;
     }
 
+    // SMAP audit beacon (perf review 2026-10-31): a no_context fault with
+    // CR4.SMAP on, AC clear and a user-range fault address is a RAW
+    // user-pointer dereference. Name the instruction BEFORE the oops
+    // machinery mangles the context — the audit loop is: run the tests,
+    // read this line, convert the site to uaccess, repeat.
+    {
+        static SHOWN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SHOWN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::println!(
+                "PF-NOCTX rip={:#x} addr={:#x} ac={} cr4smap={}",
+                regs.rip,
+                _fault_addr.bits(),
+                (regs.rflags >> 18) & 1,
+                crate::arch::cpu::smap_enabled() as u8
+            );
+        }
+    }
+
     // Cannot handle
     MmFaultResult::KernelPanic
 }
@@ -196,18 +215,6 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
 
     // Kernel mode access
     if regs.kernel_mode() {
-        // Check for kernel stack overflow
-        // If fault address is near current task's kernel stack, it's likely
-        // a stack overflow
-        let fault_addr_usize = fault_addr.bits() as usize;
-
-        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
-            panic!(
-                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x})",
-                current.pid(), fault_addr_usize, regs.rsp
-            );
-        }
-
         // Kernel-mode access to a USER address whose VMA covers it: demand-
         // fill the page and RETRY the instruction (Linux semantics — the
         // kernel's copy_from_user on a not-yet-faulted user page must fault
@@ -223,9 +230,22 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         // Route kernel EXEC faults straight to the exception table /
         // KernelPanic so the bug is loud and the CPU halts instead of
         // looping.
+        // SMAP violation check (perf review 2026-10-31): with CR4.SMAP
+        // on, a kernel-mode fault on a user-range address whose EFLAGS.AC
+        // is CLEAR is a RAW user-pointer dereference (a STAC window would
+        // have AC set, and hardware would not have faulted on present
+        // U=0 pages at all). Demand-filling those used to loop forever —
+        // fill "succeeds", the instruction re-executes, SMAP faults
+        // again — until the watchdog fired the binder stall report into
+        // a panic. Route them to the exception table instead: uaccess
+        // sites get their EFAULT fixup, raw dereferences get a precise
+        // oops. STAC-window fills (AC=1) keep the normal path.
+        let smap_violation = crate::arch::cpu::smap_enabled()
+            && (regs.rflags & (1u64 << 18)) == 0; // EFLAGS.AC
         let kernel_data_fill = fault_addr.bits()
             < crate::arch::mm::user_addr::USER_END as u64
-            && (access_type & FaultFlags::EXEC) == 0;
+            && (access_type & FaultFlags::EXEC) == 0
+            && !smap_violation;
         if kernel_data_fill {
             let covered = addr_space
                 .vma_read()
@@ -277,10 +297,34 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             }
         }
 
-        // Check exception table (copy_to_user/copy_from_user etc.)
+        // R78 twin parity (riscv64): the exception-table fixup runs BEFORE
+        // the stack-overflow panic. A faulting rip that has a fixup entry
+        // is BY CONSTRUCTION inside a copy_to_user/copy_from_user window —
+        // the right recovery is the fixup (short copy -> EFAULT), letting
+        // the syscall unwind normally (dropping any locks its frames
+        // hold). With panic-first, a uaccess fault at a wild address that
+        // happens to land in this task's kernel-stack range (or a
+        // cross-stack rsp) killed the whole machine and carried every
+        // held lock into the grave — the exact family the riscv64 twin
+        // convicted on three full-session terminal captures. Genuine
+        // kernel corruption (no fixup entry) still reaches the loud
+        // stack-overflow panic below unchanged. Wild addresses are not
+        // VMA-covered, so the demand-fill above already declined them.
         if let Some(fixup) = fixup_exception(regs.rip) {
             regs.rip = fixup;
             return MmFaultResult::Handled;
+        }
+
+        // Check for kernel stack overflow
+        // If fault address is near current task's kernel stack, it's likely
+        // a stack overflow
+        let fault_addr_usize = fault_addr.bits() as usize;
+
+        if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
+            panic!(
+                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x})",
+                current.pid(), fault_addr_usize, regs.rsp
+            );
         }
 
         // Kernel accessed invalid address (possibly a bug)

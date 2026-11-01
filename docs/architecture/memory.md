@@ -31,6 +31,28 @@ This document details the design and implementation of the Rux kernel memory man
 
 ## Overview
 
+### Updates since the 2026-10-12 sweep
+
+The narrative below dates from 2026-10-12; these mechanisms landed
+after and are the current shape (all mirrored in the code with
+R-numbered comments):
+
+- **Per-CPU pagesets** (`mm/pcp.rs`, INV-PCP-1..3): order-0
+  alloc/free served from per-CPU caches — zero zone-lock acquisitions
+  on the fast path; zone free-page counters include cached frames.
+- **Per-mm PTE locks on all architectures** (`mm_struct.rs`): the
+  global-epoch-shared + per-mm-spin split mode, previously x86_64-only,
+  is now uniform; riscv64/aarch64 leaf-PTE writers no longer serialize
+  system-wide.
+- **Bootstrap identity map dropped** (x86_64): PML4[0] is unlinked at
+  the boot-stack continuation; low-MMIO device pages (RTC,
+  virtio-mmio) are ioremapped into the kernel-half alias arena.
+- **CR4.SMAP on x86_64**: usercopy bracketed with EFLAGS.AC sequences
+  (pushfq form — STAC/CLAC fault under QEMU TCG); raw user-pointer
+  dereferences fault into the exception table.
+- **mprotect coverage walk** is allocation-free (BTreeMap range walk)
+  and seeds from the containing VMA.
+
 ### Design Goals
 
 1. **Linux Compatible**: ABI compatible with Linux kernel, uses Linux Sv39 virtual memory layout

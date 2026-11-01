@@ -650,7 +650,8 @@ crate::pr_err!(
                     }
                 }
                 // Replay this pid's final syscalls from the global ring.
-                {
+                // Recorded only under dfx=sysring (perf lane 2026-11).
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
                     use core::sync::atomic::Ordering::Relaxed;
                     use crate::syscall::dispatch::{SYSCALL_RING, SYSCALL_CURSOR};
                     let pid = crate::sched::get_current_pid();
@@ -669,6 +670,8 @@ crate::pr_err!(
                             );
                         }
                     }
+                } else {
+                    crate::pr_err!("  SYSCALL ring off (boot with dfx=sysring)");
                 }
                 // Replay this pid's full mmap history from the ring.
                 {

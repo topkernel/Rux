@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the test-coverage ledger (docs/development/test-coverage.md).
+"""Generate the test-coverage ledger (docs/test/test-coverage.md).
 
 The ledger answers one question per subsystem: what actually exercises
 this code, and does it run unattended? It is assembled from the tree,

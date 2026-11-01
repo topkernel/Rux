@@ -1,0 +1,4 @@
+make test (riscv64, guest unit-test suite) on rv-proc-sched @61ea0152
+Total: 1188 tests, Passed: 1188, Failed: 0 — ALL TESTS PASSED
+Log: /tmp/rv-proc-sched-maketest.log (22k lines)
+Suite includes tests/wait4.rs, tests/fork.rs, tests/scheduler.rs, tests/syscall_sched.rs.

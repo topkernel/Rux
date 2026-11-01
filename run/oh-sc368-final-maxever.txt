@@ -1,0 +1,13 @@
+   12146 k-page=0xffffffff80521000
+   11889 k-page=0xffffffff8034f000
+    7857 k-page=0xffffffff80520000
+    7360 k-page=0xffffffff8051e000
+    4763 k-page=0xffffffff8050d000
+    3909 k-page=0xffffffff80265000
+    2722 k-page=0xffffffff80292000
+    2473 k-page=0xffffffff80507000
+    1987 k-page=0xffffffff802b3000
+    1832 k-page=0xffffffff8034c000
+    1368 k-page=0xffffffff803c9000
+    1335 k-page=0xffffffff80513000
+last-counter: RIPSAMPLE: launcher utime=15049 stime=83524

@@ -150,12 +150,15 @@ extern "C" {
 
 /// Copy data from kernel to user space. Returns number of uncopied bytes.
 ///
-/// NOTE: the riscv64 twin additionally retries once through
-/// fault_in_write (COW/demand resolution) when the first copy faults;
-/// that helper needs the aarch64 handle_mm_fault/handle_cow_fault stage-2
-/// bodies (mm lane) and lands with them. Until then a resolvable COW
-/// fault reports a short count — no user tasks exist on this board yet,
-/// so the case cannot arise.
+/// NOTE: unlike the riscv64 twin, no fault_in_write retry runs here. The
+/// resolvable-fault coverage the twin gets from that retry is provided
+/// by the R82 demand-fill arm in mm/exception.rs::do_page_fault: a
+/// kernel-mode uaccess fault on a VMA-covered user address (not-present
+/// or COW) is resolved by the fault handler itself before the
+/// exception-table fixup ever sees it, so the instruction retries and
+/// the copy proceeds. Only unresolvable faults (no VMA, no mapping
+/// possible) reach the fixup and report a short count — the correct
+/// answer for those.
 ///
 /// # Safety
 /// - `from` must point to valid kernel memory
@@ -343,12 +346,12 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
 ///
 /// Runs at dfx init (before init exec — userspace exec is blocked on the
 /// mm walker anyway) on a kernel context where TTBR0 still carries
-/// boot.S's early identity map ([0, 2GB) device + RAM blocks) or an
-/// empty user table, so the probe address must sit INSIDE the user
-/// window but OUTSIDE every mapping: 4 GB — below TASK_SIZE (256GB),
-/// above the early map, an invalid L1 entry either way. access_ok must
-/// ACCEPT it (the exception table, not the range check, contains the
-/// fault).
+/// boot.S's early identity map ([0, 2GB) device + RAM blocks — it is
+/// torn down only after SMP start, well after this probe), so the probe
+/// address must sit INSIDE the user window but OUTSIDE every mapping:
+/// 4 GB — below TASK_SIZE (256GB), above the early map, an invalid L1
+/// entry either way. access_ok must ACCEPT it (the exception table, not
+/// the range check, contains the fault).
 #[cfg(feature = "dfx-aa64-uaccess-selftest")]
 pub fn selftest() {
     // printk's console emit does not reach PL011 on this board yet (the

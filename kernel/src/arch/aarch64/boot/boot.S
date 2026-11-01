@@ -103,13 +103,12 @@ _start:
     add     x0, x0, :lo12:aarch64_vector_table
     msr     vbar_el1, x0
     isb
-    // ------------------------------------------------------------------
-    // 2. Save the DTB pointer (physical addressing: MMU still off)
-    // ------------------------------------------------------------------
-    adrp    x1, dtb_pointer             // PC-relative page → physical
-    add     x1, x1, :lo12:dtb_pointer
-    str     x0, [x1]
-
+    // (The DTB pointer was published above with physical addressing and
+    // is re-published at its linked VA once the MMU is on; nothing may
+    // read it in between. An older draft stored x0 here — the vector
+    // table base by then — clobbering the DTB pointer until the
+    // post-MMU re-publish repaired it; two review lanes removed the
+    // store independently.)
     // Per-CPU identity: cpu index 0 (TPIDR_EL1 protocol, smp::cpu_id)
     msr     tpidr_el1, xzr
 
@@ -326,8 +325,12 @@ _start:
 // TPIDR_EL1 = index (smp::cpu_id protocol), per-cpu boot stack (physical,
 // identity-mapped), restore the boot core's saved TTBR1/TCR/MAIR, MMU on
 // against the static identity map (TTBR0 = idmap_l0 — the early identity
-// tables are image .bss and stay live for exactly this purpose), convert
-// the stack to its high VA, branch to secondary_cpu_entry (Rust).
+// tables are image .bss and serve exactly this bring-up window), convert
+// the stack to its high VA, branch to secondary_cpu_entry (Rust). The
+// identity window is torn down on the boot core once every core is up
+// (mmu_init::teardown_early_identity_map) — secondary_cpu_entry installs
+// the high-VA VBAR before reporting itself started, so nothing on a
+// started core needs a low VA anymore.
 // ============================================================================
 .global secondary_start
 .type secondary_start, %function

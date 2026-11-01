@@ -267,6 +267,19 @@ cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owne
 |---|---|
 | `watchdog` | After a spinlock-deadlock warning, automatically print a full task-state snapshot (written directly via SBI, independent of printk) |
 | `taskdump` | Reserved: on-demand task snapshot trigger hook |
+| `memwatch` | Heap/page accounting per call-site (leak hunts) |
+| `mmforensics` | mm forensic rings: PTE-install ledger, double-teardown detector, PT stamp rings — fork/exit hot-path cost, hunts only |
+| `scribble` / `scribblepark` | Byte-level scribble hunter over task control words; park on first hit for gdb watchpoints |
+| `schedtrace` / `steptrace` / `writetrace` / `syscalltrace` | Per-event traces (scheduler steps, instruction steps, write paths, syscall summaries) |
+| `sysforensic` | Per-syscall forensic instruments (SYSCALL_RING double-record, per-task fail rings, comm-scan hooks) — off in production; p1_null paid 12 atomics/syscall before gating |
+| `sysefault` | Names every syscall returning -EFAULT (rate-limited) |
+| `sysring` | Alias for the SYSCALL_RING replay portion of `sysforensic` |
+| `ohhunt` | OH graphics-hunt taps (drm ioctl/mmap/prime-import traces) |
+| `wwcensus` | Wake-wait census heartbeats (perf-gate census boots) |
+
+The full authoritative table is the switch registry in
+`kernel/src/dfx/switches.rs` (`dfx_switch_table!`); `sysrq`/debugfs
+control files mirror it under /sys/kernel/debug/dfx/.
 
 ```bash
 -append "root=/dev/vda rw console=ttyS0 dfx=watchdog"

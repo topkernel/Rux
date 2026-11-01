@@ -16,7 +16,7 @@
 //! Dump format (stable, grep-able; two compact lines, emitted at :30 past
 //! each minute to avoid the console-emit race with syscost's dump — pa28):
 //! ```text
-//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
+//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pb2=<batch drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
 //! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
 //! ```
 //!
@@ -31,7 +31,7 @@
 //! 4 — dump must stay at pr_warn or louder). Both fields are read once
 //! per dump; no hot-path cost.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
@@ -77,6 +77,10 @@ pub static PUB_HIWAT: AtomicU64 = AtomicU64::new(0);
 /// Leg-55: mkdirs counted at the scoped-flush point (the lazy-variant
 /// follow-up reads this against the phase mix).
 pub static PUB_LAZY: AtomicU64 = AtomicU64::new(0);
+/// Op-boundary batched drains (publication_batch_drain past PUB_BATCH) —
+/// the amortized creator-paid drain that keeps the queue short now that
+/// per-mkdir scoped drains are gone.
+pub static PUB_BATCH_DRAINS: AtomicU64 = AtomicU64::new(0);
 /// Maximum pending-publication queue length observed.
 pub static PUB_QMAX: AtomicU64 = AtomicU64::new(0);
 
@@ -112,6 +116,26 @@ pub static J_REVOKE: AtomicU64 = AtomicU64::new(0);
 pub static BIGLOCK: AtomicU64 = AtomicU64::new(0);
 /// Acquisitions that fell past the adaptive spin (queued/spun for the lock).
 pub static BIGLOCK_CONTEND: AtomicU64 = AtomicU64::new(0);
+
+// === op-cost anatomy (perf-fs lane 2026-10-31) ============================
+/// Whole-bracket ext4_mkdir duration (ENTRY_MUTEX guard to journal stop),
+/// microseconds: count / cumulative / max. The residual p6_mkdrmdir floor
+/// (~2.5ms/pair under load with zero steady-state device I/O) needs an
+/// in-op cost attribution; this bracket timer plus the registration-scan
+/// counter below bracket the two suspects (CPU in the op vs jbd2 dedup
+/// scans that grow with the running transaction's unique-block set).
+pub static MKDIR_US_N: AtomicU64 = AtomicU64::new(0);
+pub static MKDIR_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static MKDIR_US_MAX: AtomicU64 = AtomicU64::new(0);
+/// Same bracket timer for ext4_rmdir / ext4_unlink (us).
+pub static RMDIR_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static RMDIR_US_MAX: AtomicU64 = AtomicU64::new(0);
+pub static UNLINK_US_SUM: AtomicU64 = AtomicU64::new(0);
+pub static UNLINK_US_MAX: AtomicU64 = AtomicU64::new(0);
+/// jbd2_journal_get_write_access dedup-scan iterations (the linear
+/// already-tracked walk over t_dirty_buffers): grows O(set) per metadata
+/// registration between commits.
+pub static J_DEDUP_ITERS: AtomicU64 = AtomicU64::new(0);
 
 // === VFS walk ============================================================
 /// path_lookup calls.
@@ -217,6 +241,120 @@ pub fn note_pub_cstr() {
 #[inline]
 pub fn note_pub_hiwat() {
     bump!(PUB_HIWAT);
+}
+#[inline]
+pub fn note_pub_batch() {
+    bump!(PUB_BATCH_DRAINS);
+}
+/// Record one whole-bracket ext4_mkdir duration (microseconds).
+#[inline]
+pub fn note_mkdir_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        MKDIR_US_N.fetch_add(1, Ordering::Relaxed);
+        MKDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = MKDIR_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match MKDIR_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
+/// jbd2 registration dedup-scan iterations (see J_DEDUP_ITERS).
+#[inline]
+pub fn note_j_dedup(iters: usize) {
+    bump!(J_DEDUP_ITERS, iters);
+}
+/// Freed-block dirty-buffer drops (bio::drop_freed_block) — the
+/// discard-on-free path that keeps dead data out of publication drains.
+pub static DROP_BLOCK: AtomicU64 = AtomicU64::new(0);
+#[inline]
+pub fn note_drop_block() {
+    bump!(DROP_BLOCK);
+}
+/// Record one whole-bracket ext4_rmdir duration (microseconds). Count
+/// rides MKDIR-class counters' shape: RMDIR count = FREE_RUN-free path is
+/// not 1:1, so a dedicated count is not kept — use MKDIR_US_N for mkdir
+/// only; rmdir/unlink report sum/max.
+#[inline]
+pub fn note_rmdir_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        RMDIR_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = RMDIR_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match RMDIR_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
+/// Record one whole-bracket ext4_unlink duration (microseconds).
+#[inline]
+pub fn note_unlink_us(delta_us: u64) {
+    if crate::dfx::fsw::on() {
+        UNLINK_US_SUM.fetch_add(delta_us, Ordering::Relaxed);
+        let mut cur = UNLINK_US_MAX.load(Ordering::Relaxed);
+        while delta_us > cur {
+            match UNLINK_US_MAX.compare_exchange_weak(
+                cur,
+                delta_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
+/// ext4_rmdir_inner per-phase nanosecond sums (monotonic clock):
+/// find+is_dir_empty / delete_entry / inode writes / free_inode /
+/// free_inode_blocks. Dumped as FSW3.
+pub static RMD_PHASE1_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE2_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE3_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE4_NS: AtomicU64 = AtomicU64::new(0);
+pub static RMD_PHASE5_NS: AtomicU64 = AtomicU64::new(0);
+/// ext4_rmdir_inner phase-N max (microseconds), same order.
+pub static RMD_PHASE_MAX_US: [AtomicU64; 5] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0),
+];
+#[inline]
+pub fn note_rmdir_phases(p1: u64, p2: u64, p3: u64, p4: u64, p5: u64) {
+    if !crate::dfx::fsw::on() {
+        return;
+    }
+    RMD_PHASE1_NS.fetch_add(p1, Ordering::Relaxed);
+    RMD_PHASE2_NS.fetch_add(p2, Ordering::Relaxed);
+    RMD_PHASE3_NS.fetch_add(p3, Ordering::Relaxed);
+    RMD_PHASE4_NS.fetch_add(p4, Ordering::Relaxed);
+    RMD_PHASE5_NS.fetch_add(p5, Ordering::Relaxed);
+    let ps = [p1, p2, p3, p4, p5];
+    for (i, &v) in ps.iter().enumerate() {
+        let us = v / 1000;
+        let mut cur = RMD_PHASE_MAX_US[i].load(Ordering::Relaxed);
+        while us > cur {
+            match RMD_PHASE_MAX_US[i].compare_exchange_weak(
+                cur, us, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(x) => cur = x,
+            }
+        }
+    }
 }
 #[inline]
 pub fn note_pub_lazy() {
@@ -365,19 +503,19 @@ pub fn dump() {
         // pair had to guess the split: read 31765|408 vs 70770|0).
         // 0cd29a75 merge: main's scoped-publication counters (ps/pc/ph/pm)
         // carried in alongside; slot count unchanged.
-        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pm={} pl={} lvl={} es={}",
+        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pb2={} pm={} pl={} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),
         v(&EVICT), v(&EVICT_DIRTY), v(&SYNC_ALL),
         v(&PUB_FLUSH), v(&PUB_RECORDS),
         v(&PUB_SCOPED), v(&PUB_SCOPED_RECORDS),
-        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_QMAX), v(&PUB_LAZY),
+        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_BATCH_DRAINS), v(&PUB_QMAX), v(&PUB_LAZY),
         crate::printk::get_console_loglevel(),
         crate::printk::console_emit_skipped(),
     );
     crate::pr_warn!(
-        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{}",
+        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{} mk={}.{}.{} rm={}.{} ul={}.{} jd={}",
         secs,
         v(&READ_INODE), v(&WRITE_INODE),
         v(&DIR_LOOKUP), v(&DIR_BLOCKS), v(&LIST_DIR),
@@ -386,5 +524,22 @@ pub fn dump() {
         v(&J_COMMIT_FAST), v(&J_REVOKE),
         v(&BIGLOCK), v(&BIGLOCK_CONTEND),
         v(&WALK), v(&WALK_HIT), v(&WALK_MISS),
+        v(&MKDIR_US_N), v(&MKDIR_US_SUM), v(&MKDIR_US_MAX),
+        v(&RMDIR_US_SUM), v(&RMDIR_US_MAX),
+        v(&UNLINK_US_SUM), v(&UNLINK_US_MAX),
+        v(&J_DEDUP_ITERS),
+    );
+    crate::pr_warn!(
+        // rmdir phase sums in MICROSECONDS (find+empty / delete / inodes
+        // / free_inode / free_blocks) and per-phase max in us.
+        "FSW3 t={}s rmd={} {} {} {} {} rmdmax={} {} {} {} {} db={}",
+        secs,
+        v(&RMD_PHASE1_NS) / 1000, v(&RMD_PHASE2_NS) / 1000,
+        v(&RMD_PHASE3_NS) / 1000, v(&RMD_PHASE4_NS) / 1000,
+        v(&RMD_PHASE5_NS) / 1000,
+        v(&RMD_PHASE_MAX_US[0]), v(&RMD_PHASE_MAX_US[1]),
+        v(&RMD_PHASE_MAX_US[2]), v(&RMD_PHASE_MAX_US[3]),
+        v(&RMD_PHASE_MAX_US[4]),
+        v(&DROP_BLOCK),
     );
 }

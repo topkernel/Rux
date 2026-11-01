@@ -329,6 +329,16 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
         None
     };
 
+    // Reference mqueue_get_inode: mq_maxmsg and mq_msgsize must both be
+    // positive — anything else is EINVAL. The old code silently replaced
+    // non-positive values with the defaults (10 / 8192), creating a queue
+    // the caller never asked for.
+    if let Some(a) = attr.as_ref() {
+        if a.mq_maxmsg <= 0 || a.mq_msgsize <= 0 {
+            return -(errno::EINVAL as i64);
+        }
+    }
+
     let creating = (oflag & O_CREAT_MQ as i32) != 0;
     let excl = (oflag & O_EXCL_MQ as i32) != 0;
 
@@ -342,11 +352,17 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
             if excl {
                 return -(errno::EEXIST as i64);
             }
-            // Check read/write permission
-            let can_read = ((oflag & 3) != 1) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4);
-            let can_write = ((oflag & 3) != 0) && ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2);
-
-            if !can_read && !can_write {
+            // Check read/write permission: every access mode the open
+            // requested must be granted (reference opens the mqueue file
+            // with ACC_MODE). The old `!(can_read && can_write)` test let
+            // an O_RDWR open succeed when only one of the two modes was
+            // granted.
+            let need_read = (oflag & 3) != 1; // O_RDONLY / O_RDWR
+            let need_write = (oflag & 3) != 0; // O_WRONLY / O_RDWR
+            if need_read && !ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4) {
+                return -(errno::EACCES as i64);
+            }
+            if need_write && !ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o2) {
                 return -(errno::EACCES as i64);
             }
 
@@ -1080,6 +1096,12 @@ pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
         }
         // SAFETY: fully initialized by zeroed() above.
         let newattr = unsafe { buf.assume_init() };
+        // Only O_NONBLOCK is settable (reference mq_getsetattr: flags with
+        // any bit outside O_NONBLOCK are EINVAL). The old code stored the
+        // raw value verbatim.
+        if newattr.mq_flags & !(O_NONBLOCK_MQ as i64) != 0 {
+            return -(errno::EINVAL as i64);
+        }
         let mut attr = mq.attr.lock();
         attr.mq_flags = newattr.mq_flags;
     }

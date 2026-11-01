@@ -78,6 +78,29 @@ The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
 
 ---
 
+### Platform priority (user directive 2026-10-31): x86_64-FIRST
+
+The host is x86 with KVM — the fastest virtualization for x86 guests
+(near-native; our own A/B: reference kernel p1_null 0.040µs KVM vs
+0.240µs TCG, 6x; IO/timer paths larger). Consequences:
+- The PRIMARY dev/test/perf loop is x86_64 + KVM (`-accel kvm`): fast
+  iteration, perf numbers closest to real hardware. Perf work is
+  measured on x86/KVM first.
+- ALL functional, performance, LTP and compatibility testing runs on
+  x86_64 + KVM (user directive 2026-10-31): the OH campaign already
+  boots KVM (oh-boot.sh ACCEL=kvm default, lb-boot.py -accel kvm); LTP
+  scans, pbench batteries, suite runs and compatibility checks all
+  target x86_64+KVM first. riscv64/aarch64 remain triple-arch BUILD +
+  suite regression gates (TCG boots — KVM cannot emulate them on an
+  x86 host) but carry no performance or compatibility testing duty
+  until x86 is stable and optimized.
+- ~90% of the kernel is arch-generic (fs/mm/ipc/sched/syscall):
+  optimizations landed via x86/KVM measurement carry to every arch;
+  only arch-specific hot paths (entry/exit, TLB, context switch) are
+  x86-priority for now.
+- Fair-comparison rule stays: when comparing two kernels, same accel
+  both sides (the perf-syscall calibration lesson).
+
 ## Current Goals (2026-10)
 
 Two active goals, in priority order:
@@ -158,6 +181,8 @@ instances; `pkill` stays forbidden), and (4) relaunch the queue at full
 concurrency without waiting for instructions. The user only ever says
 "继续".
 
+**Image store (user rule 2026-10-30): ALL disk images live in /home/william/rux-images/ (outside every repo/worktree, invisible to git) — oh/ (the 7 OH images), aarch64/ (a64-rootfs.img + the toybox cross-build), ubuntu/. Worktrees reference them by SYMLINK only; boots use -snapshot + file.locking=off. Never place real image bytes inside a worktree (a disk cleanup once deleted a whole campaign's assets that way). Rebuildable scratch (probe disks) stays in the lane worktree's run/.
+
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
 
 - Boot shared images with `-snapshot` and `file.locking=off` only.
@@ -193,7 +218,7 @@ accept02, getrusage04, kill02, genfmod, rename/statfs families).
 
 - **[Getting Started](docs/guides/getting-started.md)** - up and running
 - **[Roadmap](docs/progress/roadmap.md)** - milestone status and history
-- **[Development Workflow](docs/guides/development.md)** - code standards
+- **Code standards**: docs/archive/2026-04-development-workflow.md (historical); the binding workflow is this file + [Test Reports](docs/test/README.md)
 - **[Lock Ordering](docs/architecture/lock-ordering.md)** - in-kernel lock invariants (INV-LOCK-*)
 - **[RISC-V Architecture](docs/architecture/riscv64.md)** / **[Boot](docs/architecture/boot.md)** / **[Memory](docs/architecture/memory.md)**
 - **[Changelog](docs/progress/changelog.md)** / **[Quick Reference](docs/progress/quickref.md)**

@@ -517,8 +517,9 @@ user_iret_label:
 .Lrestore_kernel_tail:
     /* no signal delivery on kernel-origin returns */
     /* R67 (scribbled-frame guard, kernel tail): a kernel-origin frame's
-     * rip is ALWAYS inside the kernel image [KIMG_BASE, KIMG_END) — the
-     * kernel has no modules, no exec anywhere else. The residual x86
+     * rip is ALWAYS inside the kernel text [__stext, __etext) — the
+     * kernel has no modules, and .rodata/.data are non-executable, so
+     * no legit kernel rip exists outside text. The residual x86
      * wild-jump family (scribble3/4 hunts: rip=0x4c with cs=8 and
      * rflags=0xc13, rip=user-code with cs=8, torn rip=0x30ff03f8_80434c81,
      * rip=stack-address) is exactly this check's complement: a parked
@@ -526,12 +527,18 @@ user_iret_label:
      * loaded by this iretq — the kernel executed user page-0 bytes and
      * cascaded. Refuse the frame: report forensics and kill the task
      * (the frame's owner is doomed; the SYSTEM survives — the Linux
-     * fixup_bad_iret discipline for the bad-frame class). */
+     * fixup_bad_iret discipline for the bad-frame class).
+     * Bounds derive from the LINKER SYMBOLS (the R57 lesson: hand-set
+     * constants drift) — the old hardcoded [0xffffffff80000000,
+     * 0xffffffff81000000) 16MB window already only cleared the image by
+     * the image's own growth (bzImage kernel ~16.6MB, text ending at
+     * 0xffffffff80805000) and would misfire the moment .text outgrew
+     * the window. kernel_text_window() reads the same symbols. */
     movq PT_RIP(%rbp), %rax
-    movabsq $0xffffffff80000000, %rdx
+    leaq __stext(%rip), %rdx
     cmpq %rdx, %rax
     jb .Lbad_frame
-    movabsq $0xffffffff81000000, %rdx
+    leaq __etext(%rip), %rdx
     cmpq %rdx, %rax
     jae .Lbad_frame
     popq %r15

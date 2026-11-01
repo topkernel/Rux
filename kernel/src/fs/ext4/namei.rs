@@ -86,7 +86,25 @@ unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, bloc
 /// Write a Vec<u8> to a block
 // SAFETY: device pointer is valid; bio functions handle buffer lifecycle
 unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
-    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+    // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
+    // (perf: the plain bread here read EVERY block it was about to
+    // completely overwrite — a fresh dir block allocated by mkdir was
+    // READ from disk first, one synchronous device round trip per create,
+    // the ~3ms p6_mkdrmdir floor after the publication-drain fix. The
+    // reference kernel never reads a block it is about to fully rewrite).
+    // Partial writes still take the read path — they splice into existing
+    // content. The buffer cache's block size is fixed at 4 KiB
+    // (bio::get_block_cache), so >=4096 is full coverage.
+    // SAFETY: getblk_overwrite returns a valid BufferHead (cached or
+    // freshly created zeroed+dirty); the full-block copy below overwrites
+    // every byte, so the never-read content never becomes observable.
+    let full_block = data.len() >= 4096;
+    let bh = if full_block {
+        bio::getblk_overwrite(device, blocknr)
+    } else {
+        bio::bread(device, blocknr)
+    }
+    .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
     // Get mutable reference to buffer head
     let bh_ref = &mut *bh;
@@ -292,6 +310,17 @@ fn mark_inode_used(
         write_block_from_vec(fs.device, bitmap_block, &new_bitmap)?;
     }
 
+    // metadata_csum: refresh the inode bitmap csum in the group
+    // descriptor (same discipline as the allocator's write_inode_bitmap;
+    // this site bypasses the allocator helpers).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::allocator::group_of_bitmap(fs, bitmap_block, true) {
+            let _ = super::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
+    }
+
     Ok(())
 }
 
@@ -360,6 +389,12 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         // the ghost-empty-file publication order is untouched.
         // Persistence happens at the standing drain points (fsync /
         // sync_buffers, eviction of the dirty buffer).
+        // metadata_csum: re-seal the superblock checksum (see the
+        // allocator's update_superblock_free_blocks).
+        if fs.metadata_csum {
+            let data: &mut [u8] = &mut (*bh).b_data;
+            super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
+        }
         (*bh).set_state_bit(BufferState::BH_Dirty);
         bio::brelse(bh);
     }
@@ -390,27 +425,41 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
         read_block_to_vec(fs.device, desc_block as u64, fs.block_size as usize)?
     };
 
-    // Write descriptor (only the low 32 bytes that Ext4GroupDesc covers;
-    // the high 32 bytes in the 64-bit on-disk descriptor are preserved from
-    // the block_data we just read).
-    let gd_ptr: *const Ext4GroupDesc = &gd;
-    // SAFETY: gd is a stack-local Ext4GroupDesc; reinterpreting as bytes is safe for #[repr(C)].
-    let gd_bytes = unsafe {
-        core::slice::from_raw_parts(
-            gd_ptr as *const u8,
-            core::mem::size_of::<Ext4GroupDesc>()
-        )
-    };
+    // Publish ONLY the fields this module owns — the free-inode counts
+    // — with a read-modify-write of the on-disk descriptor (cr2 review).
+    // The previous implementation serialized the WHOLE in-memory
+    // Ext4GroupDesc over the slot. The in-memory copy is a mount-time
+    // view: set_bitmap_csum_in_gd and the allocator's free-block counter
+    // updates write the DISK copy directly (never the in-memory struct),
+    // so the full-struct overlay reverted a freshly written bitmap
+    // checksum (and stale free-block counters) moments after it landed —
+    // the image stayed kernel-self-consistent (the next mount verifies
+    // only bg_checksum) but e2fsck, which recomputes bitmap checksums,
+    // reported mismatches on every group that had seen an inode
+    // alloc/free.
     let offset = desc_offset * fs.desc_size as usize;
-    // Write at most desc_size bytes: descriptors sit at desc_size stride,
-    // so writing the full 64-byte struct over a 32-byte descriptor table
-    // clobbered the NEXT group's descriptor — and the last descriptor in
-    // the block overflowed the slice outright (review EXT4-H4).
-    let write_len = core::cmp::min(fs.desc_size as usize, gd_bytes.len());
-    if offset + write_len > block_data.len() {
+    let desc_size = fs.desc_size as usize;
+    if offset + desc_size > block_data.len() {
         return Err(errno::Errno::IOError.as_neg_i32());
     }
-    block_data[offset..offset + write_len].copy_from_slice(&gd_bytes[..write_len]);
+    block_data[offset + 14..offset + 16]
+        .copy_from_slice(&gd.bg_free_inodes_count_lo.to_le_bytes());
+    // bg_free_inodes_count_hi (64-bit descriptors only).
+    if desc_size >= 0x2E + 2 {
+        block_data[offset + 0x2E..offset + 0x30]
+            .copy_from_slice(&gd.bg_free_inodes_count_hi.to_le_bytes());
+    }
+
+    // metadata_csum: this descriptor was just rewritten — re-seal its
+    // bg_checksum over the final content (the read path verifies it at
+    // every mount; the cook lineage boots writable /data persistently).
+    if fs.metadata_csum {
+        super::csum::group_desc_csum_set(
+            fs.csum_seed,
+            group,
+            &mut block_data[offset..offset + fs.desc_size as usize],
+        );
+    }
 
     // Write back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
@@ -489,6 +538,16 @@ fn ext4_add_entry_locked(
     let block_size = fs.block_size as usize;
     let dir_size = dir.i_size as usize;
 
+    // metadata_csum dir blocks reserve the final 12 bytes of every block
+    // for the checksum tail (struct ext4_dir_entry_tail); entry placement
+    // must stay short of it (reference geometry: the dirent chain ends at
+    // block_size - tail_reserve).
+    let tail_reserve = if fs.metadata_csum {
+        super::csum::DIR_TAIL_SIZE
+    } else {
+        0
+    };
+
     // Calculate number of blocks
     let num_blocks = if block_size > 0 {
         (dir_size + block_size - 1) / block_size
@@ -496,8 +555,23 @@ fn ext4_add_entry_locked(
         0
     };
 
-    // Iterate through directory blocks looking for space
-    for block_idx in 0..num_blocks as u64 {
+    // Iterate through directory blocks looking for space — TAIL BLOCK
+    // FIRST, and the space SEARCH runs in place on the cached buffer.
+    //
+    // Scan order (perf, p6_mkdrmdir anatomy): free space in a directory
+    // under churn is overwhelmingly in the LAST block (appends grow the
+    // tail; a fresh delete frees the slot it just appended). A forward
+    // scan made every mkdir/rmdir/create walk the whole directory — the
+    // pbench tree's ~63 blocks at ~50us/block (4 KiB read + clone + parse
+    // per block) was the 3-4ms residual floor after the publication-drain
+    // fix. Any slot is a correct host (the on-disk format does not prefer
+    // one), so trying the tail first only changes which slot wins.
+    //
+    // In-place search (no b_data.clone() per scanned block): the clone
+    // was a 4 KiB kernel-heap alloc + copy per block per operation —
+    // 60+ allocs per create into a large directory. Only the block that
+    // actually hosts the entry is cloned (for the mutation below).
+    for block_idx in (0..num_blocks as u64).rev() {
         let block_nr = match get_dir_block_nr(fs, &dir, block_idx) {
             Ok(nr) => nr,
             Err(_) => {
@@ -509,29 +583,51 @@ fn ext4_add_entry_locked(
             continue;
         }
 
-        let block_data = unsafe {
+        // Try to find space in this block, in place. metadata_csum blocks
+        // reserve the final 12 bytes for the dir tail; entry placement must
+        // stay short of it. (Declared before the loop — the fresh-block path
+        // below shares it.)
+        let found = unsafe {
             let bh = bio::bread(fs.device, block_nr)
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
-            let data = (*bh).b_data.clone();
+            let hit = find_entry_space(&(*bh).b_data, name.len(), block_size, tail_reserve)
+                .map(|off| (off, (*bh).b_data.clone()));
             bio::brelse(bh);
-            data
+            hit
         };
+        if let Some((offset, block_data)) = found {
+            // Found space, create entry. add_entry_to_block now reports
+            // "no space" (Err) when the selected slot cannot host the
+            // entry (e.g. a live entry whose slack is exactly the used
+            // length); on that, try the NEXT block instead of returning
+            // a success that never linked anything (oh-svc cook bug).
+            let mut new_block = block_data;
+            match add_entry_to_block(
+                &mut new_block,
+                offset,
+                name,
+                new_ino,
+                file_type,
+                block_size,
+                tail_reserve,
+            ) {
+                Ok(()) => {
+                    // metadata_csum: finalize the dir block's checksum tail.
+                    dir_block_seal(fs, dir_ino, &mut new_block);
+                    // Write block back — ORDERED: everything this entry publishes
+                    // (the new inode's table block, bitmaps, data blocks) is
+                    // persisted BEFORE the entry block itself.
+                    // SAFETY: same contract as write_block_from_vec.
+                    unsafe {
+                        write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    }
 
-        // Try to find space in this block
-        if let Some(offset) = find_entry_space(&block_data, name.len(), block_size) {
-            // Found space, create entry
-            let mut new_block = block_data.clone();
-            add_entry_to_block(&mut new_block, offset, name, new_ino, file_type, block_size);
-
-            // Write block back — ORDERED: everything this entry publishes
-            // (the new inode's table block, bitmaps, data blocks) is
-            // persisted BEFORE the entry block itself.
-            // SAFETY: same contract as write_block_from_vec.
-            unsafe {
-                write_entry_block_ordered(fs, block_nr, &new_block)?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Fall through to the next block / fresh allocation.
+                }
             }
-
-            return Ok(());
         }
     }
 
@@ -543,7 +639,9 @@ fn ext4_add_entry_locked(
 
     // Create new block with entry
     let mut new_block = alloc::vec![0u8; block_size];
-    create_initial_entry(&mut new_block, name, new_ino, file_type, block_size);
+    create_initial_entry(&mut new_block, name, new_ino, file_type, block_size, tail_reserve);
+    // metadata_csum: finalize the fresh dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut new_block);
 
     // Write new block — ORDERED (see the in-place path above): the freshly
     // allocated block's bitmap bit persists before the entry that names it.
@@ -556,6 +654,62 @@ fn ext4_add_entry_locked(
     add_block_to_inode(fs, dir_ino, &dir, new_block_nr)?;
 
     Ok(())
+}
+
+/// metadata_csum: finalize a directory block with its checksum tail
+/// (struct ext4_dir_entry_tail, 12 bytes at the block end). Reference
+/// geometry (cr2 review, verified against mke2fs 1.47.2 + e2fsck):
+///
+/// - the dirent chain must END at block_size - 12; the tail lives inside
+///   the last entry's rec_len slack. Chains that end past that (blocks
+///   written by the earlier 8-byte-tail model, fresh blocks whose first
+///   entry claims the whole block) are normalized here by truncating the
+///   last entry to end at the tail — the truncated bytes were slack or
+///   the old tail, never live entry data;
+/// - the checksum seed chains i_generation after the inode number
+///   (e2fsprogs ext2fs_dirent_csum: crc32c(crc32c(seed, ino), gen)) —
+///   the ino-only seed produced tails e2fsck rejects;
+/// - the tail carries the markers det_rec_len=12 / det_name_len=0xDE00
+///   that get_dirent_tail requires — markerless tails read as "no
+///   checksum".
+///
+/// Call on every finalized dir block immediately before its write.
+pub(crate) fn dir_block_seal(fs: &Ext4FileSystem, dir_ino: u32, block_data: &mut [u8]) {
+    if !fs.metadata_csum {
+        return;
+    }
+    let n = block_data.len();
+    if n < super::csum::DIR_TAIL_SIZE + 8 {
+        return;
+    }
+    let tail_start = n - super::csum::DIR_TAIL_SIZE;
+
+    // Normalize the chain to end at tail_start. Walk rec_len links over
+    // the whole block; entries never legitimately cross tail_start.
+    let mut off = 0usize;
+    let mut last = 0usize;
+    while off + 8 <= n {
+        let rec = u16::from_le_bytes([block_data[off + 4], block_data[off + 5]]) as usize;
+        if rec < 8 || off + rec > n {
+            break;
+        }
+        last = off;
+        off += rec;
+    }
+    if off != tail_start && last < tail_start && tail_start - last >= 8 {
+        let rec = (tail_start - last) as u16;
+        block_data[last + 4..last + 6].copy_from_slice(&rec.to_le_bytes());
+    }
+
+    // Seed = crc32c(crc32c(fs seed, dir ino), i_generation) — read the
+    // generation from the on-disk inode (e2fsck seeds with the stored
+    // value, which is 0 for freshly created inodes but bumped on inode
+    // reuse by the reference kernel).
+    let generation = super::inode::read_inode(fs, dir_ino)
+        .map(|i| i.i_generation)
+        .unwrap_or(0);
+    let seed = super::csum::dir_csum_seed(fs.csum_seed, dir_ino, generation);
+    super::csum::dir_block_csum_set(seed, block_data);
 }
 
 /// Serializes directory-entry mutations (add / delete / rename).
@@ -607,8 +761,62 @@ fn name_chunks_eq(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Option<usize> {
+/// Scan one directory block (in place, no copy) for an entry whose name
+/// equals `name`. Returns (offset, ino) on hit. Shared by the linear
+/// lookup paths (find_dir_entry and friends).
+fn scan_dir_block_for_name(block_data: &[u8], name: &[u8], block_size: usize) -> Option<(usize, u32)> {
     let mut offset = 0;
+    while offset + 8 <= block_size {
+        let rec_len = u16::from_le_bytes([
+            block_data[offset + 4],
+            block_data[offset + 5],
+        ]);
+
+        if rec_len == 0 {
+            break;
+        }
+
+        let ino = u32::from_le_bytes([
+            block_data[offset],
+            block_data[offset + 1],
+            block_data[offset + 2],
+            block_data[offset + 3],
+        ]);
+
+        if ino == 0 {
+            offset += rec_len as usize;
+            continue;
+        }
+
+        let entry_name_len = block_data[offset + 6] as usize;
+
+        // Compare name. Leg-56B Option A (perf-report 8.10.27): the
+        // entry loop's per-candidate cost was a memcmp CALL per entry
+        // (the grind's memcmp/bcmp page share) — most entries mismatch
+        // in the first 8 bytes, so compare full u64 chunks inline
+        // first (equality of full-width chunks is endian-independent:
+        // both sides read the same order) and only byte-compare the
+        // 0-7 byte tail. Names are 8-20 bytes in the load-phase shape;
+        // the call+prologue was a third of the compare cost.
+        if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
+            let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
+            if name_chunks_eq(entry_name, name) {
+                return Some((offset, ino));
+            }
+        }
+
+        offset += rec_len as usize;
+    }
+    None
+}
+
+fn find_entry_space(
+    block_data: &[u8],
+    name_len: usize,
+    block_size: usize,
+    tail_reserve: usize,
+) -> Option<usize> {
+    let mut offset = 0usize;
     let required_len = ((8 + name_len + 3) & !3) as u16; // Align to 4 bytes
 
     while offset + 8 <= block_size {
@@ -636,7 +844,18 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         if ino == 0 {
             // Deleted entry — can reuse if large enough
             if rec_len >= required_len {
-                return Some(offset);
+                // metadata_csum dir blocks reserve the final 12 bytes for
+                // the checksum tail (struct ext4_dir_entry_tail), covered
+                // by the last entry's rec_len. A deleted slot whose span
+                // reaches the block end can only host the new entry when
+                // the entry's own span stays short of the tail — and the
+                // tail is re-derived by dir_block_seal after the write.
+                // (The old 8-byte reserve let a short entry land with its
+                // name bytes inside the 12-byte tail region.)
+                if offset + required_len as usize <= block_size - tail_reserve {
+                    return Some(offset);
+                }
+                return None;
             }
         } else {
             let name_len_entry = block_data[offset + 6] as usize;
@@ -655,42 +874,90 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
 }
 
 /// Add entry to directory block at given offset
+///
+/// Returns Err(ENOSPC-shaped) when the slot cannot host the entry, so the
+/// caller can fall through to the next block / a fresh block instead of
+/// reporting a successful link that was never written.
+///
+/// Deleted-slot reuse (oh-svc cook lineage bug, 2026-10-31): when
+/// find_entry_space hands us an inode-0 slot (an unlinked entry — e.g.
+/// slots cleared by host-side e2fsck on the cooked userdata image), the
+/// slot's full rec_len is free space; the stale name_len of the dead
+/// entry is NOT a live prefix. The old code always treated the slot as a
+/// live entry: with rec_len == used_len(stale name_len) it took the
+/// early `return` WITHOUT writing anything, while the caller still
+/// returned Ok(()) — mkdir "succeeded", the allocated inode was never
+/// linked, and every later lookup of the name saw the dead entry and
+/// failed with ENOENT (the whole OH first-boot /data population
+/// silently no-oped).
 fn add_entry_to_block(
     block_data: &mut [u8],
     offset: usize,
     name: &[u8],
     ino: u32,
     file_type: u8,
-    _block_size: usize,
-) {
-    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
-    let existing_name_len = block_data[offset + 6] as usize;
-    let used_len = ((8 + existing_name_len + 3) & !3) as u16;
+    block_size: usize,
+    tail_reserve: usize,
+) -> Result<(), i32> {
+    // Entries may never place bytes inside the reserved tail region
+    // (metadata_csum: last 12 bytes; 0 otherwise). Slots selected by
+    // find_entry_space already respect this; the bound here also covers
+    // legacy-geometry blocks whose last entry spans into the region.
+    let usable_end = block_size - tail_reserve;
+    let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]) as usize;
+    let slot_ino = u32::from_le_bytes([
+        block_data[offset],
+        block_data[offset + 1],
+        block_data[offset + 2],
+        block_data[offset + 3],
+    ]);
 
-    // Safety: ensure rec_len > used_len before subtracting
-    if rec_len <= used_len {
-        return;
+    // Space the new entry itself needs (4-byte aligned, min 8).
+    let required_len = (8 + name.len() + 3) & !3;
+    if required_len > block_size || offset + required_len > usable_end {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
     }
 
-    // Calculate new entry length
-    let new_rec_len = rec_len - used_len;
+    let (new_offset, new_rec_len) = if slot_ino == 0 {
+        // Deleted entry: the WHOLE rec_len is free. Replace in place.
+        (offset, rec_len)
+    } else {
+        // Live entry: split off its slack.
+        let existing_name_len = block_data[offset + 6] as usize;
+        let used_len = (8 + existing_name_len + 3) & !3;
+        if rec_len <= used_len || rec_len - used_len < required_len {
+            // find_entry_space should never select such a slot for a live
+            // entry; if it does, report no-space instead of a silent no-op.
+            return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+        }
+        // Shrink the existing entry to its used length.
+        let used_bytes = (used_len as u16).to_le_bytes();
+        block_data[offset + 4] = used_bytes[0];
+        block_data[offset + 5] = used_bytes[1];
+        (offset + used_len, rec_len - used_len)
+    };
 
-    // Update existing entry's record length
-    let used_bytes = used_len.to_le_bytes();
-    block_data[offset + 4] = used_bytes[0];
-    block_data[offset + 5] = used_bytes[1];
+    if new_offset + new_rec_len > usable_end {
+        return Err(errno::Errno::NoSpaceLeftOnDevice.as_neg_i32());
+    }
 
-    // Create new entry after existing
-    let new_offset = offset + used_len as usize;
+    // If the slack after the new entry can host another header, leave it
+    // as a free (inode-0) tail entry like ext4 does; otherwise fold the
+    // remainder into the new entry's rec_len.
+    let write_rec_len = if new_rec_len - required_len >= 8 {
+        required_len
+    } else {
+        new_rec_len
+    };
 
     // Write inode number
     let ino_bytes = ino.to_le_bytes();
     block_data[new_offset..new_offset + 4].copy_from_slice(&ino_bytes);
 
     // Write record length
-    let new_rec_bytes = new_rec_len.to_le_bytes();
-    block_data[new_offset + 4] = new_rec_bytes[0];
-    block_data[new_offset + 5] = new_rec_bytes[1];
+    let rec_bytes = (write_rec_len as u16).to_le_bytes();
+    block_data[new_offset + 4] = rec_bytes[0];
+    block_data[new_offset + 5] = rec_bytes[1];
 
     // Write name length
     block_data[new_offset + 6] = name.len() as u8;
@@ -700,6 +967,20 @@ fn add_entry_to_block(
 
     // Write name
     block_data[new_offset + 8..new_offset + 8 + name.len()].copy_from_slice(name);
+
+    // Free tail entry for the remainder, if any.
+    let tail_offset = new_offset + write_rec_len;
+    if new_rec_len > write_rec_len {
+        let tail_rec = (new_rec_len - write_rec_len) as u16;
+        let tail_bytes = tail_rec.to_le_bytes();
+        block_data[tail_offset..tail_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        block_data[tail_offset + 4] = tail_bytes[0];
+        block_data[tail_offset + 5] = tail_bytes[1];
+        block_data[tail_offset + 6] = 0;
+        block_data[tail_offset + 7] = 0;
+    }
+
+    Ok(())
 }
 
 /// Crash-safe ordering for directory-entry writes (deferred form).
@@ -783,9 +1064,16 @@ fn create_initial_entry(
     ino: u32,
     file_type: u8,
     block_size: usize,
+    tail_reserve: usize,
 ) {
     let _entry_len = ((8 + name.len() + 3) & !3) as u16;
-    let rec_len = block_size as u16;
+    // The first (and only) entry covers the dirent area. With
+    // metadata_csum the final 12 bytes belong to the dir tail
+    // (reference geometry: chain ends at block_size - tail_reserve).
+    // dir_block_seal's normalization also enforces this, but building
+    // the block correctly up front keeps the chain well-formed before
+    // the seal walk runs.
+    let rec_len = (block_size - tail_reserve) as u16;
 
     // Write inode number
     let ino_bytes = ino.to_le_bytes();
@@ -946,6 +1234,9 @@ fn ext4_mkdir_no_journal(
     block_data[dotdot_offset..dotdot_offset + 8].copy_from_slice(&dotdot_entry);
     block_data[dotdot_offset + 8..dotdot_offset + 11].copy_from_slice(b"..\0");
 
+    // metadata_csum: finalize the fresh dir block's checksum tail.
+    dir_block_seal(fs, new_ino, &mut block_data);
+
     // Write directory block
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
@@ -1002,24 +1293,21 @@ fn ext4_mkdir_no_journal(
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
-    // Best-effort publication of THIS mkdir's own deferred entry record
-    // (per-cookie scoped flush: the new inode's table/bitmap blocks,
-    // then the directory entry block). NOT fatal to the syscall. The old
-    // whole-cache sync_buffers here made every mkdir pay the WORLD's
-    // dirty buffers plus the global publication backlog — the
-    // storage-daemon D-state family under provisioning churn (leg-29A
-    // adjudication). Foreign records and unrelated dirty blocks ride the
-    // buffer-cache write-back as on any write-back mount; the per-block
-    // guards keep their ordering whenever they do reach disk. Foreign
-    // devices are never touched, so the r8 mkdtemp ENXIO storm shape
-    // (mkdir inheriting a dead loop device's writeback error) cannot
-    // recur here either.
-    if let Err(e) = bio::flush_publications_scoped() {
-        crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
-    }
-    // Leg-55: counted even on the flushed path — the lazy-variant
-    // follow-up reads this against the phase mix (the flush is a
-    // fixed cost per mkdir; see the reversal note in the ledger).
+    // Per-op publication of THIS mkdir's deferred entry record is GONE
+    // (perf, the e3c1ec35/fab0e029 saga resolved by batching): the scoped
+    // drain here cost 5-8 synchronous block round trips at EVERY mkdir
+    // return — p6_mkdrmdir 15.5-30ms vs the reference kernel's ~150us
+    // (pa85: journal/no-journal arms flat, the drain owned the cost; the
+    // drain's only product was durability POSIX does not promise — entry
+    // durability belongs to fsync(dirfd)). Ordering is NOT lost: the
+    // records stay queued with their H1/H2 guards enforced at every
+    // out-of-band write (sync_dirty_buffer, eviction Phase 4, journal
+    // write-through), and the queue is kept short by the op-boundary
+    // batch drain (bio::publication_batch_drain, PUB_BATCH=64) that
+    // every entry op pays amortized instead of per-op — the fab0e029
+    // lesson: deleting this drain WITHOUT the batch bound pushed the
+    // deferred bill onto the next constrained writer (unlink 100x).
+    // Durability points remain fsync/sync(2)/eviction/commit.
     crate::dfx::fsw::note_pub_lazy();
 
     Ok(new_ino)
@@ -1031,6 +1319,8 @@ fn ext4_mkdir_inner(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
+    // fsw op-cost anatomy: whole-bracket duration (guard to stop), us.
+    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
@@ -1046,6 +1336,9 @@ fn ext4_mkdir_inner(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_mkdir_us(
+        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 
@@ -1529,6 +1822,9 @@ fn ext4_delete_entry_locked(
     // Clear the entry (set inode to 0)
     block_data[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
 
+    // metadata_csum: finalize the dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut block_data);
+
     // Write block back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
@@ -1552,59 +1848,53 @@ fn find_dir_entry(
         0
     };
 
-    for block_idx in 0..num_blocks as u64 {
+    // Bidirectional block walk (perf, same anatomy as the add-entry
+    // tail-first fix): a linear-from-0 search pays the FULL directory
+    // walk for every entry that lives near the tail — under churn
+    // (create/delete loops, rename targets) recently created entries are
+    // appended at the tail, and every rmdir/unlink/rename of them walked
+    // all ~63 blocks of the pbench tree. Names are unique within a
+    // directory (creators check existence first), so the search order
+    // only decides SPEED, not the result: alternating from both ends
+    // finds tail-resident and head-resident entries in 1-2 blocks and
+    // halves the worst case (middle of the directory).
+    let n = num_blocks as u64;
+    let mut lo = 0u64;
+    let mut hi = n; // exclusive
+    let mut from_tail = true;
+    while lo < hi {
+        let block_idx = if from_tail { hi - 1 } else { lo };
+        if from_tail {
+            hi -= 1;
+        } else {
+            lo += 1;
+        }
+        from_tail = !from_tail;
+
         let block_nr = get_dir_block_nr(fs, dir_inode, block_idx)?;
 
         if block_nr == 0 {
             continue;
         }
 
-        let block_data = unsafe {
-            read_block_to_vec(fs.device, block_nr, block_size)?
+        // In-place scan of the cached buffer (perf: the old
+        // read_block_to_vec cloned 4 KiB per block per lookup — a
+        // kernel-heap alloc+copy for every block of every lookup into a
+        // large directory).
+        // SAFETY: bread returns a valid BufferHead pointer; b_data is a
+        // block_size-byte Vec; brelse releases the cache reference after
+        // the scan (the hit path copies nothing — it returns positions).
+        let scan = unsafe {
+            let bh = match bio::bread(fs.device, block_nr) {
+                Some(b) => b,
+                None => return Err(errno::Errno::IOError.as_neg_i32()),
+            };
+            let r = scan_dir_block_for_name(&(*bh).b_data, name, block_size);
+            bio::brelse(bh);
+            r
         };
-
-        // Search for entry in this block
-        let mut offset = 0;
-        while offset + 8 <= block_size {
-            let rec_len = u16::from_le_bytes([
-                block_data[offset + 4],
-                block_data[offset + 5],
-            ]);
-
-            if rec_len == 0 {
-                break;
-            }
-
-            let ino = u32::from_le_bytes([
-                block_data[offset],
-                block_data[offset + 1],
-                block_data[offset + 2],
-                block_data[offset + 3],
-            ]);
-
-            if ino == 0 {
-                offset += rec_len as usize;
-                continue;
-            }
-
-            let entry_name_len = block_data[offset + 6] as usize;
-
-            // Compare name. Leg-56B Option A (perf-report 8.10.27): the
-            // entry loop's per-candidate cost was a memcmp CALL per entry
-            // (the grind's memcmp/bcmp page share) — most entries mismatch
-            // in the first 8 bytes, so compare full u64 chunks inline
-            // first (equality of full-width chunks is endian-independent:
-            // both sides read the same order) and only byte-compare the
-            // 0-7 byte tail. Names are 8-20 bytes in the load-phase shape;
-            // the call+prologue was a third of the compare cost.
-            if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
-                let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
-                if name_chunks_eq(entry_name, name) {
-                    return Ok((block_nr, offset, ino));
-                }
-            }
-
-            offset += rec_len as usize;
+        if let Some((offset, ino)) = scan {
+            return Ok((block_nr, offset, ino));
         }
     }
 
@@ -1728,6 +2018,8 @@ pub fn ext4_unlink(
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
+    // fsw op-cost anatomy: whole-bracket duration (us).
+    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1735,6 +2027,9 @@ pub fn ext4_unlink(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_unlink_us(
+        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 
@@ -1876,6 +2171,8 @@ pub fn ext4_rmdir(
     // Serialize entry mutations BEFORE the journal bracket (see
     // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
     let _entry_guard = ENTRY_MUTEX.guard();
+    // fsw op-cost anatomy: whole-bracket duration (us).
+    let t0 = crate::drivers::timer::monotonic_ns_since_boot();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1883,6 +2180,9 @@ pub fn ext4_rmdir(
     // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
     unsafe { clear_current_handle(); }
     super::journal::ext4_journal_stop(&mut handle)?;
+    crate::dfx::fsw::note_rmdir_us(
+        (crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0)) / 1000,
+    );
     result
 }
 
@@ -1899,6 +2199,8 @@ fn ext4_rmdir_inner(
         return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
+    // fsw op-cost anatomy: per-phase nanosecond marks (FSW3 rmd1-rmd5).
+    let p0 = crate::drivers::timer::monotonic_ns_since_boot();
     // Find the directory entry first
     let parent_inode = super::inode::read_inode(fs, dir_ino)?;
     let (parent_dir_block, _, target_ino) = find_dir_entry(fs, &parent_inode, name)?;
@@ -1915,9 +2217,11 @@ fn ext4_rmdir_inner(
     if !is_dir_empty(fs, &target_inode)? {
         return Err(errno::Errno::DirectoryNotEmpty.as_neg_i32());
     }
+    let p1 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // Delete directory entry from parent
     ext4_delete_entry_locked(fs, dir_ino, name)?;
+    let p2 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // CRASH-SAFETY (delete side, deferred): the entry removal must be
     // persisted BEFORE the inode/bitmap/block frees below (see
@@ -1936,12 +2240,20 @@ fn ext4_rmdir_inner(
     target.i_links_count = 0;
     target.i_dtime = 1; // TODO: get current time
     super::inode::write_inode_disk(fs, target_ino, &target)?;
+    let p3 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // Free inode in bitmap
     free_inode(fs, target_ino)?;
+    let p4 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // Free data blocks
     free_inode_blocks(fs, &target)?;
+    let p5 = crate::drivers::timer::monotonic_ns_since_boot();
+
+    crate::dfx::fsw::note_rmdir_phases(
+        p1.saturating_sub(p0), p2.saturating_sub(p1), p3.saturating_sub(p2),
+        p4.saturating_sub(p3), p5.saturating_sub(p4),
+    );
 
     Ok(())
 }
@@ -2052,6 +2364,15 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
         write_block_from_vec(fs.device, bitmap_block as u64, &new_bitmap)?;
+    }
+
+    // metadata_csum: refresh the inode bitmap csum (see mark_inode_used).
+    if fs.metadata_csum {
+        let size = (fs.inodes_per_group as usize) / 8;
+        let c = super::csum::bitmap_csum(fs.csum_seed, &new_bitmap, size);
+        if let Some(g) = super::allocator::group_of_bitmap(fs, bitmap_block as u64, true) {
+            let _ = super::allocator::set_bitmap_csum_in_gd(fs, g, true, c);
+        }
     }
 
     // Update group descriptor
@@ -2453,6 +2774,9 @@ fn update_dotdot(fs: &Ext4FileSystem, dir_ino: u32, new_parent_ino: u32) -> Resu
     block_data[dotdot_offset + 1] = new_parent_bytes[1];
     block_data[dotdot_offset + 2] = new_parent_bytes[2];
     block_data[dotdot_offset + 3] = new_parent_bytes[3];
+
+    // metadata_csum: finalize the dir block's checksum tail.
+    dir_block_seal(fs, dir_ino, &mut block_data);
 
     // Write block back
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.

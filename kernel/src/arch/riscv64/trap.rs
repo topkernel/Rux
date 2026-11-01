@@ -348,6 +348,9 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                         else if cs_entry != tp_entry { "pre" } else { "in" },
                         epc_ctx);
                 }
+                // Kernel-preempt hook AFTER the bracket diagnostics so the
+                // leak print describes the pre-preemption state.
+                irq_exit_maybe_preempt_kernel(regs_ref);
             }
 
             // Software interrupt (IPI)
@@ -358,6 +361,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
+                irq_exit_maybe_preempt_kernel(regs_ref);
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
                 let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
                     as usize;
@@ -509,8 +513,103 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
     // runs in the incoming task's own frozen frame with its own regs, so
     // the check validates whichever task actually returns to user.)
     if unsafe { (*regs).user_mode() } {
+        // Return-to-user is a quiescent state (rcu.rs): report it here so
+        // syscall-heavy CPUs complete grace periods without waiting for
+        // their scheduler tick. Fast-pathed on RCU_WAITERS (one load).
+        crate::sync::rcu::rcu_note_context_switch();
         crate::dfx::leakorigin::check_user_return();
     }
+}
+
+/// riscv64 twin of the x86_64 IRQ-exit kernel-preempt hook
+/// (trap.rs there, same name): after the timer or IPI handler and its
+/// irq_exit(), a KERNEL-mode incumbent whose need_resched is set gets
+/// schedule()d out instead of running until its next syscall return.
+/// Without this, every wake behind a kernel-executing CPU is quantized
+/// by the incumbent's syscall length (measured on the x86_64 twin with
+/// the pbench p2f futex battery: TCG 5608us vs reference 86us; KVM
+/// 163us vs 8.2us; hook collapses both to parity — see the x86_64
+/// comment for the full table and the sc70-era leak-amplification
+/// history that kept this OFF until WAKE-HEAL bounded it).
+///
+/// Guards, all mirroring the x86_64 twin:
+/// - kpreempt=1 arms / kpreempt=0 disarms / absent = arch default OFF
+///   on riscv64 (this twin is not yet stable — see the verdict-cache
+///   comment below; the x86_64 twin defaults ON with its battery).
+/// - user-origin frames are skipped: ret_from_exception's asm loop
+///   owns user preemption.
+/// - preempt_count != 0 (spinlock/bh/RCU held) refuses the switch.
+/// - TIF_IN_SCHED refuses re-entry (a tick inside __schedule's tail).
+/// - SIE discipline (R53 form-B): the asm kernel path twin does
+///   `csrsi sstatus,2` before asm_schedule and `csrci sstatus,2`
+///   after; __schedule returns with SIE per R54's syscall-caller
+///   contract, so the hook re-disables before unwinding the handler.
+fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
+    use crate::process::task::task_flags::TaskFlags;
+    static KP_ARMED: core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(0);
+    match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            match crate::cmdline::get_cmdline() {
+                None => return, // cmdline not parsed yet: stay disarmed
+                Some(_) => {
+                    // Same cmdline contract as the x86_64 twin:
+                    // kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes
+                    // the arch default. riscv64 default: OFF — this
+                    // twin's first A/B (pbench p2f, 2026-10-31) hit the
+                    // pick-machinery corruption the asm comments warn
+                    // about (R46/R49 phantom-heal cascade into an idle-
+                    // task user-frame KERNPANIC ~30s into the quiet
+                    // regime) while the x86_64 twin, whose guards were
+                    // tuned through sc65-sc73, runs the same battery
+                    // clean. Stabilize against the R53/R84/R85 asm
+                    // families first (the .Lcheck_resched_kernel dead
+                    // path documents the missing frame discipline), then
+                    // flip this default with battery + soak numbers.
+                    let v = if crate::cmdline::get_param("kpreempt")
+                        .as_deref()
+                        == Some("1")
+                    {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
+                    if v == 2 {
+                        crate::pr_info!(
+                            "sched: kernel-preempt armed by cmdline (cpu={})",
+                            crate::arch::cpu_id()
+                        );
+                    }
+                }
+            }
+        }
+        1 => return, // disarmed (default; kpreempt=0)
+        _ => {}
+    }
+    // Early-boot secondaries have no current task: nothing to preempt.
+    let cur = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    if regs.user_mode() {
+        return; // user path: ret_from_exception asm owns preemption
+    }
+    if !crate::sched::need_resched() {
+        return;
+    }
+    if !crate::interrupt::preempt::preemptible() {
+        return; // holds a lock / bh / RCU / nested IRQ
+    }
+    if cur.test_ti_flag(TaskFlags::TIF_IN_SCHED.bits()) {
+        return;
+    }
+    // Enable around schedule() like the asm twin (preempt_schedule_irq
+    // discipline); re-disable after so the remaining handler frames and
+    // the sret ritual run SIE=0 (R53 form-B window).
+    crate::arch::cpu::restore_irq(true);
+    crate::sched::schedule();
+    crate::arch::cpu::restore_irq(false);
 }
 
 /// Handle timer interrupt
@@ -647,8 +746,11 @@ fn handle_syscall(regs: &mut PtRegs) {
     let orig_epc = regs.epc;
     let syscall_num = regs.a7;  // syscall number is in a7, not orig_a0!
 
-    // Default return value is -ENOSYS
-    regs.a0 = crate::errno::constants::ENOSYS as u64;
+    // Default return value is -ENOSYS (the sign matches the comment, the
+    // x86_64 twin and the ABI; the dispatch overwrites it on every path
+    // that returns, so this only matters if a future early-return forgets
+    // to set a0 — +38 would leak as a bogus success-sized return).
+    regs.a0 = -(crate::errno::constants::ENOSYS as i64) as u64;
 
     // Skip ecall instruction
     // RISC-V has both 32-bit ecall and 16-bit c.ecall instructions
@@ -884,7 +986,21 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         // print WHICH mapping swallowed epc, the page's PTE, a hexdump of
         // the page around epc, and the full VMA table so the layout of the
         // dying process is recoverable from the console alone.
-        sigill_mapping_forensics(pid as usize, epc as usize);
+        //
+        // Serial-cleanliness (print-audit lane, 2026-11): one dump is
+        // ~100 lines (~5 KB, tens of ms of polled UART) — "one-shot per
+        // death" was only cheap while deaths were rare. A respawn loop
+        // over a broken binary (the sh-retry family that produced this
+        // probe) paid it per crash. Budget 2 per boot: the first two
+        // deaths carry full attribution, later ones keep the one-liner
+        // above.
+        {
+            static SIGILL_DUMPS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SIGILL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2 {
+                sigill_mapping_forensics(pid as usize, epc as usize);
+            }
+        }
     }
 
     if regs.user_mode() {
@@ -1071,6 +1187,17 @@ fn sigill_mapping_forensics(pid: usize, epc: usize) {
 /// Handle breakpoint
 fn handle_breakpoint(regs: &mut PtRegs) {
     if regs.user_mode() {
+        // gdmr28/r29 bring-up instrumentation (temporary, REMOVE before
+        // merge): an untraced user ebreak is a silent SIGTRAP death
+        // otherwise (gdm-session-worker died this way at gdmr27 with no
+        // diagnostic). Print the epc so the site can be symbolized.
+        let comm_now = crate::sched::current()
+            .map(|t| {
+                let c = t.comm();
+                let len = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+                core::str::from_utf8(&c[..len]).unwrap_or("?")
+            })
+            .unwrap_or("?");
         // PTRACE_SINGLESTEP (P1): the ebreak we displaced at epc fired —
         // restore the original instruction and report the step to the
         // tracer (or pend SIGTRAP when nobody traces). epc is NOT
@@ -1102,6 +1229,20 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                     }
                 } else {
                     // Untraced single-step (raced DETACH): plain SIGTRAP.
+                    // gdmr29 (temporary): this path is a SIGTRAP-death
+                    // candidate for the gdm-session-worker kill — name it.
+                    // REMOVE before merge.
+                    //
+                    // Demoted to pr_debug (print-audit lane, 2026-11):
+                    // an untraced ebreak left in text hits this on EVERY
+                    // step attempt — a per-trap pr_info through the
+                    // polled UART, the EXITRP class (e2717687). The hunt
+                    // is closed; release builds pay nothing.
+                    crate::pr_debug!(
+                        "SSBRK: comm={} epc={:#x} (untraced single-step ebreak)",
+                        comm_now,
+                        regs.epc
+                    );
                     (*task).pending.add(crate::signal::Signal::SIGTRAP as i32);
                 }
                 return;
@@ -1126,6 +1267,12 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                 return;
             }
         }
+        crate::pr_info!(
+            "UBRK: comm={} epc={:#x} ra={:#x}",
+            comm_now,
+            regs.epc,
+            regs.ra
+        );
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
@@ -1250,11 +1397,37 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
-                fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
-                crate::sched::get_current_pid(),
-                if regs.kernel_mode() { "kernel" } else { "user" });
+            // Serial-cleanliness (print-audit lane, 2026-11): the report
+            // and the VMA forensics below fire ONLY when the fault is
+            // FATAL (default disposition, or fault-inside-handler) or
+            // kernel-mode. A handler-routed user fault (guard pages,
+            // JITs, crash catchers, LTP mmap05) is a normal survivable
+            // event and used to pay one pr_err plus two VMA-forensics
+            // lines per fault through the polled UART — a GC touching
+            // its guard page cost ~1 ms of serial each time. Survivors
+            // stay quiet; deaths keep the full attribution.
             if regs.user_mode() {
+                // Linux semantics: route user-mode faults through normal
+                // signal delivery (force_sig_fault) — an installed
+                // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
+                // must run. With a handler (and SIGSEGV not blocked —
+                // i.e. not already inside that handler): pend the signal
+                // and RETURN; do_signal delivers it on the way back to
+                // userspace. Without one — or with the fault happening
+                // inside the handler itself — the default action kills
+                // here (and avoids a fault-retry loop).
+                let pid = crate::process::current_pid();
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    // Synchronous fault: deliver despite a blocked mask
+                    // (Linux force_sig parity — see force_unblock_current).
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
+                    return;
+                }
+                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                    fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
+                    crate::sched::get_current_pid(),
+                    "user");
                 // User-fault VMA forensics: name the mappings the fault
                 // address and epc fall in. The GNOME bring-up had
                 // recurring shell deaths at a fixed address deep inside
@@ -1336,35 +1509,25 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                         }
                     }
                 }
-                // Linux semantics: route user-mode faults through normal
-                // signal delivery (force_sig_fault) — an installed
-                // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
-                // must run. With a handler (and SIGSEGV not blocked —
-                // i.e. not already inside that handler): pend the signal
-                // and RETURN; do_signal delivers it on the way back to
-                // userspace. Without one — or with the fault happening
-                // inside the handler itself — the default action kills
-                // here (and avoids a fault-retry loop).
-                let pid = crate::process::current_pid();
-                if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
-                    // Synchronous fault: deliver despite a blocked mask
-                    // (Linux force_sig parity — see force_unblock_current).
-                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
-                    return;
-                }
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                    fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
+                    crate::sched::get_current_pid(),
+                    "kernel");
             }
         }
         MmFaultResult::PermissionDenied => {
-            crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
                 // Same handler-first routing as Segfault: a PROT_NONE
                 // access with an installed SIGSEGV handler must run it
                 // (LTP mmap05); a fault inside the (blocked) handler
                 // itself, or the default disposition, kills directly.
+                // Serial-cleanliness (print-audit lane, 2026-11): the
+                // line prints only on the FATAL branch — handler-routed
+                // PROT_NONE probes are survivable guard-page events.
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
@@ -1372,23 +1535,30 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             }
         }
         MmFaultResult::BusError => {
-            crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             if regs.user_mode() {
                 // Handler-first routing like Segfault: LTP mmap13 installs
                 // a SIGBUS handler and must catch it; the default action
-                // kills with SIGBUS.
+                // kills with SIGBUS. Serial-cleanliness (print-audit
+                // lane, 2026-11): the line prints only on the FATAL
+                // branch.
                 let pid = crate::process::current_pid();
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
+                    crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
+            } else {
+                crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             }
         }
         MmFaultResult::OutOfMemory => {

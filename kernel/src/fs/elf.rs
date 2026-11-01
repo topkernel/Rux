@@ -494,12 +494,13 @@ impl ElfLoader {
             return Err(ElfError::NotExecutable);
         }
 
-        // Check machine type (AArch64 or RISC-V)
-        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-        {
-            if !ehdr.check_machine() {
-                return Err(ElfError::WrongMachine);
-            }
+        // Machine check on every platform: a foreign-arch image must
+        // fail here with ENOEXEC, never load-and-jump into garbage.
+        // This guard was once cfg-limited to aarch64/riscv64 (written
+        // before the x86_64 port), which let an x86_64 kernel exec a
+        // riscv64 ELF straight through (review CR-2).
+        if !ehdr.check_machine() {
+            return Err(ElfError::WrongMachine);
         }
 
         Ok(())

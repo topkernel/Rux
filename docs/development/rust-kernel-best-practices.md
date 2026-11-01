@@ -154,6 +154,33 @@ and the kernel must never allocate while reporting its own death.*
 boot; denied elsewhere by clippy (§9-F6). Where an invariant genuinely
 holds, write `debug_assert!` + a graceful path anyway.
 
+### 2.4 Print discipline on hot paths (the serial-print tax)
+
+Console TX is polled and byte-at-a-time (`kernel/src/console.rs`):
+**one `pr_err!`/`pr_warn!`/`pr_info!`/`println!` line costs ~0.4–0.7 ms
+of UART per hit** at the default loglevel (6), and `pr_debug!` is
+compiled out in release. A print that fires per syscall, per fault, per
+signal, per switch, per page, or per IPC op is therefore a performance
+bug, not a log line — one such line on the exit path cost lmbench
+`lat_proc,fork` a 20x regression (commit e2717687). Rules for the files
+listed in `scripts/hotpath_print_check.py` (futex, binder, syscall
+dispatchers, mm alloc, signal, sched, arch trap paths):
+
+- Legitimate prints: boot-time one-shots, panic/oops/trap printers,
+  fatal-error paths (a line per *death* is fine; a line per *surviving
+  fault* is not), and prints behind an explicit `DfxSwitch` gate or a
+  boot-budget counter.
+- Adding a print to those files requires a `// HOTPATH-PRINT: <why>`
+  annotation on the line above; `scripts/hotpath_print_check.py` (wired
+  into `scripts/review_coverage.py --check`) fails the ratchet on any
+  un-annotated growth.
+- Temporary hunt-widenings (`if true { pr_err!(...) }`) must carry their
+  revert condition in a comment and be reverted when the hunt closes —
+  the TKSIG/KSIG/EXITGRP family shows these survive merges if left.
+- Hunt prints that churned during a closed investigation get gated
+  behind their switch (text unchanged), not deleted: the next hunt
+  re-arms them with a boot flag.
+
 ---
 
 ## 3. `unsafe` discipline and the TCB ledger
@@ -307,7 +334,7 @@ The question this section answers: *are there architectures that get
 microkernel-grade safety without paying microkernel IPC cost — and
 what of them applies to Rux?*
 
-### 10.1 Safe-language isolation — the framekernel line
+### 10.1 Safe-language isolation — the kernel line
 
 The most direct answer for a Rust kernel: **let the compiler be the
 isolation boundary instead of address spaces**. A Linux-ABI-compatible
@@ -408,7 +435,7 @@ disciplined elsewhere: pointers derived once at the boundary
 
 ## Appendix: primary sources
 
-- Asterinas — [framekernel architecture](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html),
+- Asterinas — [kernel architecture](https://asterinas.github.io/book/kernel/the-kernel-architecture.html),
   [ATC'25 paper](https://www.usenix.org/system/files/atc25-peng-yuke.pdf),
   [arXiv:2506.03876](https://arxiv.org/abs/2506.03876), [LWN](https://lwn.net/Articles/1022920/)
 - Theseus — [theseus-os.com](https://www.theseus-os.com) (intralingual design, state-spill management)

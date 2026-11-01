@@ -66,8 +66,13 @@ ltp: sdk
 	@echo "Building LTP test suite..."
 	@cd userspace/linux-ltp && ./build.sh
 
+# Restore C probe sources / x86_64 toolchain sysroot from tarballs
+# (C sources are not git-tracked; see scripts/extract-probes.sh)
+probes:
+	@./scripts/extract-probes.sh
+
 # Build user programs (Rust std + musl) - requires sdk first
-user: sdk
+user: sdk probes
 	@echo "Building user programs (debug)..."
 	@./userspace/build debug
 	@echo "Building user programs (release)..."
@@ -113,7 +118,7 @@ $(UBUNTU_IMG):
 
 # Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
 # x86_64 run the suite under that arch's QEMU; see test/run.sh)
-test:
+test: probes
 	@PLATFORM=$(PLATFORM) ./test/run.sh test
 
 # Run formal verification (sync check + proptest)

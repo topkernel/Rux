@@ -2,352 +2,178 @@
 
 <div align="center">
 
-**A Linux-like OS kernel entirely written in Rust**
+**A Linux-compatible kernel, ~310,000 lines of Rust — written entirely by AI.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-4%2C250%20cases-brightgreen.svg)](#-test-status)
-[![Code](https://img.shields.io/badge/code-~250%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#platforms)
+[![Tests](https://img.shields.io/badge/tests-4%2C200%2B%20cases-brightgreen.svg)](#numbers)
+[![Code](https://img.shields.io/badge/code-~310%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
-**Platforms: RISC-V 64-bit (RV64GC, primary) · x86_64 (q35) · AArch64 (QEMU virt)**
+Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
+Unmodified OpenHarmony boots its full 135+ services.
+No userspace patches, rebuilds, or configuration changes.
 
 </div>
 
 ---
 
-## 🖥️ Rux Runs Ubuntu
+## Overview
 
-**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus,
-Xorg with client windows, an interactive xterm, and a real GNOME Shell desktop
-(gnome-shell + mutter compositing) — boots on the Rux kernel today, on both
-riscv64 and x86_64.**
-
-| | |
-|---|---|
-| ![Ubuntu session login](docs/images/ubuntu-session-login-2026-10-15.png) | ![Interactive GNOME Shell desktop with a typed xterm conversation](docs/images/ubuntu-gnome-xterm-conversation-2026-10-28.png) |
-| *Ubuntu userland login screen on Rux (riscv64) — the image's lightweight udesk session, the 2026-10 bring-up gate; verify.py 23/23 PASS. The real GNOME Shell desktop is the right cell.* | *Interactive GNOME Shell desktop on Rux (riscv64) — run gnome-r21type, t=2700 s. Top: the live desktop — panel with Activities + clock, the focused xterm holding a typed shell conversation. Bottom (3x zoom of the xterm text area): an echoed `a`, bash's answer, a fresh prompt — twice — ending in a block cursor. Every claim is deterministic pixel evidence (frame diffing, a per-window XGetImage walk, a line-band decoder — no vision model in the chain): the desktop frame class reproduces across 9 boots, the typed conversation across 2 boots with identical line geometry and cursor cell, and injected keyboard/pointer events are delivered to the live session 1:1 in every run. An attribution A/B (older kernel, same image, calm host: the screen stayed dark) pins the unblock to the kernel merge-set. Sessions hold 2700 s with zero panics.* |
-
-What runs, end to end:
-
-- **Ubuntu 22.04 rootfs** with glibc, `ld.so`, and dynamic ELF loading
-- **GNOME Shell desktop frames, reproducible across boots** — panel, clock,
-  notification banners, and readable window content, verified by deterministic
-  pixel analysis on riscv64 (9 boots); injected pointer input moves the
-  on-screen cursor to the exact commanded coordinates, and injected
-  keyboard/pointer events are delivered to the live session 1:1 (the
-  [Roadmap](docs/progress/roadmap.md) tracks the interactivity milestone)
-- **Xorg completes full initialization** and serves X clients through
-  `/tmp/.X11-unix/X0`; X client windows render to the screen
-- **Interactive xterm** (pty + real bash/dash inside); injected pointer and
-  keyboard events are delivered to the live session 1:1 via virtio-input →
-  evdev with IRQ-driven delivery, and typing works as a conversation: the
-  key echoes, the shell answers, a fresh prompt appears with a block
-  cursor — verified by per-window XGetImage pixel analysis and reproduced
-  across 2 boots
-- **D-Bus (system + session), POSIX signals with full nesting semantics,
-  SysV IPC, 4-CPU SMP** with cross-core TLB shootdowns
-- **Linux ABI by design**: `uname` and `/proc/version` intentionally report
-  Linux-compatible strings — that identity is what lets unmodified
-  Ubuntu/glibc binaries run without patches
-
-```bash
-make ubuntu-image    # build the Ubuntu 22.04 GUI disk image (work/ubuntu-gui.img)
-make ubuntu-run      # boot it: native SDL window + keyboard + mouse, 4 CPUs, MTTCG
-                     # boot-to-login ~4.5s; login: root / rux
-python3 test/ubuntu-gui/verify.py --runs 2 --smp 4   # 23 pixel-level checks per boot
-```
-
----
-
-## 📱 Rux Runs OpenHarmony
-
-**The OpenHarmony x86_64_virt emulator boots with ~80 system services up
-(samgr, foundation, render_service, hilogd, appspawn, hdf devhosts, …),
-`hdc shell` reaches the live guest, and OH's own bootanimation renders
-fullscreen on the kernel's virtio-GPU DRM path. The launcher chain has
-reached MainAbility loading — spawn completes end to end, the ability
-managers narrate real work — the launcher UI is not on screen yet.**
-
-| | |
-|---|---|
-| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH bootanimation](docs/images/oh-bootanimation-2026-10-24.png) |
-| *OpenHarmony x86_64_virt — ~80 system services start and stay up* | *OH's own bootanimation on the Rux DRM path (720×1280 virtio-GPU) — BootAnimationController verified at 150 frames* |
-
-The kernel work behind it (full campaign in git history and the
-[Roadmap](docs/progress/roadmap.md); the iconic few):
-
-- **Binder with OH semantics**: packed token/cookie layouts, death
-  notification, thread-pool growth (`BR_SPAWN_LOOPER`) and child-thread
-  drain routing matching the reference protocol
-- **SELinux-adjacent surfaces**: `SO_PEERSEC` on AF_UNIX (init's
-  parameter service gates every `bootevent.*` set on it)
-- **Memory model**: PFN span sized by the max region end, full-map zone
-  seeding, page cache with a real LRU scaling to RAM
-- **ext4**: recursive biglock, HANDOFF fairness, directory-entry
-  mutation serialization
-
-```bash
-./test/run-oh.sh ~/oh-images console     # serial console
-./test/run-oh.sh ~/oh-images gui         # virtio-gpu at 720×1280
-```
-
----
-
-## 🦾 Rux Runs AArch64
-
-**The third architecture landed end to end (2026-10-30): QEMU virt
-(cortex-a72) boots through GICv3 + architectural timer + SMP (PSCI),
-mounts the virtio-blk PCI ext4 root, and reaches an interactive root
-shell — typed commands run, external binaries fork/exec (`id`,
-`uname`), signals deliver through the full rt_sigframe path with
-FPSIMD state, and the in-kernel test suite is green (1,119/1,119).**
-
-What the port carries today:
-
-- **Boot without firmware**: QEMU's ELF `-kernel` protocol passes no
-  DTB and no arguments on this architecture — the device tree blob is
-  embedded in `.rodata` (auto-dumped from the installed QEMU when
-  missing) and the cmdline parses out of it
-- **GICv3 + architectural timer**: distributor/redistributor/CPU
-  interface, SPI/PPI/SGI routing, IPI with bitmap multiplexing, the
-  virtual-timer tick at HZ=100 on both CPUs, PCI INTx through the
-  GPEX interrupt-map swizzle
-- **Full user memory management**: 4-level TTBR0/1 walker, fork with
-  COW, demand paging, mprotect with PROT_NONE markers, uaccess with a
-  real exception table (`.ex_table` kept alive in the link), per-task
-  TPIDR_EL0 (user TLS) switched with the context, per-trap FPSIMD
-  save so library NEON cannot dirty user FP state mid-syscall
-- **The port's own diagnostics found architecture-level semantics
-  bugs that the other two never exercised** — SVC's return-address
-  convention, the IPA size check, TLS-base ownership across fork
-
-```bash
-make build PLATFORM=aarch64
-qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
-    -accel tcg,thread=multi -m 1G -smp 2 -nographic -no-reboot \
-    -kernel target/aarch64-unknown-none/debug/rux <rootfs drive>
-make test PLATFORM=aarch64     # in-kernel suite: 1,119 cases
-```
-
----
-
-## 🤖 AI Generation Statement
-
-**This project's code is developed with AI assistance (Claude Code +
-GLM-5.3).**
-
-- Uses AI coding agents for assisted development
-- Follows POSIX standards and maintains 100% Linux ABI compatibility
-- Aims to explore the possibilities and limitations of **AI-assisted OS
-  kernel development**
-
----
-
-## 🎯 Project Goals
-
-### ⚠️ Core Principle: Full POSIX/ABI Compatibility
-
-**Core Objective**: A Linux-compatible OS kernel written in Rust
-
-- ✅ **100% POSIX Compatible** - Full compliance with POSIX standards
-- ✅ **Linux ABI Compatible** - Can run native Linux userspace programs directly
-- ✅ **System Call Compatible** - Uses Linux system call numbers and interfaces
-- ✅ **Filesystem Compatible** - Supports ext4 and other Linux filesystems
-- ✅ **ELF Format Compatible** - Executable format identical to Linux
-
-**Design Philosophy**:
-- External interfaces must be 100% compatible with Linux
-- Internal implementation can use better designs when they don't affect
-  compatibility — advantageous divergences are recorded in the
+- **Developed entirely by AI agents.** All code — scheduler, memory
+  management, ext4, binder, the network stack, the verification
+  harnesses — was written by AI agents under human direction. Humans
+  set objectives, review changes, and hold merge authority; agents
+  implement, test, and debug.
+- **Linux ABI compatibility.** 345+ system calls with semantics
+  matched against the reference implementation; ELF/auxv, futex,
+  SysV and POSIX IPC, binder, on-disk ext4, and the `/proc`,
+  `/sysfs`, `/debugfs`, tracefs layouts, down to the `uname` strings
+  glibc's loader keys on. LTP: **1,005 / 1,869**.
+- **The ABI is the contract; the internals are a clean-room design.**
+  Where an internal design differs from the mainstream, the
+  divergence and its compatibility evidence are recorded in the
   [design-divergence register](docs/architecture/design-divergences.md)
+  (13 entries). Scheduling, for example, uses a single global run
+  queue rather than per-CPU queues with load balancing. On the 2–4
+  vCPU systems Rux targets, this eliminates work stealing and
+  migration entirely; the measured queue hold is 5.1–6.1 µs, flat
+  across load. Per-CPU queues with balancing address larger core
+  counts — a difference of design intent and target scenario, not of
+  quality.
+- **Safety discipline with machine-checked evidence.** ~4,900
+  `unsafe` sites, each with a written safety contract. Kani proves
+  core unsafe code for all inputs (157 harnesses); proptest (1,088+),
+  SPIN (4 models), and Miri support it. Mirror-sync tooling keeps the
+  proofs pinned to the code they cover.
+- **One source tree, three architectures.** riscv64 (primary),
+  x86_64, aarch64 — each to a booting shell; Ubuntu runs on two of
+  the three.
 
 ---
 
-## 📊 Project Status
+## Ubuntu 22.04 → gdm login → GNOME Shell desktop
 
-| Metric | Value | Details |
-|--------|-------|---------|
-| **Source Lines** | ~249,500 lines in kernel/src (399 files) | [Review Coverage Map](docs/development/review-coverage.md) |
-| **Kernel Unit Tests** | 1,190 cases (riscv64), 1,119 (aarch64), all green | `make test [PLATFORM=…]` |
-| **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
-| **Linux LTP** | **1,005 / 1,869** (r15; trend 35 → 524 → 801 → 945 → 1,005) | [Roadmap](docs/progress/roadmap.md) |
-| **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
-| **Syscall Numbers** | 345+ dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | GNOME Shell desktop frames reproducible across 9 boots on riscv64, pointer-interactive at exact coordinates, typed keys hold a shell conversation in the focused terminal (2 boots); Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
-| **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
-| **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s | [Roadmap](docs/progress/roadmap.md) |
+![gdm login prompt on Rux](docs/images/gdm-greeter-login-2026-11-01.png)
+![GNOME Shell desktop on Rux](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png)
 
----
-
-## 🚀 Quick Start
-
-### Prerequisites
+*Unmodified Ubuntu userland: glibc, Xorg, D-Bus, GNOME Shell, mutter,
+interactive xterm. The gdm greeter runs the stock chain end to end —
+udevd → logind (CreateSession with a real session fd) → gdm3 →
+PAM → gdm-x-session → gnome-session; the login prompt renders and
+holds (login: rux). Desktop sessions hold 45 minutes with zero panics.*
 
 ```bash
-# Rust toolchain (nightly recommended)
-rustc --version
-cargo --version
-
-# QEMU system emulator
-qemu-system-riscv64 --version
-
-# RISC-V target (primary)
-rustup target add riscv64gc-unknown-none-elf
-
-# x86_64 target (optional)
-rustup target add x86_64-unknown-none
+make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / rux
 ```
 
-### Build and Run
+## OpenHarmony → launcher
+
+![OH launcher home screen](docs/images/oh-launcher-2026-10-31.png)
+
+*Unmodified OH x86_64_virt image: samgr, foundation, render_service,
+hilogd, appspawn, hdf devhosts — 135+ services, launcher home screen,
+`hdc shell` to the live guest.*
+
+---
+
+## Getting started
+
+Prerequisites: stable Rust (with the `riscv64gc-unknown-none-elf` and
+`riscv64gc-unknown-linux-musl` targets), QEMU ≥ 5.0, and
+`riscv64-linux-gnu-gcc`.
 
 ```bash
-# === Ubuntu desktop (highlight) ===
-make ubuntu-image    # build the Ubuntu 22.04 GUI disk image
-make ubuntu-run      # boot Ubuntu in a native window (4 CPUs, keyboard + mouse)
-
-# === Musl/minimal userland ===
-make build           # build kernel
-make user            # build userspace programs (shell, apps, toybox)
-make rootfs          # build rootfs image
-make run             # boot to shell
-
-# === Verification ===
-make test            # in-kernel unit tests (QEMU)
-make verify          # proptest invariant checks
-make kani            # Kani symbolic verification
-make miri            # Miri UB detection
-make spin            # SPIN concurrency model checking
+git clone https://github.com/topkernel/rux.git && cd rux
+make build            # riscv64 kernel
+make test             # in-kernel unit tests under QEMU
+make run              # boot the minimal rootfs to an interactive shell
 ```
 
-For detailed instructions: [Getting Started Guide](docs/guides/getting-started.md)
+C probe sources and the x86_64 musl sysroot ship as tarballs and are
+extracted automatically on the first `make user` / `make test`. Full
+details: [docs/guides/getting-started.md](docs/guides/getting-started.md).
+
+## Driving this repo with an AI agent
+
+This repository is maintained **by AI agents**. Everything an agent
+needs — environment, build map, verification ladder, coding contracts,
+debugging toolkit — is in one file: **[AI_GUIDE.md](AI_GUIDE.md)**.
+Point your agent at it first; then use any of these prompts as-is:
+
+> Read AI_GUIDE.md, then build the kernel for riscv64, run
+> `make test`, and boot `make run` to a shell. Report the test pass
+> count and any failure with serial-log excerpts.
+
+> Read AI_GUIDE.md. Here is the failure I observed: `<paste panic
+> excerpt / test name / LTP case>`. Symbolize it, find the root
+> cause, fix it, and verify with `make test` plus a boot. Commit in
+> English per AGENTS.md.
+
+> Read AI_GUIDE.md. Implement `<syscall or feature>` to the POSIX
+> contract, add a guest-side probe under `test/`, extend the
+> in-kernel tests, and pass the full verification ladder.
+
+> Read AI_GUIDE.md and AGENTS.md. Review `kernel/src/<subsystem>`
+> against the syscall contract and the merge-gate checklist; report
+> findings as file:line references with severity.
 
 ---
 
-## 📁 Project Structure
+## Platforms
 
+| | riscv64 | x86_64 | aarch64 |
+|---|---|---|---|
+| Boot to shell | ✅ | ✅ | ✅ |
+| Ubuntu / GNOME | ✅ | ✅ | bring-up |
+| OpenHarmony | — | ✅ | — |
+| In-kernel tests | 1,122 | ✅ | 1,119 |
+
+```bash
+make build                        # riscv64
+make build-x86                    # x86_64
+make build PLATFORM=aarch64       # aarch64
+make test [PLATFORM=…]            # in-kernel unit tests
+make verify && make kani          # proofs
 ```
-Rux/
-├── kernel/                 # Kernel source (~249,500 lines in src/)
-│   ├── src/
-│   │   ├── fs/           # Filesystem: ext4, jbd2, devfs, procfs, tmpfs, sysfs
-│   │   ├── arch/         # riscv64 + x86_64 (MM, boot, trap, uaccess)
-│   │   ├── drivers/      # virtio (blk/net/gpu/input), GPU, evdev, PCI
-│   │   ├── mm/           # zone/vmemmap/buddy/slab, VMA, page fault, COW, swap
-│   │   ├── syscall/      # 345+ system calls
-│   │   ├── ipc/          # System V, POSIX MQ, pipes, binder
-│   │   ├── net/          # TCP/UDP/IPv4 stack, sockets, netlink
-│   │   ├── sched/        # CFS, RT (FIFO/RR), Deadline (EDF+CBS), SMP
-│   │   ├── process/      # tasks, exec, signals, coredump
-│   │   ├── sync/         # futex, wait queues, rwlock, condvar
-│   │   ├── dfx/          # kallsyms, tracepoint!, pstore, perf_event_open,
-│   │   │                 #   syscost, oops/panic policy, per-switch probes
-│   │   └── tests/        # in-kernel unit tests (1,122 cases)
-│   └── build.rs
-├── userspace/            # mrsh, GUI apps, smoke tests, LTP, toybox
-├── toolchain/            # musl toolchains
-├── docs/                 # 📚 Documentation center
-└── test/                 # test programs and drivers
-```
-
-Detailed structure: [Project Structure Documentation](docs/architecture/structure.md)
 
 ---
 
-## ✨ Key Features
+## Numbers
 
-- **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags/gettid
-- **Memory Management**: Sv39 page tables/zone allocator/vmemmap/PCP/COW/demand paging/ASID/MAP_PRIVATE COW/swap (>2 GiB verified)/LRU page cache/OOM killer
-- **Filesystem**: ext4 (metadata_csum, journaling, crash recovery)/procfs/devfs/tmpfs/sysfs
-- **IPC**: System V semaphores/message queues/shared memory, POSIX message queues, pipes, epoll/select/poll/eventfd, futex
-- **Binder**: the OH binder protocol — transactions, node ownership, thread pools, async slots — running the full OH service stack
-- **Device Drivers**: virtio-blk/net/gpu/input, framebuffer, evdev with IRQ-driven delivery, PCI ECAM rescan/hotplug
-- **Network Stack**: TCP/UDP/IPv4/ARP/socket API/AF_PACKET/netlink/udhcpc bring-up/io_uring
-- **SMP Multi-core**: 4-core support/load balancing/IPI/per-CPU idle tasks
-- **Observability (DFX)**: kallsyms, tracepoint!-based tracefs events, pstore (console/dmesg ramoops), perf_event_open (software events, IP samples), oops/panic= policy, syscost accounting, per-switch probes — reference-kernel interface shapes throughout
-- **Security**: capabilities/LSM framework/signal/file/IPC permission checks
-- **POSIX Timers**: timer_create family, timerfd, setitimer/getitimer
-
----
-
-## 📚 Documentation
-
-- **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Milestones and current status
-- **[Design Divergences](docs/architecture/design-divergences.md)** - advantageous internal divergences from the mainstream, kept under the compatibility gate
-- **[Lock Ordering](docs/architecture/lock-ordering.md)** - kernel lock hierarchy and nesting rules
-- **[Review Coverage Map](docs/development/review-coverage.md)** - code-review coverage across kernel/src
-- **[Changelog](docs/progress/changelog.md)** - version history
-- **[Development Workflow](docs/guides/development.md)** - code standards
-- **[Formal Verification](docs/development/formal-verification.md)** - 4-layer verification strategy
+| | |
+|---|---|
+| Kernel source | ~310,000 lines, 422 files |
+| Syscalls dispatched | 345+ |
+| Kernel unit tests | 1,122 (riscv64) · 1,119 (aarch64), all green |
+| Formal verification | 1,116+ functions · 157 Kani proofs · 4 SPIN models |
+| Linux LTP | **1,005 / 1,869** (35 → 524 → 801 → 945 → 1,005) |
+| Swap under load | 2,064 MiB working set through 256 MB swap, verified |
+| Boot to Ubuntu login | ~4.5 s (4-CPU MTTCG) |
+| Design divergences | 13 registered, each with compatibility evidence |
 
 ---
 
-## 🧪 Test Status
+## Documentation
 
-**Total: ~4,250 test cases + formal verification proofs**
-
-| Test Suite | Cases | Run Command | Environment |
-|------------|-------|-------------|-------------|
-| **Kernel Unit Tests** | 1,122 | `make test` | QEMU (no_std, custom harness) |
-| **Formal Verification** | 1,116 | `make verify` | Host (std, proptest) |
-| **Linux LTP** | 1,869 | guest-side runner | QEMU |
-| **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
-| **Kani Proofs** | 157 | `make kani` | Host (Kani/CBMC, all-input symbolic) |
-| **SPIN Models** | 4 | `make spin` | Host (SPIN/Promela, concurrency) |
-| **Miri UB Detection** | - | `make miri` | Host (Miri, undefined behavior) |
-
-### Linux LTP (1,869-test list, guest-side runner)
-
-Full sweeps, newest first: **1,005 (r15)** ← 945 (r14) ← 801 ← 795 ← 771 ← 721
-← 673 ← 659 ← 524 ← 35. Each round's fix batches are in git history; the
-residual failures are feature gaps (hugemmap/fanotify/quotactl families) and
-musl-artifact families, tracked in the [Roadmap](docs/progress/roadmap.md).
-
-### Formal Verification (4 layers)
-
-| Layer | Tool | What It Verifies | Cases |
-|-------|------|------------------|-------|
-| **L1: Property Testing** | proptest | Data structure invariants (randomized) | 1,088 |
-| **L2: Symbolic Verification** | Kani | Core unsafe safety (all inputs, SAT/SMT) | 157 harnesses |
-| **L3: Concurrency** | SPIN/Promela | Deadlock-free, no lost wakeup, preempt balance | 4 models |
-| **L4: UB Detection** | Miri | Undefined behavior in test code | CI gate |
-
-Details: [Formal Verification Design](docs/development/formal-verification.md)
+[Getting Started](docs/guides/getting-started.md) ·
+[Roadmap](docs/progress/roadmap.md) ·
+[Design Divergences](docs/architecture/design-divergences.md) ·
+[Test Reports](docs/test/README.md) ·
+[Lock Ordering](docs/architecture/lock-ordering.md) ·
+[Review Coverage](docs/development/review-coverage.md) ·
+[Changelog](docs/progress/changelog.md)
 
 ---
 
-## 🤝 Contributing
+## License
 
-Contributions are welcome! Please check the [Roadmap](docs/progress/roadmap.md)
-for tasks that need help, and the
-[Development Workflow](docs/guides/development.md) for standards.
-
-**Core Principles**:
-- ✅ Strictly follow POSIX standards and Linux ABI
-- ✅ External interfaces must be 100% compatible with Linux
-- ✅ Internal implementation can use any design approach
-
----
-
-## 📄 License
-
-MIT License - See [LICENSE](LICENSE) for details
-
----
-
-## 🙏 Acknowledgments
-
-This project is inspired by:
-
-- [Linux Kernel](https://www.kernel.org/)
-
----
+MIT — see [LICENSE](LICENSE).
 
 <div align="center">
 
-**Made with ❤️ and Rust + AI**
+**Human sets the goal. AI writes the kernel.**
 
-[Project Home](https://github.com/topkernel/rux) • [Issue Tracker](https://github.com/topkernel/rux/issues)
+[Project Home](https://github.com/topkernel/rux) · [Issues](https://github.com/topkernel/rux/issues)
 
 </div>

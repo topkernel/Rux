@@ -439,7 +439,7 @@ struct RefDeath {
     clear_pending: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum DeathPhase {
     Armed,
     Queued,
@@ -1001,12 +1001,73 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 
 static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5 RIPPLE (fifth successor): lb30 proved the code-46 oneway is
+// ENQ'd, READ by foundation's main thread, and BC_FREE'd 8 ms later —
+// kernel delivery clean, yet no ability ever spawns. The next question
+// is what foundation DID in that window: OnStartUserDone back to the
+// sender (every early-return path calls it), the BMS launcher query, or
+// an appspawn Schedule hop. At the READ of the traced txn we latch
+// jiffies + the sender pid; for the next 120 s the ENQ hook prints every
+// transaction whose sender OR receiver is the foundation proc or the
+// StartUser sender proc. What is ABSENT names the dead leg.
+static AMS46_T0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_SENDER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+// leg-30B5: the thread that READ the traced code-46 (for the
+// THREAD-SNAPSHOT leg of the audit — its in-flight syscall + ring).
+static AMS46_READER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_RIP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ams46_on() -> bool {
     crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+}
+
+// lb47 (sixth successor): failed-send reason shadow. The fast-fail decode
+// (lb44/lb45) proved the code-46 handler's IsExistOsAccount returned false
+// in ~1 ms with ZERO binder traffic from foundation — the cached
+// osaccount proxy is death-marked (IPCObjectProxy::SendRequestInner's
+// IsObjectDead() early return, ERR_DEAD_OBJECT, only a ZLOGD) and
+// GetOsAccountProxy keeps returning it forever (proxy_ != nullptr). A
+// proxy only gets death-marked when an EARLIER send returned
+// BR_DEAD_REPLY/BR_FAILED_REPLY — and our kernel-side reason prints for
+// those are pr_info (invisible at LOGLEVEL=6) and the R-FAIL tap only
+// covers the 120 s ripple window. This shadow: every err_cmd site inside
+// binder_transaction stores a reason code; the send-command loop prints
+// each failed send at WARN with pid/tid/code/handle/BR/reason (budget
+// 400, ams46-gated). The FIRST such line for a foundation->accountmgr
+// handle names the moment the boot got poisoned.
+static SENDFAIL_WHY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn sendfail_why(code: u64) {
+    if ams46_on() {
+        SENDFAIL_WHY.store(code, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn sendfail_reason_name(code: u64) -> &'static str {
+    match code {
+        1 => "invalid-handle",
+        2 => "child-node-dead",
+        3 => "owner-proc-dead",
+        4 => "no-ctxmgr",
+        5 => "self-ctxmgr",
+        6 => "reply-empty-stack",
+        7 => "reply-stack-top",
+        8 => "reply-oneway",
+        9 => "reply-requester-dead",
+        10 => "target-alloc-none",
+        11 => "offsets-misalign",
+        12 => "buffer-alloc",
+        13 => "target-gone-relock",
+        14 => "target-died-pre-copy",
+        15 => "data-copy-fault",
+        16 => "offsets-copy-fault",
+        17 => "reply-target-gone",
+        18 => "translate-fd",
+        _ => "unknown",
+    }
 }
 
 // ============================================================================
@@ -1759,12 +1820,19 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
     crate::dfx::schb::note_proc_open(pid);
-    crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
+    // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
+    // once per binder-using process start — on OH boots that is nearly
+    // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
+    // per process start (the EXITGRP class, e2717687). The info line is
+    // demoted to pr_debug; the sc157 open-probe joins the dfx=syscalltrace
+    // family (the sc156/sc157 hunts re-arm with the flag).
+    crate::pr_debug!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
     // the info line). Decides in one boot whether forked appspawn
     // children EVER open /dev/binder themselves (own proc, own pid) or
     // reuse the daemon's inherited fd (shared proc — the sc156 APPTXN
     // "from pid=330 comm='m.ohos.systemui'" shape).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
     {
         static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -1867,15 +1935,28 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                     }
                 }
                 if !deaths.is_empty() {
+                    // lb51: the notice lines print under WORLD — use the
+                    // lockless writer and a budget (a big proc death
+                    // carries dozens of armed refs across holder procs;
+                    // see the DRS tap note). Collected (desc, cookie)
+                    // pairs print AFTER the qim borrow ends.
+                    static NOTICE_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let mut printed = Vec::new();
+                    if NOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                        printed = deaths.clone();
+                    }
+                    for (desc, cookie) in printed {
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        use core::fmt::Write as _;
+                        let _ = writeln!(
+                            w,
+                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
+                            q.pid, desc, cookie, proc.pid
+                        );
+                    }
                     let qim = pm(world, &q).im();
                     for (desc, cookie) in deaths {
-                        crate::pr_info!(
-                            "binder: death notice pid {} desc {} cookie {:#x} (owner {} died)",
-                            q.pid,
-                            desc,
-                            cookie,
-                            proc.pid
-                        );
                         qim.todo.push_back(Work::DeadBinder { desc, cookie });
                     }
                     wake_targets.push(q.clone());
@@ -2058,6 +2139,34 @@ unsafe fn dead_reply_to_sender(
     let Some(fp) = &txn.from_proc else {
         return wakes;
     };
+    // lb48 DRS tap: this is the ONLY BR_DEAD_REPLY producer that bypasses
+    // binder_transaction's sendfail shadow — a sync sender whose
+    // transaction was queued or in-flight on a thread/proc that went
+    // away. The sender's userspace maps the reply through
+    // OnDeadOrFailedReply; if the ioctl layer ever surfaces it as -32 it
+    // death-marks the proxy. Name every delivery.
+    if ams46_on() {
+        static DRS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if DRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+            // lb51: WORLD is held here — a printk-path WARN under a
+            // backpressured console held the global binder lock past the
+            // 2 s watchdog (DEADLOCK prints named lock=..., the WORLD
+            // symbol) and wedged lb48/lb50/lb51. All death-event taps
+            // that run under WORLD print through the lockless batched
+            // ConsoleWriter instead (same discipline as SLOW-TXN).
+            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            use core::fmt::Write as _;
+            let _ = writeln!(
+                w,
+                "AMS46-DRS dying pid{} txn{} code{:#x} from pid{} tid{}",
+                dying.pid,
+                txn.id,
+                txn.code,
+                fp.pid,
+                txn.from_tid.unwrap_or(0)
+            );
+        }
+    }
     let same = Arc::ptr_eq(fp, dying);
     let mut delivered = false;
     if let Some(ftid) = txn.from_tid {
@@ -2506,6 +2615,13 @@ pub fn binder_mmap_handler(
     // DONTFORK drop of the daemon's binder VMA is the prime suspect;
     // the daemon's [base, base+size) vs the crash VA decides it in one
     // boot without a guest-side maps dump.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): binder_mmap runs
+    // once per binder-using process start — two lines per spawn through
+    // the polled UART (the EXITGRP class, e2717687). The sc160 probe
+    // joins the dfx=syscalltrace family (the hunt re-arms with the
+    // flag); the info line is demoted to pr_debug.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
     {
         static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2519,7 +2635,7 @@ pub fn binder_mmap_handler(
             );
         }
     }
-    crate::pr_info!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
+    crate::pr_debug!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
     Ok(vaddr)
 }
 
@@ -2636,6 +2752,27 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                             if let Some(d) = r.death.as_mut() {
                                 if matches!(d.phase, DeathPhase::Armed) {
                                     d.phase = DeathPhase::Queued;
+                                    // lb48: the child-node death notice
+                                    // (reg_tgid exit path) — same class as
+                                    // the proc-exit notice. lb51: lockless
+                                    // writer + budget (under WORLD).
+                                    static CNOTICE_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if CNOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 120
+                                    {
+                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        use core::fmt::Write as _;
+                                        let _ = writeln!(
+                                            w,
+                                            "binder: child-node death notice pid {} desc {} cookie {:#x} (owner {} reg_tgid {} exited)",
+                                            q.pid,
+                                            r.desc,
+                                            d.cookie,
+                                            owner.pid,
+                                            tgid
+                                        );
+                                    }
                                     qim.im().todo.push_back(Work::DeadBinder {
                                         desc: r.desc,
                                         cookie: d.cookie,
@@ -3406,6 +3543,44 @@ pub fn txn_hang_audit() {
                 &h.outstanding
             }
         );
+        // lb59 (eighth successor): the 30 s CreateNewUser handler parked
+        // in a PRIVATE futex retry loop (sys=202, a1=0x80, stack uaddr
+        // changing every ~5 s — the waited-on producer lives in another
+        // thread of the same process). When any txn's exec crosses 20 s,
+        // dump EVERY task's state once: the parked locations of the
+        // server's sibling threads name the leaf the handler waits for
+        // (the FFRT/IPC worker-exhaustion shape shows as all workers
+        // parked as CLIENTS).
+        if h.exec_ms >= 20_000 {
+            // Re-armable once per 600 s (the global one-shot latch spent
+            // itself on an early 20 s samgr txn and went dark exactly when
+            // the real installs hang formed — lb70 lesson).
+            static HANG_DUMP_AT: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now_j = crate::drivers::timer::get_jiffies();
+            let last = HANG_DUMP_AT.load(core::sync::atomic::Ordering::Acquire);
+            if now_j.wrapping_sub(last) >= 60_000
+                && HANG_DUMP_AT
+                    .compare_exchange(
+                        last,
+                        now_j,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
+                // -> wait_for_used_interruptible, 441 s): capture the
+                // virtio ring state at the hang moment — at_device vs
+                // used-ahead-of-walker vs matched-but-undelivered splits
+                // the engine (lost kick / deferred softirq / descriptor
+                // window) in one line. DIRECT console (pr_err from this
+                // context was dropped on lb70/lb71 — printk contention;
+                // the TXN-HANG lines themselves print via ConsoleWriter).
+                crate::drivers::virtio::vw_snap_direct();
+            }
+        }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
         // entry was written by this tid's own entry path (open family:
@@ -3671,6 +3846,95 @@ pub fn ams46_audit() {
     }
     if !found {
         return;
+    }
+    // leg-30B5 THREAD-SNAPSHOT: lb32 showed the code-46 READ by
+    // foundation's main thread, its IsOsAccountExists reply returned,
+    // then the thread went dark with the async slot held forever and
+    // zero follow-up binder traffic — stuck in pure userspace inside
+    // the StartUser handler. The reader task's in-flight syscall
+    // (kernel-stack entry frame) + syscall-nr ring names the shape:
+    // nanosleep poll loop (the isBoot BMS retry ladder), a futex park,
+    // or live compute.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let rtid = AMS46_READER.load(Relaxed);
+        if rtid != 0 {
+            static SNAP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SNAP_N.fetch_add(1, Relaxed);
+            if n < 40 && (n % 2) == 0 {
+                let tk = unsafe { crate::sched::find_task_by_pid(rtid) };
+                if tk.is_null() {
+                    crate::pr_warn!("AMS46-T j={} tid={} GONE", now / 100, rtid);
+                } else {
+                    // SAFETY: diagnostic reads of the task's own fields
+                    // and mapped kernel stack (sleep_snapshot contract).
+                    let t = unsafe { &*tk };
+                    let state = t.state().bits() as u64;
+                    let (sys, rip, a0) = match t.kernel_stack_top_checked() {
+                        None => (0u64, 0u64, 0u64),
+                        Some(top) => {
+                            #[cfg(feature = "x86_64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi) }
+                            }
+                            #[cfg(feature = "riscv64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe { ((*regs).a7, (*regs).epc, (*regs).a0) }
+                            }
+                            #[cfg(feature = "aarch64")]
+                            {
+                                let regs = (top.wrapping_sub(
+                                    crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                                ))
+                                    as *const crate::arch::aarch64::pt_regs::PtRegs;
+                                // SAFETY: entry-frame read of this task's stack.
+                                unsafe {
+                                    ((*regs).syscallno, (*regs).pc, (*regs).regs[0])
+                                }
+                            }
+                        }
+                    };
+                    use core::fmt::Write;
+                    let mut s = alloc::string::String::new();
+                    const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                    let cur = t.last_calls_cur.load(Relaxed);
+                    let mut shown = 0usize;
+                    for k in 0..RL {
+                        // newest first
+                        let i = (cur + RL - k) % RL;
+                        let v = t.last_calls[i].load(Relaxed);
+                        if v != 0 {
+                            let _ = write!(s, " {}", v & 0xffff);
+                            shown += 1;
+                            if shown >= 16 {
+                                break;
+                            }
+                        }
+                    }
+                    crate::pr_warn!(
+                        "AMS46-T j={} tid={} state={:#x} sys={} rip={:#x} a0={:#x} calls:{}",
+                        now / 100,
+                        rtid,
+                        state,
+                        sys,
+                        rip,
+                        a0,
+                        s
+                    );
+                }
+            }
+        }
     }
     if async_held || parked > 0 || todo_d > 0 {
         static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -4869,6 +5133,27 @@ fn binder_ioctl_write_read(
             &mut bwr.write_consumed,
         );
         if ret < 0 {
+            // lb48 WERR tap: a negative ioctl return reaches userspace as
+            // -errno through WriteBinder; errno 32 (EPIPE) is exactly
+            // ERR_DEAD_OBJECT (-32), the ONLY value that death-marks an
+            // IPCObjectProxy from a send. Every negative write-side
+            // return is named so the -32 moment, if it ever happens, is
+            // attributed to its pid/tid/first-command.
+            if ams46_on() {
+                static WERR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if WERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+                    let first = get_user_at::<u32>(bwr.write_buffer, 0).unwrap_or(0xFFFF_FFFF);
+                    crate::pr_warn!(
+                        "AMS46-WERR pid={} tid={} rc={} firstcmd={:#x} wcons={}",
+                        proc.pid,
+                        thread.tid,
+                        ret,
+                        first,
+                        bwr.write_consumed
+                    );
+                }
+            }
             bwr.read_consumed = 0;
             // SAFETY: 48-byte copy back to the same location.
             unsafe {
@@ -5157,6 +5442,59 @@ fn binder_thread_write(
                     0
                 };
                 ptr += if sg { 72 } else { 64 };
+                // lb57 (eighth successor): the osaccount proxy-poison engine.
+                // OH's IPCObjectProxy::SendRequestInner marks its proxy dead
+                // when the send returns ERR_DEAD_OBJECT (=32, c_utils errors.h
+                // BASE_ERR_OFFSET+EPIPE), and the ONLY +32 a sync send can
+                // return with zero kernel error verdicts is HandleReply's
+                // TF_STATUS_CODE leg (binder_invoker.cpp:1026): a reply whose
+                // first int32 IS the status. A server stub that returns an
+                // error with an EMPTY reply parcel sends exactly that shape
+                // (BinderInvoker::SendReply -> WriteTransaction sets
+                // TF_STATUS_CODE + the int32), so a transient server-side 32
+                // PERMANENTLY death-marks every caller's proxy. Tap every
+                // status-code reply with a nonzero status: names the server
+                // pid/tid, the code, and the poison value.
+                if reply
+                    && ams46_on()
+                    && tr.flags & _TF_STATUS_CODE != 0
+                    && tr.data_size >= 4
+                {
+                    // lb58: samgr's early boot answers a storm of
+                    // status-7 (ERR_NULL_OBJECT, SA-not-loaded) replies
+                    // that would burn any shared budget in seconds —
+                    // budget the POISON value (32) separately and cap the
+                    // rest.
+                    static SC_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    static SC_POISON: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val != 0 {
+                        let n = if val == 32 {
+                            SC_POISON.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        } else {
+                            SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        };
+                        if n < (if val == 32 { 4000 } else { 50 }) {
+                            crate::pr_warn!(
+                                "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
+                                proc.pid,
+                                thread.tid,
+                                tr.code,
+                                val,
+                                if val == 32 { " POISON(ERR_DEAD_OBJECT)" } else { "" }
+                            );
+                        }
+                    }
+                }
                 // dfx=bindertrace: payload head for small parcels — the
                 // interface token ("ohos.system...." / hdf names) is ASCII
                 // at the head and names the target interface; replies carry
@@ -5200,6 +5538,29 @@ fn binder_thread_write(
                 let mut err_cmd: u32 = 0;
                 binder_transaction(proc, thread, &mut tr, reply, sg_size, &mut err_cmd);
                 if err_cmd != 0 {
+                    // lb47: ALWAYS-ON failed-send WARN under ams46 (the
+                    // R-FAIL print below only covers the 120 s ripple
+                    // window; the proxy-poisoning send happens long before
+                    // any code-46). Budget 400; reason shadow from the
+                    // sendfail_why stores inside binder_transaction.
+                    if ams46_on() {
+                        static SF_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if SF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                            let why = SENDFAIL_WHY.load(core::sync::atomic::Ordering::Relaxed);
+                            crate::pr_warn!(
+                                "AMS46-SENDFAIL pid={} tid={} code={:#x} h={} BR={:#x} why={}-{} {}",
+                                proc.pid,
+                                thread.tid,
+                                tr.code,
+                                tr.target_handle,
+                                err_cmd,
+                                why,
+                                sendfail_reason_name(why),
+                                if reply { "reply" } else { "txn" }
+                            );
+                        }
+                    }
                     crate::pr_info!(
                         "binder: pid {} {} failed with BR {:#x} (code {}, ds {} os {})",
                         proc.pid,
@@ -5209,6 +5570,38 @@ fn binder_thread_write(
                         tr.data_size,
                         tr.offsets_size
                     );
+                    // leg-30B6: inside the ripple window, a FAILED send
+                    // from foundation (or the StartUser sender) at WARN —
+                    // the fast-fail shape's IsExistOsAccount made zero
+                    // successful calls; if the lookup was attempted and
+                    // failed at our send layer, this names it (the
+                    // pr_info above is invisible at loglevel 6).
+                    if ams46_on() {
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let t0 = AMS46_T0.load(Relaxed);
+                        if t0 != 0 {
+                            let now_j = crate::drivers::timer::get_jiffies() as u32;
+                            if now_j.wrapping_sub(t0)
+                                < (crate::config::KERNEL_HZ as u32).saturating_mul(120)
+                            {
+                                let tp = AMS46_TPID.load(Relaxed);
+                                let sp = AMS46_SENDER.load(Relaxed);
+                                if proc.pid == tp || proc.pid == sp {
+                                    static RF_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if RF_N.fetch_add(1, Relaxed) < 64 {
+                                        crate::pr_warn!(
+                                            "AMS46-R-FAIL pid{} code={:#x} BR={:#x} {}",
+                                            proc.pid,
+                                            tr.code,
+                                            err_cmd,
+                                            if reply { "reply" } else { "txn" }
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Linux stops processing write commands and queues the
                     // error as thread work for the following read.
                     let w = world_lock();
@@ -5606,6 +5999,38 @@ fn binder_thread_write(
                         };
                         if request {
                             if pim.refs[ridx].death.is_some() {
+                                // lb48 ARM tap: a re-arm while a death
+                                // record still occupies the slot is the
+                                // silent-drop shape — userspace believes
+                                // the recipient attached, the kernel
+                                // never notifies. Named at WARN because
+                                // it is the one arm outcome with no
+                                // other visibility.
+                                if ams46_on() {
+                                    static ARM_DUP_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if ARM_DUP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 120
+                                    {
+                                        let owner = world
+                                            .procs
+                                            .iter()
+                                            .find(|q| q.id == pim.refs[ridx].node.proc_id)
+                                            .map(|q| q.pid)
+                                            .unwrap_or(0);
+                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        use core::fmt::Write as _;
+                                        let _ = writeln!(
+                                            w,
+                                            "AMS46-ARM dup pid={} desc={} cookie={:#x} owner={} phase={:?}",
+                                            proc.pid,
+                                            target,
+                                            cookie,
+                                            owner,
+                                            pim.refs[ridx].death.as_ref().map(|d| d.phase)
+                                        );
+                                    }
+                                }
                                 drop(w);
                                 crate::pr_info!(
                                     "binder: pid {} BC_REQUEST_DEATH_NOTIFICATION already set (desc {})",
@@ -5615,6 +6040,44 @@ fn binder_thread_write(
                                 continue;
                             }
                             let already_dead = node_is_dead(world, &pim.refs[ridx].node);
+                            // lb48 ARM tap: desc -> node-owner map at arm
+                            // time. The death notice for a desc is only
+                            // interpretable against this table: a notice
+                            // whose desc was armed against owner X tells
+                            // us which userspace proxy (the cookie) the
+                            // framework expected to die with X.
+                            if ams46_on() {
+                                static ARM_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                // lb49: skip the first ~100 s — lb48 spent the
+                                // whole budget on the boot-start arm storm
+                                // (240 gone by ~35 s), dark exactly over the
+                                // account phase the map exists for.
+                                // lb51: lockless writer (under WORLD).
+                                let j = crate::drivers::timer::get_jiffies();
+                                if j >= 1000
+                                    && ARM_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                        < 240
+                                {
+                                    let owner = world
+                                        .procs
+                                        .iter()
+                                        .find(|q| q.id == pim.refs[ridx].node.proc_id)
+                                        .map(|q| q.pid)
+                                        .unwrap_or(0);
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    let _ = writeln!(
+                                        w,
+                                        "AMS46-ARM pid={} desc={} cookie={:#x} owner={} nodedead={}",
+                                        proc.pid,
+                                        target,
+                                        cookie,
+                                        owner,
+                                        already_dead
+                                    );
+                                }
+                            }
                             pim.refs[ridx].death = Some(RefDeath {
                                 cookie,
                                 phase: if already_dead { DeathPhase::Queued } else { DeathPhase::Armed },
@@ -5791,11 +6254,13 @@ fn binder_transaction(
                 // transaction delivered TO this thread.
                 let stack_top = thread.st().txn_stack.last().cloned();
                 let Some(t) = stack_top else {
+                    sendfail_why(6);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY with empty transaction stack");
                     return;
                 };
                 if t.to_tid() != Some(thread.tid) || !Arc::ptr_eq(&t.to_proc, proc) {
+                    sendfail_why(7);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!(
                         "binder: BC_REPLY stack top not ours (to_tid={:?}, me={})",
@@ -5873,6 +6338,7 @@ fn binder_transaction(
                     }
                 }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
+                    sendfail_why(8);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY on oneway");
                     return;
@@ -5881,6 +6347,7 @@ fn binder_transaction(
                 // it, a failed reply leaves the original sender unwakeable.
                 thread.hist(EV_REPLY_POP, t.id as u32, from_proc.pid);
                 if from_proc.im().is_dead {
+                    sendfail_why(9);
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: BC_REPLY requester dead");
                     return;
@@ -5888,6 +6355,43 @@ fn binder_transaction(
                 target_thread_key = Some((from_proc, from_tid));
                 target_proc = Some(target_thread_key.as_ref().unwrap().0.clone());
                 allows_fd = t.flags & TF_ACCEPT_FDS != 0;
+                // lb61 (ninth successor): name the CLIENT of every poison
+                // reply. The server-side STATUSCODE-REPLY tap cannot see
+                // who receives the 32; this site has the originating txn
+                // (from_proc/from_tid + the ORIGINAL request code), so the
+                // print names the exact proxy that gets death-marked by
+                // IPCObjectProxy::SendRequestInner on the client side.
+                if ams46_on()
+                    && tr.flags & _TF_STATUS_CODE != 0
+                    && tr.data_size >= 4
+                {
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val == 32 {
+                        // HOTPATH-PRINT: binder poison-32 delivery hunt;
+                        // budget-gated (P32_N, 4000/boot) — oh-launcher lane
+                        static P32_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 4000 {
+                            let (fproc, ftid) = target_thread_key.as_ref().unwrap();
+                            crate::pr_warn!(
+                                "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
+                                proc.pid,
+                                thread.tid,
+                                fproc.pid,
+                                ftid,
+                                t.code
+                            );
+                        }
+                    }
+                }
                 in_reply_to = Some(t);
             } else if tr.target_handle != 0 {
                 let node = pm(world, proc)
@@ -5897,6 +6401,7 @@ fn binder_transaction(
                     .find(|r| r.desc == tr.target_handle)
                     .map(|r| r.node.clone());
                 let Some(node) = node else {
+                    sendfail_why(1);
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
                     // sc141: failed-send visibility for the launcher lane —
@@ -5909,6 +6414,7 @@ fn binder_transaction(
             } else {
                 let mgr = world.mgr_node[proc.ctx as usize].clone();
                 let Some(mgr) = mgr else {
+                    sendfail_why(4);
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
                     app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
@@ -5917,6 +6423,7 @@ fn binder_transaction(
                 if mgr.proc_id == proc.id {
                     // Linux: a transaction to the context manager from its
                     // own process is a protocol error.
+                    sendfail_why(5);
                     *err_cmd = BR_FAILED_REPLY;
                     return;
                 }
@@ -5930,6 +6437,7 @@ fn binder_transaction(
                 // delivery (work_readable_by gate); fail fast like a
                 // dead-owner node instead of queueing forever.
                 if node.dead.load(core::sync::atomic::Ordering::Acquire) {
+                    sendfail_why(2);
                     *err_cmd = BR_DEAD_REPLY;
                     app_txn_fail_print(proc, "child-node-dead", tr.target_handle as u64, tr.code as u64);
                     return;
@@ -5937,6 +6445,7 @@ fn binder_transaction(
                 match world.procs.iter().find(|p| p.id == node.proc_id) {
                     Some(p) if !p.im().is_dead => target_proc = Some(p.clone()),
                     _ => {
+                        sendfail_why(3);
                         *err_cmd = BR_DEAD_REPLY;
                         return;
                     }
@@ -5953,10 +6462,12 @@ fn binder_transaction(
             // own process stays an error above, exactly like 5.10's
             // "got transaction to context manager from process owning it".
             if tp.im().alloc.is_none() {
+                sendfail_why(10);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
             }
             if offsets_size % 8 != 0 {
+                sendfail_why(11);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
             }
@@ -6035,6 +6546,7 @@ fn binder_transaction(
                     }) {
                         Some(Some(o)) => o,
                         _ => {
+                            sendfail_why(12);
                             *err_cmd = BR_FAILED_REPLY;
                             crate::pr_info!(
                                 "binder: buffer alloc failed (need {}+{}+{})",
@@ -6064,6 +6576,7 @@ fn binder_transaction(
     // allocator before this re-lock. Reply DEAD instead of unwrapping a
     // freed alloc; the cleanup mirrors the copy-fault paths below.
     let Some(target) = target_proc.clone() else {
+        sendfail_why(13);
         *err_cmd = BR_DEAD_REPLY;
         return;
     };
@@ -6094,6 +6607,7 @@ fn binder_transaction(
         None => {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(14);
             *err_cmd = BR_DEAD_REPLY;
             crate::pr_info!(
                 "binder: target pid {} died before payload copy — BR_DEAD_REPLY",
@@ -6110,6 +6624,7 @@ fn binder_transaction(
         {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(15);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
@@ -6123,6 +6638,7 @@ fn binder_transaction(
         {
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
+            sendfail_why(16);
             *err_cmd = BR_FAILED_REPLY;
             crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
@@ -6493,6 +7009,48 @@ fn binder_transaction(
         }
     }
 
+    // lb-lane hunt (launcher bring-up): samgr -> client CALLBACK
+    // deliveries. accountmgr (SA 200) creates user 100 — the gate the
+    // launcher spawn waits on — only from OnAddSystemAbility callbacks,
+    // which samgr sends as NEW (non-reply) transactions to the
+    // subscriber's stub. On the lb1 boot none of the three
+    // AddSystemAbilityListener subscriptions (storage/BMS/AMS) ever
+    // fired while direct client->accountmgr queries worked, so the
+    // notification direction is the suspect. This tap rings every
+    // transaction whose SENDER is the latched samgr pid and whose
+    // target is a different process: target pid/tgid, code, oneway
+    // bit, txn id — the send-side twin of SLRD's read-side audit, for
+    // the callback direction.
+    {
+        let samgr_pid = binder_sareg_samgr_pid();
+        if samgr_pid != 0
+            && !reply
+            && proc.pid as u32 == samgr_pid
+            && target.pid as u32 != samgr_pid
+        {
+            static SACB_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SACB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "SACB txn{} code={} flags={:#x}{} comm='{}' -> pid={} tid={} dlen={}",
+                    txn.id,
+                    tr.code,
+                    tr.flags,
+                    if tr.flags & TF_ONE_WAY != 0 { " ONEWAY" } else { "" },
+                    comm,
+                    target.pid,
+                    crate::process::current_pid(),
+                    data_size
+                );
+            }
+        }
+    }
+
     // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
     // IAbilityManager interface token on the sender's parcel head,
     // latch the AMS node id + foundation pid on first sight, and ring
@@ -6522,20 +7080,85 @@ fn binder_transaction(
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
+                    // leg-30B6: the sender's euid — CheckUserParam
+                    // rejects the call unless GetCallingUid() reads
+                    // 3058 (accountmgr); this prints the kernel-side
+                    // truth at enqueue.
+                    let euid = crate::sched::current()
+                        .map(|t| unsafe { (*t).cred().euid })
+                        .unwrap_or(0);
                     let hex: alloc::string::String = hb[..48]
                         .iter()
                         .map(|b| alloc::format!("{:02x}", b))
                         .collect();
                     crate::pr_warn!(
-                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' flags={:#x} dlen={} parcel={}",
+                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' euid={} flags={:#x} dlen={} parcel={}",
                         txn.id,
                         proc.pid,
                         thread.tid,
                         comm,
+                        euid,
                         tr.flags,
                         data_size,
                         hex
                     );
+                }
+            }
+        }
+    }
+
+    // leg-30B5 RIPPLE (dfx=ams46): inside the 120 s window after the
+    // traced code-46 was READ, print every transaction whose sender or
+    // receiver is the foundation proc (AMS46_TPID) or the StartUser
+    // sender proc (AMS46_SENDER). Budget 640; zero lines outside the
+    // window.
+    if ams46_on() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let t0 = AMS46_T0.load(Relaxed);
+        if t0 != 0 {
+            let now_j = crate::drivers::timer::get_jiffies() as u32;
+            if now_j.wrapping_sub(t0) < (crate::config::KERNEL_HZ as u32).saturating_mul(120) {
+                let tp = AMS46_TPID.load(Relaxed);
+                let sp = AMS46_SENDER.load(Relaxed);
+                if proc.pid == tp || proc.pid == sp || target.pid == tp || target.pid == sp {
+                    if AMS46_RIP_N.fetch_add(1, Relaxed) < 640 {
+                        let rcomm = crate::sched::current()
+                            .map(|t| unsafe { (*t).comm() })
+                            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                            .unwrap_or("")
+                            .trim_end_matches('\0');
+                        // leg-30B6: parcel head — the OnStartUserDone
+                        // callback's errcode rides in this buffer (after
+                        // the IUserCallback token: 8B header + u32 len +
+                        // 46B UTF-16 + int32 userId + int32 errcode =
+                        // 68 bytes total); 80 covers it whole.
+                        let mut rb = [0u8; 80];
+                        let hex: alloc::string::String = if tr.data_buffer != 0
+                            && unsafe {
+                                crate::arch::uaccess::copy_from_user(
+                                    rb.as_mut_ptr(),
+                                    tr.data_buffer as *const u8,
+                                    rb.len(),
+                                ) == 0
+                            }
+                        {
+                            rb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+                        } else {
+                            alloc::string::String::from("-")
+                        };
+                        crate::pr_warn!(
+                            "AMS46-R txn{} pid{} tid{} '{}' -> pid{} code={:#x} oneway={} dlen={} parcel={}",
+                            txn.id,
+                            proc.pid,
+                            thread.tid,
+                            rcomm,
+                            target.pid,
+                            tr.code,
+                            tr.flags & TF_ONE_WAY != 0,
+                            data_size,
+                            hex
+                        );
+                    }
                 }
             }
         }
@@ -6861,6 +7484,7 @@ fn binder_transaction(
                     wakes.push(tproc.clone());
                     wakes.push(proc.clone());
                 } else {
+                    sendfail_why(17);
                     *err_cmd = BR_DEAD_REPLY;
                     reply_target_gone = true;
                     thread.hist(
@@ -7175,6 +7799,7 @@ fn fail_txn_after_fixups(
     release_block(target, block_off);
     close_installed_fds(installed_fds);
     unpin_after_failure(target, node, reply, oneway);
+    sendfail_why(18);
     *err_cmd = BR_FAILED_REPLY;
 }
 
@@ -7789,6 +8414,32 @@ fn binder_thread_read(
                                     t.code,
                                     is_reply
                                 );
+                                // leg-30B5 RIPPLE: open the 120 s
+                                // follow-window at the traced code-46's
+                                // kernel delivery; latch the sender proc
+                                // and the reading thread.
+                                if AMS46_T0.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                    AMS46_T0.store(
+                                        crate::drivers::timer::get_jiffies() as u32,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    let fp = t
+                                        .from_proc
+                                        .as_ref()
+                                        .map(|p| p.pid)
+                                        .unwrap_or(0);
+                                    AMS46_SENDER.store(fp, core::sync::atomic::Ordering::Relaxed);
+                                    AMS46_READER.store(
+                                        thread.tid,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    crate::pr_warn!(
+                                        "AMS46 RIPPLE window open (foundation={} sender={} reader={})",
+                                        AMS46_TPID.load(core::sync::atomic::Ordering::Relaxed),
+                                        fp,
+                                        thread.tid
+                                    );
+                                }
                             }
                             // sc262 (leg-23): SLTX read-side — an
                             // app-family child's thread picked this

@@ -292,6 +292,32 @@ impl Dentry {
 
     /// Add a child dentry. If a child with the same name exists, it is replaced.
     pub fn add_child(&self, name: String, child: Arc<Dentry>) {
+        // lb-lane hunt (OH /storage invisibility): pid 1's early tmpfs
+        // mounts (/mnt, /mnt/data, /storage — mounted rc=0 at ~1.2 s) are
+        // invisible to pid 1 itself by 4.8 s (mkdir under /mnt -> EROFS,
+        // mkdir /storage/media -> ENOENT, kernel-confirmed), while later
+        // block mounts stay visible. add_child REPLACES a same-name child
+        // — if anything re-creates a dentry whose predecessor carried a
+        // mount, the replacement has none and every later walk loses the
+        // mount. Ring exactly that case.
+        {
+            let guard = self.children.lock();
+            if let Some(old) = guard.get(&name) {
+                if old.vfsmount.lock().is_some() && child.vfsmount.lock().is_none() {
+                    static DUPMNT_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if DUPMNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        let pname = self.name.lock().clone();
+                        crate::pr_warn!(
+                            "DUPMNT-REPLACE parent='{}' name='{}' (pid {})",
+                            pname,
+                            name,
+                            crate::process::current_pid()
+                        );
+                    }
+                }
+            }
+        }
         self.children.lock().insert(name, child);
     }
 

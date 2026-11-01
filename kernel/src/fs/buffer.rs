@@ -432,6 +432,12 @@ impl FileBuffer {
     /// Resize (ftruncate semantics: grow-with-zeros / shrink drops bytes).
     /// Growth allocates one chunk at a time; Err(ENOMEM) when the zone
     /// allocator and the heap both fail (R76).
+    ///
+    /// Shrink zeroes the tail of the kept last chunk: ftruncate(2) says the
+    /// file "is extended, and the extended portion reads as null bytes" —
+    /// a shrink-then-grow would otherwise serve the pre-shrink bytes back
+    /// (the chunks are kept, only `len` bounds reads). Same discipline as
+    /// TmpfsNode::truncate.
     pub fn resize(&mut self, new_len: usize) -> Result<(), ()> {
         let new_chunks = new_len.div_ceil(FILE_BUFFER_CHUNK);
         while self.chunks.len() < new_chunks {
@@ -441,10 +447,26 @@ impl FileBuffer {
             }
         }
         if new_len < self.len {
-            // Shrink: drop whole trailing chunks; the new last chunk keeps
-            // stale bytes past new_len, but len bounds every read.
+            // Shrink: drop whole trailing chunks, then zero the kept last
+            // chunk's tail so a later re-extend exposes zeros, not stale
+            // data.
             let keep = new_len.div_ceil(FILE_BUFFER_CHUNK);
             self.chunks.truncate(keep);
+            let tail = new_len % FILE_BUFFER_CHUNK;
+            if tail != 0 {
+                if let Some(c) = self.chunks.last_mut() {
+                    // SAFETY: &mut access to the chunk we own; the write
+                    // stays inside the FILE_BUFFER_CHUNK-sized chunk.
+                    unsafe {
+                        let base = c.base_ptr();
+                        core::ptr::write_bytes(
+                            base.add(tail),
+                            0,
+                            FILE_BUFFER_CHUNK - tail,
+                        );
+                    }
+                }
+            }
         }
         self.len = new_len;
         Ok(())

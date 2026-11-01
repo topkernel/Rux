@@ -153,6 +153,15 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         None => return no_context(regs, fault_addr),
     };
 
+    // Interrupt context: the mm fault path allocates and takes the PTE
+    // section — it must not run from an IRQ handler (twin guard, the
+    // x86_64/riscv64 arms; the riscv64 preempt-underflow healing engine
+    // has no aarch64 counterpart, so this is the plain no_context form).
+    // A fixup entry still unwinds a uaccess copy cleanly.
+    if crate::interrupt::preempt::in_interrupt() {
+        return no_context(regs, fault_addr);
+    }
+
     // Kernel-mode fault on a user address
     if regs.kernel_mode() {
         // Demand-fill BEFORE fixup (twin R82): a uaccess fault on a

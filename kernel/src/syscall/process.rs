@@ -1307,7 +1307,17 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(e) => return e,
     };
 
+    // forkprof (cmdline forkprof=1): whole-exec wall (exec's own mm
+    // teardown + ELF load is the other half of lat_proc,exec).
+    let fp_t_exec = if crate::dfx::forkprof::on() {
+        crate::dfx::forkprof::now()
+    } else {
+        0
+    };
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
+    if fp_t_exec != 0 {
+        crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);
+    }
     // sc39 gate: the launcher spawn child completes every sandbox hook
     // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
     // exec'ing — name any failed exec of an app-shaped path (a bare
@@ -1331,6 +1341,34 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
                 pathname_str,
                 rc,
                 root_str,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    } else if rc < 0 {
+        // lb-lane hunt (syscost census): a stockperf boot made ~111k
+        // execve syscalls in the first 60 s while only ~110 execs
+        // succeeded — a failed-exec retry storm burning ~2 CPUs (the
+        // rmap/fork churn in the rip histogram matches a spawn-loop).
+        // The /data and /mnt/sandbox gates above never see it, so name
+        // ANY other failing path with its caller comm, then go quiet.
+        static EXEC_FAIL2_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static EXEC_FAIL2_SEEN: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        EXEC_FAIL2_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let n = EXEC_FAIL2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 48 {
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "execfail2[{}] '{}' -> {} comm='{}' (pid {})",
+                n,
+                pathname_str,
+                rc,
+                comm,
                 unsafe { crate::process::current_pid() }
             );
         }
@@ -1384,37 +1422,47 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .filter(|s| !s.is_empty())
             .count() >= 4;
         if deep {
-            use core::sync::atomic::Ordering::Relaxed;
-            let pid = unsafe { crate::process::current_pid() } as u32;
-            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
-            let mut n = 0usize;
-            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
-                if e.pid.load(Relaxed) == pid && n < picks.len() {
-                    picks[n] = (
-                        e.nr.load(Relaxed),
-                        e.a0.load(Relaxed),
-                        e.a1.load(Relaxed),
-                        e.ret.load(Relaxed),
-                    );
-                    n += 1;
+            // Ring recorded only under dfx=sysring (perf lane 2026-11).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+                use core::sync::atomic::Ordering::Relaxed;
+                let pid = unsafe { crate::process::current_pid() } as u32;
+                let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+                let mut n = 0usize;
+                for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                    if e.pid.load(Relaxed) == pid && n < picks.len() {
+                        picks[n] = (
+                            e.nr.load(Relaxed),
+                            e.a0.load(Relaxed),
+                            e.a1.load(Relaxed),
+                            e.ret.load(Relaxed),
+                        );
+                        n += 1;
+                    }
                 }
-            }
-            crate::pr_warn!(
-                "childexit pid={} root='{}' status={:#x} last{}:",
-                pid,
-                root_str,
-                args[0] as u32,
-                n
-            );
-            for i in (0..n).rev() {
-                let (nr, a0, a1, ret) = picks[i];
                 crate::pr_warn!(
-                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
-                    i,
-                    nr,
-                    a0,
-                    a1,
-                    ret as i64
+                    "childexit pid={} root='{}' status={:#x} last{}:",
+                    pid,
+                    root_str,
+                    args[0] as u32,
+                    n
+                );
+                for i in (0..n).rev() {
+                    let (nr, a0, a1, ret) = picks[i];
+                    crate::pr_warn!(
+                        "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                        i,
+                        nr,
+                        a0,
+                        a1,
+                        ret as i64
+                    );
+                }
+            } else {
+                crate::pr_warn!(
+                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
+                    unsafe { crate::process::current_pid() },
+                    root_str,
+                    args[0] as u32
                 );
             }
         }
@@ -1524,13 +1572,30 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         }
     } else {
         // Blocking wait for child process to exit
-        match crate::process::exit::do_wait(wait_pid, wstatus, options) {
+        // forkprof (cmdline forkprof=1): wait4 wall incl. sleep.
+        let fp_t_wt = if crate::dfx::forkprof::on() {
+            crate::dfx::forkprof::trace(
+                crate::dfx::forkprof::T_WAIT_ENTRY,
+                crate::sched::get_current_pid(),
+            );
+            crate::dfx::forkprof::now()
+        } else {
+            0
+        };
+        let r = match crate::process::exit::do_wait(wait_pid, wstatus, options) {
             Ok(child_pid) => {
                 fill_rusage();
-                report_wait_pid(child_pid)
+                Ok(report_wait_pid(child_pid))
             }
-            Err(e) => e as i32 as i64,
+            Err(e) => Err(e as i32 as i64),
+        };
+        if fp_t_wt != 0 {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_BODY, fp_t_wt);
         }
+        return match r {
+            Ok(v) => v,
+            Err(e) => e as i64,
+        };
     }
 }
 
@@ -1564,6 +1629,28 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Validate id per idtype (reference kernel_waitid): P_PID wants a
+    // positive pid, P_PGID a non-negative pgid — anything else is
+    // EINVAL, not "no such child" ECHILD.
+    if idtype == 1 && id <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if idtype == 2 && id < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // U1c pid-namespace semantics parity with sys_wait4: a P_PID target
+    // is interpreted in the CALLER's pid namespace (identity in init ns).
+    // do_waitid compares against global child pids.
+    let wait_id: i32 = if idtype == 1 {
+        match crate::process::ns::resolve_vpid(id as u32) {
+            Some(g) => g as i32,
+            None => return -(errno::ECHILD as i64),
+        }
+    } else {
+        id
+    };
+
     // Validate infop pointer
     if infop.is_null() {
         return -(errno::EFAULT as i64);
@@ -1572,7 +1659,7 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    match crate::process::exit::do_waitid(idtype, id, infop, options) {
+    match crate::process::exit::do_waitid(idtype, wait_id, infop, options) {
         // Ok(false) = WNOHANG, no event: Linux returns 0 and leaves
         // infop untouched (the old -EAGAIN broke every poll loop).
         Ok(_) => 0,
@@ -5162,7 +5249,11 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         );
     }
     if let Some(fs) = current.fs_arc() {
-        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry.clone());
+        // The root now comes from a pivot: setns(CLONE_NEWNS) into a
+        // non-pivoted namespace must reset it (beget pivots into its
+        // sandbox, then jumps back to the default ns).
+        fs.set_root_is_pivot(true);
         // Record put_old for the post-pivot cleanup umount2 (Linux leaves
         // the old root MOUNTED at put_old; our jail-style pivot stacks
         // nothing, so the matching umount2(MNT_DETACH) consumes the marker
@@ -5229,8 +5320,12 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
             fs_type: old_root_entry.fs_type,
             flags: old_root_entry.flags,
         });
-        // Update the namespace root anchor.
-        *ns.root.lock() = crate::fs::vfs::get_vfs_root();
+        // Update the namespace root anchor: this namespace's root is now
+        // the PIVOT TARGET dentry (the field's reserved purpose). setns
+        // into this namespace re-anchors entering tasks onto it; setns
+        // OUT (to a non-pivoted ns) resets pivoted tasks to the global
+        // root.
+        *ns.root.lock() = root_dentry.or_else(crate::fs::vfs::get_vfs_root);
     }
 
     crate::pr_info!("pivot_root: new root '{}' (old root at '{}')", new_root, put_old);
@@ -5285,9 +5380,16 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
 
     // SAFETY: rlim_ptr validated with access_ok above; put_user is the
     // exception-table copy path.
+    // uafault probe (2026-10-31): the put_user results used to be
+    // discarded — getrlimit with an unmapped user pointer returned 0
+    // ("success") while writing nothing. The reference do_prlimit
+    // reports the failed copy_to_user as -EFAULT; so does prlimit64.
     unsafe {
-        let _ = crate::arch::uaccess::put_user(rlim_ptr, cur);
-        let _ = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        let ok_cur = crate::arch::uaccess::put_user(rlim_ptr, cur);
+        let ok_max = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        if !ok_cur || !ok_max {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
@@ -5318,9 +5420,22 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: rlim_ptr validated with access_ok; get_user is the
-    // exception-table copy path (SUM=0 safe).
-    let rlim_cur = unsafe { crate::arch::uaccess::get_user(rlim_ptr).unwrap_or(0) };
-    let rlim_max = unsafe { crate::arch::uaccess::get_user(rlim_ptr.add(1)).unwrap_or(0) };
+    // exception-table copy path (SUM=0 safe). An unreadable struct must
+    // be EFAULT — the old unwrap_or(0) read it as {0, 0} and silently
+    // clamped the limit to zero instead of failing (reference
+    // do_prlimit: copy_from_user of struct rlimit fails with EFAULT).
+    let rlim_cur = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
+    let rlim_max = unsafe {
+        match crate::arch::uaccess::get_user(rlim_ptr.add(1)) {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        }
+    };
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
@@ -5623,9 +5738,19 @@ pub fn ctrl_alt_del_latch() {
 
 /// Execute any latched Ctrl-Alt-Del. Called in TASK context from
 /// check_and_deliver_signals (every return to user space).
+/// (perf-syscall lane) Load-first for the same reason as the ISIG
+/// latch: one plain load per return instead of an RMW.
 pub fn cad_deliver_pending() {
-    if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
+    // Load-first (syscall-exit hot path): called on EVERY return to
+    // user space, so the disabled path must be a plain Acquire load —
+    // the swap is a locked RMW on x86 and is paid only when a
+    // Ctrl-Alt-Del is actually latched. Claim semantics are unchanged:
+    // only the CPU whose swap observes `true` runs the cascade.
+    if !PENDING_CAD.load(core::sync::atomic::Ordering::Acquire) {
         return;
+    }
+    if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return; // another CPU claimed it
     }
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST_CAD_JIFFY.load(core::sync::atomic::Ordering::Acquire);
@@ -5832,6 +5957,10 @@ fn shutdown_cascade(cmd: u32) {
 
     // --- 3. Sync filesystems + minimal rootfs umount (flush + clean) ---
     crate::println!("reboot: syncing filesystems");
+    // forkprof (cmdline forkprof=1): ride the shutdown cascade — every
+    // probe rig ends with reboot(2), so the phase table lands in the
+    // serial log without a dedicated reader.
+    crate::dfx::forkprof::report();
     if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }
@@ -5988,7 +6117,9 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: fd - file descriptor
 pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
-    // Flush all buffer cache (simplified: sync everything)
+    // Delayed allocation (2026-11): dirty page-cache frames first (see
+    // sys_sync), then the buffer cache (simplified: sync everything).
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
     let _ = crate::fs::bio::sync_buffers();
     0
 }
@@ -6037,28 +6168,81 @@ pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
 /// - args[2]: ioprio - I/O priority class + value
+///
+/// Validation mirrors the reference block/ioprio.c: class NONE requires
+/// level 0; RT additionally requires CAP_SYS_ADMIN (not CAP_SYS_NICE);
+/// RT and BE levels are 0..IOPRIO_BE_NR-1 (7). The value is stored per
+/// task (inherited across fork) so ioprio_get reads it back — the old
+/// accept-and-ignore made every set-then-get probe read class NONE
+/// (LTP ioprio_set01).
 pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
-    let _which = args[0] as i32;
-    let _who = args[1] as i32;
+    let which = args[0] as i32;
+    let who = args[1] as i32;
     let ioprio = args[2] as i32;
 
-    // IOPRIO_CLASS_SHIFT = 13
-    // Class bits: who << 13 | data
-    let class = (ioprio >> 13) & 0x7;
+    const PRIO_PROCESS: i32 = 0;
+    const PRIO_PGRP: i32 = 1;
+    const PRIO_USER: i32 = 2;
+    const IOPRIO_CLASS_NONE: i32 = 0;
+    const IOPRIO_CLASS_RT: i32 = 1;
+    const IOPRIO_CLASS_BE: i32 = 2;
+    const IOPRIO_CLASS_IDLE: i32 = 3;
+    const IOPRIO_BE_NR: i32 = 8;
 
-    // IOPRIO_CLASS_NONE = 0, IOPRIO_CLASS_RT = 1, IOPRIO_CLASS_BE = 2, IOPRIO_CLASS_IDLE = 3
-    if class > 3 {
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         return -(errno::EINVAL as i64);
     }
 
-    // CAP_SYS_NICE required to set RT or idle class
-    if class == 1 || class == 3 {
-        if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-            return -(errno::EPERM as i64);
+    let class = (ioprio >> 13) & 0x7;
+    let data = ioprio & 0x1fff;
+    match class {
+        IOPRIO_CLASS_NONE => {
+            if data != 0 {
+                return -(errno::EINVAL as i64);
+            }
         }
+        IOPRIO_CLASS_RT => {
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EPERM as i64);
+            }
+            if data < 0 || data >= IOPRIO_BE_NR {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        IOPRIO_CLASS_BE => {
+            if data < 0 || data >= IOPRIO_BE_NR {
+                return -(errno::EINVAL as i64);
+            }
+        }
+        IOPRIO_CLASS_IDLE => {}
+        _ => return -(errno::EINVAL as i64),
     }
 
-    // Accept and ignore — no I/O priority storage yet
+    // Target resolution. PRIO_PROCESS resolves the pid exactly; the
+    // group/user selectors are approximated by the calling task when
+    // who == 0 (no pid/uid enumeration here) and report ESRCH for a
+    // named foreign target — the reference sets/queries every matching
+    // task, but nothing in LTP or the images selects a foreign pgrp/user.
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let target_pid = if who == 0 {
+        current.pid() as i32
+    } else if which == PRIO_PROCESS {
+        who
+    } else {
+        return -(errno::ESRCH as i64);
+    };
+    let task = if target_pid as u32 == current.pid() {
+        current
+    } else {
+        match crate::process::find_task_by_pid(target_pid as u32) {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        }
+    };
+    task.set_ioprio(ioprio);
     0
 }
 
@@ -6067,11 +6251,42 @@ pub fn sys_ioprio_set(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: which - PRIO_PROCESS (0), PRIO_PGRP (1), PRIO_USER (2)
 /// - args[1]: who - target PID/PGID/UID (0 = current)
+///
+/// Returns the stored per-task value ((class << 13) | level; the
+/// default 0 = IOPRIO_CLASS_NONE level 0 — the reference reports
+/// task_struct::ioprio the same way).
 pub fn sys_ioprio_get(args: SyscallArgs) -> i64 {
-    let _which = args[0] as i32;
-    let _who = args[1] as i32;
-    // Default I/O priority: IOPRIO_PRIO_VALUE(IO_PRIO_CLASS_BE, 0) = 0
-    0
+    let which = args[0] as i32;
+    let who = args[1] as i32;
+
+    const PRIO_PROCESS: i32 = 0;
+    const PRIO_PGRP: i32 = 1;
+    const PRIO_USER: i32 = 2;
+
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
+        return -(errno::EINVAL as i64);
+    }
+
+    let current = match crate::sched::current() {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    let target_pid = if who == 0 {
+        current.pid() as i32
+    } else if which == PRIO_PROCESS {
+        who
+    } else {
+        return -(errno::ESRCH as i64);
+    };
+    let task = if target_pid as u32 == current.pid() {
+        current
+    } else {
+        match crate::process::find_task_by_pid(target_pid as u32) {
+            Some(t) => t,
+            None => return -(errno::ESRCH as i64),
+        }
+    };
+    task.ioprio() as i64
 }
 
 /// sys_quotactl - Disk quota operations

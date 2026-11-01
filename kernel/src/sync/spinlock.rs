@@ -287,51 +287,29 @@ impl<T> Spinlock<T> {
 
     /// Preempt disable + lock.
     /// Guard drop: unlock + preempt enable.
+    /// track_caller: leakorigin's outermost-acquire shadow records the
+    /// LOCK CALLER's site (preempt-hunt), not this helper's line.
+    ///
+    /// Reference discipline (sync-realign, 2026-11): a spinlock NEVER
+    /// sleeps. The acquire is preempt_disable + pure bounded spinning
+    /// (spin until acquired — the DEADLOCK_WARN threshold only prints,
+    /// it never gives up); no task-state change and no schedule()
+    /// anywhere in this path. This is sound ONLY because every lock
+    /// that may be held across blocking I/O is a SleepMutex
+    /// (kernel/src/sync/mutex.rs), never a Spinlock: a preempt-disabled
+    /// spinner can starve the holder's wake IPI, so a Spinlock section
+    /// must stay short by construction. The former "preemptible
+    /// bounded wait" that yielded via schedule() here (preempt-hunt,
+    /// then the lost-park-patched handoff) was a divergence from the
+    /// reference design and is deleted — the lost-park hazard class
+    /// (a caller inside a wait path's prepared window parked inside a
+    /// spinlock acquire) is structurally impossible now.
     #[inline]
+    #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
         preempt_disable();
         self.raw.lock();
         SpinlockGuard { lock: self }
-    }
-
-    /// Bounded-spin + yield acquire for COARSE, long-held global locks
-    /// (VFS_MUTATION_LOCK, EXT4_BIG_LOCK — held across synchronous block
-    /// I/O, i.e. for milliseconds at a time).
-    ///
-    /// Wedge background (LTP r2 WEDGE family: inode02, ftest02/04/06,
-    /// creat09, sendmsg02): when enough tasks contend a plain lock(),
-    /// every CPU ends up spinning preempt-disabled; the lock holder —
-    /// which may be BLOCKED in virtio I/O or simply not resident on any
-    /// CPU — can then never be rescheduled (wake IPIs cannot preempt a
-    /// preempt-disabled spinner), and the machine freezes with all CPUs
-    /// pinned. This acquire spins a bounded budget like lock(); if the
-    /// lock still isn't free it re-enables preemption and yields the CPU
-    /// (schedule()) so the holder can run HERE, then retries. Waiters
-    /// therefore never starve the system of a schedulable CPU.
-    ///
-    /// NOT for IRQ context or short critical sections — schedule() from
-    /// interrupt context is illegal; use plain lock()/lock_irq() there.
-    pub fn lock_fair(&self) -> SpinlockGuard<'_, T> {
-        const FAIR_SPIN_BUDGET: u32 = 1_000_000;
-        loop {
-            preempt_disable();
-            let mut spins: u32 = 0;
-            loop {
-                if self.raw.try_lock() {
-                    return SpinlockGuard { lock: self };
-                }
-                spins += 1;
-                if spins >= FAIR_SPIN_BUDGET {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-            // Budget exhausted: hand the CPU to the holder instead of
-            // pinning it. The schedule() picks another task (likely the
-            // holder); we come back and retry afterwards.
-            preempt_enable();
-            crate::sched::schedule();
-        }
     }
 
     /// Disable interrupts + preempt disable + lock.
@@ -340,7 +318,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irq(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -351,7 +329,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irqsave(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -368,8 +346,9 @@ impl<T> Spinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockGuard { lock: self })
         } else {
@@ -382,7 +361,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn try_lock_irqsave(&self) -> Option<SpinlockIrqGuard<'_, T>> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockIrqGuard { lock: self, flags })
         } else {
@@ -564,8 +543,20 @@ impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
 #[inline]
 #[track_caller]
 fn preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add(
+    crate::interrupt::preempt::preempt_count_add_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
+    );
+}
+
+/// As `preempt_disable`, booking the CALLER-of-the-lock's location (the
+/// #[track_caller] lock helpers forward their own caller down so the
+/// leakorigin shadow names the real acquire site).
+#[inline]
+fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
+    crate::interrupt::preempt::preempt_count_add_at(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+        loc,
     );
 }
 

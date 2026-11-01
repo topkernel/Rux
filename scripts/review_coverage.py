@@ -36,6 +36,7 @@ OUT = os.path.join(ROOT, "docs", "development", "review-coverage.md")
 STATUS = {
     "kernel/src/arch/riscv64/mm/memory_layout.rs": ("part", "image window constants"),
     "kernel/src/arch/riscv64/mm/mmu_init.rs": ("part", "kernel image mapping"),
+    "kernel/src/arch/uaccess_safe.rs": ("part", "safe uaccess capsules over the arch primitives"),
     "kernel/src/arch/riscv64/trap.rs": ("part", "tick accounting, trap entry"),
     "kernel/src/arch/riscv64/vext.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/memory_layout.rs": ("todo", ""),
@@ -49,19 +50,20 @@ STATUS = {
     "kernel/src/dfx/hung_task.rs": ("part", "D-state scan"),
     "kernel/src/dfx/ksyms.rs": ("done", "written by this review (symbol table)"),
     "kernel/src/dfx/ledger.rs": ("part", "page census"),
-    "kernel/src/dfx/leakorigin.rs": ("todo", ""),
+    "kernel/src/dfx/leakorigin.rs": ("done", "cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS"),
     "kernel/src/dfx/memwatch.rs": ("part", "heap census"),
     "kernel/src/dfx/metawatch.rs": ("part", "buddy shadow scan"),
     "kernel/src/dfx/mod.rs": ("part", "init, debugfs knob registration"),
     "kernel/src/dfx/monowatch.rs": ("part", "monotonic jump tripwire"),
     "kernel/src/dfx/oops.rs": ("todo", ""),
+    "kernel/src/dfx/scmtap.rs": ("part", "cr3: session-fifo hunt tap — every print budgeted, dfx=scmtap gated; no failure-path semantics touched"),
     "kernel/src/dfx/r83hunt.rs": ("part", "task header audit"),
     "kernel/src/dfx/pathstash.rs": ("todo", ""),
     "kernel/src/dfx/pstore.rs": ("todo", ""),
     "kernel/src/dfx/sbi_debug.rs": ("part", "raw SBI printers"),
     "kernel/src/dfx/scribble.rs": ("part", "task scribble hunter"),
     "kernel/src/dfx/softlockup.rs": ("part", "soft lockup detector"),
-    "kernel/src/dfx/switches.rs": ("done", "switch table refactored to one macro"),
+    "kernel/src/dfx/switches.rs": ("done", "switch table refactored to one macro; cr2: ohhunt switch added (95094dd2)"),
     "kernel/src/dfx/syscost.rs": ("part", "per-syscall cost table"),
     "kernel/src/dfx/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/dfx/taskdump.rs": ("part", "task dump format"),
@@ -69,7 +71,7 @@ STATUS = {
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
-    "kernel/src/drivers/drm/mod.rs": ("todo", ""),
+    "kernel/src/drivers/drm/mod.rs": ("part", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated"),
     "kernel/src/drivers/gpu/*": ("todo", ""),
     "kernel/src/drivers/input/*": ("todo", ""),
     "kernel/src/drivers/intc/*": ("todo", ""),
@@ -77,28 +79,29 @@ STATUS = {
     "kernel/src/drivers/pci/*": ("todo", ""),
     "kernel/src/drivers/timer/mod.rs": ("part", "jiffies/monotonic"),
     "kernel/src/drivers/timer/riscv64.rs": ("part", "time CSR timebase"),
-    "kernel/src/drivers/timer/x86_64.rs": ("part", "TSC/HPET timebase"),
+    "kernel/src/drivers/timer/x86_64.rs": ("part", "TSC/HPET timebase; cr3: set_next_trigger min(grid,hres) arming + re-arm-first placement in handle_timer_tick; idempotent jiffies derive makes PIT/LAPIC double-tick structurally impossible — PASS"),
     "kernel/src/drivers/virtio/mod.rs": ("part", "virtio queue handling"),
     "kernel/src/drivers/virtio/offset.rs": ("todo", ""),
     "kernel/src/drivers/virtio/probe.rs": ("todo", ""),
     "kernel/src/drivers/virtio/queue.rs": ("todo", ""),
-    "kernel/src/drivers/virtio/virtio_pci.rs": ("todo", ""),
-    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications"),
+    "kernel/src/drivers/virtio/virtio_pci.rs": ("part", "device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed"),
+    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS"),
     "kernel/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/src/fs/cgroup.rs": ("todo", ""),
     "kernel/src/fs/char_dev.rs": ("todo", ""),
+    "kernel/src/fs/vt.rs": ("todo", ""),
     "kernel/src/fs/debugfs.rs": ("done", "written by this review (debugfs)"),
     "kernel/src/fs/dentry.rs": ("part", "per-directory locking"),
     "kernel/src/fs/devfs/mod.rs": ("todo", ""),
     "kernel/src/fs/ext4/dir.rs": ("part", "directory ops"),
     "kernel/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
-    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); write body/alloc/lseek/fsync from earlier sessions"),
+    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions"),
     "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
-    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount"),
-    "kernel/src/fs/ext4/namei.rs": ("todo", ""),
+    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites"),
+    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS"),
     "kernel/src/fs/fifo.rs": ("todo", ""),
-    "kernel/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）"),
+    "kernel/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）；cr3: arch-gated O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE bit positions (aarch64 uapi vs asm-generic) verified against both reference tables; raw literals replaced with the shared constants — PASS"),
     "kernel/src/fs/inode.rs": ("part", "read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）"),
     "kernel/src/fs/inotify.rs": ("part", "event notification"),
     "kernel/src/fs/jbd2/checkpoint.rs": ("todo", ""),
@@ -139,7 +142,7 @@ STATUS = {
     "kernel/src/fs/selinuxfs.rs": ("todo", ""),
     "kernel/src/fs/stat.rs": ("todo", ""),
     "kernel/src/fs/sysfs.rs": ("part", "sysfs tree, writable attributes"),
-    "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write"),
+    "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it)"),
     "kernel/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化"),
     "kernel/src/fs/xattr.rs": ("todo", ""),
     "kernel/src/interrupt/domain.rs": ("todo", ""),
@@ -152,12 +155,12 @@ STATUS = {
     "kernel/src/interrupt/tasklet.rs": ("todo", ""),
     "kernel/src/io_uring/mod.rs": ("todo", ""),
     "kernel/src/ipc/access_token.rs": ("todo", ""),
-    "kernel/src/ipc/binder.rs": ("part", "ioctl numbers, dispatch, mmap 区的 VMA 记账（e32cdfef）"),
+    "kernel/src/ipc/binder.rs": ("part", "ioctl numbers, dispatch, mmap 区的 VMA 记账（e32cdfef）；cr3 (d608a9b7..5bf31528 delta): death-reply path re-read — sendfail_why reason shadows ams46-gated, SENDFAIL WARN ams46-gated+budget-400, SACB/ripple taps pid-latched+budgeted; BR_DEAD_REPLY/BR_FAILED_REPLY mapping per case unchanged and matches the reference binder protocol — PASS"),
     "kernel/src/ipc/mod.rs": ("todo", ""),
     "kernel/src/ipc/posix_mq.rs": ("part", "open/unlink/send/receive；绝对超时已修（e47b155a）"),
-    "kernel/src/ipc/sysv_msg.rs": ("part", "msgsnd/msgrcv"),
-    "kernel/src/ipc/sysv_sem.rs": ("part", "semtimedop timeout"),
-    "kernel/src/ipc/sysv_shm.rs": ("part", "IPC_RMID, attach/detach"),
+    "kernel/src/ipc/sysv_msg.rs": ("part", "msgsnd/msgrcv; cr2: msgrcv selection semantics spot-check (msgtyp 0/+/− branches, MSG_EXCEPT, MSG_COPY ordinals, E2BIG-before-removal) — conforms"),
+    "kernel/src/ipc/sysv_sem.rs": ("part", "semtimedop timeout; cr2: semget/semctl contract spot-check (EEXIST precedence, nsems==0 create-only, ENOENT bare lookup, SETVAL/SETALL ordering) — conforms"),
+    "kernel/src/ipc/sysv_shm.rs": ("part", "IPC_RMID, attach/detach; cr2: shmget size paths + SHM_LOCK cap spot-check — conforms"),
     "kernel/src/ipc/util.rs": ("done", "idr allocation, permission checks"),
     "kernel/src/main.rs": ("part", "boot sequence, panic handler, layout constants"),
     "kernel/src/mm/buddy_allocator.rs": ("part", "heap allocator, dealloc dispatch"),
@@ -165,13 +168,14 @@ STATUS = {
     "kernel/src/mm/memblock.rs": ("todo", ""),
     "kernel/src/mm/mm_struct.rs": ("part", "total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef）"),
     "kernel/src/mm/mod.rs": ("todo", ""),
+    "kernel/src/mm/pcp.rs": ("done", "written by this review (per-CPU pagesets, INV-PCP-1..3)"),
     "kernel/src/mm/page_alloc.rs": ("part", "分配快路径、OOM 判定、直接回收闸门、free 的各路防护"),
     "kernel/src/mm/page_desc.rs": ("fixed", "stale Page.mapping/index field-contract docs corrected (mapping is the cache eviction key, never rmap slot 0); Chinese comment translated"),
     "kernel/src/mm/pglist.rs": ("todo", ""),
-    "kernel/src/mm/rmap.rs": ("done", "read end to end (mm review): no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice"),
+    "kernel/src/mm/rmap.rs": ("done", "read end to end (mm review); cr2: try_to_unmap_inner FD-1 reroute re-read (VMA lock discipline + broadcast shootdown arms) — clean. Original note: no code defect. AnonVma/page_add_anon_rmap/page_add_file_rmap/page_get_mappings/rmap_stats are exported scaffolding with zero callers (documented). try_to_unmap correctness rests on ppn revalidation under the PTE lock + caller-held refcounts; it is an O(all tasks) scan per page (Linux anon_vma chains jump straight to the mms) — degraded-but-safe, acknowledged in-code. rmap_alt slots are written only by the legacy non-pcache alias arm: every primary fault site set_index()es slot 0 first, making page_record_mapping a no-op there, so the 4.10 multi-map mechanism is effectively slot-0-only in practice"),
     "kernel/src/mm/slab.rs": ("todo", ""),
     "kernel/src/mm/small_alloc.rs": ("part", "size classes、每 CPU magazine、alloc/free 的快慢路径与 D-7 护栏"),
-    "kernel/src/mm/vdso.rs": ("todo", ""),
+    "kernel/src/mm/vdso.rs": ("part", "per-arch e_machine arm + ELF header emit reviewed; clock_gettime payload unchanged"),
     "kernel/src/mm/vma.rs": ("fixed", "re-read end to end after main moved (origin stamps are the last functional change): split/merge offset continuity, chain merges, max_end, expand_downwards, find_stack_vma all verified against the reference kernel; the mmap-after-merge metadata-clobber hypothesis disproven by construction (file VMAs are added with fd=-1, so install-time merges are anon-only and the fd/offset writes find the merged VMA harmlessly). Fixed: VMA-ADD-DUP tripwire message claimed 'replacing incumbent' while the code rejects the add with Overlap — message now states the real outcome"),
     "kernel/src/mm/vmscan.rs": ("todo", ""),
     "kernel/src/mm/vmstat.rs": ("done", "written by this review (page counters)"),
@@ -184,22 +188,22 @@ STATUS = {
     "kernel/src/process/coredump.rs": ("todo", ""),
     "kernel/src/process/exec.rs": ("fixed", "read end to end (abi-review s1): image/stack/interp load, auxv, entry frames; redundant zeroing fixed, linear stack/interp writers audited safe-by-single-block"),
     "kernel/src/process/exit.rs": ("todo", ""),
-    "kernel/src/process/fork.rs": ("part", "task creation paths"),
+    "kernel/src/process/fork.rs": ("part", "task creation paths; TLS inheritance arms (x86_64 fs/gs bases, aarch64 TPIDR_EL0 live read, CLONE_SETTLS) reviewed this session"),
     "kernel/src/process/kthread.rs": ("todo", ""),
     "kernel/src/process/mod.rs": ("todo", ""),
     "kernel/src/process/pid.rs": ("todo", ""),
     "kernel/src/process/pid_hash.rs": ("part", "task iteration"),
     "kernel/src/process/ptrace.rs": ("todo", ""),
-    "kernel/src/process/task.rs": ("part", "task layout, counters, comm"),
+    "kernel/src/process/task.rs": ("part", "task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect); compat-review: cpus_allowed default + default_cpus_allowed/refresh_default_affinity_to_online read (affinity fix 5252505e/a9cbdac2 family)"),
     "kernel/src/process/wait.rs": ("todo", ""),
     "kernel/src/sched/cgroup.rs": ("done", "cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented"),
     "kernel/src/sched/class.rs": ("done", "sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI"),
     "kernel/src/sched/deadline.rs": ("done", "EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次；dl 计数已改 checked-sub 防回绕"),
-    "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）"),
+    "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）；cr3: claim_sweep (position-independent stale-claim/oncpu sweep, owner_live + 50-jiffy exec-frozen confirm, full-qword release matches __switch_to store, lying-slot shapes census-only) — PASS"),
     "kernel/src/sched/idle.rs": ("done", ""),
     "kernel/src/sched/mod.rs": ("done", "纯 re-export 层"),
     "kernel/src/sched/rt.rs": ("done", "全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）；rt/rr 计数已改 checked-sub 防回绕"),
-    "kernel/src/sched/sched.rs": ("fixed", "188d844d 全文读完（见前注）；2b092c49 GRQ 锁交换已撤回（623c4736，13-boot 配对判决= d2a58ccb panic 家族触发器；机制为 codegen/时序揭示的潜在 GRQ 协议竞争，R74-DOUBLE-SEED 为线索，OPEN）"),
+    "kernel/src/sched/sched.rs": ("fixed", "188d844d 全文读完（见前注）；cr3 (d608a9b7..5bf31528): WAKE-HEAL (wake_up_enqueue_opt, 3-skip adjudication vs sc265 conviction — preempt-discipline refusal + GRQ-release-before-switch make a parked nonzero count phantom 100%; full-zero correct for a no-CPU task), CLAIM-SWEEP hook (scheduler_tick -> fair::claim_sweep), claim_idle_cpu_for + preempt_check_wake (measured-wait CFS gate, D-14), PEREMPT-HEAL cumulative per-task window re-read — all three gates PASS;2b092c49 GRQ 锁交换已撤回（623c4736，13-boot 配对判决= d2a58ccb panic 家族触发器；机制为 codegen/时序揭示的潜在 GRQ 协议竞争，R74-DOUBLE-SEED 为线索，OPEN）"),
     "kernel/src/sched/stats.rs": ("done", "sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致"),
     "kernel/src/sched/stop_task.rs": ("done", "stop 类为 PerCpuState 直管的 stub，next_class 链正确"),
     "kernel/src/sched/wakewatch.rs": ("done", "DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place"),
@@ -213,38 +217,42 @@ STATUS = {
     "kernel/src/sync/seqlock.rs": ("todo", ""),
     "kernel/src/sync/spinlock.rs": ("todo", ""),
     "kernel/src/syscall/dispatch.rs": ("todo", ""),
-    "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync"),
-    "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验"),
-    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）"),
+    "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync; compat-review: xattr syscall family read end to end (set/get/list/remove + *at variants) — found and fixed the xattr_read_name errno double-negation (LTP setxattr01/fsetxattr01/fremovexattr02 EFAULT contracts); readlinkat read (ring/NOFOLLOW trailing-slash divergence recorded in run/review-findings-compat.md)"),
+    "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验; cr2: drm/prime ioctl dispatch region + ohhunt tap gating (95094dd2)"),
+    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; cr2: drm GEM mmap region + ohhunt tap gating (95094dd2)"),
     "kernel/src/syscall/misc.rs": ("part", "timerfd 族已对齐 v6.6（sys_timerfd_settime 契约已修 4e1f6110）；epoll/poll/eventfd/signalfd 未读"),
     "kernel/src/syscall/mod.rs": ("todo", ""),
-    "kernel/src/syscall/network.rs": ("todo", ""),
+    "kernel/src/syscall/network.rs": ("fixed", "read end to end (this review): socket/bind/listen/accept/connect/send/recv family + get/setsockopt + mmsg batchers; 4 defects fixed — recvmsg msg_namelen VALUE field was dereferenced as a pointer (write-back gate ate by garbage pointer, msg_namelen never updated), put_sockaddr_* ignored the caller's buffer length (move_addr_to_user clamp), v6 write-backs ran 28B through a 16B-validated range, unix dgram sendto/recvfrom silently truncated at RW_CHUNK 64KB (all-or-nothing datagram contract); A/B probe test/sockaddr_clamp.c (sockaddr_clamp_boot.py): 6 fixable cases FAIL->PASS; findings F5-F11 filed (run/review-findings-func.md) incl. loopback TCP connect wedge vs accept"),
     "kernel/src/syscall/process.rs": ("part", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending"),
     "kernel/src/syscall/time.rs": ("part", "nanosleep, realtime clock"),
-    "kernel/src/syscall/x86_compat.rs": ("todo", ""),
+    "kernel/src/syscall/x86_compat.rs": ("done", "every table entry audited against the host x86_64 + riscv64 asm-generic unistd headers (0 mismatches); targets cross-checked against dispatch arms; legacy block (poll/select/dup2/pause/epoll_create/epoll_wait/arch_prctl) covers the no-generic numbers"),
     "kernel/src/tests/*": ("todo", ""),
     "kernel/src/trace/files.rs": ("done", "written by this review (tracefs files)"),
     "kernel/src/trace/mod.rs": ("done", "written by this review (tracepoint core)"),
-    "kernel/src/arch/aarch64/boot.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/context.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/cpu.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/ipi.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/asid.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/exception.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/memory_layout.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mm_ops.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mmu_init.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/mod.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/page_fault.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/mm/pagetable.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/boot.rs": ("done", "DTB-pointer extern + get_dtb_pointer; boot.S publishes the pointer pre-MMU and re-publishes post-MMU"),
+    "kernel/src/arch/aarch64/boot/boot.S": ("fixed", "read end to end (this review): EL2 drop, early TTBR0/TTBR1 tables, MAIR/TCR, secondary_start PSCI path; stray 'str x0, [x1]' stored the vector-table base into dtb_pointer (latent — the post-MMU re-publish repaired it before any consumer), store removed"),
+    "kernel/src/arch/aarch64/dtb_blob.S": ("done", "7-line .incbin of the QEMU virt DTB"),
+    "kernel/src/arch/aarch64/trap.S": ("done", "read end to end: VBAR vectors, TRAP_BODY save protocol, SPSR-based EL0/EL1 sp select, FPSIMD capture/restore, exit loop preempt gate, restore_and_eret slot map, ret_from_fork trampolines"),
+    "kernel/src/drivers/timer/aarch64.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/context.rs": ("part", "switch_mm/TTBR0/ASID paths, context_switch step order, R56 switch_abort twin — mirrors riscv64"),
+    "kernel/src/arch/aarch64/cpu.rs": ("done", "DAIF/timer/TPIDR/barrier primitives; local_flush_tlb_all vmalle1"),
+    "kernel/src/arch/aarch64/ipi.rs": ("part", "IPI surface mirrors the riscv64 twin (request/send/flush/handle); GIC SGI wiring from the aarch64 campaign"),
+    "kernel/src/arch/aarch64/mm/asid.rs": ("fixed", "read end to end (this review): tlbi operand encodings, composed satp; the bump-only ASID counter exhausted permanently after 254 mm creations (later mms ran ASID 0 = TLB-miss-per-access) — riscv64 twin's reuse bitmap ported, AsidContext::free gained the twin's flush-before-free"),
+    "kernel/src/arch/aarch64/mm/exception.rs": ("fixed", "read end to end (this review): fixup table search, bad_area/no_context, kernel demand-fill-before-fixup (R82/R78 parity), non-canonical gate — the in_interrupt guard both twins carry was MISSING (an IRQ-context fault would run the sleeping mm path); guard added, x86_64 form"),
+    "kernel/src/arch/aarch64/mm/fixmap.rs": ("done", "slot map anchored at VMEMMAP_START, PL011 earlycon slot"),
+    "kernel/src/arch/aarch64/mm/memory_layout.rs": ("done", "TTBR1 bands, VA_PA_OFFSET identity-from-zero linear map, mmio_alias/ECAM alias, VirtAddr sign extension, user_addr block (256GB parity)"),
+    "kernel/src/arch/aarch64/mm/mm_ops.rs": ("done", "read end to end: walker, mmap/MAP_FIXED split surgery, munmap/zap, unmap_pages device/foreign guards, fork COW walk + SMP shootdown, handle_cow_fault (S7 pre-alloc, tri-state, shootdown), mprotect range + PROT_NONE markers; note: mprotect_pte_range doc says aside1e1is but emits all-ASID vaae1is (conservative, correct)"),
+    "kernel/src/arch/aarch64/mm/mmu_init.rs": ("done", "read end to end: staged PT allocator + ledger-guarded frees, TTBR1 adoption from boot.S, linear-map block sizing, device windows, free_user_page_tables teardown"),
+    "kernel/src/arch/aarch64/mm/mod.rs": ("done", "module re-export tree"),
+    "kernel/src/arch/aarch64/mm/page_fault.rs": ("done", "read end to end: stack expansion, PROT_NONE marker re-presentation, handle_mm_fault fill arms (file SIGBUS at EOF, effective-size re-derivation, race-lost free), PTE section + R7-C3 re-checks"),
+    "kernel/src/arch/aarch64/mm/pagetable.rs": ("done", "descriptor model: hardware attrs synthesized from software R/W/X/U/G bits, AP/AP_RO/XN/nG derivation, PROT_NONE marker constructor, no table-XN bits, Satp abstraction"),
     "kernel/src/arch/aarch64/mod.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/process.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/pt_regs.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/smp.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/thread.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/trap.rs": ("todo", ""),
-    "kernel/src/arch/aarch64/uaccess.rs": ("todo", ""),
+    "kernel/src/arch/aarch64/process.rs": ("part", "start_thread PSTATE, copy_thread parity, flush_thread (FPSIMD + tp_value + live TPIDR_EL0 clear) reviewed"),
+    "kernel/src/arch/aarch64/pt_regs.rs": ("done", "Linux arm64 frame layout (320B 16-aligned), ESR decode, pseudo-cause IRQ/FIQ/SError mapping"),
+    "kernel/src/arch/aarch64/smp.rs": ("part", "mpidr mapping, boot-complete park/signl shape reviewed against the riscv64 twin"),
+    "kernel/src/arch/aarch64/thread.rs": ("done", "FPSIMD eager model: live fpu image + user_fpsimd entry-capture buffer, offset exports"),
+    "kernel/src/arch/aarch64/trap.rs": ("fixed", "read end to end (mm/ + boot remainder of the earlier routing pass): dispatch, fault-flag derivation (WnR ISS bit 6), CURRENT_PT_REGS swap, bad-vector dumper; dfsc_class rows contradicted the ARM DFSC encoding (AF 0x09-0x0C / permission 0x0D-0x0F|0x13 vs truth AF 0x08-0x0B, permission 0x0C-0x0F; dead diagnostics) — rows corrected"),
+    "kernel/src/arch/aarch64/uaccess.rs": ("part", "access_ok/copy_from_user/clear_user semantics match the twins (zero-fill tails); byte-loop extable copies; NOTE: no explicit fault_in_write retry in copy_to_user — covered by do_page_fault's kernel-uaccess demand-fill-first (R82), a belt-layer divergence from the riscv64/x86_64 second belt, not a defect"),
     "kernel/src/arch/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/boot.S": ("todo", ""),
     "kernel/src/arch/riscv64/boot.rs": ("todo", ""),
@@ -254,18 +262,18 @@ STATUS = {
     "kernel/src/arch/riscv64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/exception.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/riscv64/mm/mm_ops.rs": ("part", "COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）"),
+    "kernel/src/arch/riscv64/mm/mm_ops.rs": ("part", "COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）; cr2: FD-1 leaf primitives (leaf_pte_replace/install, pte_flag_bits) reviewed — Sv39 walk shape, expect_pfn re-validation, 0x3FF flag mask all correct"),
     "kernel/src/arch/riscv64/mm/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mm/page_fault.rs": ("fixed", "R-SC-RV64: file-fault path re-derived (vma_start, file, effective_size) in 4 separately locked lookups (shared-alias site took TWO back-to-back vma_read acquisitions) - mismatched generations could pair one file with another VMA's start and pin a foreign file's cache page; single entry-time snapshot ported from the x86_64 twin (3 finds + up to 4 pin-table lookups per file fault -> 1) + devfs live-size (b74) parity"),
     "kernel/src/arch/riscv64/mm/pagetable.rs": ("todo", ""),
     "kernel/src/arch/riscv64/mod.rs": ("todo", ""),
     "kernel/src/arch/riscv64/process.rs": ("todo", ""),
     "kernel/src/arch/riscv64/pt_regs.rs": ("todo", ""),
-    "kernel/src/arch/riscv64/smp.rs": ("todo", ""),
+    "kernel/src/arch/riscv64/smp.rs": ("part", "compat-review: start_secondaries flow + num_started_cpus semantics read (affinity default-mask fix wired here); CPU_STARTED accounting verified"),
     "kernel/src/arch/riscv64/thread.rs": ("todo", ""),
     "kernel/src/arch/riscv64/trap.S": ("todo", ""),
     "kernel/src/arch/riscv64/uaccess.S": ("todo", ""),
-    "kernel/src/arch/riscv64/uaccess.rs": ("todo", ""),
+    "kernel/src/arch/riscv64/uaccess.rs": ("part", "cr3: strncpy_from_user chunked rewrite reviewed (same verdict as the x86_64 twin); duplicate shadowed limit pair removed"),
     "kernel/src/arch/x86_64/boot.S": ("todo", ""),
     "kernel/src/arch/x86_64/boot.rs": ("todo", ""),
     "kernel/src/arch/x86_64/context.rs": ("todo", ""),
@@ -274,7 +282,7 @@ STATUS = {
     "kernel/src/arch/x86_64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/exception.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/fixmap.rs": ("todo", ""),
-    "kernel/src/arch/x86_64/mm/mm_ops.rs": ("part", "mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（与 riscv64 同构，e32cdfef）"),
+    "kernel/src/arch/x86_64/mm/mm_ops.rs": ("part", "mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（与 riscv64 同构，e32cdfef）; cr2: FD-1 leaf primitives reviewed — 4-level walk (39/30/21/12) with correct root-not-leaf handling, re-validation, flag mask correct"),
     "kernel/src/arch/x86_64/mm/mod.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/page_fault.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/pagetable.rs": ("todo", ""),
@@ -286,9 +294,9 @@ STATUS = {
     "kernel/src/arch/x86_64/smp_trampoline.S": ("todo", ""),
     "kernel/src/arch/x86_64/thread.rs": ("todo", ""),
     "kernel/src/arch/x86_64/trap.S": ("todo", ""),
-    "kernel/src/arch/x86_64/uaccess.rs": ("todo", ""),
+    "kernel/src/arch/x86_64/uaccess.rs": ("part", "cr3: strncpy_from_user chunked rewrite reviewed (64B chunks, mid-chunk fault zero-fills tail, Ok/EFAULT shapes byte-loop-identical, NUL-at-0 success kept); duplicate shadowed limit pair removed"),
     "kernel/src/config.rs": ("todo", ""),
-    "kernel/src/console.rs": ("todo", ""),
+    "kernel/src/console.rs": ("part", "arch UART arms: x86_64 16550 THRE/stall machinery, riscv64 raw sb, aarch64 PL011 (FR 0x18/IMSC 0x38/ICR 0x44) — PL011 init_irq follows the twins' ownership discipline (pre-arm drain, IRQ-owned RX, armed-flag fallback); cr3: batched TX family (puts_bytes lock-once, fmt::Write coalescing with \r\n expansion, ConsoleWriter staging with Drop flush, uart_write_kernel 32B chunk+cond_resched) — byte-identical streams, per-slice irqsave span is the one ledger note (ms-class at boot volumes) — PASS"),
     "kernel/src/dfx/fsw.rs": ("todo", ""),
     "kernel/src/dfx/ksyms_generated.rs": ("todo", ""),
     "kernel/src/dfx/schb.rs": ("todo", ""),
@@ -306,7 +314,7 @@ STATUS = {
     "kernel/src/drivers/input/mod.rs": ("todo", ""),
     "kernel/src/drivers/input/ps2.rs": ("todo", ""),
     "kernel/src/drivers/input/virtio_input.rs": ("todo", ""),
-    "kernel/src/drivers/intc/apic.rs": ("todo", ""),
+    "kernel/src/drivers/intc/apic.rs": ("part", "cr3: timer_arm_oneshot (LVT one-shot + TMICT, u128 conversion, past-deadline clamp to 1 count, freq==0/!READY refuse keeps periodic) — PASS"),
     "kernel/src/drivers/intc/clint.rs": ("todo", ""),
     "kernel/src/drivers/intc/mod.rs": ("todo", ""),
     "kernel/src/drivers/intc/plic.rs": ("todo", ""),
@@ -316,18 +324,18 @@ STATUS = {
     "kernel/src/drivers/net/mod.rs": ("todo", ""),
     "kernel/src/drivers/net/space.rs": ("todo", ""),
     "kernel/src/drivers/net/virtio_net.rs": ("todo", ""),
-    "kernel/src/drivers/pci/mod.rs": ("todo", ""),
+    "kernel/src/drivers/pci/mod.rs": ("fixed", "device-ID table + ECAM scan walk: 04e23b45 shifted the modern virtio IDs (blk 0x1042->0x1041), losing every disable-legacy=on root disk; restored to spec IDs 0x1040+dev (net 1/blk 2), QEMU-verified"),
     "kernel/src/drivers/rtc.rs": ("todo", ""),
     "kernel/src/drivers/timer/hpet.rs": ("todo", ""),
     "kernel/src/drivers/watchdog.rs": ("todo", ""),
     "kernel/src/errno.rs": ("todo", ""),
     "kernel/src/fs/dev_t.rs": ("todo", ""),
     "kernel/src/fs/devfs/registry.rs": ("todo", ""),
-    "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1): Ehdr/Phdr parsing, validate/load/load_dynamic_to; interp BSS double-zero removed"),
+    "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1); this review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every platform)"),
     "kernel/src/fs/ext4/allocator.rs": ("part", "geometry/addressing sites + alloc/free paths around them (EXT4-64BIT hi-half fix, 070770d6); full read pending"),
-    "kernel/src/fs/ext4/csum.rs": ("todo", ""),
+    "kernel/src/fs/ext4/csum.rs": ("fixed", "read end to end (cr2): crc32c + all six checksum classes; 3 write-path divergences vs e2fsprogs fixed (a6b01fd9) — sb le32 full-crc seal, 12-byte dir tail with markers + generation-chained seed + blocksize-12 span, extent seed contract; proven with the run/cr2-csum-harness e2fsck oracle (reseal bit-identical, dirfix clean)"),
     "kernel/src/fs/ext4/indirect.rs": ("todo", ""),
-    "kernel/src/fs/ext4/superblock.rs": ("todo", ""),
+    "kernel/src/fs/ext4/superblock.rs": ("part", "cr2: Ext4GroupDesc/Ext4SuperBlock field layout vs on-disk offsets (write_group_descriptor RMW fix)"),
     "kernel/src/fs/fs_struct.rs": ("todo", ""),
     "kernel/src/fs/io_completion.rs": ("todo", ""),
     "kernel/src/fs/jbd2/journal.rs": ("todo", ""),
@@ -345,7 +353,7 @@ STATUS = {
     "kernel/src/initrd.rs": ("todo", ""),
     "kernel/src/list.rs": ("todo", ""),
     "kernel/src/mm/allocator.rs": ("todo", ""),
-    "kernel/src/mm/compact.rs": ("todo", ""),
+    "kernel/src/mm/compact.rs": ("part", "cr2: remap_page FD-1 reroute through leaf_pte_install reviewed (migration window + Migrating-flag wait) — clean"),
     "kernel/src/mm/hugepage.rs": ("todo", ""),
     "kernel/src/mm/kswapd.rs": ("todo", ""),
     "kernel/src/mm/layout.rs": ("todo", ""),
@@ -354,7 +362,7 @@ STATUS = {
     "kernel/src/mm/oom_kill.rs": ("todo", ""),
     "kernel/src/mm/page.rs": ("todo", ""),
     "kernel/src/mm/pagemap.rs": ("todo", ""),
-    "kernel/src/mm/swap.rs": ("todo", ""),
+    "kernel/src/mm/swap.rs": ("part", "cr2: entry-encoding section (swap bit 62 / migration bit 61 signatures, type/offset codec, pending-write tracking) — internally consistent, clean"),
     "kernel/src/mm/vmemmap.rs": ("todo", ""),
     "kernel/src/net/arp.rs": ("todo", ""),
     "kernel/src/net/buffer.rs": ("todo", ""),
@@ -369,19 +377,19 @@ STATUS = {
     "kernel/src/net/mod.rs": ("todo", ""),
     "kernel/src/net/netlink.rs": ("todo", ""),
     "kernel/src/net/raw.rs": ("todo", ""),
-    "kernel/src/net/socket.rs": ("todo", ""),
+    "kernel/src/net/socket.rs": ("part", "cr3: socket_file_stat (S_IFSOCK|0777 + per-description st_ino, ops-ptr dispatch for inet/unix/netlink/raw) — closes the EBADF fstat hole; reference sockfs behavior — PASS"),
     "kernel/src/net/tcp.rs": ("todo", ""),
     "kernel/src/net/tcp_timer.rs": ("todo", ""),
     "kernel/src/net/udp.rs": ("todo", ""),
     "kernel/src/net/unix.rs": ("todo", ""),
     "kernel/src/print.rs": ("todo", ""),
-    "kernel/src/process/ns.rs": ("todo", ""),
+    "kernel/src/process/ns.rs": ("done", "compat-review: read end to end (UTS namespace) — found and fixed the empty default hostname (reference default is \"(none)\", LTP gethostname02)"),
     "kernel/src/sbi.rs": ("todo", ""),
     "kernel/src/security/cap_lsm.rs": ("todo", ""),
     "kernel/src/security/capability.rs": ("todo", ""),
     "kernel/src/security/lsm.rs": ("todo", ""),
     "kernel/src/security/mod.rs": ("todo", ""),
-    "kernel/src/signal.rs": ("part", "flush_handlers 处置重置语义"),
+    "kernel/src/signal.rs": ("part", "flush_handlers reset semantics; this session: per-arch cfg arms (restart_syscall_no_handler cause-gates, SIGTRAMP_BASE, setup_frame dispatch) reviewed — deliberate and twin-documented; cr3: aarch64 SA_RESTORER arm (sa_restorer honored only under the flag, restorer-less via SIGTRAMP — matches the reference arm64 setup_return contract; fixes the 34-test garbage-lr class) — PASS"),
     "kernel/src/sync/mod.rs": ("todo", ""),
     "kernel/src/sync/percpu.rs": ("todo", ""),
     "kernel/src/syscall/sched.rs": ("todo", ""),
@@ -459,6 +467,64 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("4ee3e430", "kernel/src/arch/aarch64/mm/asid.rs",
+     "The aarch64 ASID allocator bumped NEXT_ASID monotonically and never consulted the in-use "
+     "table: after 254 mm creations (any process-churning workload — LTP forks thousands) "
+     "alloc_asid returned None FOREVER and every later mm fell back to ASID 0 via context.rs's "
+     "unwrap_or(0) — functionally correct (every leaf write invalidates all-ASID, every switch "
+     "full-flushes) but every user access TLB-misses for the rest of the boot. The riscv64 twin "
+     "scans a reuse bitmap and only exhausts under genuine concurrency. Twin divergence fixed: "
+     "the twin's bitmap allocator ported over the 256-entry pool (TCR_EL1.AS = 0); reuse is safe "
+     "because stale entries die at every all-ASID leaf invalidation and every full-flush switch."),
+    ("cfc04591", "kernel/src/arch/aarch64/mm/exception.rs",
+     "aarch64 do_page_fault ran handle_mm_fault unconditionally — the in_interrupt guard both "
+     "twins carry was missing, so a fault taken from an IRQ handler would run the sleeping "
+     "mm fault path (allocator + PTE section) from interrupt context. Ported the x86_64 guard "
+     "form: in_interrupt() routes to no_context, which still unwinds a uaccess copy through "
+     "the exception table before giving up (the riscv64 arm additionally heals preempt-count "
+     "underflow — no aarch64 counterpart engine, not ported)."),
+    ("6e808eea", "kernel/src/arch/aarch64/boot/boot.S",
+     "The 'Save the DTB pointer' step stored x0 into dtb_pointer, but x0 held the "
+     "aarch64_vector_table address from the VBAR_EL1 setup immediately above — it clobbered "
+     "the DTB pointer published at .Lat_el1 entry. Latent only: nothing reads dtb_pointer "
+     "between the clobber and the post-MMU re-publish that repaired it, so the boot worked; "
+     "the stray store contradicted its own comment and would feed the vector table to the "
+     "first pre-MMU-republish reader if one ever appeared. Store removed."),
+    ("00338fd2", "kernel/src/arch/aarch64/trap.rs",
+     "dfsc_class rows contradicted the ARM DDI 0487 DFSC encoding (the rows Linux arm64 names "
+     "FSC_FAULT/FSC_ACCESS/FSC_PERM): access-flag faults are 0x08-0x0B, permission faults "
+     "0x0C-0x0F — the draft read AF as 0x09-0x0C (misclassifying permission level 0) and "
+     "permission as 0x0D-0x0F|0x13 (0x13 is not a permission row; AF level 0 was missed). "
+     "Dead diagnostics today (zero consumers in-tree); fixed so the first consumer inherits "
+     "the right interface."),
+    ("eaefd06f", "kernel/src/drivers/pci/mod.rs",
+     "04e23b45 (aarch64 campaign) shifted the modern virtio PCI device IDs to net=0x1040/blk="
+     "0x1041, reading the reserved base 0x1040 as the net id. Modern IDs are 0x1040 + virtio "
+     "device id (net=1 -> 0x1041, blk=2 -> 0x1042): with the shifted table a virtio-blk-pci,"
+     "disable-legacy=on device (1af4:1042, QEMU-verified via info pci) matched NOTHING — the "
+     "riscv64 suite/probe boots (which attach the rootfs exactly that way) enumerated zero block "
+     "devices and died at 'init: no init program loadable'. A modern-only net device (0x1041) "
+     "would have bound the BLK probe. The commit's aarch64 motivation was a misdiagnosis: the "
+     "GPEX boot used transitional devices (1af4:1001) and was actually fixed by the BAR "
+     "self-assignment commit 096c4eca. Restored to spec IDs; the suite itself (test/run.sh "
+     "disable-legacy=on) is now the regression guard. How the merge gate went green with the "
+     "broken table is a stale-binary question for the coordinator."),
+    ("76b92e71", "kernel/src/fs/elf.rs",
+     "ElfLoader::validate's machine check was cfg-gated to aarch64/riscv64 (written before the "
+     "x86_64 port): on x86_64 builds a foreign-architecture ELF passed validation, its PT_LOAD "
+     "segments were mapped, and execve jumped into garbage instead of returning ENOEXEC. The "
+     "gate is validate() alone on the exec path (the PT_INTERP image is never machine-checked). "
+     "cfg dropped — check_machine has a per-feature arm on every platform."),
+    ("f73a13d8", "kernel/src/fs/ext4/file.rs, kernel/src/fs/tmpfs.rs, test/inoaccess.c",
+     "IN_ACCESS double-fire: the ext4 read_at op (both arms), the ext4 ops.read O_DIRECT arm, "
+     "and the tmpfs read_at op self-notified while running behind File::read/File::read_at whose "
+     "wrappers already notify — one watched pread(2) queued the event twice. The inotify "
+     "last-event merge (fsnotify_add_event coalescing) masked the visible count, so no test "
+     "failed; the duplicate surfaced only when another watcher event interleaved between the two "
+     "fires. Op-level self-notify now lives only in the ext4 read(2) fast path that genuinely "
+     "bypasses the wrappers; test/inoaccess-probe.sh pins one event per read/pread/O_DIRECT "
+     "pread."),
+
     ("b70a5deb", "kernel/src/fs/ext4/extent.rs",
      "Three defects in the extent engine. (1) ext4_ext_insert_written's external-leaf merge had "
      "NEITHER the unwritten-state check NOR the u15 headroom check append_node has: a written "
@@ -576,6 +642,27 @@ BUGS = [
      "returned early keeping the OLD interval and the stale expiration count (timerfd_setup() "
      "sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the "
      "arming call ran even for total_nsec == 0, arming a dead timer slot."),
+    ("a6b01fd9", "kernel/src/fs/ext4/csum.rs, kernel/src/fs/ext4/namei.rs",
+     "cr2 review of the review-sprint delta (82059759..40e925fd). Three metadata_csum "
+     "WRITE-path divergences vs e2fsprogs, all e2fsck-proven with a host harness that "
+     "compiles the kernel's own csum.rs against real mke2fs images: (1) s_checksum is "
+     "the FULL 32-bit crc32c (le32 at 0x3FC) — we sealed only the low u16, leaving "
+     "[1022..1024) stale; a u16 read passes on mkfs images, which hid it (e2fsck "
+     "compares all 32 bits and refused the primary sb). (2) the dir tail is 12 bytes "
+     "(0, rec_len=12, name_len=0xDE00, csum) over a blocksize-12 span with the seed "
+     "crc32c(crc32c(seed,ino),generation) — we wrote an 8-byte markerless tail with an "
+     "ino-only seed over blocksize-8; dir_block_seal now normalizes the dirent chain "
+     "to end at blocksize-12 and the three entry-space sites reserve the tail. (3) "
+     "write_group_descriptor serialized the whole in-memory (mount-time-view) "
+     "Ext4GroupDesc over the disk descriptor, reverting freshly written bitmap "
+     "checksums and counter updates — now a read-modify-write of the free-inode "
+     "fields. Bitmap/inode/GD formulas verified correct as-is."),
+    ("95094dd2", "kernel/src/dfx/switches.rs, kernel/src/syscall/io.rs, kernel/src/syscall/memory.rs, kernel/src/drivers/drm/mod.rs, kernel/src/signal.rs",
+     "Known-gap-4 sweep: the oh-lane hunt instruments (MAP_DUMB + failing-ioctl traces, "
+     "drm mmap resolve/placement prints — one unbudgeted — the prime-import "
+     "compose-content probe walking the whole GEM per import, and the SIGABRT "
+     "first-raise dump) moved behind a new dfx=ohhunt switch, off by default; "
+     "standard and perf-gate boots pay nothing."),
 ]
 
 MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
@@ -658,7 +745,17 @@ def main():
             print("map has entries for files that no longer exist:")
             for rel in stale:
                 print("  " + rel)
-        return 1 if (unknown or stale) else 0
+        # Hot-path print ratchet (print-audit lane, 2026-11): one more
+        # un-annotated pr_err/pr_warn/pr_info in a hot-path file fails
+        # the check — see scripts/hotpath_print_check.py.
+        import hotpath_print_check
+        save_argv = sys.argv
+        sys.argv = [sys.argv[0]]
+        try:
+            hot_rc = hotpath_print_check.main()
+        finally:
+            sys.argv = save_argv
+        return 1 if (unknown or stale or hot_rc) else 0
 
     # Per-directory tables.
     groups = {}

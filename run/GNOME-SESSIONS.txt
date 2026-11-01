@@ -1663,3 +1663,314 @@ is the instrument if the greeter still does not launch.
   ~06:37), v2quiet (yield check fixed to match watch*, to ~10:38),
   gdm-evidence (to ~13:12). If watch2 expires unquiet again, re-arm
   per the standing debt pattern.
+
+## Session 20 — gdm chain to the LAST domino (2026-10-31, r51-r64)
+
+Lane: feature/gnome-bringup (worktree gnome-bringup). Merged main
+40e925fd (fast-forward; lane commits d58c1dd9/5dda1b73 were already in
+main). x86_64 + aarch64 builds rc=0; riscv make test ALL PASS.
+
+### The domino chain this session (each verified in serial evidence):
+
+1. KERNEL sysfs: boot_vga=1 on the DRM PCI function (4744bfe0).
+   gdm's udev_is_settled reads boot_vga on the card's PCI parent;
+   without it every boot idled ~61s in the "secondary PCI graphics
+   adapter" retry loop before the graphics-check timeout. Now:
+   "Found primary PCI graphics adapter, proceeding" immediately.
+2. IMAGE: /etc/X11/xorg.conf = the fbdev config (41e0af7f family).
+   gdm's [server-X0] -config flag is ROOT-ONLY in Xorg; the uid-120
+   greeter Xorg silently ignored it, autoconfig picked modesetting ->
+   glamor -> gbm -> deterministic SIGSEGV in libgbm's DRI-driver
+   loader (gdmr50, every ~2 min cycle). With the system xorg.conf the
+   greeter Xorg runs FBDEV+shadow — the proven pixels path.
+3. IMAGE: libpam-systemd (jammy 249.11) + 'session optional
+   pam_systemd.so debug' in common-session. The gdmr46 sd-login
+   bridge was retired (logind owns /run/systemd/users/120 and its
+   UserNew/user_start/UserRemoved churn clobbered the bridge every
+   attempt — gdmr51). pam_systemd + a real CreateSession is the stock
+   path.
+4. KERNEL sysfs: /sys/class/tty/tty0/active (live from fs::vt)
+   (fe23f64b). logind v249 seat_has_vts() == seat0 && console_active_fd
+   >= 0; without the attr CreateSession is rejected ("Seat has no VTs
+   but VT number not 0"). The gdmr26-era fear (logind wedge) is dead:
+   the VT layer now carries the whole console path ("Preallocating
+   VTs...", "VT changed to 1").
+5. IMAGE: systemd1shim — a ~300-line GLib daemon owning
+   org.freedesktop.systemd1 (test/ubuntu-gnome/systemd1shim.c, built
+   cross against the image glib; headers in work/glibdev-riscv64).
+   logind's CreateSession starts the session scope via
+   StartTransientUnit; with the name unowned, dbus activation failed
+   ("Launch helper exited with unknown return code 1") and no logind
+   session could exist. The shim answers Subscribe/StartUnit/
+   StartTransientUnit (+ unit job semantics: reply job path, then
+   JobRemoved(uoss,'done') 500ms later), GetEnvironment,
+   Properties.Environment, ListUnits. Reply path MUST be a REGISTERED
+   GDBus object (g_dbus_method_invocation_return_value) — a message
+   filter + send_message got its method_returns REJECTED by dbus-daemon
+   ("requested_reply=0") and pam_systemd timed out (gdmr56). runit
+   SUPERVISES it (connection watchdog + respawn) because of (7).
+6. STATE AFTER r59: "New session c1 of user gdm", CreateSession
+   replies arrive ("Sending reply about created session ... vtnr=1"),
+   RegisterDisplay no longer errors at the session lookup — the chain
+   now dies at ONE remaining kernel/userspace seam:
+7. THE REMAINING BLOCKER (r62-r64): the greeter session dies
+   INSTANTLY of a session-fifo EOF — logind logs "Session c1 logged
+   out. Waiting for processes to exit." milliseconds after the create
+   reply (session_stop_scope's abandon branch), the session file goes
+   STATE=closing, and gdm-manager's register check ("Session 'c1' is
+   not active or online") rejects -> gdm-x-session exit 70 loop.
+   Root-cause elimination so far:
+   - SCM_RIGHTS over AF_UNIX stream: WORKS (boot probes SCMFDS ok,
+     SCMTRANSIT ok — sender-closes-immediately transit included).
+   - fifo poll semantics: CORRECT (FIFOPOLL: no HUP with a live
+     writer; HUP only via is_write_closed).
+   - kernel send-side ancillary parking holds the Arc<File> refs in
+     the queued segment (net/unix.rs) — refs survive sender close.
+   - pam_systemd v249 (source checked) keeps the received fd
+     (F_DUPFD_CLOEXEC + pam_set_data).
+   - SECOND symptom, likely the same seam: once per boot, long-lived
+     bus connections DROP while their processes live (logind AND the
+     shim; names vanish, dbus-daemon re-activates login1 — up to 20
+     logind banners/boot; later greeter attempts fail with "Connection
+     timed out" and systemd1 activation errors). No process exits, no
+     kill storm (EXITGRP/KSIG forensics clean), no OOM.
+   NEXT HUNT DIRECTIONS (for the successor):
+   a. pam_systemd debug is ON in the image now (common-session
+      "pam_systemd.so debug") — the "Reply from logind: ...
+      session_fd=N" line will show whether the fd reaches pam (-1 =
+      lost in the dbus-daemon relay). The r64 dumps did not capture
+      that window before the session ended; keep grepping.
+   b. Watch the dbus-daemon's fd relay specifically: logind sends the
+      reply WITH fd to the daemon; the daemon must re-send with fd to
+      pam. Enable DBUS_VERBOSE? not shipped; instrument the kernel
+      recv/send cmsg paths with a dfx-gated tap for pid=dbus-daemon.
+   c. The connection-drop class: correlate with the first fd-carrying
+      message; suspect our unix socket's SCM delivery corrupting the
+      DAEMON's internal state (e.g., a cmsg written past the control
+      buffer, MSG_CTRUNC misreport) — the daemon then closes the
+      connection. A kernel-side tap on recvmsg for the daemon pid
+      (control buffer addresses + returned controllen) would settle it.
+   d. If (a) shows session_fd=N arriving at pam, the fifo EOF source
+      is the DBUS relay dropping the fd — then compare against stock
+      dbus-daemon behavior with a standalone repro (two gdbus peers
+      passing a fifo fd through the system bus).
+
+### Chain state on the last boot (gdmr64):
+udevd coldplug OK (udev db tags master-of-seat) -> logind owns login1,
+seat0 CanGraphical=yes (probe rc=0 with the CORRECT object path
+/org/freedesktop/login1/seat/seat0 — the old flat path was a probe
+bug) -> gdm3 settles immediately (boot_vga) -> PAM chain green ->
+CreateSession -> scope job "done" -> reply with session fd -> [session
+fifo EOFs here] -> gdm-manager rejects ('not active or online') ->
+gdm-x-session exit 70 -> 10s retry loop. Xorg (fbdev) itself is
+healthy all boot. Screen still black because gnome-shell never starts.
+
+### Commits this session (all pushed to feature/gnome-bringup):
+6d90800c charter; 4744bfe0 boot_vga; 7b24c43b seat-path probe;
+image: 41e0af7f shim v1 (+xorg.conf), [a0a58a14-era purge restored
+gdm-img/gdm-repack locally]; fe23f64b tty0/active; shim fixes
+(StartTransientUnit, registered-object replies, supervision, /var/log/
+gdm3, sd-login state dumps); fd/fifo probes in runit.
+
+### Registered-blocker verdicts (charter):
+1. "devfs symlink CanGraphical" — SUPERSEDED: CanGraphical passes since
+   r50 (udev db + logind seat); the operative gates were boot_vga and
+   the seat bus-object path (both fixed).
+2. netlink multicast — RESOLVED (session 17/18 fixes; udevd+logind run
+   the full coldplug/monitor path on current main).
+3. console-VT — the VT layer (fs/vt.rs, gdmr28-48 era) + tty0/active
+   (this session) carry logind's whole VT-controller path; no wedge.
+
+## Session 21 — the LAST seam closed: sd-bus fd negotiation was never on (2026-10-31, r65-r72)
+
+Lane: feature/gnome-bringup. Hunt: the session-fifo domino (session 20
+next-steps a-d, all executed).
+
+### The elimination ladder (each step serial-verified)
+1. r64/r65 evidence re-read: pam_systemd's debug line "Reply from
+   logind:" NEVER printed — not once, any boot — while logind's
+   "Sending reply about created session ... session_fd=16" printed for
+   every attempt. The fd-carrying method_return never reached pam.
+2. dfx=scmtap kernel tap (caa3b832, KERN_ERR so it survives
+   loglevel=3 boots): TX/RX per unix-fd hop, DROP-{NOCTL,EFAULT,
+   EMFILE,PLAINREAD}, ORPHAN (fds queued at socket close), and
+   FIFO-LASTWRITER (the exact EPOLLHUP source). gdmr66: ZERO TX lines
+   from logind — the kernel never saw ONE fd-carrying sendmsg from
+   logind. All session-20 "kernel relay" suspects (cmsg copy, MSG_CTRUNC,
+   plain-read drops, fifo poll) were thereby EXONERATED: the message
+   never entered the kernel.
+3. Zero-new-code probe (r65 image): logind's Inhibit (returns "h")
+   answered org.freedesktop.DBus.Error.NotSupported — the sd-bus send
+   was REFUSED in userspace (sd_bus_can_send==0 → -EOPNOTSUPP), and
+   gdmr68's wrong-what control proved the error came from logind, not
+   the bus.
+4. Raw auth probes in runit (AUTHPROBE/AUTHIOV): the daemon answers
+   AGREE_UNIX_FD — including for sd-bus's EXACT shape (one 3-iov
+   sendmsg "\0AUTH EXTERNAL\r\nDATA\r\n"+"NEGOTIATE_UNIX_FD\r\n"+
+   "BEGIN\r\n"; all three reply lines DATA/OK/AGREE arrive in one
+   clean recvmsg, flags=0, no cmsg). Transport byte-perfect.
+
+### ROOT CAUSE
+socket(2)/accept(2) Files carry no VFS inode, and file_stat's
+anonymous branch (pipe → char_dev → drm → memfd → EBADF) had NO socket
+case: fstat(2) on ANY socket fd returned EBADF. sd-bus probes its bus
+connection with sd_is_socket() (fstat + S_ISSOCK + SO_DOMAIN) inside
+bus_socket_start_auth(); on failure it clears accept_fd BEFORE the
+auth write — so the client NEVER SENDS NEGOTIATE_UNIX_FD, the daemon
+never answers AGREE_UNIX_FD, can_fds stays false, and EVERY
+fd-carrying sd-bus send returns -EOPNOTSUPP. For CreateSession the
+refusal happens inside the JobRemoved match callback, where the error
+is swallowed: pam times out ("Connection timed out"), the fifo write
+fd is _cleanup_close_'d, and logind logs "Session c1 logged out"
+milliseconds after the create. The once-per-boot bus-connection drops
+were the same EOPNOTSUPP surfacing through other reply paths.
+
+### FIX (be5b2709)
+net/socket.rs socket_file_stat(): S_IFSOCK|0777, per-description
+st_ino = file_id, dispatched from fs/vfs.rs file_stat's anonymous
+branch (before char_dev), covering all four socket ops tables (inet,
+unix, netlink, raw).
+
+### gdmr72 verification boot (r65 image + fixed kernel)
+- INHIBIT-FD-PROBE busctl rc=0, gdbus rc=0 (fd arrives both stacks).
+- scmtap chain complete: TX pid=512(logind) → RX pid=307(dbus-daemon)
+  fds=[14] → TX pid=307 → RX client fds=[n].
+- pam_systemd: "Reply from logind: id=c1 ... session_fd=10 seat=seat0
+  vtnr=1" — first time on this system.
+- ZERO "Session c1 logged out" lines; session STATE=active; no
+  gdm-x-session exit-70, no "not active or online".
+- Greeter chain runs: gdm-x-session → dbus-run-session →
+  gnome-session (gsd daemons register) → gnome-shell.
+- SCREEN LIT: t=420s shot 99% non-black — gnome-shell renders its
+  "Oh no! Something has gone wrong." recovery screen
+  (runs/gnome-gdmr72/shot-0420s.ppm). The whole session stays up.
+- Remaining (NEXT lane): gnome-shell itself exits code 1 in the
+  greeter (repeats "App org.gnome.Shell.desktop exited with code 1";
+  a "[pango] FcInit" worker thread exists before death — fontconfig/
+  theme suspects). That is past this charter's seam; gsd-* plugins
+  and the session survive the crash now.
+
+### Validation
+x3 builds rc=0 (riscv64, x86_64, aarch64 fresh .config); riscv make
+test: maketest-gdmr72.log (see below). Image r65 = central store
+gnome-gdm-r65.img (repack uses the LOCAL musl toolchain — the shared
+ltp-r20 toolchain symlink died mid-session and silently produced a
+glibc-static runit that killed boots at t=2s; rebuilt via
+toolchain/build-musl.sh, 03f406c3).
+
+### Commits this session (pushed)
+caa3b832 dfx(scmtap) relay tap; ce322b38 KERN_ERR; 4002dcd6 TXERR
+tap; f5646935 PLAINREAD tap; 3d22366f Inhibit probe; 03f406c3 musl
+toolchain rebuild (+idle arg fix); 80b7b6fe auth probes tarball;
+be5b2709 THE FIX (fstat S_IFSOCK).
+
+## Session 22 — THE GREETER LOGIN PROMPT IS ON SCREEN (2026-11-01, gdmr74)
+
+Succession: predecessor died ~25 min in (quota); their 2 commits
+(0d4a5050 tee probe + e66d7830) were merged. Their gdmr73 boot (r66
+tee image) had ALREADY named the failing component — this leg read
+it, root-caused, fixed, and verified.
+
+### gdmr73 harvest (no new boot needed)
+- The tee probe worked: the greeter shell's own stderr (tee'd to
+  /tmp/gshell.log, tailer-dumped) shows the death is NOT fontconfig
+  (the .cache-7 files build fine, "[pango] FcInit" was a red
+  herring): "Unset XDG_SESSION_ID, getCurrentSessionProxy() called
+  outside a user session. Asking logind directly." then
+  "Gjs-CRITICAL: JS ERROR: TypeError: this._userProxy.Display is
+  null at loginManager.js:111:41" → "Execution of main.js threw an
+  exception" → exit 1 → gdm greeter loop (the "Oh no" screen).
+- gnome-shell 42.9 source (fetched): LoginManagerSystemd's
+  constructor builds this._userProxy on
+  /org/freedesktop/login1/user/self; getCurrentSessionProxy line 111
+  destructures `this._userProxy.Display` with NO null guard. Display
+  is null iff the GDBus proxy cached ZERO properties iff the
+  construction-time GetAll failed.
+- gdmr73's own sd-bus debug (SYSTEMD_LOG_LEVEL=debug on logind) had
+  the smoking gun: every "Got message ... path=/org/freedesktop/
+  login1/user/self ... member=GetAll" is followed by "Failed to
+  process message ...: No medium found" — ENOMEDIUM.
+
+### Root cause (systemd 249.11 source, aliyun orig tarball)
+user_object_find("self") → manager_get_user_from_creds(UID_INVALID)
+→ get_sender_user → sd_bus_query_sender_creds(OWNER_UID|AUGMENT) →
+bus-creds.c cg_pid_get_path() → cg_unified_cached() →
+statfs("/sys/fs/cgroup") == SYSFS_MAGIC → **-ENOMEDIUM ("No
+filesystem is currently mounted on /sys/fs/cgroup")**. The ENOMEDIUM
+aborts the whole creds query → user/self dispatch fails → error
+reply → proxy property-less → Display null → JS TypeError.
+OWNER_UID resolution needs BOTH a mounted cgroup2 (statfs magic)
+AND a /proc/<pid>/cgroup "0::<path>" line whose path carries a
+"user-<uid>.slice" component (cg_path_get_owner_uid parser).
+
+### Fix (kernel + image)
+1. KERNEL (9bd18f83): generate_cgroup in fs/procfs/pid.rs — with a
+   cgroup2 hierarchy mounted, each task now reports a per-task
+   user-slice path: pid 1 → "0::/init.scope" (cg_get_root_path
+   strips it → shift root "/"), every other task →
+   "0::/user.slice/user-<euid>.slice/user@<euid>.service". The
+   fabricated dirs do NOT exist in the hierarchy, so cg_kill against
+   them is an ENOENT no-op (cg_kill_items treats it as empty) — the
+   r17b udevd root-sweep storm cannot recur, and no task names the
+   root group either.
+2. IMAGE r67 (runit.c, rides the worktree per test/**/*.c policy;
+   52300b70 documents it in gdm-repack): gdm-mode runit now does
+   mount("cgroup2","/sys/fs/cgroup","cgroup2") BEFORE
+   udevd/logind/gdm3 — the kernel's full cgroup2 fs exists behind
+   mount(2) (U1b); statfs then reports CGROUP2_SUPER_MAGIC and
+   cg_unified_cached() takes the unified path. PID1 mounting it
+   matches the reference shape (systemd mounts it itself).
+3. Probes: ground-truth cycle dumps /proc/1/cgroup +
+   /proc/self/cgroup + the hierarchy, and probes login1 user/_120
+   and user/self Display (root caller → expected business error,
+   never ENOMEDIUM).
+
+### gdmr74 verification boot (kernel 9bd18f83 + image r67, smp2/2G,
+### 932s, zero input)
+- "[runit] cgroup2 mounted /sys/fs/cgroup" first try.
+- /proc cgroup paths exactly as designed; user-_120 Display rc=0
+  (3 cycles); user-self rc=256 (root, "not logged in" — ENOMEDIUM
+  count in the whole serial: 0; gdmr73 had dozens).
+- The stock greeter chain runs END TO END: udevd coldplug → logind
+  → gdm3 → PAM (pam_limits/pam_systemd "Asking logind to create
+  session: uid=120 ... class=greeter") → CreateSession reply with
+  session_fd → gdm-x-session → dbus-run-session → gnome-session
+  (autostart walk, full gsd family, ibus) → gnome-shell.bin pid 600
+  ALIVE the whole boot ("App org.gnome.Shell.desktop registered",
+  "GdmDisplay: session registered: yes", "session c1 found,
+  activating").
+- ZERO shell exits (0 "exited with code"), zero Oh-no/failed-dialog
+  markers, zero panics/SIGDEATH/OOM.
+- **SCREEN: the gdm login prompt** — dark greeter background
+  (#202020, 97.5%), white clock text top-center (y 11-17), centered
+  blue login box x 468-802 y 348-422 (dead center of 1280x800) with
+  a text line inside (ink 696, y 379-395) that OCRs as the username
+  row ("Rux Login User"). M4_screen_lit @270s, nonblack 1.0000,
+  frame composition IDENTICAL at 450s and 930s (held the whole
+  window — a live login screen, not a splash).
+- Evidence: runs/gnome-gnome-gdmr74/ (note the doubled tag prefix;
+  fire.py prepends gnome- itself), shots + serial; PNG copies
+  run/gdm74-greeter-450s.png, run/gdm74-greeter-final-930s.png,
+  run/gdm74-greeter-loginbox-3x.png.
+
+### Gates
+riscv64 build rc=0 (build-gdmr74.log); x86_64 rc=0
+(build-gdmr74-x86.log); aarch64 fresh .config rc=0
+(build-gdmr74-aa64.log); riscv make test green (maketest-gdmr74.log
+— verdict below). Kernel diff vs main: procfs/pid.rs
+(generate_cgroup) ONLY.
+
+### Open items for the next leg
+- Log IN (type the password, Enter) — the ladder's next rung: user
+  rux session → user gnome-shell → desktop. QMP keyprobe/clickprobe
+  exist; the greeter entry needs click-to-focus then 'r','u','x',
+  'ret'.
+- The greeter's stderr channel (/var/log/gdm3/:0-greeter.log never
+  appears; the env-dump wrapper's output is lost the same way) —
+  cosmetic forensics gap only.
+- XDG_SESSION_ID still does not reach the greeter program env (the
+  shell logs "Unset XDG_SESSION_ID"); with user/self fixed this is
+  now harmless, but a faithful PAM-env transfer would take the
+  direct session-proxy branch instead.
+- M2/M3 serial milestone patterns are session-mode strings; they
+  never fire in gdm mode (fire.py pattern gap, known).

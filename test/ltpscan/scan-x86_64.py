@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""LTP chunked scan driver for the Rux kernel (x86_64, KVM).
+
+The x86_64 mirror of scan.py (riscv64 TCG): same RES|name|rc|tail protocol,
+same classify() semantics, same WEDGE retry + POISON parking logic — only
+the rig differs (q35 + -accel kvm + bzImage). KVM boots in seconds, so the
+boot/stall deadlines are tighter than the TCG ones; the per-chunk wall
+budget stays generous because LTP tests themselves are the slow part.
+
+Usage:
+  python3 scan-x86_64.py --image test/rootfs-x86_64-ltp.img \
+      --kernel target/x86_64-unknown-none/debug/bzImage \
+      --tests test/ltpscan/tests-all.txt --out results/results-rXX.txt \
+      [--chunk 100] [--qemu-timeout 4200] [--attempts 5] [--keep-logs DIR]
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+QEMU = "qemu-system-x86_64"
+
+
+def classify(rc):
+    if rc == 0:
+        return "PASS"
+    if rc in (124, 125):
+        return "TIMEOUT"
+    if rc in (126, 127):
+        return "EXECFAIL"
+    # 143 = SIGTERM, 158 = SIGKILL: the ltpscan wall-clock kill (30s/40s)
+    # — TIMEOUT, not a crash. Other signal deaths are real CRASHes.
+    if rc in (143, 158):
+        return "TIMEOUT"
+    if rc >= 128:
+        return "CRASH"
+    if rc == 4:
+        return "WARN"
+    if rc & 32:
+        return "TCONF"
+    if rc & 1 or rc & 2:
+        return "FAIL"
+    return "FAIL"
+
+
+def debugfs_write(image, local_path, remote_path):
+    """Replace remote_path in the ext4 image with local file (no loop mount)."""
+    rdir, rname = os.path.split(remote_path)
+    cmdfile = tempfile.NamedTemporaryFile(mode="w", suffix=".dbfs", delete=False)
+    cmdfile.write(f"cd {rdir}\nrm {rname}\nwrite {local_path} {rname}\n")
+    cmdfile.close()
+    try:
+        p = subprocess.run(["debugfs", "-w", "-f", cmdfile.name, image],
+                           capture_output=True, text=True, timeout=120)
+        if "File not found" in p.stderr or "Cannot" in p.stderr:
+            print(f"[scan] debugfs stderr: {p.stderr.strip()[:300]}", file=sys.stderr)
+    finally:
+        os.unlink(cmdfile.name)
+
+
+def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path, accel="kvm"):
+    """Boot once and run `tests`. Returns {name: (rc, tail)} for reported tests."""
+    chunk_local = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    chunk_local.write("\n".join(tests) + "\n")
+    chunk_local.close()
+    debugfs_write(image, chunk_local.name, "/test/linux-ltp/chunk.txt")
+    os.unlink(chunk_local.name)
+
+    cmd = [
+        QEMU, "-M", "q35", "-accel", accel, "-cpu", "max",
+        "-m", mem, "-smp", str(smp), "-display", "none",
+        "-serial", "stdio", "-monitor", "none", "-no-reboot", "-snapshot",
+        "-drive", f"file={image},if=none,id=rootfs,format=raw,file.locking=off",
+        "-device", "virtio-blk-pci,drive=rootfs",
+        "-kernel", kernel,
+        "-append", "root=/dev/vda rw init=/test/ltpscan console=ttyS0",
+    ]
+    with open(log_path, "wb") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        deadline = time.time() + qemu_timeout
+        boot_deadline = time.time() + 120   # KVM: boot+banner must appear in 2 min
+        last_res_count = -1
+        last_progress = time.time()
+        STALL_LIMIT = 240                   # 4 min without a new RES line = wedge
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(3)
+            try:
+                with open(log_path, "rb") as lf:
+                    data = lf.read()
+                if b"SCAN_DONE" in data or b"kernel panic" in data:
+                    time.sleep(2)  # let the last serial bytes drain
+                    break
+                # Stall detector (same classes as the riscv driver, tighter
+                # budgets: KVM boots are seconds, not minutes).
+                res_count = data.count(b"\nRES|")
+                if b"SCAN_BEGIN" in data or b"\nRES|" in data:
+                    boot_deadline = None
+                if res_count != last_res_count:
+                    last_res_count = res_count
+                    last_progress = time.time()
+                if boot_deadline is not None and time.time() > boot_deadline:
+                    print("[scan] boot stall: no runner banner in 120s", flush=True)
+                    time.sleep(2)
+                    break
+                if time.time() - last_progress > STALL_LIMIT:
+                    print(f"[scan] RES stall: {STALL_LIMIT}s without progress",
+                          flush=True)
+                    time.sleep(2)
+                    break
+                if data.count(b"DEADLOCK: spinlock stuck") >= 3:
+                    time.sleep(2)
+                    break
+                if data.count(b"blocked for more than") >= 3:
+                    time.sleep(2)
+                    break
+            except OSError:
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return parse_serial(log_path)
+
+
+RES_RE = re.compile(r"^RES\|([^|]+)\|(-?\d+)\|(.*)$", re.M)
+
+
+def parse_serial(log_path):
+    with open(log_path, "r", errors="replace") as f:
+        text = f.read()
+    out = {}
+    for m in RES_RE.finditer(text):
+        name, rc, tail = m.group(1), int(m.group(2)), m.group(3)
+        # Last occurrence wins (retry duplicates)
+        out[name] = (rc, tail.strip())
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--image", default="test/rootfs-x86_64-ltp.img")
+    ap.add_argument("--kernel",
+                    default="target/x86_64-unknown-none/debug/bzImage")
+    ap.add_argument("--tests", required=True, help="file with one test name per line")
+    ap.add_argument("--only", help="comma-separated test names to run (overrides --tests)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--range", dest="letter_range", help="e.g. a-k: first-letter filter")
+    ap.add_argument("--chunk", type=int, default=100)
+    ap.add_argument("--qemu-timeout", type=int, default=4200)
+    ap.add_argument("--attempts", type=int, default=5)
+    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--mem", default="2G")
+    ap.add_argument("--accel", default="kvm")
+    ap.add_argument("--keep-logs", help="directory to keep per-chunk serial logs")
+    args = ap.parse_args()
+
+    if args.only:
+        tests = [t.strip() for t in args.only.split(",") if t.strip()]
+    else:
+        with open(args.tests) as f:
+            tests = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    if args.letter_range:
+        lo, hi = args.letter_range.split("-")
+        tests = [t for t in tests if lo <= t[0] <= hi]
+    print(f"[scan] {len(tests)} tests, chunk={args.chunk}", flush=True)
+
+    results = {}  # name -> (class, rc, tail)
+    if args.keep_logs:
+        os.makedirs(args.keep_logs, exist_ok=True)
+    t0 = time.time()
+    for ci in range(0, len(tests), args.chunk):
+        chunk = tests[ci:ci + args.chunk]
+        remaining = list(chunk)
+        for attempt in range(1, args.attempts + 1):
+            if not remaining:
+                break
+            log_path = os.path.join(args.keep_logs, f"chunk{ci:04d}-a{attempt}.log") \
+                if args.keep_logs else tempfile.mktemp(suffix=".log")
+            got = run_chunk(args.image, args.kernel, remaining,
+                            args.qemu_timeout, args.smp, args.mem, log_path,
+                            args.accel)
+            for name in list(remaining):
+                if name in got:
+                    rc, tail = got[name]
+                    results[name] = (classify(rc), rc, tail)
+            remaining = [t for t in remaining if t not in got]
+            # Culpable-test parking (same rule as the riscv driver): the
+            # first unreported test was in flight at the wedge; running it
+            # first on a fresh boot would re-wedge and lose the chunk.
+            if got and remaining and attempt < args.attempts:
+                poison = remaining.pop(0)
+                results[poison] = ("POISON", "", "")
+                print(f"[scan] chunk@{ci}: parked {poison} as POISON "
+                      f"(in-flight at stall)", flush=True)
+            done = len(chunk) - len(remaining)
+            print(f"[scan] chunk@{ci}: attempt {attempt} reported {len(got)}, "
+                  f"cumulative {done}/{len(chunk)}, elapsed {time.time()-t0:.0f}s",
+                  flush=True)
+            if remaining:
+                print(f"[scan] chunk@{ci}: WEDGE retry with: {remaining[:10]}{'...' if len(remaining)>10 else ''}", flush=True)
+        for name in remaining:
+            results[name] = ("WEDGE", "", "")
+
+    with open(args.out, "w") as f:
+        f.write("# idx|test|class|rc|tail\n")
+        for i, t in enumerate(tests):
+            cls, rc, tail = results.get(t, ("NOTRUN", "", ""))
+            f.write(f"{i}|{t}|{cls}|{rc}|{tail}\n")
+
+    from collections import Counter
+    c = Counter(v[0] for v in results.values())
+    print(f"[scan] done in {time.time()-t0:.0f}s: " +
+          " ".join(f"{k}={v}" for k, v in sorted(c.items())), flush=True)
+
+
+if __name__ == "__main__":
+    main()

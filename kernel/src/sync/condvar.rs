@@ -11,7 +11,7 @@
 //! - signal() wakes one waiting process
 //! - broadcast() wakes all waiting processes
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

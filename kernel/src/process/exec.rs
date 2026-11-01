@@ -1165,6 +1165,26 @@ pub(crate) fn do_execve_elf(
         new_addr_space.setup_envp(env_start_addr as usize, env_end_addr as usize);
     }
 
+    // Record argv range for /proc/pid/cmdline (the exact mirror of the
+    // envp block above). setup_argv existed but had NO caller, so every
+    // process reported an EMPTY /proc/<pid>/cmdline — musl fgets on it
+    // returns NULL immediately. Observed on the OH image: the EGL
+    // wrapper (EglSystemLayersManager::GetProcessName) reads
+    // /proc/<pid>/cmdline to key its layer injection and fails through
+    // "Failed to get process name" on every graphics process; anything
+    // else keying off the process name (watchdogs, ANR dumps) gets the
+    // same empty answer. argv strings sit at string_offset, packed
+    // back-to-back NUL-terminated (8-byte padded slots).
+    if !argv.is_empty() {
+        let arg_start_addr = adjusted_stack_top + (string_offset * 8) as u64;
+        let mut arg_end_offset = string_offset;
+        for arg in argv.iter() {
+            arg_end_offset += (arg.len() + 1 + 7) / 8;
+        }
+        let arg_end_addr = adjusted_stack_top + (arg_end_offset * 8) as u64;
+        new_addr_space.setup_argv(arg_start_addr as usize, arg_end_addr as usize);
+    }
+
     // Save the auxv into the mm so a fatal-signal core dump can emit
     // NT_AUXV without depending on the (clobberable) user stack.
     new_addr_space.set_saved_auxv(&auxv_words);

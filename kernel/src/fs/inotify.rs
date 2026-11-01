@@ -535,36 +535,39 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
     let effective_mask = mask & !IN_MASK_ADD;
 
     // Per-instance watch list: existing watch on the same inode keeps its
-    // wd; IN_MASK_ADD ORs into it, otherwise the mask is replaced.
-    let wd = {
+    // wd; IN_MASK_ADD ORs into it, otherwise the mask is replaced. The
+    // IN_MASK_ADD test uses the RAW user mask — effective_mask already
+    // stripped the bit, so testing it made the OR branch unreachable and
+    // every re-add with IN_MASK_ADD silently REPLACED the mask instead
+    // (inotify(7): "Add (OR) the events ... instead of replacing").
+    let (wd, final_mask) = {
         let mut inner = instance.inner.lock();
         if let Some(existing) = inner.watches.iter_mut().find(|w| w.key == key) {
-            if effective_mask & IN_MASK_ADD != 0 {
-                existing.mask |= effective_mask & !IN_MASK_ADD;
+            if mask & IN_MASK_ADD != 0 {
+                existing.mask |= effective_mask;
             } else {
                 existing.mask = effective_mask;
             }
-            existing.wd
+            (existing.wd, existing.mask)
         } else {
             let wd = inner.next_wd;
             inner.next_wd += 1;
             inner.watches.push(Watch {
                 wd,
                 key,
-                mask: effective_mask & !IN_MASK_ADD,
+                mask: effective_mask,
             });
-            wd
+            (wd, effective_mask)
         }
     };
 
     // Mirror into the global registry (upsert, keyed by instance+inode).
     {
         let mut registry = WATCH_REGISTRY.lock();
-        let stored_mask = effective_mask & !IN_MASK_ADD;
         let mut found = false;
         for r in registry.iter_mut() {
             if r.key == key && Arc::ptr_eq(&r.instance, &instance) {
-                r.mask = stored_mask;
+                r.mask = final_mask;
                 found = true;
                 break;
             }
@@ -574,7 +577,7 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
                 key,
                 instance: Arc::clone(&instance),
                 wd,
-                mask: stored_mask,
+                mask: final_mask,
             });
         }
         WATCH_COUNT.store(registry.len(), Ordering::Release);

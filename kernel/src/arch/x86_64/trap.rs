@@ -1106,6 +1106,8 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     // runs in the incoming task's own frozen frame with its own regs, so
     // the check validates whichever task actually returns to user.)
     if unsafe { (*regs).user_mode() } {
+        // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
+        crate::sync::rcu::rcu_note_context_switch();
         crate::dfx::leakorigin::check_user_return();
     }
 }
@@ -1152,10 +1154,11 @@ fn ww_irqwin_budget_ok() -> bool {
 ///
 /// - schedule() sets the TIF_IN_SCHED ti_flags bit around __schedule.
 ///   This hook refuses while the bit is set — the only re-entry point is
-///   this hook (the trap-exit asm loop, cond_resched and lock_fair all
-///   call schedule() sequentially, never from inside another one). A
-///   leaked flag, should one ever happen, only disables preemption for
-///   that task; count semantics and the sleep discipline stay exact.
+///   this hook (the trap-exit asm loop, cond_resched and the SleepMutex
+///   slowpath all call schedule() sequentially, never from inside
+///   another one). A leaked flag, should one ever happen, only disables
+///   preemption for that task; count semantics and the sleep discipline
+///   stay exact.
 /// - sub_preempt_count clamps and reports underflow, so a residual
 ///   unpaired decrement is one attributable log line, never a silent -1
 ///   faking in_interrupt() for a user task.
@@ -1187,11 +1190,77 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     //   86 s / 29 heals). With the hook OFF the same leaks self-bound at
     //   user-mode boundaries (~2.6 s, sc69) and the heals bound the rest.
     // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
-    // stay as the safety net either way. Flip to true only after the
-    // producer is fixed.
-    const PREEMPT_HOOK_ENABLED: bool = false;
-    if !PREEMPT_HOOK_ENABLED {
-        return;
+    // stay as the safety net either way.
+    //
+    // kpreempt (cmdline): runtime arm of this hook. Same contract on
+    // every arch: kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes the
+    // arch default. x86_64 default: OFF (wedge-fix lane, 2026-11-01;
+    // was ON since the perf-sched lane, 2026-10-31). The riscv64 twin
+    // also defaults OFF (frame discipline unstabilized).
+    //
+    // WHY the default went back to OFF: release builds with the hook
+    // armed wedge the OH SA storm (wedge-fix lane, 2026-11-01). At the
+    // perf-sched merge (192bfdce, hook ON by default, release build) the
+    // early SA storm produced 66 both-CPU `DEADLOCK: spinlock stuck`
+    // prints on binder::WORLD with waiters in world_lock(); the SAME
+    // tree booted with `kpreempt=0` shows ZERO deadlock prints and
+    // clean-anchor-level SA progress (SAREG txn 7266 vs clean anchor
+    // 33d007fe's 7213 at 120 s). Same verdict on main tip 4a757d6e
+    // (wfB wedge on binder::WORLD vs wfC clean). The mechanism family
+    // is the documented one below (sc70: hook ON + count leaks =
+    // monopolies) resurfacing under the storm's timing — the hook needs
+    // its own fix before it can be the default again. Re-land
+    // conditions: (1) a release OH SA-storm boot with the hook ON
+    // survives 600 s with zero DEADLOCK prints; (2) the p2f futex
+    // wake->run gains (KVM med 163us -> 9.5us) still hold.
+    //
+    // The sc70-era amplification verdict (hook ON + preempt_count leaks
+    // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
+    // counts zeroed at wake before the monopoly can form) and the
+    // rotation-proof 2s tick heal, so the amplifier's fuel is bounded.
+    //
+    // Default-ON evidence (perf-sched lane, pbench p2f futex battery,
+    // TCG q35 smp2/2G and KVM, kernel = 159111af lineage + mprotect fix):
+    // with a pread(4MB)-cached hog pinned to the woken waiter's CPU (one
+    // syscall = one contiguous kernel stretch; hogcal TCG 5.5ms / KVM
+    // 160us), futex wake->run was syscall-length-quantized:
+    //   TCG: med 5608us (97% of wakes 1-10ms) vs reference 86us = 65x
+    //   KVM: med 163us vs reference 8.2us = 20x
+    // kpreempt=1 collapses it to reference parity (TCG 23us, KVM 9.5us)
+    // and the full P1-P7 battery shows no row moved beyond noise
+    // (KVM kp=0 vs kp=1 back-to-back: all rows within ±5%, p2_ctxsw
+    // 0.18->0.175). Boot beacon delta on the same battery: PREEMPT-HEAL
+    // events went DOWN with the hook on (49 -> 2), zero WAKE-STRANDED.
+    // The verdict-cache discipline mirrors syscost::on(): never cache a
+    // verdict before the cmdline exists (the first vector can fire
+    // pre-cmdline::init).
+    static KP_ARMED: core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(0);
+    match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            match crate::cmdline::get_cmdline() {
+                None => return, // cmdline not parsed yet: stay disarmed
+                Some(_) => {
+                    let v = if crate::cmdline::get_param("kpreempt")
+                        .as_deref()
+                        == Some("1")
+                    {
+                        2u8
+                    } else {
+                        1u8
+                    };
+                    KP_ARMED.store(v, core::sync::atomic::Ordering::Relaxed);
+                    if v == 2 {
+                        crate::pr_info!(
+                            "sched: kernel-preempt armed by cmdline (cpu={})",
+                            crate::arch::cpu_id()
+                        );
+                    }
+                }
+            }
+        }
+        1 => return, // disarmed (cmdline off OR the OFF default; kpreempt=1 arms)
+        _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule
     // handles a null prev, but there is nothing to preempt either way.
@@ -1376,6 +1445,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
                     crate::dfx::syscost::tick_user();
+                    // leg-40C perf rider: user-mode rip sampling for
+                    // launcher-comm tasks (dfx-gated inside).
+                    utime_sample_rip(regs.rip, (*task).comm());
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
                     crate::perf::note_tick(regs.rip, crate::perf::MODE_USER, (*task).pid());
@@ -1386,6 +1458,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     // task comm, so one task's burn is separable from the
                     // boot crowd). KILLDUMP prints the table.
                     stime_sample_rip(regs.rip, (*task).comm());
+                    if comm_has_launcher((*task).comm()) {
+                        STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
+                    }
                     crate::dfx::syscost::tick_kern(regs.rip);
                     crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid());
                 }
@@ -1402,6 +1477,15 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
+    // 1.1 Re-arm the LAPIC timer BEFORE anything below can switch tasks
+    // or block: once x86_64 arms one-shot mode (set_next_trigger via
+    // apic::timer_arm_oneshot, perf lane pd), a tick that fails to
+    // re-arm leaves this CPU tick-less forever. Grid-glued to the next
+    // nominal tick, pulled earlier by any due hres deadline. No-op
+    // while the timebase is not precise (periodic tick still running)
+    // and on the PIT fallback path.
+    crate::drivers::timer::set_next_trigger();
+
     // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
     // timekeeper (offset-only forward steps, clamped; see
     // x86_64::resync_tsc_against_hpet).
@@ -1409,6 +1493,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         let j = crate::drivers::timer::x86_64::get_jiffies();
         if j % crate::config::KERNEL_HZ as u64 == 0 {
             crate::drivers::timer::x86_64::resync_tsc_against_hpet();
+            // leg-40C perf rider: 1 Hz boundary rides the drift block;
+            // self-throttled to 60 s inside.
+            utime_ripsample_report();
         }
     }
 
@@ -1503,6 +1590,13 @@ fn handle_external_interrupt(vector: u64) {
 
 /// Handle system call — x86 port of the twin's handle_syscall.
 fn handle_syscall(regs: &mut PtRegs) {
+    // forkprof trace: first Rust code of a syscall (entry side). The
+    // nr rides a second event (site 15, pid field = nr) so the timeline
+    // names each child-side call.
+    if crate::dfx::forkprof::trace_on() {
+        crate::dfx::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
+        crate::dfx::forkprof::trace(15, regs.rax as u32); // T_SYSNR
+    }
     // Re-enable interrupts before entering the syscall handler.  SYSCALL
     // entered with IF=0 (FMASK cleared it); running the whole syscall
     // with IF=0 starves timer ticks, softlockup detection, and preemption
@@ -2328,10 +2422,18 @@ fn handle_page_fault(regs: &mut PtRegs) {
         MmFaultResult::BusError => {
             crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             if regs.user_mode() {
+                // Handler-first routing like Segfault: LTP mmap13 installs
+                // a SIGBUS handler and must catch it; the default action
+                // kills with SIGBUS. force_unblock (the riscv64 twin):
+                // a blocked SIGBUS would otherwise stay pended while the
+                // task returns to the faulting rip and refaults forever —
+                // the same livelock the SIGSEGV arm guards against.
                 let pid = crate::process::current_pid();
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
+                } else {
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
             } else {
                 #[cfg(feature = "x86_64")]
@@ -2494,8 +2596,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             // Forensic ring tail: the last 12 completed syscalls before
             // the crash (pid/nr/a0/ret), oldest first. Identifies the
-            // in-flight syscall for interrupt-time crashes.
-            {
+            // in-flight syscall for interrupt-time crashes. The ring is
+            // recorded only under dfx=sysring (perf lane 2026-11) — say
+            // so instead of replaying a stale/zero ring.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
                 use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
                 let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
                 let len = SYSCALL_RING.len();
@@ -2513,6 +2617,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::putchar_no_lock(b' ');
                     kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
                     crate::console::putchar_no_lock(b'\n');
+                }
+            } else {
+                for &b in b"kp-sys ring off (boot with dfx=sysring)\n" {
+                    crate::console::putchar_no_lock(b);
                 }
             }
             // The old terminal was an unconditional hlt loop — every
@@ -2687,6 +2795,147 @@ static STIME_FOCUS: [StimeSample; STIME_SLOTS] = {
     };
     [EMPTY; STIME_SLOTS]
 };
+
+// ==================== leg-40C perf rider: user-mode rip sampling ====================
+// The cold-start wall is compute-bound ArkTS work in the launcher's
+// user space; stime_sample_rip only sees kernel-mode ticks. These
+// tables mirror the pattern for USER-mode rips (module attribution
+// offline via the byte-matched .so inventory — launcher mmaps are
+// deterministic, no ASLR), plus raw utime/stime tick counts for the
+// mode split. Printed every 60 s by utime_ripsample_report (called
+// from the 1 Hz drift block in the tick path, dfx-gated).
+
+const UTIME_SLOTS: usize = 32;
+
+struct UtimeSample {
+    page: core::sync::atomic::AtomicU64,
+    count: core::sync::atomic::AtomicU64,
+}
+
+static UTIME_HIST: [UtimeSample; UTIME_SLOTS] = {
+    const EMPTY: UtimeSample = UtimeSample {
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; UTIME_SLOTS]
+};
+
+/// launcher-comm user ticks (mode split numerator).
+static UTIME_LAUNCHER_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// launcher-comm kernel ticks.
+static STIME_LAUNCHER_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn comm_has_launcher(comm: &[u8; 16]) -> bool {
+    let mut run = 0u8;
+    for &b in comm.iter() {
+        if b == 0 {
+            break;
+        }
+        run = if b == b"launcher"[run as usize] {
+            run + 1
+        } else if b == b"launcher"[0] {
+            1
+        } else {
+            0
+        };
+        if run as usize == b"launcher".len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Record one USER-mode tick at `rip` for a launcher-comm task.
+fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !comm_has_launcher(comm) {
+        return;
+    }
+    UTIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
+    let page = rip & !0xFFFu64;
+    let mut min_idx = 0usize;
+    let mut min_count = u64::MAX;
+    for i in 0..UTIME_SLOTS {
+        let p = UTIME_HIST[i].page.load(Relaxed);
+        if p == 0 {
+            if UTIME_HIST[i]
+                .page
+                .compare_exchange(
+                    0,
+                    page,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                UTIME_HIST[i].count.store(1, Relaxed);
+                return;
+            }
+            continue;
+        }
+        if p == page {
+            UTIME_HIST[i].count.fetch_add(1, Relaxed);
+            return;
+        }
+        let c = UTIME_HIST[i].count.load(Relaxed);
+        if c < min_count {
+            min_count = c;
+            min_idx = i;
+        }
+    }
+    if UTIME_HIST[min_idx]
+        .count
+        .compare_exchange(
+            min_count,
+            1,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        UTIME_HIST[min_idx].page.store(page, Relaxed);
+    }
+}
+
+/// Periodic report (dfx=ripsample): the launcher's user-rip histogram
+/// + utime/stime split + the kernel-mode focus table. Self-throttled
+/// to one print every 60 s.
+pub fn utime_ripsample_report() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::RipSample) {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let j = crate::drivers::timer::x86_64::get_jiffies();
+    if j < LAST.load(Relaxed) + 60 * crate::config::KERNEL_HZ as u64 {
+        return;
+    }
+    LAST.store(j, Relaxed);
+    let u = UTIME_LAUNCHER_TICKS.load(Relaxed);
+    let s = STIME_LAUNCHER_TICKS.load(Relaxed);
+    crate::pr_warn!("RIPSAMPLE: launcher utime={} stime={}", u, s);
+    for i in 0..UTIME_SLOTS {
+        let p = UTIME_HIST[i].page.load(Relaxed);
+        let c = UTIME_HIST[i].count.load(Relaxed);
+        if p != 0 && c > 0 {
+            crate::pr_warn!("RIPSAMPLE: u-page={:#x} n={}", p, c);
+        }
+    }
+    for i in 0..STIME_SLOTS {
+        let p = STIME_FOCUS[i].page.load(Relaxed);
+        let c = STIME_FOCUS[i].count.load(Relaxed);
+        if p != 0 && c > 0 {
+            let mut comm = [0u8; 16];
+            for jx in 0..16 {
+                comm[jx] = STIME_FOCUS[i].comm[jx].load(Relaxed);
+            }
+            let name = core::str::from_utf8(&comm[..]).unwrap_or("").trim_end_matches('\0');
+            crate::pr_warn!("RIPSAMPLE: k-page={:#x} n={} comm={}", p, c, name);
+        }
+    }
+}
 
 /// Record one kernel-mode tick at `rip` for `comm`.
 fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {

@@ -1852,14 +1852,23 @@ unsafe fn setup_frame_aarch64(
         regs.regs[2] = 0;
     }
 
-    // Enter the handler: pc = handler, sp = frame. lr = the return path
-    // — the caller's sa_restorer when provided (arm64 glibc/musl ALWAYS
-    // pass their own `mov x8,#139; svc #0` stub via rt_sigaction), or
-    // the kernel trampoline page as the fallback for restorer-less raw
-    // callers (the reference kernel's vDSO sigtramp role).
+    // Enter the handler: pc = handler, sp = frame. lr = the return path.
+    // The arm64 contract (reference kernel setup_return): sa_restorer is
+    // honored ONLY when the action carries SA_RESTORER — glibc's aarch64
+    // libc_sigaction.c copies sa_restorer into the kernel struct just
+    // under that flag and otherwise leaves the slot UNINITIALIZED stack
+    // garbage (verified: LTP tst_test's SAFE_SIGNAL(SIGUSR1) delivered
+    // restorer=mid-_IO_setb garbage; the handler's ret landed there and
+    // executed stdio code with the sigframe's siginfo as operands — the
+    // whole 34-test SIGSEGV class, fp=child-pid-shaped 0x132 values).
+    // Restorer-less callers (every glibc/musl sigaction user on arm64)
+    // return through the kernel SIGTRAMP page, the reference kernel's
+    // vDSO-sigtramp role.
     regs.pc = action.sa_handler as u64;
     regs.sp = frame_addr;
-    regs.regs[30] = if action.sa_restorer != 0 {
+    regs.regs[30] = if action.sa_flags.bits() & SigFlags::SA_RESTORER != 0
+        && action.sa_restorer != 0
+    {
         action.sa_restorer as u64
     } else {
         SIGTRAMP_BASE
@@ -1867,6 +1876,19 @@ unsafe fn setup_frame_aarch64(
     // Terminate the frame-pointer chain: unwinders stop at a handler
     // frame boundary (arm64 ABI; the reference kernel zeroes x29 here).
     regs.regs[29] = 0;
+
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+        crate::pr_info!(
+            "SIGTRACE setup pid={} sig={} sp={:#x} frame={:#x} handler={:#x} restorer={:#x} ->pc={:#x}",
+            (*task).pid(),
+            sig,
+            user_sp,
+            frame_addr,
+            action.sa_handler,
+            regs.regs[30],
+            regs.pc
+        );
+    }
 
     true  // Success
 }
@@ -2196,6 +2218,19 @@ unsafe fn restore_sigcontext_aarch64(
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
     (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
+
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+        crate::pr_info!(
+            "SIGTRACE restore pid={} frame={:#x} copied={} ->pc={:#x} sp={:#x} x29={:#x} x0={:#x}",
+            (*task).pid(),
+            frame_addr,
+            copied,
+            regs.pc,
+            regs.sp,
+            regs.regs[29],
+            regs.regs[0]
+        );
+    }
 
     // Clear signal frame record
     (*task).sigframe = None;
@@ -2705,6 +2740,116 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
     send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
 }
 
+/// oh-svc abort-reason dump: name the aborting binary/library and the
+/// return chain at the moment of a self-raised SIGABRT. See the tap in
+/// send_signal_from_user_tkill — runs on the raising task, in its
+/// syscall context, so user registers and user memory are live.
+fn abort_reason_dump(leader_tid: u32) {
+
+
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    // SAFETY: task is the current task, valid for the duration.
+    let (comm, tgid) = unsafe { ((*task).comm(), (*task).tgid()) };
+    let comm = core::str::from_utf8(comm).unwrap_or("").trim_end_matches('\0');
+
+    let (rip, rsp) = {
+        #[cfg(feature = "x86_64")]
+        {
+            crate::arch::trap::current_task_pt_regs()
+                .map(|r| (r.rip, r.rsp))
+                .unwrap_or((0, 0))
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            (0u64, 0u64)
+        }
+    };
+    crate::pr_warn!(
+        "ABORT-DUMP tgid={} tid={} comm='{}' rip={:#x} rsp={:#x}",
+        tgid,
+        leader_tid,
+        comm,
+        rip,
+        rsp
+    );
+
+    let Some(aspace) = (unsafe { (*task).address_space_arc() }) else {
+        crate::pr_warn!("ABORT-DUMP: no address space");
+        return;
+    };
+
+    // Pass 1 (vma_read held, no name resolution): capture every
+    // executable VMA's range. render_service maps hundreds of libraries;
+    // the pass must cover ALL of them or the abort chain's return
+    // addresses fall outside the snapshot.
+    let mut ranges: [(u64, u64, usize); 1024] = [(0, 0, 0); 1024];
+    let mut n = 0usize;
+    {
+        let vma_mgr = aspace.vma_read();
+        for vma in vma_mgr.iter() {
+            if n >= 1024 {
+                break;
+            }
+            if !vma.flags().is_executable() {
+                continue;
+            }
+            ranges[n] = (vma.start().as_usize() as u64, vma.end().as_usize() as u64, vma.offset());
+            n += 1;
+        }
+    }
+
+    // Pass 2: classify the user rip and the stack words; resolve the
+    // owning library's name lazily (only for values that hit a range).
+    let label = |addr: u64| -> alloc::string::String {
+        for i in 0..n {
+            let (s, e, _off) = ranges[i];
+            if addr >= s && addr < e {
+                let name = aspace.get_vma_file(s as usize).and_then(|file| {
+                    // SAFETY: read-only dentry access on the pinned file.
+                    let dentry = unsafe { &*file.dentry.get() };
+                    dentry.as_ref().map(|d| d.name.lock().clone())
+                });
+                return match name {
+                    Some(name) => alloc::format!("{}+{:#x}", name, addr - s),
+                    None => alloc::format!("exec+{:#x}", addr - s),
+                };
+            }
+        }
+        alloc::format!("{:#x}", addr)
+    };
+    crate::pr_warn!("ABORT-DUMP rip-in {}", label(rip));
+    crate::pr_warn!("ABORT-MAPS n={} exec-vmas", n);
+
+    // Return-chain scan: 64 qwords from user rsp upward; values landing
+    // in an exec VMA print as lib+offset, everything else raw (the
+    // abort chain can sit a few hundred bytes above rsp when CFI shims
+    // pad the frames).
+    let mut line = alloc::string::String::new();
+    for i in 0..64u64 {
+        let mut w = [0u8; 8];
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(w.as_mut_ptr(), (rsp + i * 8) as *const u8, 8)
+        } != 0
+        {
+            continue;
+        }
+        let v = u64::from_le_bytes(w);
+        if v == 0 {
+            continue;
+        }
+        let inside = ranges[..n].iter().any(|(s, e, _)| v >= *s && v < *e);
+        if inside {
+            line.push_str(&alloc::format!(" [{}]{}", i, label(v)));
+        } else {
+            line.push_str(&alloc::format!(" [{}]{:#x}", i, v));
+        }
+    }
+    crate::pr_warn!("ABORT-STK{}", line);
+}
+
 /// Thread-directed user signal (tkill/tgkill — glibc raise() is tgkill):
 /// identical to send_signal_from_user but the queued siginfo carries
 /// si_code = SI_TKILL, exactly like Linux's do_send_specific(). Without
@@ -2718,10 +2863,20 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     // instrumented path; tkill/tgkill delivery was the silent one (the
     // legacy sys_tkill has NO tgid restriction — any process can
     // tkill(ANY_PID, SIGKILL)). Name caller + target for fatal signals.
-    if sig == 9 || sig == 15 {
+    // gdmr29 (TEMPORARY widening to every signal): catch the SIGTRAP
+    // sender that kills gdm-session-worker. Revert to 9/15 before merge.
+    //
+    // Reverted (print-audit lane, 2026-11, same revert as the KSIG twin
+    // in send_signal_g): the widened `if true` put a ~40-char pr_err on
+    // EVERY tkill/tgkill — pthread_kill, raise(), LTP thread tests —
+    // 4000 budgeted lines ≈ 2.4 s of polled-16550 serial per boot (the
+    // EXITGRP class, e2717687). The SIGTRAP hunt is closed; the 9/15
+    // filter is restored. The next every-signal hunt should use a
+    // dfx-switched tracepoint instead.
+    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (
@@ -2740,6 +2895,33 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
                 cc,
                 tid
             );
+        }
+    }
+    // oh-svc abort-reason tap (2026-10-31): a self-raised SIGABRT (musl
+    // abort()) prints NOTHING — the OH image's stderr is /dev/null and
+    // hilogd may never see the dying process — so render_service's abort
+    // (first composition frame, tgid 896) died with no reason anywhere.
+    // On the FIRST sig-6 of each process, dump the raiser's user rip/rsp
+    // plus its exec-VMA map so the serial names the aborting library and
+    // the return chain into it (musl raise keeps the caller frames live
+    // on the stack; scanning rsp upward for code-region values gives the
+    // poor-man's backtrace). Budgeted: one dump per tgid, 8 per boot.
+    if sig == 6 {
+        static ABORT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static LAST_TGID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        // oh-svc T1 abort-reason tap (known-gap 4): the dump walks the
+        // exec-VMA map and scans the user stack — gated behind
+        // dfx=ohhunt so ordinary userspace aborts (glibc assertions in
+        // LTP runs included) cost nothing.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+            && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
+            && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
+            && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
+        {
+            LAST_TGID.store(tid, core::sync::atomic::Ordering::Relaxed);
+            abort_reason_dump(tid);
         }
     }
     if sig < 1 || sig > 64 {
@@ -2819,10 +3001,20 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     // kill_other_threads (instrumented, legitimate). This is the CORE
     // kernel-origin entry — name caller + target for every kernel
     // SIGKILL/SIGTERM until the storm is attributed.
-    if sig == 9 || sig == 15 {
+    // gdmr29 (TEMPORARY widening to every signal): gdm-session-worker
+    // dies of a pending SIGTRAP(5) right after jump_to_vt; the sender is
+    // invisible under the 9/15 filter. Revert to 9/15 before merge.
+    //
+    // Reverted (perf-fork lane, 2026-11): the widening put a ~50-char
+    // pr_err on EVERY kernel-origin signal send (a 4000 budget — the
+    // first seconds of any fork storm burned ~650 us of polled-16550
+    // time per SIGCHLD, ~2.6 s of pure serial per boot). The SIGTRAP
+    // hunt is closed; the original 9/15 filter is restored. The next
+    // every-signal hunt should use the (already gated) tracepoints.
+    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static KS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {
             let (cp, cc) = crate::sched::current()
                 .map(|t| unsafe {
                     (
@@ -3412,6 +3604,10 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 ///
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
+    // forkprof trace: the trap-exit signal gate (every user return).
+    if crate::dfx::forkprof::trace_on() {
+        crate::dfx::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+    }
     use crate::sched;
 
     // ^C interrupt path (review批次8): deliver any ISIG character the UART
