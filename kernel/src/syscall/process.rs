@@ -1412,37 +1412,47 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .filter(|s| !s.is_empty())
             .count() >= 4;
         if deep {
-            use core::sync::atomic::Ordering::Relaxed;
-            let pid = unsafe { crate::process::current_pid() } as u32;
-            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
-            let mut n = 0usize;
-            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
-                if e.pid.load(Relaxed) == pid && n < picks.len() {
-                    picks[n] = (
-                        e.nr.load(Relaxed),
-                        e.a0.load(Relaxed),
-                        e.a1.load(Relaxed),
-                        e.ret.load(Relaxed),
-                    );
-                    n += 1;
+            // Ring recorded only under dfx=sysring (perf lane 2026-11).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+                use core::sync::atomic::Ordering::Relaxed;
+                let pid = unsafe { crate::process::current_pid() } as u32;
+                let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+                let mut n = 0usize;
+                for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                    if e.pid.load(Relaxed) == pid && n < picks.len() {
+                        picks[n] = (
+                            e.nr.load(Relaxed),
+                            e.a0.load(Relaxed),
+                            e.a1.load(Relaxed),
+                            e.ret.load(Relaxed),
+                        );
+                        n += 1;
+                    }
                 }
-            }
-            crate::pr_warn!(
-                "childexit pid={} root='{}' status={:#x} last{}:",
-                pid,
-                root_str,
-                args[0] as u32,
-                n
-            );
-            for i in (0..n).rev() {
-                let (nr, a0, a1, ret) = picks[i];
                 crate::pr_warn!(
-                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
-                    i,
-                    nr,
-                    a0,
-                    a1,
-                    ret as i64
+                    "childexit pid={} root='{}' status={:#x} last{}:",
+                    pid,
+                    root_str,
+                    args[0] as u32,
+                    n
+                );
+                for i in (0..n).rev() {
+                    let (nr, a0, a1, ret) = picks[i];
+                    crate::pr_warn!(
+                        "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                        i,
+                        nr,
+                        a0,
+                        a1,
+                        ret as i64
+                    );
+                }
+            } else {
+                crate::pr_warn!(
+                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
+                    unsafe { crate::process::current_pid() },
+                    root_str,
+                    args[0] as u32
                 );
             }
         }
@@ -5704,11 +5714,16 @@ pub fn ctrl_alt_del_latch() {
 /// (perf-syscall lane) Load-first for the same reason as the ISIG
 /// latch: one plain load per return instead of an RMW.
 pub fn cad_deliver_pending() {
+    // Load-first (syscall-exit hot path): called on EVERY return to
+    // user space, so the disabled path must be a plain Acquire load —
+    // the swap is a locked RMW on x86 and is paid only when a
+    // Ctrl-Alt-Del is actually latched. Claim semantics are unchanged:
+    // only the CPU whose swap observes `true` runs the cascade.
     if !PENDING_CAD.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }
     if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
-        return;
+        return; // another CPU claimed it
     }
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST_CAD_JIFFY.load(core::sync::atomic::Ordering::Acquire);

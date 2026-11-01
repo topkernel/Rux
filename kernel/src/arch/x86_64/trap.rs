@@ -2588,8 +2588,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             // Forensic ring tail: the last 12 completed syscalls before
             // the crash (pid/nr/a0/ret), oldest first. Identifies the
-            // in-flight syscall for interrupt-time crashes.
-            {
+            // in-flight syscall for interrupt-time crashes. The ring is
+            // recorded only under dfx=sysring (perf lane 2026-11) — say
+            // so instead of replaying a stale/zero ring.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
                 use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
                 let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
                 let len = SYSCALL_RING.len();
@@ -2607,6 +2609,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::putchar_no_lock(b' ');
                     kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
                     crate::console::putchar_no_lock(b'\n');
+                }
+            } else {
+                for &b in b"kp-sys ring off (boot with dfx=sysring)\n" {
+                    crate::console::putchar_no_lock(b);
                 }
             }
             // The old terminal was an unconditional hlt loop — every

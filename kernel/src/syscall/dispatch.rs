@@ -779,8 +779,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     }
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
-    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
+    // Same dfx=sysring gate as the entry-side record — see above.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+        SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
+    }
 
     // sc128 (Session P): per-task nr-only ring of the last syscalls
     // (successes included) — read at APP-PARK to see the child's final

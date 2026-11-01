@@ -100,6 +100,7 @@ macro_rules! dfx_switch_table {
             ScmTap => "scmtap",
             SigTrace => "sigtrace",
             SysForensic => "sysforensic",
+            SysRing => "sysring",
         }
     };
 }
@@ -473,10 +474,17 @@ pub enum DfxSwitch {
     /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
     /// 12 atomics per syscall for them).
     SysForensic,
+    /// Forensic SYSCALL_RING (dispatch.rs): the global 2048-entry ring
+    /// of (pid, nr, a0, a1, ret) recorded at syscall ENTRY and EXIT,
+    /// replayed by the KERNPANIC printer and the NOVMA handlers to
+    /// reconstruct the victim's final syscall sequence. Superseded by
+    /// SysForensic (which gates the ring together with the other
+    /// per-syscall instruments); kept as an alias so hunt scripts
+    /// written against `dfx=sysring` keep working.
+    SysRing,
 }
 
-const SWITCH_COUNT: usize = 52;
-
+const SWITCH_COUNT: usize = 53;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -569,6 +577,7 @@ impl DfxSwitch {
             DfxSwitch::ScmTap => 49,
             DfxSwitch::SigTrace => 50,
             DfxSwitch::SysForensic => 51,
+            DfxSwitch::SysRing => 52,
         }
     }
 
