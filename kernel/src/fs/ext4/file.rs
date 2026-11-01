@@ -263,10 +263,30 @@ fn ext4_file_read_cached_dst(
         // 4 KiB-read hot path under TCG.
         let mut run: [(u64, *const u8); 16] = [(0, core::ptr::null()); 16];
         let want = core::cmp::min(pages_wanted, run.len());
+        // dfx=filerd: phase anatomy of the warm path (bw_file_rd 50x
+        // attribution). The probe's copy bracket is skipped on the
+        // user-fault early returns below — a diagnostic undercount on
+        // the EFAULT path only, never on the benchmark's fast path.
+        let probe = crate::dfx::filerd::on();
+        let t_pin = if probe { crate::dfx::filerd::now() } else { 0 };
         let run_len = cache.get_range_into(fs_id, ino, page_index, &mut run[..want]);
+        if probe {
+            crate::dfx::filerd::charge(&crate::dfx::filerd::PIN_CYCLES, t_pin);
+        }
         if run_len > 0 {
-            // Copy each pinned page's contribution.
-            for (i, (_idx, page_data)) in run[..run_len].iter().enumerate() {
+            let t_copy = if probe { crate::dfx::filerd::now() } else { 0 };
+            // Copy the run in MERGED groups: physically-contiguous pinned
+            // pages (direct-map neighbors, run[j].1 == run[j-1].1 + block)
+            // are served by ONE dst.put — one copy_to_user (one AC bracket,
+            // one rep-movsb startup) instead of one per 4 KiB page. The
+            // bw_file_rd anatomy probe showed the per-page copies were 81%
+            // of the warm read(2) kernel time; batch-filled runs (buddy
+            // allocations) are largely contiguous, so the common 16-page
+            // sequential read collapses to a few copies. Byte-for-byte
+            // identical to the per-page walk: a group spans [src, src+span)
+            // contiguously and is truncated by the same `remaining` cap.
+            let mut i = 0usize;
+            while i < run_len {
                 let in_page_off = if i == 0 { page_offset } else { 0 };
                 let remaining_now = to_read - total_read;
                 // dfx=exthunt: frame-hit truth for the run's first page
@@ -275,7 +295,7 @@ fn ext4_file_read_cached_dst(
                     // SAFETY: page_data is a valid page-aligned pointer of
                     // block_size bytes pinned by get_range_into.
                     unsafe {
-                        let pd = *page_data;
+                        let pd = run[0].1;
                         crate::fs::ext4::extent::exthunt_rd_hit(
                             ino,
                             page_index,
@@ -284,13 +304,23 @@ fn ext4_file_read_cached_dst(
                         );
                     }
                 }
-                // SAFETY: page_data is a valid page-aligned pointer of
-                // block_size bytes pinned by get_range_into; the copy length
-                // is bounded by the page size and the remaining request bytes.
+                // SAFETY: page_data pointers are valid page-aligned
+                // pointers of block_size bytes pinned by get_range_into;
+                // the copy length is bounded by the contiguous span and the
+                // remaining request bytes.
                 unsafe {
                     let avail = block_size_usize - in_page_off;
-                    let copy_len = core::cmp::min(remaining_now, avail);
-                    let copied = match dst.put(buf_offset, page_data.add(in_page_off), copy_len) {
+                    let mut span = avail;
+                    let mut k = 1usize;
+                    while i + k < run_len
+                        && span < remaining_now
+                        && run[i + k].1 as usize == run[i + k - 1].1 as usize + block_size_usize
+                    {
+                        span += block_size_usize;
+                        k += 1;
+                    }
+                    let copy_len = core::cmp::min(remaining_now, span);
+                    let copied = match dst.put(buf_offset, run[i].1.add(in_page_off), copy_len) {
                         Ok(c) => c,
                         Err(e) => {
                             // Immediate full user fault: EFAULT when nothing
@@ -307,10 +337,23 @@ fn ext4_file_read_cached_dst(
                         cache.put_range(fs_id, ino, &run[..run_len]);
                         return Ok(total_read);
                     }
+                    i += k;
                 }
             }
+            if probe {
+                crate::dfx::filerd::charge(&crate::dfx::filerd::COPY_CYCLES, t_copy);
+            }
+            let t_unpin = if probe { crate::dfx::filerd::now() } else { 0 };
             cache.put_range(fs_id, ino, &run[..run_len]);
+            if probe {
+                crate::dfx::filerd::charge(&crate::dfx::filerd::UNPIN_CYCLES, t_unpin);
+            }
             continue;
+        }
+
+        // dfx=filerd: this read call fell off the warm path.
+        if probe {
+            crate::dfx::filerd::note_miss();
         }
 
         // Cache miss on the first page: batch-fill from here. The window
@@ -537,8 +580,16 @@ fn fill_page_cache_batch(
                 &inode.block,
                 idx,
             );
-            idx += 1;
-            continue;
+            // STOP the read-ahead window at the first hole — the
+            // reference kernel's readahead discipline. Holes are never
+            // page-cache entries, so walking past one only re-resolves
+            // extents (and cache probes) for pages that can never be
+            // filled: a fully-sparse scratch file paid 512 lookups per
+            // read(2) here (the lmbench bw_file_rd "50x" was exactly
+            // this — 611 MB/s hole reads vs a 33.6 GB/s reference).
+            // Demand pages after a hole still get served one at a time
+            // by the caller's sync fallback, which handles holes.
+            break;
         }
 
         // Coalesce the following pages while their physical blocks stay
@@ -1567,6 +1618,11 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
 pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: same inode/fs lifetime guarantees as ext4_file_read_vfs.
     unsafe {
+        // dfx=filerd: outer bracket for the whole fast path (the lock /
+        // pin / copy / unpin / epilog phases are charged inside; the
+        // residue vs their sum is resolution + ra_state + loop scaffolding).
+        let probe = crate::dfx::filerd::on();
+        let t_outer = if probe { crate::dfx::filerd::now() } else { 0 };
         let inode_opt = &*file.inode.get();
         let inode = match inode_opt {
             Some(i) => i,
@@ -1582,8 +1638,12 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
             None => return errno::Errno::IOError.as_neg_i32() as isize,
         };
         // Same pos-race serialization as ext4_file_read_vfs (LTP fork07).
+        let t_lock = if probe { crate::dfx::filerd::now() } else { 0 };
         let _pos_guard = file.io_lock.guard();
         let offset = file.get_pos() as u64;
+        if probe {
+            crate::dfx::filerd::charge(&crate::dfx::filerd::LOCK_CYCLES, t_lock);
+        }
 
         let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
         match ext4_file_read_cached_dst(
@@ -1591,6 +1651,7 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
             ReadDst::User(dst, count), ra_state,
         ) {
             Ok(read_bytes) => {
+                let t_ep = if probe { crate::dfx::filerd::now() } else { 0 };
                 file.set_pos(offset + read_bytes as u64);
                 if read_bytes > 0 {
                     let atime = crate::drivers::rtc::wall_secs() as u32;
@@ -1612,9 +1673,20 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
                         crate::fs::inotify::inotify_events::IN_ACCESS,
                     );
                 }
+                if probe {
+                    crate::dfx::filerd::charge(&crate::dfx::filerd::EPILOG_CYCLES, t_ep);
+                    crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
+                    crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 read_bytes as isize
             }
-            Err(e) => e as isize,
+            Err(e) => {
+                if probe {
+                    crate::dfx::filerd::charge(&crate::dfx::filerd::OUTER_CYCLES, t_outer);
+                    crate::dfx::filerd::OUTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+                e as isize
+            }
         }
     }
 }

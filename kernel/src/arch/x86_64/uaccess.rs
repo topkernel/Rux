@@ -30,6 +30,23 @@ use super::mm::memory_layout::user_addr::USER_END;
 pub const MAX_RW_COUNT: usize = 0x7FFF_F000;
 
 // asm copy cores (AT&T syntax — global_asm defaults to Intel on x86).
+//
+// AC bracketing (perf-filerd lane, bw_file_rd 50x-turned-1.5x anatomy):
+// the cores used to set/clear EFLAGS.AC with pushfq + orq/andq on (%rsp)
+// + popfq — a read-modify-write of the full flags word through memory,
+// ~100+ cycles per bracket pair, around EVERY page-sized copy. With 16
+// per-page copies per 64 KiB read(2) that bracket tax alone was a third
+// of the copy phase. Two properties make the fast form safe:
+//   * CR4.SMAP is the ONLY feature that faults user accesses at CPL0
+//     with AC clear — when SMAP_ENABLED is 0 the bracket is dead weight
+//     and is skipped entirely (STAC/CLAC would also #UD on a CPU without
+//     the SMAP CPUID bit, e.g. QEMU's default TCG model).
+//   * When SMAP is on, the SMAP CPUID bit (leaf 7 EBX[20]) implies the
+//     STAC/CLAC instructions exist — 2-cycle flag writes, no memory, no
+//     serialization — so the bracket becomes stac/clac.
+// The fixup label ALSO clears AC (a fault mid-copy lands there with AC
+// still set); with SMAP off both clac sites degrade to plain ret, same
+// as the old pushfq/andq/popfq pair did.
 core::arch::global_asm!(
     r#"
 .section .text.uaccess
@@ -42,26 +59,28 @@ core::arch::global_asm!(
 __x64_copy_to_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
-    jz 2f
-    pushfq
-    orq $0x40000, (%rsp)
-    popfq
-    cld
-1:  rep movsb
+    jz 80f
+    cmpb $0, {smap}(%rip)
+    je 81f
+    stac
+81: cld
+82: rep movsb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 82b
+    .quad 84f
     .popsection
-2:  movq %rcx, %rax          /* rcx == 0 on completion */
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
-    ret
-3:  movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
+    movq %rcx, %rax          /* rcx == 0 on completion */
+    cmpb $0, {smap}(%rip)
+    je 83f
+    clac
+83: ret
+84: movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    cmpb $0, {smap}(%rip)
+    je 86f
+    clac
+86: ret
+80: xorl %eax, %eax
     ret
 
 /* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
@@ -71,26 +90,28 @@ __x64_copy_to_user:
 __x64_copy_from_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
-    jz 2f
-    pushfq
-    orq $0x40000, (%rsp)
-    popfq
-    cld
-1:  rep movsb
+    jz 70f
+    cmpb $0, {smap}(%rip)
+    je 71f
+    stac
+71: cld
+72: rep movsb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 72b
+    .quad 74f
     .popsection
-2:  movq %rcx, %rax
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
-    ret
-3:  movq %rcx, %rax
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
+    movq %rcx, %rax
+    cmpb $0, {smap}(%rip)
+    je 73f
+    clac
+73: ret
+74: movq %rcx, %rax
+    cmpb $0, {smap}(%rip)
+    je 76f
+    clac
+76: ret
+70: xorl %eax, %eax
     ret
 
 /* __x64_clear_user: rdi = user dst, rsi = n.
@@ -100,30 +121,33 @@ __x64_copy_from_user:
 __x64_clear_user:
     movq %rsi, %rcx
     testq %rcx, %rcx
-    jz 2f
-    pushfq
-    orq $0x40000, (%rsp)
-    popfq
-    xorl %eax, %eax
+    jz 60f
+    cmpb $0, {smap}(%rip)
+    je 61f
+    stac
+61: xorl %eax, %eax
     cld
-1:  rep stosb
+62: rep stosb
     .pushsection __ex_table, "a"
     .balign 8
-    .quad 1b
-    .quad 3f
+    .quad 62b
+    .quad 64f
     .popsection
-2:  xorl %eax, %eax
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
-    ret
-3:  movq %rcx, %rax
-    pushfq
-    andq $~0x40000, (%rsp)
-    popfq
+    xorl %eax, %eax           /* rcx == 0 on completion */
+    cmpb $0, {smap}(%rip)
+    je 63f
+    clac
+63: ret
+64: movq %rcx, %rax          /* fault mid-clear: rcx = remaining */
+    cmpb $0, {smap}(%rip)
+    je 66f
+    clac
+66: ret
+60: xorl %eax, %eax
     ret
 "#,
-    options(att_syntax)
+    options(att_syntax),
+    smap = sym super::cpu::SMAP_ENABLED
 );
 
 extern "C" {
