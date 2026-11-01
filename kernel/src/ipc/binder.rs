@@ -5446,7 +5446,7 @@ fn binder_thread_write(
                         } else {
                             SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                         };
-                        if n < (if val == 32 { 400 } else { 50 }) {
+                        if n < (if val == 32 { 4000 } else { 50 }) {
                             crate::pr_warn!(
                                 "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
                                 proc.pid,
@@ -6340,7 +6340,7 @@ fn binder_transaction(
                         static P32_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if n < 400 {
+                        if n < 4000 {
                             let (fproc, ftid) = target_thread_key.as_ref().unwrap();
                             crate::pr_warn!(
                                 "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
