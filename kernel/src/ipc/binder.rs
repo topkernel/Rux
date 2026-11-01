@@ -6372,6 +6372,8 @@ fn binder_transaction(
                         )
                     } == 0;
                     if ok && val == 32 {
+                        // HOTPATH-PRINT: binder poison-32 delivery hunt;
+                        // budget-gated (P32_N, 4000/boot) — oh-launcher lane
                         static P32_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

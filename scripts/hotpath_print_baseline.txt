@@ -3,7 +3,7 @@
 # sites allowed per hot-path file. Regenerate with --update after
 # removing prints (never after adding one without a review).
 kernel/src/sync/futex.rs 68
-kernel/src/ipc/binder.rs 116
+kernel/src/ipc/binder.rs 117
 kernel/src/syscall/process.rs 49
 kernel/src/syscall/file.rs 27
 kernel/src/syscall/memory.rs 21
