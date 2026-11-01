@@ -3607,8 +3607,11 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         false
     };
 
+    // review F7: MSG_PEEK — inet sockets honor it now (the flag is plumbed
+    // into socket_recv_ctl; the AF_UNIX branch above already did).
+    let peek = (flags & MSG_PEEK) != 0;
     let (bytes_read, src_addr) =
-        match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+        match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline, peek) {
             Ok(r) => r,
             Err(e) => return e as i64,
         };
@@ -4129,8 +4132,11 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
         }
 
         let mut buf = alloc::vec![0u8; total_buf_len];
+        // review F7: MSG_PEEK plumbed through the inet engines (recvmmsg
+        // applies its flags to every message, like the reference).
+        let peek = (flags & MSG_PEEK) != 0;
         let (bytes_read, _src) =
-            match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+            match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline, peek) {
                 Ok(r) => r,
                 Err(e) => {
                     // W3: first would-block/error with nothing received
@@ -4474,8 +4480,10 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
 
     // W3: the blocking engine also drains loopback between attempts (the
     // explicit ethernet_poll the old code did is folded in).
+    // review F7: MSG_PEEK plumbed through the inet engines.
+    let peek = (flags & MSG_PEEK) != 0;
     let (bytes_read, src_addr) =
-        match crate::net::socket::socket_recv_ctl(&socket, kbuf.as_mut_slice(), nonblock, deadline)
+        match crate::net::socket::socket_recv_ctl(&socket, kbuf.as_mut_slice(), nonblock, deadline, peek)
         {
             Ok(r) => r,
             Err(e) => return e as i64,

@@ -189,6 +189,13 @@ impl UdpSocket {
         self.recv_bytes = self.recv_bytes.saturating_sub(packet.data.len());
         Some(packet)
     }
+
+    /// (review F7) MSG_PEEK view of the head datagram without consuming
+    /// it — recv_bytes stays (the datagram still occupies the buffer), so
+    /// SO_RCVBUF accounting is unchanged by a peek.
+    pub fn peek_packet(&self) -> Option<&UdpPacket> {
+        self.recv_buffer.front()
+    }
 }
 
 /// Global UDP socket table
@@ -656,6 +663,7 @@ fn udp_send_locked6(
 pub fn udp_recvfrom_ext(
     fd: i32,
     buf: &mut [u8],
+    peek: bool,
 ) -> Result<(isize, crate::net::ipv6::IpAddr, u16), isize> {
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
@@ -664,7 +672,18 @@ pub fn udp_recvfrom_ext(
         None => return Err(-9), // EBADF
     };
 
-    match socket.dequeue_packet() {
+    // review F7: peek serves the head datagram without dequeuing it
+    // (reference udp_recvmsg MSG_PEEK — even a truncated peek leaves the
+    // datagram queued). The v6 source address reporting mirrors the
+    // consuming arm through the same head borrow.
+    let dequeued;
+    let head = if peek {
+        socket.peek_packet()
+    } else {
+        dequeued = socket.dequeue_packet();
+        dequeued.as_ref()
+    };
+    match head {
         Some(packet) => {
             let copy_len = packet.data.len().min(buf.len());
             buf[..copy_len].copy_from_slice(&packet.data[..copy_len]);
