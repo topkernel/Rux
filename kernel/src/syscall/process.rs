@@ -5695,8 +5695,16 @@ pub fn ctrl_alt_del_latch() {
 /// Execute any latched Ctrl-Alt-Del. Called in TASK context from
 /// check_and_deliver_signals (every return to user space).
 pub fn cad_deliver_pending() {
-    if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
+    // Load-first (syscall-exit hot path): called on EVERY return to
+    // user space, so the disabled path must be a plain Acquire load —
+    // the swap is a locked RMW on x86 and is paid only when a
+    // Ctrl-Alt-Del is actually latched. Claim semantics are unchanged:
+    // only the CPU whose swap observes `true` runs the cascade.
+    if !PENDING_CAD.load(core::sync::atomic::Ordering::Acquire) {
         return;
+    }
+    if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return; // another CPU claimed it
     }
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST_CAD_JIFFY.load(core::sync::atomic::Ordering::Acquire);

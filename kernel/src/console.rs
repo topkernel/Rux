@@ -858,9 +858,20 @@ fn tty_isig_record(c: u8) {
 /// check_and_deliver_signals (every return to user) — this is what makes
 /// ^C interrupt a busy foreground task that is not blocked in read().
 pub fn tty_isig_deliver_pending() {
-    let signo = PENDING_ISIG_SIGNO.swap(0, core::sync::atomic::Ordering::AcqRel);
-    if signo != 0 {
-        tty_isig_deliver(signo);
+    // Load-first (syscall-exit hot path): this runs on EVERY return to
+    // userspace via check_and_deliver_signals, so the disabled path must
+    // be a plain Acquire load — the swap is a locked RMW on x86 and is
+    // paid only when a ^C byte is actually pending. Claim semantics are
+    // unchanged: only the CPU whose swap observes the pending signo
+    // delivers it; a value landing between the load and the swap is
+    // claimed on the next user return (at most one trip of latency).
+    let signo = PENDING_ISIG_SIGNO.load(core::sync::atomic::Ordering::Acquire);
+    if signo == 0 {
+        return;
+    }
+    let claimed = PENDING_ISIG_SIGNO.swap(0, core::sync::atomic::Ordering::AcqRel);
+    if claimed != 0 {
+        tty_isig_deliver(claimed);
     }
 }
 
