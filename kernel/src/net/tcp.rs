@@ -1541,7 +1541,13 @@ impl TcpSocket {
     /// R35: `tx` receives every outbound segment this packet triggers
     /// (SYN-ACK/ACK/FIN/retransmit) as deferred descriptors; the caller
     /// emits them after dropping TCP_TABLE_LOCK.
-    pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8], tx: &mut TcpTxBatch) -> Result<(), ()> {
+    pub fn handle_packet(
+        &mut self,
+        tcp_hdr: &TcpHdr,
+        opts: &[u8],
+        data: &[u8],
+        tx: &mut TcpTxBatch,
+    ) -> Result<(), ()> {
         // Global RST handling (RFC 793 §3.9 / RFC 1122 §4.2.3.30), with
         // the sequence-number validation the reference requires before an
         // RST is processed at all:
@@ -1556,11 +1562,21 @@ impl TcpSocket {
         if tcp_hdr.rst() {
             let acceptable = match self.state {
                 TcpState::TCP_SYN_SENT => {
-                    tcp_hdr.ack() && tcp_hdr.ack_seq == self.snd_nxt.wrapping_add(1)
+                    // Byte-order (pinned by tests/tcp_semantics): the
+                    // header fields carry wire (big-endian) values —
+                    // compare after from_be, like every other seq
+                    // consumer. The first version compared the raw
+                    // field against host snd_nxt, so NO legitimate
+                    // RST+ACK ever passed this test and SYN_SENT RSTs
+                    // were always dropped (the R34 SYN/RST ping-pong
+                    // would have come back on user networking).
+                    tcp_hdr.ack()
+                        && TcpSeq::from_be(tcp_hdr.ack_seq)
+                            == self.snd_nxt.wrapping_add(1)
                 }
                 TcpState::TCP_LISTEN | TcpState::TCP_CLOSE => false,
                 _ => {
-                    let seq = tcp_hdr.seq;
+                    let seq = TcpSeq::from_be(tcp_hdr.seq);
                     seq >= self.rcv_nxt.wrapping_sub(1)
                         && seq < self
                             .rcv_nxt
@@ -1597,16 +1613,16 @@ impl TcpSocket {
                 TcpState::TCP_LISTEN | TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV
             )
         {
-            if let Some(mss) = tcp_parse_mss(tcp_hdr) {
+            if let Some(mss) = tcp_parse_mss(opts) {
                 if mss < self.mss {
                     self.mss = mss;
                 }
             }
-            match tcp_parse_wscale(tcp_hdr) {
+            match tcp_parse_wscale(opts) {
                 Some(ws) => self.peer_wscale = ws,
                 None => self.peer_wscale = 0,
             }
-            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+            if let Some(tsval) = tcp_parse_tsval(opts) {
                 self.ts_recent = tsval;
                 // ts_enabled stays true only if our SYN also offered TS
                 // (we always do); a peer that skipped the option gets no
@@ -1619,7 +1635,7 @@ impl TcpSocket {
             // RFC 7323: refresh ts_recent from every in-order segment's
             // TSval (PAWS ordering checks are not implemented — minimal
             // echo only).
-            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+            if let Some(tsval) = tcp_parse_tsval(opts) {
                 self.ts_recent = tsval;
             }
         }
@@ -1950,39 +1966,51 @@ impl TcpSocket {
             // alloc_error_handler (panic → wfi holding TCP_TABLE_LOCK, the
             // R34 wedge); dropping an OOO segment is TCP-legal (the peer
             // retransmits after the dup-ACK).
-            // Review finding 10 (memory DoS): the OOO queue used to grow
-            // without bound — a peer retransmitting the same
-            // out-of-order segment N times inserted N copies, and the
-            // advertised RCV.WND never accounted for OOO bytes, so
-            // nothing throttled it. Two caps, both TCP-legal (drop +
-            // dup-ACK; the peer retransmits):
-            //  - trim bytes already below rcv_nxt (duplicates of
-            //    delivered data — the old code buffered them anyway),
-            //  - drop when OOO bytes would exceed the advertised
-            //    receive window.
+            // Review finding 10 (memory DoS), trim corrected 2026-10-31:
+            // the OOO queue used to grow without bound — a peer
+            // retransmitting the same out-of-order segment N times
+            // inserted N copies, and the advertised RCV.WND never
+            // accounted for OOO bytes, so nothing throttled it. Two caps,
+            // both TCP-legal (drop + dup-ACK; the peer retransmits):
+            //  - trim the already-delivered prefix [seq, rcv_nxt) off the
+            //    FRONT. The first version of this trim kept
+            //    data[len-cut] with seq+(len-cut) — inverting the
+            //    arithmetic — which DROPPED the stream range
+            //    [rcv_nxt, seq+len-cut) of a straddling retransmit
+            //    (permanent stream hole; pinned by tests/tcp_semantics).
+            //  - drop when OOO bytes would exceed the advertised receive
+            //    window.
             let ooo_bytes: usize = self.ooo_queue.iter().map(|o| o.data.len()).sum();
-            let lo = if seq.wrapping_add(data.len() as u32) <= self.rcv_nxt {
-                // Entirely below the window: pure duplicate.
-                0
+            let below = if self.seq_before(seq, self.rcv_nxt) {
+                self.rcv_nxt.wrapping_sub(seq) as usize
             } else {
-                data.len()
-                    - ((self.rcv_nxt.wrapping_sub(seq)) as usize).min(data.len())
+                0
             };
-            if lo == 0
-                || ooo_bytes + (data.len() - lo) > self.rcv_wnd as usize
+            let cut = below.min(data.len());
+            if cut == data.len()
+                || ooo_bytes + (data.len() - cut) > self.rcv_wnd as usize
                 || self.ooo_queue.try_reserve(1).is_err()
             {
                 return Ok(());
             }
             let mut seg_data = alloc::vec::Vec::new();
-            if seg_data.try_reserve_exact(data.len() - lo).is_err() {
+            if seg_data.try_reserve_exact(data.len() - cut).is_err() {
                 return Ok(());
             }
-            seg_data.extend_from_slice(&data[lo..]);
+            seg_data.extend_from_slice(&data[cut..]);
             self.ooo_queue.push_back(TcpOooSeg {
-                seq: seq.wrapping_add(lo as u32),
+                seq: seq.wrapping_add(cut as u32),
                 data: seg_data,
             });
+
+            // RFC 793 §3.9: a segment trimmed so that its seq equals
+            // RCV.NXT is processed as in-order — drain now so a
+            // straddling retransmit delivers instead of waiting for the
+            // peer's next retransmission. For ordinary OOO entries
+            // (seq > rcv_nxt) the drain scan is a no-op.
+            if cut > 0 {
+                self.drain_ooo_queue();
+            }
 
             // Send duplicate ACK to trigger fast retransmit on sender
             self.send_ack(tx)?;
@@ -3014,7 +3042,8 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
+                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                    let _ = socket.handle_packet(&tcp_hdr, opts, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -3050,7 +3079,8 @@ impl TcpConnectionManager {
                     new_socket.parent_fd = Some(parent);
                     // State machine drives itself from LISTEN: SYN →
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
-                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
+                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                    let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -3133,7 +3163,8 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
+                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                    let _ = socket.handle_packet(&tcp_hdr, opts, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -3165,7 +3196,8 @@ impl TcpConnectionManager {
                     new_socket.remote_ip6 = *src6;
                     new_socket.state = TcpState::TCP_LISTEN;
                     new_socket.parent_fd = Some(parent);
-                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
+                    let opts = tcp_option_slice(skb, tcp_hdr.header_len());
+                    let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -4236,20 +4268,14 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<TcpHdr> {
 
 /// W3: parse the MSS option (kind 2, len 4) from a SYN's option bytes.
 /// Returns None when the option is absent or malformed.
-pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
-    let hlen = tcp_hdr.header_len();
-    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
-        return None;
-    }
-    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
-    // [TCP_MIN_HLEN, header_len) of the same buffer, which
-    // tcp_parse_packet validated against the packet length.
-    let opts = unsafe {
-        core::slice::from_raw_parts(
-            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
-            hlen - TCP_MIN_HLEN,
-        )
-    };
+///
+/// `opts` is the segment's option-byte slice — since the finding-8
+/// unaligned-parse fix, `TcpHdr::from_bytes` returns the header BY VALUE,
+/// so the option bytes no longer live at a fixed offset past the header
+/// pointer; the RX path carries them alongside the copy
+/// (tcp_option_slice). Reading past a by-value header (the old
+/// tcp_option_bytes) dereferenced the caller's stack.
+pub fn tcp_parse_mss(opts: &[u8]) -> Option<u16> {
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {
@@ -4273,19 +4299,25 @@ pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
     None
 }
 
-/// P2 TCP options: raw option-bytes accessor shared by the parsers.
-/// SAFETY contract mirrors tcp_parse_mss (caller-validated header).
-fn tcp_option_bytes(tcp_hdr: &TcpHdr) -> &'static [u8] {
-    let hlen = tcp_hdr.header_len();
-    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
+/// Option bytes of a parsed inbound segment: a slice into the skb data
+/// buffer at [TCP_MIN_HLEN, header_len), computed from the SKB — never
+/// from memory following a `TcpHdr` (see tcp_parse_mss's note: the
+/// header travels by value since the finding-8 fix, so the bytes after
+/// the copy are NOT the packet's options).
+fn tcp_option_slice(skb: &SkBuff, header_len: usize) -> &'static [u8] {
+    if header_len <= TCP_MIN_HLEN || header_len > TCP_MAX_HLEN {
         return &[];
     }
-    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
-    // [TCP_MIN_HLEN, header_len) of the same buffer, which
-    // tcp_parse_packet validated against the packet length.
+    let hlen = header_len.min(skb.len as usize);
+    if hlen <= TCP_MIN_HLEN {
+        return &[];
+    }
+    // SAFETY: skb.data and skb.len describe a valid byte range in the
+    // skb buffer; tcp_parse_packet validated header_len against the
+    // packet length before the caller stored it in the header's dof.
     unsafe {
         core::slice::from_raw_parts(
-            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
+            skb.data.add(TCP_MIN_HLEN),
             hlen - TCP_MIN_HLEN,
         )
     }
@@ -4293,8 +4325,8 @@ fn tcp_option_bytes(tcp_hdr: &TcpHdr) -> &'static [u8] {
 
 /// P2: parse the window-scale option (kind 3, len 3) from a SYN.
 /// Returns the peer's advertised shift (0..=14), or None when absent.
-pub fn tcp_parse_wscale(tcp_hdr: &TcpHdr) -> Option<u8> {
-    let opts = tcp_option_bytes(tcp_hdr);
+/// (`opts` is the skb-backed option slice — see tcp_parse_mss.)
+pub fn tcp_parse_wscale(opts: &[u8]) -> Option<u8> {
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {
@@ -4319,9 +4351,9 @@ pub fn tcp_parse_wscale(tcp_hdr: &TcpHdr) -> Option<u8> {
 }
 
 /// P2: parse the timestamps option (kind 8, len 10) from a segment.
-/// Returns the peer's TSval.
-pub fn tcp_parse_tsval(tcp_hdr: &TcpHdr) -> Option<u32> {
-    let opts = tcp_option_bytes(tcp_hdr);
+/// Returns the peer's TSval. (`opts` is the skb-backed option slice —
+/// see tcp_parse_mss.)
+pub fn tcp_parse_tsval(opts: &[u8]) -> Option<u32> {
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {

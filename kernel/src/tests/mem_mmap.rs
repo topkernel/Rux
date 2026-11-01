@@ -109,6 +109,38 @@ pub fn test_mmap_syscalls() {
         }
     }
 
+    // Test 8c: sys_mprotect across a HOLE — two mapped pieces with an
+    // unmapped gap between them; the span covering both plus the gap
+    // must fail ENOMEM (Linux mprotect_fixup walks until the VMA list
+    // stops covering the range). Pins the 2026-10-31 allocation-free
+    // coverage walk's span bound (commit 1f2f18cb): the walk must run
+    // to addr+length, not stop at the first covering VMA's end — an
+    // early exit at a VMA boundary would miss the hole and return 0.
+    {
+        const PAGE: u64 = 4096;
+        let base = sys_mmap([0, 4 * PAGE, 0x3, 0x22, !0u64, 0]); // RW whole
+        if base > 0 && base != -1 {
+            let hole_ok = sys_munmap([base as u64 + PAGE, 2 * PAGE, 0, 0, 0, 0]);
+            test_assert!(hole_ok == 0, "sys_mprotect-hole hole punched");
+            // [base, base+4P) = mapped | hole | mapped
+            let span = sys_mprotect([base as u64, 4 * PAGE, 0x1, 0, 0, 0]);
+            test_assert!(span == -12, "sys_mprotect span over hole returns ENOMEM");
+            // Each side alone still succeeds (the failed call changed
+            // nothing and the walk is exact).
+            let left = sys_mprotect([base as u64, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(left == 0, "sys_mprotect left piece succeeds");
+            let right = sys_mprotect([base as u64 + 3 * PAGE, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(right == 0, "sys_mprotect right piece succeeds");
+            // A span reaching PAST the last mapped page also fails.
+            let overrun = sys_mprotect([base as u64 + 3 * PAGE, 2 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(overrun == -12, "sys_mprotect overrun past mapping returns ENOMEM");
+            let _ = sys_munmap([base as u64, PAGE, 0, 0, 0, 0]);
+            let _ = sys_munmap([base as u64 + 3 * PAGE, PAGE, 0, 0, 0, 0]);
+        } else {
+            test_skip("sys_mprotect hole span", "no VMA context in test");
+        }
+    }
+
     // Test 9: Multiple mmap calls return different addresses
     let a1 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);
     let a2 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);

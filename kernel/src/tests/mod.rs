@@ -214,6 +214,8 @@ pub mod small_alloc;
 #[cfg(feature = "unit-test")]
 pub mod page_allocator;
 #[cfg(feature = "unit-test")]
+pub mod mm_pcp;
+#[cfg(feature = "unit-test")]
 pub mod buffer_state;
 #[cfg(feature = "unit-test")]
 pub mod file_buffer;
@@ -301,6 +303,8 @@ pub mod mem_cow;
 // ===== Network =====
 #[cfg(feature = "unit-test")]
 pub mod tcp_handshake;
+#[cfg(feature = "unit-test")]
+pub mod tcp_semantics;
 #[cfg(feature = "unit-test")]
 pub mod virtio_net;
 #[cfg(feature = "unit-test")]
@@ -498,6 +502,9 @@ pub fn run_all_tests() {
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();
 
+    test_group_start("mm_pcp");
+    mm_pcp::test_pcp_pagesets();
+
     test_group_start("buffer_state");
     buffer_state::test_buffer_state();
 
@@ -609,6 +616,9 @@ pub fn run_all_tests() {
     // ===== 10. Network =====
     test_group_start("tcp_handshake");
     tcp_handshake::test_tcp_handshake();
+
+    test_group_start("tcp_semantics");
+    tcp_semantics::test_tcp_semantics();
 
     test_group_start("virtio_net");
     virtio_net::test_virtio_net();

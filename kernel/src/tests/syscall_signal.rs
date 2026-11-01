@@ -193,14 +193,23 @@ fn test_sys_rt_sigaction() {
     let ret = sys_rt_sigaction([19, 0, 0, 8, 0, 0]);
     test_assert_eq!(ret, einval, "sys_rt_sigaction SIGSTOP cannot be caught");
 
-    // Test: query SIGUSR1 action with null act_ptr and null oldact_ptr
-    // May return -EINVAL if process has no signal_struct in test context
+    // Test: query SIGUSR1 action with null act_ptr and null oldact_ptr.
+    // Contract fix (test-supplement lane, 2026-10-31): this used to be
+    // `ret == 0 || ret < 0` — a tautology no syscall can fail. The
+    // unit-test boot task (pid 0) carries no signal_struct, so the
+    // syscall reports -EINVAL before touching any pointer (the pr_info
+    // above names it). A real user process would get 0; if the boot
+    // task ever gains a signal_struct this row goes red and should be
+    // updated to assert 0 — either way it must assert exactly ONE
+    // value, not "whatever the syscall returned".
     let ret = sys_rt_sigaction([10, 0, 0, 8, 0, 0]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigaction query SIGUSR1 (null act)",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, einval, "sys_rt_sigaction query SIGUSR1 (null act)");
 
-    // Test: set SIGUSR2 to SIG_IGN
-    // Kernel-space pointers fail access_ok → -EFAULT; syscall still processes internally
+    // Test: set SIGUSR2 to SIG_IGN. act/oldact are KERNEL pointers —
+    // but the no-signal_struct EINVAL fires before the pointer checks,
+    // so the exact harness answer is -EINVAL (Linux order would be
+    // -EFAULT for the kernel act pointer; both are "rejected", and the
+    // row pins the kernel's actual validation order).
     let mut old_action = signal::SigAction::new();
     let new_action = signal::SigAction::ignore();
     let ret = sys_rt_sigaction([
@@ -210,11 +219,9 @@ fn test_sys_rt_sigaction() {
         8,                                              // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0,
-        "sys_rt_sigaction set SIGUSR2 to SIG_IGN",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, einval, "sys_rt_sigaction set SIGUSR2 to SIG_IGN");
 
-    // Restore SIGUSR2 to default
+    // Test: restore SIGUSR2 to default — same contract, exact value.
     let default_action = signal::SigAction::new();
     let ret = sys_rt_sigaction([
         12,                                             // SIGUSR2
@@ -223,9 +230,7 @@ fn test_sys_rt_sigaction() {
         8,                                              // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0,
-        "sys_rt_sigaction restore SIGUSR2 to default",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, einval, "sys_rt_sigaction restore SIGUSR2 to default");
 }
 
 fn test_sys_rt_sigprocmask() {
@@ -276,6 +281,11 @@ fn test_sys_rt_sigprocmask() {
     // Test: query current signal mask
     // oldset_ptr is kernel-space → access_ok returns -EFAULT
     // But the syscall still processes successfully internally (SIG_BLOCK with empty set = no-op)
+    // Contract fix (test-supplement lane, 2026-10-31): `ret == 0 ||
+    // ret < 0` accepted every value a syscall can return. Exact
+    // contract: set=NULL is a pure query (mask untouched), the kernel
+    // oldset pointer fails access_ok at put_user -> -EFAULT.
+    let efault = -(errno::EFAULT as i64);
     let mut old_mask: u64 = 0xFFFF_FFFF_FFFF_FFFF; // sentinel
     let ret = sys_rt_sigprocmask([
         signal::sigprocmask_how::SIG_BLOCK as u64, // how
@@ -284,8 +294,8 @@ fn test_sys_rt_sigprocmask() {
         8,                                          // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask query old mask",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, efault, "sys_rt_sigprocmask query old mask (kernel ptr -> EFAULT)");
+    test_assert_eq!(old_mask, 0xFFFF_FFFF_FFFF_FFFF, "sys_rt_sigprocmask query wrote nothing");
 
     // Test: block SIGUSR1 (signal 10), mask bit = 1u64 << 9
     // set_ptr is kernel-space → access_ok returns -EFAULT before reading new_mask
@@ -299,8 +309,9 @@ fn test_sys_rt_sigprocmask() {
         8,                                           // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask block SIGUSR1",
-        &alloc::format!("got {:#x}", ret));
+    // Kernel set pointer -> access_ok fails BEFORE the mask update:
+    // -EFAULT and the mask is untouched (Linux copies the new set first).
+    test_assert_eq!(ret, efault, "sys_rt_sigprocmask block SIGUSR1 (kernel set ptr -> EFAULT)");
 
     // Cannot verify mask from kernel context (access_ok rejects kernel ptr)
     test_skip("sys_rt_sigprocmask verify SIGUSR1 blocked",
@@ -315,8 +326,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask unblock SIGUSR1",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, efault, "sys_rt_sigprocmask unblock SIGUSR1 (kernel set ptr -> EFAULT)");
 
     test_skip("sys_rt_sigprocmask verify SIGUSR1 unblocked",
         "requires user-space oldset pointer (access_ok rejects kernel ptr)");
@@ -331,8 +341,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask SETMASK clear all",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, efault, "sys_rt_sigprocmask SETMASK clear (kernel set ptr -> EFAULT)");
 
     // Test: SIG_SETMASK to block multiple signals at once
     let multi_mask: u64 = (1u64 << 9) | (1u64 << 12); // SIGUSR1 | SIGUSR2
@@ -344,8 +353,7 @@ fn test_sys_rt_sigprocmask() {
         8,                                            // sigsetsize
         0, 0,
     ]);
-    test_assert!(ret == 0 || ret < 0, "sys_rt_sigprocmask SETMASK block multiple",
-        &alloc::format!("got {:#x}", ret));
+    test_assert_eq!(ret, efault, "sys_rt_sigprocmask SETMASK multi (kernel set ptr -> EFAULT)");
 
     test_skip("sys_rt_sigprocmask verify both signals blocked",
         "requires user-space oldset pointer (access_ok rejects kernel ptr)");
