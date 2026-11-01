@@ -813,7 +813,7 @@ pub fn persist_ioc_flags(vfs_inode: &crate::fs::inode::Inode, merged: u32) {
     ) {
         return; // not an ext4 inode — nothing to persist
     }
-    let _guard = EXT4_BIG_LOCK.lock_fair();
+    let _guard = EXT4_BIG_LOCK.lock();
     if let Some(fs_ptr) = vfs_inode.private_data {
         let fs = fs_ptr as *const crate::fs::ext4::Ext4FileSystem;
         // SAFETY: private_data holds the Ext4FileSystem for

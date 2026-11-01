@@ -376,7 +376,7 @@ fn ext4_file_read_cached_dst(
         // ftest01/05's bad-verify TFAILs. Cached-page serving (the fast
         // path above) stays lock-free: cached pages are immutable and the
         // write path's invalidate already fences stale entries.
-        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         let seq_contd = offset == ra_state.last_read_end || ra_state.active;
         if demand_pages == 1 && offset % block_size == 0 {
             // Page-shaped miss (mmap demand-fault signature) — see the
@@ -2090,7 +2090,7 @@ unsafe fn ext4_buffered_write(
             // then retry the pin-and-copy path.
             if !filled_once && idx * ps < base_size {
                 filled_once = true;
-                let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+                let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock();
                 fill_page_cache_batch(fs, sbi, cache, fs_id, ino, idx, idx + 1);
                 continue;
             }
@@ -2140,7 +2140,7 @@ unsafe fn ext4_buffered_write(
     // 2) Publish: data is in frames; lift the read bound + timestamps
     // under the big lock (atomic vs the write-through refresh paths).
     {
-        let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+        let _g = crate::fs::ext4::EXT4_BIG_LOCK.lock();
         let now = crate::drivers::rtc::wall_secs() as u32;
         // SAFETY: sb_ptr is the inode's boxed copy, installed at open and
         // never freed while the inode lives; advisory field, volatile
@@ -2246,7 +2246,7 @@ unsafe fn ext4_write_at_core(
     // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
     // descriptor updates and the inode rewrite all happen under the
     // ext4 big lock, same as namei.
-    let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+    let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock();
 
     // Start a journal transaction for data=ordered semantics:
     // data blocks are synced during write, then the inode metadata is
