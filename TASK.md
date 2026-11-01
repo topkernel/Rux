@@ -711,3 +711,46 @@ lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
   wfE/wfF evidence) — sched/ code is identical to the clean anchor, so
   the dynamics shift is in the window's non-sched changes (bio
   batching, ext4 namei, vfs, uaccess).
+
+### lb60 (main@5f730335 merged + taps): the 30s hang's LEAF named — starvation by softirq-booked incumbent
+Merged origin/main (wedge cleared: kpreempt default-off; wedge-fix's pcp
+fix supersedes mine — took theirs). Healthy boot: 78 SAs, 0 DEADLOCK, 0
+panic. The one-shot taskdump fired at 169.4 on an earlier 20s hang
+(softbus->samgr txn7112, 50s exec) — and the dump CAUGHT THE ENGINE:
+- samgr main (325) AND OS_IPC_0_329 futex-wait on the SAME uaddr
+  0x7ff000ca697c (LoadSystemAbility's internal wait-for-registration).
+- samgr's OS_FFRT_2_2 (pid 340) and OS_FFRT_2_3 (pid 341): WOKEN,
+  state=RUNNING, on_rq=1 linked=1 — QUEUED BUT NEVER PICKED, vruntime
+  ~0.83-1.04e6.
+- The two CPU incumbents at that moment: os_ds_service (552, on_cpu=1,
+  preempt=0x100 = SOFTIRQ-bit booking, vruntime 1.05e9) and
+  sysevent_source (572, vruntime 1.05e9). The woken workers' vruntime is
+  ~1000x LOWER — CFS must pick them essentially immediately; they sat
+  queued for tens of seconds instead. A preempt/softirq-booked incumbent
+  cannot be preempted at all.
+- Dump-wide census: 551 tasks preempt=0, exactly ONE preempt=256 — a
+  single softirq-booked monopolist is enough to wedge the pick on one
+  CPU. WAKE-STRANDED at 172.9 names h0=(pid 318 pc=0x102) — the same
+  softirq-class booking on another incumbent.
+- PREEMPT-HEAL lines run all boot stripping was=0x10001 bookings
+  (hardirq-bit phantoms) — the phantom-BIT producer (the sc265/266/73
+  re-leak family) is ALIVE on current main and books not just preempt+1
+  but the SOFTIRQ bit (0x100) and HARDIRQ bit (0x10000).
+=> DECODE (answers the "30s txn is a bug" directive): the CreateNewUser
+   handler and the samgr code-7 handlers are not SLOW — they are
+   STARVED, directly or transitively. Their 3x10s private-futex waits
+   wait for pool workers that are WOKEN-QUEUED but never scheduled,
+   because a phantom/softirq-booked incumbent monopolizes a CPU with no
+   preemption point. Same family as wedge-fix's init-vruntime strand
+   (init runnable, frozen, 60-90s, self-heals) and lb55's pc=0x101/0x102
+   incumbents. The 26x boot wall, the watchdog group-suicides, the
+   distributeddata "SLOW-TXN" family, and the init strand all reduce to:
+   PHANTOM PREEMPT-COUNT/BIT BOOKINGS make unpreemptible monopolists.
+=> THE NEXT KERNEL FIX TARGET (for the producer hunt / r83hunt lane):
+   the phantom-bit producer. Sharper target from this session: it books
+   the SOFTIRQ bit (preempt=0x100 in task context, os_ds_service) and
+   the HARDIRQ bit (PREEMPT-HEAL was=0x10001) — suspect the
+   softirq/irq-exit bracket paths (a softirq_enter without its exit
+   pair, e.g. an early return or the ksoftirqd dispatch legs) — check
+   taskdump-preempt census + PREEMPT-HEAL lines on any loaded boot.
+   lb60 boot/log: run/oh-lb60-serial.log (dump at 169.4).
