@@ -56,7 +56,7 @@ boot_case() { # $1 kernel  $2 case (spec)  $3 label
 
 K0="$WT/work/k0-base.bzImage"
 K1="$WT/work/k1-merge.bzImage"
-K2="$WT/work/k2-merge-stac.bzImage"
+K2="$WT/work/k3-holebreak.bzImage"
 
 # Interleaved passes: bw_file_rd x5 on all three kernels (splits the two
 # commits), neighbors x3 on K0 and K2.
