@@ -722,3 +722,29 @@ With the pcp fix + tap kernel (healthy boot, 76 SAs, 0 DEADLOCK/panic):
   lbwarm (population boot) running at write time; lb60 = warm+snapshot.
 - GATES for the pcp fix + taps: make test ALL PASSED (lb59-maketest.log);
   x86_64 release + riscv64 + aarch64 builds rc=0.
+
+### The 30s CreateNewUser exec — dissected per user directive (bug, not perf)
+Two independent samples (lb59 tid 912, lbwarm tid 930 — same window, same
+image state) agree exactly:
+- The handler parks in sys=202 (futex) with a1=0x80 (FUTEX_WAIT |
+  FUTEX_PRIVATE_FLAG — process-INTERNAL sync, NOT a binder reply wait:
+  a binder client parks in ioctl sys=16 as the neighboring samples show).
+- The uaddr chain is DETERMINISTIC across boots: 0x7fffffffc8f4 -> c844
+  -> c654, each held ~10s (2 audit samples) — a CHAIN of three
+  sequential ~10s stack-based waits (condvar/future wait_for), NOT one
+  5s loop: phase1 c8f4, phase2 c844, phase3 c654, then give-up-empty.
+- ZERO installd install-stream traffic in the window (only 2 tiny SACB
+  oneways to installs) -> the per-user install loop never ran; the
+  early-empty-set leg is confirmed from the kernel side too.
+- The same 1Hz audit names the wedged SERVERS concurrent with the
+  window: samgr code-7 handlers at 30-55s exec whose server threads sit
+  in sys=45 (brk!) for the whole window — an ALLOCATION storm inside
+  samgr's handler, plus netmanager->samgr 54.7s. Working hypothesis
+  (lb60 proves): foundation's KVS-open needs a worker (FFRT/IPC pool);
+  the pool is exhausted (workers parked as sync-IPC CLIENTS against the
+  30s samgr handlers); the open never runs; main thread wait_for x3 x10s
+  gives up -> silent empty user 100 -> no launcher, forever-spin ladder.
+- TAP LANDED (oh-ladder): one-shot dump_all_tasks("txn-hang-20s") when
+  any txn's exec crosses 20s — prints EVERY task's state + parked
+  syscall mid-hang. lb60 = fresh-data boot with this kernel
+  (bzImage-ladder-hangdump): the dump names the leaf's producer thread.
