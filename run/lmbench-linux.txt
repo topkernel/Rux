@@ -1,0 +1,19 @@
+===CASE lat_syscall null
+Simple syscall: 0.0398 microseconds
+===CASE lat_syscall read
+Simple read: 0.0638 microseconds
+===CASE lat_syscall write
+Simple write: 0.0604 microseconds
+===CASE lat_syscall stat
+Simple stat: 0.2159 microseconds
+===CASE lat_syscall fstat
+Simple fstat: 0.1084 microseconds
+===CASE lat_syscall open
+Simple open/close: 0.3900 microseconds
+===CASE lat_pagefault 1M
+===CASE lat_mmap 1M
+===CASE lat_pipe
+Pipe latency: 2.6541 microseconds
+===CASE lat_unix
+AF_UNIX sock stream latency: 2.7526 microseconds
+===CASE lat_fifo

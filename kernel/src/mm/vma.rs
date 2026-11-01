@@ -748,6 +748,20 @@ impl VmaManager {
         self.vmas.range((Excluded(after), Unbounded)).map(|(_, v)| v)
     }
 
+    /// Last VMA whose start is at or before `addr` — the candidate for
+    /// the VMA *containing* `addr`. iter_after only yields VMAs that
+    /// start after a key, so a walk that must begin coverage at `addr`
+    /// (mprotect's range check) has to fetch the containing VMA
+    /// separately or a strict sub-range of a larger VMA looks like a
+    /// gap (geekbench's 8MB RWX arena carve died exactly there).
+    pub fn last_at_or_before(&self, addr: VirtAddr) -> Option<&Vma> {
+        use core::ops::Bound::{Included, Unbounded};
+        self.vmas
+            .range((Unbounded, Included(addr)))
+            .next_back()
+            .map(|(_, v)| v)
+    }
+
     /// True if any VMA starts within [start, end) — used by add() to
     /// reject forward merges that would swallow a successor VMA (R7-5).
     fn has_vma_starting_within(&self, start: VirtAddr, end: VirtAddr) -> bool {
