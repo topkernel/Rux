@@ -98,51 +98,34 @@ pub fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
 
 // ==================== target memory access ====================
 
-/// Translate a user VA in the target's address space to a physical address
-/// plus the leaf page size (SV39 walk, 4 KiB / 2 MiB / 1 GiB leaves).
+/// Translate a user VA in the target's address space to a physical
+/// address plus the page size used for the copy chunking.
+///
+/// The walk goes through the arch walker
+/// (`arch::mm::mm_ops::PageTableWalker`). An earlier hand-rolled SV39
+/// loop ran on every arch: on x86_64 it misread x86 PTEs (SV39 index
+/// bits and leaf/PPN decoding on an x86 PML4/PDP/PD/PT chain), so it
+/// either died mid-walk (process_vm_readv on a musl heap at
+/// 0x7ff000000000 returned EFAULT — LTP r21 process_vm_readv02/03)
+/// or, worse, misdecoded a PML4 entry as a 1 GiB SV39 leaf and
+/// returned a garbage physical address, and process_vm_writev02
+/// copied 100000 bytes through the wrong linear-map pages (silent
+/// cross-process corruption). The arch walker decodes per-arch PTEs
+/// and root/intermediate-guards stale entries.
+///
+/// Returns (phys_of_va_frame_base, 4096): the walker folds huge-leaf
+/// offsets in, so the answer is always the 4 KiB frame containing
+/// `va`.
 ///
 /// # Safety
 /// `root_ppn` must be a valid page-table root PPN.
 unsafe fn translate(root_ppn: u64, va: u64) -> Option<(u64, u64)> {
-    use crate::arch::mm::{phys_to_virt, PhysAddr};
-
-    let a2 = (root_ppn << 12) + ((va >> 30) & 0x1FF) * 8;
-    // SAFETY: a2 addresses a valid PTE in the target's level-2 table.
-    let mut pte = unsafe {
-        core::ptr::read_volatile(phys_to_virt(PhysAddr::new(a2)).0 as *const u64)
-    };
-    if pte & 1 == 0 {
-        return None;
-    }
-    let mut level = 2u32;
-    loop {
-        let is_leaf = pte & 0xE != 0; // R|W|X
-        if is_leaf || level == 0 {
-            break;
-        }
-        let shift = 12 + 9 * (level - 1);
-        let next_table = ((pte >> 10) & 0xFFF_FFFF_FFFF) << 12;
-        let idx = (va >> shift) & 0x1FF;
-        // SAFETY: next_table is a valid page-table page in the target mm.
-        pte = unsafe {
-            core::ptr::read_volatile(
-                phys_to_virt(PhysAddr::new(next_table + idx * 8)).0 as *const u64,
-            )
-        };
-        if pte & 1 == 0 {
-            return None;
-        }
-        level -= 1;
-    }
-
-    let (page_phys, page_len) = if level == 0 {
-        (((pte >> 10) & 0xFFF_FFFF_FFFF) << 12, 4096u64)
-    } else {
-        let shift = 12 + 9 * level;
-        let mask: u64 = !((1u64 << shift) - 1);
-        ((((pte >> 10) & 0xFFF_FFFF_FFFF) << 12) & mask, 1u64 << shift)
-    };
-    Some((page_phys, page_len))
+    use crate::arch::mm::mm_ops::PageTableWalker;
+    // SAFETY: root_ppn belongs to the pinned target mm; the walker
+    // bounds-checks the root and every intermediate entry against
+    // machine memory.
+    let (ppn, _) = unsafe { PageTableWalker::walk(root_ppn, va) }?;
+    Some((ppn << 12, 4096))
 }
 
 /// Read one word of target user memory at `addr`.

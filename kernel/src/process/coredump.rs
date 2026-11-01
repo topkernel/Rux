@@ -41,8 +41,14 @@ use alloc::vec::Vec;
 
 /// ELF core file type.
 const ET_CORE: u16 = 4;
-/// RISC-V machine type.
-const EM_RISCV: u16 = 243;
+/// Machine type of the core file — arch-selected (an x86_64 or aarch64
+/// core claiming EM_RISCV is a malformed ELF for every core reader).
+#[cfg(feature = "riscv64")]
+const EM_MACHINE: u16 = 243; // EM_RISCV
+#[cfg(feature = "x86_64")]
+const EM_MACHINE: u16 = 62; // EM_X86_64
+#[cfg(feature = "aarch64")]
+const EM_MACHINE: u16 = 183; // EM_AARCH64
 
 /// NT_PRSTATUS note type.
 const NT_PRSTATUS: u32 = 1;
@@ -286,55 +292,36 @@ unsafe fn expand_core_pattern(task: *mut Task, sig: i32) -> Vec<u8> {
 /// (page-granular; non-present pages read as zeros so a whole VMA can be
 /// covered by one PT_LOAD).
 ///
+/// The walk goes through the arch walker
+/// (`arch::mm::mm_ops::PageTableWalker`). An earlier hand-rolled SV39
+/// walk ran on every arch: on x86_64 it misread x86 PTEs (phys at PTE
+/// bits 51:12 read through the SV39 lens) into off-machine physical
+/// addresses and the memcpy below faulted in kernel mode — LTP r21
+/// kill11 KERNPANIC `do_coredump -> memcpy`, 3/3 deterministic. The
+/// arch walkers also root-guard against stale mm roots, which this
+/// hand-rolled copy lacked.
+///
 /// # Safety
 /// `root_ppn` is a valid page-table root PPN of the dumped mm.
 unsafe fn dump_read(root_ppn: u64, va: u64, out: &mut [u8]) {
+    use crate::arch::mm::mm_ops::PageTableWalker;
     use crate::arch::mm::{phys_to_virt, PhysAddr};
 
     for b in out.iter_mut() {
         *b = 0;
     }
-    let page = va & !0xFFFu64;
-    // SV39 walk to the leaf (4 KiB / 2 MiB / 1 GiB).
-    let a2 = (root_ppn << 12) + ((page >> 30) & 0x1FF) * 8;
-    // SAFETY: a2 addresses a valid PTE in the level-2 table.
-    let mut pte = unsafe {
-        core::ptr::read_volatile(phys_to_virt(PhysAddr::new(a2)).0 as *const u64)
+    // SAFETY: root_ppn belongs to the pinned mm; the walker bounds-checks
+    // the root and every intermediate entry against machine memory.
+    let (ppn, _) = match unsafe { PageTableWalker::walk(root_ppn, va) } {
+        Some(r) => r,
+        None => return, // non-present page: zero-filled PT_LOAD content
     };
-    if pte & 1 == 0 {
-        return;
-    }
-    let mut level = 2u32;
-    loop {
-        let is_leaf = pte & 0xE != 0;
-        if is_leaf || level == 0 {
-            break;
-        }
-        let shift = 12 + 9 * (level - 1);
-        let next_table = ((pte >> 10) & 0xFFF_FFFF_FFFF) << 12;
-        let idx = (page >> shift) & 0x1FF;
-        // SAFETY: valid page-table page in the dumped mm.
-        pte = unsafe {
-            core::ptr::read_volatile(
-                phys_to_virt(PhysAddr::new(next_table + idx * 8)).0 as *const u64,
-            )
-        };
-        if pte & 1 == 0 {
-            return;
-        }
-        level -= 1;
-    }
-    let (page_phys, page_len) = if level == 0 {
-        (((pte >> 10) & 0xFFF_FFFF_FFFF) << 12, 4096u64)
-    } else {
-        let shift = 12 + 9 * level;
-        let mask: u64 = !((1u64 << shift) - 1);
-        ((((pte >> 10) & 0xFFF_FFFF_FFFF) << 12) & mask, 1u64 << shift)
-    };
-    let off = (va & (page_len - 1)) as usize;
-    let copy = core::cmp::min(out.len(), page_len as usize - off);
+    // The arch walkers fold huge-leaf offsets in: `ppn` is the 4 KiB
+    // frame containing `va`.
+    let off = (va & 0xFFF) as usize;
+    let copy = core::cmp::min(out.len(), 4096 - off);
     // SAFETY: kernel linear map of a present user page.
-    let src = phys_to_virt(PhysAddr::new(page_phys + off as u64)).0 as *const u8;
+    let src = phys_to_virt(PhysAddr::new((ppn << 12) + off as u64)).0 as *const u8;
     // SAFETY: bounded copy from the linear-mapped user page.
     unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), copy) };
 }
@@ -502,7 +489,7 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
             0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ],
         e_type: ET_CORE,
-        e_machine: EM_RISCV,
+        e_machine: EM_MACHINE,
         e_version: 1,
         e_entry: 0,
         e_phoff: 64,
