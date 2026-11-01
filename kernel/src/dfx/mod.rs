@@ -110,6 +110,10 @@ pub mod scmtap;
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// dfx/forkprof.rs.
 pub mod forkprof;
+/// Lost-park event ring (dfx=lostpark, fix-lostpark lane): last-64
+/// scheduling events around an SMP lost-park wedge, dumped by the
+/// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
+pub mod lostpark;
 
 /// Initialize the DFX subsystem.
 ///

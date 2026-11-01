@@ -235,6 +235,20 @@ impl WaitQueueHead {
                     // __schedule with a sleeping state).
                     if !crate::sched::wake_up_process(task) {
                         entry.clear_woken();
+                        // Lost-park ring (dfx=lostpark): the refused-wake
+                        // token return — pid, state bits, preempt_count.
+                        if crate::dfx::lostpark::armed() {
+                            let st = unsafe { (*task).state() };
+                            let pc = unsafe { (*task).preempt_count() };
+                            let pid = unsafe { (*task).pid() };
+                            crate::dfx::lostpark::record(
+                                4,
+                                pid as u64,
+                                st.bits() as u64,
+                                pc as u32 as u64,
+                                crate::drivers::timer::get_jiffies(),
+                            );
+                        }
                         // Do not count a refused wake as awakened: no task
                         // transition happened. Continue scanning so other
                         // entries on this queue still get their chance.
