@@ -1589,6 +1589,13 @@ fn handle_external_interrupt(vector: u64) {
 
 /// Handle system call — x86 port of the twin's handle_syscall.
 fn handle_syscall(regs: &mut PtRegs) {
+    // forkprof trace: first Rust code of a syscall (entry side). The
+    // nr rides a second event (site 15, pid field = nr) so the timeline
+    // names each child-side call.
+    if crate::dfx::forkprof::trace_on() {
+        crate::dfx::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
+        crate::dfx::forkprof::trace(15, regs.rax as u32); // T_SYSNR
+    }
     // Re-enable interrupts before entering the syscall handler.  SYSCALL
     // entered with IF=0 (FMASK cleared it); running the whole syscall
     // with IF=0 starves timer ticks, softlockup detection, and preemption

@@ -102,6 +102,10 @@ pub mod slowtask;
 /// per unix-fd hop/drop plus the fifo last-writer-close line; see
 /// dfx/scmtap.rs.
 pub mod scmtap;
+/// fork/exec/exit phase profiler (cmdline forkprof=1, process-lifecycle
+/// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
+/// dfx/forkprof.rs.
+pub mod forkprof;
 
 /// Initialize the DFX subsystem.
 ///

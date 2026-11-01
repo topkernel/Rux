@@ -1061,6 +1061,10 @@ fn build_sigchld_info(child_pid: u32) -> Option<(crate::signal::SigInfo, u8)> {
 /// parent, plus the group-wide wait_chldexit wake.
 fn process_deferred_exit_pid(packed: i64) {
     use crate::signal::Signal;
+    // forkprof (cmdline forkprof=1): the notify+wake cost that runs in
+    // the switcher's context after the exiting task is off-CPU.
+    let fp = crate::dfx::forkprof::on();
+    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
     let (parent_pid, child_pid) = unpack_notify(packed);
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
@@ -1101,6 +1105,10 @@ fn process_deferred_exit_pid(packed: i64) {
         // glib's gmain worker) must also observe the child exit.
         unsafe { crate::process::exit::wake_group_chldexit(parent) };
         crate::process::task::Task::task_put(parent);
+    }
+    if fp {
+        crate::dfx::forkprof::add(crate::dfx::forkprof::P_SCHED_NOTIFY, fp_t0);
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SNDNOTIFY_DONE, child_pid);
     }
 }
 
@@ -5632,6 +5640,13 @@ pub fn scheduler_tick() {
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
+    // forkprof (cmdline forkprof=1): consume a pending wake stamp —
+    // wake->switch-in is the latency the fork/exit handoff pays.
+    if crate::dfx::forkprof::on() {
+        crate::dfx::forkprof::consume_wake((*next).pid());
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_CTXSW_IN, (*next).pid());
+    }
+
     // Leak-hunt round 3f: __schedule's discipline refuses to switch out
     // any non-dead task with a nonzero preempt_count, so a prev reaching
     // here with a live count means a DISCIPLINE-BYPASSING switch just
@@ -5735,6 +5750,13 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
 #[no_mangle]
 pub extern "C" fn schedule_tail(_prev: *mut Task) {
+    // forkprof: first Rust code in the newborn's frame — splits the
+    // switch machinery (context_switch entry -> here) from the
+    // return-to-user tail (here -> first syscall entry).
+    if crate::dfx::forkprof::trace_on() {
+        let pid = crate::sched::get_current_pid();
+        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
+    }
     // Called after context_switch in the new task's context (ret_from_fork).
     // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
     // per-CPU deferred exit notify stored by the task we replaced would be

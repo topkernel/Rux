@@ -3589,6 +3589,10 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 ///
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
+    // forkprof trace: the trap-exit signal gate (every user return).
+    if crate::dfx::forkprof::trace_on() {
+        crate::dfx::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+    }
     use crate::sched;
 
     // ^C interrupt path (review批次8): deliver any ISIG character the UART

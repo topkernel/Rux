@@ -3101,6 +3101,10 @@ impl Task {
             // through here — filtering only is_sleeping() made them
             // permanently unkillable.
             if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
+                // forkprof (cmdline forkprof=1): waker-side body cost and
+                // the stamp consumed at the wakee's switch-in.
+                let fp = crate::dfx::forkprof::on();
+                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(&*task);
                 let prev_cpu = (*task).ti_cpu();
@@ -3245,6 +3249,10 @@ impl Task {
                     );
                 }
 
+                if fp {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                }
                 true
             } else {
                 // R46 (B-form phantom — refused-wake mirror of R41/R42):

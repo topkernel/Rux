@@ -1102,6 +1102,14 @@ impl Drop for MmStruct {
         if self.space_type == PageTableType::User {
             crate::dfx::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+            // forkprof (cmdline forkprof=1): drop-phase split — VMA
+            // release / grace wait / page-table free.
+            let fp = crate::dfx::forkprof::on();
+            if fp {
+                crate::dfx::forkprof::bump(crate::dfx::forkprof::S_MM_DROPS, 1);
+            }
+            let fp_t_vma = if fp { crate::dfx::forkprof::now() } else { 0 };
+
             // ===== SysV shm detach (exactly once, Linux exit_mmap parity) =====
             // nattch must drop exactly once per mm, at the point its address
             // space goes away — NOT per task exit (CLONE_VM siblings share
@@ -1144,6 +1152,9 @@ impl Drop for MmStruct {
                 *mgr = VmaManager::new();
                 self.vma_files.write().clear();
             }
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_VMAFREE, fp_t_vma);
+            }
 
             // ===== Grace-period wait: hold off the free under raw borrowers =====
             // procfs generate_maps/smaps/status take `task.address_space()` —
@@ -1158,10 +1169,14 @@ impl Drop for MmStruct {
             // softirq — e.g. an OOM-scan Arc dropped under a pid-hash
             // bucket lock): those callers are restructured to drop outside
             // their locks, this is the belt-and-braces guard.
+            let fp_t_rcu = if fp { crate::dfx::forkprof::now() } else { 0 };
             if crate::interrupt::preempt::preempt_count() == 0
                 && crate::arch::cpu::get_interrupts_state()
             {
                 crate::sync::rcu::synchronize_rcu();
+            }
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_RCU, fp_t_rcu);
             }
 
             // Teardown-context witness (FUT-STALE family): a teardown in a
@@ -1205,12 +1220,16 @@ impl Drop for MmStruct {
                 }
             }
 
+            let fp_t_pt = if fp { crate::dfx::forkprof::now() } else { 0 };
             unsafe {
                 // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
                 // construction here (last-Arc + synchronize_rcu drain), so
                 // the teardown chunks never queue behind a live mm's
                 // sections.
                 crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd);
+            }
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_PTFREE, fp_t_pt);
             }
         }
     }

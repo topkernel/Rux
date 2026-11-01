@@ -635,6 +635,15 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // forkprof (cmdline forkprof=1): leader-arm phase timings. The probe
+    // rig's children are single-threaded, so the leader arm is the exit
+    // cost lmbench attributes to fork+exit.
+    let fp = crate::dfx::forkprof::on() && dying_pid == unsafe { (*current).tgid() };
+    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
+    if fp {
+        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_EXIT_ENTRY, dying_pid);
+    }
+
     // The sched:sched_process_exit tracepoint, recorded at do_exit entry
     // (the reference's record point). group_dead: this exit takes the
     // thread group to its last live thread — nr_threads has not been
@@ -970,8 +979,13 @@ pub fn do_exit(exit_code: i32) -> ! {
                 }
             }
         }
+        let fp_t_mmdrop = if fp { crate::dfx::forkprof::now() } else { 0 };
         (*current).set_address_space(None);
         (*current).clear_active_mm();
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_MMDROP, fp_t_mmdrop);
+            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_MMDROP_DONE, dying_pid);
+        }
 
         // Wake vfork parent (if any) — child has dropped the shared address
         // space, so the parent can safely resume.  This must happen before
@@ -1016,8 +1030,12 @@ pub fn do_exit(exit_code: i32) -> ! {
         // never reaped — the PID space leaks monotonically.
         // Applies to threads too: a thread may have fork()ed children.
         // SAFETY: process-tree mutations take PROCESS_TREE_LOCK inside.
+        let fp_t_rep = if fp { crate::dfx::forkprof::now() } else { 0 };
         unsafe {
             reparent_children_to_init(current);
+        }
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_REPARENT, fp_t_rep);
         }
 
         // ===== Thread-group split =====
@@ -1182,6 +1200,7 @@ pub fn do_exit(exit_code: i32) -> ! {
         // notify — a timer IRQ landing here would schedule() us out with
         // state != RUNNING, and lines below (the notify arm) would never
         // run: the parent's only wake source lost.
+        let fp_t_notify = if fp { crate::dfx::forkprof::now() } else { 0 };
         crate::interrupt::preempt::preempt_count_add(1);
         // Set process state to Zombie
         (*current).set_state(TaskState::new(TaskState::ZOMBIE));
@@ -1201,6 +1220,11 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::sched::defer_exit_notify(parent_pid, current_pid);
         }
         crate::interrupt::preempt::preempt_count_sub(1);
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_NOTIFY, fp_t_notify);
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_EX_TOTAL, fp_t0);
+            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_NOTIFY_DONE, dying_pid);
+        }
 
         // ===== do_task_dead: Final schedule, never returns =====
         // sc186/sc189: see the non-leader tail above — the terminal
@@ -1725,7 +1749,13 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
 
                 // Release task resources (kernel stack, Arc refs, PID)
                 // Note: remove_child is done inside release_task()
+                let fp_t_reap =
+                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
                 release_task(child_ptr);
+                if fp_t_reap != 0 {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_REAP, fp_t_reap);
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_REAP_DONE, child_pid);
+                }
 
                 return Ok(child_pid);
             }
@@ -1881,7 +1911,18 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 crate::arch::cpu::restore_irq(true);
 
                 // Schedule other processes
+                // forkprof: this schedule() returns only after the child
+                // ran + exited + woke us — it IS the fork->exit handoff.
+                let fp_t_ws =
+                    if crate::dfx::forkprof::on() { crate::dfx::forkprof::now() } else { 0 };
+                if fp_t_ws != 0 {
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_SLEEP, current_pid);
+                }
                 crate::sched::schedule();
+                if fp_t_ws != 0 {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_SCHED, fp_t_ws);
+                    crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SCHED_WAKE, current_pid);
+                }
 
                 // After wakeup: state is RUNNING (set by wake_up_process).
                 // Clean up waitqueue entry before next iteration.

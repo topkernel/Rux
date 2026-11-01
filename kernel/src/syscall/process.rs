@@ -1307,7 +1307,17 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(e) => return e,
     };
 
+    // forkprof (cmdline forkprof=1): whole-exec wall (exec's own mm
+    // teardown + ELF load is the other half of lat_proc,exec).
+    let fp_t_exec = if crate::dfx::forkprof::on() {
+        crate::dfx::forkprof::now()
+    } else {
+        0
+    };
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
+    if fp_t_exec != 0 {
+        crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);
+    }
     // sc39 gate: the launcher spawn child completes every sandbox hook
     // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
     // exec'ing — name any failed exec of an app-shaped path (a bare
@@ -1562,13 +1572,30 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
         }
     } else {
         // Blocking wait for child process to exit
-        match crate::process::exit::do_wait(wait_pid, wstatus, options) {
+        // forkprof (cmdline forkprof=1): wait4 wall incl. sleep.
+        let fp_t_wt = if crate::dfx::forkprof::on() {
+            crate::dfx::forkprof::trace(
+                crate::dfx::forkprof::T_WAIT_ENTRY,
+                crate::sched::get_current_pid(),
+            );
+            crate::dfx::forkprof::now()
+        } else {
+            0
+        };
+        let r = match crate::process::exit::do_wait(wait_pid, wstatus, options) {
             Ok(child_pid) => {
                 fill_rusage();
-                report_wait_pid(child_pid)
+                Ok(report_wait_pid(child_pid))
             }
-            Err(e) => e as i32 as i64,
+            Err(e) => Err(e as i32 as i64),
+        };
+        if fp_t_wt != 0 {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_BODY, fp_t_wt);
         }
+        return match r {
+            Ok(v) => v,
+            Err(e) => e as i64,
+        };
     }
 }
 
@@ -5930,6 +5957,10 @@ fn shutdown_cascade(cmd: u32) {
 
     // --- 3. Sync filesystems + minimal rootfs umount (flush + clean) ---
     crate::println!("reboot: syncing filesystems");
+    // forkprof (cmdline forkprof=1): ride the shutdown cascade — every
+    // probe rig ends with reboot(2), so the phase table lands in the
+    // serial log without a dedicated reader.
+    crate::dfx::forkprof::report();
     if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }

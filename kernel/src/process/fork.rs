@@ -366,6 +366,18 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         };
         let current_ptr = current as *mut Task;
 
+        // forkprof (cmdline-gated): phase timings for the plain-fork arm
+        // only (CLONE_VM clones exercise the share path, not the mm copy
+        // this probe decomposes). One relaxed load when off.
+        let fp = crate::dfx::forkprof::on() && args.flags & CLONE_VM == 0 && args.flags & CLONE_VFORK == 0;
+        let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
+        if fp {
+            crate::dfx::forkprof::trace(
+                crate::dfx::forkprof::T_FORK_ENTRY,
+                (*current_ptr).pid() as u32,
+            );
+        }
+
         // RLIMIT_NPROC (process-forking clones only — threads are not
         // process products). Simplification per the P1 rlimits plan: the
         // count is GLOBAL user processes (tasks with an address space —
@@ -413,6 +425,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // Allocate task slot from scheduler
         // Note: alloc_task_slot calls new_task_at which already allocates kernel stack
+        let fp_t_alloc = if fp { crate::dfx::forkprof::now() } else { 0 };
         let task_ptr = match crate::sched::alloc_task_slot() {
             Some(p) => p,
             None => {
@@ -460,6 +473,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             }
         };
         let pid = (*task_ptr).pid();
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_ALLOC, fp_t_alloc);
+        }
 
         crate::pr_debug!("fork: parent={}, child={}, flags={:#x}",
             (*current).pid(), pid, args.flags);
@@ -496,8 +512,12 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // === copy_thread: Set up child's context ===
         let parent_regs = &*parent_pt_regs;
+        let fp_t_ct = if fp { crate::dfx::forkprof::now() } else { 0 };
         if copy_thread(&mut *task_ptr, &args, parent_regs).is_none() {
             return unwind(task_ptr, enomem());
+        }
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_COPYTHREAD, fp_t_ct);
         }
 
         // Copy signal mask
@@ -671,12 +691,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // Copy file descriptor table (fork semantics) — single-lock
             // deep copy (see FdTable::fork_from; FD_CLOEXEC bits are part
             // of the snapshot, regression round 5's leak stays fixed).
+            let fp_t_fd = if fp { crate::dfx::forkprof::now() } else { 0 };
             let child_fdtable = match (*current_ptr).try_fdtable() {
                 Some(parent_fdtable) => {
                     alloc::sync::Arc::new(FdTable::fork_from(&*parent_fdtable))
                 }
                 None => alloc::sync::Arc::new(FdTable::new()),
             };
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_FDTABLE, fp_t_fd);
+            }
 
             (*task_ptr).set_fdtable(Some(child_fdtable));
         }
@@ -696,6 +720,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // Copy address space (COW)
             let parent_addr_space = (*current_ptr).address_space();
             if let Some(parent_as) = parent_addr_space {
+                let fp_t_mm = if fp { crate::dfx::forkprof::now() } else { 0 };
                 match parent_as.fork() {
                     Ok(child_as) => {
                         #[cfg(feature = "dfx-futex-trace")]
@@ -765,6 +790,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                     Err(_e) => {
                         return unwind(task_ptr, enomem());
                     }
+                }
+                if fp {
+                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_MMFORK, fp_t_mm);
                 }
             } else {
                 return unwind(task_ptr, enomem());
@@ -943,6 +971,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // invariant "constructed ⇒ enqueued or fully unwound" holds by
         // construction. (The parent has not slept yet — the vfork block
         // below never runs on this path.)
+        let fp_t_enq = if fp { crate::dfx::forkprof::now() } else { 0 };
         if !crate::sched::enqueue_task(&mut *task_ptr) {
             crate::pr_warn!(
                 "fork: enqueue refused for child pid={} — unwinding (R52 tripwire)",
@@ -1037,6 +1066,14 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // /proc/stat "processes": the number of forks since boot.
         crate::fs::procfs::stat::note_fork();
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_ENQUEUE, fp_t_enq);
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_FK_TOTAL, fp_t0);
+            crate::dfx::forkprof::trace(crate::dfx::forkprof::T_FORK_DONE, pid as u32);
+            // enqueue->first-switch-in latency of the child (consumed at
+            // context_switch) — the fork-child queue delay.
+            crate::dfx::forkprof::stamp_child(pid as u32);
+        }
 
         Ok(pid)
     }

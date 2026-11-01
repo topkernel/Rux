@@ -1174,6 +1174,10 @@ impl MmStruct {
         // per-PTE granularity and simply stays out of the child's
         // snapshot — the race-equivalent outcome POSIX already assigns to
         // mm writers concurrent with fork.
+        // forkprof (cmdline forkprof=1): phase split of the mm fork —
+        // snapshot / COW walk / VMA replay. One relaxed load when off.
+        let fp = crate::dfx::forkprof::on();
+        let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
         let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>) = {
             let parent_vma_guard = self.vma_read();
 
@@ -1203,15 +1207,26 @@ impl MmStruct {
 
             (exempt, snapshot)
         };
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
+            crate::dfx::forkprof::bump(
+                crate::dfx::forkprof::S_FORKS_VMASES,
+                vma_snapshot.len() as u64,
+            );
+        }
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
         // The walk takes the PARENT's per-mm PTE section internally per leaf
         // table and may cond_resched between chunks (launcher wall fix — see
         // the function's own comment for the exclusion argument).
+        let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
         let new_root_ppn = unsafe {
             copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
+        if fp {
+            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
+        }
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
         // a valid, freshly allocated root page table. space_type and brk are valid by
@@ -1225,6 +1240,7 @@ impl MmStruct {
         {
             // Everything after this point only touches the CHILD's manager
             // (the snapshot was taken before the walk — no parent lock held).
+            let fp_t_replay = if fp { crate::dfx::forkprof::now() } else { 0 };
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
@@ -1261,6 +1277,9 @@ impl MmStruct {
                     let _ = new_vma_mgr.add(new_vma);
                     new_space.add_total_vm(copied_pages);
                 }
+            }
+            if fp {
+                crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_REPLAY, fp_t_replay);
             }
         }
 
@@ -2075,6 +2094,9 @@ pub unsafe fn copy_page_table_cow(
     // across the walk.
     use crate::mm::page_desc::pfn_to_page_mut;
 
+    // forkprof scalars (armed check hoisted out of the PTE loop).
+    let fp_count = crate::dfx::forkprof::on();
+
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
     // riscv64 twin (see its long comment for the failure history).
@@ -2218,6 +2240,9 @@ pub unsafe fn copy_page_table_cow(
 
                         let child_pt_phys = alloc_page_table()?;
                         let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
+                        if fp_count {
+                            crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_TABLES, 1);
+                        }
                         (*child_pmd_ref).set(
                             vpn2,
                             PageTableEntry::from_bits(
@@ -2331,6 +2356,11 @@ pub unsafe fn copy_page_table_cow(
                     };
 
                     (*child_pt_ref).set(vpn1, new_pte);
+                    // forkprof scalar: PTEs copied (hoisted armed check —
+                    // one relaxed load when off).
+                    if fp_count {
+                        crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_PTES, 1);
+                    }
                     pte_install_log(
                         child_root_ppn,
                         leaf_va,
