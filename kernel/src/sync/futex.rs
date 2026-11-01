@@ -1409,6 +1409,49 @@ pub fn futex_requeue(
     ret
 }
 
+/// FUTEX_OP_OPARG_SHIFT (include/uapi/linux/futex.h): bit 3 of the op
+/// nibble makes oparg a SHIFT AMOUNT (oparg = 1 << oparg) instead of an
+/// immediate.
+pub const FUTEX_OP_OPARG_SHIFT: u32 = 1 << 3;
+
+/// The decoded FUTEX_WAKE_OP operand encoding.
+///
+/// Reference contract (kernel/futex/waitwake.c futex_atomic_op_inuser):
+/// - op nibble is 3 bits + the OPARG_SHIFT bit: `(encoded & 0x70000000) >> 28`
+///   selects the operation, bit 3 (`0x80000000`) turns oparg into a shift
+///   amount;
+/// - oparg and cmparg are 12-bit SIGNED fields (sign_extend32(..., 11)) —
+///   0xfff is -1, not 4095;
+/// - an op nibble 5-7 or a cmp nibble 6-15 is -ENOSYS, not -EINVAL.
+///
+/// Split out so the in-kernel suite can pin the ABI decode (the old inline
+/// decode masked op with 0xf and read the args unsigned).
+pub fn futex_wake_op_decode(encoded: u32) -> Result<(u32, i32, u32, i32), i32> {
+    let op = (encoded & 0x7000_0000) >> 28;
+    let cmp = (encoded & 0x0f00_0000) >> 24;
+    let mut oparg = sign_extend12((encoded & 0x00ff_f000) >> 12);
+    let cmparg = sign_extend12(encoded & 0x0000_0fff);
+    if encoded & (FUTEX_OP_OPARG_SHIFT << 28) != 0 {
+        // Reference: oparg &= 31 after a ratelimited complaint when out of
+        // range; negative oparg can never occur here (12-bit sign-extended
+        // values in -2048..2047 — the reference's < 0 check dates from its
+        // int-typed decode). 1 << (oparg & 31).
+        oparg = 1i32 << (oparg & 31);
+    }
+    if op > FUTEX_OP_XOR {
+        return Err(ENOSYS);
+    }
+    if cmp > crate::sync::futex::FUTEX_OP_CMP_GE {
+        return Err(ENOSYS);
+    }
+    Ok((op, oparg, cmp, cmparg))
+}
+
+/// sign_extend32(v, 11) of the reference: 12-bit field to a signed i32.
+const fn sign_extend12(v: u32) -> i32 {
+    ((v << 20) as i32) >> 20
+}
+
 /// FUTEX_WAKE_OP implementation (Linux futex_wake_op).
 ///
 /// Atomically (w.r.t. futex waiters on `uaddr2`) applies the encoded
@@ -1424,10 +1467,12 @@ pub fn futex_wake_op(
     uaddr2: usize,
     encoded: u32,
 ) -> i64 {
-    let op = (encoded >> 28) & 0xf;
-    let cmp = (encoded >> 24) & 0xf;
-    let oparg = ((encoded >> 12) & 0xfff) as i32;
-    let cmparg = (encoded & 0xfff) as i32;
+    // Reference errno shape: an invalid op/cmp nibble is -ENOSYS
+    // (futex_atomic_op_inuser's default cases), not -EINVAL.
+    let (op, oparg, cmp, cmparg) = match futex_wake_op_decode(encoded) {
+        Ok(t) => t,
+        Err(e) => return -(e as i64),
+    };
 
     let mm = current_futex_mm_id();
     let key2 = FutexKey::new(uaddr2, mm, flags);
@@ -1456,7 +1501,7 @@ pub fn futex_wake_op(
             FUTEX_OP_OR => old | (oparg as u32),
             FUTEX_OP_ANDN => old & !(oparg as u32),
             FUTEX_OP_XOR => old ^ (oparg as u32),
-            _ => return -EINVAL as i64,
+            _ => unreachable!("op range checked in futex_wake_op_decode"),
         };
         cmp_holds = match cmp {
             FUTEX_OP_CMP_EQ => old_i == cmparg,
@@ -1465,7 +1510,7 @@ pub fn futex_wake_op(
             FUTEX_OP_CMP_LE => old_i <= cmparg,
             FUTEX_OP_CMP_GT => old_i > cmparg,
             FUTEX_OP_CMP_GE => old_i >= cmparg,
-            _ => return -EINVAL as i64,
+            _ => unreachable!("cmp range checked in futex_wake_op_decode"),
         };
         if unsafe {
             !crate::arch::uaccess::put_user(uaddr2 as *mut u32, new)
@@ -1803,8 +1848,11 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         }
         FUTEX_WAKE_OP => {
             // ABI: val = nr_wake on uaddr, args[3] (_timeout slot) = nr_wake2
-            // on uaddr2, val3 = encoded op/cmp.
-            if uaddr2 == 0 || uaddr2 & 0x3 != 0 {
+            // on uaddr2, val3 = encoded op/cmp. uaddr2 == NULL needs no
+            // special case: the reference runs the op through
+            // pagefault-disabled user access and reports EFAULT, which is
+            // exactly what futex_wake_op's get_user produces on its own.
+            if uaddr2 & 0x3 != 0 {
                 return -EINVAL as i64;
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
