@@ -68,8 +68,8 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 | `lat_unix` | 2.688 microseconds | 3.011 microseconds | **0.89x (faster)** |
 | `lat_ctx -s 64 2` | 0.73 us/ctxsw | 0.91 us/ctxsw | **0.80x (faster)** |
 | `lat_ctx -s 64 8` | 1.05 us/ctxsw | 1.3 us/ctxsw | **0.81x (faster)** |
-| `lat_proc fork` | 672.936 microseconds | 33.133 microseconds | 20.31x |
-| `lat_proc exec` | 673.619 microseconds | 57.54 microseconds | 11.71x |
+| `lat_proc fork` | ~~672.936~~ 47.6 µs *(perf-fork lane: the 673 µs was one EXITGRP pr_err serial line, ~650 µs through the polled UART)* | 33.133 microseconds | 1.44x |
+| `lat_proc exec` | ~~673.619~~ 55.9 µs *(same print)* | 57.54 microseconds | **0.95x (at reference)** |
 | `lat_sem` | **TIMEOUT** | 0.444 microseconds | - |
 | `lat_fs -s 1k` | n/a | 438368 files/s | - |
 | `lat_mem_rd -s 1048576 -e 1048576 1` | 2.283 ns/load | 2.437 ns/load | **0.94x (faster)** |
