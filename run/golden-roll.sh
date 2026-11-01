@@ -12,7 +12,7 @@ cd /home/william/rux-agents/oh-launcher || exit 1
 MAX=${1:-8}
 START=${2:-212}
 KERN=run/bzImage-ladder-gpbound
-IMG=run/system-lb6.img
+IMG=run/system-lb8.img
 BASE=run/userdata-warm.img
 mkdir -p run/roll-logs
 for i in $(seq 0 $((MAX-1))); do
