@@ -1075,3 +1075,122 @@ SAME BUG. Evidence chain, closed:
    boots until one passes the accountmgr coin-flip, then read
    VW-POLLSTALL (fires only if a poll truly stalls 2M laps) and
    startUser -> SwitchToUser -> appspawn -> pixels.
+
+## TWELFTH-SUCCESSOR SESSION (2026-11-01 23:00 → 11-02 01:00, branch oh-ladder @ c002dbe3)
+Mission: the munmap VMA-convoy fix, then the golden population. Landed both
+mm fixes PLUS the user's single-sticking-point directive decode: THE CRAWL
+IS A CLASS — init's boot jobs are chains of SYNCHRONOUS execs + child-exit
+reaping; any child blocking T seconds freezes the WHOLE service graph
+(no starts, no params, no reaping) for T. Three concrete blockers named
+with A/B evidence, two FIXED, one left with a named next probe.
+
+### Kernel commits (all make-test green 1267/1267, x3 builds rc=0)
+1. bbcc5cae mm(munmap): CHUNKED the VMA surgery + PTE zap (all three arch
+   twins). Per iteration: ≤1MiB of ONE VMA — surgery+zap under ONE guard
+   (mm-audit invariant preserved: at every guard drop, VMA-gone ⇒ PTEs-
+   cleared), then drop + cond_resched + RE-DERIVE the first overlapping
+   VMA (tree can change between holds). Verification lb122 (vs lb119):
+   brk-park (sys=45) max exec 735s → 25s; service graph 81-by-105s; the
+   4th-ever SwitchToUser @207.8s. Wall 1 (15/18 boots) is DEAD.
+2. 4c71a4f5 mm(mmap): MAP_FIXED teardown routed through the chunked
+   munmap (was the SECOND whole-range vma_write+zap hold; a PROT_NONE
+   reserve carve over empty space walked every page under the lock with
+   ZERO overlapping VMAs). Install under fresh guard + bounded
+   racer-retry (8, then ENOMEM).
+3. f0c57182 task/exit/signal: Task::comm_str() (lossy NUL-terminated
+   decode) replacing all ten from_utf8_unchecked(comm) sites — lb120
+   PANICKED at 672s in do_exit's KOT-KILL vnames Debug print ("start
+   byte 12 is not a char boundary"; a >15-byte UTF-8 thread name
+   truncates mid-char in the 16-byte comm).
+4. 9c8bcba0 binder: deliver context-manager SELF-SENDS (mainline parity).
+   The S1-era BR_FAILED_REPLY refusal was an unverified port assumption;
+   it fired at 4.09s every boot (samgr's self-registration oneway, code
+   0x5f504e47, AMS46-SENDFAIL why=5) and lb119/lb122 carried 69-112
+   *.accessToken handle:0 ERR_NULL_OBJECT failures from 6s on. NOTE: the
+   accessToken proxy badness PERSISTS on lb123+ with the fix — its own
+   chain, see successor notes.
+5. c002dbe3 rcu/exit: synchronize_rcu_bounded(1500ms, site) at the THREE
+   exit-path grace waits (MmStruct::drop raw-borrower wait, thread
+   kernel-stack free, release_task task-memory free). THE lb125 DECODE
+   (see below). WARN RCU-GP-BOUND names site+stuck-CPU on each trip.
+
+### THE lb125 DIFFERENTIAL DECODE (the sticking point, evidence chain)
+Healthy lb65 vs crawling lb125 service-start cadence: lb65 86-by-40s;
+lb125 FROZEN at 44 from 20s to 100s, then the whole backlog flushed in
+~3s to the same total. Inside the freeze window:
+- 12.0s chipset_init (pid 466, init's sub-init plugin) last print
+  (configfs usb_gadget mkdirfails — /config absent); it blocked ~30s on
+  a command and its OWN poll watchdog fired
+- 42.03s EXITGRP pid=466 code 32512 (=127)
+- 105.39s init's signal handler finally reaped it — 63 SECONDS LATER
+- In between init received ZERO param msgs, started ZERO services, left
+  six ohos.ctl.start device_manager requests unread (samgr's
+  "Start dynamic proc ... 15000ms" chain x7 — the visible 15s family)
+MECHANISM: do_exit drops the last mm Arc inline; MmStruct::drop calls
+synchronize_rcu() BEFORE the ZOMBIE transition + deferred SIGCHLD. A CPU
+whose task runs unpreemptible (phantom preempt counts / monopolist
+windows) reports NO quiescent state → grace period stalls the window's
+full length → SIGCHLD late → init (signal-driven, single loop) frozen.
+Bimodality = the coincidence coin. lb127 post-fix: no grace tail; the
+residual 40s freeze was named as sdc (below).
+
+### The sdc coin (lb127, image-side fixed)
+lb127: last ServiceStart 4.02s; "Sync exec: /system/bin/sdc" at 4.315s;
+"result 12 1" at 58.043s — init blocked 54s on ONE sync exec (the debug-
+bridge client retrying a transport that is not up; exit 12). Healthy
+boots: sdc exits 0 in ~1.2s (lb65 17.3→18.4, lb122 4.4→5.5). FIX:
+run/system-lb5.img = lb4 + sdc replaced by a #!/system/bin/sh exit-0
+stub (mode 0755) — verified on lb128 (result 0, fast).
+
+### Population hunt state (the prize, unclaimed)
+- run/system-lb4.img = lb3 + installs.cfg ondemand true→false (lb3 had
+  LOST the lb2 resident-installs fix — the 30-75s dynamic installd loads
+  were back on every lb3 boot!). system-lb5.img = lb4 + sdc stub.
+- lb124 died at 84s: accesstoken_ser's OS_DfxWatchdog mutual-kill (its
+  23s init window; lb122-class boots pass at 16.6-17s — a ~6s margin
+  coin) → init StopAllServices → DELIBERATE sysrq-'c' crash (our sysrq
+  handler is correct; that is OH init's reboot path).
+- lb123 (fresh2 copy, lb3): scan started 513s, stalled ~700s (foundation
+  pool parked, userspace futex family); copy kept (goldpop-lb123.img).
+- lb126 (fresh2 copy #2): degenerate from 11s (userspace panic + hdf
+  devmgr 65280 early death + same-process code-30 txn 240s) — bad boot.
+- lb128 (RUNNING at close): fresh2 copy + system-lb5 + gpbound kernel;
+  post-fs-data (first-boot, ~50s) → post-fs 12.3s → late-fs 0.03s →
+  services flowing; watcher armed (run/pop-hunt.sh lb128). Population
+  copies inventory: goldpop-{lb123,lb125,lb126,lb128}.img (pristine
+  partial states) + rollpop-lb122.img (2nd CheckUserParam lineage).
+
+### Successor entry points (in order)
+1. lb128's outcome (run/lb128-hunt.log): with sdc stubbed + grace waits
+   bounded + resident installs, the fresh2 first-boot scan + creation
+   race is the cleanest shot yet at 'bundle size'. pop-hunt.sh kills the
+   VM before an out-of-order CreateNewUser poisons the copy.
+2. chipset_init's ~30s configfs block (lb125 12→42s): the third concrete
+   blocker, UNFIXED. The child's parked syscall is nameable with a
+   mid-block sampler (last_calls ring exists in do_exit's print; add a
+   watchdog-side tap or boot dfx=taskdump on a fresh2 copy).
+3. First-boot post-fs-data ~50s (lb128 10→61s): the fs sync-write family
+   (fs domain) — genuine work, but the e2fsck/restorecon exec chain
+   under it deserves a per-command breakdown before the population race
+   can be won reliably.
+4. *.accessToken proxy handle:0 ERR_NULL_OBJECT (85-112/boot from 6s,
+  persists past the binder self-send fix): the proxy is CONSTRUCTED
+  broken (handle 0, null invoker — SendRequestInner error 7 before any
+  kernel send). Trace foundation's AccessTokenKit init at 6s vs SA 3503
+  registration at 23-27s — a GetSystemAbility-null answer cached into a
+  permanent broken proxy is the shape; OH-side retry or kernel-side
+  nothing. This gates the post-SwitchToUser user-start leg.
+5. The flicker-monopolist heal + phantom-producer hunts (sched lane,
+   unchanged) — the monopolist windows are now the only thing that
+   trips RCU-GP-BOUND (watch that print: it names site+CPU per trip).
+
+### Boots this session
+lb120 (munchunk: 81-svcs-fast, brk residual 144s→MAP_FIXED suspect,
+PANIC 672s comm print → fix 3), lb122 (mmfix3: 4th SwitchToUser 207.8s,
+brk max 25s, empty-records ladder spin = lineage property; copy kept),
+lb123 (pop attempt 1: scan stall), lb124 (mmfix4+lb4: accesstoken
+watchdog reboot), lb125 (THE differential decode boot; mmfix4+lb4),
+lb126 (degenerate), lb127 (warm+gpbound: 152-by-70s, sdc named+fixed),
+lb128 (RUNNING: lb5+gpbound population hunt).
+Gates: make test GREEN 3x (lb120/lb121/lb123/lb126-maketest.log — the
+last on the final gpbound tree, 1267/1267); x3 builds rc=0 per commit.
