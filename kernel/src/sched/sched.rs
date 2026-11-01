@@ -2407,6 +2407,31 @@ unsafe fn __schedule() {
     // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
     // path's final schedule() must always switch away.
     //
+    // LOST-PARK FIX (fix-lostpark lane, 2026-11-01): the refusal used to
+    // trigger on ANY nonzero count — including counts whose ONLY set bits
+    // are the interrupt classes (HARDIRQ/SOFTIRQ/NMI offsets). Those bits
+    // are phantom on a task attempting a VOLUNTARY sleep: no hardirq,
+    // softirq or NMI handler can legally call schedule(), so a sleeper
+    // presenting them carries a leaked bracket (the x86 tick path's
+    // entry/exit imbalance producers; the same class WAKE-HEAL and
+    // PARKED-HEAL already zero on woken/parked targets). Refusing the
+    // park anyway turned the phantom into a permanent unpreemptible
+    // kernel poll loop: with kernel-preemption off, nothing evicts the
+    // spinner, and because the spinner never completes another wait-queue
+    // event, its peer's one-shot wake tokens (returned by W1 when the
+    // wake hit the spinner's RUNNING phase of the oscillation) are never
+    // re-issued — the lmbench lat_sem / ping-pong SMP wedge (satisfiable
+    // parked waiter + peer spinning with both "idle" counters frozen;
+    // repro: run/lostpark-notes.md). The reference kernel treats this
+    // shape as a BUG print ("scheduling while atomic") and SLEEPS THE
+    // TASK ANYWAY — an IRQ-class bit must never prevent a voluntary park.
+    // Adjudicate: on a voluntary sleep (INTERRUPTIBLE/UNINTERRUPTIBLE/
+    // STOPPED — states only the task's own wait path writes), with the
+    // spinlock nest (PREEMPT_MASK) and PREEMPT_ACTIVE both clean, zero
+    // the phantom interrupt bits and allow the park. Every other shape
+    // keeps the original refusal exactly as-is (lock holders, involuntary
+    // switches, terminal states).
+    //
     // NOTE (kernel-preemption round 2): the schedule() recursion guard is
     // TIF_IN_SCHED, a ti_flags bit — NOT a preempt_count bit — so this
     // check needs no masking. (Round 1 used a PREEMPT_ACTIVE count bit;
@@ -2415,9 +2440,67 @@ unsafe fn __schedule() {
     {
         let prev_state = (*prev).state();
         if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
-            (*prev).set_state(TaskState::new(TaskState::RUNNING));
-            crate::sched::dequeue_if_enqueued(&*prev);
-            return;
+            // Adjudicate under a brief IRQ-off window so a tick landing
+            // between the read and the zero cannot erase an in-flight
+            // balanced bracket (its un-paired sub would underflow the
+            // count negative — a new phantom of the opposite sign).
+            let flags = crate::arch::cpu::save_and_disable_irq();
+            let pc = (*prev).preempt_count();
+            let irq_class = pc
+                & (crate::interrupt::preempt::HARDIRQ_MASK
+                    | crate::interrupt::preempt::SOFTIRQ_MASK
+                    | crate::interrupt::preempt::NMI_MASK);
+            let holdout = pc & !irq_class;
+            let voluntary_sleep = prev_state.is_sleeping()
+                || prev_state.contains(TaskState::STOPPED);
+            if !voluntary_sleep || holdout != 0 {
+                crate::arch::cpu::restore_irq(flags);
+                (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                crate::sched::dequeue_if_enqueued(&*prev);
+                return;
+            }
+            // Phantom interrupt bits on a voluntary sleeper: same
+            // medicine WAKE-HEAL administers (full zero — the holdout is
+            // clean, so the whole count IS the phantom).
+            (*prev).ti_preempt_count_zero();
+            crate::arch::cpu::restore_irq(flags);
+            static LPP_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn pdec3(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 {
+                        putchar(b'0');
+                        return;
+                    }
+                    while v > 0 {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    while n > 0 {
+                        n -= 1;
+                        putchar(buf[n]);
+                    }
+                }
+                const M: &[u8] = b"\nLP-PARK-IRQBITS-ZEROED pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                pdec3((*prev).pid() as u64);
+                const M2: &[u8] = b" was_pc=0x";
+                for &b in M2 {
+                    putchar(b);
+                }
+                pdec3(pc as u32 as u64);
+                putchar(b'\n');
+            }
         }
     }
 
@@ -4214,6 +4297,78 @@ pub fn wake_up_enqueue_opt(
                             putchar(b'c');
                         }
                         putchar(b'\n');
+                        // Lost-park census tail (dfx=lostpark): when the
+                        // refusal is curr_on AND nothing is runnable
+                        // anywhere, name the lying slot's CPU + writer tag
+                        // and the victim's full ownership word — the
+                        // wedged-park signature (a satisfiable sleeper no
+                        // wake can reach).
+                        if curr_on
+                            && grq_guard.rq_load() == 0
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::LostParkTrace,
+                            )
+                        {
+                            static LPW_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            if LPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                < 96
+                            {
+                                fn pdec2(mut v: u64) {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    let mut buf = [0u8; 20];
+                                    let mut n = 0;
+                                    if v == 0 {
+                                        putchar(b'0');
+                                        return;
+                                    }
+                                    while v > 0 {
+                                        buf[n] = b'0' + (v % 10) as u8;
+                                        v /= 10;
+                                        n += 1;
+                                    }
+                                    while n > 0 {
+                                        n -= 1;
+                                        putchar(buf[n]);
+                                    }
+                                }
+                                const M: &[u8] = b"LP-WAKE-SKIP-EMPTY pid=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                pdec2((*task).pid() as u64);
+                                for c in 0..MAX_CPUS {
+                                    if cpu_state(c).current == task {
+                                        const MC: &[u8] = b" naming_cpu=";
+                                        for &b in MC {
+                                            putchar(b);
+                                        }
+                                        pdec2(c as u64);
+                                        const MW: &[u8] = b" slotw=";
+                                        for &b in MW {
+                                            putchar(b);
+                                        }
+                                        pdec2(
+                                            SLOT_WRITER[c]
+                                                .load(core::sync::atomic::Ordering::Relaxed)
+                                                as u64,
+                                        );
+                                        let bit = grq()
+                                            .idle_cpus
+                                            .load(core::sync::atomic::Ordering::Acquire)
+                                            & (1u32 << c)
+                                            != 0;
+                                        const MI: &[u8] = b" idlebit=";
+                                        for &b in MI {
+                                            putchar(b);
+                                        }
+                                        pdec2(bit as u64);
+                                        break;
+                                    }
+                                }
+                                putchar(b'\n');
+                            }
+                        }
                     }
                 }
             }
@@ -6718,6 +6873,129 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
     });
 }
 
+/// Lost-park idle-lie report (fix-lostpark lane, dfx=lostpark): called
+/// from the idle loop when the CPU's own slot names a real task after
+/// schedule() returned. Rate-limited to one line per CPU per 10 jiffies
+/// with a global budget, direct-console (R34 discipline — the caller may
+/// not hold the GRQ, but the diag path must stay lock-free anyway).
+fn lp_idle_lie_report(cpu: usize) {
+    use crate::console::putchar_no_lock as putchar;
+    static LP_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    static LP_LAST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+    if LP_N.load(core::sync::atomic::Ordering::Relaxed) >= 128 {
+        return;
+    }
+    let jif = crate::drivers::timer::get_jiffies();
+    let last = LP_LAST[cpu.min(MAX_CPUS - 1)].load(core::sync::atomic::Ordering::Relaxed);
+    if jif.wrapping_sub(last) < 10 {
+        return;
+    }
+    if LP_LAST[cpu.min(MAX_CPUS - 1)]
+        .compare_exchange(
+            last,
+            jif,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return;
+    }
+    LP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    fn phex(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16u32).rev() {
+            let nb = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        }
+    }
+    // SAFETY: diagnostic reads of the slot-named task; the slot pins it
+    // as this CPU's published current (it cannot be freed while named).
+    unsafe {
+        let curr = cpu_state(cpu).current;
+        const M: &[u8] = b"\nLP-IDLE-LIE cpu=";
+        for &b in M {
+            putchar(b);
+        }
+        pdec(cpu as u64);
+        const M2: &[u8] = b" slot_pid=";
+        for &b in M2 {
+            putchar(b);
+        }
+        pdec((*curr).pid() as u64);
+        const M3: &[u8] = b" st=0x";
+        for &b in M3 {
+            putchar(b);
+        }
+        phex((*curr).state().bits() as u64);
+        const M4: &[u8] = b" pc=0x";
+        for &b in M4 {
+            putchar(b);
+        }
+        phex((*curr).preempt_count() as u64);
+        const M5: &[u8] = b" oncpu=";
+        for &b in M5 {
+            putchar(b);
+        }
+        pdec((*curr).on_cpu() as u64);
+        let claim = (*curr).running_on_cpu.load(core::sync::atomic::Ordering::Relaxed);
+        const M6: &[u8] = b" cl=";
+        for &b in M6 {
+            putchar(b);
+        }
+        if (claim as i64) < 0 {
+            putchar(b'-');
+        }
+        pdec((claim as i64).unsigned_abs() as u64);
+        const M7: &[u8] = b" pk=";
+        for &b in M7 {
+            putchar(b);
+        }
+        pdec((*curr).pick_state() as u64);
+        const M8: &[u8] = b" onrq=";
+        for &b in M8 {
+            putchar(b);
+        }
+        pdec(task_onrq_flag(curr) as u64);
+        const M9: &[u8] = b" slotw=";
+        for &b in M9 {
+            putchar(b);
+        }
+        pdec(SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed) as u64);
+        const M10: &[u8] = b" wtask=0x";
+        for &b in M10 {
+            putchar(b);
+        }
+        phex(SLOT_WRITER_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed));
+        const M11: &[u8] = b" nr=";
+        for &b in M11 {
+            putchar(b);
+        }
+        pdec(GlobalRunQueue::grq_nr_running() as u64);
+        putchar(b'\n');
+    }
+}
+
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
@@ -6861,6 +7139,23 @@ pub fn cpu_idle_loop() -> ! {
             let curr = pcpu.current;
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
+
+        // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
+        // CPU just ran schedule() and is about to idle-mark/halt, but its
+        // slot names a REAL task. With an empty global queue that task is
+        // registered-nowhere and "running-nowhere" — every wake of it is
+        // refused by the curr_on scan (the WAKE-HEAL-SKIP why=c family),
+        // so this is exactly the moment the wedge becomes permanent.
+        // Report the victim's ownership word and the SLOT_WRITER tag (the
+        // last writer of the lying slot: 1=pick 2=R56d 3=R56c 4=steal
+        // 5=abort-republish) so the producer is named live.
+        if !is_idle
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            )
+        {
+            lp_idle_lie_report(cpu_id);
+        }
 
         if is_idle {
             grq().mark_idle(cpu_id);

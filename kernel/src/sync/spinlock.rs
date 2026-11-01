@@ -64,6 +64,44 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "dfx-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
+/// LOST-PARK FIX (fix-lostpark lane): the spinlock yield handoff.
+///
+/// `Spinlock::lock` / `lock_fair` call this instead of `schedule()`
+/// when they hand the CPU to the lock holder. A plain `schedule()` here
+/// PARKS a caller whose state was set to a sleep state by an enclosing
+/// wait path (the window between the wait path's prepare_to_wait and
+/// its own park site — e.g. sysv semop's post-registration recheck,
+/// which takes the same spinlock this yield contends). Such a park is
+/// permanent: the sleeper is registered on no wait queue at this point,
+/// so no future wake reaches it. Force the caller to RUNNING for the
+/// duration of the handoff so `__schedule` treats it as a preempted
+/// running task (requeue + later resume); the enclosing wait loop
+/// re-asserts its sleep state at its own park site.
+#[inline]
+fn yield_no_park() {
+    if let Some(cur) = crate::sched::current() {
+        let st = cur.state();
+        if st.is_sleeping() || st.contains(crate::process::task::TaskState::STOPPED) {
+            cur.set_state(crate::process::task::TaskState::new(
+                crate::process::task::TaskState::RUNNING,
+            ));
+            static LPY_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            ) && LPY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40
+            {
+                crate::pr_warn!(
+                    "LP-YIELD-PARK-PREVENTED pid={} state={:#x}",
+                    cur.pid(),
+                    st.bits()
+                );
+            }
+        }
+    }
+    crate::sched::schedule();
+}
+
 // ==================== RawSpinlock (TTAS) ====================
 
 /// Capture this function's return address (the spinlock call site) for
@@ -349,7 +387,26 @@ impl<T> Spinlock<T> {
             // the CAS): hand the CPU over — the schedule() may run the
             // holder here. We hold nothing at this point, so switching
             // away is always safe.
-            crate::sched::schedule();
+            //
+            // LOST-PARK FIX (fix-lostpark lane, 2026-11-01): this yield
+            // is a HANDOFF, never a sleep — but schedule() parks a task
+            // whose state is a sleep state, and a caller CAN legally be
+            // inside a wait path's prepared window (state set
+            // INTERRUPTIBLE by its prepare_to_wait, e.g. semop's
+            // post-registration recheck taking this same lock). Parking
+            // there is permanent: the sleeper is on NO wait queue here,
+            // its enclosing path's wake sources fire only for the
+            // queued entry, and the lock holder's release arms nothing.
+            // The lmbench lat_sem / semop ping-pong SMP wedge was
+            // exactly this shape (capture: reader parked at
+            // Spinlock::lock inside try_apply_semops, writer parked
+            // registered-satisfiable, both vCPUs idle forever —
+            // run/lostpark-notes.md). Force the handoff's prev to
+            // RUNNING so __schedule requeues it instead of parking it;
+            // the enclosing wait loop re-asserts its sleep state at its
+            // own park site (prepare_to_wait re-runs every iteration),
+            // costing at most one extra recheck loop.
+            yield_no_park();
         }
     }
 
@@ -390,7 +447,10 @@ impl<T> Spinlock<T> {
             // pinning it. The schedule() picks another task (likely the
             // holder); we come back and retry afterwards.
             preempt_enable();
-            crate::sched::schedule();
+            // LOST-PARK FIX: same discipline as lock()'s yield — the
+            // handoff must never park a caller caught in a wait path's
+            // prepared window (see lock()'s comment).
+            yield_no_park();
         }
     }
 
