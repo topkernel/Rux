@@ -4787,35 +4787,36 @@ pub fn scheduler_tick() {
                     if t0 == 0 {
                         t0 = now;
                     }
-                    // phantom-bits contiguity bar: a task-context base
-                    // DRAIN (a live outermost guard pair completing)
-                    // re-arms the window. The sc41/sc42 cumulative bar
-                    // could not tell a hot lock user from a phantom —
-                    // at 100 Hz the sampler never catches a lock-hot
-                    // task's microsecond gaps between guards, so the
-                    // window matured on LIVE holders (pb3: 887
-                    // heals/boot, 96% on 4 lock-hot pids, each with a
-                    // fresh 0->1 acquire inside the "2 s hold"), and
-                    // every false heal stripped a live guard + set
-                    // need_resched, preempting the holder MID-SECTION —
-                    // stranding its lock for every spinner (the
-                    // both-CPU spin/deadlock amplifier). Direct
-                    // zeroings (heal paths bypass the sub path) do not
-                    // stamp ti_pc_zero_jif, so a genuine phantom — whose
-                    // base never drains — still heals after 2 s.
+                    // Contiguity bar REVERTED to the sc42 cumulative bar
+                    // (lb59-lb66 evidence, 2026-11-01): d2381bf9 re-armed
+                    // the window on any completed PREEMPT pair, which
+                    // shielded leaked counts on lock-hot carriers — on
+                    // the OH image the carriers ARE the monopolists (OS_IPC
+                    // workers live in spinlock loops), so from lb61 on
+                    // ZERO heals fired and every boot froze at the
+                    // monopolist wall (lb64: systemui 0x100 in exit_group
+                    // 600 s; lb66: init 0x10000 + el5_filekey_man 0x100,
+                    // installs' mkdir never scheduled, WAKE-STRANDED
+                    // incumbents at pc=1). lb59, the last cumulative-bar
+                    // boot, fired 1784 heals and made the furthest ladder
+                    // progress of the whole campaign (SwitchToUser
+                    // reached). pb3's false-heal cost (887 heals/boot on
+                    // 4 lock-hot pids, guards stripped mid-section) is
+                    // now bounded: spin-waiting is preemptible at the
+                    // outermost depth (5f0537a8) so a stranded holder no
+                    // longer both-CPU-deadlocks, and a false heal's later
+                    // release underflow-clamps at zero and REPORTS
+                    // instead of poisoning. If pb3-class false heals ever
+                    // dominate again, the discriminator to build is
+                    // per-acquire (leakorigin outermost-record age), not
+                    // tick-sampled count continuity — sc42/pb3 proved the
+                    // count observable itself cannot split the shapes.
                     //
-                    // Per-field honesty (phantom-bits round 2, lb64/lb65):
-                    // a PREEMPT-pair completion is liveness evidence ONLY
-                    // for the base preempt field. Lock traffic never
-                    // touches the SOFTIRQ/HARDIRQ fields, so the bar must
-                    // not let it shield a stranded 0x100/0x10000 on a
-                    // lock-hot carrier — on the OH boots exactly that
-                    // shield froze every CPU (systemui in exit_group at
-                    // pc=0x100 for 600 s, OS_IPC/FFRT incumbents at
-                    // 0x10000, ZERO heals). When the observed count's
-                    // SOFTIRQ field or extra HARDIRQ levels have been
-                    // present at 200 consecutive ticks (their own
-                    // zero-stamps older than the bar), skip the re-arm.
+                    // Per-field faces (phantom-bits round 2): a stranded
+                    // SOFTIRQ bit or extra HARDIRQ levels have their OWN
+                    // honest bar below (their fields never churn under
+                    // lock traffic), so they neither need nor honor a
+                    // PREEMPT-pair re-arm.
                     let s_set = pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0;
                     let h_extra =
                         (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
@@ -4828,13 +4829,6 @@ pub fn scheduler_tick() {
                         let j = unsafe { (*cur).ti_pc_hirq_zero_jif() };
                         j == 0 || now.wrapping_sub(j) >= 200
                     };
-                    let zero_jif = unsafe { (*cur).ti_pc_zero_jif() };
-                    if !(s_stale || h_stale)
-                        && zero_jif != 0
-                        && now.wrapping_sub(zero_jif) < 200
-                    {
-                        t0 = now;
-                    }
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
                     w.last.store(now, core::sync::atomic::Ordering::Relaxed);
