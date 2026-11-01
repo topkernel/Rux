@@ -1535,12 +1535,13 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 /// Leaf-PTE exclusion epoch (INV-LOCK-7; type `GlobalPteLock`, see
 /// mm/mm_struct.rs and docs/architecture/lock-ordering.md).
 ///
-/// riscv64 runs in GLOBAL mode for now: every PTE section — the direct
-/// `PTE_MODIFY_LOCK` users below AND `pte_lock_for(mm)` from the
-/// arch-neutral files — maps to the SAME exclusive epoch section, i.e.
-/// exactly the former single-Spinlock whole-domain serialization. The
-/// split-mode (per-mm) migration is an x86_64 change for now; riscv64
-/// follows once its own site audit is done.
+/// Split mode on all arches since the 2026-10-31 perf review: PTE sites
+/// with a reachable `MmStruct` take that mm's `PteLock` via
+/// `pte_lock_for(mm)` (global epoch SHARED + per-mm spin — writers on
+/// different mms run concurrently). The DIRECT `PTE_MODIFY_LOCK`
+/// (exclusive) users below are the whole-domain minority:
+/// `map_user_region`, kernel-root/unpublished-tree maps — sites that
+/// cannot reach the owning mm and must exclude against everyone.
 
 /// map_page caller-context marker (advisory, interface parity with
 /// x86_64's MM_CTX): arch-neutral sites (sysv_shm, mremap, the mmap

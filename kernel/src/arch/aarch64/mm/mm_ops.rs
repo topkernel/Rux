@@ -283,7 +283,7 @@ impl MmStruct {
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
                     // Serialize the leaf-PTE write + rmap setup against a
                     // concurrent fork()/COW walk on this mm (riscv64 twin
-                    // protocol, INV-LOCK-7 GLOBAL mode).
+                    // protocol, INV-LOCK-7 per-mm section).
                     let _pte_guard = pte_lock_for(self).lock_irqsave();
                     // Re-check under the lock: a racing CLONE_VM thread
                     // may have mapped this address between the walk and
@@ -1223,8 +1223,9 @@ pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
     crate::mm::mm_struct::GlobalPteLock::new();
 
-/// Per-mm leaf-PTE section hook (INV-LOCK-7), GLOBAL mode like the
-/// riscv64 twin: every mm maps to the same global epoch section
+/// Per-mm leaf-PTE section hook (INV-LOCK-7): split mode on all arches
+/// since the 2026-10-31 perf review (per-mm spin + global epoch SHARED;
+/// see mm/mm_struct.rs `PteLock::lock`).
 #[inline]
 pub fn pte_lock_for(
     mm: &crate::mm::mm_struct::MmStruct,
