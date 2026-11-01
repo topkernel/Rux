@@ -71,7 +71,17 @@ impl UtsNamespace {
     fn new(inum: u64) -> Self {
         Self {
             inum,
-            hostname: Spinlock::new([0u8; UTS_LEN]),
+            hostname: Spinlock::new({
+                // Linux init_uts_ns defaults BOTH nodename and domainname
+                // to "(none)" (kernel/uts.c) until userspace sets one. An
+                // empty default made glibc's gethostname(buf, len) see a
+                // zero-length name and succeed where it must fail with
+                // ENAMETOOLONG (LTP gethostname02), and loggers recorded
+                // an empty hostname on fresh boots.
+                let mut h = [0u8; UTS_LEN];
+                h[..6].copy_from_slice(b"(none)");
+                h
+            }),
             // Linux init_uts_ns default domainname is "(none)" — an
             // empty default makes setdomainname-restore fail EINVAL
             // (LTP setdomainname02's cleanup path warns).
