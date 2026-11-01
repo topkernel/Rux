@@ -448,40 +448,104 @@ pub fn udp_connect(fd: i32, ip: u32, port: UdpPort) -> i32 {
 ///
 /// # Returns
 /// Bytes sent on success, error code on failure
-pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
-    // R24 (HIGH-6): leaf lock — held across the whole send so the &mut into
-    // the table cannot race udp_rcv. No RX re-entry below: virtio xmit only
-    // DMAs, loopback TX only queues.
-    let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // Get socket
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
-        Some(s) => s,
-        None => return -9, // EBADF
-    };
+/// One built, checksummed, not-yet-emitted UDP datagram (review-s2b lock
+/// audit): the table-lock section of a send produces this, the WIRE emit
+/// runs after the lock drops — ipv4_send_src_ttl/ipv6_send_hops reach the
+/// virtio-net xmit completion wait, and running that under
+/// UDP_TABLE_LOCK (irqsave) is the R34/R35 wedge class TCP already fixed
+/// with its deferred TcpTxBatch (every CPU's UDP serialized behind one
+/// slow device drain, IRQs off for the whole spin).
+enum BuiltUdp {
+    V4 {
+        skb: SkBuff,
+        src: u32,
+        dst: u32,
+        ttl: u8,
+    },
+    V6 {
+        skb: SkBuff,
+        src6: crate::net::ipv6::Ipv6Addr,
+        dst6: crate::net::ipv6::Ipv6Addr,
+        ttl: u8,
+    },
+}
 
-    // Get destination address
-    // P1 IPv6: a v6-connected socket sends through the v6 wire path.
-    if socket.is_v6 {
-        if !socket.connected {
-            // U1: unconnected datagram socket with no destination is
-            // EDESTADDRREQ (reference udp_sendmsg), not ENOTCONN.
-            return -89; // EDESTADDRREQ
+impl BuiltUdp {
+    /// Emit outside every table lock. Returns 0 (caller reports buf.len())
+    /// or a negative errno on a wire failure.
+    fn emit(self) -> isize {
+        match self {
+            BuiltUdp::V4 { skb, src, dst, ttl } => {
+                match crate::net::ipv4::ipv4_send_src_ttl(skb, src, dst, 17, ttl) {
+                    Ok(()) => 0,
+                    Err(_) => -5, // EIO
+                }
+            }
+            BuiltUdp::V6 { skb, src6, dst6, ttl } => {
+                match crate::net::ipv6::ipv6_send_hops(
+                    skb,
+                    &src6,
+                    &dst6,
+                    crate::net::ipv6::next_header::UDP,
+                    ttl,
+                ) {
+                    Ok(()) => 0,
+                    Err(_) => -5, // EIO (NS-triggered neighbor loss included)
+                }
+            }
         }
-        let dest = socket.remote_ip6;
-        let port = socket.remote_port;
-        return udp_send_locked6(socket, buf, dest, port);
     }
+}
 
-    let (dest_ip, dest_port) = if socket.connected {
-        (socket.remote_ip, socket.remote_port)
-    } else {
-        // Unconnected UDP socket needs a destination address: EDESTADDRREQ
-        // (reference udp_sendmsg; POSIX send(2) lists it as "the socket is
-        // not connection-mode and no peer address is set").
-        return -89; // EDESTADDRREQ
+pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
+    // R24 (HIGH-6) + review-s2b lock audit: the table-lock section only
+    // reads/mutates the slot and builds the datagram; the WIRE emit runs
+    // after the guard drops (see BuiltUdp) — the old shape ran
+    // ipv4/ipv6_send inline under UDP_TABLE_LOCK (irqsave), i.e. the
+    // virtio-net xmit completion wait under a spinlock with IRQs off —
+    // the R34/R35 wedge class TCP already fixed with its deferred batch.
+    let built = {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // Get socket
+        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+
+        // Get destination address
+        // P1 IPv6: a v6-connected socket sends through the v6 wire path.
+        if socket.is_v6 {
+            if !socket.connected {
+                // U1: unconnected datagram socket with no destination is
+                // EDESTADDRREQ (reference udp_sendmsg), not ENOTCONN.
+                return -89; // EDESTADDRREQ
+            }
+            let dest = socket.remote_ip6;
+            let port = socket.remote_port;
+            match udp_build_locked6(socket, buf, dest, port) {
+                Ok(b) => b,
+                Err(e) => return e,
+            }
+        } else {
+            let (dest_ip, dest_port) = if socket.connected {
+                (socket.remote_ip, socket.remote_port)
+            } else {
+                // Unconnected UDP socket needs a destination address: EDESTADDRREQ
+                // (reference udp_sendmsg; POSIX send(2) lists it as "the socket is
+                // not connection-mode and no peer address is set").
+                return -89; // EDESTADDRREQ
+            };
+            match udp_build_locked(socket, buf, dest_ip, dest_port) {
+                Ok(b) => b,
+                Err(e) => return e,
+            }
+        }
     };
-
-    udp_send_locked(socket, buf, dest_ip, dest_port)
+    let n = built.emit();
+    if n < 0 {
+        return n;
+    }
+    buf.len() as isize
 }
 
 /// Send UDP packet to specified address
@@ -495,15 +559,26 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
 /// # Returns
 /// Bytes sent on success, error code on failure
 pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
-    // R24 (HIGH-6): leaf lock, same rationale as udp_send.
-    let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // Get socket
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
-        Some(s) => s,
-        None => return -9, // EBADF
-    };
+    // R24 (HIGH-6) + review-s2b lock audit: build under the table lock,
+    // emit after it drops (see udp_send).
+    let built = {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // Get socket
+        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
 
-    udp_send_locked(socket, buf, dest_ip, dest_port)
+        match udp_build_locked(socket, buf, dest_ip, dest_port) {
+            Ok(b) => b,
+            Err(e) => return e,
+        }
+    };
+    let n = built.emit();
+    if n < 0 {
+        return n;
+    }
+    buf.len() as isize
 }
 
 // ============================================================================
@@ -574,24 +649,37 @@ pub fn udp_sendto6(
     dest6: crate::net::ipv6::Ipv6Addr,
     dest_port: u16,
 ) -> isize {
-    let _g = UDP_TABLE_LOCK.lock_irqsave();
-    // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
-    let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
-        Some(s) => s,
-        None => return -9, // EBADF
+    // review-s2b lock audit: build under the table lock, emit after it
+    // drops (see udp_send).
+    let built = {
+        let _g = UDP_TABLE_LOCK.lock_irqsave();
+        // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
+        let socket = match unsafe { UDP_SOCKET_TABLE.get_mut(fd as usize) } {
+            Some(s) => s,
+            None => return -9, // EBADF
+        };
+        match udp_build_locked6(socket, buf, dest6, dest_port) {
+            Ok(b) => b,
+            Err(e) => return e,
+        }
     };
-    udp_send_locked6(socket, buf, dest6, dest_port)
+    let n = built.emit();
+    if n < 0 {
+        return n;
+    }
+    buf.len() as isize
 }
 
 /// Common v6 transmit path (caller holds UDP_TABLE_LOCK). The UDP checksum
 /// is MANDATORY over IPv6 (RFC 8200 §8.1) and covers the 128-bit
 /// pseudo-header addresses.
-fn udp_send_locked6(
+/// (review-s2b lock audit) Build half only — the wire emit runs post-lock.
+fn udp_build_locked6(
     socket: &mut UdpSocket,
     buf: &[u8],
     dest6: crate::net::ipv6::Ipv6Addr,
     dest_port: u16,
-) -> isize {
+) -> Result<BuiltUdp, isize> {
     use crate::net::ipv6::{self, next_header};
 
     // U1: a zero-length UDP payload is a legal datagram (RFC 768; the
@@ -609,19 +697,19 @@ fn udp_send_locked6(
                 socket.local_port = p;
                 socket.bound = true;
             }
-            None => return -99, // EADDRNOTAVAIL
+            None => return Err(-99), // EADDRNOTAVAIL
         }
     }
     socket.is_v6 = true;
 
     let mut skb = match crate::net::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
         Some(skb) => skb,
-        None => return -12, // ENOMEM
+        None => return Err(-12), // ENOMEM
     };
 
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
         crate::net::buffer::kfree_skb(skb);
-        return -5; // EIO
+        return Err(-5); // EIO
     }
 
     // Source: the socket's bound v6 address, else our SLAAC link-local.
@@ -630,7 +718,7 @@ fn udp_send_locked6(
             Some(ll) => ll,
             None => {
                 crate::net::buffer::kfree_skb(skb);
-                return -99; // EADDRNOTAVAIL — no v6 source configured
+                return Err(-99); // EADDRNOTAVAIL — no v6 source configured
             }
         }
     } else {
@@ -651,10 +739,13 @@ fn udp_send_locked6(
         hdr.check = csum.to_be();
     }
 
-    match ipv6::ipv6_send_hops(skb, &src6, &dest6, next_header::UDP, socket.ttl) {
-        Ok(()) => buf.len() as isize,
-        Err(_) => -5, // EIO (NS-triggered neighbor loss included)
-    }
+    let _ = next_header::UDP;
+    Ok(BuiltUdp::V6 {
+        skb,
+        src6,
+        dst6: dest6,
+        ttl: socket.ttl,
+    })
 }
 
 /// Receive with a family-aware source address: v4 datagrams report
@@ -796,7 +887,14 @@ pub fn udp_rcv6(
 ///   made every >1472-byte sendto fail skb_put and return EIO — larger
 ///   datagrams now flow through IPv4 fragmentation);
 /// - the UDP checksum is computed on TX (it used to go out as 0).
-fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
+/// (review-s2b lock audit) Build half of the v4 send — caller holds
+/// UDP_TABLE_LOCK; returns the checksummed datagram for post-lock emit.
+fn udp_build_locked(
+    socket: &mut UdpSocket,
+    buf: &[u8],
+    dest_ip: u32,
+    dest_port: u16,
+) -> Result<BuiltUdp, isize> {
     // U1: zero-length UDP datagrams are transmitted (header-only frame),
     // like the reference — the old early return swallowed them.
 
@@ -808,7 +906,7 @@ fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: 
     if !socket.broadcast
         && (dest_ip == 0xFFFF_FFFF || (dest_ip & 0xFF) == 0xFF)
     {
-        return -13; // EACCES
+        return Err(-13); // EACCES
     }
 
     // W3: implicit ephemeral bind at first send.
@@ -818,20 +916,20 @@ fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: 
                 socket.local_port = p;
                 socket.bound = true;
             }
-            None => return -99, // EADDRNOTAVAIL
+            None => return Err(-99), // EADDRNOTAVAIL
         }
     }
 
     // W3: size the skb for the full datagram (max 65507 + 8 header fits u16).
     let mut skb = match crate::net::buffer::alloc_skb((UDP_HLEN + buf.len()) as u32) {
         Some(skb) => skb,
-        None => return -12, // ENOMEM
+        None => return Err(-12), // ENOMEM
     };
 
     // Build UDP header + data (udp_build_packet puts data into skb)
     if udp_build_packet(&mut skb, socket.local_port, dest_port, buf).is_err() {
         crate::net::buffer::kfree_skb(skb);
-        return -5; // EIO
+        return Err(-5); // EIO
     }
 
     // Send to IP layer (source = the socket's bound address; 0 = device)
@@ -854,10 +952,12 @@ fn udp_send_locked(socket: &mut UdpSocket, buf: &[u8], dest_ip: u32, dest_port: 
         (*(skb.data as *mut UdpHdr)).check = csum.to_be();
     }
 
-    match crate::net::ipv4::ipv4_send_src_ttl(skb, src_ip, dest_ip, 17, socket.ttl) { // IPPROTO_UDP = 17
-        Ok(()) => buf.len() as isize,
-        Err(_) => -5, // EIO
-    }
+    Ok(BuiltUdp::V4 {
+        skb,
+        src: src_ip,
+        dst: dest_ip,
+        ttl: socket.ttl,
+    })
 }
 
 /// P2 SO_BROADCAST: mirror the socket-layer option into the protocol slot.
