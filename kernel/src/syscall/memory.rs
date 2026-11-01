@@ -1648,6 +1648,20 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // Walk the tree directly, bounded to the target span:
                 // no allocation, no sort, early exit at the span end.
                 let mut cursor = addr;
+                // iter_after only yields VMAs STARTING at/after addr, so
+                // a VMA that contains addr (a strict sub-range mprotect,
+                // e.g. geekbench carving an 8MB RWX arena out of a
+                // larger heap VMA) is invisible to the walk below and
+                // the head of the range read as a gap → ENOMEM with no
+                // gap existing. Seed the cursor from the containing VMA
+                // (geekbench lane, gb1).
+                if let Some(v) = vma_mgr
+                    .last_at_or_before(crate::mm::page::VirtAddr::new(addr))
+                {
+                    if v.end().as_usize() > addr {
+                        cursor = v.end().as_usize();
+                    }
+                }
                 for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
                     let (s, e) = (v.start().as_usize(), v.end().as_usize());
                     if s >= addr + length {
