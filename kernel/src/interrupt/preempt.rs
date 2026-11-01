@@ -340,21 +340,32 @@ pub fn irq_exit() {
     // lock the interrupted holder owns (lock_bh was a lie before). Deferring
     // to ksoftirqd is always safe.
     //
+    // phantom-bits (2026-11-01): the same deferral now also applies when
+    // the interrupted task holds ANY task-context base count (a live
+    // spinlock guard books PREEMPT_OFFSET). Softirq handlers take the
+    // same locks syscall code takes (net rx → socket queues → unix
+    // registry); an inline dispatch over a spinning lock holder wedges
+    // the CPU forever: the handler spins with preemption disabled inside
+    // an IF=0 window — the tick cannot land (no heal, no preemption),
+    // the holder cannot resume (its CPU never exits the window), and the
+    // task shows up as the unpreemptible monopolist (preempt=0x100/0x101/
+    // 0x102, CFS-undefeatable, the lb60 pid-552 / lb55 UNIX_TABLE
+    // both-CPU DEADLOCK family). Deferring costs one ksoftirqd wake —
+    // the reference kernel's backlog-to-ksoftirqd behavior under the
+    // equivalent condition (its irq_exit runs softirqs inline only
+    // outside interrupt context; its task-side users of softirq-shared
+    // locks disable bh for exactly this reason).
+    //
     // Dispatch black hole fix (UART perf gate round 2, 2026-10-20): the
     // timer IRQ raises its softirqs via raise_softirq_irqoff (no
-    // ksoftirqd wake — it expects THIS path to run them). When the skip
-    // fires, nothing else ever dispatches them until some LATER IRQ
-    // happens to exit outside a bh section — a task looping through
-    // lock_bh sections with sub-tick iterations starved its CPU's
-    // Hrtimer softirq for seconds (TIMER-SOFTIRQ-STALL tick_age=0ms
-    // shape: ticks arriving, dispatch skipped). Linux drains at
-    // local_bh_enable(); until that exists here, waking ksoftirqd at the
-    // skip point closes the hole: the pending bits stay set, and the
-    // woken kthread drains them as soon as the scheduler picks it.
+    // ksoftirqd wake — it expects THIS path to run them). Every deferral
+    // branch therefore wakes ksoftirqd: the pending bits stay set, and
+    // the woken kthread drains them as soon as the scheduler picks it.
     if crate::sched::current().is_some() {
-        if !in_irq() && !in_softirq() {
+        let base = preempt_count() & PREEMPT_MASK;
+        if !in_irq() && !in_softirq() && base == 0 {
             crate::interrupt::softirq::invoke_softirq();
-        } else if !in_irq() && in_softirq() {
+        } else if !in_irq() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
         }
     }
