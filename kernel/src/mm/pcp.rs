@@ -146,8 +146,24 @@ pub fn alloc_order0(zone: &Zone) -> Option<usize> {
     }
     PCP_REFILLS.fetch_add(1, Ordering::Relaxed);
     let pfn = batch[0];
+    // lb58 panic fix ("index out of bounds: the len is 32 but the index
+    // is 32", this line): the miss check above and this store run in
+    // TWO SEPARATE irq-off windows. A nested irq-context alloc between
+    // them refills the row on its own (net rx softirq allocating
+    // fragment buffers does exactly this under the OH load), so
+    // row.count is NOT the zero we observed at the miss — the
+    // unconditional store then indexed past list.len(). Store only what
+    // fits; surplus batch frames go straight back to the zone (its free
+    // path relinks them and re-adds the count).
+    let mut keep = n - 1;
     with_row(|row| {
-        let keep = n - 1;
+        // Cap at PCP_HIGH-1, never exactly PCP_HIGH: a push landing ON
+        // the high-water mark self-drains inside its own irq-off window,
+        // but a REFILL parked at PCP_HIGH would arm the next push to
+        // index out of bounds. Leaving one slot of headroom makes the
+        // row's count unreachable-at-32 outside a push window.
+        let room = (PCP_HIGH - row.count).saturating_sub(1);
+        keep = (n - 1).min(room);
         for i in 0..keep {
             let p = batch[1 + i];
             row.list[row.count] = p;
@@ -155,10 +171,13 @@ pub fn alloc_order0(zone: &Zone) -> Option<usize> {
             to_cached(p);
         }
     });
-    if n > 1 {
-        // INV-PCP-2: n-1 frames are back to "free" (cached) state; the
+    if keep > 0 {
+        // INV-PCP-2: the cached frames are back to "free" state; the
         // handed-out frame was already decremented by alloc_pages_locked.
-        zone.free_pages_add(n - 1);
+        zone.free_pages_add(keep);
+    }
+    for i in (1 + keep)..n {
+        zone.free_pages(batch[i], 0);
     }
     to_in_use(pfn);
     Some(pfn)
