@@ -2996,7 +2996,14 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     // gdmr29 (TEMPORARY widening to every signal): gdm-session-worker
     // dies of a pending SIGTRAP(5) right after jump_to_vt; the sender is
     // invisible under the 9/15 filter. Revert to 9/15 before merge.
-    if true {
+    //
+    // Reverted (perf-fork lane, 2026-11): the widening put a ~50-char
+    // pr_err on EVERY kernel-origin signal send (a 4000 budget — the
+    // first seconds of any fork storm burned ~650 us of polled-16550
+    // time per SIGCHLD, ~2.6 s of pure serial per boot). The SIGTRAP
+    // hunt is closed; the original 9/15 filter is restored. The next
+    // every-signal hunt should use the (already gated) tracepoints.
+    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static KS_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {

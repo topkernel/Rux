@@ -680,7 +680,19 @@ pub fn do_exit(exit_code: i32) -> ! {
         // fail-latch dies with it. Print the exiting THREAD's fail tail
         // here (leader exits excluded — those are whole-process exits with
         // their own forensics). Budget 12.
-        if !((*current).pid() == (*current).tgid()) {
+        //
+        // Serial-clean (perf-fork lane, 2026-11): the whole block — two
+        // ring-dump Strings plus a ~500-char pr_warn line — cost ~6 ms of
+        // polled-16550 UART time per thread exit and ran for the first 80
+        // thread exits of every boot; pthread create/exit loops (and any
+        // thread-heavy bring-up) paid it directly. The dumps belong to
+        // the syscall-trace hunt that added them: default off behind
+        // dfx=syscalltrace (sc129/sc131/sc135 hunts re-arm with the flag).
+        if !((*current).pid() == (*current).tgid())
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::SyscallTrace,
+            )
+        {
             use core::fmt::Write;
             let mut s = alloc::string::String::new();
             {
@@ -1257,13 +1269,22 @@ pub fn do_exit_group(exit_code: i32) -> ! {
     // caller, the code, and the pending-signal set that drove it — the
     // storm's first domino and the TERM->st=9 status overwrite both
     // decode from this one print.
+    //
+    // Serial-clean discipline (perf-fork lane, 2026-11): pr_err printed
+    // on EVERY exit_group — one ~60-char line through the polled 16550
+    // costs ~650 us under KVM, which was ~85% of the whole fork+exit
+    // round trip (lmbench lat_proc,fork sat ~20x over the reference
+    // column on this print alone; forkprof/ftrace attribution, ledger
+    // perf-fork round 1). The storm hunts are done; the line moves to
+    // pr_debug (hidden by the default loglevel, raisable for the next
+    // hunt) so the exit path stays off the console.
     {
         let ccomm = unsafe {
             core::str::from_utf8_unchecked((*current).comm())
                 .trim_end_matches('\0')
         };
         let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };
-        crate::pr_err!(
+        crate::pr_debug!(
             "EXITGRP: pid={} comm='{}' code={} pending=0x{:x}",
             unsafe { (*current).pid() },
             ccomm,
