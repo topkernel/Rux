@@ -1200,6 +1200,11 @@ pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, po
 }
 
 /// Write a full sockaddr_nl { AF_NETLINK, pid=portid, groups=groups }.
+/// review F6: move_addr_to_user discipline — the copy is clamped to the
+/// CALLER's buffer length (the *addrlen value read here) while the stored
+/// length is the full 12-byte kernel size; the old form wrote all 12
+/// bytes unconditionally, clobbering whatever followed a short caller
+/// object.
 /// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
 pub unsafe fn put_sockaddr_nl_bound_groups(
     addr_ptr: *mut u8,
@@ -1207,12 +1212,17 @@ pub unsafe fn put_sockaddr_nl_bound_groups(
     portid: u32,
     groups: u32,
 ) {
-    use crate::arch::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, get_user, put_user};
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
     buf[8..12].copy_from_slice(&groups.to_le_bytes());
-    let _ = copy_to_user(addr_ptr, buf.as_ptr(), SOCKADDR_NL_LEN);
+    // review F6: clamp to the caller's object (a faulting length read
+    // falls back to the full write; the put_user below reports it).
+    let copy_len = get_user::<u32>(addrlen_ptr)
+        .map(|v| (v as usize).min(SOCKADDR_NL_LEN))
+        .unwrap_or(SOCKADDR_NL_LEN);
+    let _ = copy_to_user(addr_ptr, buf.as_ptr(), copy_len);
     let _ = put_user(addrlen_ptr, SOCKADDR_NL_LEN as u32);
 }
 

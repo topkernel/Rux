@@ -1600,9 +1600,11 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     // monitor died at "Failed to set address: Invalid argument" and
     // took the whole gdm login chain down with it (gdm bring-up r3).
     if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
-        if addrlen_early < 12 {
-            return -(errno::EINVAL as i64);
-        }
+        // review F6: no 12-byte floor — the reference move_addr_to_user
+        // clamps the copy to the caller's *addrlen and stores the full 12
+        // (a 6-byte caller object gets 6 bytes, then nl_pid stays visible
+        // in the stored length). The old gate returned EINVAL for every
+        // short caller object.
         if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
             return -(errno::EFAULT as i64);
         }

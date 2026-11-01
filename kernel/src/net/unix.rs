@@ -669,6 +669,11 @@ pub fn parse_sockaddr_un(bytes: &[u8]) -> Option<UnixAddr> {
 /// Write a sockaddr_un { AF_UNIX, path } into user memory.
 /// `name` = None writes only the family (unbound socket) with len 2.
 ///
+/// review F6: move_addr_to_user discipline — the copy is clamped to the
+/// CALLER's buffer length (the *addrlen value read here) while the stored
+/// length is the full kernel size; the old form wrote `total` bytes
+/// unconditionally, clobbering whatever followed a short caller object.
+///
 /// SAFETY: `addr_ptr`/`addrlen_ptr` must be access_ok-validated by the
 /// caller for up to SOCKADDR_UN_LEN / 4 bytes.
 pub unsafe fn put_sockaddr_un(
@@ -676,7 +681,7 @@ pub unsafe fn put_sockaddr_un(
     addrlen_ptr: *mut u32,
     name: Option<&str>,
 ) -> bool {
-    use crate::arch::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, get_user, put_user};
     let mut buf = [0u8; SOCKADDR_UN_LEN];
     buf[0] = AF_UNIX as u8;
     buf[1] = 0;
@@ -696,7 +701,12 @@ pub unsafe fn put_sockaddr_un(
         }
         None => 2,
     };
-    if copy_to_user(addr_ptr, buf.as_ptr(), total) != 0 {
+    // review F6: clamp to the caller's object (a faulting length read
+    // falls back to the full write; the put_user below reports it).
+    let copy_len = get_user::<u32>(addrlen_ptr)
+        .map(|v| (v as usize).min(total))
+        .unwrap_or(total);
+    if copy_to_user(addr_ptr, buf.as_ptr(), copy_len) != 0 {
         return false;
     }
     let _ = put_user(addrlen_ptr, total as u32);
