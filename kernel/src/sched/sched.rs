@@ -4637,6 +4637,10 @@ pub fn scheduler_tick() {
     crate::dfx::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
+    // phantom-bits orphan scan: bits the interrupted task carried INTO
+    // the tick whose release never executed (softirq bit outside any
+    // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
+    crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
     // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
     // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
@@ -4775,6 +4779,26 @@ pub fn scheduler_tick() {
                     // and REPORTS (sub_preempt_count_at) instead of
                     // silently poisoning.
                     if t0 == 0 {
+                        t0 = now;
+                    }
+                    // phantom-bits contiguity bar: a task-context base
+                    // DRAIN (a live outermost guard pair completing)
+                    // re-arms the window. The sc41/sc42 cumulative bar
+                    // could not tell a hot lock user from a phantom —
+                    // at 100 Hz the sampler never catches a lock-hot
+                    // task's microsecond gaps between guards, so the
+                    // window matured on LIVE holders (pb3: 887
+                    // heals/boot, 96% on 4 lock-hot pids, each with a
+                    // fresh 0->1 acquire inside the "2 s hold"), and
+                    // every false heal stripped a live guard + set
+                    // need_resched, preempting the holder MID-SECTION —
+                    // stranding its lock for every spinner (the
+                    // both-CPU spin/deadlock amplifier). Direct
+                    // zeroings (heal paths bypass the sub path) do not
+                    // stamp ti_pc_zero_jif, so a genuine phantom — whose
+                    // base never drains — still heals after 2 s.
+                    let zero_jif = unsafe { (*cur).ti_pc_zero_jif() };
+                    if zero_jif != 0 && now.wrapping_sub(zero_jif) < 200 {
                         t0 = now;
                     }
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
@@ -4975,6 +4999,17 @@ pub fn scheduler_tick() {
                                 b"PREEMPT-HEAL-ORIGIN",
                                 cur,
                             );
+                            // phantom-bits: when the healed count carried
+                            // the SOFTIRQ bit, name its +0x100 booker
+                            // (the monopolist face — the release never
+                            // executed anywhere: no sub=0x100 underflow
+                            // exists to point at it instead).
+                            if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
+                                crate::dfx::leakorigin::report_softirq_origin(
+                                    b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
                         }
                     }
                 }

@@ -567,6 +567,9 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
+        // Cached-read cost anatomy (dfx=filerd probe; counters are inert
+        // unless the switch armed them).
+        self.create_dynamic_file("filerd", crate::dfx::filerd::generate);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).

@@ -3,7 +3,7 @@
 //! Provides the central IPC object registry (ipc_ids), permission checking,
 //! and ID encoding/decoding following the Linux kernel's design.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

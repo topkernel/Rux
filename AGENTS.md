@@ -218,7 +218,7 @@ accept02, getrusage04, kill02, genfmod, rename/statfs families).
 
 - **[Getting Started](docs/guides/getting-started.md)** - up and running
 - **[Roadmap](docs/progress/roadmap.md)** - milestone status and history
-- **[Development Workflow](docs/guides/development.md)** - code standards
+- **Code standards**: docs/archive/2026-04-development-workflow.md (historical); the binding workflow is this file + [Test Reports](docs/test/README.md)
 - **[Lock Ordering](docs/architecture/lock-ordering.md)** - in-kernel lock invariants (INV-LOCK-*)
 - **[RISC-V Architecture](docs/architecture/riscv64.md)** / **[Boot](docs/architecture/boot.md)** / **[Memory](docs/architecture/memory.md)**
 - **[Changelog](docs/progress/changelog.md)** / **[Quick Reference](docs/progress/quickref.md)**

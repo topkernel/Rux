@@ -727,7 +727,7 @@ impl File {
     }
 
     // -------------------------------------------------------------------------
-    // Slice-typed I/O entries (framekernel capsule boundary)
+    // Slice-typed I/O entries (kernel capsule boundary)
     //
     // Identical dispatch to the raw-pointer read/write/read_at/write_at
     // above; the only difference is that the buffer bounds ride the type
@@ -1575,7 +1575,7 @@ pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {
     sched::get_current_fdtable()?.get_file(fd)
 }
 
-/// Safe-typed fd lookup for the framekernel capsule boundary: identical
+/// Safe-typed fd lookup for the kernel capsule boundary: identical
 /// to get_file_fd. That fn's `unsafe` marker is historical — its body is
 /// two safe calls (get_current_fdtable + FdTable::get_file) — so the
 /// syscall layer takes this entry instead; raw callers migrate here as

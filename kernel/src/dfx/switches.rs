@@ -31,7 +31,7 @@
 //!   dbus-activation and reparent-safety investigations; they pollute
 //!   the structured boot table, so they are OFF unless requested.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
@@ -101,6 +101,7 @@ macro_rules! dfx_switch_table {
             SigTrace => "sigtrace",
             SysForensic => "sysforensic",
             SysRing => "sysring",
+            FilerdProbe => "filerd",
         }
     };
 }
@@ -482,9 +483,14 @@ pub enum DfxSwitch {
     /// per-syscall instruments); kept as an alias so hunt scripts
     /// written against `dfx=sysring` keep working.
     SysRing,
+    /// dfx=filerd (perf-filerd lane): cached-file read(2) cost anatomy —
+    /// RDTSC phase counters (lock/pin/copy/unpin/epilog) around the ext4
+    /// read fast path, reported via /proc/filerd. Built to attribute the
+    /// bw_file_rd 50x lmbench gap; see dfx/filerd.rs.
+    FilerdProbe,
 }
 
-const SWITCH_COUNT: usize = 53;
+const SWITCH_COUNT: usize = 54;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -578,6 +584,7 @@ impl DfxSwitch {
             DfxSwitch::SigTrace => 50,
             DfxSwitch::SysForensic => 51,
             DfxSwitch::SysRing => 52,
+            DfxSwitch::FilerdProbe => 53,
         }
     }
 
@@ -598,6 +605,9 @@ pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::FilerdProbe = switch {
+        super::filerd::set_enabled(on);
     }
     if let DfxSwitch::LeakHunt = switch {
         super::leakorigin::ENABLED.store(on, Ordering::Relaxed);

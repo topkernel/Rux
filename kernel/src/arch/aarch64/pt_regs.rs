@@ -38,7 +38,7 @@
 //! ptrace-visible prefix (regs/sp/pc/pstate/orig_x0/syscallno) is
 //! unchanged by the pad.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

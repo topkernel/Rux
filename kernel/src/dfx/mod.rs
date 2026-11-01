@@ -64,6 +64,10 @@ pub mod metawatch;
 /// Whole-syscall cost table + tick-mode accounting + kernel-rip page
 /// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
 pub mod syscost;
+/// Cached-file read(2) cost anatomy (perf-filerd lane, cmdline
+/// `dfx=filerd`): RDTSC phase counters around the ext4 read fast path,
+/// reported via /proc/filerd; see dfx/filerd.rs.
+pub mod filerd;
 /// pstore-lite: the last panic's record in reserved RAM, re-exposed as
 /// /sys/fs/pstore/console-ramoops-0 after the reboot (Tranche 5); see
 /// dfx/pstore.rs.

@@ -7,7 +7,7 @@
 //! Note: PS/2 ports (0x60/0x64) are not available on RISC-V virt platform
 //! This driver is kept as a framework only, actual input should use VirtIO Input
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

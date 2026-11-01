@@ -19,7 +19,7 @@
 //!    cycle is served predominantly by hits, and every frame returned
 //!    by the cycle is a frame the cycle owned.
 //!
-//! Framekernel layer policy (docs/architecture/framekernel-layers.md):
+//! Kernel layer policy (docs/architecture/kernel-layers.md):
 //! this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

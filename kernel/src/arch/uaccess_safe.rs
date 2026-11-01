@@ -14,7 +14,7 @@
 //! the exception-table copies, so ANY address is sound to pass and a bad
 //! one simply reports uncopied bytes.
 //!
-//! Framekernel layer policy (docs/architecture/framekernel-layers.md):
+//! Kernel layer policy (docs/architecture/kernel-layers.md):
 //! this module is Framework (arch/) — it holds the unsafe mechanics so
 //! service files (`syscall/**` first) can carry
 //! `#![forbid(unsafe_code)]` while still doing user I/O.

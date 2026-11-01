@@ -20,7 +20,7 @@
 //! Rux merges no requests, has no discard path and no separate flush
 //! path, so those columns report zero.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

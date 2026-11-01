@@ -41,7 +41,7 @@
 //! lands precisely at `stack_top - sizeof(PtRegs)` (same contract as
 //! riscv64, relied on by `current_task_pt_regs` and fork).
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

@@ -1,5 +1,13 @@
 # Rux Design Principles
 
+> **Where divergent designs live (2026-11-01):** the "internal
+> implementation is free" clause below is operationalized by the
+> [design-divergence register](design-divergences.md) (D-1..D-18):
+> every deliberate internal divergence from the mainstream design is
+> registered there with its design rationale, compatibility evidence,
+> known cost and a perf guard — that register is the companion of this
+> document, not an afterthought.
+
 ## Highest Principle (Absolutely Must Not Be Violated)
 
 ### **0. Complete POSIX/ABI Compatibility**
@@ -310,4 +318,4 @@ When implementing any feature, must verify:
 ---
 
 **Document Version**: v5.0.0
-**Last Updated**: 2026-04-09
+**Last Updated**: 2026-11-01 (principles unchanged since April; divergence bridge added)

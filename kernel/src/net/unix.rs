@@ -2399,7 +2399,7 @@ const READ_BOUNCE: usize = 1024;
 ///   signal returns the partial count when bytes already landed.
 /// - Ancillary data is discarded (unix_file_read's existing contract).
 ///
-/// Safe entry for the syscall capsule layer (framekernel): `dst` may be
+/// Safe entry for the syscall capsule layer (kernel): `dst` may be
 /// ANY address — every store to it goes through the exception-table
 /// copy, so a bad range surfaces as EFAULT instead of a kernel fault.
 /// The historical `# Safety` contract (caller-validated dst) is now

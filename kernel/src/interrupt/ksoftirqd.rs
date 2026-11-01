@@ -49,6 +49,16 @@ extern "C" fn ksoftirqd_fn(arg: *mut core::ffi::c_void) -> i32 {
         // Drain softirqs
         while crate::interrupt::softirq::has_pending_softirqs() {
             crate::interrupt::softirq::__do_softirq();
+            // phantom-bits fairness: between windows our preempt_count
+            // is 0, so yielding here is legal. Without it a feedback-
+            // heavy backlog (loopback request/response conversations)
+            // keeps this kthread monopolizing its CPU through thousands
+            // of 2 ms windows — the same starvation the inline windows
+            // caused, just in schedulable context. Pending stays armed;
+            // we remain RUNNING, so the scheduler re-picks us in turn.
+            if crate::sched::need_resched() {
+                crate::sched::schedule();
+            }
         }
 
         // Nothing more to do — sleep.

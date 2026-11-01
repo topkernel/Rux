@@ -7,7 +7,7 @@ This document provides a comparative analysis of the core design philosophies of
 - **ArceOS**: Tsinghua University, Rust Unikernel, modular design
 - **FTL-OS**: HIT (Shenzhen), Rust monolithic kernel, async coroutines
 - **Theseus**: Rice University, Rust Cytokernel, single address space safe language OS
-- **Asterinas**: DNXLabs, Rust Framekernel, Linux ABI compatible
+- **Asterinas**: DNXLabs, Rust Kernel, Linux ABI compatible
 - **Kerla**: Personal project, Rust monolithic kernel, Linux ABI compatible
 - **RedLeaf**: UC Irvine, Rust microkernel, language safety isolation
 - **Rux**: This project, Rust monolithic kernel, 100% Linux ABI compatible
@@ -24,7 +24,7 @@ This document provides a comparative analysis of the core design philosophies of
 | **ArceOS** | Modular Unikernel | Unikernel | Rust | Modular + compile-time config |
 | **FTL-OS** | High-performance competition kernel | Monolithic+async | Rust | Performance first + stackless coroutine |
 | **Theseus** | Safe language OS research | Cytokernel | Rust | Single address space + live evolution |
-| **Asterinas** | Production Linux alternative | Framekernel | Rust | Memory safety + Linux ABI |
+| **Asterinas** | Production Linux alternative | Kernel | Rust | Memory safety + Linux ABI |
 | **Kerla** | Linux compatible kernel | Monolithic | Rust | Linux ABI + simple implementation |
 | **RedLeaf** | Language safety research | Microkernel | Rust | RRef + domain isolation |
 | **Rux** | Linux ABI compatible | Monolithic | Rust | **100% POSIX/Linux ABI compatible** |
@@ -42,7 +42,7 @@ This document provides a comparative analysis of the core design philosophies of
 - **Live Evolution**: Any component can be replaced at runtime (Ship of Theseus paradox)
 - **P.I.E. Principle**: Performance In Hardware, Isolation In Software
 
-**Asterinas - Framekernel**
+**Asterinas - Kernel**
 - **Minimal TCB**: Only OS framework (OSTD) can use unsafe Rust
 - **Safe Rust Kernel**: All OS services must be written in safe Rust
 - **Single Address Space**: Similar to monolithic kernel, all services in same address space
@@ -370,7 +370,7 @@ FTL-OS implements a complete lock suite worth referencing:
 
 ### 9.2 Asterinas - Safe Rust Kernel
 
-**Framekernel Architecture**:
+**Kernel Architecture**:
 - OS framework (OSTD): Encapsulates low-level unsafe code
 - OS services (Kernel): **Must be written in safe Rust**
 - Drivers also must use safe Rust
@@ -605,7 +605,7 @@ make A=apps/net/httpserver ARCH=riscv64 LOG=info SMP=4 run
 | **zCore** | Async architecture concepts |
 | **ArceOS** | Modular design philosophy, compile-time configuration |
 | **FTL-OS** | RCU mechanism, high-performance lock implementations, stackless coroutine concepts |
-| **Asterinas** | Safe Rust practices, Framekernel architecture concepts |
+| **Asterinas** | Safe Rust practices, Kernel architecture concepts |
 | **Theseus** | Intralingual design philosophy, live evolution mechanism |
 | **Kerla** | Simple kernel implementation |
 | **RedLeaf** | RRef ownership transfer mechanism |

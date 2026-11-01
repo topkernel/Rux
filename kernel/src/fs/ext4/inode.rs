@@ -795,7 +795,7 @@ pub mod perm {
 }
 
 // ============================================================================
-// Framekernel typed entries
+// Kernel typed entries
 // ============================================================================
 
 /// FS_IOC_SETFLAGS backing (safe entry for the syscall capsule layer):

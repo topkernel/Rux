@@ -529,6 +529,21 @@ pub fn ethernet_rcv(mut skb: SkBuff) -> Result<(), ()> {
 ///
 /// # Notes
 /// Gets received packets from network device and processes them
+/// Per-source packet budget for one ethernet_poll() invocation
+/// (phantom-bits, 2026-11-01). The softirq time budget (2 ms) is only
+/// checked BETWEEN vectors — a single net_rx handler call used to drain
+/// `while let Some(skb)` unbounded, and a chatty request/response
+/// conversation over loopback feeds itself DURING the drain (each
+/// delivered packet can queue a response back into the backlog the same
+/// pass is consuming), so one window could monopolize its CPU for
+/// seconds inside an untickable IF=0 bracket — the preempt=0x100
+/// monopolist face of the OH wedge (lb60 pid 552: 22+ s, CFS-undefeatable,
+/// heal-blind because no tick can land). Bound each source at 64
+/// packets per invocation (reference-kernel NAPI parity); the backlog
+/// is re-armed via raise_softirq so the next window (or ksoftirqd)
+/// continues the drain.
+const POLL_BUDGET_PER_SRC: usize = 64;
+
 pub fn ethernet_poll() {
     // R35: drop ARP-parked packets whose resolution timed out (bounded
     // per pass; frees happen outside the ARP_PENDING lock).
@@ -537,17 +552,41 @@ pub fn ethernet_poll() {
     // Drain the loopback backlog FIRST: the virtio-net poll path has known
     // descriptor-handling defects (review DRIV NEW) and must not be able to
     // block loopback delivery.
-    while let Some(skb) = crate::drivers::net::loopback::loopback_poll() {
+    let mut lo_n = 0;
+    while lo_n < POLL_BUDGET_PER_SRC {
+        let Some(skb) = crate::drivers::net::loopback::loopback_poll() else {
+            break;
+        };
+        lo_n += 1;
         // P0-2: AF_PACKET cooked fanout (peek only — rcv still owns the skb).
         crate::net::raw::packet_input(1, &skb);
         let _ = ethernet_rcv(skb);
     }
+    if lo_n >= POLL_BUDGET_PER_SRC {
+        // Budget cut with the backlog possibly non-empty: re-arm NetRx
+        // (from softirq context this wakes ksoftirqd; from task context
+        // the next irq_exit dispatches) — the drain resumes in a fresh,
+        // bounded window instead of extending this one.
+        crate::interrupt::softirq::raise_softirq(
+            crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+        );
+    }
 
     if let Some(device) = crate::drivers::net::virtio_net::get_device() {
-        while let Some(skb) = device.poll() {
+        let mut dev_n = 0;
+        while dev_n < POLL_BUDGET_PER_SRC {
+            let Some(skb) = device.poll() else {
+                break;
+            };
+            dev_n += 1;
             // P0-2: AF_PACKET cooked fanout (eth0 = presented ifindex 2).
             crate::net::raw::packet_input(2, &skb);
             let _ = ethernet_rcv(skb);
+        }
+        if dev_n >= POLL_BUDGET_PER_SRC {
+            crate::interrupt::softirq::raise_softirq(
+                crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
+            );
         }
     }
 }

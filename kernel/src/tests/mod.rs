@@ -293,6 +293,8 @@ pub mod ipc_eventfd;
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
 pub mod ipc_sysv;
+#[cfg(feature = "unit-test")]
+pub mod sysv_sem_block;
 
 // ===== Memory syscalls =====
 #[cfg(feature = "unit-test")]
@@ -605,6 +607,12 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();
+
+    // R40: semop blocking contract (block-until-post, EAGAIN only with
+    // IPC_NOWAIT) — runs AFTER the pure-logic ipc_sysv rows; it spawns
+    // helper kthreads and sleeps the boot task.
+    test_group_start("sysv_sem_block");
+    sysv_sem_block::test_sysv_sem_block();
 
     // ===== 9. Memory syscalls =====
     test_group_start("mem_mmap");

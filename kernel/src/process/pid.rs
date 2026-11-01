@@ -14,7 +14,7 @@
 //! RESERVED_PIDS when reaching PID_MAX_DEFAULT, matching Linux's
 //! cyclic PID reuse semantics.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

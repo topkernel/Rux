@@ -6,42 +6,45 @@ This document describes the directory structure and file organization of the Rux
 
 ## Code Statistics
 
-**Last Updated**: 2026-09-20
+**Last Updated**: 2026-11-01 (statistics; narrative from the 2026-09 sweep)
 
 ### Overall Statistics
 
+*Statistics refreshed 2026-11-01 (main); the module narrative below the
+tables dates from the earlier sweep and is kept for its explanations —
+where it disagrees with these tables, the tables win.*
+
 | Metric | Value |
 |--------|-------|
-| **Total Source Files** | 278 (274 Rust + 3 Assembly + 1 Linker Script) |
-| **Total Lines of Code** | **~112,000 lines** |
-| **Kernel Binary Size (debug)** | ~3 MB |
+| **Total Source Files** | 427 (Rust + per-arch assembly) |
+| **Total Lines of Code** | **~319,000 lines** |
+| **Architectures** | riscv64 (primary) · x86_64 (q35) · aarch64 (virt) |
 
 ### Module Code Distribution
 
 | Module | Files | Lines of Code | Percentage | Description |
 |--------|-------|---------------|------------|-------------|
-| **fs/** | 52 | 24,478 | 21.9% | File system (ext4, procfs, jbd2, VFS) |
-| **syscall/** | 11 | 14,061 | 12.6% | System call dispatch |
-| **mm/** | 25 | 10,632 | 9.5% | Memory management |
-| **tests/** | 60 | 9,610 | 8.6% | Unit tests |
-| **drivers/** | 28 | 9,504 | 8.5% | Device drivers |
-| **arch/** | 21 | 8,422 | 7.5% | Architecture-specific (RISC-V) |
-| **Top-level** | 12 | 8,396 | 7.5% | Main entry, console, config, etc. |
-| **net/** | 12 | 6,905 | 6.2% | Network protocol stack |
-| **process/** | 9 | 5,818 | 5.2% | Process management |
-| **sched/** | 8 | 4,307 | 3.8% | Process scheduling |
-| **ipc/** | 6 | 4,055 | 3.6% | IPC (System V, POSIX MQ) |
-| **sync/** | 8 | 3,053 | 2.7% | Synchronization primitives |
-| **interrupt/** | 8 | 1,762 | 1.6% | Interrupt subsystem |
-| **dfx/** | 8 | 1,044 | 0.9% | Diagnostics and debugging |
+| **fs/** | 80 | 61,091 | 19.1% | File system (ext4, procfs, jbd2, page cache, VFS) |
+| **arch/** | 73 | 43,440 | 13.6% | Three architectures (riscv64, x86_64, aarch64) |
+| **syscall/** | 12 | 33,840 | 10.6% | System call dispatch and implementations |
+| **dfx/** | 30 | 37,946 | 11.9% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
+| **drivers/** | 40 | 23,247 | 7.3% | virtio, DRM, serial, timer, input |
+| **net/** | 18 | 18,649 | 5.8% | TCP/UDP/unix/netlink stack |
+| **mm/** | 29 | 16,712 | 5.2% | Memory (zones, pcp pagesets, VMA, page cache glue, swap) |
+| **ipc/** | 8 | 14,559 | 4.6% | IPC (System V, POSIX MQ, binder) |
+| **process/** | 12 | 14,824 | 4.6% | Process management (fork/exec/exit, signals) |
+| **sched/** | 11 | 12,532 | 3.9% | Global run queue scheduler |
+| **tests/** | 73 | 13,922 | 4.4% | In-kernel guest test suite |
+| **sync/** | 10 | 7,281 | 2.3% | Synchronization primitives |
 
 ### Test Statistics
 
 | Test Type | Count | Description |
 |-----------|-------|-------------|
-| **Kernel Unit Tests** | 60 files, 995 cases (last report: 901 PASS + 94 SKIP) | Memory, process, file system, network, etc. |
-| **Formal Verification** | 1,116 verify-crate test functions (98 modules); 157 Kani proofs (22 modules); 4 SPIN models (8 LTL) | 4-layer: proptest (L1), Kani (L2), SPIN (L3), Miri (L4) |
-| **Smoke Tests** | 15 tests (all passing) | Core functionality validation |
+| **Kernel Unit Tests** | 73 files; 1267 cases riscv64 / 1263 x86_64, all green | In-guest suite via `make test` |
+| **Formal Verification** | 157 Kani harnesses; 1104 host proptests; 4 SPIN models; Miri nightly | Mirror-sync enforced; see docs/test/formal-verification-report.md |
+| **LTP** | 1028/1869 (riscv64 TCG) · 1010/1869 (x86_64 KVM) | docs/test/ltp-report.md |
+| **Benchmarks** | lmbench + Geekbench 5 dual-kernel baselines | docs/test/ |
 | **Linux LTP Tests** | 1,838 tests | Official LTP test suite (syscall, mem, fs, etc.) |
 | **Total** | **4,125 test cases + 161 formal verification proofs** | Comprehensive kernel verification coverage |
 
@@ -702,4 +705,4 @@ make verify  # Run formal verification (sync check + proptest)
 ---
 
 **Document Version**: v12.1
-**Last Updated**: 2026-09-20
+**Last Updated**: 2026-11-01 (statistics; narrative from the 2026-09 sweep)

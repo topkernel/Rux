@@ -3,7 +3,7 @@
 //! mirroring Linux fs/namei.c vfs_prepare_mode() and fs/inode.c
 //! mode_strip_sgid() / inode_init_owner().
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

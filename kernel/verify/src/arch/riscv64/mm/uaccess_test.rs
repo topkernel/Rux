@@ -2,7 +2,7 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! uaccess bounds-check property tests (framekernel Framework rail #1).
+//! uaccess bounds-check property tests (kernel Framework rail #1).
 //!
 //! `access_ok` is the pure-arithmetic gate every user pointer must pass
 //! before the Framework's raw copy routines run; `clamp_rw_count` is the
@@ -30,7 +30,7 @@ pub const USER_START: usize = 0x0000_0000;
 pub const USER_END: usize = TASK_SIZE;
 pub const KERNEL_LINK_ADDR: usize = 0xffff_ffff_8000_0000;
 
-// The framekernel isolation boundary, checked at compile time of this test:
+// The kernel isolation boundary, checked at compile time of this test:
 // the entire user range accepted by access_ok lies strictly below the
 // kernel's link address.
 const _: () = assert!(USER_END < KERNEL_LINK_ADDR);

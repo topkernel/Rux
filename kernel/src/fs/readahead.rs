@@ -8,7 +8,7 @@
 //! After detecting consecutive sequential reads, prefetches upcoming blocks
 //! into the page cache to reduce VirtIO round-trips.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

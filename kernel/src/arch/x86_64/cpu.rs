@@ -239,12 +239,17 @@ pub fn smap_enabled() -> bool {
     SMAP_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-#[allow(dead_code)]
 pub fn enable_smap() {
-    // CPUID leaf 7 subleaf 0, EBX bit 20 = SMAP capability.
-    let (_, _, _, d7) = cpuid(7, 0);
-    if d7 & (1 << 20) == 0 {
-        crate::println!("arch: SMAP not available, leaving CR4 untouched");
+    // CPUID leaf 7 subleaf 0, **EBX** bit 20 = SMAP capability.
+    //
+    // The register was wrong until 2026-11-01: the check read EDX[20]
+    // (the architectural SMAP capability bit lives in EBX), so the
+    // protection never armed on silicon — the emulators we test on
+    // happen to report the bit in EDX as well, which is why CI stayed
+    // green while real hardware ran with SMAP off.
+    let (_, ebx, _, _) = cpuid(7, 0);
+    if ebx & (1 << 20) == 0 {
+        crate::println!("arch: SMAP not available (CPUID.7.0:EBX[20]=0), leaving CR4 untouched");
         return;
     }
     // SAFETY: CR4 update with the SMAP bit only; CPUID gated. BIOS may

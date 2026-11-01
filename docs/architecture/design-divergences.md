@@ -130,7 +130,7 @@ pins; the DFX plan's adoption rule requires the macro for new files.
 
 ---
 
-## D-5: tracepoint! declaration macro (T4 event table)
+## D-5: tracepoint! declaration macro (T4 event table)  [superseded by D-15, kept for history]
 
 **Design.** One tracepoints! table row per event derives the static
 row, the typed record function (armed() check inside), and the
@@ -327,7 +327,7 @@ checks the count, the end-of-text coverage and a symbolized backtrace.
 
 ---
 
-## D-4: Single-declaration tracepoint table (tracepoints! macro)
+## D-15: Single-declaration tracepoint table (tracepoints! macro)  [renamed from a duplicated D-4]
 
 **Design.** Every trace event is declared exactly once, as one row in
 the `tracepoints!` table at `kernel/src/trace/mod.rs`: group, name,
@@ -728,3 +728,76 @@ for tasks whose producers hold the CPU across their pick.
 **Guard.** Perf-gate scheduling domain: pbench P2 context-switch and
 P5 IPC medians within band; census (TERM 8±2 / REFUSED 32±4); the
 ipcdisc battery's drain-shape discriminators.
+---
+
+## D-16: Deferred-free timer ring (wall-clock stand-in for deferred reclamation)
+
+**Design.** Freed `MmStruct`/`Task` blocks enter a global 16384-entry ring
+drained after a 1500 ms wall-clock deadline (`mm/deferred_free.rs`), sized
+by a length-class match, instead of grace-period-based reclamation
+(call_rcu) for these objects. The QSBR RCU (`sync/rcu.rs`) exists and is
+used where readers are enumerable; the mm/task blocks take the ring
+because their borrowers (procfs walkers) are unaccounted `&MmStruct`
+borrows that a quiescent-state discipline cannot see cheaply.
+
+**Advantage.** Reclamation latency is bounded and independent of
+scheduler activity; no reader-side instrumentation on the hot walk paths.
+
+**Compatibility evidence.** The fake-OOM/stale-tree hunt families closed
+under it; full suite green; OH boots unaffected.
+
+**Known cost.** 1500 ms retention per freed block (memory headroom, not
+correctness); the ring is a single global lock — fine at current object
+rates. Revisit: unaccounted borrows → RcuHead on the structures would let
+call_rcu serve them and delete the ring.
+
+**Guard.** meminfo pcp/deferred rows; OOM-forensics census on hunts.
+
+## D-17: Kernel-half device alias arena (no identity MMIO window)
+
+**Design.** Device MMIO is reached exclusively through kernel-half alias
+windows — two static windows plus a dynamic ioremap arena
+(`mmu_init::ioremap_bar_kernel`) — and the bootstrap identity map is
+UNLINKED from the kernel CR3 after the boot-stack switch. The mainstream
+approach keeps an identity window and ioremaps on demand into the vmalloc
+space; here there is no low identity window at all after boot, and BARs
+(including firmware-placed low MMIO like the RTC page at 0x101000) map
+into the arena.
+
+**Advantage.** One MMIO discipline under every CR3 (trap-context MMIO
+under a user page table cannot fault); the uaccess contract has no
+identity hole (copy_from_user at low user addresses faults instead of
+reading physical memory — the prlimit64 EFAULT gap this closed).
+
+**Compatibility evidence.** x86_64 suite 1194/1194 with the window gone
+(including the previously-red EFAULT row); RTC/virtio-mmio/virtio-BAR
+consumers converted and green; OH boots green.
+
+**Known cost.** Arena is bounded (registry slots); a BAR outside every
+window needs an explicit ioremap call at probe time.
+
+**Guard.** PF-NOCTX beacon silent across the suite; SMAP-VIOL beacon
+silent.
+
+## D-18: SMAP enablement with EFLAGS.AC pushfq sequences
+
+**Design.** x86_64 enables CR4.SMAP with the usercopy primitives
+bracketing their copies with pushfq/orq/popfq AC set/clear sequences
+instead of the STAC/CLAC encodings. The semantics are identical (AC gates
+supervisor access to user pages); the pushfq form is chosen because the
+STAC/CLAC encodings take #UD under QEMU TCG regardless of CR4.SMAP
+(bisection-proven 2026-10-31), which would make the KVM-class rig
+unbootable under the emulator fallback.
+
+**Advantage.** Identical default-deny semantics on hardware AND under
+TCG; no acceleration-mode-dependent kernel image.
+
+**Compatibility evidence.** x86_64 suite green with SMAP on and the
+identity window dropped; strong pbench board in band (p4 best-ever
+456µs); zero SMAP-VIOL beacons — the syscall layer is fully on uaccess.
+
+**Known cost.** pushfq/popfq is a few cycles heavier per bracket than
+STAC/CLAC on hardware; measured invisible under the benchmark rigs.
+
+**Guard.** SMAP-VIOL beacon on every boot; the uafault guest probe (11
+syscalls × bad pointer → EFAULT) in the packed probe set.

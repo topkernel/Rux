@@ -46,7 +46,7 @@ to a reboot — expect to re-run boots from scratch.
 - Screenshot: pipe QEMU monitor commands (`screendump /path/out.ppm`) via
   stdin to the run script's serial/monitor, or use `-monitor` + socat;
   PPMs can be checked for non-black pixel counts with python.
-- Reference: `docs/development/openharmony-phase1-runbook.md` (Phase 1
+- Reference: `docs/archive/openharmony-phase1-runbook.md` (Phase 1
   gate: 74 services up, stable 300s — already merged to main).
 
 ## Likely next steps (ranked)
