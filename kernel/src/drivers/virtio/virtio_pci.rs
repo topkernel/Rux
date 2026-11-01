@@ -1987,8 +1987,15 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
 
 /// Block-completion service: hand used-ring processing to the Block
 /// softirq (same bottom half the PLIC top half raises on riscv64).
+/// The fn-pointer registry carries no slot identity, so x86 counts INTx
+/// deliveries in one global (vw_blk_intx_count) — per-disk VW_IRQS
+/// attribution stays with the riscv/aarch64 per-device handlers
+/// (lb73's VW-SNAP showed irqs=0 on all disks while "first PCI INTx
+/// interrupt delivered" proved the path live; the riscv-only wiring
+/// made the snapshot lie).
 #[cfg(feature = "x86_64")]
 pub fn intx_blk_service() {
+    crate::drivers::virtio::vw_blk_intx_bump();
     crate::interrupt::softirq::raise_softirq_irqoff(
         crate::interrupt::softirq::SoftirqIndex::Block as usize,
     );

@@ -2360,6 +2360,16 @@ pub fn vw_report(tag: &str) {
     }
 }
 
+/// x86 INTx Block-service delivery counter (the fn-pointer registry has
+/// no slot identity — see intx_blk_service). Printed by VW-SNAP.
+pub static VW_BLK_INTX: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Increment the x86 INTx delivery counter (intx_blk_service).
+pub fn vw_blk_intx_bump() {
+    VW_BLK_INTX.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+}
+
 /// One-line direct-console virtio ring snapshot (VW-SNAP): the same
 /// fields as the watchdog's VW-WEDGE, printed through putchar_no_lock —
 /// pr_err-based reports were silently dropped from the audit context on
@@ -2398,6 +2408,11 @@ pub fn vw_snap_direct() {
     pd(crate::interrupt::softirq::softirq_pending_raw(1) as u64);
     ps(b" walks=");
     pd(VW_WALKS.load(core::sync::atomic::Ordering::Acquire));
+    #[cfg(feature = "x86_64")]
+    {
+        ps(b" intx=");
+        pd(VW_BLK_INTX.load(core::sync::atomic::Ordering::Acquire));
+    }
     for disk in 0..MAX_PCI_BLK_DISKS {
         if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
             continue;
