@@ -263,10 +263,10 @@ fn ext4_file_read_cached_dst(
         // 4 KiB-read hot path under TCG.
         let mut run: [(u64, *const u8); 16] = [(0, core::ptr::null()); 16];
         let want = core::cmp::min(pages_wanted, run.len());
-        // dfx=filerd: phase anatomy of the warm path (bw_file_rd gap
-        // attribution). The copy bracket is skipped on the user-fault
-        // early returns below — a diagnostic undercount on the EFAULT
-        // path only, never on the fast path.
+        // dfx=filerd: phase anatomy of the warm path (bw_file_rd 50x
+        // attribution). The probe's copy bracket is skipped on the
+        // user-fault early returns below — a diagnostic undercount on
+        // the EFAULT path only, never on the benchmark's fast path.
         let probe = crate::dfx::filerd::on();
         let t_pin = if probe { crate::dfx::filerd::now() } else { 0 };
         let run_len = cache.get_range_into(fs_id, ino, page_index, &mut run[..want]);
@@ -275,8 +275,18 @@ fn ext4_file_read_cached_dst(
         }
         if run_len > 0 {
             let t_copy = if probe { crate::dfx::filerd::now() } else { 0 };
-            // Copy each pinned page's contribution.
-            for (i, (_idx, page_data)) in run[..run_len].iter().enumerate() {
+            // Copy the run in MERGED groups: physically-contiguous pinned
+            // pages (direct-map neighbors, run[j].1 == run[j-1].1 + block)
+            // are served by ONE dst.put — one copy_to_user (one AC bracket,
+            // one rep-movsb startup) instead of one per 4 KiB page. The
+            // bw_file_rd anatomy probe showed the per-page copies were 81%
+            // of the warm read(2) kernel time; batch-filled runs (buddy
+            // allocations) are largely contiguous, so the common 16-page
+            // sequential read collapses to a few copies. Byte-for-byte
+            // identical to the per-page walk: a group spans [src, src+span)
+            // contiguously and is truncated by the same `remaining` cap.
+            let mut i = 0usize;
+            while i < run_len {
                 let in_page_off = if i == 0 { page_offset } else { 0 };
                 let remaining_now = to_read - total_read;
                 // dfx=exthunt: frame-hit truth for the run's first page
@@ -285,7 +295,7 @@ fn ext4_file_read_cached_dst(
                     // SAFETY: page_data is a valid page-aligned pointer of
                     // block_size bytes pinned by get_range_into.
                     unsafe {
-                        let pd = *page_data;
+                        let pd = run[0].1;
                         crate::fs::ext4::extent::exthunt_rd_hit(
                             ino,
                             page_index,
@@ -294,13 +304,23 @@ fn ext4_file_read_cached_dst(
                         );
                     }
                 }
-                // SAFETY: page_data is a valid page-aligned pointer of
-                // block_size bytes pinned by get_range_into; the copy length
-                // is bounded by the page size and the remaining request bytes.
+                // SAFETY: page_data pointers are valid page-aligned
+                // pointers of block_size bytes pinned by get_range_into;
+                // the copy length is bounded by the contiguous span and the
+                // remaining request bytes.
                 unsafe {
                     let avail = block_size_usize - in_page_off;
-                    let copy_len = core::cmp::min(remaining_now, avail);
-                    let copied = match dst.put(buf_offset, page_data.add(in_page_off), copy_len) {
+                    let mut span = avail;
+                    let mut k = 1usize;
+                    while i + k < run_len
+                        && span < remaining_now
+                        && run[i + k].1 as usize == run[i + k - 1].1 as usize + block_size_usize
+                    {
+                        span += block_size_usize;
+                        k += 1;
+                    }
+                    let copy_len = core::cmp::min(remaining_now, span);
+                    let copied = match dst.put(buf_offset, run[i].1.add(in_page_off), copy_len) {
                         Ok(c) => c,
                         Err(e) => {
                             // Immediate full user fault: EFAULT when nothing
@@ -317,6 +337,7 @@ fn ext4_file_read_cached_dst(
                         cache.put_range(fs_id, ino, &run[..run_len]);
                         return Ok(total_read);
                     }
+                    i += k;
                 }
             }
             if probe {
