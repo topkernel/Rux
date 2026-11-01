@@ -458,6 +458,8 @@ pub fn start_secondaries() {
     }
 
     let online = num_started_cpus();
+    // Post-bring-up affinity refresh (see Task::refresh_default_affinity_to_online).
+    crate::process::task::Task::refresh_default_affinity_to_online();
     if failures == 0 {
         crate::print_status(
             "smp",

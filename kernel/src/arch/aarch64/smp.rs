@@ -494,6 +494,8 @@ pub fn start_secondaries() {
     }
 
     // 6. Structured status row.
+    // Post-bring-up affinity refresh (see Task::refresh_default_affinity_to_online).
+    crate::process::task::Task::refresh_default_affinity_to_online();
     let count = num_started_cpus();
     let v = PSCI_VERSION_REG.load(Ordering::Relaxed);
     let conduit = if CONDUIT_HVC.load(Ordering::Relaxed) {

@@ -1526,7 +1526,7 @@ impl Task {
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
-            cpus_allowed: core::sync::atomic::AtomicU32::new(!0u32),
+            cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -2354,7 +2354,7 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cpus_allowed)) as *mut core::sync::atomic::AtomicU32,
-            core::sync::atomic::AtomicU32::new(!0u32),
+            core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_on_cpu)) as *mut core::sync::atomic::AtomicBool,
@@ -4184,6 +4184,60 @@ impl Task {
     #[inline]
     pub fn cpus_allowed(&self) -> u32 {
         self.cpus_allowed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Default affinity for a NEWLY-CREATED task: the mask of CPUs that are
+    /// ONLINE at creation time (Linux: a fresh task inherits the parent's
+    /// cpus_mask, and the boot-time default is the platform's possible set —
+    /// which on a real machine equals the -smp CPU count, never the
+    /// compile-time MAX_CPUS ceiling). Initializing with !0 reported CPUs
+    /// that can never come online (MAX_CPUS=4 on a -smp 2 boot): LTP
+    /// getcpu01/nice05 take the highest bit from sched_getaffinity and pass
+    /// it back to sched_setaffinity, which correctly rejects never-online
+    /// CPUs with EINVAL — the kernel's own view was self-inconsistent.
+    /// Tasks created before SMP bring-up keep the boot-CPU mask (Linux
+    /// early kthreads behave the same way); every userspace task is created
+    /// after start_secondaries() and gets the full online set.
+    pub fn default_cpus_allowed() -> u32 {
+        let online = crate::arch::smp::num_started_cpus().max(1);
+        if online >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << online) - 1
+        }
+    }
+
+    /// Widen the masks of tasks created before SMP bring-up to the now-known
+    /// online set (the Linux sched_cpu_activate/cpuset refresh analogue).
+    /// Called from start_secondaries() once the secondaries are online: at
+    /// that point only kernel-boot tasks and the boot init task exist, none
+    /// of them carrying a USER-requested affinity, so overwriting the
+    /// boot-default masks ({CPU0} from the pre-SMP default, or !0 from the
+    /// idle-task initializer) with the online mask cannot clobber an
+    /// explicit sched_setaffinity. Without this, the boot init task (pid 1,
+    /// created before start_secondaries) kept a CPU0-only mask on every
+    /// -smp>1 boot and every userspace process inherited it.
+    pub fn refresh_default_affinity_to_online() {
+        let online = Self::default_cpus_allowed();
+        let mut visited = 0usize;
+        let mut widened = 0usize;
+        crate::sched::for_each_task(|t| {
+            // SAFETY: for_each_task yields live task pointers.
+            let task = unsafe { &*t };
+            let cur = task.cpus_allowed.load(core::sync::atomic::Ordering::Relaxed);
+            if cur == 1 || cur == u32::MAX {
+                task.cpus_allowed
+                    .store(online, core::sync::atomic::Ordering::Release);
+                widened += 1;
+            }
+            visited += 1;
+        });
+        crate::pr_info!(
+            "affinity: {} of {} task(s) default mask -> {:#x}",
+            widened,
+            visited,
+            online
+        );
     }
 
     /// R12-5: drop a lookup pin; the LAST put frees the slot.
