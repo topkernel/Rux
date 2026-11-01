@@ -1001,6 +1001,45 @@ debug ELFs).
   firings and fully-drained rings (VW-SNAP used==last==shadow on all
   six disks, intx flowing).
 
+### SESSION CLOSE (22:40) — eleventh successor final
+- Pop roller final: lb110-lb119 (10 NOSNAP boots on reflink copies).
+  lb119 = SUCCESS-switch (SwitchToUser @135.3s, THIRD-ever; no
+  CreateNewUser -> not golden) then wedged post-SwitchToUser:
+  foundation's user-start blocked on accesstoken_ser (txn10607 exec
+  269s, server RUNNING stuck mid-syscall sys=75) + powermgr txn11799
+  exec 252s (server parked in ioctl, never picked up). The starvation
+  family again. Screen frozen-logo md5 06b933b4 to the end. VM killed
+  at 832s; its copy run/rollpop-lb119.img KEPT (freshly persisted
+  SwitchToUser-era /data; snapshot-boot it if you want the same
+  osaccount-true read lane — lb92/lb119 both passed CheckUserParam on
+  this lineage while 15 sibling boots failed).
+- Tonight's tally: 18 boots on the fix kernels. Zero POLLSTALL, zero
+  virtio-layer stalls, rings drained at every snapshot (VW-SNAP). The
+  441s poll-stall engine is dead; the walls that replaced it (in hit
+  order): Shape-B osaccount read/answer (15), monopolist starvation
+  crawl (2: lb74, lb112), post-SwitchToUser accesstoken stall (lb119).
+  Ladder deepest point reached twice: SwitchToUser (lb92, lb119).
+- The pixel path for the twelfth successor, in order:
+  1. The golden population is still THE unclaimed prize: a NOSNAP boot
+     that runs CreateNewUser+install-stream (the lb65@40s shape) —
+     roll-pop.sh automates the hunt; when 'bundle size' lands, that
+     copy makes every later boot's ImplicitQuery find the launcher.
+     Tonight's obstacle: the creation flow needs the osaccount read to
+     say NO-USER early (the coin's other face) + a fast-enough service
+     graph. Boot count is the lever (lb65 landed 1-in-3 on its era).
+  2. Kernel-side odds-raisers, both named with evidence above: bound
+     the munmap VMA-write hold (kills the 100s-class brk convoy that
+     crawls the service graph), and the flicker-monopolist heal.
+  3. The post-SwitchToUser accesstoken stall (lb119) is a NEW wall
+     name: foundation->accesstoken_ser code10 exec 269s server RUNNING
+     mid-syscall — same starvation class; capture its stack next time
+     (TXN-HANG-STK symbolization: sys=75 = sendto/setsockopt family).
+- Branch oh-ladder pushed through 450c4d95 (+ this close). Kernels in
+  run/: bzImage-ladder-polldl (release, 05e3c4c5),
+  bzImage-ladder-pollfix2 (release, HEAD-class r3+fix, md5-identical
+  to the concurrent lane's r3w), bzImage-ladder-fieldpoll (release,
+  af5577c5+e8b9a969+05e3c4c5 — the lb92/lb119 SwitchToUser boots).
+
 ### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
 THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
 SAME BUG. Evidence chain, closed:
