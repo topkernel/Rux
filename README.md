@@ -159,7 +159,7 @@ make verify && make kani          # proofs
 [Getting Started](docs/guides/getting-started.md) ·
 [Roadmap](docs/progress/roadmap.md) ·
 [Design Divergences](docs/architecture/design-divergences.md) ·
-[Formal Verification](docs/development/formal-verification.md) ·
+[Test Reports](docs/test/README.md) ·
 [Lock Ordering](docs/architecture/lock-ordering.md) ·
 [Review Coverage](docs/development/review-coverage.md) ·
 [Changelog](docs/progress/changelog.md)

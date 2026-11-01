@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """make-report.py — turn the two lmbench result files into the
-comparison table in docs/development/lmbench-report.md.
+comparison table in docs/test/lmbench-report.md.
 
 Inputs (both produced by userspace/lmbench/run-{rux,linux}.sh):
   run/lmbench-rux.txt     Rux guest (x86_64 + KVM)
