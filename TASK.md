@@ -748,3 +748,57 @@ image state) agree exactly:
   any txn's exec crosses 20s — prints EVERY task's state + parked
   syscall mid-hang. lb60 = fresh-data boot with this kernel
   (bzImage-ladder-hangdump): the dump names the leaf's producer thread.
+
+## TENTH-SUCCESSOR SESSION (2026-11-01 18:00+, branch oh-ladder @ af5577c5)
+Mission: verify the poison-patched image end-to-end. The predecessor's
+lbpop2 (population, NOSNAP) + lb64/lb65 (snapshot boots, system-lb3.img +
+userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
+
+### lb64/lb65 decode (evidence: oh-lb64/65-serial.log + task dumps)
+1. The empty-bundle wall is dead and the poison ladder advanced:
+   lb65 `CreateNewUser user(100) start` @40.2 -> `create user:100 bundle
+   size:34` — the per-user install stream RAN (lb64: SetBundleQuota for
+   /data/app/el2/100/base/com.ohos.launcher @119.78s; hmdfs/sharefs
+   launcher mkdirfails @119.3 = install stream touching the bundle).
+   systemui + render_service (llvmpipe/CompThread) SPAWNED on lb64/65 —
+   the GUI stack is loading.
+2. THE WALL: phantom-preempt monopolists own every CPU and the tick-side
+   PREEMPT-HEAL never fires (ZERO PREEMPT-HEAL lines on both boots; lb59
+   pre-contiguity-bar fired 1784). lb65 dump @64.5s: cpu slots 1232
+   (m.ohos.systemui, preempt=0x10000) / 1067 (render_service watchdog,
+   0x100) / 319 / 1177 (tgid 313 OS_IPC/FFRT, 0x10000) — all four busy,
+   nr_running=165; installs tid 1138 state=RUNNING on_rq=1 NEVER picked
+   (its mkdir = txn13201 exec 2350s; the CreateNewUser txn9711 itself
+   2355s). lb64: systemui main wedged in exit_group (lastsys=231) at
+   0x100 from ~118s through kill @660s.
+3. Root cause: d2381bf9's contiguity bar re-arms the heal window on any
+   completed PREEMPT pair — correct for the base field, but it shields
+   stranded SOFTIRQ/HARDIRQ bits on lock-hot carriers (OS_IPC threads
+   live in spinlock loops), AND the pure-field faces (base==0) were
+   never reachable by the base!=0 gate (keep_tick_nesting existed but
+   had NO call site). preemptible()==0 for ANY bit, so these monopolize
+   exactly like the base face.
+4. FIX (af5577c5): per-field contiguity — Task ti_pc_sirq_zero_jif /
+   ti_pc_hirq_zero_jif stamped whenever the tick observes that field
+   ABSENT; a field present at 200 consecutive ticks is phantom (lock
+   traffic never touches these fields). Stale field -> skip the re-arm
+   -> window matures -> new heal leg (base==0): keep_tick_nesting +
+   need_resched + PREEMPT-HEAL-FIELD print with softirq/hardirq origin
+   sites; the base leg now collapses stale hardirq extras too.
+   Base-face (pc=1) policy deliberately untouched.
+5. Build note for successors: `build-release` does NOT regen ksyms
+   (only the debug `build` target does). A release build after a
+   `make build` for ANOTHER arch embeds wrong symbols. Two-pass release:
+   cargo build --release; gen-ksyms.py <elf> x86_64-unknown-none
+   kernel/src/dfx/ksyms_generated.rs; cargo build --release; mkbzimage.
+   LTO byte-loop-transforms the tick prints into immediate stores —
+   `strings` on the release ELF is NOT evidence a print was stripped;
+   disassemble for the heal's andl sites instead (0xff0000 = clear_base,
+   0xf10000 = keep_tick_nesting).
+6. lb66 (verification boot): bzImage-ladder-fieldheal + system-lb3.img +
+   userdata-warm.img + dfx=ams46,txnhunt, SMP=2. Watch: PREEMPT-HEAL*
+   lines (the fix firing), the install stream completing (installs
+   code-4 execs bounded), startUser in service:100 -> CheckUserParam
+   (poison leg: POISON32-DELIVER then NO marking = patch works) ->
+   SwitchToUser -> appspawn com.ohos.launcher -> pixel md5 change
+   (frozen-logo set: 5f8b704d/06b933b4/82f0a25f/23312e5b).
