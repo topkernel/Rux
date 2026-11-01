@@ -12,7 +12,7 @@ cd /home/william/rux-agents/oh-launcher || exit 1
 MAX=${1:-8}
 START=${2:-212}
 KERN=run/bzImage-ladder-fieldpoll
-IMG=run/system-lb9.img
+IMG=run/system-lb10.img
 BASE=run/userdata-warm.img
 mkdir -p run/roll-logs
 for i in $(seq 0 $((MAX-1))); do
