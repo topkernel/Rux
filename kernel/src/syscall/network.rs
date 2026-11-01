@@ -3196,10 +3196,13 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         };
     }
 
-    if total_len == 0 {
-        return 0;
-    }
-
+    // review F8: NO zero-length early return — the reference sendmsg with
+    // an empty iovec set TRANSMITS (a header-only UDP datagram crosses the
+    // wire, udp_send_locked's U1 contract) and returns 0. The old gate
+    // reported success without sending, so a leading empty message in a
+    // sendmmsg batch was swallowed (musl's sendmmsg fallback loops over
+    // sendmsg — msg 0 reported 0 and never reached the wire).
+    //
     // W3: parse the destination from msg_name (same path as sendto's
     // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
     // datagram; TCP ignores it.
@@ -3881,9 +3884,9 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                 let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
             }
             total_sent += 1;
-            if ret == 0 {
-                break;
-            }
+            // review F8: a zero-length send COUNTS (msg_len=0) and the
+            // batch continues — the reference __sys_sendmmsg only stops
+            // on an error or vlen exhaustion.
         }
         return total_sent as i64;
     }
@@ -3974,9 +3977,11 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
             }
         }
 
-        if total_len == 0 {
-            break;
-        }
+        // review F8: a zero-length message is SENT (the reference sends a
+        // 0-byte datagram / 0-byte stream write, reports msg_len=0, and
+        // continues) — the old break skipped the message entirely.
+        // (Fall through with the empty buffer; socket_send_ctl handles a
+        // 0-byte send on every family.)
 
         // W3: UDP above 65507 → EMSGSIZE (first failure semantics).
         if socket.sock_type == crate::net::socket::SocketType::Udp
@@ -3990,6 +3995,9 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
 
         // W3: per-message msg_name destination (same parse as sendmsg).
         // P1 IPv6: family-aware parse (v4-mapped normalizes to V4).
+        // review F9: a family that does not parse is EAFNOSUPPORT — the
+        // same contract sys_sendmsg enforces; the old `Err(_) => None`
+        // silently sent the message UNADDRESSED.
         let dest_addr = if !msg_name_ptr.is_null()
             && crate::arch::uaccess::access_ok(msg_name_ptr as usize, 16)
         {
@@ -4000,7 +4008,12 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                 Ok(ParsedSockAddr::V6 { addr, port }) => {
                     Some((crate::net::ipv6::IpAddr::V6(addr), port))
                 }
-                Err(_) => None,
+                Err(_) => {
+                    if total_sent == 0 {
+                        return -(errno::EAFNOSUPPORT as i64);
+                    }
+                    break;
+                }
             }
         } else {
             None
@@ -4092,9 +4105,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
             }
             total_recv += 1;
-            if ret == 0 {
-                break; // EOF
-            }
+            // review F8: a zero-length receive COUNTS and the batch
+            // continues (a 0-length datagram, or stream EOF — the next
+            // round decides); the reference __sys_recvmmsg only stops on
+            // error / EAGAIN / vlen exhaustion.
         }
         return total_recv as i64;
     }
@@ -4175,9 +4189,12 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
             }
         }
 
-        if total_buf_len == 0 {
-            break;
-        }
+        // review F8: a zero-length buffer still RECEIVES (and consumes) a
+        // zero-length datagram / stream chunk — the reference recvmmsg
+        // counts msg_len=0 messages and continues; only error / EAGAIN /
+        // vlen exhaustion stops the batch. The old break made a leading
+        // empty iovec abort the whole batch (socket_recv_ctl consumes the
+        // head datagram even when the copy length is 0).
 
         let mut buf = alloc::vec![0u8; total_buf_len];
         // review F7: MSG_PEEK plumbed through the inet engines (recvmmsg
@@ -4227,9 +4244,8 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
             let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, bytes_read as u32);
         }
         total_recv += 1;
-        if bytes_read == 0 {
-            break; // EOF
-        }
+        // review F8: a 0-length message (empty datagram / stream EOF)
+        // counts and the batch continues — the loop is bounded by vlen.
     }
     total_recv as i64
 }

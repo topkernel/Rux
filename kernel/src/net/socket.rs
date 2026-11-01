@@ -953,11 +953,13 @@ impl Socket {
                 // datagram's v6 address; v4 sockets see the u32).
                 match crate::net::udp::udp_recvfrom_ext(udp_fd, buf, peek) {
                     Ok((len, src_addr, src_port)) => {
-                        if len > 0 {
-                            Ok((len as usize, Some((src_addr, src_port))))
-                        } else {
-                            Err(-11) // EAGAIN
-                        }
+                        // review F8: a REAL zero-length datagram (already
+                        // consumed above!) reports 0 with its source — the
+                        // old `len > 0` gate turned it into EAGAIN while
+                        // the datagram was gone (recvmmsg batches of
+                        // 0-length messages then lost the whole batch).
+                        // "No data yet" is the None arm's Err(-11) above.
+                        Ok((len as usize, Some((src_addr, src_port))))
                     }
                     Err(e) => Err(e as i32),
                 }
