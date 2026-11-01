@@ -1541,7 +1541,13 @@ impl TcpSocket {
     /// R35: `tx` receives every outbound segment this packet triggers
     /// (SYN-ACK/ACK/FIN/retransmit) as deferred descriptors; the caller
     /// emits them after dropping TCP_TABLE_LOCK.
-    pub fn handle_packet(&mut self, tcp_hdr: &TcpHdr, data: &[u8], tx: &mut TcpTxBatch) -> Result<(), ()> {
+    pub fn handle_packet(
+        &mut self,
+        tcp_hdr: &TcpHdr,
+        wire_hdr: &[u8],
+        data: &[u8],
+        tx: &mut TcpTxBatch,
+    ) -> Result<(), ()> {
         // Global RST handling (RFC 793 §3.9 / RFC 1122 §4.2.3.30), with
         // the sequence-number validation the reference requires before an
         // RST is processed at all:
@@ -1597,16 +1603,16 @@ impl TcpSocket {
                 TcpState::TCP_LISTEN | TcpState::TCP_SYN_SENT | TcpState::TCP_SYN_RECV
             )
         {
-            if let Some(mss) = tcp_parse_mss(tcp_hdr) {
+            if let Some(mss) = tcp_parse_mss(wire_hdr) {
                 if mss < self.mss {
                     self.mss = mss;
                 }
             }
-            match tcp_parse_wscale(tcp_hdr) {
+            match tcp_parse_wscale(wire_hdr) {
                 Some(ws) => self.peer_wscale = ws,
                 None => self.peer_wscale = 0,
             }
-            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+            if let Some(tsval) = tcp_parse_tsval(wire_hdr) {
                 self.ts_recent = tsval;
                 // ts_enabled stays true only if our SYN also offered TS
                 // (we always do); a peer that skipped the option gets no
@@ -1619,7 +1625,7 @@ impl TcpSocket {
             // RFC 7323: refresh ts_recent from every in-order segment's
             // TSval (PAWS ordering checks are not implemented — minimal
             // echo only).
-            if let Some(tsval) = tcp_parse_tsval(tcp_hdr) {
+            if let Some(tsval) = tcp_parse_tsval(wire_hdr) {
                 self.ts_recent = tsval;
             }
         }
@@ -2913,6 +2919,13 @@ impl TcpConnectionManager {
             Some(hdr) => hdr,
             None => return Ok(None),
         };
+        // gb1: the on-wire header (options included) — checksum-verified
+        // upstream and handed to handle_packet for option parsing; the
+        // by-value copy above is only good for its scalar fields.
+        // SAFETY: tcp_parse_packet validated header_len <= skb.len.
+        let wire_hdr: &'static [u8] = unsafe {
+            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
+        };
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
@@ -3014,7 +3027,7 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
+                    let _ = socket.handle_packet(&tcp_hdr, wire_hdr, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -3050,7 +3063,7 @@ impl TcpConnectionManager {
                     new_socket.parent_fd = Some(parent);
                     // State machine drives itself from LISTEN: SYN →
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
-                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
+                    let _ = new_socket.handle_packet(&tcp_hdr, wire_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -3074,6 +3087,11 @@ impl TcpConnectionManager {
         let tcp_hdr = match tcp_parse_packet(skb) {
             Some(hdr) => hdr,
             None => return Ok(None),
+        };
+        // gb1: wire header for option parsing (see handle_tcp_packet).
+        // SAFETY: tcp_parse_packet validated header_len <= skb.len.
+        let wire_hdr: &'static [u8] = unsafe {
+            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
         };
 
         let src_port = TcpPort::from_be(tcp_hdr.source);
@@ -3133,7 +3151,7 @@ impl TcpConnectionManager {
                         Some(p) => p,
                         None => return Ok(None),
                     };
-                    let _ = socket.handle_packet(&tcp_hdr, payload, tx);
+                    let _ = socket.handle_packet(&tcp_hdr, wire_hdr, payload, tx);
                     return Ok(Some(TcpRvWake { socket: fd as i32, parent: None }));
                 }
             }
@@ -3165,7 +3183,7 @@ impl TcpConnectionManager {
                     new_socket.remote_ip6 = *src6;
                     new_socket.state = TcpState::TCP_LISTEN;
                     new_socket.parent_fd = Some(parent);
-                    let _ = new_socket.handle_packet(&tcp_hdr, &[], tx);
+                    let _ = new_socket.handle_packet(&tcp_hdr, wire_hdr, &[], tx);
                     let _ = table.install(slot, new_socket);
                     return Ok(Some(TcpRvWake { socket: slot as i32, parent: Some(parent) }));
                 }
@@ -3982,14 +4000,28 @@ pub fn tcp_set_ttl(fd: i32, ttl: u8) {
 /// Calculate TCP checksum
 ///
 /// # Arguments
-/// - `shdr`: Source IP address (network byte order)
-/// - `dhdr`: Destination IP address (network byte order)
-/// - `thdr`: TCP header
-/// - `data`: Data
+/// Checksum a TCP segment from its WIRE header bytes.
+///
+/// gb1: the old signature took `&TcpHdr` and read `header_len()` bytes
+/// from the struct pointer. That is only valid when the reference points
+/// into the packet buffer (TX build path). The RX path parses with
+/// tcp_parse_packet, which returns the header BY VALUE — a stack copy —
+/// so the checksum summed `header_len()` bytes of stack, i.e. 20 valid
+/// bytes plus whatever sat after the local as "options". Every inbound
+/// segment carrying options (a SYN-ACK with MSS from QEMU user-network
+/// slirp) failed the verify gate with a sum that even varied between
+/// byte-identical retransmissions, while option-less segments (RST)
+/// passed. Checksumming (and option parsing — see tcp_option_bytes) now
+/// operate on the wire bytes themselves.
+///
+/// - `shdr`/`dhdr`: source/destination IP (network byte order)
+/// - `wire_hdr`: the on-wire TCP header INCLUDING options (checksum
+///   field included as stored — a valid segment folds to 0)
+/// - `data`: payload bytes
 ///
 /// # Returns
 /// Checksum (network byte order)
-pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
+pub fn tcp_checksum(shdr: u32, dhdr: u32, wire_hdr: &[u8], data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
     // Pseudo header (12 bytes). Callers pass network-order (`.to_be()`)
@@ -4005,19 +4037,11 @@ pub fn tcp_checksum(shdr: u32, dhdr: u32, thdr: &TcpHdr, data: &[u8]) -> u16 {
     sum += u16::from_be(dhdr as u16) as u32;
     // Reserved (1 byte) + Protocol (1 byte) + TCP length (2 bytes)
     sum += 6u32; // TCP protocol number (reserved=0, protocol=6)
-    let tcp_len = (thdr.header_len() + data.len()) as u16;
+    let tcp_len = (wire_hdr.len() + data.len()) as u16;
     sum += tcp_len as u32;
 
     // TCP header (include full header with options)
-    // SAFETY: thdr is a valid TcpHdr reference; reading header_len() bytes
-    // from its repr(C) layout is well-defined. The underlying skb buffer is
-    // large enough for the full TCP header.
-    let hdr_bytes = unsafe {
-        core::slice::from_raw_parts(
-            (thdr as *const TcpHdr) as *const u8,
-            thdr.header_len()
-        )
-    };
+    let hdr_bytes = wire_hdr;
 
     let mut i = 0;
     while i + 1 < hdr_bytes.len() {
@@ -4124,11 +4148,15 @@ pub fn tcp_build_packet(
 
         // Compute TCP checksum (RFC 793). The field is big-endian on the
         // wire — store the network-order value (review NEW: missing .to_be()
-        // byte-swapped every outbound segment's checksum).
+        // byte-swapped every outbound segment's checksum). gb1: sum the
+        // header straight from the buffer (options already serialized, the
+        // check field still zero) — see tcp_checksum for the wire-bytes
+        // contract.
         let data_ptr = ptr.add(hdr_len);
         let data_len = (skb.len as usize).saturating_sub(hdr_len);
         let data_slice = core::slice::from_raw_parts(data_ptr as *const u8, data_len);
-        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, tcp_hdr, data_slice).to_be();
+        let wire_hdr = core::slice::from_raw_parts(ptr as *const u8, hdr_len as usize);
+        tcp_hdr.check = tcp_checksum(src_ip, dest_ip, wire_hdr, data_slice).to_be();
     }
 
     Ok(())
@@ -4236,20 +4264,13 @@ pub fn tcp_parse_packet(skb: &SkBuff) -> Option<TcpHdr> {
 
 /// W3: parse the MSS option (kind 2, len 4) from a SYN's option bytes.
 /// Returns None when the option is absent or malformed.
-pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
-    let hlen = tcp_hdr.header_len();
-    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
-        return None;
-    }
-    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
-    // [TCP_MIN_HLEN, header_len) of the same buffer, which
-    // tcp_parse_packet validated against the packet length.
-    let opts = unsafe {
-        core::slice::from_raw_parts(
-            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
-            hlen - TCP_MIN_HLEN,
-        )
-    };
+///
+/// gb1: takes the WIRE header bytes. The old `&TcpHdr` form read option
+/// bytes through the struct pointer, which only aliases the packet for
+/// TX-built headers — RX callers pass the by-value copy from
+/// tcp_parse_packet, so options were read off the stack.
+pub fn tcp_parse_mss(wire_hdr: &[u8]) -> Option<u16> {
+    let opts = tcp_option_bytes(wire_hdr);
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {
@@ -4273,28 +4294,25 @@ pub fn tcp_parse_mss(tcp_hdr: &TcpHdr) -> Option<u16> {
     None
 }
 
-/// P2 TCP options: raw option-bytes accessor shared by the parsers.
-/// SAFETY contract mirrors tcp_parse_mss (caller-validated header).
-fn tcp_option_bytes(tcp_hdr: &TcpHdr) -> &'static [u8] {
-    let hlen = tcp_hdr.header_len();
-    if hlen <= TCP_MIN_HLEN || hlen > TCP_MAX_HLEN {
+/// P2 TCP options: raw option-bytes accessor shared by the parsers —
+/// the option bytes [20, header_len) of a WIRE TCP header (gb1: see
+/// tcp_parse_mss for why this cannot work off a parsed struct copy).
+fn tcp_option_bytes(wire_hdr: &[u8]) -> &[u8] {
+    if wire_hdr.len() < TCP_MIN_HLEN {
         return &[];
     }
-    // SAFETY: tcp_hdr aliases the skb data buffer; the option bytes occupy
-    // [TCP_MIN_HLEN, header_len) of the same buffer, which
-    // tcp_parse_packet validated against the packet length.
-    unsafe {
-        core::slice::from_raw_parts(
-            (tcp_hdr as *const TcpHdr as *const u8).add(TCP_MIN_HLEN),
-            hlen - TCP_MIN_HLEN,
-        )
+    let hlen = ((wire_hdr[12] >> 4) as usize) * 4;
+    if hlen < TCP_MIN_HLEN || hlen > wire_hdr.len() {
+        return &[];
     }
+    &wire_hdr[TCP_MIN_HLEN..hlen]
 }
 
 /// P2: parse the window-scale option (kind 3, len 3) from a SYN.
 /// Returns the peer's advertised shift (0..=14), or None when absent.
-pub fn tcp_parse_wscale(tcp_hdr: &TcpHdr) -> Option<u8> {
-    let opts = tcp_option_bytes(tcp_hdr);
+/// gb1: wire-header form (see tcp_parse_mss).
+pub fn tcp_parse_wscale(wire_hdr: &[u8]) -> Option<u8> {
+    let opts = tcp_option_bytes(wire_hdr);
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {
@@ -4319,9 +4337,9 @@ pub fn tcp_parse_wscale(tcp_hdr: &TcpHdr) -> Option<u8> {
 }
 
 /// P2: parse the timestamps option (kind 8, len 10) from a segment.
-/// Returns the peer's TSval.
-pub fn tcp_parse_tsval(tcp_hdr: &TcpHdr) -> Option<u32> {
-    let opts = tcp_option_bytes(tcp_hdr);
+/// Returns the peer's TSval. gb1: wire-header form (see tcp_parse_mss).
+pub fn tcp_parse_tsval(wire_hdr: &[u8]) -> Option<u32> {
+    let opts = tcp_option_bytes(wire_hdr);
     let mut i = 0;
     while i < opts.len() {
         match opts[i] {
@@ -4388,7 +4406,14 @@ pub fn tcp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     };
     {
         let payload = tcp_payload_slice(skb, tcp_hdr.header_len()).unwrap_or(&[]);
-        if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), &tcp_hdr, payload) != 0 {
+        // gb1: verify against the WIRE header bytes — tcp_parse_packet
+        // returns a by-value copy, and checksumming the copy read option
+        // bytes from the stack (see tcp_checksum). skb.data points at the
+        // TCP header; tcp_parse_packet validated header_len <= skb.len.
+        let wire_hdr = unsafe {
+            core::slice::from_raw_parts(skb.data, tcp_hdr.header_len())
+        };
+        if tcp_checksum(src_ip.to_be(), dest_ip.to_be(), wire_hdr, payload) != 0 {
             TCP_RX_CSUM_ERRORS.fetch_add(1, Ordering::Relaxed);
             return Ok(()); // silently drop (counted)
         }
