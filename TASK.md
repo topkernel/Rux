@@ -579,3 +579,19 @@ lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
 - Next: dfx=periodic boot to read pid 1's task state — starved-RUNNABLE
   (sched wake-gating family) vs SLEEPING-inside-critical-section
   (sleep-while-holding bug).
+### wf legs — anchor and window structure (bisect prep)
+- base33 (33d007fe release, userdata-fresh2, 120s): GOOD — init alive
+  past 100s, zero DEADLOCK / BIGLOCK-STALL. Anchor holds on today's
+  assets (this re-validates the lane's lb44 control on fresh2).
+- s977 (977adb51 standalone): unbootable mid-branch tree — init
+  MPROTECT-FAIL ENOMEM, EXITGRP code=32512 at 1.0s, power down. NOT a
+  wedge; plain-commit bisect will hit these — use first-parent merge
+  boundaries instead.
+- Lane report (e8216064, main TASK.md): wedge window is 33d007fe..
+  dd94e441 (95 commits); DEADLOCK waiters named world_lock() on
+  binder::WORLD / unix_send() on net::unix::UNIX_TABLE — matches wfB
+  symbolization (WORLD @0xffffffff8095a2d0, ra in world_lock).
+  Suspect->merge mapping: 977adb51 in perf-sched (192bfdce),
+  e1e7d8f9 in perf-ipc (22db8f0f), e22f72a8 content in 32958f4b
+  ("drop the bootstrap identity map"), 6cd3c9b8 in the perf-sched or
+  ltp-r20 family. Bisect: good=33d007fe bad=dd94e441 --first-parent.
