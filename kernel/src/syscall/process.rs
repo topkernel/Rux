@@ -5907,6 +5907,11 @@ fn shutdown_cascade(cmd: u32) {
         }
     }
 
+    // dfx: final counter dump — short-lived probe boots (lmbench single-
+    // case rigs power off at ~35 s, before the 60 s fsw tick) would
+    // otherwise never print their accumulators.
+    crate::dfx::fsw::dump();
+
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();
     if my_pid != 1 {

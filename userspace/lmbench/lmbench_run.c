@@ -172,6 +172,30 @@ int main(void)
     char buf[4096];
     ssize_t n;
     int ticks = 0;
+    /* In-guest budget: 35 s default; `budget=<secs>` on the kernel
+     * cmdline overrides it (perf lanes booting under host contention:
+     * the auto-calibration of the slow cases needs more wall time than
+     * 35 s of a contended vCPU, which used to turn a slow host into a
+     * bogus TIMEOUT). The benchmark binaries and their arguments are
+     * unchanged — this only decides when to kill. */
+    int budget_ticks = 3500;
+    {
+        char cl[512];
+        int cfd = open("/proc/cmdline", O_RDONLY);
+        if (cfd >= 0) {
+            ssize_t r = read(cfd, cl, sizeof(cl) - 1);
+            close(cfd);
+            if (r > 0) {
+                cl[r] = 0;
+                char *b = strstr(cl, "budget=");
+                if (b) {
+                    int secs = atoi(b + 7);
+                    if (secs >= 5)
+                        budget_ticks = secs * 100;
+                }
+            }
+        }
+    }
     for (;;) {
         n = read(pfd[0], buf, sizeof(buf));
         if (n > 0) {
@@ -186,9 +210,10 @@ int main(void)
                 write(1, buf, (size_t)n);
             break;
         }
-        if (++ticks >= 3500) {   /* 35 s: enough for the slow cases
-                                  * (lat_mem_rd 256M) under KVM; real
-                                  * hangs still hit the outer 60 s cap */
+        if (++ticks >= budget_ticks) { /* default 35 s: enough for the
+                                         * slow cases (lat_mem_rd 256M)
+                                         * under KVM; real hangs still
+                                         * hit the outer cap */
             kill(p, SIGTERM);
             usleep(200000);
             kill(p, SIGKILL);

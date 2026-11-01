@@ -145,6 +145,59 @@ pub static WALK_HIT: AtomicU64 = AtomicU64::new(0);
 /// Walk components that needed a filesystem lookup (dcache miss).
 pub static WALK_MISS: AtomicU64 = AtomicU64::new(0);
 
+// === path-walk cost anatomy (perf-path lane 2026-11-01) ==================
+// Sub-microsecond phases: NS sums (converted at dump), one count each
+// where the divisor is not implied by the counters above. The brackets
+// live in sys_fstatat / sys_openat / path_lookup; the question they
+// answer: of the measured stat/open latency, how much is (a) the syscall
+// prelude (user copies, resolve_user_path, shortcut gates), (b) the walk
+// prologue (root fetch, normalize, component split), (c) the per-
+// component loop, and inside it (d) get_inode+permission, (e) the dentry
+// child-map lookup, (f) the per-hit icache refresh, (g) mount+symlink
+// follow, versus (h) getattr+copyout / File+fdtable for the tail.
+pub static STAT_N: AtomicU64 = AtomicU64::new(0);
+pub static STAT_PRE_NS: AtomicU64 = AtomicU64::new(0);
+pub static STAT_TAIL_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_N: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_PRE_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_TAIL_NS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_PRE_NS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_LOOP_NS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_COMP_N: AtomicU64 = AtomicU64::new(0);
+/// Loop arm: current.get_inode() + dir/x permission checks.
+pub static WALK_A_NS: AtomicU64 = AtomicU64::new(0);
+/// Loop arm: lookup_child (dentry child-map lock + compare).
+pub static WALK_B_NS: AtomicU64 = AtomicU64::new(0);
+/// Loop hit arm: icache refresh (global ICACHE lock path).
+pub static WALK_C_NS: AtomicU64 = AtomicU64::new(0);
+/// Loop arm: get_mount + follow_symlink check.
+pub static WALK_D_NS: AtomicU64 = AtomicU64::new(0);
+/// Loop miss arm: fs lookup + iget + dentry add (excludes A/B/D).
+pub static WALK_MISSCOST_NS: AtomicU64 = AtomicU64::new(0);
+/// Final dentry inode re-fetch + trailing-slash checks (walk tail).
+pub static WALK_TAIL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Bracket timestamp (0 when the probe is off — skips the clock read).
+#[inline]
+pub fn pc_now() -> u64 {
+    if on() {
+        crate::drivers::timer::monotonic_ns_since_boot()
+    } else {
+        0
+    }
+}
+
+/// Close a bracket opened with pc_now() (no-op when t0 == 0, i.e. off).
+#[inline]
+pub fn pc_add(dst: &AtomicU64, t0: u64) {
+    if t0 != 0 {
+        dst.fetch_add(
+            crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 /// Probe armed? Lazy verdict after cmdline init (syscost's pa15 lesson:
 /// never cache a verdict before the cmdline exists). Tri-state AtomicU8
 /// exactly like syscost (0 = unresolved, 1 = off, 2 = on) plus a one-shot
@@ -496,6 +549,9 @@ fn v(c: &AtomicU64) -> u64 {
 
 /// Print the counter snapshot (cumulative since boot).
 pub fn dump() {
+    if !on() {
+        return; // shutdown-path dump hook: silent when the probe is off
+    }
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
         // sd: sync_dirty calls / deferred-skips — the separator matters:
@@ -541,5 +597,20 @@ pub fn dump() {
         v(&RMD_PHASE_MAX_US[2]), v(&RMD_PHASE_MAX_US[3]),
         v(&RMD_PHASE_MAX_US[4]),
         v(&DROP_BLOCK),
+    );
+    crate::pr_warn!(
+        // path-walk cost anatomy (perf-path lane): phase NS sums and
+        // their divisor counts. Averages: stat pre = STAT_PRE_NS/STAT_N,
+        // walk pre = WALK_PRE_NS/WALK, loop = WALK_LOOP_NS/WALK,
+        // per-component A..D = WALK_x_NS/WALK_COMP_N, miss arm =
+        // WALK_MISSCOST_NS/WALK_MISS, walk tail = WALK_TAIL_NS/WALK,
+        // open pre = OPEN_PRE_NS/OPEN_N, tails likewise.
+        "PC t={}s stat={} pre={} tail={} open={} pre={} tail={} walk pre={} loop={} tail={} comp={} a={} b={} c={} d={} miss={}",
+        secs,
+        v(&STAT_N), v(&STAT_PRE_NS), v(&STAT_TAIL_NS),
+        v(&OPEN_N), v(&OPEN_PRE_NS), v(&OPEN_TAIL_NS),
+        v(&WALK_PRE_NS), v(&WALK_LOOP_NS), v(&WALK_TAIL_NS),
+        v(&WALK_COMP_N), v(&WALK_A_NS), v(&WALK_B_NS),
+        v(&WALK_C_NS), v(&WALK_D_NS), v(&WALK_MISSCOST_NS),
     );
 }
