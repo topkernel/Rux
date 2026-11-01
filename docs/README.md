@@ -112,10 +112,10 @@ docs/
 ├── architecture/          # Architecture design documents
 │   ├── design.md          # Design principles
 │   ├── structure.md       # Code structure (stats refreshed 2026-11-01)
-│   ├── design-divergences.md  # Registered internal design divergences (binding register)
+│   ├── design-divergences.md  # Divergence register D-1..D-18 (each with rationale/evidence/guard)
 │   ├── riscv64.md         # RISC-V implementation (status banner 2026-11-01)
 │   ├── aarch64.md         # aarch64 port map
-│   ├── boot.md            # riscv64 boot process (scoped 2026-11-01)
+│   ├── boot.md            # Boot: all three ports (rewritten 2026-11-01)
 │   ├── memory.md          # Memory management (+ updates-since section)
 │   ├── lock-ordering.md   # Lock hierarchy (binding INV-LOCK-*)
 │   ├── sched-period.md    # Scheduler period design
