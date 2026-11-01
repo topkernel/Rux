@@ -1,0 +1,117 @@
+name: Smoke
+
+# The per-commit gate: fast, deterministic, green when the tree builds
+# and the host-side verification passes. The heavyweight formal jobs
+# (Kani / Miri / SPIN) live in their own workflows on a nightly
+# schedule — they cannot fit a per-push budget and used to paint every
+# kernel commit red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            target: riscv64gc-unknown-none-elf
+            make: make build
+          - arch: x86_64
+            target: x86_64-unknown-none
+            make: make build-x86
+          - arch: aarch64
+            target: aarch64-unknown-none
+            make: make build PLATFORM=aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
+          rustup target add ${{ matrix.target }}
+
+      - name: Build the kernel
+        run: ${{ matrix.make }}
+
+      - name: Upload kernel image
+        if: matrix.arch == 'riscv64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-riscv64
+          path: target/riscv64gc-unknown-none-elf/debug/rux
+          retention-days: 5
+
+  verify:
+    name: Host verification (sync + proptests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup default $(cat rust-toolchain.toml 2>/dev/null | grep channel | cut -d'"' -f2 || echo stable)
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: Mirror sync check
+        run: python3 scripts/verify_sync_check.py
+
+      - name: Proptest suite
+        run: |
+          cd kernel/verify
+          cargo test --target x86_64-unknown-linux-gnu
+
+  guest-tests:
+    name: In-kernel test suite (riscv64, QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain + QEMU
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
+          rustup target add riscv64gc-unknown-none-elf riscv64gc-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-riscv64 gcc-riscv64-linux-gnu musl-tools e2fsprogs
+
+      - name: Restore userland cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/riscv64-rux-linux-musl
+            userspace/target
+          key: userland-${{ runner.os }}-${{ hashFiles('toolchain/build-musl.sh', 'toolchain/musl-1.2.5.tar.gz') }}
+          restore-keys: userland-${{ runner.os }}-
+
+      - name: Build kernel
+        run: make build
+
+      - name: Build userland + rootfs (also restores the packed C probes)
+        run: |
+          ./scripts/extract-probes.sh
+          make sdk
+          make user
+          make rootfs
+
+      - name: Run the in-kernel test suite
+        run: make test
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-test-log
+          path: /tmp/rux-maketest.*.log
+          if-no-files-found: ignore
