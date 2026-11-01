@@ -34,7 +34,6 @@ use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
-use crate::sync::Mutex;
 
 use crate::errno;
 use crate::fs::file::{File, FileFlags, FileOps, get_file_fd, close_file_fd, get_file_fd_install};
@@ -89,19 +88,20 @@ pub const NAME_MAX: usize = 255;
 /// rename of an ancestor between hash and use. ext4 additionally takes
 /// EXT4_BIG_LOCK inside its ops, so mutual exclusion composes.
 ///
-/// This MUST be a sleeping lock (semaphore Mutex), not a Spinlock: the
-/// critical section spans the ext4_*_wrapper callbacks, and those take
-/// EXT4_BIG_LOCK whose lock_fair() sleeps under contention. With a
-/// Spinlock guard pinning preempt_count != 0 across that window, the
-/// sleeper's schedule() is refused by __schedule's preempt discipline and
-/// lock_fair degenerates into a hot retry loop whose dequeue_if_enqueued
-/// hammers the GRQ lock hard enough to starve the other CPU's timer tick
-/// (which needs GRQ with IRQs disabled) — the sendmsg02 early-exec
+/// This MUST be a sleeping lock, not a Spinlock: the critical section
+/// spans the ext4_*_wrapper callbacks, and those take EXT4_BIG_LOCK
+/// whose slowpath parks in block I/O under contention. With a Spinlock
+/// guard pinning preempt_count != 0 across that window, the sleeper's
+/// schedule() is refused by __schedule's preempt discipline and the
+/// acquire degenerates into a hot retry loop whose dequeue_if_enqueued
+/// hammers the GRQ lock hard enough to starve the other CPU's timer
+/// tick (which needs GRQ with IRQs disabled) — the sendmsg02 early-exec
 /// machine-wide stall-quiet wedge (2/2 on main c517099, gdb frozen-state:
-/// pid sendmsg02 preempt=0x2 inside lock_fair's retry, CPU1 spinning on GRQ
-/// in scheduler_tick). All users are syscall-context directory mutators, so
-/// sleeping is legal everywhere this lock is taken.
-pub static VFS_MUTATION_LOCK: Mutex = Mutex::new();
+/// pid sendmsg02 preempt=0x2 inside the contended acquire, CPU1 spinning
+/// on GRQ in scheduler_tick). All users are syscall-context directory
+/// mutators, so sleeping is legal everywhere this lock is taken.
+pub static VFS_MUTATION_LOCK: crate::sync::SleepMutex =
+    crate::sync::SleepMutex::new("VFS-MUTATION", false);
 
 
 impl VfsPath {

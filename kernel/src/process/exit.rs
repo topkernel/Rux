@@ -807,6 +807,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         // survives the kill.
         crate::fs::ext4::EXT4_BIG_LOCK.release_if_owner(current_pid);
 
+        // ===== VFS mutation lock force-release =====
+        // Same leak family: do_exit does not unwind Rust guards, so a
+        // task killed inside a lookup+mutate window would strand
+        // VFS_MUTATION_LOCK (a SleepMutex since the sync-realign lane)
+        // on a dead owner forever.
+        crate::fs::vfs::VFS_MUTATION_LOCK.release_if_owner(current_pid);
+
         // ===== Ptrace tracer death: auto-detach tracees =====
         // Linux forgets the tracing relationship when the tracer exits
         // (ptrace_exit → every tracee is detached and resumed). Without
