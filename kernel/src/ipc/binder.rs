@@ -3529,6 +3529,21 @@ pub fn txn_hang_audit() {
                 &h.outstanding
             }
         );
+        // lb59 (eighth successor): the 30 s CreateNewUser handler parked
+        // in a PRIVATE futex retry loop (sys=202, a1=0x80, stack uaddr
+        // changing every ~5 s — the waited-on producer lives in another
+        // thread of the same process). When any txn's exec crosses 20 s,
+        // dump EVERY task's state once: the parked locations of the
+        // server's sibling threads name the leaf the handler waits for
+        // (the FFRT/IPC worker-exhaustion shape shows as all workers
+        // parked as CLIENTS).
+        if h.exec_ms >= 20_000 {
+            static HANG_DUMPED: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !HANG_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+            }
+        }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
         // entry was written by this tid's own entry path (open family:
