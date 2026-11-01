@@ -34,7 +34,8 @@ for i in $(seq 0 $((MAX-1))); do
     EL=$(( $(date +%s) - T0 ))
     kill -0 "$DRV" 2>/dev/null || { VERDICT=died; break; }
     if grep -aq 'bundle size' "$SER" 2>/dev/null; then VERDICT=GOLDEN; break; fi
-    if grep -aqE 'appspawn start com.ohos.launcher|AppSpawn start com.ohos.launcher|bootevent.launcher.ready' "$SER" 2>/dev/null; then VERDICT=SUCCESS-spawn; break; fi
+    if grep -aqE 'appspawn start com.ohos.launcher|AppSpawn start com.ohos.launcher' "$SER" 2>/dev/null; then VERDICT=SUCCESS-spawn; break; fi
+    if grep -aq 'Handle set param.*launcher.ready' "$SER" 2>/dev/null; then VERDICT=SUCCESS-ready; break; fi
     SA=$(grep -a -c 'insert SA:' "$SER" 2>/dev/null)
     if [ "$PHASE" = early ]; then
       if [ "$SA" -gt 5 ]; then PHASE=flowing; echo "[gold] $TAG SA flowing (${SA} @${EL}s)" >> run/roll-logs/goldroll.log
