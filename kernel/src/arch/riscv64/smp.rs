@@ -216,6 +216,10 @@ pub fn start_secondaries() {
     }
 
     let cpu_count = num_started_cpus();
+    // Post-bring-up affinity refresh: every task created before this point
+    // (boot init + early kthreads) gets its default mask widened to the
+    // online set (see Task::refresh_default_affinity_to_online).
+    crate::process::task::Task::refresh_default_affinity_to_online();
     if failed_harts == 0 {
         crate::print_status(
             "smp",

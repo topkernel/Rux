@@ -4249,7 +4249,13 @@ fn xattr_read_name(ptr: u64) -> Result<alloc::vec::Vec<u8>, i64> {
     let mut buf = [0u8; NAME_MAX + 1];
     let name = match strncpy_from_user(ptr as *const u8, NAME_MAX + 1, &mut buf) {
         Ok(s) => s,
-        Err(e) => return Err(-(e as i64)),
+        // strncpy_from_user already returns a NEGATIVE errno (Err(-EFAULT)):
+        // negating it here handed +14 back to the syscall layer, which
+        // returned +14 to userspace — setxattr/fsetxattr/fremovexattr with a
+        // bad NAME pointer came back as a positive return with errno left at
+        // 0 (LTP setxattr01/fsetxattr01 "should fail with EFAULT: SUCCESS",
+        // fremovexattr02 "returned 14").
+        Err(e) => return Err(e),
     };
     Ok(alloc::vec::Vec::from(name))
 }
