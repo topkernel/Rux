@@ -1,6 +1,12 @@
 # OpenHarmony on Rux — Feasibility Analysis and Port Plan
 
-> **Status**: analysis complete, plan not yet started. This document is the
+> **Status (2026-11-01)**: the plan is far along in execution — the
+> x86_64 port, binder, ext4 and the boot chain carry the stock OH
+> image to its full ~135-service set with launcher bring-up under
+> active hunt (the image boots, the launcher chain is the remaining
+> wall). Phase close-outs live in docs/progress/; the executed spike
+> docs are archived under docs/archive/. Read the phases below as the
+> original plan, not the current status. This document is the
 > working plan for replacing the Linux kernel of the OpenHarmony x86_64_virt
 > emulator image with Rux. It was produced by auditing two trees:
 > `/home/william/workspace/oh-robot` (OpenHarmony source + built images +

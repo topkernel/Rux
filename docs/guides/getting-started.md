@@ -248,7 +248,13 @@ mmu             : sv39
 make test
 ```
 
-Test module categories (60 test files, 901 PASS + 94 SKIP at last report):
+All assertions run in-guest under QEMU (the kernel crate cannot host
+host-side `#[cfg(test)]`). Standing: **1267/1267 riscv64, 1263/1263
+x86_64** (2026-11-01; see [docs/test/](../test/README.md) for every
+test report — LTP, lmbench, Geekbench, stress, integration, formal
+verification).
+
+Test module categories (73 test files):
 
 **Memory Tests**
 - heap_allocator, page_allocator, buffer_state
@@ -439,4 +445,4 @@ If you encounter "Load access fault" or "Store access fault":
 
 ---
 
-Last updated: 2026-09-20
+Last updated: 2026-11-01

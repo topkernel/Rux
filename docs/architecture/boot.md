@@ -1,4 +1,12 @@
-# Rux Kernel Boot Process
+# Rux Kernel Boot Process (riscv64)
+
+> **Scope note (2026-11-01):** this is the riscv64 boot path as of the
+> April sweep — the OpenSBI → stvec → init flow it describes is still
+> the shape of the primary port. The x86_64 boot (multiboot → bzImage
+> protocol, the PML4 bootstrap tables and their teardown) and the
+> aarch64 boot (DTB + virt) are documented in
+> [aarch64.md](aarch64.md) and in the arch sources; this document has
+> not tracked them.
 
 This document describes the complete boot process of the Rux kernel from OpenSBI to userspace programs.
 

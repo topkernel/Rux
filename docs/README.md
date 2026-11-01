@@ -95,7 +95,7 @@ See [CLAUDE.md](../CLAUDE.md) for details
 1. Read [Roadmap](progress/roadmap.md) to understand pending tasks
 2. Check [Code Review Records](archive/code-review.md) to avoid known issues
 3. Read the repo-root AGENTS.md for contribution discipline
-4. Check [Testing Guide](guides/testing.md) to learn testing methods
+4. Check the [Test Reports](test/README.md) to learn the testing landscape
 
 ### If You Want to Deeply Understand Architecture
 1. Read [RISC-V Architecture Documentation](architecture/riscv64.md)
@@ -111,29 +111,39 @@ docs/
 ├── README.md              # This file
 ├── architecture/          # Architecture design documents
 │   ├── design.md          # Design principles
-│   ├── structure.md       # Code structure
-│   ├── riscv64.md         # RISC-V architecture
-│   ├── boot.md            # Boot process
-│   ├── memory.md          # Memory management
-│   ├── lock-ordering.md  # Kernel lock ordering (binding INV-LOCK-*)
-│   └── lock-ordering.md   # Lock hierarchy documentation
+│   ├── structure.md       # Code structure (stats refreshed 2026-11-01)
+│   ├── design-divergences.md  # Registered internal design divergences (binding register)
+│   ├── riscv64.md         # RISC-V implementation (status banner 2026-11-01)
+│   ├── aarch64.md         # aarch64 port map
+│   ├── boot.md            # riscv64 boot process (scoped 2026-11-01)
+│   ├── memory.md          # Memory management (+ updates-since section)
+│   ├── lock-ordering.md   # Lock hierarchy (binding INV-LOCK-*)
+│   ├── sched-period.md    # Scheduler period design
+│   └── framekernel-layers.md / rust-design-headroom.md
+├── test/                  # THE test-report home (every report + its rig)
+│   ├── README.md          # Index + report conventions
+│   ├── unit-test-report.md / integration-test-report.md
+│   ├── ltp-report.md / ltp-tracking.md
+│   ├── lmbench-report.md / geekbench-report.md
+│   ├── stress-fleet.md / test-coverage.md
+│   └── formal-verification-report.md
 ├── guides/                # Development guides
-│   ├── getting-started.md # Getting started
+│   ├── getting-started.md # Getting started (refreshed 2026-11-01)
 │   ├── configuration.md   # Configuration system
-│   ├── development.md     # Development workflow
-│   └── testing.md         # Testing guide
+│   ├── debugging.md       # Debugging + the dfx= switch table
+│   └── ubuntu-image.md    # Ubuntu test image build
 ├── progress/              # Project progress
-│   ├── roadmap.md         # Development roadmap
+│   ├── roadmap.md         # Development roadmap (kept per milestone)
 │   ├── quickref.md        # Quick reference
 │   └── changelog.md       # Changelog
-├── development/           # Development records
-│   ├── formal-verification.md  # Formal verification design
-│   ├── compaction-design.md    # Memory compaction design
-│   └── fork-exec-debug-report.md  # Fork+Exec debug report
-└── archive/               # Historical document archives
-    ├── README.md          # Archive index
-    ├── code-review.md     # Code review records
-    └── ...                # Other historical documents
+├── development/           # Active engineering records
+│   ├── review-coverage.md # Line-by-line review coverage map (generated)
+│   ├── perf-gate-baseline.md / perf-report.md / perf-audit.md
+│   ├── openharmony-port-plan.md (status header 2026-11-01) / dfx-align-plan.md
+│   ├── f4-ext4-route-map.md / wildwrite-hunt.md (active hunts)
+│   └── rust-kernel-best-practices.md / rust-kernel-survey.md / security-posture.md / tcb-ledger.md
+└── archive/               # Historical documents (60+ files, April-era reports,
+    └── ...                # closed hunts, superseded plans)
 ```
 
 ## 🔍 Search Tips
