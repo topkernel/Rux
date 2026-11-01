@@ -541,10 +541,15 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 pub fn sys_syslog(args: [u64; 6]) -> i64 {
     let action = args[0] as i32;
     let bufp = args[1] as *mut u8;
-    // syslog: a negative `len` is EINVAL (LTP syslog12). Without the
-    // signed check, args[2] cast to usize wraps negative to a huge
-    // positive and access_ok(bufp, huge) returns false → EFAULT.
-    let len_signed = args[2] as i64;
+    // syslog(2) declares `int len`: truncate to 32 bits and sign-extend.
+    // A C caller passing -1 through varargs leaves the register's upper
+    // 32 bits undefined (typically zeroed), so the raw u64 reads as
+    // 0x00000000FFFFFFFF — positive. Without the int-width read the
+    // negative-length EINVAL below never fires and read_all happily
+    // copies ring bytes past the caller's buffer (LTP r21 syslog12:
+    // "negative length" returned 8836/SUCCESS, then the smashed test
+    // SIGSEGVd).
+    let len_signed = args[2] as u32 as i32 as i64;
     if len_signed < 0 {
         return -(crate::syscall::errno::EINVAL as i64);
     }
@@ -591,13 +596,13 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
             0
         }
 
-        // Set console log level
+        // Set console log level (`int level`: <0 and >8 are EINVAL)
         8 => {
-            let new_level = args[2] as u8;
-            if new_level > loglevel::KERN_DEBUG {
+            let new_level = args[2] as u32 as i32;
+            if !(0..=loglevel::KERN_DEBUG as i32).contains(&new_level) {
                 return -(crate::syscall::errno::EINVAL as i64);
             }
-            CONSOLE_LOGLEVEL.store(new_level, Ordering::Relaxed);
+            CONSOLE_LOGLEVEL.store(new_level as u8, Ordering::Relaxed);
             0
         }
 
