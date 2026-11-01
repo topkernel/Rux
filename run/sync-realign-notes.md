@@ -94,21 +94,35 @@ recursion depth/outermost release, stranger release inert). 6 tests,
 1110 total green. scripts/verify_sync_check.py mappings unaffected
 (compares only RawSpinlock try_lock/unlock/is_locked, unchanged).
 
-## Gates
+## Gates (final numbers)
 
-- Dual-arch clean-config builds rc=0 (run/sr-build-rv.log, run/sr-build-x86.log).
-- make test riscv64: 1278 passed / 0 failed (run/sr-maketest-rv.log path
-  used /tmp wrapper log; VW-WEDGE lines after "All tests passed! Halting"
-  are post-halt idle chatter).
+- Dual-arch clean-config builds rc=0 both (run/sr-build-rv.log,
+  run/sr-build-x86.log); release-opt x86 kernel built for the stress
+  rigs (build-release-opt, LTO).
+- make test riscv64: 1278 passed / 0 failed (the VW-WEDGE lines after
+  "All tests passed! Halting" are post-halt idle chatter, not a wedge).
 - make test x86_64: ALL TESTS PASSED (run/sr-maketest-x86.log).
-- make verify: green.
-- Contended-I/O wedge stress: run/sr-wedge.py — x86 release kernel
-  (build-release-opt, LTO), q35 KVM -smp 2, private copy of the x86
-  lmbench image, 3 parallel churn loops (dd+cp+rm, variable dd+rm,
-  creat/unlink/mkdir/rmdir by name — the inode02/ftest/creat09 shape).
-  Verdicts in runs/srwedge-*/verdict.txt.
-- 2M semop ping-pong: run/sr-sem.sh (fix-lostpark probe image + semprobe
-  init, q35 KVM -smp 2, release kernel).
+- make verify: green; the mirror crate is 1110 tests incl. the 6 new
+  SleepMutex protocol tests.
+- Contended-I/O wedge stress (run/sr-wedge.py, runs/srwedge-kvm1):
+  6 min, x86 release kernel, q35 KVM -smp 2, private lmbench-x86 image,
+  3 parallel churn loops (dd+cp+rm; variable dd+rm; creat/unlink/mkdir/
+  rmdir by name — the inode02/ftest/creat09 shape). Verdict CLEAN:
+  zero DEADLOCK/KERNPANIC/panic markers, zero stall prints, no serial
+  silence; progress at kill time SEQ=45400 RAND=46300 NAME=34100
+  iterations. (PREEMPT-HEAL lines = the known phantom-pc informational
+  family owned by the preempt-hunt lane, unchanged by this work.)
+- 2M semop ping-pong (run/sr-sem.sh): PROBE done 18.86 s / 2M rounds =
+  9.43 us/round, child st=0x0 — same class as the fix-lostpark post-fix
+  baseline (19-21 s, 9.2-10.4 us).
+- Semop soak (run/sr-sem-soak.sh): 25 cycles, 25 OK / 0 bad, all
+  9.4-11.3 us/round, every child exit state clean.
+- LTP wedge-family spot check (test/ltpscan/run1.sh, private image,
+  riscv64 TCG): ftest02 PASS, ftest04 PASS (was FAIL at the r21
+  baseline scan), ftest06 PASS, creat09 PASS, sendmsg02 PASS (was
+  POISON at baseline), inode02 = known baseline FAIL (rc=1 at r21);
+  my isolated rerun hit the 650 s TCG timeout without wedging — serial
+  stayed live, SIGTERM handled. No DEADLOCK prints anywhere.
 
 ## What is NOT done here
 
