@@ -1,0 +1,43 @@
+perf-gate: tiers=[2] tag=pa115debt2 kernel=run/pa115-main-afc41b8b-debug-bzImage secs=780
+== Tier 2: pbench medians ==
+PASS  pbench run                         DONE (/home/william/rux-agents/perf-audit/work/pbench-pa115debt2-pb-serial.log) band: rc=0
+PASS pbench p1_clock med=4.188 anchor 5.124 +-20%
+FAIL pbench p1_null med=3.477 anchor 4.853 +-20%
+PASS pbench p2_ctxsw med=12.494 anchor 12.022 +-20%
+INFO pbench p2f_futex_rt med=131.747  no anchor (baseline cell PENDING)
+INFO pbench p2f_futex_w2r med=131.867  no anchor (baseline cell PENDING)
+INFO pbench p2g_futex_khog_rt med=132.258  no anchor (baseline cell PENDING)
+INFO pbench p2g_futex_khog_w2r med=131.958  no anchor (baseline cell PENDING)
+INFO pbench p2h_futex_uhog_rt med=4.359  no anchor (baseline cell PENDING)
+INFO pbench p2h_futex_uhog_w2r med=6.152  no anchor (baseline cell PENDING)
+PASS pbench p3a_fault_anon med=0.090 anchor 0.080 +-20%
+PASS pbench p3b_fault_cow med=22.494 anchor 24.817 +-20%
+FAIL pbench p3c_fault_file med=0.100 anchor 0.070 +-20%
+FAIL pbench p4_fork_exec med=46442.093 anchor 14049.013 +-20%
+FAIL pbench p4_fork_exit med=13195.702 anchor 9542.662 +-20%
+PASS pbench p5a_pipe med=18.306 anchor 19.673 +-20%
+FAIL pbench p5b_dgram_recv_peek med=40.850 anchor 318.308 +-20%
+FAIL pbench p5b_dgram_send med=23.105 anchor 318.579 +-20%
+FAIL pbench p5c2_stream_send med=24.869 anchor 276.526 +-20%
+FAIL pbench p5c3_stream_wrecv med=24.969 anchor 32.698 +-20%
+FAIL pbench p5c_stream_write med=26.832 anchor 277.619 +-20%
+PASS pbench p5d_rt_read med=41.200 anchor 48.471 +-20%
+PASS pbench p5d_rt_recv med=45.950 anchor 56.322 +-20%
+PASS pbench p5e_child_spin med=1761.688 anchor 1595.121 +-20%
+FAIL pbench p5e_stream_send med=23.145 anchor 30.673 +-20%
+FAIL pbench p5f_stream_dwait med=25.339 anchor 277.388 +-20%
+FAIL pbench p6_append med=77.411 anchor 657.222 +-20%
+PASS pbench p6_getdents med=5638.213 anchor 5438.826 +-20%
+FAIL pbench p6_mkdrmdir med=2757.261 anchor 22814.349 +-20%
+FAIL pbench p6_openclose med=156.315 anchor 512.863 +-20%
+FAIL pbench p6_read_cached med=203.748 anchor 546.804 +-20%
+FAIL pbench p6_stat med=71.089 anchor 200.902 +-20%
+FAIL pbench p6_unlink med=807.957 anchor 1141.418 +-20%
+PASS pbench p6_write_fsync med=14186.365 anchor 13919.945 +-20%
+FAIL pbench p7_sleep1ms med=54.409 anchor 1795.376 +-20%
+INFO pbench note: anchor is the pb1 SMOKE column (one TCG boot) — treat FAIL as a lead, rerun before calling a regression
+
+perf-gate done: see verdicts above (PASS/FAIL/SKIP/INFO per metric).
+FAIL does not auto-block: apply the rerun-once rule, then weigh against
+docs/development/perf-gate-baseline.md.
+gate rc=0

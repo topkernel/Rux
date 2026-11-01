@@ -62,19 +62,25 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- baseline constants (docs/development/perf-gate-baseline.md) ----
-VOLUME_BASE="${VOLUME_BASE:-107500000}"     # pa50main quiet re-bank (load1=0/qemus=1), +-10%
+VOLUME_BASE="${VOLUME_BASE:-126000000}"     # pa115debt1 re-bank (main@afc41b8b,
+                                            # load1 6-11): 6394e8ee deepens boots
+                                            # ~36%; enforce load-gated (+-10%)
 TERM_BASE="${TERM_BASE:-8}"; TERM_BAND="${TERM_BAND:-2}"
 REFUSED_BASE="${REFUSED_BASE:-32}"; REFUSED_BAND="${REFUSED_BAND:-4}"
 TICK_MIN="${TICK_MIN:-99.5}"                # ticks/s/CPU sustained
 CGAVG_US_MIN="${CGAVG_US_MIN:-3}"           # clock_gettime avg band
 CGAVG_US_MAX="${CGAVG_US_MAX:-4.8}"         # 3-4us +-20%
-NANOAVG_MS_MAX="${NANOAVG_MS_MAX:-244}"     # nanosleep 203ms (pa50main) +-20%
-GRQ_AVG_NS_MIN="${GRQ_AVG_NS_MIN:-4080}"    # GRQ hold 5.1-6.1us +-20%
-GRQ_AVG_NS_MAX="${GRQ_AVG_NS_MAX:-7320}"
+NANOAVG_MS_MAX="${NANOAVG_MS_MAX:-244}"     # 203ms (pa50main) +-20%; family
+                                            # 158-222ms through 2026-11-01
+GRQ_AVG_NS_MIN="${GRQ_AVG_NS_MIN:-1200}"    # floor re-banked 2026-11-01
+GRQ_AVG_NS_MAX="${GRQ_AVG_NS_MAX:-7320}"    # (pa115debt1 2786ns, debt3 1215ns)
 SMALL_ALLOC_SHARE_MAX="${SMALL_ALLOC_SHARE_MAX:-10}"  # % of machine
-KSHARE_MIN="${KSHARE_MIN:-83}"              # probe-less proxy band
-KSHARE_MAX="${KSHARE_MAX:-86}"
-IF0_BASE="${IF0_BASE:-25.7}"; IF0_BAND="${IF0_BAND:-2}"  # Tier 3
+KSHARE_MIN="${KSHARE_MIN:-83}"              # RETIRED proxy: tick-counter
+KSHARE_MAX="${KSHARE_MAX:-86}"              # semantics changed on this arc —
+                                            # the if0 probe (now on main) is
+                                            # the official Tier-3 measure
+IF0_BASE="${IF0_BASE:-20.4}"; IF0_BAND="${IF0_BAND:-3}"  # Tier 3 re-bank
+                                            # 2026-11-01 (was 25.7 +-2)
 
 PASS=0; FAIL=0; SKIP=0
 verdict() { # verdict PASS|FAIL|SKIP|INFO <metric> <value> <band> [note]

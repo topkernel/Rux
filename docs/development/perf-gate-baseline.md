@@ -31,9 +31,9 @@ main lands, do not cherry-pick rows.
 | WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s | no 1001ms-grid class |
 | tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | ~107.5M (pa50main, 2026-10-25) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — re-banked 2026-10-25 from the pa50main quiet-window run (PURE main ddb3ed01, x86_64 debug, load1=0/qemus=1 at launch, all other enforced rows PASS); the old 136M seed was the pa38 boot at host load ~5.5 with the app phase running 81 ABC restarts (a deeper workload mix) — superseded. Pace-coupling stands: pa41gate (leg 32) proved a flat −35% pace deficit under 14–19 foreign QEMUs (77.1M, per-op costs held); pa46main at load1 11–17 read 93.2M. Enforce only in a load-gated window (load1 ≤9, qemus ≤8 — run/pa50-rebank.sh gate) |
+| total syscall volume (780s boot) | 126.0M (pa115debt1, 2026-11-01, main@afc41b8b) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — re-banked 2026-11-01: 6394e8ee un-quantizes ms-class sleeps and the boot goes ~36% deeper in the same wall (pa113 92.4M → 126.0M, same-depth pace corroborated by debt3 8.0M@60s→18.1M@120s). Enforce only in a load-gated window (load1 ≤9, qemus ≤8); the superseded 107.5M/85–107M families and their load-coupling history are documented in the refresh sections below |
 | clock_gettime avg | 3–4 µs | ±20% or better |
-| nanosleep avg | 203 ms (pa50main, n=26,945) | ≤244 ms (203 ms ±20%; enforced 2026-10-25 — observed cross-run range 174–222 ms across pa41gate/pa46main/pa46f4r2/pa27, workload-mix dependent but the mix is stable in this image class; the old ~221/333 ms seeds predate the tick-fix-era steady state) |
+| nanosleep avg | 203 ms (pa50main, n=26,945); family 158–222 ms through 2026-11-01 (pa115debt1 read 158.4 ms, n=29.5k) | ≤244 ms (one-sided; 203 ms +20% top) |
 
 ## Tier 2 — pbench P1-P7 medians (main-class kernel, usbless image)
 
@@ -203,16 +203,18 @@ rc=0, zero panics.
 | alloc/reclaim | small_alloc global class-lock sections/boot | 19.7M (pa20, post-magazine) | ≤25M |
 | alloc/reclaim | small_alloc REST wall (share of machine) | 133.2s ≈ 9.2% | ≤10% |
 | alloc/reclaim | reclaim slowpath on standard boots | drct=0 class | no emergence |
-| scheduling | GRQ average hold | 3.4–5.4 µs window-spanned on main@82059759 (pa112tok quiet-window 3451 ns, pa113tok loadier-window 5367 ns; older family 6.3–7.0 µs at load1 9–15) | 4080–7320 ns gate band (env GRQ_AVG_NS_MIN/MAX); quiet-window floor 3.4 µs is improvement-side, band re-bank pending a pa50main-class (load1≈0) window |
+| scheduling | GRQ average hold | 2786 ns (pa115debt1, main@afc41b8b; pre-wedge debt3 read 1215 ns same family; was 3451–5367 ns on 82059759) | 1200–7320 ns (env GRQ_AVG_NS_MIN/MAX; floor re-banked 2026-11-01, improvement side) |
 | scheduling | context-switch half-rt (pbench P2) | pb1 column | ±20% |
+| scheduling | fork/exit + fork/exec+reap (pbench P4, debug class) | **REGRESSION OPEN on main@afc41b8b**: fork_exit 13.2 ms / fork_exec 46.4–46.6 ms (2 boards, 0.5% apart) vs the tight 9.4–10.0 / 13.9–14.6 ms family on 82059759 | recovery target = the 82059759 family; root-cause lead: wake-behind-incumbent tick quantization in the reap handoffs (p2f battery demonstrates the class); attribution tool: forkprof (95d3d5a5) |
+| scheduling | futex wake→run behind an incumbent (p2f battery, KVM strong) | quiet 7.5 µs / khog 9.99 ms / uhog 10.0 ms (pa115p2f, kpreempt off; kpreempt=1 A/B reads the same 10 ms) | quiet ±20%; hog regimes are the known tick-quantized class — the canary row for the 977adb51 batch-peer gate + kpreempt re-land |
 | scheduling | census TERM/REFUSED | 8 / 32 | 8±2 / 32±4 |
-| filesystem | stat / mkdir+rmdir / unlink / write+fsync medians (pbench P6) | pb1 column | ±20% or better |
+| filesystem | stat / mkdir+rmdir / unlink / write+fsync medians (pbench P6) | 2026-11-01 debug-class families: stat 71 µs, openclose 156 µs, read_cached 204 µs, append 77 µs, mkdrmdir 2.76 ms, unlink 808 µs, write_fsync 14.2 ms, getdents 5.6 ms | ±20% of the 2026-11-01 column or better |
 | filesystem | fsw sync-write classes | first-phase (t<90s) only | no new class |
 | filesystem | buffer-cache hit rate | 99.1% | ≥ baseline |
-| interrupts | IF=0 share (official KVM) | 25.7% | ±2pp |
-| interrupts | max closed cli segments | 3–7 ms | ≤10 ms |
-| interrupts | SOFTIRQ share of IF=0 | 3.1% | ±2pp |
-| IPC | pipe roundtrip (pbench P5) | pb1 column | ±20% |
+| interrupts | IF=0 share (official KVM, if0 v3 probe on main) | 20.4% (pa115debt1; was 25.1–27.6% on 82059759) | 20.4 ±3pp — tighten at the next clean pair |
+| interrupts | max closed cli segments | REST zone 6–9 ms (pa115debt1; the 594–599 ms one-shots on 82059759 are gone); hardirq-frame one-shot 210 ms = the starvation-bound inline dispatch (watch row) | REST ≤10 ms |
+| interrupts | SOFTIRQ share of IF=0 | 4.1% avg (c0 2.7 / c1 5.5) | 3.1 ±2pp (in band, top half) |
+| IPC | pipe roundtrip (pbench P5) | 2026-11-01 debug-class families: p5a_pipe 18.3 µs, p5b_dgram 23–41 µs, p5c/f stream 24–27 µs, p5c3 25 µs, p5d 41–46 µs | ±20% of the 2026-11-01 column or better |
 | IPC | unix writev/truesize avg | 24 µs class | ±20% |
 | binder | SLOW-TXN classes | queue <= 10 ms everywhere; exec-side bands keyed by code: {1,64} 4.5-9 s, {7}->Init 13-140 s | leg-35 correction: the old "15/30/89 s family" was ONE code-7->Init exec class stretched by host load (pa47smoke light-load: tight 15.0-15.1 s cluster; load1 13-17 boots: same class 18.8-77.1 s, queue still <=10 ms). leg-36 correction: the band top 95 s was fit to loaded boots only and FAILED the accepted quiet baseline itself (pa50main, load1=0: one code-7 row at 133.6 s exec, queue 0 ms) — top widened to 140 s. Operative FAIL: queue >= 50 ms (a queueing class — what a broken reclaim would introduce), a total outside the code-keyed bands, or an unknown code (leg-36 open: ONE code-14 row, 40.7 s exec queue 0 ms, branch boot pa56branch at host load 30 — no prior log has code 14; adjudicate against the pending a5af759c pure-main census boot). Machine check: `run/pa46-slowtxn.sh <serial-log>` (validates PASS on pa40/pa41gate/pa47smoke/pa46main/pa46f4r2/pa50main, spanning the de41d5ab reclaim) |
 
@@ -222,9 +224,17 @@ DFX tool", not "skip the check".
 
 ## Tier 3 — IF=0 share (allocator / IRQ-path changes)
 
-Official post-tick-fix KVM flagship (pa27): IF=0 = 25.7% of machine, heal
-miss = 0, max closed cli segments 3–7 ms. Interim proxy until the EFLAGS
-probe patch lands on main: syscost tick-mode kernel share 83–86%.
+The EFLAGS-pair probe (syscost if0 v3, rest/hard/soft/uart zones +
+per-site REST histogram) is ON main since this arc — Tier-3 is now an
+official measurement, not a proxy. Current accepted read (pa115debt1,
+main@afc41b8b, KVM q35 smp2): IF=0 = 20.4% of machine (c0 20.8 / c1
+20.0), heal miss = 0, REST-zone max closed cli segments 6–9 ms (≤10 ms
+band; the 594–599 ms one-shot class on 82059759 is gone), SOFTIRQ
+share of IF=0 4.1% avg. Historical anchor: pa27 read 25.7% pre
+phantom-bits. The old interim proxy (tick-mode kernel share 83–86%)
+is retired, and the tick-counter semantics changed on this arc
+(hooks fire beyond jiffies) — that proxy row must not be re-derived
+from this arc's counters without fixing the accounting first.
 
 ## Notes
 
@@ -253,3 +263,127 @@ documented load-coupled caveat applies). Verdict split:
   the sched-domain verdict (guarded: sync/ spinlock change) rests on
   that rerun plus the lane's own OH-image numbers (wake-strands 233→31,
   SLOW-TXN median 5780→1970ms).
+
+## Whole-table refresh (2026-11-01, main@afc41b8b — the 2026-11-01 sched/sync/softirq debt cleared)
+
+Closes the Tier-2 debt of the 2026-11-01 merges (including the
+preempt-hunt rerun queued above): preempt-hunt's bounded spin
+(5f0537a8, then realigned on-tip by bd9c0881 spinlocks-never-sleep),
+the heal stack rounds 1-3 (d2381bf9/264c61b2/8387c00b), phantom-bits
+softirq dispatch gating + drain bounds + starvation bound
+(1854ec4d/bef10f42), kpreempt default OFF (28b1afca), plus the
+same-arc merges the board attributes mechanically: 6394e8ee (x86_64
+LAPIC one-shot re-arm — hres sleeps stop waiting for the 10 ms grid),
+977adb51 (idle-CPU dispatch + sleep-gated wakeup preemption,
+perf-ipc), and the sync-realign SleepMutex conversions
+(dd5f3731/a9825b45/ab397dfd).
+
+Vehicle: same rig as the 2026-10-31 re-bank (pa-boot 780 s KVM q35
+smp2/4G, syscost=1 dfx=wwcensus, tok109 lineage), kernel =
+main@afc41b8b x86_64 debug bzImage md5 6fe271cbf910ec667bf8f2136e0bee83
+(strong twin for the p2f rig: 974d519ef141e513e3a9223abd3d8939).
+Evidence: run/pa115debt1-gate.txt, run/perf-gate-pa115debt1-parse.txt,
+run/pa115debt1-window.log, run/pa115debt2-gate.txt,
+run/pa115p2f-boot.log, run/pa115p2fk-boot.log.
+
+### Tier-1 board (pa115debt1, load1 6.4–11.3, 3–5 foreign QEMUs, rc=0 at 780 s)
+
+| metric | pa113tok anchor (main@82059759) | pa115debt1 (main@afc41b8b) | verdict |
+|---|---|---|---|
+| TERM / REFUSED census | 8 / 32 | 8 / 36 (band top; debt3 read 30) | in band. The intermediate-tree sub-floor reads (preempt-hunt 17, preempt-heal 12) did not survive the later merges — the tip reads in-band; band 8±2 / 32±4 HOLDS, no re-bank |
+| WAKE-STRANDED | 23–31 organic, max 32–107 s | 5 organic (debt3: 12) | in band (fewer), no 1001 ms grid class |
+| tick rate per CPU | 99.58–100.00 | counter advances 124–182/s class on this arc — the tick-accounting hooks now fire beyond jiffies; row passes ≥99.5 trivially | PASS + accounting-semantics note (needs an owner pass; not a perf change) |
+| panics / new OOM | 0 / 0 | 0 / 0 | clean |
+| syscall volume (t=720 s) | 92.4–97.5M (85–107M swing family) | 126.0M (+36% vs pa113) | **re-banked: 126M ±10% in a load-gated window.** Same-depth corroboration: pa115debt3 (same kernel, wedged later under load) paced 8.0M@60 s → 18.1M@120 s, the same ~10–11M/min regime debt1 ran from 24.8M@180 to 126.0M@720. Mechanism: 6394e8ee un-quantizes ms-class sleeps, userspace pacing loops run at true rate, the boot goes ~36% deeper in the same wall. Per-op avgs flat or better — throughput, not cost |
+| clock_gettime avg | 3 µs (n=38.8M) | 3 µs (n=54.0M) | same class, deeper n — the preempt-heal SKIP rows from the quiet rerun are now measured |
+| nanosleep avg | 188–198 ms | 158.4 ms (n=29.5k) | within the one-sided ≤244 ms band (improvement side); family note extends to 158 ms |
+| GRQ avg hold (sched.rs REST site) | 3451–5367 ns | 2786 ns (n=6.3M, tot 17.6 s; pa113 tot was 100.9 s at n=18.8M) | **floor re-banked: gate band 1200–7320 ns.** avg −48%, charged total −82% vs pa113. Single clean sample (the debt3 rerun wedged, see below); debt3's pre-wedge read 1215 ns is the same family |
+| small_alloc REST share | 0.9–1.1% | 0.4% (6.2 s); section count 6.0M vs 18.8M | improved, ≤10% band |
+| get_file REST site | file.rs:1032: 92.4M / 26.2 s / 283 ns | file.rs:1110: 124.8M / 34.8 s / 278 ns | avg flat, n +35% (deeper boot); the old 13.8 ms-avg file.rs:1077 outlier site left the top table |
+
+### Tier-3 / IRQ-domain rows (same boot; the if0 v3 probe is now ON main — official measurement, no proxy)
+
+| metric | old band | pa115debt1 | verdict |
+|---|---|---|---|
+| IF=0 share of machine | 25.7 ±2pp (pa27) | **20.4%** (c0 20.8 / c1 20.0); pa112 read 25.1%, pa113 27.6% — a real ~5–7 pp drop | **re-banked: 20.4 ±3pp** (single clean sample — tighten at the next clean pair). Mechanism: phantom-bits defers softirq dispatch out of irq_exit IF=0 windows into schedulable ksoftirqd; bounded drains |
+| SOFTIRQ share of IF=0 | 3.1 ±2pp | c0 2.7% / c1 5.5% (avg 4.1%) | in band |
+| max closed cli segments (REST zone) | 3–7 ms class, ≤10 ms | **6 ms (c0) / 9 ms (c1)** — pa112/pa113 carried 594–599 ms one-shots | back inside the band; the 594–599 ms one-shot class on 82059759 is gone (preempt-hunt bounded spin + heal stack + softirq bounds) |
+| hardirq-frame zone max | (not banded) | one-shot 210 ms (c1) | the bef10f42 20 ms starvation bound forces one inline dispatch whose bounded drain (64 packets/source) can still stretch the hardirq frame; bounded, one-shot, REST zone unaffected. Watch row, no band yet |
+| heal counters | (new instrument class) | 64.5k/52.1k heals, 605 ms total, miss=0 (pa113: 154k/132k) | heal volume −58%, zero model-vs-reality misses |
+
+### Tier-2 debug-class board (pa115debt2, q35 TCG thread=multi smp2/2G, DONE t=411 s rc=0, load1 9–11 / 3–5 foreign)
+
+Probe provenance: test/pbench.c row implementations are byte-identical
+to the pa114pb board's probe (the Nov 1 probe only ADDS the p2f battery
+and a riscv timer reader — verified by diff) — the shifts below are
+kernel behavior, not probe drift. The pa115debt4 rerun board (launched
+load1 8.5, tail under 18–22, DONE t=258 s rc=0) reproduces every
+family within 0.4–11% (p4 rows within 0.5%); its cells confirm the
+re-banks below are stable across windows. TCG context for the p2f
+battery: both debug boards read khog w2r 131–132 µs — the tick
+quantization is a KVM-rig behavior (TCG's cooperative scheduling
+preempts fine); the banked p2f row is the KVM-strong one per the
+x86_64-first platform priority.
+
+| cell | pa114pb (main@82059759) | pa115debt2 (main@afc41b8b) | delta | verdict |
+|---|---|---|---|---|
+| p1_null | 4.853 | 3.477 | −28% | improved (same-arc hot-path work, 4ce0cda5); re-bank family 3.5 µs |
+| p1_clock | 5.124 | 4.188 | −18% | in ±20% |
+| p2_ctxsw | 12.022 | 12.494 | +3.9% | **flat on the primary board — the scheduling-domain P2 row holds**; the debt4 rerun board read 15.150 (+21% vs debt2, +26% vs the 12.0–12.6 anchor family) — marginal-out sample under its load spike (board tail ran at load1 18–22); two-board family 12.5–15.2, WATCH row, not a regression call at these windows |
+| p5a_pipe | 19.673 | 18.306 | −6.9% | flat (blocker handoffs untouched by the wake gate, as designed) |
+| p5b_dgram_send / recv_peek | 318.6 / 318.3 | 23.1 / 40.9 | −93% / −87% | 977adb51 (author lane measured the same 321.8→23.8 class); **family re-bank: 23–41 µs** |
+| p5c_stream_write / c2_send / f_dwait | 276.5–277.6 | 24.9–26.8 | −90–91% | same; **family re-bank: 24–27 µs** |
+| p5c3_stream_wrecv | 32.7 | 25.0 | −24% | improved, in ±20% anyway |
+| p6_stat | 200.9 | 71.1 | −65% | **family re-bank: 71 µs** (SleepMutex ext4/VFS conversions + same-arc) |
+| p6_openclose | 512.9 | 156.3 | −70% | **family re-bank: 156 µs** |
+| p6_read_cached | 546.8 | 203.7 | −63% | **family re-bank: 204 µs** |
+| p6_getdents | 5438.8 | 5638.2 | +3.7% | flat, in ±20% |
+| p6_write_fsync | 13919.9 | 14186.4 | +1.9% | flat, in ±20% |
+| p6_append | 657.2 | 77.4 | −88% | **family re-bank: 77 µs** |
+| p6_mkdrmdir | 22814.3 | 2757.3 | −88% | **family re-bank: 2.76 ms** |
+| p6_unlink | 1141.4 | 808.0 | −29% | improved, in ±20% anyway |
+| p7_sleep1ms (1 ms-sleep overshoot) | 1795.4 | 54.4 | −97% | 6394e8ee hres sleeps off the 10 ms grid; **family re-bank: 54 µs** |
+| p4_fork_exit | 9.4–10.0 (tight 4-board family) | 13.2 | **+38%** | **CONFIRMED REGRESSION** — the pa115debt4 rerun board (launched at load1 8.5/4 qemus) read 13262 µs, within 0.5% of debt2's 13196: two boards agree vs a family that sat tight at 9.4–10.0 under load1 8–11. Root-cause lead: the p2f battery demonstrates a 10 ms wake-behind-incumbent quantization on this tip (below), and p4's reap handoffs are that shape; the perf-fork lane's forkprof (95d3d5a5) is the built attribution tool |
+| p4_fork_exec | 13.9–14.6 (tight 4-board family) | 46.4 | **+231%** | **CONFIRMED REGRESSION** — rerun read 46620 µs (+0.4% vs debt2). +32 ms ≈ 3 ticks + the fork-side cost; same lead. This row BLOCKS a clean Tier-2 verdict for the arc — every other P1–P7 row is improved or flat |
+
+### p2f futex wake→run battery (KVM, strong kernel 974d519e, kpreempt default OFF — the 28b1afca debt row)
+
+| row (med, n=20000) | perf-sched anchors (6ab42522/28b1afca) | pa115p2f (kpreempt off) | pa115p2fk (kpreempt=1 A/B) |
+|---|---|---|---|
+| p2f_hogcal (pread4m) | KVM ~160 µs | 146.7 µs | 156.4 µs |
+| p2f_futex_w2r (quiet) | 7.6 µs | **7.49 µs** | 7.61 µs |
+| p2g_futex_khog_w2r | hook-off 163 µs / hook-on 9.5 µs | **9.99 ms** (b2lt10ms 10673 / b3ge10ms 9087 / b0lt100us 239) | **10.0 ms** (b2 17353 / b3 2567) |
+| p2h_futex_uhog_w2r | — | **10.0 ms** (b2 19029 / b3 925) | 10.0 ms |
+
+**Re-banked rows**: quiet futex wake→run 7.5 µs (unchanged class);
+khog and uhog wake→run behind a running incumbent **~10 ms
+(tick-quantized), both hog regimes, both kpreempt settings** — the
+163 µs hook-off anchor is superseded. The A/B is the load-bearing
+finding: arming kpreempt=1 on this tip does NOT restore the 9.5 µs
+class, because 977adb51's sleep-gated wakeup preemption (batch-peer:
+wakee ran within one latency window ⇒ no need_resched set) never
+raises the flag the hook acts on, and a pure userspace incumbent has
+no syscall exit to preempt at. The 28b1afca re-land condition "(2)
+the p2f futex wake→run gains still hold" is therefore NOT satisfiable
+by the hook alone on this tip — re-landing needs the batch-peer gate
+and the hook addressed together. This is the honest cost side of the
+9–13x p5 IPC wins and the +36% boot depth banked above; the p2f rows
+are the canary for it.
+
+### pa115debt3 (rerun boot) — load-wedge repro, not a Tier-1 sample
+
+The rerun window collapsed (load1 9.4 → 25.7 while other lanes
+booted). The boot wedged at t≈120 s: PREEMPT-LEAK storm, pid 138
+current on cpu0 in `arch::x86_64::cpu::wfi` (rip ffffffff805ac6f5)
+with pc=0x10000 (softirq field) held for 63k+ jiffies unhealed;
+3715 leak prints vs 123 boot-wide heals; syscost dumps
+(softirq-scheduled) stopped at t=120 s while jiffies kept advancing —
+the softirq dispatch machinery stalled with the bit booked. The first
+leak of the boot was pid=1 pc=0x10000 rip=ffffffff80626573 =
+`fs::ext4::dir::Ext4DirEntry` (booked during ext4 dir ops, healed at
+2 s). The same kernel ran a clean 780 s rc=0 in the quieter window
+(pa115debt1), so the wedge is load-triggered/stochastic, not
+deterministic. Evidence: run/pa115debt3-wedge-excerpt.txt (full
+serial kept lane-local). Filed for the owning lane: the round-3
+per-field absence-stamp heal (8387c00b) did not clear a
+wfi-resident softirq-field phantom under vCPU starvation.
