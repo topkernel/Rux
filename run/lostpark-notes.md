@@ -153,3 +153,53 @@ brackets, likely the x86 softirq/IRQ exit path or a steal/abort in the
 pick machinery — slotw tags on the frozen slots were all 1=pick) is
 unresolved. Census shapes are in the LP-CENSUS lines of
 run/lp-lm-lat_sem2.log and run/lp-lm-lat_tcp-smp2.log.
+
+## Design review vs the reference kernel (2026-11-01, post-merge)
+
+User directive: check how the reference kernel solves this; do not
+freelance. Verdict on our own design:
+
+**The hazard class exists only because we invented a primitive the
+reference does not have.** Reference discipline, verified against
+kernel/locking/osq_lock.c + mutex.c semantics:
+
+1. **A spinlock NEVER sleeps.** The optimistic-spin queue (osq) is pure
+   atomics; on exhaustion it returns false and the CALLER falls to the
+   sleeping slowpath. Nothing inside a spinlock acquire touches task
+   state or calls schedule().
+2. **Every sleeping slowpath is queue-based and wake-safe.** mutex/
+   sem/rwsem park through a wait list: entry added, state set by the
+   waiter immediately before ITS OWN schedule(), unlock wakes the
+   queue. There is no bare yield-inside-acquire anywhere in the
+   reference — even the paravirt qspinlock slowpath (pv_wait) is
+   queue/kick-based.
+3. **The semop recheck runs under a spinlock** (ipc/sem.c sem_lock),
+   precisely so it can execute inside a prepared wait window. That is
+   only sound because rule 1 holds.
+
+Our divergence: `Spinlock::lock()` (preemptible bounded wait → yield
+via schedule()) and `lock_fair()` were invented for a real wedge
+(waiters spinning preempt-disabled while the holder blocks in virtio
+I/O — LTP r2 WEDGE family). The reference answer to that wedge is NOT
+a yielding spinlock; it is rule (0): **a lock that may be held across
+blocking I/O is a mutex, not a spinlock.** The wedge call sites
+(VFS_MUTATION_LOCK, EXT4_BIG_LOCK — 18 lock_fair sites in fs/) are
+mutex-shaped loads wearing a spinlock.
+
+Current state after the fix: yield_no_park() (force RUNNING across the
+handoff) restores safety in the reference sense for the yield point
+(a voluntary schedule must be at a RUNNING-owned point — the same rule
+that makes cond_resched() safe in the reference), and the empirical
+gates hold (25/25 ping-pong, soak 21/21). But it is a patch on a
+divergent primitive, not the reference design.
+
+**Realignment plan (next lane):**
+- R1. Introduce a sleeping lock for the coarse/I/O-holding sites
+  (wait-queue slowpath: entry + state-at-park-site + wake on unlock —
+  the mutex recipe). Convert the 18 lock_fair call sites.
+- R2. Return `Spinlock::lock()` to pure bounded spinning (no schedule()
+  anywhere in the acquire); the preemptible-yield branch is deleted
+  once R1 removes its users. Then rule 1 holds tree-wide and the
+  prepared-window hazard class is structurally impossible.
+- R3. The sem recheck path keeps taking SEM_IDS as a (now genuinely
+  non-sleeping) spinlock — reference rule 3 restored.
