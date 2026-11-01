@@ -41,8 +41,9 @@ run_case() {
         -drive file="$IMG",if=none,id=rootfs,format=raw,snapshot=on,file.locking=off \
         -device virtio-blk-pci,drive=rootfs >/dev/null 2>&1
 }
-has_result() {  # a case produced a measurement line
-    tr -d '\r' < "/tmp/lmq-$1.log" 2>/dev/null | grep -aqE "[0-9]+\.[0-9]+" 
+has_result() {  # a case produced a measurement line (banner v0.1.0 does NOT count)
+    tr -d '\r' < "/tmp/lmq-$1.log" 2>/dev/null \
+        | grep -avE "POSIX|v0\.1\.0" | grep -aqE "[0-9]+\.[0-9]+"
 }
 
 echo "=== lmbench QUICK $(date +%H:%M:%S) load=$(cut -d' ' -f1 /proc/loadavg) kernel=$(git -C "$WT" log --oneline -1 | cut -c1-8) [INDICATIVE — no load gate]" > "$OUT"
