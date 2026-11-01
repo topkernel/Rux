@@ -1307,15 +1307,21 @@ unsafe fn devfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     // userspace stat report major 0).
     stat.st_rdev = entry.devno.to_user_dev();
     let fsize = if entry.is_regular_file() {
-        entry.data.lock().len()
+        // review-s2b: the ENTRY-AUTHORITATIVE size, not data.len() — while
+        // a MAP_SHARED backing is active, entry.data is deliberately stale
+        // (the shared pages are the canonical store; see shared_entry_of)
+        // and a shrink-ftruncate under an active mapping leaves data at the
+        // old length too. stat(2) must report the same size the mmap EOF
+        // gate and devfs_reg_current_size serve.
+        entry.size.load(Ordering::Acquire) as i64
     } else if entry.is_symlink() {
         // stat on a symlink reports the TARGET length (stat(2)); the
         // target bytes live in `data` (see new_symlink).
-        entry.data.lock().len()
+        entry.data.lock().len() as i64
     } else {
         0
     };
-    stat.st_size = fsize as i64;
+    stat.st_size = fsize;
     stat.st_blocks = ((fsize as i64) + 511) / 512;
     stat.st_blksize = 4096;
     // File type from the (immutable) entry kind, permission bits from the
@@ -2145,9 +2151,19 @@ fn devfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
 
 fn devfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize {
     // SAFETY: VFS callback contract — inode/private_data are valid.
+    // review-s2b: SEEK_END sizes off the ENTRY-AUTHORITATIVE size — while a
+    // MAP_SHARED backing is active entry.data is stale (see devfs_getattr),
+    // and a shrink-ftruncate under it leaves data long.
     let size = unsafe {
         match (&*file.inode.get()).as_ref().and_then(|i| i.private_data) {
-            Some(p) => (*(p as *const DevfsEntry)).data.lock().len() as isize,
+            Some(p) => {
+                let e = &*(p as *const DevfsEntry);
+                if e.is_regular_file() {
+                    e.size.load(Ordering::Acquire) as isize
+                } else {
+                    e.data.lock().len() as isize
+                }
+            }
             None => return -9,
         }
     };
