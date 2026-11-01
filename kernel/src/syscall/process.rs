@@ -5343,9 +5343,16 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
 
     // SAFETY: rlim_ptr validated with access_ok above; put_user is the
     // exception-table copy path.
+    // uafault probe (2026-10-31): the put_user results used to be
+    // discarded — getrlimit with an unmapped user pointer returned 0
+    // ("success") while writing nothing. The reference do_prlimit
+    // reports the failed copy_to_user as -EFAULT; so does prlimit64.
     unsafe {
-        let _ = crate::arch::uaccess::put_user(rlim_ptr, cur);
-        let _ = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        let ok_cur = crate::arch::uaccess::put_user(rlim_ptr, cur);
+        let ok_max = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        if !ok_cur || !ok_max {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
