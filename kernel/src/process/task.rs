@@ -838,6 +838,37 @@ pub struct Task {
     /// +1 never drains — still heal after 2 s.
     ti_pc_zero_jif: AtomicU64,
 
+    /// jiffies of the most recent tick that observed this task's SOFTIRQ
+    /// field ABSENT (0 = never). Per-field contiguity stamp for the
+    /// tick-side PREEMPT-HEAL: d2381bf9's bar (a PREEMPT-pair completion
+    /// re-arms the window) is the right liveness proof for the base
+    /// preempt field — but it shields a stranded SOFTIRQ bit on a
+    /// lock-hot carrier (the lb64/lb65 OH boots: systemui wedged in
+    /// exit_group at pc=0x100 for 600 s, render_service watchdog at
+    /// 0x100, three 0x10000 incumbents — every CPU monopolized, ZERO
+    /// heals fired, because the carriers keep completing ordinary
+    /// spinlock pairs). A SOFTIRQ field observed PRESENT at 200
+    /// consecutive ticks is phantom by the same five-orders argument
+    /// the heal doctrine uses; only the field's OWN absences re-arm it.
+    ti_pc_sirq_zero_jif: AtomicU64,
+
+    /// Same per-field stamp for the HARDIRQ nesting field: the observer
+    /// tick's own in-flight level is subtracted by the >=2 gate, so one
+    /// phantom hardirq level observed for 200 consecutive ticks heals
+    /// to exactly one kept level (ti_preempt_count_keep_tick_nesting —
+    /// the still-pending irq_exit sub pairs against the kept level).
+    ti_pc_hirq_zero_jif: AtomicU64,
+
+    /// Same per-field stamp for the base PREEMPT field (round 3): the
+    /// pb3 lock-hot false-heal family and the sc42 re-leak carriers are
+    /// both distinguished from true base phantoms by exactly this — a
+    /// legal guard pair is microseconds, so a PREEMPT field observed
+    /// ABSENT at most ticks (fresh stamp) is lock churn, protected; a
+    /// field observed PRESENT at 200 consecutive ticks (stale stamp) is
+    /// a stranded +1. Replaces both the sc42 cumulative window and
+    /// d2381bf9's PREEMPT-pair re-arm in the tick-side heal gate.
+    ti_pc_pirq_zero_jif: AtomicU64,
+
     /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
     /// Per-task storage replaces the old pid-indexed side table — real pids
@@ -1540,6 +1571,9 @@ impl Task {
             ti_flags: AtomicU32::new(0),
             ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
             ti_pc_zero_jif: AtomicU64::new(0),
+            ti_pc_sirq_zero_jif: AtomicU64::new(0),
+            ti_pc_hirq_zero_jif: AtomicU64::new(0),
+            ti_pc_pirq_zero_jif: AtomicU64::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -4224,6 +4258,51 @@ impl Task {
     #[inline]
     pub fn ti_pc_zero_jif(&self) -> u64 {
         self.ti_pc_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// jiffies of the most recent tick observation of the SOFTIRQ field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_sirq_zero_jif(&self) -> u64 {
+        self.ti_pc_sirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the SOFTIRQ-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_sirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_sirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// jiffies of the most recent tick observation of the HARDIRQ field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_hirq_zero_jif(&self) -> u64 {
+        self.ti_pc_hirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the HARDIRQ-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_hirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_hirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// jiffies of the most recent tick observation of the PREEMPT field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif(&self) -> u64 {
+        self.ti_pc_pirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the PREEMPT-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_pirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set running CPU (thread_info.cpu)

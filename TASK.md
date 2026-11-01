@@ -748,3 +748,113 @@ image state) agree exactly:
   any txn's exec crosses 20s — prints EVERY task's state + parked
   syscall mid-hang. lb60 = fresh-data boot with this kernel
   (bzImage-ladder-hangdump): the dump names the leaf's producer thread.
+
+## TENTH-SUCCESSOR SESSION (2026-11-01 18:00+, branch oh-ladder @ af5577c5)
+Mission: verify the poison-patched image end-to-end. The predecessor's
+lbpop2 (population, NOSNAP) + lb64/lb65 (snapshot boots, system-lb3.img +
+userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
+
+### lb64/lb65 decode (evidence: oh-lb64/65-serial.log + task dumps)
+1. The empty-bundle wall is dead and the poison ladder advanced:
+   lb65 `CreateNewUser user(100) start` @40.2 -> `create user:100 bundle
+   size:34` — the per-user install stream RAN (lb64: SetBundleQuota for
+   /data/app/el2/100/base/com.ohos.launcher @119.78s; hmdfs/sharefs
+   launcher mkdirfails @119.3 = install stream touching the bundle).
+   systemui + render_service (llvmpipe/CompThread) SPAWNED on lb64/65 —
+   the GUI stack is loading.
+2. THE WALL: phantom-preempt monopolists own every CPU and the tick-side
+   PREEMPT-HEAL never fires (ZERO PREEMPT-HEAL lines on both boots; lb59
+   pre-contiguity-bar fired 1784). lb65 dump @64.5s: cpu slots 1232
+   (m.ohos.systemui, preempt=0x10000) / 1067 (render_service watchdog,
+   0x100) / 319 / 1177 (tgid 313 OS_IPC/FFRT, 0x10000) — all four busy,
+   nr_running=165; installs tid 1138 state=RUNNING on_rq=1 NEVER picked
+   (its mkdir = txn13201 exec 2350s; the CreateNewUser txn9711 itself
+   2355s). lb64: systemui main wedged in exit_group (lastsys=231) at
+   0x100 from ~118s through kill @660s.
+3. Root cause: d2381bf9's contiguity bar re-arms the heal window on any
+   completed PREEMPT pair — correct for the base field, but it shields
+   stranded SOFTIRQ/HARDIRQ bits on lock-hot carriers (OS_IPC threads
+   live in spinlock loops), AND the pure-field faces (base==0) were
+   never reachable by the base!=0 gate (keep_tick_nesting existed but
+   had NO call site). preemptible()==0 for ANY bit, so these monopolize
+   exactly like the base face.
+4. FIX (af5577c5): per-field contiguity — Task ti_pc_sirq_zero_jif /
+   ti_pc_hirq_zero_jif stamped whenever the tick observes that field
+   ABSENT; a field present at 200 consecutive ticks is phantom (lock
+   traffic never touches these fields). Stale field -> skip the re-arm
+   -> window matures -> new heal leg (base==0): keep_tick_nesting +
+   need_resched + PREEMPT-HEAL-FIELD print with softirq/hardirq origin
+   sites; the base leg now collapses stale hardirq extras too.
+   Base-face (pc=1) policy deliberately untouched.
+5. Build note for successors: `build-release` does NOT regen ksyms
+   (only the debug `build` target does). A release build after a
+   `make build` for ANOTHER arch embeds wrong symbols. Two-pass release:
+   cargo build --release; gen-ksyms.py <elf> x86_64-unknown-none
+   kernel/src/dfx/ksyms_generated.rs; cargo build --release; mkbzimage.
+   LTO byte-loop-transforms the tick prints into immediate stores —
+   `strings` on the release ELF is NOT evidence a print was stripped;
+   disassemble for the heal's andl sites instead (0xff0000 = clear_base,
+   0xf10000 = keep_tick_nesting).
+6. lb66 (verification boot): bzImage-ladder-fieldheal + system-lb3.img +
+   userdata-warm.img + dfx=ams46,txnhunt, SMP=2. Watch: PREEMPT-HEAL*
+   lines (the fix firing), the install stream completing (installs
+   code-4 execs bounded), startUser in service:100 -> CheckUserParam
+   (poison leg: POISON32-DELIVER then NO marking = patch works) ->
+   SwitchToUser -> appspawn com.ohos.launcher -> pixel md5 change
+   (frozen-logo set: 5f8b704d/06b933b4/82f0a25f/23312e5b).
+
+### Tenth-successor session close (2026-11-01 ~19:45, branch @ e8b9a969)
+1. HEAL STACK, three rounds, honest final form (8387c00b): per-field
+   tick-observed absence stamps for ALL THREE count fields
+   (ti_pc_{p,s,h}irq_zero_jif); a field PRESENT at 200 consecutive
+   ticks is phantom, a field observed ABSENT refreshes its stamp. This
+   replaces both the sc42 cumulative window (false-healed live
+   softirq windows — round 2's make-test wedge) and d2381bf9's
+   PREEMPT-pair re-arm (shielded stranded S/H bits behind lock churn —
+   the lb61-lb66 zero-heal freeze). make test GREEN 1267/1267 (the
+   VW-WEDGE prints after "All tests passed! Halting..." are POST-HALT
+   writeback noise, NOT failures — verify the suite verdict line before
+   believing a wedge; 3112b576 also passes, sometimes without the noise).
+2. THE 441s INSTALLS STALL, decoded to its wait site (coordinator
+   redirect; lb66 tid984 stack, symbolized against the af5577c5
+   two-pass rebuild): sys_mkdir -> vfs_mkdir -> ext4_mkdir_wrapper ->
+   ext4_journal_stop (the mkdir's journal commit) -> blkdev_write ->
+   submit_request -> VirtQueue::wait_for_used_interruptible — the
+   POLL path (caller holds a preempt guard: the VFS mutation lock over
+   the journal write), 5M laps, NO deadline (poll_only skips the 10s
+   deadline entirely!), caller retried for 441s+. NOTE: Rux's internal
+   dispatch uses asm-generic numbers: nr 83 = FDATASYNC; the x86 native
+   83 = mkdir maps to internal 34 — the lastsys=83 prints on the mkdir
+   stacks are the NATIVE number. The wait site is the same either way.
+3. Instruments landed for the capture (e8b9a969): VW-POLLSTALL (the
+   poller's own ring snapshot at 2M laps: resp byte, used idx,
+   prev_used, pc — splits delivery-loss vs kick-loss vs descriptor-
+   window in one line) + re-armable txn-hang-20s dump+vw_report (the
+   old global one-shot latch spent itself on an early 20s samgr txn
+   and went dark at the real hang — lb70 lesson; now once per 600s).
+4. OH boots this session (all bzImage + system-lb3.img + userdata-warm,
+   dfx=ams46,txnhunt, SMP=2): lb66 (r2 kernel) froze at the monopolist
+   wall AGAIN pre-install; lb67 (cumulative heals, 185 heals/70
+   underflows) passed the wall, SA storm 88, then the accountmgr
+   userspace-futex stall (txn16360 code66, tid977 in FUTEX_WAIT with
+   txn16423 QUEUED behind it) — the fifth successor's pool-exhaustion
+   family, NOT kernel scheduling; lb70/71 (r3 heals, 34-119 heals,
+   28-60 underflows at spinlock.rs:210 — the samgr-brk/mm-unmap real
+   2s+ hold false-heal cost) stalled pre-install (lb71: accountmgr
+   txn19304 code53 exec 445s). The wall ROTATES: monopolists /
+   accountmgr futex / samgr code-7 storms / installs fdatasync —
+   boot-to-boot variance decides which one bites.
+5. NEXT (in order): (a) roll boots until one reaches the install
+   stream with the r3i kernel — VW-POLLSTALL names the fdatasync
+   engine directly; the fix is then targeted (candidates: give the
+   poll_only path a deadline + kick+walk like the sleep path's; the
+   caller retry loop in submit_request; the descriptor window). To
+   reproduce lb66's no-heal shape exactly, boot 3112b576 + cherry-pick
+   e8b9a969. (b) The accountmgr futex family (tid parked with queued
+   txn) is userspace-internal — the samgr/installs 30s chain on the
+   campaign map. (c) The r3 heal false-positive cost on REAL 2s+ holds
+   (spinlock.rs:210 underflows) wants the leakorigin outermost-age
+   discriminator if it grows.
+6. Gates this session: x3 builds rc=0 (x86_64 release two-pass +
+   riscv64 + aarch64), make test GREEN (lb69-maketest.log: verdict
+   green, 1267/1267). Branch pushed through e8b9a969.

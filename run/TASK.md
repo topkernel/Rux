@@ -97,3 +97,70 @@ bzImage path — serial is stdio so no tag in cmdline); pkill FORBIDDEN.
   it as monopolist evidence.
 - Stretch (kpreempt=1 re-eval): with false heals dead, the false-heal
   deadlock objection (lb19b) is gone; re-trial kpreempt=1 next session.
+
+## NINTH-SUCCESSOR SESSION (2026-11-01 13:00-, branch oh-ladder @ 618bf480)
+
+### lb61 (main a8fae0b7, release, fresh2): THE EMPTY-BUNDLE WALL IS DEAD
+With ALL kernel monopolists dead, the ladder advanced further than every
+prior boot in campaign history:
+- 116.868 CreateNewUser(100) start; 116.875 **"create user:100 bundle size:34"**
+  — the set is NON-EMPTY (the first boot ever to print this line; the
+  preinstall rdb read worked: the 8th successor's empty-set early leg
+  never fired). The 3x10s futex chain did NOT recur in this window.
+- 117.2 SetBundleQuota com.ohos.launcher uid 20010010
+  /data/app/el2/100/base/com.ohos.launcher — per-user install stream ran.
+- 135.709 OnCreateNewUser wait complete (34 bundles, 18.9s); bundles.ready;
+  135.730 CreateNewUser end SUCCESS.
+- 135.973 USER_UNLOCKED services start; 135.876 lockstatus_100 SET.
+- Storage: /data/service/el2/100 restorecon + quotas all clean.
+NOTE (8th successor's warm-play postmortem): the lbwarm population boot
+never persisted — userdata-warm.img mtime == its copy time; the boot ran
+with snapshot=on (NOSNAP not exported). The warm play remains UNTESTED.
+
+### The NEW wall: foundation's IOsAccount proxy death-mark (lb61, bracketed)
+- 135.984 startUser in service:100 -> 135.986 "userId not exist" (2ms).
+  AMS46 ripple: between the StartUser READ (135.982) and the failure
+  callback (135.994, txn14525 oneway ohos.aafwk.UserCallback) foundation
+  sent ZERO osaccount queries — CheckUserParam's IsExistOsAccount never
+  left the process = SendRequestInner's IsObjectDead early-return on a
+  PERMANENTLY death-marked proxy (6th successor's decode, confirmed).
+- The mark: accountmgr (pid 922) authored a storm of status-32
+  TF_STATUS_CODE replies 100.0-102.1s (right after SA 200 publish at
+  99.98); 101.927 the first "failed, handle:10 error:32 desc:*.IOsAccount"
+  print (the client's marking moment, IsPrint first-error rule).
+- Server-side IsOsAccountExists is a FILE check (user_info_base/<id>/
+  user_info.json) returning ERR_OK always — the 32s come from OTHER
+  stub methods (see lb62 decode below).
+
+### lb62 (p32tap kernel: POISON32-DELIVER names the 32's client) — the poison map
+New tap (commit 618bf480) prints at the reply-origin site: server,
+CLIENT pid/tid, and the ORIGINAL request code of every status-32 reply:
+- 133.8-135.2: auth hosts (face 558/556, pin 772) poison USERIAM's
+  executor proxies (client 677, req_code=0x1).
+- 139.0-140.4: accountmgr (959) replies 32 to NINE clients — and at
+  **140.187/140.188 client pid=887 (foundation) req_code=0x42
+  (COMMAND_GET_FOREGROUND_OS_ACCOUNTS) + req_code=0x35
+  (COMMAND_QUERY_ACTIVE_OS_ACCOUNT_IDS)** — foundation's osaccount-kit
+  polling queries hit accountmgr mid-init, got 32, and the proxies were
+  permanently death-marked. 30-100s later the ladder dies on the same
+  marked proxy. The cascade: auth hosts -> useriam -> accountmgr ->
+  foundation (each level's stub propagates its dependency's 32 up).
+- lb62 was the slow variant (no CreateNewUser by 253s), killed early;
+  the poison map was complete.
+
+### The fix (image-side, private copy): system-lb3.img
+- Patched /system/lib64/platformsdk/libipc_single.z.so (the framework lib
+  every OH process loads; verified the image copy is BIT-IDENTICAL to
+  oh-robot's out-tree build): in IPCObjectProxy::SendRequestInner the
+  `if (status == ERR_DEAD_OBJECT) SetObjectDied(true);` leg is REMOVED —
+  a TF_STATUS_CODE reply authored by a server stub error must not
+  permanently death-mark the caller's proxy. The REAL death path
+  (SendObituary, kernel death notice) still marks. OH-source edit was
+  rebuilt via `ninja -w dupbuild=warn ipc_single` (prebuilt python on
+  PATH) and REVERTED after extraction (oh-robot tree left pristine;
+  out-tree .so restored to the original md5 fb4a215b...).
+- system-lb3.img = system-lb.img + ONLY this .so (reflink copy + debugfs
+  write; md5-verified round trip 072dbb39...).
+- lb63 = system-lb3.img + p32tap kernel, 2400s. Watch: no permanent
+  poison, CheckUserParam passes, SwitchToUser, appspawn com.ohos.launcher,
+  pixel md5 != 5f8b704d.

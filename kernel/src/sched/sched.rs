@@ -4735,6 +4735,28 @@ pub fn scheduler_tick() {
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
+                // Per-field contiguity stamps (phantom-bits round 2/3): a
+                // field's liveness is proven only by its OWN absences —
+                // a field observed PRESENT at 200 consecutive ticks is
+                // phantom (every legal bracket is microseconds, so 2 s of
+                // tick-observed presence is five orders beyond any live
+                // hold), and a field observed ABSENT refreshes its stamp
+                // no matter how hot the OTHER fields churn. Stamped BEFORE
+                // the pc != 0 gate so an entirely-zero count refreshes
+                // every field. Three relaxed stores per tick; only the
+                // task's own CPU writes these.
+                {
+                    let now = crate::drivers::timer::get_jiffies();
+                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0 {
+                        unsafe { (*cur).ti_pc_pirq_zero_jif_stamp(now) };
+                    }
+                    if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0 {
+                        unsafe { (*cur).ti_pc_sirq_zero_jif_stamp(now) };
+                    }
+                    if pc & crate::interrupt::preempt::HARDIRQ_MASK == 0 {
+                        unsafe { (*cur).ti_pc_hirq_zero_jif_stamp(now) };
+                    }
+                }
                 if pc != 0 {
                     let now = crate::drivers::timer::get_jiffies();
                     let task_word = cur as usize as u64;
@@ -4781,26 +4803,39 @@ pub fn scheduler_tick() {
                     if t0 == 0 {
                         t0 = now;
                     }
-                    // phantom-bits contiguity bar: a task-context base
-                    // DRAIN (a live outermost guard pair completing)
-                    // re-arms the window. The sc41/sc42 cumulative bar
-                    // could not tell a hot lock user from a phantom —
-                    // at 100 Hz the sampler never catches a lock-hot
-                    // task's microsecond gaps between guards, so the
-                    // window matured on LIVE holders (pb3: 887
-                    // heals/boot, 96% on 4 lock-hot pids, each with a
-                    // fresh 0->1 acquire inside the "2 s hold"), and
-                    // every false heal stripped a live guard + set
-                    // need_resched, preempting the holder MID-SECTION —
-                    // stranding its lock for every spinner (the
-                    // both-CPU spin/deadlock amplifier). Direct
-                    // zeroings (heal paths bypass the sub path) do not
-                    // stamp ti_pc_zero_jif, so a genuine phantom — whose
-                    // base never drains — still heals after 2 s.
-                    let zero_jif = unsafe { (*cur).ti_pc_zero_jif() };
-                    if zero_jif != 0 && now.wrapping_sub(zero_jif) < 200 {
-                        t0 = now;
-                    }
+                    // Per-field adjudication (phantom-bits round 3,
+                    // supersedes BOTH bars): the sc42 cumulative window
+                    // and d2381bf9's PREEMPT-pair re-arm were two wrong
+                    // answers to the same question — "has THIS field been
+                    // held continuously?" — asked through a shared
+                    // window that any field's activity (or inactivity)
+                    // answered for all of them. The cumulative bar
+                    // false-healed live softirq windows and guards
+                    // (make-test sgid_mode VW-WEDGE: the window's pending
+                    // bits clear before its handlers run; a heal mid-
+                    // window makes it preemptible, the handler never
+                    // finishes, 29 completions lost, both CPUs idle
+                    // forever — 3112b576 passes the same boot, the only
+                    // delta is the heal policy); the pair-based re-arm
+                    // shielded stranded S/H bits on lock-hot carriers
+                    // (lb61-lb66: ZERO heals, every CPU monopolized).
+                    // The stamps above answer the question per field:
+                    // stale stamp = present at 200 consecutive ticks.
+                    let s_set = pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0;
+                    let p_set = pc & crate::interrupt::preempt::PREEMPT_MASK != 0;
+                    let h_extra =
+                        (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
+                            2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
+                    let stale_200 = |j: u64| j == 0 || now.wrapping_sub(j) >= 200;
+                    let p_stale = p_set && {
+                        stale_200(unsafe { (*cur).ti_pc_pirq_zero_jif() })
+                    };
+                    let s_stale = s_set && {
+                        stale_200(unsafe { (*cur).ti_pc_sirq_zero_jif() })
+                    };
+                    let h_stale = h_extra && {
+                        stale_200(unsafe { (*cur).ti_pc_hirq_zero_jif() })
+                    };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
                     w.last.store(now, core::sync::atomic::Ordering::Relaxed);
@@ -4919,7 +4954,7 @@ pub fn scheduler_tick() {
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && now.wrapping_sub(t0) >= 200 {
+                        if base != 0 && (p_stale || s_stale) {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -4932,8 +4967,19 @@ pub fn scheduler_tick() {
                             // PARKED-HEAL below keeps the full zero: a task
                             // current on NO CPU has no in-flight nesting by
                             // definition.
+                            // phantom-bits round 2: when the same count also
+                            // carries stale EXTRA hardirq levels (>= 2 at
+                            // tick, one being the observer's own), collapse
+                            // them to exactly one kept level instead of
+                            // preserving them (clear_base keeps ALL hardirq
+                            // bits, so a 0x10101-style heal used to leave
+                            // the 0x10000 monopoly standing).
                             unsafe {
-                                (*cur).ti_preempt_count_clear_base();
+                                if h_stale {
+                                    (*cur).ti_preempt_count_keep_tick_nesting();
+                                } else {
+                                    (*cur).ti_preempt_count_clear_base();
+                                }
                             }
                             // "Actually preempt" (launcher perf wall): the
                             // zero alone leaves the incumbent running —
@@ -5007,6 +5053,80 @@ pub fn scheduler_tick() {
                             if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
                                 crate::dfx::leakorigin::report_softirq_origin(
                                     b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
+                        }
+                        // phantom-bits round 2 — the pure-field faces the
+                        // base leg can never reach: base == 0 with a
+                        // stranded SOFTIRQ bit (pc=0x100 at task level) or
+                        // extra HARDIRQ levels (pc=0x10000-phantom shows as
+                        // >= 2 levels at tick, one being the observer's
+                        // own). These monopolize exactly like the base
+                        // face but the old gate (base != 0) skipped them
+                        // by design — the unified keep-exactly-one-level
+                        // form was written for them (task.rs
+                        // ti_preempt_count_keep_tick_nesting) but never
+                        // wired. Same 2 s window, same five-orders
+                        // doctrine: a softirq bracket or hardirq nesting
+                        // held across 200 consecutive ticks is phantom;
+                        // the kept single level pairs the observer's own
+                        // still-pending irq_exit sub.
+                        if base == 0 && h_stale {
+                            unsafe {
+                                (*cur).ti_preempt_count_keep_tick_nesting();
+                            }
+                            set_need_resched();
+                            w.task.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.first.store(0, core::sync::atomic::Ordering::Relaxed);
+                            w.last.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPREEMPT-HEAL-FIELD cpu=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(cpu_id as u64);
+                            const M2: &[u8] = b" pid=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).pid() } as u64);
+                            const M3: &[u8] = b" was=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(pc as u32 as u64);
+                            const M4: &[u8] = b" held_jiffies=";
+                            for &b in M4 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(t0));
+                            const M5: &[u8] = b" face=";
+                            for &b in M5 {
+                                putchar(b);
+                            }
+                            putchar(if h_stale { b'H' } else { b'S' });
+                            putchar(b'\n');
+                            if s_stale {
+                                crate::dfx::leakorigin::report_softirq_origin(
+                                    b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
+                            if h_stale {
+                                crate::dfx::leakorigin::report_hardirq_origin(
+                                    b"PREEMPT-HEAL-HARDIRQ",
                                     cur,
                                 );
                             }

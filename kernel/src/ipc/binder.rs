@@ -3538,10 +3538,31 @@ pub fn txn_hang_audit() {
         // (the FFRT/IPC worker-exhaustion shape shows as all workers
         // parked as CLIENTS).
         if h.exec_ms >= 20_000 {
-            static HANG_DUMPED: core::sync::atomic::AtomicBool =
-                core::sync::atomic::AtomicBool::new(false);
-            if !HANG_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            // Re-armable once per 600 s (the global one-shot latch spent
+            // itself on an early 20 s samgr txn and went dark exactly when
+            // the real installs hang formed — lb70 lesson).
+            static HANG_DUMP_AT: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now_j = crate::drivers::timer::get_jiffies();
+            let last = HANG_DUMP_AT.load(core::sync::atomic::Ordering::Acquire);
+            if now_j.wrapping_sub(last) >= 60_000
+                && HANG_DUMP_AT
+                    .compare_exchange(
+                        last,
+                        now_j,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
                 crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
+                // -> wait_for_used_interruptible, 441 s): capture the
+                // virtio ring state at the hang moment — at_device vs
+                // used-ahead-of-walker vs matched-but-undelivered splits
+                // the engine (lost kick / deferred softirq / descriptor
+                // window) in one line.
+                crate::drivers::virtio::vw_report("txn-hang-20s");
             }
         }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
@@ -5446,7 +5467,7 @@ fn binder_thread_write(
                         } else {
                             SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                         };
-                        if n < (if val == 32 { 400 } else { 50 }) {
+                        if n < (if val == 32 { 4000 } else { 50 }) {
                             crate::pr_warn!(
                                 "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
                                 proc.pid,
@@ -6318,6 +6339,41 @@ fn binder_transaction(
                 target_thread_key = Some((from_proc, from_tid));
                 target_proc = Some(target_thread_key.as_ref().unwrap().0.clone());
                 allows_fd = t.flags & TF_ACCEPT_FDS != 0;
+                // lb61 (ninth successor): name the CLIENT of every poison
+                // reply. The server-side STATUSCODE-REPLY tap cannot see
+                // who receives the 32; this site has the originating txn
+                // (from_proc/from_tid + the ORIGINAL request code), so the
+                // print names the exact proxy that gets death-marked by
+                // IPCObjectProxy::SendRequestInner on the client side.
+                if ams46_on()
+                    && tr.flags & _TF_STATUS_CODE != 0
+                    && tr.data_size >= 4
+                {
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val == 32 {
+                        static P32_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 4000 {
+                            let (fproc, ftid) = target_thread_key.as_ref().unwrap();
+                            crate::pr_warn!(
+                                "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
+                                proc.pid,
+                                thread.tid,
+                                fproc.pid,
+                                ftid,
+                                t.code
+                            );
+                        }
+                    }
+                }
                 in_reply_to = Some(t);
             } else if tr.target_handle != 0 {
                 let node = pm(world, proc)
