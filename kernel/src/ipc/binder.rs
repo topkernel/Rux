@@ -3575,8 +3575,10 @@ pub fn txn_hang_audit() {
                 // virtio ring state at the hang moment — at_device vs
                 // used-ahead-of-walker vs matched-but-undelivered splits
                 // the engine (lost kick / deferred softirq / descriptor
-                // window) in one line.
-                crate::drivers::virtio::vw_report("txn-hang-20s");
+                // window) in one line. DIRECT console (pr_err from this
+                // context was dropped on lb70/lb71 — printk contention;
+                // the TXN-HANG lines themselves print via ConsoleWriter).
+                crate::drivers::virtio::vw_snap_direct();
             }
         }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server

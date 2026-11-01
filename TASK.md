@@ -858,3 +858,105 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
 6. Gates this session: x3 builds rc=0 (x86_64 release two-pass +
    riscv64 + aarch64), make test GREEN (lb69-maketest.log: verdict
    green, 1267/1267). Branch pushed through e8b9a969.
+
+## ELEVENTH-SUCCESSOR SESSION (2026-11-01 20:00+, branch oh-ladder @ 05e3c4c5)
+Mission: the fix run for the 441s installs poll stall. THE VIRTIO POLL
+STALL IS FIXED AND VERIFIED HEALTHY; the wall rotated on.
+
+### The fix (05e3c4c5)
+wait_for_used_interruptible's poll_only branch (read_block_once /
+write_block_once / flush_block_once — everything synchronous under a
+preempt guard or early boot) had NEITHER the sleep path's 10s deadline
+NOR its kick-and-walk recovery leg: 5M laps of blind resp-byte spin,
+then the caller's retry stack re-polled the same dead ring (lb66: 441s).
+Now: every 10ms of wall time (read_time: TSC-derived, IRQ-independent —
+a jiffies deadline would stand still under an irqsave guard) the poller
+RE-KICKS the device (lost/quiet kick: an un-kicked chain's completion
+never arrives no matter how long we spin) and RUNS THE COMPLETION WALKER
+IN ITS OWN CONTEXT (irq_exit defers Block softirq to ksoftirqd under a
+preempt guard, and ksoftirqd cannot run under that guard on this CPU —
+the walker is the process-context last-line consumer, same discipline as
+the drain/rescue paths); at 10s it returns the prev_used sentinel so the
+caller runs its bounded late-drain, flags the tombstone, fails loudly.
+Early-boot polling unchanged (pure spin, 5M budget — no scheduler yet).
+VW-POLLSTALL print now carries walker/shadow/unkicked (vw_pollstall_print
++ pci_blk_lag_snapshot) — one line splits delivery-loss / kick-loss /
+window-reuse; deadline exit prints POLLSTALL-DL.
+
+### Verification (lb74 — concurrent lane's boot, same kernel bytes:
+### bzImage-ladder-r3w == my pollfix2, md5-identical)
+- ZERO POLLSTALL prints through a 600s+ install-phase boot: the poll
+  path never hit 2M laps once.
+- VW-SNAP @603s: ALL six disks used == last == shadow, unkicked=0,
+  intx=42317/walks=42302 — rings fully drained, interrupts flowing.
+  The 441s engine is not present with the fix in.
+- lb75: install-phase SLOW-TXNs absent from the virtio layer entirely.
+
+### The wall rotated (evidence lb74/lb75, both on the fixed kernel)
+1. lb74: pid 311 el5_filekey_man monopolizes cpu with preempt=0x100
+   (softirq-field phantom or storm), nr_running=203 starved, installs
+   tid 990 blocked 512s in sys_faccessat on a Mutex whose holder never
+   runs. Heals fired 29x early (all was=0x10001), NONE after 113.8s —
+   the pure-0x100 face never healed. r3-heal gap: a permanent sirq-field
+   count should stale its stamp in 2s and heal; why it did not for 500s
+   is THE open sched question (sched lane's hunt).
+2. lb75: Shape B DECODED AT THE QUERY LEVEL — the IsOsAccountExists
+   query (SAREG txn12749, ohos.accountfwk.IOsAccount) LEFT foundation at
+   241.515 (the libipc poison-mark patch WORKS — no client-side marking),
+   and accountmgr tid 929 ANSWERED it with a TF_STATUS_CODE 32 reply at
+   241.521 -> "userId not exist" 7ms later. distributeddata was answering
+   accountmgr's own queries at the same moment (txn12763 @241.548) — the
+   32 is authored by accountmgr's osaccount stub under load (userspace),
+   NOT by kernel delivery and NOT by the poison mark anymore.
+3. Remaining ladder walls (all pre-existing, none virtio): monopolist
+   starvation / samgr code-7 slow loads (brk storm) / accountmgr inner
+   futex stalls / accountmgr osaccount-32 answers. Boot-to-boot lottery
+   decides; lb27/lb57/lb59/lb65-class boots have passed all of them.
+
+### Boots this session
+lb73 (pollfix kernel): driver died at 150s (serial truncated
+mid-poison-storm, QEMU SIGPIPE'd; cause unclear — a concurrent lane
+works this worktree, its cleanup or the patrol may have killed the
+driver). lb75 (pollfix2): Shape B at 241.5s (decode above), killed.
+lb76 (pollfix2): rolling at write time. lb74 is the CONCURRENT LANE's
+boot (r3w) — do not kill it.
+Gates: make test GREEN (lb73-maketest.log, "All tests passed!", rc=0;
+post-halt VW-WEDGE prints are noise); x3 builds rc=0 (x86_64 release
+two-pass + riscv64 + aarch64; POLLSTALL-DL string verified in both
+debug ELFs).
+
+### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
+THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
+SAME BUG. Evidence chain, closed:
+1. lb66's installs tid984 stack: sys_mkdir -> ext4_journal_stop ->
+   blkdev_write -> submit_request -> wait_for_used_interruptible —
+   and lb66's OWN task dump at 126s: init at preempt=0x10000 +
+   el5_filekey_man at 0x100 owning both CPUs, installs state=RUNNING
+   on_rq=1 NEVER SCHEDULED. The 441s "fdatasync that never returns"
+   is that task FROZEN MID-SYSCALL by the phantom-preempt monopoly —
+   the last syscall it entered is what the audit printed. Not a virtio
+   delivery loss.
+2. Direct proof the block layer is healthy (76e4b6ed, lb74 VW-SNAP at
+   603s): walks=42302 intx=42317 (1:1 x86 INTx deliveries to walker
+   passes, every disk's used==last==shadow, unkicked=0, pending=0/0).
+   The earlier "irqs=0 all boot" was the riscv-only VW_IRQS wiring
+   lying on x86 — now counted (VW_BLK_INTX) and it matches walks 1:1.
+3. The round-3 heal removes the monopoly: lb70-lb74, ZERO
+   monopolist/strand census events after the early phase, CPUs clean
+   (heals 29-119/boot naming the 0x10001/0x10000 faces). With the
+   freeze gone, every boot advanced into the USERSPACE walls:
+   accountmgr tid parked in FUTEX_WAIT with a QUEUED txn (lb67
+   txn16360/16423), samgr code-7 30s family, ui_service/powermgr
+   700-860s chains (lb72/73/74). This is the samgr/installs 30s-class
+   futex chain on the campaign map — userspace-internal, the next
+   hunt's territory. NO boot this session reached the install stream;
+   the fdatasync shape should be RE-EVALUATED there with the r3w
+   kernel — with the monopoly dead it is expected to compress to
+   milliseconds (the poll path's own bounded 5M-lap budget + 5
+   caller retries were never the wall).
+4. Artifacts for the successor (all pushed, branch oh-ladder @76e4b6ed):
+   run/bzImage-ladder-r3w (x86_64 release, VW-SNAP+VW-POLLSTALL+
+   VW_BLK_INTX), lb70-lb74 serials, and the one-line recipe: roll
+   boots until one passes the accountmgr coin-flip, then read
+   VW-POLLSTALL (fires only if a poll truly stalls 2M laps) and
+   startUser -> SwitchToUser -> appspawn -> pixels.
