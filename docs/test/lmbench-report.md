@@ -59,9 +59,9 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 | `lat_syscall null` | 0.095 microseconds | 0.044 microseconds | 2.15x |
 | `lat_syscall read` | 0.234 microseconds | 0.069 microseconds | 3.41x |
 | `lat_syscall write` | 0.198 microseconds | 0.064 microseconds | 3.09x |
-| `lat_syscall stat` | 4.077 microseconds | 0.217 microseconds | 18.77x |
+| `lat_syscall stat` | ~~4.077~~ 1.067 µs → **0.651 µs** *(perf-path lane: fresh baseline already 4.9x — the 18.8x row predated the print purge; lock-free path-walk fast paths −39%)* | 0.213 microseconds | 3.06x |
 | `lat_syscall fstat` | 0.17 microseconds | 0.111 microseconds | 1.53x |
-| `lat_syscall open` | 5.685 microseconds | 0.41 microseconds | 13.88x |
+| `lat_syscall open` | ~~5.685~~ 1.773 µs → **1.222 µs** *(same lane, −31%)* | 0.395 microseconds | 3.09x |
 | `lat_pagefault /tmp/lmbench.file` | 0.449 microseconds | 0.07 microseconds | 6.45x |
 | `lat_mmap 1m /tmp/lmbench.file` | 1.049 us | 4.41 us | **0.24x (faster)** |
 | `lat_pipe` | 2.006 microseconds | 2.745 microseconds | **0.73x (faster)** |
