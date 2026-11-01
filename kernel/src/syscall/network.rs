@@ -457,61 +457,87 @@ pub fn sys_listen(args: SyscallArgs) -> i64 {
 // sstatus.SUM=0 in the kernel they page-fault into KernelPanic. These
 // helpers route through the exception-table copy paths.
 
-/// Write a sockaddr_in { AF_INET, port, addr, zero-pad } and *addrlen=16
-/// into user memory. Callers must access_ok-validate both pointers;
-/// failures are dropped (same visible semantics as the old bare stores,
-/// minus the kernel-fault window on unmapped pages).
-unsafe fn put_sockaddr_in(addr_ptr: *mut u8, addrlen_ptr: *mut u32, port: u16, addr: u32) {
-    use crate::arch::uaccess::{put_user, clear_user};
-    let _ = put_user(addr_ptr as *mut u16, 2u16); // sin_family = AF_INET
-    let _ = put_user(addr_ptr.add(2) as *mut u16, port.to_be());
-    let _ = put_user(addr_ptr.add(4) as *mut u32, addr.to_be());
-    clear_user(addr_ptr.add(8), 8); // sin_zero
-    let _ = put_user(addrlen_ptr, 16u32);
+/// Write a sockaddr_in { AF_INET, port, addr, zero-pad } bounded by the
+/// CALLER's buffer (`limit` = the *addrlen / msg_namelen the user passed
+/// in): exactly move_addr_to_user — copy min(limit, 16) BYTES of the
+/// kernel sockaddr, then store the full family size 16 into *addrlen.
+/// The old helper wrote all 16 bytes regardless of the caller's buffer
+/// length, clobbering caller memory past a short sockaddr object AND
+/// undoing recvfrom's explicit clamp. A NULL addrlen_ptr (recvfrom's
+/// NULL-fromlen case) stores no length word. Callers must access_ok both
+/// pointers for 16 bytes; failures are dropped.
+unsafe fn put_sockaddr_in(
+    addr_ptr: *mut u8,
+    addrlen_ptr: *mut u32,
+    limit: usize,
+    port: u16,
+    addr: u32,
+) {
+    use crate::arch::uaccess::{copy_to_user, put_user};
+    let mut sa = [0u8; 16];
+    sa[0..2].copy_from_slice(&2u16.to_ne_bytes()); // sin_family = AF_INET
+    sa[2..4].copy_from_slice(&port.to_be_bytes());
+    sa[4..8].copy_from_slice(&addr.to_be_bytes());
+    // sin_zero stays zeroed
+    let n = limit.min(16);
+    if n > 0 {
+        let _ = copy_to_user(addr_ptr, sa.as_ptr(), n);
+    }
+    if !addrlen_ptr.is_null() {
+        let _ = put_user(addrlen_ptr, 16u32);
+    }
 }
 
 /// P1 IPv6: write a sockaddr_in6 { AF_INET6, port, 0 flowinfo, addr,
-/// scope_id } and *addrlen=28. Callers must access_ok-validate both
-/// pointers (28 / 4 bytes); failures are dropped, same visible semantics
-/// as put_sockaddr_in. Link-local addresses report the single-interface
-/// scope id 2 (eth0, Linux ifindex convention); everything else 0.
+/// scope_id } bounded by the CALLER's buffer (see put_sockaddr_in): copy
+/// min(limit, 28) bytes, store the full 28 into *addrlen. Callers must
+/// access_ok-validate both pointers for 28 / 4 bytes. Link-local
+/// addresses report the single-interface scope id 2 (eth0, the reference
+/// kernel's ifindex convention); everything else 0.
 unsafe fn put_sockaddr_in6(
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
+    limit: usize,
     port: u16,
     addr: crate::net::ipv6::Ipv6Addr,
 ) {
-    use crate::arch::uaccess::{put_user};
+    use crate::arch::uaccess::{copy_to_user, put_user};
     let scope_id: u32 = if crate::net::ipv6::is_link_local(&addr) { 2 } else { 0 };
-    let _ = put_user(addr_ptr as *mut u16, 10u16); // sin6_family = AF_INET6
-    let _ = put_user(addr_ptr.add(2) as *mut u16, port.to_be());
-    let _ = put_user(addr_ptr.add(4) as *mut u32, 0u32); // sin6_flowinfo
-    let mut off = 8usize;
-    for i in 0..16 {
-        let _ = put_user(addr_ptr.add(off) as *mut u8, addr[i]);
-        off += 1;
+    let mut sa = [0u8; 28];
+    sa[0..2].copy_from_slice(&10u16.to_ne_bytes()); // sin6_family = AF_INET6
+    sa[2..4].copy_from_slice(&port.to_be_bytes());
+    // sin6_flowinfo (4..8) stays zeroed
+    sa[8..24].copy_from_slice(&addr);
+    sa[24..28].copy_from_slice(&scope_id.to_ne_bytes());
+    let n = limit.min(28);
+    if n > 0 {
+        let _ = copy_to_user(addr_ptr, sa.as_ptr(), n);
     }
-    let _ = put_user(addr_ptr.add(24) as *mut u32, scope_id);
-    let _ = put_user(addrlen_ptr, 28u32);
+    if !addrlen_ptr.is_null() {
+        let _ = put_user(addrlen_ptr, 28u32);
+    }
 }
 
 /// P1 IPv6: write a source/peer address honoring the socket's family —
 /// AF_INET sockets get sockaddr_in; AF_INET6 sockets get sockaddr_in6
-/// (v4 sources are reported v4-mapped). `want28` selects the access_ok
-/// bound the caller already validated.
+/// (v4 sources are reported v4-mapped). `limit` is the caller's buffer
+/// length in bytes (clamped inside each helper); `addrlen_ptr` may be
+/// null, in which case no length word is written.
 unsafe fn put_sockaddr_family(
     socket: &crate::net::socket::Socket,
     addr_ptr: *mut u8,
     addrlen_ptr: *mut u32,
+    limit: usize,
     port: u16,
     src: crate::net::ipv6::IpAddr,
 ) {
     if socket.is_ipv6() {
-        put_sockaddr_in6(addr_ptr, addrlen_ptr, port, src.as_v6());
+        put_sockaddr_in6(addr_ptr, addrlen_ptr, limit, port, src.as_v6());
     } else {
         put_sockaddr_in(
             addr_ptr,
             addrlen_ptr,
+            limit,
             port,
             src.as_v4().unwrap_or(0),
         );
@@ -944,13 +970,27 @@ fn sys_accept_common(fd: usize, flags: i32, addr_ptr: *mut u8, addrlen_ptr: *mut
                     // remote endpoint, not the listener's.
                     let (paddr, pport) = crate::net::tcp::tcp_remote_endpoint(ret);
                     let (paddr6, _) = crate::net::tcp::tcp_remote_endpoint6(ret);
+                    // move_addr_to_user: the caller's *addrlen bounds the
+                    // COPY (a short sockaddr object must not be overrun);
+                    // *addrlen is then set to the full family size. An
+                    // unreadable length word skips the write (accept keeps
+                    // its fd — the reference kernel would EFAULT-and-close,
+                    // an unwind this layer cannot express).
+                    // SAFETY: addrlen_ptr validated with access_ok(4) above;
+                    // get_user is the exception-table copy path.
+                    let limit = match unsafe {
+                        crate::arch::uaccess::get_user::<u32>(addrlen_ptr)
+                    } {
+                        Some(v) if (v as i32) >= 0 => (v as usize).min(128),
+                        _ => want,
+                    };
                     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok;
                     // put_sockaddr_* use the exception-table copy path.
                     unsafe {
                         if want == 28 {
-                            put_sockaddr_in6(addr_ptr, addrlen_ptr, pport, paddr6);
+                            put_sockaddr_in6(addr_ptr, addrlen_ptr, limit, pport, paddr6);
                         } else {
-                            put_sockaddr_in(addr_ptr, addrlen_ptr, pport, paddr);
+                            put_sockaddr_in(addr_ptr, addrlen_ptr, limit, pport, paddr);
                         }
                     }
                 }
@@ -1245,8 +1285,28 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // it into the segment — one copy total), and the reserve is no longer
     // zero-filled (copy_from_user overwrites every staged byte before any
     // read; a faulting copy returns EFAULT with the buffer discarded).
+    //
+    // R37 (review-func): DGRAM/SEQPACKET payloads must NEVER be silently
+    // truncated — a unix datagram is all-or-nothing (the reference
+    // unix_dgram_sendmsg delivers the whole record or fails; there is no
+    // partial send). The old RW_CHUNK cap here staged only the first 64KB
+    // of a larger datagram and reported a successful partial send: the
+    // receiver got a corrupted record, and sendto/sendmsg disagreed (the
+    // sendmsg path in this file already stages up to 4*RW_CHUNK whole).
+    // DGRAM now stages the entire record bounded at the same 4*RW_CHUNK
+    // ceiling, EMSGSIZE above it; STREAM keeps the partial-send staging
+    // (POSIX-legal for byte streams).
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
-        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        const UNIX_STAGE_MAX: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
+        let stage = match usock.kind {
+            crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket => {
+                if len > UNIX_STAGE_MAX {
+                    return -(errno::EMSGSIZE as i64);
+                }
+                len
+            }
+            _ => len.min(crate::syscall::io::RW_CHUNK),
+        };
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
@@ -1615,7 +1675,15 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     let local_addr = *socket.local_addr.lock();
     let local_port = *socket.local_port.lock();
     // P1 IPv6: v6 sockets report sockaddr_in6 (a v4 local address as
-    // v4-mapped).
+    // v4-mapped). The write length and the access_ok bound are the
+    // FAMILY size — the old code validated only 16 bytes and then let a
+    // v6 socket push 28 bytes past that (three unchecked user words),
+    // and copied the full struct even when the caller's buffer was
+    // shorter (move_addr_to_user copies min(*addrlen, klen)).
+    let want = if socket.is_ipv6() { 28 } else { 16 };
+    if !crate::arch::uaccess::access_ok(addr_ptr as usize, want) {
+        return -(errno::EFAULT as i64);
+    }
     // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
     unsafe {
         if socket.is_ipv6() {
@@ -1625,9 +1693,9 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
             } else {
                 local6
             };
-            put_sockaddr_in6(addr_ptr, addrlen_ptr, local_port, addr6);
+            put_sockaddr_in6(addr_ptr, addrlen_ptr, addrlen, local_port, addr6);
         } else {
-            put_sockaddr_in(addr_ptr, addrlen_ptr, local_port, local_addr);
+            put_sockaddr_in(addr_ptr, addrlen_ptr, addrlen, local_port, local_addr);
         }
     }
     0
@@ -1721,12 +1789,25 @@ pub fn sys_getpeername(args: SyscallArgs) -> i64 {
         if state == crate::net::socket::SocketState::Connected {
             let peer_addr = *socket.remote_addr.lock();
             let peer_port = *socket.remote_port.lock();
+            // Same family-sized bound + caller-length clamp as
+            // getsockname above (the old code validated 16 bytes and let
+            // a v6 socket write 28, unclamped by *addrlen).
+            let want = if socket.is_ipv6() { 28 } else { 16 };
+            if !crate::arch::uaccess::access_ok(addr_ptr as usize, want) {
+                return -(errno::EFAULT as i64);
+            }
             // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
             unsafe {
                 if socket.is_ipv6() {
-                    put_sockaddr_in6(addr_ptr, addrlen_ptr, peer_port, *socket.remote_addr6.lock());
+                    put_sockaddr_in6(
+                        addr_ptr,
+                        addrlen_ptr,
+                        addrlen,
+                        peer_port,
+                        *socket.remote_addr6.lock(),
+                    );
                 } else {
-                    put_sockaddr_in(addr_ptr, addrlen_ptr, peer_port, peer_addr);
+                    put_sockaddr_in(addr_ptr, addrlen_ptr, addrlen, peer_port, peer_addr);
                 }
             }
             return 0;
@@ -3195,10 +3276,19 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         crate::arch::uaccess::get_user::<*mut u8>(msg_ptr as *const *mut u8)
             .unwrap_or(core::ptr::null_mut())
     };
-    let msg_namelen_ptr = unsafe {
-        crate::arch::uaccess::get_user::<*mut u32>(msg_ptr.add(8) as *const *mut u32)
-            .unwrap_or(core::ptr::null_mut())
-    };
+    // msg_namelen is a socklen_t VALUE field at msghdr offset 8 — the
+    // length word this syscall must update lives in the caller's msghdr
+    // ITSELF. The old code read offset 8 AS A POINTER (the namelen+pad
+    // bytes reinterpreted): the "pointer" was usually garbage, so the
+    // access_ok(msg_namelen_ptr, 4) gate silently skipped the whole
+    // source-address write-back (raw/netlink recvmsg never saw a
+    // msg_name), and when the garbage happened to land in the user range
+    // the length store went to a random user address. msg_namelen was
+    // never updated in either case — the reference kernel always sets it
+    // to the actual address length.
+    // SAFETY: msg_ptr was access_ok(64)-validated at entry; offset 8 is
+    // inside that range.
+    let msg_namelen_ptr: *mut u32 = unsafe { msg_ptr.add(8) as *mut u32 };
     let msg_iov_ptr = unsafe { get_user_usize(msg_ptr.add(16) as usize) };
     let msg_iovlen = unsafe { get_user_usize(msg_ptr.add(24) as usize) };
 
@@ -3557,15 +3647,28 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // W3: write the source address into msg_name/msg_namelen (UDP peers
     // are now visible; TCP reports the connected remote).
     // P1 IPv6: family-aware shape (v6 sockets get sockaddr_in6; a v4
-    // source is reported v4-mapped).
+    // source is reported v4-mapped). The access_ok bound is the family
+    // size (the old 16-byte check let a v6 write push 28 bytes past it),
+    // and the caller's msg_namelen value bounds the copy — move_addr_to_user
+    // semantics.
     if let Some((addr, port)) = src_addr {
         if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
-            if crate::arch::uaccess::access_ok(msg_name_ptr as usize, 16)
+            let want = if socket.is_ipv6() { 28 } else { 16 };
+            if crate::arch::uaccess::access_ok(msg_name_ptr as usize, want)
                 && crate::arch::uaccess::access_ok(msg_namelen_ptr as usize, 4)
             {
+                // SAFETY: msg_namelen_ptr was fixed to point at the
+                // msghdr's msg_namelen field (inside the access_ok(64)
+                // range); get_user is the exception-table copy path.
+                let limit = match unsafe {
+                    crate::arch::uaccess::get_user::<u32>(msg_namelen_ptr)
+                } {
+                    Some(v) if (v as i32) >= 0 => (v as usize).min(128),
+                    _ => want,
+                };
                 // SAFETY: pointers validated with access_ok; exception-table copy.
                 unsafe {
-                    put_sockaddr_family(&socket, msg_name_ptr, msg_namelen_ptr, port, addr);
+                    put_sockaddr_family(&socket, msg_name_ptr, msg_namelen_ptr, limit, port, addr);
                 }
             }
         }
@@ -4154,8 +4257,21 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // perf-ipc: no zero-fill of the stage (the receive engine writes
     // exactly the bytes it reports back; a `resize(stage, 0)` was a
     // memset of up to 64 KiB on EVERY recvfrom before any byte landed).
+    // R37 (review-func): DGRAM/SEQPACKET stage the FULL requested buffer
+    // (bounded at the send-side 4*RW_CHUNK ceiling) — the old RW_CHUNK
+    // cap truncated every receive of a datagram larger than 64KB even
+    // though the send side now delivers it whole (recv() returned 65536
+    // with no MSG_TRUNC signal for a 100KB record). STREAM keeps the
+    // chunked stage: a partial read is legal and later reads drain the
+    // rest.
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
-        let stage = len.min(crate::syscall::io::RW_CHUNK);
+        const UNIX_STAGE_MAX: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
+        let stage = match usock.kind {
+            crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket => {
+                len.min(UNIX_STAGE_MAX)
+            }
+            _ => len.min(crate::syscall::io::RW_CHUNK),
+        };
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
@@ -4383,63 +4499,47 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // contract): runs AFTER a successful receive. The user *fromlen is
     // read — a negative value is EINVAL even though the data was
     // already consumed (LTP recvfrom01 "invalid socket addr length") —
-    // clamped to what the protocol reports, written back (EFAULT if
-    // unreadable/unwritable), and only a NONZERO clamped length copies
-    // address bytes. TCP reports no per-recv source (the peer IS the
-    // connection), so on a TCP socket a bad `from` pointer never
-    // faults and the receive itself stands (LTP "invalid socket
-    // buffer" expects exactly that).
+    // then min(*fromlen, klen) address bytes are copied and *fromlen is
+    // set to the FULL family size klen (the reference move_addr_to_user
+    // stores klen, not the clamped count). TCP reports no per-recv
+    // source (the peer IS the connection), so on a TCP socket a bad
+    // `from` pointer never faults and the receive itself stands (LTP
+    // "invalid socket buffer" expects exactly that).
     if !addr_ptr.is_null() {
-        let klen: usize = match src_addr {
-            Some(_) => {
-                if socket.is_ipv6() {
-                    28
-                } else {
-                    16
-                }
-            }
-            None => 0,
-        };
-        if addrlen_ptr.is_null() {
-            // A NULL fromlen with a non-NULL from copies the full
-            // address (move_addr_to_user with ulen == NULL).
-            if let Some((addr, port)) = src_addr {
+        if let Some((addr, port)) = src_addr {
+            let klen: usize = if socket.is_ipv6() { 28 } else { 16 };
+            if addrlen_ptr.is_null() {
+                // A NULL fromlen with a non-NULL from copies the full
+                // address (move_addr_to_user with ulen == NULL).
                 // SAFETY: bounded, family-shaped copy; the kernel source
-                // buffer is well-formed.
+                // buffer is well-formed. put_sockaddr_* skip the length
+                // word for a NULL addrlen_ptr.
                 unsafe {
-                    put_sockaddr_family(&socket, addr_ptr, core::ptr::null_mut(), port, addr);
+                    put_sockaddr_family(&socket, addr_ptr, core::ptr::null_mut(), klen, port, addr);
                 }
-            }
-        } else {
-            // SAFETY: exception-table read of the user length word.
-            let ulen =
-                unsafe { crate::arch::uaccess::get_user(addrlen_ptr as *const u32) };
-            match ulen {
-                None => return -(errno::EFAULT as i64),
-                Some(u) => {
-                    if (u as i32) < 0 {
-                        return -(errno::EINVAL as i64);
-                    }
-                    let clamped = (u as usize).min(klen);
-                    // SAFETY: exception-table write of the clamped length.
-                    if !unsafe {
-                        crate::arch::uaccess::put_user(
-                            addrlen_ptr as *mut u32,
-                            clamped as u32,
-                        )
-                    } {
-                        return -(errno::EFAULT as i64);
-                    }
-                    if clamped > 0 {
-                        if let Some((addr, port)) = src_addr {
-                            // SAFETY: length word proven writable above;
-                            // the family-shaped copy below is bounded by
-                            // the same clamp via the stored length.
-                            unsafe {
-                                put_sockaddr_family(
-                                    &socket, addr_ptr, addrlen_ptr, port, addr,
-                                );
-                            }
+            } else {
+                // SAFETY: exception-table read of the user length word.
+                let ulen =
+                    unsafe { crate::arch::uaccess::get_user(addrlen_ptr as *const u32) };
+                match ulen {
+                    None => return -(errno::EFAULT as i64),
+                    Some(u) => {
+                        if (u as i32) < 0 {
+                            return -(errno::EINVAL as i64);
+                        }
+                        // SAFETY: length word proven readable above; the
+                        // copy below is bounded by the caller's value via
+                        // `limit` and the length store goes back to the
+                        // same word.
+                        unsafe {
+                            put_sockaddr_family(
+                                &socket,
+                                addr_ptr,
+                                addrlen_ptr,
+                                (u as usize).min(128),
+                                port,
+                                addr,
+                            );
                         }
                     }
                 }
