@@ -907,8 +907,56 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         }
     }
 
-    // First pass: try to apply all operations atomically
-    // This is a simplified version — Linux does a two-pass undo algorithm
+    semop_blocking_loop(idx, semid, &sops, deadline, sub_jiffy_timeout)
+}
+
+/// Kernel-context semop entry for the in-kernel blocking-contract test
+/// (tests/sysv_sem_block.rs): same validation as the syscall, sops
+/// built in the kernel (the unit-test boot task has no user mm to
+/// uaccess through). Exercises the exact production apply/block loop.
+pub(crate) fn semop_kernel(semid: i32, sops: &[SemBuf]) -> i64 {
+    if sops.is_empty() {
+        return -(errno::EINVAL as i64);
+    }
+    if sops.len() > 500 {
+        return -(errno::E2BIG as i64);
+    }
+    let alter = sops.iter().any(|s| s.sem_op != 0);
+    let idx = match SEM_IDS.find_with_perms(semid, if alter { 0o2 } else { 0o4 }) {
+        Ok(i) => i,
+        Err(e) => return e as i64,
+    };
+    let nsems_in_set;
+    {
+        let slots = SEM_IDS.slots.lock();
+        nsems_in_set = match slots[idx] {
+            Some(ref entry) => entry.inner.nsems(),
+            None => return -(errno::EINVAL as i64),
+        };
+    }
+    for sop in sops {
+        if sop.sem_num as usize >= nsems_in_set {
+            return -(errno::EFBIG as i64);
+        }
+    }
+    semop_blocking_loop(idx, semid, sops, None, false)
+}
+
+/// The semop apply/block core: try the atomic apply; when the op set
+/// cannot proceed and no op carries IPC_NOWAIT, block on the set's wait
+/// queue until it can (or a signal/deadline ends the wait). Contract:
+/// EAGAIN is returned ONLY for IPC_NOWAIT ops, a sub-jiffy timeout, or
+/// deadline expiry — never for a plain blocking op.
+///
+/// Split out of sys_semtimedop after its uaccess copy so the in-kernel
+/// blocking-contract test drives this exact loop (semop_kernel).
+fn semop_blocking_loop(
+    idx: usize,
+    semid: i32,
+    sops: &[SemBuf],
+    deadline: Option<u64>,
+    sub_jiffy_timeout: bool,
+) -> i64 {
     'outer: loop {
         let result = try_apply_semops(idx, &sops, semid);
         match result {
@@ -926,7 +974,19 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
                     // Blocking P/Z operation: sleep on the set's wait queue
                     let blocking_idx = find_blocking_op(idx, &sops);
                     match blocking_idx {
-                        None => return -(errno::EAGAIN as i64),
+                        // R40: "nothing blocks" means the set became
+                        // satisfiable (or was deleted) between the failed
+                        // try_apply and this scan — e.g. a concurrent post
+                        // landed in that window. The reference kernel
+                        // re-runs the atomic apply and either consumes the
+                        // post or blocks on the queue; it NEVER turns a
+                        // non-IPC_NOWAIT op into EAGAIN. The old immediate
+                        // EAGAIN killed lmbench lat_sem's writer (reader's
+                        // concurrent post raced the scan; the writer died,
+                        // the reader slept forever). Retry the loop: the
+                        // next try_apply succeeds, reports EIDRM for a
+                        // deleted slot, or re-enters this arm and blocks.
+                        None => continue 'outer,
                         Some(_) => {
                             // Check for signals
                             if crate::signal::signal_pending() {
@@ -1251,26 +1311,35 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
 }
 
 /// Find the index of the first operation that needs to block.
+///
+/// R40: mirrors try_apply_semops' ACCUMULATED working-copy semantics —
+/// each op sees the post-op value of the previous ops on the same
+/// semaphore (reference perform_atomic_semop). The old per-op re-read of
+/// the raw value disagreed with try_apply on sets like [{0,-1},{0,-1}]
+/// on value=1 (try_apply: the second -1 blocks against the working 0;
+/// scan: both -1s fit against the raw 1 → None), which fed the
+/// NEED_BLOCK handler a spurious "nothing blocks" even with NO
+/// concurrency, surfacing EAGAIN for a plain blocking op.
 fn find_blocking_op(idx: usize, sops: &[SemBuf]) -> Option<usize> {
     let slots = SEM_IDS.slots.lock();
     let entry = match slots[idx] {
         Some(ref e) if !e.deleted => e,
+        // Deleted/mismatched slot: None sends the caller back around the
+        // loop, where try_apply_semops reports EIDRM (the reference
+        // outcome for a set removed while an op was in flight).
         _ => return None,
     };
 
     if let Some(ref sems) = *entry.inner.sems.lock() {
+        let mut work: alloc::vec::Vec<i32> = (0..sems.len())
+            .map(|i| sems[i].value.load(Ordering::Relaxed))
+            .collect();
         for (i, sop) in sops.iter().enumerate() {
-            if sop.sem_op < 0 {
-                let cur = sems[sop.sem_num as usize].value.load(Ordering::Relaxed);
-                if (cur + sop.sem_op as i32) < 0 {
-                    return Some(i);
-                }
-            }
-            if sop.sem_op == 0 {
-                let cur = sems[sop.sem_num as usize].value.load(Ordering::Relaxed);
-                if cur != 0 {
-                    return Some(i);
-                }
+            let cur = work[sop.sem_num as usize];
+            let new_val = cur.wrapping_add(sop.sem_op as i32);
+            work[sop.sem_num as usize] = new_val;
+            if (sop.sem_op < 0 && new_val < 0) || (sop.sem_op == 0 && new_val != 0) {
+                return Some(i);
             }
         }
     }
