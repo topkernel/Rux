@@ -557,3 +557,25 @@ ACQUIRE-DIVERGENT print) BOTH wedged on net::unix::UNIX_TABLE
 unproven. make test on the final tree GREEN (ALL TESTS PASSED); x3
 builds rc=0. The ph5/ph5b UNIX_TABLE wedge shape matches the pre-existing
 lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
+
+## wedge-fix session (2026-11-01): merge-window release-build wedge regression
+
+### wfA — main tip 4a757d6e release boot: spinlock wedge GONE, new shape found
+- Build: `cd build && PLATFORM=x86_64 make build-release` rc=0, bzImage
+  md5 d19ad8f4db35a7c76de3634a5288be45 (9748480 bytes, fresh 09:24).
+- Boot: oh-launcher lb-boot.py wfA 120s, USERDATA=userdata-fresh2.img,
+  system-lb.img, KVM q35. SA load present (samgr pid 325 started 3.8s,
+  SAMGR kmsgs live to 118s), serial live to 123s.
+- Verdict vs lb48/lb50/lb51/lb52 (all first DEADLOCK print 5-10s in):
+  ZERO spinlock DEADLOCK prints. The b96a2e48 preempt-hunt merge (bounded
+  preemptible spinlock wait) cured the both-CPU spinlock wedge.
+- BUT: NEW stall shape, absent from lb44/lb47b/lb48/lb50/lb51/lb52 (all
+  zero matches) and wfA has 11:
+  `[14.052] EXT4-BIGLOCK-STALL waiter=325 holder=1 depth=1 held=1000j..11000j`
+  init (pid 1) took the ext4 big lock at ~4.0s and NEVER released it
+  through 123s; init's last kmsg is 4.058 (mid SELinux ignore-cfg loop,
+  "Failed to load ignore cfg!" repeated). waiter=325 = samgr. Boot ladder
+  stalled at the same point (no launcher after appspawn maps).
+- Next: dfx=periodic boot to read pid 1's task state — starved-RUNNABLE
+  (sched wake-gating family) vs SLEEPING-inside-critical-section
+  (sleep-while-holding bug).
