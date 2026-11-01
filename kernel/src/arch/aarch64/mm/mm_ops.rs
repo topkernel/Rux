@@ -475,82 +475,42 @@ impl MmStruct {
         if is_fixed {
             // Reference-kernel semantics: MAP_FIXED replaces only the
             // covered range; overlapping VMAs are SPLIT with
-            // type/flags/fd/offset preserved, and the whole surgery —
-            // snapshot, remove, piece re-add, PTE zap, replacement
-            // install — runs under ONE vma_write guard (twin ATOMICITY
-            // note; unmap_pages takes no VMA lock, so the extended hold
-            // is safe).
-            let fixed_end = PageVirtAddr::new(start.as_usize() + aligned_size);
-            let test_vma = Vma::new(start, fixed_end, flags);
-
-            let mut vma_mgr = self.vma_write();
-
-            let overlapping: Vec<(
-                Vma,
-                Option<alloc::sync::Arc<crate::fs::file::File>>,
-            )> = vma_mgr
-                .iter()
-                .filter(|v| v.overlaps(&test_vma))
-                .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
-                .collect();
-
-            let mut kept: Vec<(
-                Vma,
-                Option<alloc::sync::Arc<crate::fs::file::File>>,
-            )> = Vec::new();
-            for (vma, file) in overlapping.iter() {
-                if vma.start().as_usize() < start.as_usize() {
-                    if let Some((head, _)) =
-                        vma.split(PageVirtAddr::new(start.as_usize()))
-                    {
-                        kept.push((head, file.clone()));
+            // type/flags/fd/offset preserved. Whole-range teardown via
+            // the CHUNKED munmap loop (the same bounded-hold discipline
+            // as sys_munmap — see munmap; the old shape held vma_write
+            // across the ENTIRE fixed range's surgery AND PTE-zap walk,
+            // the whole-range VMA-lock convoy shape). The install
+            // re-checks under its own guard; a same-mm racer landing in
+            // the cleared gap is cleared by one bounded retry (a legal
+            // linearization for concurrent mmap/MAP_FIXED on the same
+            // range). Split head/tail preservation and pin (vm_file)
+            // discipline are munmap's own.
+            let mut attempts = 0;
+            loop {
+                self.munmap(start, aligned_size)?;
+                let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+                let mut vma_mgr = self.vma_write();
+                let test_vma = Vma::new(start, end, flags);
+                if vma_mgr.iter().any(|v| v.overlaps(&test_vma)) {
+                    // a same-mm racer mapped into the gap after the last
+                    // teardown pass; drop the guard and clear it too
+                    drop(vma_mgr);
+                    attempts += 1;
+                    if attempts >= 8 {
+                        return Err(MapError::OutOfMemory);
                     }
+                    continue;
                 }
-                if vma.end().as_usize() > fixed_end.as_usize() {
-                    let mut tail = Vma::new(fixed_end, vma.end(), vma.flags());
-                    tail.set_type(vma.vma_type());
-                    tail.set_origin(vma.origin());
-                    tail.set_file_fd(vma.file_fd());
-                    tail.set_file_size(vma.file_size());
-                    tail.set_offset(
-                        vma.offset() + (fixed_end.as_usize() - vma.start().as_usize()),
-                    );
-                    kept.push((tail, file.clone()));
-                }
+                let mut vma = Vma::new(start, end, flags);
+                vma.set_type(vma_type);
+                vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
+                vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
+                drop(vma_mgr);
+                self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+                self.update_highest_vm_end(end.as_usize());
+                vma_installed = true;
+                break;
             }
-
-            for (vma, _) in overlapping.iter() {
-                // The replaced range leaves the mapping: release its
-                // virtual-size charge (head/tail pieces stay charged).
-                self.release_unmapped_pages(
-                    vma.start().as_usize(),
-                    vma.end().as_usize(),
-                    start.as_usize(),
-                    fixed_end.as_usize(),
-                );
-                let _ = vma_mgr.remove(vma.start());
-                self.unpin_vma_file(vma.start().as_usize());
-            }
-            for (piece, file) in kept {
-                let _ = vma_mgr.add(piece.clone());
-                if let Some(f) = file {
-                    self.pin_vma_file(piece.start().as_usize(), f);
-                }
-            }
-
-            // PTE teardown under PTE_MODIFY_LOCK (unmap_pages).
-            self.unmap_pages(start, aligned_size)?;
-
-            // Install the replacement VMA under the SAME guard.
-            let end = PageVirtAddr::new(start.as_usize() + aligned_size);
-            let mut vma = Vma::new(start, end, flags);
-            vma.set_type(vma_type);
-            vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
-            vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
-            drop(vma_mgr);
-            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
-            self.update_highest_vm_end(end.as_usize());
-            vma_installed = true;
         }
 
         if !vma_installed {
