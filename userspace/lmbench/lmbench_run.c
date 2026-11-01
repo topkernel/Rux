@@ -38,12 +38,17 @@ static void make_scratch(void)
     int fd = open(SCRATCH, O_CREAT | O_TRUNC | O_WRONLY, 0644);
     if (fd < 0)
         return;
-    if (ftruncate(fd, (off_t)SCRATCH_SZ) != 0) {
-        /* no sparse support: extend the hard way via one dummy write */
-        ssize_t w = 0;
-        if (lseek(fd, (off_t)SCRATCH_SZ - 1, SEEK_SET) >= 0)
-            w = write(fd, "", 1);
-        (void)w;
+    /* Materialize REAL blocks, not a sparse file: ftruncate alone leaves
+     * a 16 MiB hole, and the file-backed cases then measure hole service
+     * (zero-fill / shared-zero-page faults), not the cached-file reads
+     * they exist to measure — bw_file_rd's "50x" row was exactly that
+     * artifact (the reference kernel serves holes from memory too, Rux
+     * re-resolved 512 extent lookups per read). Write the full size so
+     * the file occupies real, cacheable blocks. */
+    static char zeros[4096];
+    for (size_t off = 0; off < SCRATCH_SZ; off += sizeof(zeros)) {
+        if (write(fd, zeros, sizeof(zeros)) != (ssize_t)sizeof(zeros))
+            break;
     }
     close(fd);
 }
