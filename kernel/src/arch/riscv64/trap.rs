@@ -986,7 +986,21 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         // print WHICH mapping swallowed epc, the page's PTE, a hexdump of
         // the page around epc, and the full VMA table so the layout of the
         // dying process is recoverable from the console alone.
-        sigill_mapping_forensics(pid as usize, epc as usize);
+        //
+        // Serial-cleanliness (print-audit lane, 2026-11): one dump is
+        // ~100 lines (~5 KB, tens of ms of polled UART) — "one-shot per
+        // death" was only cheap while deaths were rare. A respawn loop
+        // over a broken binary (the sh-retry family that produced this
+        // probe) paid it per crash. Budget 2 per boot: the first two
+        // deaths carry full attribution, later ones keep the one-liner
+        // above.
+        {
+            static SIGILL_DUMPS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SIGILL_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2 {
+                sigill_mapping_forensics(pid as usize, epc as usize);
+            }
+        }
     }
 
     if regs.user_mode() {
@@ -1218,7 +1232,13 @@ fn handle_breakpoint(regs: &mut PtRegs) {
                     // gdmr29 (temporary): this path is a SIGTRAP-death
                     // candidate for the gdm-session-worker kill — name it.
                     // REMOVE before merge.
-                    crate::pr_info!(
+                    //
+                    // Demoted to pr_debug (print-audit lane, 2026-11):
+                    // an untraced ebreak left in text hits this on EVERY
+                    // step attempt — a per-trap pr_info through the
+                    // polled UART, the EXITRP class (e2717687). The hunt
+                    // is closed; release builds pay nothing.
+                    crate::pr_debug!(
                         "SSBRK: comm={} epc={:#x} (untraced single-step ebreak)",
                         comm_now,
                         regs.epc
@@ -1377,11 +1397,37 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // Page handled, re-execute instruction
         }
         MmFaultResult::Segfault => {
-            crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
-                fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
-                crate::sched::get_current_pid(),
-                if regs.kernel_mode() { "kernel" } else { "user" });
+            // Serial-cleanliness (print-audit lane, 2026-11): the report
+            // and the VMA forensics below fire ONLY when the fault is
+            // FATAL (default disposition, or fault-inside-handler) or
+            // kernel-mode. A handler-routed user fault (guard pages,
+            // JITs, crash catchers, LTP mmap05) is a normal survivable
+            // event and used to pay one pr_err plus two VMA-forensics
+            // lines per fault through the polled UART — a GC touching
+            // its guard page cost ~1 ms of serial each time. Survivors
+            // stay quiet; deaths keep the full attribution.
             if regs.user_mode() {
+                // Linux semantics: route user-mode faults through normal
+                // signal delivery (force_sig_fault) — an installed
+                // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
+                // must run. With a handler (and SIGSEGV not blocked —
+                // i.e. not already inside that handler): pend the signal
+                // and RETURN; do_signal delivers it on the way back to
+                // userspace. Without one — or with the fault happening
+                // inside the handler itself — the default action kills
+                // here (and avoids a fault-retry loop).
+                let pid = crate::process::current_pid();
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
+                    // Synchronous fault: deliver despite a blocked mask
+                    // (Linux force_sig parity — see force_unblock_current).
+                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
+                    return;
+                }
+                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                    fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
+                    crate::sched::get_current_pid(),
+                    "user");
                 // User-fault VMA forensics: name the mappings the fault
                 // address and epc fall in. The GNOME bring-up had
                 // recurring shell deaths at a fixed address deep inside
@@ -1463,35 +1509,25 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                         }
                     }
                 }
-                // Linux semantics: route user-mode faults through normal
-                // signal delivery (force_sig_fault) — an installed
-                // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
-                // must run. With a handler (and SIGSEGV not blocked —
-                // i.e. not already inside that handler): pend the signal
-                // and RETURN; do_signal delivers it on the way back to
-                // userspace. Without one — or with the fault happening
-                // inside the handler itself — the default action kills
-                // here (and avoids a fault-retry loop).
-                let pid = crate::process::current_pid();
-                if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
-                    // Synchronous fault: deliver despite a blocked mask
-                    // (Linux force_sig parity — see force_unblock_current).
-                    crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
-                    return;
-                }
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                crate::pr_err!("pagefault: Segfault at {:#x}, epc={:#x}, ra={:#x}, sp={:#x}, t6={:#x}, pid={}, mode={}",
+                    fault_addr, regs.epc, regs.ra, regs.sp, regs.t6,
+                    crate::sched::get_current_pid(),
+                    "kernel");
             }
         }
         MmFaultResult::PermissionDenied => {
-            crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             // Terminate user process via do_exit (properly notifies parent)
             if regs.user_mode() {
                 // Same handler-first routing as Segfault: a PROT_NONE
                 // access with an installed SIGSEGV handler must run it
                 // (LTP mmap05); a fault inside the (blocked) handler
                 // itself, or the default disposition, kills directly.
+                // Serial-cleanliness (print-audit lane, 2026-11): the
+                // line prints only on the FATAL branch — handler-routed
+                // PROT_NONE probes are survivable guard-page events.
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
@@ -1499,23 +1535,30 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
+            } else {
+                crate::pr_err!("pagefault: Permission denied at {:#x}", fault_addr);
             }
         }
         MmFaultResult::BusError => {
-            crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             if regs.user_mode() {
                 // Handler-first routing like Segfault: LTP mmap13 installs
                 // a SIGBUS handler and must catch it; the default action
-                // kills with SIGBUS.
+                // kills with SIGBUS. Serial-cleanliness (print-audit
+                // lane, 2026-11): the line prints only on the FATAL
+                // branch.
                 let pid = crate::process::current_pid();
                 let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
+                    crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 } else {
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGBUS as i32);
                 }
+            } else {
+                crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             }
         }
         MmFaultResult::OutOfMemory => {

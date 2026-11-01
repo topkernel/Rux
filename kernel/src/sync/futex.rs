@@ -1626,6 +1626,16 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // deduped per address so the UART survives: "WAIT-forever preceded by
     // matching WAKEs" vs "no WAKE ever" decides lost-wake vs leaked-reader
     // directly.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): this whole block
+    // runs on EVERY futex syscall. Unlatched, it paid a sched::current +
+    // comm read + utf8 + name compare per op on every boot that never
+    // runs hdf_devmgr; latched (or in the FXDV2 arena window below), it
+    // printed up to 900 lines of HEALTHY churn per OH boot (~0.6 s of
+    // polled-16550 time). The hunt is gated behind dfx=futextrace (the
+    // same switch as the wake-miss scan in futex_wake_in_mm); the
+    // sc184/sc185 hunts re-arm with the flag.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
@@ -2339,9 +2349,21 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // printing ->0 while a waiter sits parked is a lost wake; no WAKE
     // at all after a WAIT is never-sent ((a) or (b) — the paired
     // appclone census in sys_clone separates those). Budget 150 lines.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): STK_PAGE is 3
+    // pages below the stack top of EVERY x86_64 process, so any
+    // main-thread futex on a shallow frame hit this — two pr_warn
+    // lines per op through the polled UART until the 400-op budget
+    // burned (~0.8 s of serial per boot). The census joins the
+    // dfx=futextrace family; the sc118/sc119 hunts re-arm with the
+    // flag.
     {
         const STK_PAGE: usize = 0x7fffffffc000;
-        if uaddr & !0xfff == STK_PAGE {
+        if uaddr & !0xfff == STK_PAGE
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::FutexTrace,
+            )
+        {
             // Budget raised 150 -> 400 for sc119: the page is 3 pages below
             // the stack top of EVERY x86_64 process, so ANY main-thread
             // futex on a shallow frame burns it — appspawn's own main-loop
@@ -2449,7 +2471,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // first two waits also dump the caller's syscall rings. The timespec
     // is decoded so relative(100s)/absolute(now+100s) deadlines are
     // distinguishable offline.
-    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) && timeout != 0 {
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): condition_variable
+    // wait_for is a hot per-op path for foundation/sa_main threads —
+    // ungated this paid a comm compare per timed WAIT plus up to 240
+    // pr_warn lines per OH boot. The census joins the dfx=futextrace
+    // family; the sc156 hunt re-arms with the flag.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+        && timeout != 0
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+    {
         if let Some(t) = crate::sched::current() {
             let tk = unsafe { &*t };
             let comm = core::str::from_utf8(&tk.comm()[..])
