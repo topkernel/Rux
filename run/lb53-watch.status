@@ -1,0 +1,11 @@
+== 05:28:35 lines=19739 inserts=79 dl=0 last: [ 1224.233] PREEMPT-HEAL cpu=0000000000000000 pid=
+-- chain:
+[  191.933] HILOG-AMS[293] W0 BMS: [a92ab300bfa07a9, 0, 0] [bundle_user_mgr_host_impl.cpp(CreateNewUser:154)]Create
+[  223.038] [kmsg] [pid=1][LoopEvent][WARNING][le_epoll.c:122]timeout:140095HILOG-AMS[298] W0 BMS: [a92ab300bfa07a9
+-- net:
+[  366.809] binder: death notice pid 334 desc 64 cookie 0x7ff0004cb4c0 (owner 1141 died)
+[  366.810] binder: death notice pid 334 desc 65 cookie 0x7ff0004f07e0 (owner 1141 died)
+[  366.811] binder: death notice pid 334 desc 66 cookie 0x7ff0004f0650 (owner 1141 died)
+[  366.812] binder: death notice pid 334 desc 67 cookie 0x7ff0004f0c90 (owner 1141 died)
+[  366.812] binder: death notice pid 334 desc 68 cookie 0x7ff0004f0010 (owner 1141 died)
+[  366.814] AMS46-SENDFAIL pid=334 tid=347 code=0x0 h=4294967295 BR=0x7205 why=17-reply-target-gone reply
