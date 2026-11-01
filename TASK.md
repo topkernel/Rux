@@ -858,3 +858,39 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
 6. Gates this session: x3 builds rc=0 (x86_64 release two-pass +
    riscv64 + aarch64), make test GREEN (lb69-maketest.log: verdict
    green, 1267/1267). Branch pushed through e8b9a969.
+
+### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
+THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
+SAME BUG. Evidence chain, closed:
+1. lb66's installs tid984 stack: sys_mkdir -> ext4_journal_stop ->
+   blkdev_write -> submit_request -> wait_for_used_interruptible —
+   and lb66's OWN task dump at 126s: init at preempt=0x10000 +
+   el5_filekey_man at 0x100 owning both CPUs, installs state=RUNNING
+   on_rq=1 NEVER SCHEDULED. The 441s "fdatasync that never returns"
+   is that task FROZEN MID-SYSCALL by the phantom-preempt monopoly —
+   the last syscall it entered is what the audit printed. Not a virtio
+   delivery loss.
+2. Direct proof the block layer is healthy (76e4b6ed, lb74 VW-SNAP at
+   603s): walks=42302 intx=42317 (1:1 x86 INTx deliveries to walker
+   passes, every disk's used==last==shadow, unkicked=0, pending=0/0).
+   The earlier "irqs=0 all boot" was the riscv-only VW_IRQS wiring
+   lying on x86 — now counted (VW_BLK_INTX) and it matches walks 1:1.
+3. The round-3 heal removes the monopoly: lb70-lb74, ZERO
+   monopolist/strand census events after the early phase, CPUs clean
+   (heals 29-119/boot naming the 0x10001/0x10000 faces). With the
+   freeze gone, every boot advanced into the USERSPACE walls:
+   accountmgr tid parked in FUTEX_WAIT with a QUEUED txn (lb67
+   txn16360/16423), samgr code-7 30s family, ui_service/powermgr
+   700-860s chains (lb72/73/74). This is the samgr/installs 30s-class
+   futex chain on the campaign map — userspace-internal, the next
+   hunt's territory. NO boot this session reached the install stream;
+   the fdatasync shape should be RE-EVALUATED there with the r3w
+   kernel — with the monopoly dead it is expected to compress to
+   milliseconds (the poll path's own bounded 5M-lap budget + 5
+   caller retries were never the wall).
+4. Artifacts for the successor (all pushed, branch oh-ladder @76e4b6ed):
+   run/bzImage-ladder-r3w (x86_64 release, VW-SNAP+VW-POLLSTALL+
+   VW_BLK_INTX), lb70-lb74 serials, and the one-line recipe: roll
+   boots until one passes the accountmgr coin-flip, then read
+   VW-POLLSTALL (fires only if a poll truly stalls 2M laps) and
+   startUser -> SwitchToUser -> appspawn -> pixels.
