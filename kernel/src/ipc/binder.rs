@@ -5408,18 +5408,30 @@ fn binder_thread_write(
                     && tr.flags & _TF_STATUS_CODE != 0
                     && tr.data_size >= 4
                 {
+                    // lb58: samgr's early boot answers a storm of
+                    // status-7 (ERR_NULL_OBJECT, SA-not-loaded) replies
+                    // that would burn any shared budget in seconds —
+                    // budget the POISON value (32) separately and cap the
+                    // rest.
                     static SC_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
-                    if SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                        let mut val: i32 = 0;
-                        let ok = unsafe {
-                            crate::arch::uaccess::copy_from_user(
-                                &mut val as *mut i32 as *mut u8,
-                                tr.data_buffer as *const u8,
-                                4,
-                            )
-                        } == 0;
-                        if ok && val != 0 {
+                    static SC_POISON: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val != 0 {
+                        let n = if val == 32 {
+                            SC_POISON.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        } else {
+                            SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        };
+                        if n < (if val == 32 { 400 } else { 50 }) {
                             crate::pr_warn!(
                                 "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
                                 proc.pid,
