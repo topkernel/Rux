@@ -590,3 +590,41 @@ system-lb2.img + userdata-fresh2.img + dfx=ams46,txnhunt LOGLEVEL=6 SMP=2):
   Conflicts were comment-only + the preempt_disable_at site-shadow call
   (leakorigin hook absent on this base) — resolved to plain preempt_disable.
   bzImage saved: run/bzImage-ladder-53f4fd47 (release, 12.9MB).
+
+### lb57 (ladder rig, release+spinlock fix): the healthiest fail ever — POISON EVENT CAPTURED
+- SA storm COMPLETE (78 inserts, 0 DEADLOCK), accountmgr alive ALL BOOT (SA:200
+  @174.3, NO group-suicide — KOT-KILL lines 173 -> 35 vs lb54), CreateNewUser
+  222.9->262.9 end, lockstatus_100 SET 263.1. SLOW-TXN n=27 p50=27.5s max=72.9s
+  (variance-dominated; still the samgr code-7 30s family).
+- 263.218: same one-shot fail as lb54 — BUT WITHOUT any watchdog kill or restart:
+  startUser -> "userId not exist" (2097193) 0ms apart, zero kernel traffic.
+- THE POISON MOMENT (bracketed to the millisecond): 263.000/263.001
+  `IPCObjectProxy PrintErrorDetailedInfo: failed, handle:26 error:32
+  desc:*.IOsAccount proxy:4920816` x2 — error 32 IS ERR_DEAD_OBJECT
+  (c_utils errors.h: BASE_ERR_OFFSET+EPIPE). SendRequestInner marks the proxy
+  dead (`status == ERR_DEAD_OBJECT -> SetObjectDied(true)`) AT THIS PRINT —
+  every later osaccount query (CheckUserParam at 263.218 included) fails
+  instantly and silently. THE PERMANENT MARK IS MADE HERE, NOT BY A DEATH
+  NOTICE: no death notice fired for it (DRS/notice net silent), accountmgr
+  alive, and the kernel SENDFAIL net did NOT fire -> the send returned +32
+  WITHOUT any kernel error verdict.
+- SOURCE AUDIT (oh-robot, this image's tree): the ONLY way a sync send returns
+  +32 with zero kernel traffic is HandleReply's TF_STATUS_CODE leg
+  (binder_invoker.cpp:1026): a BR_REPLY whose flags carry TF_STATUS_CODE (0x08)
+  has its FIRST INT32 read as the send status. Servers author that shape via
+  BinderInvoker::SendReply -> WriteTransaction (binder_invoker.cpp:1241):
+  an error return with an EMPTY reply parcel becomes TF_STATUS_CODE + errcode.
+  => A TRANSIENT server-side error 32 from accountmgr's osaccount stub
+  PERMANENTLY death-marks foundation's IOsAccount proxy. Kernel BR_DEAD_REPLY
+  (raw 0x7205) does NOT mark (verified against this tree's invoker source);
+  kernel ioctls return -errno, also not +32.
+- Our kernel relays reply flags verbatim (construction flags:tr.flags,
+  delivery flags:t.flags) and never fabricates status-code replies — the 32
+  is authored by the SERVER userspace. TAP LANDED (oh-ladder @ +1):
+  STATUSCODE-REPLY WARN on every BC_REPLY with TF_STATUS_CODE + nonzero
+  status (names server pid/tid, code, poison value). lb58 runs it.
+- OH-side: the fix belongs upstream (a stub error must not equal ERR_DEAD_
+  OBJECT, or SendRequestInner must not treat HandleReply status as liveness);
+  kernel-side there is nothing to fix on this leg — but the SERVER error's
+  own origin (why accountmgr's osaccount handler returns 32 under load)
+  is the next hop, and THAT one is perf-family.
