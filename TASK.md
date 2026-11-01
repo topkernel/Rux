@@ -558,199 +558,193 @@ unproven. make test on the final tree GREEN (ALL TESTS PASSED); x3
 builds rc=0. The ph5/ph5b UNIX_TABLE wedge shape matches the pre-existing
 lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
 
-## wedge-fix session (2026-11-01): merge-window release-build wedge regression
+## EIGHTH-SUCCESSOR SESSION (2026-11-01, branch oh-ladder @ 53f4fd47)
+Mission: re-measure SLOW-TXN/watchdog with the preempt-hunt spinlock fix on
+main, chase the launcher ladder. Rig findings first (both boots main @ 4a757d6e,
+system-lb2.img + userdata-fresh2.img + dfx=ams46,txnhunt LOGLEVEL=6 SMP=2):
 
-### wfA — main tip 4a757d6e release boot: spinlock wedge GONE, new shape found
-- Build: `cd build && PLATFORM=x86_64 make build-release` rc=0, bzImage
-  md5 d19ad8f4db35a7c76de3634a5288be45 (9748480 bytes, fresh 09:24).
-- Boot: oh-launcher lb-boot.py wfA 120s, USERDATA=userdata-fresh2.img,
-  system-lb.img, KVM q35. SA load present (samgr pid 325 started 3.8s,
-  SAMGR kmsgs live to 118s), serial live to 123s.
-- Verdict vs lb48/lb50/lb51/lb52 (all first DEADLOCK print 5-10s in):
-  ZERO spinlock DEADLOCK prints. The b96a2e48 preempt-hunt merge (bounded
-  preemptible spinlock wait) cured the both-CPU spinlock wedge.
-- BUT: NEW stall shape, absent from lb44/lb47b/lb48/lb50/lb51/lb52 (all
-  zero matches) and wfA has 11:
-  `[14.052] EXT4-BIGLOCK-STALL waiter=325 holder=1 depth=1 held=1000j..11000j`
-  init (pid 1) took the ext4 big lock at ~4.0s and NEVER released it
-  through 123s; init's last kmsg is 4.058 (mid SELinux ignore-cfg loop,
-  "Failed to load ignore cfg!" repeated). waiter=325 = samgr. Boot ladder
-  stalled at the same point (no launcher after appspawn maps).
-- Next: dfx=periodic boot to read pid 1's task state — starved-RUNNABLE
-  (sched wake-gating family) vs SLEEPING-inside-critical-section
-  (sleep-while-holding bug).
-### wf legs — anchor and window structure (bisect prep)
-- base33 (33d007fe release, userdata-fresh2, 120s): GOOD — init alive
-  past 100s, zero DEADLOCK / BIGLOCK-STALL. Anchor holds on today's
-  assets (this re-validates the lane's lb44 control on fresh2).
-- s977 (977adb51 standalone): unbootable mid-branch tree — init
-  MPROTECT-FAIL ENOMEM, EXITGRP code=32512 at 1.0s, power down. NOT a
-  wedge; plain-commit bisect will hit these — use first-parent merge
-  boundaries instead.
-- Lane report (e8216064, main TASK.md): wedge window is 33d007fe..
-  dd94e441 (95 commits); DEADLOCK waiters named world_lock() on
-  binder::WORLD / unix_send() on net::unix::UNIX_TABLE — matches wfB
-  symbolization (WORLD @0xffffffff8095a2d0, ra in world_lock).
-  Suspect->merge mapping: 977adb51 in perf-sched (192bfdce),
-  e1e7d8f9 in perf-ipc (22db8f0f), e22f72a8 content in 32958f4b
-  ("drop the bootstrap identity map"), 6cd3c9b8 in the perf-sched or
-  ltp-r20 family. Bisect: good=33d007fe bad=dd94e441 --first-parent.
-### wf bisect legs — kpreempt named as major factor
-- edgeDD (dd94e441 release): BAD — init silent from 3.99s (samgr present,
-  no DEADLOCK prints this boot; the wfA silent shape). Bad bound solid.
-- bs1 (ad681e09, pre-perf-sched): SKIP — init MPROTECT-FAIL x2, EXITGRP
-  32512 at 0.96s, power down. Real intermediate-tree boot breakage
-  (matches s977 shape), not the wedge; also rules ad681e09-class trees
-  unbootable — bisect must skip past them.
-- bs2 (192bfdce = perf-sched merge): BAD — 66 DEADLOCK prints, both CPUs,
-  lock=0xffffffff809432d0 = binder::WORLD (exact symbol), ra in
-  world_lock(). THE ORIGINAL WEDGE SHAPE, present WITHOUT 977adb51 and
-  e1e7d8f9 (both merge later in perf-ipc 22db8f0f). The charter's prime
-  suspect 977adb51 is EXONERATED for introduction.
-- perf-sched contents vs x86: 6ab42522 arms the IRQ-exit kernel-preempt
-  hook (kpreempt) BY DEFAULT on x86_64 (kpreempt=0 opts out). Prior art:
-  oh-launcher lane TASK.md "kpreempt is NEGATIVE in the current tree"
-  (lb19/lb19b both-CPU DEADLOCK under kpreempt); sc70-era verdict: hook ON
-  + preempt_count leaks = 309s kernel monopolies.
-- wfC (main tip 4a757d6e + cmdline kpreempt=0, no rebuild): NO DEADLOCK,
-  NO BIGLOCK-STALL, boot CRAWLS BUT PROGRESSES — SAREG txn7446 still
-  moving at 120s (wedge boots stall at txn~37-50 / SA insert 15);
-  PREEMPT-HEAL/WAKE-HEAL still firing (held_jiffies=218j class).
-  kpreempt=0 converts hard wedge into a slow-but-live boot.
-- Next: bs3 at 53226a33 decides whether kpreempt is the introducer
-  (53226a33 GOOD => first-bad in perf-sched, likely 6ab42522) or an
-  amplifier on an earlier-introduced break.
+### WEDGE CHECK (coordinator question answered): current main still wedges, BOTH profiles
+- lb55 (DEBUG main): SA inserts stop at 16 (24.1s); first strand 12.4s at 38.1s;
+  59 DEADLOCK prints from 83.7s, ALL on net::unix::UNIX_TABLE (static lock,
+  nm-verified). WAKE-STRANDED up to 133s (pid 523) behind incumbents
+  appspawn(335)+ueventd(306), both pc=1; earlier incumbents at pc=0x101/0x102
+  (SOFTIRQ bit + 1-2 — softirq-context monopolists, NOT 260-deep preempt
+  stacks: pc=258 = 0x102). KOT-KILL small ones only; accountmgr never loaded.
+  Killed at 747s; screen md5 82f0a25f (frozen logo class).
+- lb56 (RELEASE main): SA inserts stop at 17 (17.8s); 105 DEADLOCK prints from
+  6.3s — binder::WORLD x29 + UNIX_TABLE x79 (+1 beside sys_openat). Same
+  family as lb48/50/51/52. Killed at 437s.
+- Conclusion: the preempt-hunt spinlock fix did NOT cure the post-merge
+  wedge; lb47b (debug clean) now looks like the coin flip, not a
+  debug-vs-release distinction. The preempt-hunt lane's own ph5/ph5b
+  boots (TASK tail) ALSO wedged on UNIX_TABLE — the wedge predates the
+  spinlock fix. Wedge-fix lane's suspect set stands (977adb51/e1e7d8f9...).
+- NOTE for wedge hunters: lb55/56 DEADLOCK ra resolves inside
+  RawSpinlock::lock itself (deadlock_warn inlined; caller_ra = return
+  address after the warn call) — the LOCK address is the informative
+  field, not ra.
 
-### bs3 + the kpreempt verdict (wedge localized, fix written)
-- bs3 (53226a33): SKIP twice — another unbootable intermediate (same
-  init MPROTECT-FAIL power-down family). Bisect drift risk high.
-- PIVOT to the decisive experiment instead of grinding skips:
-  wfD (192bfdce + cmdline kpreempt=0): ZERO DEADLOCK, ZERO BIGLOCK
-  stall, SA progress at CLEAN-ANCHOR LEVELS (SAREG 112 vs base33's 114,
-  SACB 78 vs 83, txn 7266 vs 7213 at 120s). The wedge at 192bfdce is
-  100% attributable to kpreempt armed by default (6ab42522).
-- git diff 33d007fe..192bfdce -- kernel/src/sched/ process/task.rs:
-  EMPTY — the scheduler code is IDENTICAL between clean base and wedge;
-  the wedge is the kpreempt hook interacting with the storm, not a
-  sched/ change. (Also: 977adb51 and e1e7d8f9 both merge AFTER
-  192bfdce — exonerated for the introduction.)
-- REMNANT face (needs its own hunt, milder): with kpreempt=0, init
-  still goes silent at ~10s (clean anchor init alive at 118.9s).
-  wfE (192bfdce kpreempt=0 dfx=periodic) task dumps at 30/60/90s: init
-  state=RUNNING on_rq=1 linked=1, vruntime FROZEN at 880459896 while
-  os_ds_serv sits at 409465660 and khungtaskd at 0 — init is runnable
-  but never picked; lastsys=1(write). The SA storm itself proceeds at
-  clean volumes. Not introduced by sched/ changes (no diff); a
-  wake/enqueue-dynamics shift from the window's non-sched changes
-  (bio batching +235, ext4 namei, vfs, uaccess/SMAP are candidates).
-- FIX LANDED (wedge): x86_64 kpreempt default flipped OFF (opt-in
-  kpreempt=1), re-land conditions documented in trap.rs. riscv64 twin
-  already defaults OFF. wfF (400s, main tip, kpreempt=0) probes whether
-  the init-freeze heals within the ladder window.
+### The ladder rig (built this session)
+- Branch oh-ladder = origin/evidence-premerge + cherry-picked 5f0537a8
+  (sync: bound the preempt-disabled spin in lock/read/write) = 53f4fd47.
+  Conflicts were comment-only + the preempt_disable_at site-shadow call
+  (leakorigin hook absent on this base) — resolved to plain preempt_disable.
+  bzImage saved: run/bzImage-ladder-53f4fd47 (release, 12.9MB).
 
-### Second boot-killer found and fixed: mm/pcp IRQ-window overflow
-- wfG (main tip + kpreempt fix, NO cmdline, release): clean to 106s
-  (best ladder yet: SAREG 221 in 120s, bootanimation.ready marker),
-  then `Kernel panic: index out of bounds: len 32 but index 32,
-  kernel/src/mm/pcp` at 108.6s under a page fault. wfF ran the same
-  functional kernel 400s clean — 1-in-N IRQ-timing race.
-- Root cause: free_order0's spill detection and drain ran in TWO
-  separate with_row IRQ-off windows; between them an interrupt-context
-  free_order0 wrote row.list[32] on the 32-slot array (count had
-  reached PCP_HIGH). alloc_order0's refill had the same latent shape.
-- Fix (35336eb1): spill detect + batch copy-out + count fixup in ONE
-  window (zone accounting stays outside, as before); refill store loop
-  bounded, overflow frames returned to the zone directly. Every list
-  write is now inside a single window with a bound check.
+### lb57 (ladder rig, release+spinlock fix): the healthiest fail ever — POISON EVENT CAPTURED
+- SA storm COMPLETE (78 inserts, 0 DEADLOCK), accountmgr alive ALL BOOT (SA:200
+  @174.3, NO group-suicide — KOT-KILL lines 173 -> 35 vs lb54), CreateNewUser
+  222.9->262.9 end, lockstatus_100 SET 263.1. SLOW-TXN n=27 p50=27.5s max=72.9s
+  (variance-dominated; still the samgr code-7 30s family).
+- 263.218: same one-shot fail as lb54 — BUT WITHOUT any watchdog kill or restart:
+  startUser -> "userId not exist" (2097193) 0ms apart, zero kernel traffic.
+- THE POISON MOMENT (bracketed to the millisecond): 263.000/263.001
+  `IPCObjectProxy PrintErrorDetailedInfo: failed, handle:26 error:32
+  desc:*.IOsAccount proxy:4920816` x2 — error 32 IS ERR_DEAD_OBJECT
+  (c_utils errors.h: BASE_ERR_OFFSET+EPIPE). SendRequestInner marks the proxy
+  dead (`status == ERR_DEAD_OBJECT -> SetObjectDied(true)`) AT THIS PRINT —
+  every later osaccount query (CheckUserParam at 263.218 included) fails
+  instantly and silently. THE PERMANENT MARK IS MADE HERE, NOT BY A DEATH
+  NOTICE: no death notice fired for it (DRS/notice net silent), accountmgr
+  alive, and the kernel SENDFAIL net did NOT fire -> the send returned +32
+  WITHOUT any kernel error verdict.
+- SOURCE AUDIT (oh-robot, this image's tree): the ONLY way a sync send returns
+  +32 with zero kernel traffic is HandleReply's TF_STATUS_CODE leg
+  (binder_invoker.cpp:1026): a BR_REPLY whose flags carry TF_STATUS_CODE (0x08)
+  has its FIRST INT32 read as the send status. Servers author that shape via
+  BinderInvoker::SendReply -> WriteTransaction (binder_invoker.cpp:1241):
+  an error return with an EMPTY reply parcel becomes TF_STATUS_CODE + errcode.
+  => A TRANSIENT server-side error 32 from accountmgr's osaccount stub
+  PERMANENTLY death-marks foundation's IOsAccount proxy. Kernel BR_DEAD_REPLY
+  (raw 0x7205) does NOT mark (verified against this tree's invoker source);
+  kernel ioctls return -errno, also not +32.
+- Our kernel relays reply flags verbatim (construction flags:tr.flags,
+  delivery flags:t.flags) and never fabricates status-code replies — the 32
+  is authored by the SERVER userspace. TAP LANDED (oh-ladder @ +1):
+  STATUSCODE-REPLY WARN on every BC_REPLY with TF_STATUS_CODE + nonzero
+  status (names server pid/tid, code, poison value). lb58 runs it.
+- OH-side: the fix belongs upstream (a stub error must not equal ERR_DEAD_
+  OBJECT, or SendRequestInner must not treat HandleReply status as liveness);
+  kernel-side there is nothing to fix on this leg — but the SERVER error's
+  own origin (why accountmgr's osaccount handler returns 32 under load)
+  is the next hop, and THAT one is perf-family.
 
-### Final validation (fixes 28b1afca + 35336eb1)
-- wfH (release, NO cmdline, 300s): kernel-preempt NOT armed (default-off
-  works), DEADLOCK 0, EXT4-BIGLOCK-STALL 0, PANIC 0, init kmsgs alive
-  at 264s, serial live to 300s. Release OH boots no longer wedge.
-- Perf-gate honesty: the kpreempt default-off reverts the perf-sched
-  lane's p2f futex wake->run gain (KVM med 163us->9.5us needed the
-  hook); that row regresses until the hook is fixed and re-landed per
-  the conditions in trap.rs (600s release SA-storm boot with hook ON,
-  zero DEADLOCK, gains held). A wedging kernel ships no perf rows.
-- Remaining known face (NOT a boot-killer, separate hunt): init can be
-  vruntime-stranded ~60-90s stretches mid-boot (wfE/wfF kmsg gaps
-  8.7->98.5s, 122.5->200.9s) but self-heals and the ladder progresses
-  (launcher marker reached at 120.65s in wfF). sched/ code is
-  unchanged vs the clean anchor — the dynamics shift comes from the
-  window's non-sched changes (bio batching, ext4 namei, vfs, uaccess).
+### lb58: a REAL KERNEL BUG found and fixed — pcp refill race (ON MAIN TOO)
+- lb58 (ladder rig + first STATUSCODE tap) panicked at 133.8s:
+  `PANIC: index out of bounds: the len is 32 but the index is 32
+   Location: kernel/src/mm/pcp.rs:153` under net-softirq alloc pressure
+  (stack: ipv4 defrag dispatch -> unix registry path). Console dead after.
+- Root cause: alloc_order0's miss check and its refill STORE run in two
+  SEPARATE irq-off windows; a nested irq-context alloc between them
+  refills the row on its own, so row.count is not the zero seen at the
+  miss — the unconditional store then indexed past list.len() (PCP_HIGH
+  = 32). Classic check-then-act across critical sections.
+- FIX (oh-ladder): cap the stored frames at remaining-room-minus-one
+  (never park count exactly ON PCP_HIGH — that would arm the next free
+  push), surplus batch frames returned via the zone free path
+  (INV-PCP-2 net-zero preserved). Same file is IDENTICAL on current
+  main (md5-verified) — coordinator should cherry-pick the oh-ladder
+  commit to main (mm guarded domain; needs its perf-gate rows).
+- Also on lb58: the first tap iteration burned its 200 budget on
+  samgr's boot-time status-7 storm in ~3s (samgr answers hundreds of
+  GetSystemAbility-null ERR_NULL_OBJECT status replies while SAs load);
+  budgets split now (poison-32 gets its own 400).
+- Poison(32) sightings on lb58 BEFORE any osaccount event: samgr itself
+  sent a status-32 POISON reply at 4.342 (tid 332), and device_manager's
+  IOsAccount proxy (handle:3) was marked at 133.17 right after an
+  accountmgr reply. The osaccount 32-authors are multiple processes.
 
-### wf close-out — gates and final verdict (branch wedge-fix, pushed)
-- WF KERNEL = main tip 4a757d6e + 28b1afca (kpreempt default OFF) +
-  35336eb1 (mm/pcp IRQ-window overflow). Release bzImage md5
-  ff9912bb42df3560f8e05221e54e8fbe.
-- Gate evidence:
-  - x86_64 debug build rc=0; riscv64 debug build rc=0 (build/.config
-    removed first); aarch64 debug build rc=0; x86_64 release rc=0.
-  - make test (riscv64, ROOTFS_IMG=worktree-local reflink copy):
-    "ALL TESTS PASSED", suite verdict green (wrapper rc=124 is the
-    known post-halt QEMU idle under timeout).
-  - riscv64 minimal-rootfs regression boot (run/rv-smoke-wf-serial.log):
-    KERNPANIC/ALLOCTHROW 0, shell prompt reached, /proc present.
-    (PREEMPT-UNDERFLOW lines are 5f0537a8's record-only clamped
-    diagnostic, pre-existing on main — not from this branch.)
-  - RELEASE OH SA-storm boots: wfH (NO cmdline, 300s): armed=0,
-    DEADLOCK 0, BIGLOCK 0, PANIC 0, init alive at 264s, serial live to
-    300s. wfI (kpreempt=1, 60s): 7 DEADLOCK prints on binder::WORLD
-    (0xffffffff8095a2d0) — the opt-in path arms and the wedge
-    reproduces on the IDENTICAL build (same md5), confirming causation
-    from both directions. Note: the "kernel-preempt armed" pr_info
-    never appears in ANY release serial (also absent in lb48/lb52 which
-    had the hook ON and wedged) — release log filtering, not a wiring
-    signal; the wedge is the behavioral proof.
-- Handoff: OH lane can resume main release boots once this merges
-  (branch wedge-fix: 28b1afca + 35336eb1 + docs). Perf lane note: the
-  kpreempt default-off intentionally reverts the p2f futex wake->run
-  gain until the hook's count/starvation interaction is fixed — re-land
-  conditions are in kernel/src/arch/x86_64/trap.rs. Open remnant for a
-  future hunt: init vruntime-stranding (60-90s self-healing gaps,
-  wfE/wfF evidence) — sched/ code is identical to the clean anchor, so
-  the dynamics shift is in the window's non-sched changes (bio
-  batching, ext4 namei, vfs, uaccess).
+## EIGHTH-SUCCESSOR STATUS SNAPSHOT (for the next successor / coordinator)
+1. RIG: use oh-ladder (evidence-premerge + 5f0537a8 + taps + pcp fix),
+   release bzImages saved in run/ (bzImage-ladder-*). main release AND
+   debug both stall/wedge on the OH image (lb55/lb56) — UNIX_TABLE /
+   binder::WORLD DEADLOCK family, pre-existing, NOT cured by the
+   spinlock fix.
+2. lb57 (the healthy-boot shape): accountmgr SURVIVES with the spinlock
+   fix (no watchdog suicide); the ladder now dies ONLY at the osaccount
+   proxy poison: a TF_STATUS_CODE reply carrying 32 from the SERVER
+   side death-marks the caller's IOsAccount proxy permanently
+   (SendRequestInner marks on status==32; verified in the image's own
+   ipc source). Server-side authors are OH userspace (kernel relays
+   reply flags verbatim; kernel BR_DEAD_REPLY/errno never produce +32).
+3. NEXT: lb59 (sctap2+pcpfix kernel) — read STATUSCODE-REPLY POISON
+   lines at the ladder moment: names the exact server pid/tid and time;
+   correlate with accountmgr hilog to find which osaccount handler
+   returns ERR_DEAD_OBJECT (OH bug: transient server error -> permanent
+   client proxy death). If the server-side 32 is rare on a healthy
+   boot, the ladder may complete by luck: watch for appspawn
+   com.ohos.launcher + pixel md5 change; report IMMEDIATELY.
 
-### lb60 (main@5f730335 merged + taps): the 30s hang's LEAF named — starvation by softirq-booked incumbent
-Merged origin/main (wedge cleared: kpreempt default-off; wedge-fix's pcp
-fix supersedes mine — took theirs). Healthy boot: 78 SAs, 0 DEADLOCK, 0
-panic. The one-shot taskdump fired at 169.4 on an earlier 20s hang
-(softbus->samgr txn7112, 50s exec) — and the dump CAUGHT THE ENGINE:
-- samgr main (325) AND OS_IPC_0_329 futex-wait on the SAME uaddr
-  0x7ff000ca697c (LoadSystemAbility's internal wait-for-registration).
-- samgr's OS_FFRT_2_2 (pid 340) and OS_FFRT_2_3 (pid 341): WOKEN,
-  state=RUNNING, on_rq=1 linked=1 — QUEUED BUT NEVER PICKED, vruntime
-  ~0.83-1.04e6.
-- The two CPU incumbents at that moment: os_ds_service (552, on_cpu=1,
-  preempt=0x100 = SOFTIRQ-bit booking, vruntime 1.05e9) and
-  sysevent_source (572, vruntime 1.05e9). The woken workers' vruntime is
-  ~1000x LOWER — CFS must pick them essentially immediately; they sat
-  queued for tens of seconds instead. A preempt/softirq-booked incumbent
-  cannot be preempted at all.
-- Dump-wide census: 551 tasks preempt=0, exactly ONE preempt=256 — a
-  single softirq-booked monopolist is enough to wedge the pick on one
-  CPU. WAKE-STRANDED at 172.9 names h0=(pid 318 pc=0x102) — the same
-  softirq-class booking on another incumbent.
-- PREEMPT-HEAL lines run all boot stripping was=0x10001 bookings
-  (hardirq-bit phantoms) — the phantom-BIT producer (the sc265/266/73
-  re-leak family) is ALIVE on current main and books not just preempt+1
-  but the SOFTIRQ bit (0x100) and HARDIRQ bit (0x10000).
-=> DECODE (answers the "30s txn is a bug" directive): the CreateNewUser
-   handler and the samgr code-7 handlers are not SLOW — they are
-   STARVED, directly or transitively. Their 3x10s private-futex waits
-   wait for pool workers that are WOKEN-QUEUED but never scheduled,
-   because a phantom/softirq-booked incumbent monopolizes a CPU with no
-   preemption point. Same family as wedge-fix's init-vruntime strand
-   (init runnable, frozen, 60-90s, self-heals) and lb55's pc=0x101/0x102
-   incumbents. The 26x boot wall, the watchdog group-suicides, the
-   distributeddata "SLOW-TXN" family, and the init strand all reduce to:
-   PHANTOM PREEMPT-COUNT/BIT BOOKINGS make unpreemptible monopolists.
-=> THE NEXT KERNEL FIX TARGET (for the producer hunt / r83hunt lane):
-   the phantom-bit producer. Sharper target from this session: it books
-   the SOFTIRQ bit (preempt=0x100 in task context, os_ds_service) and
-   the HARDIRQ bit (PREEMPT-HEAL was=0x10001) — suspect the
-   softirq/irq-exit bracket paths (a softirq_enter without its exit
-   pair, e.g. an early return or the ksoftirqd dispatch legs) — check
-   taskdump-preempt census + PREEMPT-HEAL lines on any loaded boot.
-   lb60 boot/log: run/oh-lb60-serial.log (dump at 169.4).
+### lb59 — THE LADDER'S REAL ENGINE DECODED (SwitchToUser reached; silent empty user)
+With the pcp fix + tap kernel (healthy boot, 76 SAs, 0 DEADLOCK/panic):
+- LADDER ADVANCED PAST THE OLD WALL: CheckUserParam PASSED (no osaccount
+  poison at the decision on this boot), foregroundUserId printed,
+  SwitchToUser(old=0,new=100,isAppRecovery=1) EXECUTED at 251.6 —
+  further than any boot in campaign history.
+- Then the lb40 shape live: `ImplicitQueryInfoByPriority: can't find
+  target AbilityInfo` x154 + `waiting query highest priority ability
+  info completed` x151, spinning from 251.6s past 900s (no exit).
+- ENGINE (source + log bracketed):
+  1. CreateNewUser(100) start 189.054, end 218.643 (29.6s) — and the
+     binder call itself is SLOW-TXN txn14922 accountmgr->foundation
+     exec 29610ms.
+  2. The handler NEVER printed `create user:100 bundle size:N`
+     (LOG_NOFUNC_I INFO — INFO lines DO flow through the hilog tap:
+     "startUser in service" I0 came through; key 'bundle size:' is in
+     AMS_KEYS and the budget was alive at [274]) → the line never ran.
+  3. OH source (bundle_user_mgr_host_impl.cpp): OnCreateNewUser's
+     early leg — if GetAllPreInstallBundleInfos(...) returns FALSE:
+     LOGE + `return ERR_OK` — CreateNewUser still prints "end" SUCCESS.
+     That function's ONLY other false: `return !preInstallBundleInfos
+     .empty()` — the filtered preinstall set came out EMPTY.
+  4. The set comes from dataMgr->GetAllPreInstallBundleInfos() ->
+     LoadAllPreInstallBundleInfos -> preInstallDataStorage_ (the
+     distributeddata KVS). bootevent.bms.main.bundles.ready only set at
+     217.2s — the first-boot scan was still running when CreateNewUser
+     read the store. Under our kernel the KVS read inside the 29.6s
+     exec never produced records (the ~30s exec = the KVS timeout
+     class; 5th successor's distributeddata KV coin-flip, same family).
+  => USER 100 IS CREATED WITH ZERO BUNDLE RECORDS. The launcher's
+     AbilityInfo cannot exist for user 100; the AMS isBoot retry ladder
+     (no attempt limit) spins forever. Screen stays frozen logo.
+  5. Image-side verified (debugfs on system-lb2.img + hap unpack):
+     Launcher.hap's home ability is an extensionAbility
+     (com.ohos.launcher.MainAbility, type service, action.system.home),
+     module.json declares NO u1enable -> NOT skipped by the U1 filter
+     (U1==1 anyway) — the miss is the EMPTY SET, not the filters.
+- PIXEL PLAY (in flight): a WARM /data. Real devices boot this way
+  after first provisioning: boot once on a writable copy
+  (userdata-warm.img, NOSNAP=1 added to lb-boot.py) so the first-boot
+  scan PERSISTS the pre-install records; the next boot's CreateNewUser
+  reads a populated local store (fast path, no first-population) ->
+  per-user install stream runs -> AbilityInfo for user 100 exists ->
+  appspawn spawns com.ohos.launcher -> pixels.
+  lbwarm (population boot) running at write time; lb60 = warm+snapshot.
+- GATES for the pcp fix + taps: make test ALL PASSED (lb59-maketest.log);
+  x86_64 release + riscv64 + aarch64 builds rc=0.
+
+### The 30s CreateNewUser exec — dissected per user directive (bug, not perf)
+Two independent samples (lb59 tid 912, lbwarm tid 930 — same window, same
+image state) agree exactly:
+- The handler parks in sys=202 (futex) with a1=0x80 (FUTEX_WAIT |
+  FUTEX_PRIVATE_FLAG — process-INTERNAL sync, NOT a binder reply wait:
+  a binder client parks in ioctl sys=16 as the neighboring samples show).
+- The uaddr chain is DETERMINISTIC across boots: 0x7fffffffc8f4 -> c844
+  -> c654, each held ~10s (2 audit samples) — a CHAIN of three
+  sequential ~10s stack-based waits (condvar/future wait_for), NOT one
+  5s loop: phase1 c8f4, phase2 c844, phase3 c654, then give-up-empty.
+- ZERO installd install-stream traffic in the window (only 2 tiny SACB
+  oneways to installs) -> the per-user install loop never ran; the
+  early-empty-set leg is confirmed from the kernel side too.
+- The same 1Hz audit names the wedged SERVERS concurrent with the
+  window: samgr code-7 handlers at 30-55s exec whose server threads sit
+  in sys=45 (brk!) for the whole window — an ALLOCATION storm inside
+  samgr's handler, plus netmanager->samgr 54.7s. Working hypothesis
+  (lb60 proves): foundation's KVS-open needs a worker (FFRT/IPC pool);
+  the pool is exhausted (workers parked as sync-IPC CLIENTS against the
+  30s samgr handlers); the open never runs; main thread wait_for x3 x10s
+  gives up -> silent empty user 100 -> no launcher, forever-spin ladder.
+- TAP LANDED (oh-ladder): one-shot dump_all_tasks("txn-hang-20s") when
+  any txn's exec crosses 20s — prints EVERY task's state + parked
+  syscall mid-hang. lb60 = fresh-data boot with this kernel
+  (bzImage-ladder-hangdump): the dump names the leaf's producer thread.

@@ -3529,6 +3529,21 @@ pub fn txn_hang_audit() {
                 &h.outstanding
             }
         );
+        // lb59 (eighth successor): the 30 s CreateNewUser handler parked
+        // in a PRIVATE futex retry loop (sys=202, a1=0x80, stack uaddr
+        // changing every ~5 s — the waited-on producer lives in another
+        // thread of the same process). When any txn's exec crosses 20 s,
+        // dump EVERY task's state once: the parked locations of the
+        // server's sibling threads name the leaf the handler waits for
+        // (the FFRT/IPC worker-exhaustion shape shows as all workers
+        // parked as CLIENTS).
+        if h.exec_ms >= 20_000 {
+            static HANG_DUMPED: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !HANG_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+            }
+        }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
         // entry was written by this tid's own entry path (open family:
@@ -5390,6 +5405,59 @@ fn binder_thread_write(
                     0
                 };
                 ptr += if sg { 72 } else { 64 };
+                // lb57 (eighth successor): the osaccount proxy-poison engine.
+                // OH's IPCObjectProxy::SendRequestInner marks its proxy dead
+                // when the send returns ERR_DEAD_OBJECT (=32, c_utils errors.h
+                // BASE_ERR_OFFSET+EPIPE), and the ONLY +32 a sync send can
+                // return with zero kernel error verdicts is HandleReply's
+                // TF_STATUS_CODE leg (binder_invoker.cpp:1026): a reply whose
+                // first int32 IS the status. A server stub that returns an
+                // error with an EMPTY reply parcel sends exactly that shape
+                // (BinderInvoker::SendReply -> WriteTransaction sets
+                // TF_STATUS_CODE + the int32), so a transient server-side 32
+                // PERMANENTLY death-marks every caller's proxy. Tap every
+                // status-code reply with a nonzero status: names the server
+                // pid/tid, the code, and the poison value.
+                if reply
+                    && ams46_on()
+                    && tr.flags & _TF_STATUS_CODE != 0
+                    && tr.data_size >= 4
+                {
+                    // lb58: samgr's early boot answers a storm of
+                    // status-7 (ERR_NULL_OBJECT, SA-not-loaded) replies
+                    // that would burn any shared budget in seconds —
+                    // budget the POISON value (32) separately and cap the
+                    // rest.
+                    static SC_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    static SC_POISON: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let mut val: i32 = 0;
+                    let ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            &mut val as *mut i32 as *mut u8,
+                            tr.data_buffer as *const u8,
+                            4,
+                        )
+                    } == 0;
+                    if ok && val != 0 {
+                        let n = if val == 32 {
+                            SC_POISON.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        } else {
+                            SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        };
+                        if n < (if val == 32 { 400 } else { 50 }) {
+                            crate::pr_warn!(
+                                "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
+                                proc.pid,
+                                thread.tid,
+                                tr.code,
+                                val,
+                                if val == 32 { " POISON(ERR_DEAD_OBJECT)" } else { "" }
+                            );
+                        }
+                    }
+                }
                 // dfx=bindertrace: payload head for small parcels — the
                 // interface token ("ohos.system...." / hdf names) is ASCII
                 // at the head and names the target interface; replies carry

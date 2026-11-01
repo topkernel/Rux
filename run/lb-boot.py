@@ -26,8 +26,12 @@ for f in (SERIAL, MON):
 def drive(path, i):
     if not os.path.exists(path):
         return ""
+    # NOSNAP=1: boot the USERDATA drive WITHOUT snapshot (one-time
+    # population boots that must persist /data — e.g. cooking a warm
+    # userdata image whose pre-install KVS is already populated).
+    snap = "" if (os.environ.get("NOSNAP") == "1" and i == 5) else ",snapshot=on"
     return (f" -drive file={path},if=none,id=ohd{i},format=raw,"
-            f"file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd{i}")
+            f"file.locking=off{snap} -device virtio-blk-pci,drive=ohd{i}")
 
 DISKS = (drive("run/oh-img/updater.img", 0) + drive(SYSIMG, 1)
          + drive("run/oh-img/vendor.img", 2) + drive("run/oh-img/sys_prod.img", 3)
