@@ -602,6 +602,15 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
+    // Allocation discipline (s2-a review finding P1): the scan loop
+    // below can run many rounds (every spurious wake re-enters it);
+    // the pollfd mirror and the resolved-file array are allocated ONCE
+    // here and reused per round. nfds is already bounded (<= 1024), so
+    // these are bounded buffers.
+    let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
+    let mut files: alloc::vec::Vec<alloc::sync::Arc<crate::fs::File>> =
+        alloc::vec::Vec::with_capacity(nfds);
+
     // Poll loop with timeout support. The expiry decision runs on the
     // high-res ns clock (see poll_deadline_ns); jiffies only schedule
     // the intermediate re-check sleeps.
@@ -614,7 +623,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // copy it in, compute revents, copy it back — all through the
         // exception-table paths (SUM=0 safe; raw derefs fault the kernel).
         // SAFETY: fds_ptr validated with access_ok; nfds bounded to 1024.
-        let mut pollfds = alloc::vec![PollFd { fd: -1, events: 0, revents: 0 }; nfds];
+        // (buffer hoisted out of the loop — reused per round)
         unsafe {
             crate::arch::uaccess::copy_from_user(
                 pollfds.as_mut_ptr() as *mut u8,
@@ -709,8 +718,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // path registered (poll_wait_impls None), preserving behavior for
         // exotic fd types.
         {
-            let mut files: alloc::vec::Vec<alloc::sync::Arc<crate::fs::File>> =
-                alloc::vec::Vec::with_capacity(nfds);
+            files.clear();
             let mut wired = true;
             for i in 0..nfds {
                 let pollfd = &pollfds[i];
@@ -1948,9 +1956,19 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
     // schedule the intermediate re-check sleeps.
     let deadline_ns = poll_deadline_ns(timeout_ms as i64 * 1_000_000);
 
+        // Allocation discipline (s2-a review finding P2): these scratch
+        // buffers were allocated UNDER the entries lock on every wake
+        // round; hoisted out and reused. maxevents is validated (1..=
+        // EPOLL_MAX_EVENTS) so the capacity is bounded.
+        let mut ready_events: alloc::vec::Vec<EPollEvent> =
+            alloc::vec::Vec::with_capacity(maxevents as usize);
+        let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> = alloc::vec::Vec::new();
+        let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
         loop {
         let mut entries = epoll.entries.lock();
-        let mut ready_events: alloc::vec::Vec<EPollEvent> = alloc::vec::Vec::new();
+        ready_events.clear();
+        trace_fds.clear();
+        dead_fds.clear();
         // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
         // the trace line can be symbolized against the kernel ELF.
         let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
@@ -1963,8 +1981,6 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         // phantom wakeup that spun GLib main loops. sys_close purges the
         // common case; this catches anything that slips past (fd-number
         // reuse without EPOLL_CTL_DEL).
-        let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-
         let mut nent: usize = 0;
         for entry in entries.iter_mut() {
             nent += 1;

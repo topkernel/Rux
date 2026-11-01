@@ -864,13 +864,17 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
 
     // Copy sops from userspace through the exception-table path
     // (review IPC M: uaccess 裸访改 copy_from_user).
-    let mut sops: alloc::vec::Vec<SemBuf> = alloc::vec::Vec::with_capacity(nsops);
+    // Allocation discipline (s2-a finding P3): nsops <= 500 and SemBuf
+    // is 6 bytes — a bounded stack array replaces the per-call heap Vec.
+    const MAX_SOPS: usize = 500;
+    assert!(nsops <= MAX_SOPS);
+    let mut sops_buf: [SemBuf; MAX_SOPS] =
+        [SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; MAX_SOPS];
     // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
-    // above; sops holds exactly that many SemBuf values.
+    // above; exactly nsops entries are written.
     unsafe {
-        sops.set_len(nsops);
         if crate::arch::uaccess::copy_from_user(
-            sops.as_mut_ptr() as *mut u8,
+            sops_buf.as_mut_ptr() as *mut u8,
             sops_ptr as *const u8,
             nsops * core::mem::size_of::<SemBuf>(),
         ) != 0
@@ -878,6 +882,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             return -(errno::EFAULT as i64);
         }
     }
+    let sops: &[SemBuf] = &sops_buf[..nsops];
 
     // Permission: write when any op alters a value (sem_op != 0), otherwise
     // read — reference __do_semtimedop does ipcperms(alter ? S_IWUGO :
@@ -899,7 +904,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
         };
     }
 
-    for sop in &sops {
+    for sop in sops.iter() {
         if sop.sem_num as usize >= nsems_in_set {
             // Linux ipc/sem.c: EFBIG when sem_num is out of range
             // (LTP semop02 passes -1 and PSEMS+1 as sem_num).
@@ -1240,16 +1245,18 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
             .map(|i| sems[i].value.load(Ordering::Relaxed))
             .collect();
         // First pass: compute all resulting values, accumulated.
-        let mut new_vals = alloc::vec::Vec::with_capacity(sops.len());
-        for sop in sops {
+        // Allocation discipline (s2-a finding P3): nsops <= 500 — a
+        // bounded stack array replaces the per-call heap Vec.
+        let mut new_vals: [i32; 500] = [0; 500];
+        for (ni, sop) in sops.iter().enumerate() {
             let cur = work[sop.sem_num as usize];
             let new_val = cur.wrapping_add(sop.sem_op as i32);
-            new_vals.push(new_val);
+            new_vals[ni] = new_val;
             work[sop.sem_num as usize] = new_val;
         }
 
         // Second pass: verify all operations can succeed
-        for (i, &new_val) in new_vals.iter().enumerate() {
+        for (i, &new_val) in new_vals[..sops.len()].iter().enumerate() {
             // Positive op must not exceed SEMVMX (per Linux perform_atomic_semop)
             if sops[i].sem_op > 0 && new_val > SEMVMX {
                 return Err(-(errno::ERANGE as i32));
@@ -1272,7 +1279,7 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         // Save original values for rollback if SEM_UNDO adjustment exceeds SEMAEM.
         let orig_vals: alloc::vec::Vec<i32> = sops.iter().map(|s| sems[s.sem_num as usize].value.load(Ordering::Relaxed)).collect();
         let caller_pid = get_current_pid();
-        for (i, &new_val) in new_vals.iter().enumerate() {
+        for (i, &new_val) in new_vals[..sops.len()].iter().enumerate() {
             sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
             // Each operated semaphore records the caller as its last
             // operator (semctl GETPID; Linux perform_atomic_semop).

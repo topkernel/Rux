@@ -8162,16 +8162,47 @@ fn binder_thread_read(
     consumed: &mut u64,
     non_block: bool,
 ) -> i64 {
-    let mut staged: Vec<u8> = Vec::new();
+    // Allocation discipline (s2-a finding P4): the BR command stream
+    // staged here is a handful of u32/u64 commands (typ. < 64 bytes;
+    // read_size bounds the copy-out). A bounded stack buffer replaces
+    // the per-read heap Vec.
+    let mut staged_buf: [u8; 512] = [0; 512];
+    let mut staged_len: usize = 0;
+    struct Staged<'a> {
+        buf: &'a mut [u8; 512],
+        len: &'a mut usize,
+    }
+    impl<'a> Staged<'a> {
+        #[inline]
+        fn extend(&mut self, bytes: &[u8]) {
+            if *self.len + bytes.len() <= self.buf.len() {
+                self.buf[*self.len..*self.len + bytes.len()].copy_from_slice(bytes);
+                *self.len += bytes.len();
+            }
+        }
+        #[inline]
+        fn len(&self) -> usize {
+            *self.len
+        }
+        #[inline]
+        fn extend_from_slice(&mut self, bytes: &[u8]) {
+            self.extend(bytes);
+        }
+        #[inline]
+        fn as_ptr(&self) -> *const u8 {
+            self.buf.as_ptr()
+        }
+    }
+    let mut staged = Staged { buf: &mut staged_buf, len: &mut staged_len };
 
     macro_rules! stage_cmd {
         ($cmd:expr) => {
-            staged.extend_from_slice(&$cmd.to_ne_bytes())
+            staged.extend(&$cmd.to_ne_bytes())
         };
     }
     macro_rules! stage_u64 {
         ($v:expr) => {
-            staged.extend_from_slice(&$v.to_ne_bytes())
+            staged.extend(&$v.to_ne_bytes())
         };
     }
 
