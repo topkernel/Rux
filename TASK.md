@@ -967,6 +967,40 @@ debug ELFs).
   shapes stop it and leave the VM up). Bugs fixed: setsid per boot +
   process-group teardown.
 
+### Session close part 2 (~22:00) — lb92: SECOND-EVER SwitchToUser; the population strategy
+- lb92 (roller boot, kernel bzImage-ladder-fieldpoll = af5577c5 +
+  e8b9a969 + 05e3c4c5): CheckUserParam PASSED for the first time in 12
+  boots tonight (the osaccount read coin landed), SwitchToUser
+  oldUserId:0 newUserId:100 EXECUTED at 97.867 (lb59 in campaign
+  history was the first). Then the known lb40/lb59 shape: no
+  CreateNewUser had run on this boot either, so user 100 has NO
+  per-user bundle records -> ImplicitQueryInfoByPriority can't find the
+  launcher -> the isBoot retry ladder spins (365+ lines) -> no spawn.
+- THE WIN CONDITION, named: a boot that runs the CREATION flow
+  (GenerateUserKeys + CreateNewUser + bundle size:NN install stream —
+  the lb65 shape at 40s) AND PERSISTS IT. lb65 ran it under snapshot
+  (records discarded). run/roll-pop.sh now boots NOSNAP on a FRESH
+  REFLINK COPY per boot; the boot that lands the lb65 shape writes
+  user 100 + the per-user records into its own copy (the GOLDEN
+  population) — later snapshot boots on that copy get AbilityInfo for
+  user 100 deterministically. First pop-roller boots (lb110/111):
+  fail-shapeB as usual; lb112 slow-phase. Roller runs unattended,
+  logs to run/roll-logs/poproller.log.
+- The osaccount coin (tonight 1-pass/13): lb92's "exists" answer means
+  the warm image's DB plausibly HAS user 100 (from the original lbwarm
+  population at 14:38) and the 11 "not exist" boots were failed/empty
+  KVS READS (the fifth successor's lb42 coin-flip conclusion). A golden
+  population copy removes the read's dependence on timing: the records
+  are physically present and freshly written.
+- NOTE for the perf lane (merge review of 05e3c4c5): the poll-path
+  change's healthy-path delta is one Option check + one TSC read per
+  4096 spin laps; the sleep path (the common waiter) is untouched; the
+  recovery only engages at >=10ms polls and the deadline at 10s. Tier-2
+  pbench rows (p6_write_fsync/mkdrmdir) re-bank on the next pa battery
+  of the merged tree — this session's OH boots showed zero POLLSTALL
+  firings and fully-drained rings (VW-SNAP used==last==shadow on all
+  six disks, intx flowing).
+
 ### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
 THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
 SAME BUG. Evidence chain, closed:
