@@ -828,6 +828,23 @@ unsafe impl Sync for InodeCache {}
 /// Global Inode cache
 static ICACHE: Spinlock<Option<InodeCache>> = Spinlock::new(None);
 
+/// (perf-path lane) Inode-identity generation: bumped on every icache
+/// membership change (insert / replace / evict / remove). Dentries stamp
+/// the generation they last refreshed at, so a walk can decide with ONE
+/// Relaxed load whether its cached inode Arc is still the icache's
+/// current object for that (ino, fs_id) — replacing the per-component
+/// global-lock icache_lookup on the dcache-hit fast path. The mapping
+/// only ever changes when the bucket set changes, which is exactly what
+/// bumps this counter.
+static ICACHE_REGEN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(1);
+
+/// (perf-path lane) Current inode-identity generation (see ICACHE_REGEN).
+#[inline]
+pub fn icache_regen() -> u64 {
+    ICACHE_REGEN.load(Ordering::Relaxed)
+}
+
 /// Initialize Inode cache
 ///
 /// (perf-syscall lane) The init check used to take the global ICACHE
@@ -973,6 +990,9 @@ pub fn icache_add(inode: Arc<Inode>) {
     if was_empty {
         inner.count += 1;
     }
+    // (perf-path lane) membership changed — invalidate the walk-side
+    // generation fast path (see ICACHE_REGEN).
+    ICACHE_REGEN.fetch_add(1, Ordering::Relaxed);
 }
 
 /// LRU eviction policy: evict least recently used entry.
@@ -1042,6 +1062,8 @@ pub fn icache_remove(ino: Ino, fs_id: u64) {
             inner.buckets[index].fs_id = 0;
             inner.buckets[index].access_time.store(0, Ordering::Relaxed);
             inner.count -= 1;
+            // (perf-path lane) membership changed — see ICACHE_REGEN.
+            ICACHE_REGEN.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -1090,4 +1112,6 @@ pub fn icache_flush() {
     }
 
     inner.count = 0;
+    // (perf-path lane) full flush — every identity mapping changed.
+    ICACHE_REGEN.fetch_add(1, Ordering::Relaxed);
 }

@@ -1018,6 +1018,48 @@ impl FdTable {
         self.alloc_fd_from(0)
     }
 
+    /// (perf-path lane) alloc + install in ONE entry-lock section. The
+    /// old get_file_fd_install sequence (alloc_fd then install_fd) took
+    /// the irqsave entry lock twice per open — two cli/sti pairs on the
+    /// open hot path. Same semantics: lowest free fd, emptiness-gated
+    /// install, RLIMIT honored.
+    pub fn install_lowest_fd(&self, file: Arc<File>) -> Option<usize> {
+        let ceiling = Self::nofile_ceiling();
+        let mut entry = self.entry.lock_irqsave();
+        let start = entry.next_fd.min(ceiling);
+
+        // Lowest free fd at/above next_fd (alloc_fd_from discipline).
+        let mut fd = None;
+        for i in start..ceiling {
+            if self.slots[i].0.load(Ordering::Relaxed).is_null() {
+                fd = Some(i);
+                break;
+            }
+        }
+        if fd.is_none() && start > 0 {
+            // Wrap to [0, start): dead code under the close_fd pullback
+            // invariant, kept for the same belt-and-braces reason as
+            // alloc_fd_from.
+            for i in 0..start {
+                if self.slots[i].0.load(Ordering::Relaxed).is_null() {
+                    fd = Some(i);
+                    break;
+                }
+            }
+        }
+        let fd = fd?;
+        entry.next_fd = (fd + 1) % MAX_FDS;
+        // The slot now owns one reference (published with Release so the
+        // File's fields are visible to lock-free readers' Acquire loads).
+        self.slots[fd]
+            .0
+            .store(Arc::into_raw(file) as *mut File, Ordering::Release);
+        entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        entry.open_bits[fd / 64] |= 1u64 << (fd % 64);
+        entry.count += 1;
+        Some(fd)
+    }
+
     /// Allocate file descriptor >= min_fd
     ///
     /// Honors RLIMIT_NOFILE: returns None for the first free fd at or
@@ -1588,10 +1630,9 @@ pub fn get_file_fd_safe(fd: usize) -> Option<Arc<File>> {
 
 pub unsafe fn get_file_fd_install(file: Arc<File>) -> Option<usize> {
     use crate::sched;
-    let fdtable = sched::get_current_fdtable()?;
-    let fd = fdtable.alloc_fd()?;
-    fdtable.install_fd(fd, file).ok()?;
-    Some(fd)
+    // (perf-path lane) single entry-lock alloc+install — see
+    // install_lowest_fd.
+    sched::get_current_fdtable()?.install_lowest_fd(file)
 }
 
 pub unsafe fn close_file_fd(fd: usize) -> Result<(), i32> {
