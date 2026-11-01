@@ -11,7 +11,7 @@
 cd /home/william/rux-agents/oh-launcher || exit 1
 MAX=${1:-8}
 START=${2:-212}
-KERN=run/bzImage-ladder-gpbound
+KERN=run/bzImage-ladder-fieldpoll
 IMG=run/system-lb8.img
 BASE=run/userdata-warm.img
 mkdir -p run/roll-logs
@@ -36,6 +36,9 @@ for i in $(seq 0 $((MAX-1))); do
     if grep -aq 'bundle size' "$SER" 2>/dev/null; then VERDICT=GOLDEN; break; fi
     if grep -aqE 'appspawn start com.ohos.launcher|AppSpawn start com.ohos.launcher' "$SER" 2>/dev/null; then VERDICT=SUCCESS-spawn; break; fi
     if grep -aq 'Handle set param.*launcher.ready' "$SER" 2>/dev/null; then VERDICT=SUCCESS-ready; break; fi
+    # shapeB: startUser failed with user-100 absent/failed creation — boot spent.
+    # A winning boot never prints it (creation commits the user before activation).
+    if grep -aq 'userId not exist' "$SER" 2>/dev/null; then VERDICT=fail-shapeB; break; fi
     SA=$(grep -a -c 'insert SA:' "$SER" 2>/dev/null)
     if [ "$PHASE" = early ]; then
       if [ "$SA" -gt 5 ]; then PHASE=flowing; echo "[gold] $TAG SA flowing (${SA} @${EL}s)" >> run/roll-logs/goldroll.log
