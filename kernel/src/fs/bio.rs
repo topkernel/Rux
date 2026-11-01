@@ -2419,8 +2419,27 @@ impl WritePlan {
 /// write, publishes it); a pending record whose `post` intersects the plan
 /// contributes its entry (H2) — and that entry then pulls its own H1 set.
 /// Converges: every iteration either adds a block or stops.
+///
+/// Round-capped with a conservative fallback — ALLOCATION-FREE on purpose.
+/// The closure is reachable from journal commits and buffer eviction under
+/// spinlocks, so it must not enter the allocator (an earlier index+worklist
+/// version allocated per mention and correlated with whole-boot allocator
+/// class-lock wedges: samgr's workers frozen in RawVec finish_grow for
+/// 293s, lb234/lb235). The unbounded round loop was the original crawl
+/// engine instead: each round rescans every pending record against the
+/// whole plan, and the plan grows a few blocks per round — thousands of
+/// quadratic rounds burned 18+ MINUTES in one durability point (lb229:
+/// distributeddata's OS_IPC_0_912 frozen at push_entry for the whole 1092s
+/// store-load window). Now: at most MAX_ROUNDS cheap rounds, then one
+/// linear conservative pass scheduling EVERY record's pres and entries of
+/// the device (a strict superset of the true closure, same pre->entry
+/// phase discipline) — deep dependency chains cost one linear pass, and
+/// the pathological backlog actually drains. A cond_resched checkpoint
+/// every other round bounds the latency added to the rest of the CPU (the
+/// loop body is lock-free task context).
 fn plan_add_constraints(plan: &mut WritePlan, pend: &[Publication], dev: (u32, u32)) {
-    loop {
+    const MAX_ROUNDS: usize = 3;
+    for round in 0..MAX_ROUNDS {
         let mut grew = false;
         for p in pend {
             if p.device != dev {
@@ -2454,6 +2473,26 @@ fn plan_add_constraints(plan: &mut WritePlan, pend: &[Publication], dev: (u32, u
         }
         if !grew {
             return;
+        }
+        if round % 2 == 1 {
+            crate::sched::cond_resched();
+        }
+    }
+    // Closure not converged within the round cap: the dependency chain is
+    // deep (heavy churn). Schedule EVERY record of the device — a strict
+    // superset of the true closure with the same phase discipline (all
+    // pres, then all entries; posts are only ever written by the owning
+    // flush in the post phase, which now follows every entry). One linear
+    // pass; obligations are force-satisfied early, never late.
+    for p in pend {
+        if p.device != dev {
+            continue;
+        }
+        for &b in &p.pre {
+            plan.push_pre(b);
+        }
+        if let Some(e) = p.entry {
+            plan.push_entry(e);
         }
     }
 }
