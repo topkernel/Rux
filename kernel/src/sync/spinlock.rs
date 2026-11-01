@@ -64,44 +64,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "dfx-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
-/// LOST-PARK FIX (fix-lostpark lane): the spinlock yield handoff.
-///
-/// `Spinlock::lock` / `lock_fair` call this instead of `schedule()`
-/// when they hand the CPU to the lock holder. A plain `schedule()` here
-/// PARKS a caller whose state was set to a sleep state by an enclosing
-/// wait path (the window between the wait path's prepare_to_wait and
-/// its own park site — e.g. sysv semop's post-registration recheck,
-/// which takes the same spinlock this yield contends). Such a park is
-/// permanent: the sleeper is registered on no wait queue at this point,
-/// so no future wake reaches it. Force the caller to RUNNING for the
-/// duration of the handoff so `__schedule` treats it as a preempted
-/// running task (requeue + later resume); the enclosing wait loop
-/// re-asserts its sleep state at its own park site.
-#[inline]
-fn yield_no_park() {
-    if let Some(cur) = crate::sched::current() {
-        let st = cur.state();
-        if st.is_sleeping() || st.contains(crate::process::task::TaskState::STOPPED) {
-            cur.set_state(crate::process::task::TaskState::new(
-                crate::process::task::TaskState::RUNNING,
-            ));
-            static LPY_N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
-            ) && LPY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40
-            {
-                crate::pr_warn!(
-                    "LP-YIELD-PARK-PREVENTED pid={} state={:#x}",
-                    cur.pid(),
-                    st.bits()
-                );
-            }
-        }
-    }
-    crate::sched::schedule();
-}
-
 // ==================== RawSpinlock (TTAS) ====================
 
 /// Capture this function's return address (the spinlock call site) for
@@ -328,130 +290,26 @@ impl<T> Spinlock<T> {
     /// track_caller: leakorigin's outermost-acquire shadow records the
     /// LOCK CALLER's site (preempt-hunt), not this helper's line.
     ///
-    /// preempt-hunt (bounded preemptible wait): the old body ran
-    /// preempt_disable BEFORE the TTAS spin, so a waiter contending a
-    /// lock whose holder ran a multi-second section (OH boots:
-    /// recv_queue drains, mm unmap loops, dentry path builds) kept its
-    /// OWN CPU monopolized with preemption disabled for the whole spin —
-    /// the pc=1 "incumbent" family (WAKE-STRANDED h0), the 2s tick-heal
-    /// stripping a LIVE spin booking (then the guard's Drop
-    /// PREEMPT-UNDERFLOWed), and the kpreempt deadlock face. When the
-    /// caller is in task context at the outermost preempt depth, wait
-    /// PREEMPTIBLY — TTAS on is_locked with preemption enabled, preempt
-    /// disabled only around the acquiring CAS — and hand the CPU to the
-    /// holder after a spin budget. Nested or interrupt-context callers
-    /// keep the legacy preempt-off acquire: scheduling mid-nesting would
-    /// strand the outer section's waiters (the LTP r2 WEDGE family).
+    /// Reference discipline (sync-realign, 2026-11): a spinlock NEVER
+    /// sleeps. The acquire is preempt_disable + pure bounded spinning
+    /// (spin until acquired — the DEADLOCK_WARN threshold only prints,
+    /// it never gives up); no task-state change and no schedule()
+    /// anywhere in this path. This is sound ONLY because every lock
+    /// that may be held across blocking I/O is a SleepMutex
+    /// (kernel/src/sync/mutex.rs), never a Spinlock: a preempt-disabled
+    /// spinner can starve the holder's wake IPI, so a Spinlock section
+    /// must stay short by construction. The former "preemptible
+    /// bounded wait" that yielded via schedule() here (preempt-hunt,
+    /// then the lost-park-patched handoff) was a divergence from the
+    /// reference design and is deleted — the lost-park hazard class
+    /// (a caller inside a wait path's prepared window parked inside a
+    /// spinlock acquire) is structurally impossible now.
     #[inline]
     #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
-        // Outermost-in-task-context test BEFORE our own disable books +1.
-        // Brackets (hardirq/softirq/NMI) restore the count on exit, so a
-        // load here is stable modulo our own call. No current task (early
-        // boot, secondary harts in the WFI loop) means no schedule() is
-        // possible either — keep the legacy acquire.
-        let pc0 = crate::interrupt::preempt::preempt_count();
-        let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
-            && (pc0
-                & (crate::interrupt::preempt::HARDIRQ_MASK
-                    | crate::interrupt::preempt::SOFTIRQ_MASK
-                    | crate::interrupt::preempt::NMI_MASK))
-                == 0
-            && crate::sched::current().is_some();
         preempt_disable();
-        if self.raw.try_lock() {
-            return SpinlockGuard { lock: self };
-        }
-        if !yieldable {
-            // Nested / IRQ context: legacy acquire — preempt stays
-            // disabled across the TTAS spin (no schedule point is legal
-            // here; the caller's outer section depends on it).
-            self.raw.lock();
-            return SpinlockGuard { lock: self };
-        }
-        // Contended at the outermost depth: preemptible bounded wait.
-        preempt_enable();
-        const SPIN_BUDGET: u32 = 20_000;
-        loop {
-            let mut spins: u32 = 0;
-            while self.raw.is_locked() && spins < SPIN_BUDGET {
-                spins = spins.wrapping_add(1);
-                core::hint::spin_loop();
-            }
-            preempt_disable();
-            if self.raw.try_lock() {
-                return SpinlockGuard { lock: self };
-            }
-            preempt_enable();
-            // Lock still held (or raced away between the TTAS probe and
-            // the CAS): hand the CPU over — the schedule() may run the
-            // holder here. We hold nothing at this point, so switching
-            // away is always safe.
-            //
-            // LOST-PARK FIX (fix-lostpark lane, 2026-11-01): this yield
-            // is a HANDOFF, never a sleep — but schedule() parks a task
-            // whose state is a sleep state, and a caller CAN legally be
-            // inside a wait path's prepared window (state set
-            // INTERRUPTIBLE by its prepare_to_wait, e.g. semop's
-            // post-registration recheck taking this same lock). Parking
-            // there is permanent: the sleeper is on NO wait queue here,
-            // its enclosing path's wake sources fire only for the
-            // queued entry, and the lock holder's release arms nothing.
-            // The lmbench lat_sem / semop ping-pong SMP wedge was
-            // exactly this shape (capture: reader parked at
-            // Spinlock::lock inside try_apply_semops, writer parked
-            // registered-satisfiable, both vCPUs idle forever —
-            // run/lostpark-notes.md). Force the handoff's prev to
-            // RUNNING so __schedule requeues it instead of parking it;
-            // the enclosing wait loop re-asserts its sleep state at its
-            // own park site (prepare_to_wait re-runs every iteration),
-            // costing at most one extra recheck loop.
-            yield_no_park();
-        }
-    }
-
-    /// Bounded-spin + yield acquire for COARSE, long-held global locks
-    /// (VFS_MUTATION_LOCK, EXT4_BIG_LOCK — held across synchronous block
-    /// I/O, i.e. for milliseconds at a time).
-    ///
-    /// Wedge background (LTP r2 WEDGE family: inode02, ftest02/04/06,
-    /// creat09, sendmsg02): when enough tasks contend a plain lock(),
-    /// every CPU ends up spinning preempt-disabled; the lock holder —
-    /// which may be BLOCKED in virtio I/O or simply not resident on any
-    /// CPU — can then never be rescheduled (wake IPIs cannot preempt a
-    /// preempt-disabled spinner), and the machine freezes with all CPUs
-    /// pinned. This acquire spins a bounded budget like lock(); if the
-    /// lock still isn't free it re-enables preemption and yields the CPU
-    /// (schedule()) so the holder can run HERE, then retries. Waiters
-    /// therefore never starve the system of a schedulable CPU.
-    ///
-    /// NOT for IRQ context or short critical sections — schedule() from
-    /// interrupt context is illegal; use plain lock()/lock_irq() there.
-    #[track_caller]
-    pub fn lock_fair(&self) -> SpinlockGuard<'_, T> {
-        const FAIR_SPIN_BUDGET: u32 = 1_000_000;
-        loop {
-            preempt_disable();
-            let mut spins: u32 = 0;
-            loop {
-                if self.raw.try_lock() {
-                    return SpinlockGuard { lock: self };
-                }
-                spins += 1;
-                if spins >= FAIR_SPIN_BUDGET {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-            // Budget exhausted: hand the CPU to the holder instead of
-            // pinning it. The schedule() picks another task (likely the
-            // holder); we come back and retry afterwards.
-            preempt_enable();
-            // LOST-PARK FIX: same discipline as lock()'s yield — the
-            // handoff must never park a caller caught in a wait path's
-            // prepared window (see lock()'s comment).
-            yield_no_park();
-        }
+        self.raw.lock();
+        SpinlockGuard { lock: self }
     }
 
     /// Disable interrupts + preempt disable + lock.

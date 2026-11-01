@@ -1154,10 +1154,11 @@ fn ww_irqwin_budget_ok() -> bool {
 ///
 /// - schedule() sets the TIF_IN_SCHED ti_flags bit around __schedule.
 ///   This hook refuses while the bit is set — the only re-entry point is
-///   this hook (the trap-exit asm loop, cond_resched and lock_fair all
-///   call schedule() sequentially, never from inside another one). A
-///   leaked flag, should one ever happen, only disables preemption for
-///   that task; count semantics and the sleep discipline stay exact.
+///   this hook (the trap-exit asm loop, cond_resched and the SleepMutex
+///   slowpath all call schedule() sequentially, never from inside
+///   another one). A leaked flag, should one ever happen, only disables
+///   preemption for that task; count semantics and the sleep discipline
+///   stay exact.
 /// - sub_preempt_count clamps and reports underflow, so a residual
 ///   unpaired decrement is one attributable log line, never a silent -1
 ///   faking in_interrupt() for a user task.

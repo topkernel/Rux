@@ -1,0 +1,4 @@
+CLEAN
+{'DEADLOCK: spinlock stuck': 0, 'KERNPANIC': 0, 'panic!': 0}
+stalls=0
+{'SEQ': 45400, 'RAND': 46300, 'NAME': 34100}
