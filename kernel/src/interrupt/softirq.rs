@@ -116,6 +116,38 @@ static mut SOFTIRQ_IN_PROGRESS: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0), AtomicU32::new(0),
 ];
 
+// ==================== Softirq window progress (phantom-bits) ====
+//
+// The monopolist face of the OH wedge (incumbents at preempt=0x100 /
+// 0x101 / 0x102, CFS-undefeatable for tens of seconds) is a task stuck
+// INSIDE an __do_softirq window. While the window runs, its booking is
+// live and legal — the tick-side orphan scan and PREEMPT-HEAL can only
+// observe it if a tick lands, and a wedged window (handler spinning on
+// a same-CPU-held lock, often with IF=0) is untickable. These two
+// per-CPU records let ANY CPU read what a monopolized CPU's softirq
+// window is doing: which vector is dispatching, the restart count, the
+// pending snapshot and the window age. Packed WIN: 1<<63 open |
+/// handler bit << 48 | restart_count << 40 | pending (low 16).
+pub static SOFTIRQ_WIN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// read_time() ticks when the open window began (0 = closed).
+pub static SOFTIRQ_WIN_T0: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+fn win_note(cpu: usize, open: bool, bit: usize, restart: usize, pending: u32) {
+    let v = if open {
+        (1u64 << 63)
+            | ((bit as u64 & 0xFF) << 48)
+            | ((restart as u64 & 0xFF) << 40)
+            | (pending as u64 & 0xFFFF)
+    } else {
+        0
+    };
+    // SAFETY: per-CPU arrays written only by current CPU; bounded index.
+    unsafe {
+        SOFTIRQ_WIN[cpu].store(v, Ordering::Release);
+    }
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -188,6 +220,12 @@ pub fn __do_softirq() -> bool {
     }
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); }
+    // phantom-bits: window-open progress record (cross-CPU readable).
+    win_note(cpu, true, 0, 0, 0);
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
+    unsafe {
+        SOFTIRQ_WIN_T0[cpu].store(crate::drivers::timer::read_time(), Ordering::Release);
+    }
 
     // Session-6 discriminator (fleet s2): bracket the SOFTIRQ PROCESSING
     // window itself. The timer/soft/ext TRAP brackets are silent on v7
@@ -262,6 +300,10 @@ pub fn __do_softirq() -> bool {
             let handler = unsafe { SOFTIRQ_VEC[bit] };
             if let Some(h) = handler {
                 WW_VEC_RUN[bit].fetch_add(1, Ordering::Relaxed);
+                // phantom-bits: progress record — cross-CPU readers (the
+                // wake-strand census) name the vector a monopolized CPU
+                // is dispatching when the window wedges.
+                win_note(cpu, true, bit, restart_count, pending);
                 h(bit);
             }
         }
@@ -290,6 +332,12 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_sub(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+    // phantom-bits: window closed.
+    win_note(cpu, false, 0, 0, 0);
+    // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
+    unsafe {
+        SOFTIRQ_WIN_T0[cpu].store(0, Ordering::Release);
+    }
 
     // Session-6 discriminator exit side (see entry comment): print when
     // the task switched inside the processing window. Direct console —
