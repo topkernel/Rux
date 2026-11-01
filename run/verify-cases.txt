@@ -1,0 +1,12 @@
+getcpu01
+nice05
+gethostname02
+sethostname02
+uname01
+sched_setaffinity01
+getxattr01
+lgetxattr01
+removexattr01
+setxattr01
+fsetxattr01
+fremovexattr02
