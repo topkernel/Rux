@@ -5147,7 +5147,7 @@ pub fn scheduler_tick() {
                             // switch by itself, but every preempt point
                             // the healed task passes from here on
                             // (user-return, cond_resched in loops,
-                            // lock_fair slowpath) now takes it instead of
+                            // SleepMutex slowpath) now takes it instead of
                             // waiting for the next tick's slice check.
                             set_need_resched();
                             // Re-arm: next nonzero observation starts a
