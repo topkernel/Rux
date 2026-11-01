@@ -1,0 +1,9 @@
+panics: 0
+shell: 7
+proc-cd: 5
+done-mark: 1
+ls: not found
+[1;32mroot[0m:[1;34m/proc[0m# cd /
+[1;32mroot[0m:[1;34m/[0m# echo RVSMOKE-DONE
+echo: not found
+[1;32mroot[0m:[1;34m/[0m# qemu-system-riscv64: terminating on signal 15 from pid 4120937 (timeout)
