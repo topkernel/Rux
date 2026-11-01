@@ -24,7 +24,7 @@ for i in $(seq 0 $((MAX-1))); do
   K="${KERN[$((i % 2))]}"
   SER="run/oh-${TAG}-serial.log"
   echo "[roll] boot $((i+1))/$MAX tag=$TAG kernel=$K $(date +%H:%M:%S)" | tee -a run/roll-logs/roller.log
-  env USERDATA=run/userdata-warm.img SMP=2 python3 run/lb-boot.py "$TAG" 2400 run/system-lb3.img "$K" " dfx=ams46,txnhunt" > "run/${TAG}-driver.out" 2>&1 &
+  setsid env USERDATA=run/userdata-warm.img SMP=2 python3 run/lb-boot.py "$TAG" 2400 run/system-lb3.img "$K" " dfx=ams46,txnhunt" > "run/${TAG}-driver.out" 2>&1 &
   DRV=$!
   # find the qemu child pid
   sleep 12
@@ -54,8 +54,8 @@ for i in $(seq 0 $((MAX-1))); do
   case "$VERDICT" in
     SUCCESS-*) echo "[roll] SUCCESS — VM left running ($TAG), operator take over" | tee -a run/roll-logs/roller.log; exit 0 ;;
   esac
-  kill "$DRV" 2>/dev/null
-  [ -n "$QPID" ] && kill "$QPID" 2>/dev/null
+  kill -- -"$DRV" 2>/dev/null; kill "$DRV" 2>/dev/null
+  [ -n "$QPID" ] && kill "$QPID" 2>/dev/null; [ -n "$QPID" ] && kill -- -"$QPID" 2>/dev/null
   sleep 3
   pkill -f "lb-boot.py $TAG " 2>/dev/null
   sleep 2
