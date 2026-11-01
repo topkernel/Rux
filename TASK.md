@@ -925,6 +925,121 @@ post-halt VW-WEDGE prints are noise); x3 builds rc=0 (x86_64 release
 two-pass + riscv64 + aarch64; POLLSTALL-DL string verified in both
 debug ELFs).
 
+### Session close part 1 (21:3x) — tonight's Shape-B is DETERMINISTIC; engine decoded
+- 11 consecutive Shape-B fails (lb75/76/77/78/80/81/82/83 + lbpop3 +
+  roller boots): startUser(100) -> "userId not exist" with the SAME
+  signature every time: the IsOsAccountExists query LEAVES foundation
+  (proxy unmarked — libipc patch works), accountmgr answers it with a
+  TF_STATUS_CODE 32 reply in 1-4ms (the stub's own inner failure), and
+  user 100 was NEVER CREATED on these boots — no CreateNewUser /
+  GenerateUserKeys lines at all, vs lb65 (PASS) which ran
+  GenerateUserKeys(user:100) + CreateNewUser at 40.2s.
+- WHY lb65 created and tonight doesn't: the SERVICE GRAPH crawls. lb65
+  had 41 services started by 41s; lb80 had 14 by 98s. lb78's dynamic
+  proc loads ran 59.8/102.6/222.9s each (lb65: 40/133/249ms) with
+  72 brk-class SLOW-TXN stalls (server threads parked in sys=45 = brk
+  for 2.8-222s). brk is the VICTIM: sys_brk is VMA-surgery-only; the
+  wait is addr_space.vma_write() held across AddressSpace::munmap's
+  WHOLE PTE-zap walk (mm_ops.rs: "the guard now also spans the PTE zap
+  below" — deliberate, the mmap-into-hole audit) while the holder is
+  CPU-starved by the monopolist family. The 100s-class stalls predate
+  my fix (lb71 pre-fix: txn19304 exec 1019s) — NOT introduced by 05e3c4c5.
+- The monopolist face (lb74 dump): pid 311 el5_filekey_man, preempt=0x100,
+  vruntime 5.6e9 (280x peers), nr_running=203 starved, installs tid 990
+  blocked 512s in sys_faccessat on a Mutex whose holder never runs.
+  r3 heal analysis: a PERMANENT 0x100 leak would stale its stamp in 2s
+  and heal (clear_base clears SOFTIRQ bits too — verified in task.rs);
+  it did not heal => the field FLICKERS (high-duty softirq re-entry or
+  re-leak every <2s), the shape the stamp logic treats as live. The
+  binder ioctl loop returns to user mode constantly (lastsys=16), so
+  the trap-exit gate SHOULD preempt on need_resched — why it doesn't is
+  the sched lane's open question (same hunt as before).
+- NOSNAP population retry (lbpop3 on reflink copy userdata-warm2.img)
+  ALSO failed Shape-B — the population path is blocked by the same
+  crawl; no kernel knob for it tonight.
+- NEXT for pixels, in order: (a) bound the munmap VMA-write hold
+  (chunked zap + lock drop — the preempt-hunt's named prerequisite;
+  mm guarded domain, needs LTP+perf gates; collapses the 100s-class
+  convoy that crawls the service graph), (b) the flicker-monopolist
+  adjudication in the heal, (c) keep rolling boots (run/roll-boots.sh)
+  — the lottery does land (lb65-class) when the host is quiet.
+- Roller: run/roll-boots.sh (fail-shape detection + relaunch; success
+  shapes stop it and leave the VM up). Bugs fixed: setsid per boot +
+  process-group teardown.
+
+### Session close part 2 (~22:00) — lb92: SECOND-EVER SwitchToUser; the population strategy
+- lb92 (roller boot, kernel bzImage-ladder-fieldpoll = af5577c5 +
+  e8b9a969 + 05e3c4c5): CheckUserParam PASSED for the first time in 12
+  boots tonight (the osaccount read coin landed), SwitchToUser
+  oldUserId:0 newUserId:100 EXECUTED at 97.867 (lb59 in campaign
+  history was the first). Then the known lb40/lb59 shape: no
+  CreateNewUser had run on this boot either, so user 100 has NO
+  per-user bundle records -> ImplicitQueryInfoByPriority can't find the
+  launcher -> the isBoot retry ladder spins (365+ lines) -> no spawn.
+- THE WIN CONDITION, named: a boot that runs the CREATION flow
+  (GenerateUserKeys + CreateNewUser + bundle size:NN install stream —
+  the lb65 shape at 40s) AND PERSISTS IT. lb65 ran it under snapshot
+  (records discarded). run/roll-pop.sh now boots NOSNAP on a FRESH
+  REFLINK COPY per boot; the boot that lands the lb65 shape writes
+  user 100 + the per-user records into its own copy (the GOLDEN
+  population) — later snapshot boots on that copy get AbilityInfo for
+  user 100 deterministically. First pop-roller boots (lb110/111):
+  fail-shapeB as usual; lb112 slow-phase. Roller runs unattended,
+  logs to run/roll-logs/poproller.log.
+- The osaccount coin (tonight 1-pass/13): lb92's "exists" answer means
+  the warm image's DB plausibly HAS user 100 (from the original lbwarm
+  population at 14:38) and the 11 "not exist" boots were failed/empty
+  KVS READS (the fifth successor's lb42 coin-flip conclusion). A golden
+  population copy removes the read's dependence on timing: the records
+  are physically present and freshly written.
+- NOTE for the perf lane (merge review of 05e3c4c5): the poll-path
+  change's healthy-path delta is one Option check + one TSC read per
+  4096 spin laps; the sleep path (the common waiter) is untouched; the
+  recovery only engages at >=10ms polls and the deadline at 10s. Tier-2
+  pbench rows (p6_write_fsync/mkdrmdir) re-bank on the next pa battery
+  of the merged tree — this session's OH boots showed zero POLLSTALL
+  firings and fully-drained rings (VW-SNAP used==last==shadow on all
+  six disks, intx flowing).
+
+### SESSION CLOSE (22:40) — eleventh successor final
+- Pop roller final: lb110-lb119 (10 NOSNAP boots on reflink copies).
+  lb119 = SUCCESS-switch (SwitchToUser @135.3s, THIRD-ever; no
+  CreateNewUser -> not golden) then wedged post-SwitchToUser:
+  foundation's user-start blocked on accesstoken_ser (txn10607 exec
+  269s, server RUNNING stuck mid-syscall sys=75) + powermgr txn11799
+  exec 252s (server parked in ioctl, never picked up). The starvation
+  family again. Screen frozen-logo md5 06b933b4 to the end. VM killed
+  at 832s; its copy run/rollpop-lb119.img KEPT (freshly persisted
+  SwitchToUser-era /data; snapshot-boot it if you want the same
+  osaccount-true read lane — lb92/lb119 both passed CheckUserParam on
+  this lineage while 15 sibling boots failed).
+- Tonight's tally: 18 boots on the fix kernels. Zero POLLSTALL, zero
+  virtio-layer stalls, rings drained at every snapshot (VW-SNAP). The
+  441s poll-stall engine is dead; the walls that replaced it (in hit
+  order): Shape-B osaccount read/answer (15), monopolist starvation
+  crawl (2: lb74, lb112), post-SwitchToUser accesstoken stall (lb119).
+  Ladder deepest point reached twice: SwitchToUser (lb92, lb119).
+- The pixel path for the twelfth successor, in order:
+  1. The golden population is still THE unclaimed prize: a NOSNAP boot
+     that runs CreateNewUser+install-stream (the lb65@40s shape) —
+     roll-pop.sh automates the hunt; when 'bundle size' lands, that
+     copy makes every later boot's ImplicitQuery find the launcher.
+     Tonight's obstacle: the creation flow needs the osaccount read to
+     say NO-USER early (the coin's other face) + a fast-enough service
+     graph. Boot count is the lever (lb65 landed 1-in-3 on its era).
+  2. Kernel-side odds-raisers, both named with evidence above: bound
+     the munmap VMA-write hold (kills the 100s-class brk convoy that
+     crawls the service graph), and the flicker-monopolist heal.
+  3. The post-SwitchToUser accesstoken stall (lb119) is a NEW wall
+     name: foundation->accesstoken_ser code10 exec 269s server RUNNING
+     mid-syscall — same starvation class; capture its stack next time
+     (TXN-HANG-STK symbolization: sys=75 = sendto/setsockopt family).
+- Branch oh-ladder pushed through 450c4d95 (+ this close). Kernels in
+  run/: bzImage-ladder-polldl (release, 05e3c4c5),
+  bzImage-ladder-pollfix2 (release, HEAD-class r3+fix, md5-identical
+  to the concurrent lane's r3w), bzImage-ladder-fieldpoll (release,
+  af5577c5+e8b9a969+05e3c4c5 — the lb92/lb119 SwitchToUser boots).
+
 ### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
 THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
 SAME BUG. Evidence chain, closed:
