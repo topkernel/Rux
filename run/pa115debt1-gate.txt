@@ -1,0 +1,26 @@
+perf-gate: tiers=[1,3] tag=pa115debt1 kernel=run/pa115-main-afc41b8b-debug-bzImage secs=780
+== booting (quiet syscost, pa-boot.sh; ~13 min) ==
+boot rc=0 serial=/home/william/rux-agents/perf-audit/run/pa-pa115debt1-serial.log
+== Tier 1: quiet syscost boot (/home/william/rux-agents/perf-audit/run/pa-pa115debt1-serial.log) ==
+PASS  kernel panics                      0                            band: = 0
+PASS  OOM lines                          0                            band: = 0
+PASS  census TERM-DESCHED                8                            band: 8 +-2
+PASS  census WAKE-REFUSED                36                           band: 32 +-4
+INFO  census WAKE-STRANDED (organic)     5                            band: no 1001ms grid class
+PASS tick rate /CPU cpu0=165.67/s min 99.5
+FAIL  syscall volume                     125989795                    band: 107500000 +-10%  [boot-depth-sensitive RERUN-ONCE-RULE: rerun in isolation before calling a regression.]
+PASS clock_gettime avg 3us n=53974510 t=720s 3-5us
+PASS nanosleep avg 158435us n=29544 t=720s <=244ms (pa50main 203ms +-20%)
+== Domains: guarded hot paths (/home/william/rux-agents/perf-audit/run/pa-pa115debt1-serial.log) ==
+FAIL GRQ avg hold 2786ns n=6322679 4080-7320ns
+PASS small_alloc REST share 0.4% (6219ms) <=10%
+SKIP  buffer-cache hit rate              not in this build            band: needs cache-stats instrument
+SKIP  fsw sync-write classes             not in this build            band: needs fsw=1 boot
+== Tier 3: IF=0 share (pa16 probe hooks) ==
+FAIL IF=0 share of machine 20.4% (cpus: 20.8,20.0, heal miss=0) 25.7 +-2.0pp, miss=0
+(full syscost dump: run/perf-gate-pa115debt1-parse.txt)
+
+perf-gate done: see verdicts above (PASS/FAIL/SKIP/INFO per metric).
+FAIL does not auto-block: apply the rerun-once rule, then weigh against
+docs/development/perf-gate-baseline.md.
+gate rc=1

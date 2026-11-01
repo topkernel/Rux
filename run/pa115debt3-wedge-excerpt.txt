@@ -1,0 +1,28 @@
+# pa115debt3 wedge excerpt (full serial: run/pa-pa115debt3-serial.log, uncommitted 1.3MB)
+# boot: main@afc41b8b debug, tok109 lineage, 780s horizon, window load1 9.4->25.7
+
+== first PREEMPT-LEAK + context ==
+219-[kmsg] [pid=1][Init][ERROR][init_common_cmds.c:403]Failed to change mode " /sys/kernel/debug/tracing/options/ " to 0755, err=2[kmsg] [pid=1][Init][ERROR][in
+220-[kmsg] [pid=1][Init][ERROR][init_common_cmds.c:403]Failed to change mode " /sys/kernel/debug/tracing/events/clk/clk_enable/enable " to 0666, err=2[kmsg] [pi
+221-[kmsg] [pid=1][Init][ERROR][init_common_cmds.c:403]Failed to change mode " /sys/kernel/debug/tracing/events/clk/clk_set_rate/enable " to 0666, err=2[kmsg] [
+222-[kmsg] [pid=1][Init][ERROR][init_common_cmds.c:403]Failed to change mode " /sys/kernel/debug/tracing/events/ftrace/print/enable " to 0666, err=2[kmsg] [pid=
+223:PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000001 pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff80626573 pctick=000000000000
+
+== leak/heal totals ==
+PREEMPT-LEAK lines: 3715
+PREEMPT-HEAL lines: 123
+last SYSCOST dump: SYSCOST t=120s rip page=0xffffffff80629000 n=77 (0%)
+
+== last 3 leak lines (jiffies still advancing, bit never cleared) ==
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000138 pc=0000000000010000 held_nonzero_for=000000000000f7cbjiffies rip=ffffffff805ac6f5 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000138 pc=0000000000010000 held_nonzero_for=000000000000f7dfjiffies rip=ffffffff805ac6f5 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000138 pc=0000000000010000 held_nonzero_for=000000000000f7f3jiffies rip=ffffffff805ac6f5 pctick=0000000000000000
+
+== pid 138 first leak ==
+
+== pid 138 first leak ==
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000138 pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff805ac6f5 pctick=0000000000000000
+
+== rip symbolization ==
+ffffffff805ac6f5 = _RNvNtNtNtCsgiCqCJ1KYcj_3rux4arch6x86_643cpu3wfiB7_
+ffffffff80626573 = _RNvMNtNtNtCsgiCqCJ1KYcj_3rux2fs4ext43dirNtB2_12Ext4DirEntry

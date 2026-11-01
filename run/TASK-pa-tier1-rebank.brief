@@ -1,0 +1,13 @@
+# Lane: Tier-1 perf baseline re-bank
+Work autonomously; never ask; commit with numbers. Worktree = THIS (already merged main@82059759; 77 dirty files = predecessor's start — INVENTORY FIRST with git status/diff and keep-or-discard deliberately).
+
+## Setup
+Tier-1 driver run/pa-boot.sh needs run/oh-img/{updater,system,vendor,sys_prod,chip_prod,ramdisk,userdata-tok}.img. ALL IMAGES NOW LIVE IN THE CENTRAL STORE /home/william/rux-images/oh/ (7 seed images incl. userdata.img; READ-ONLY — symlink them into run/oh-img/, boot with -snapshot). userdata-tok (the cooked lineage disk) is GONE — only the SEED survives.
+Lineage plan: (1) try pa-boot quiet-syscost directly on the SEED on current main (the coordinator's fresh probe booted the seed deep: 185 services, aborted only by OH's own reboot decision — see /home/william/rux-agents/oh-launcher/run/oh-probe1-serial.log); if stable for the 780s window, bank from the seed and note the lineage change. (2) else cook a tok-equivalent: private COPY of userdata (never the store original), boot snapshot-OFF once until first-boot setup completes, boot the cooked copy again; the cooked copy becomes this lane's asset in run/ (document md5; never commit images to git).
+
+## Battery (docs/development/perf-gate-baseline.md)
+Quiet syscost boot (pa-boot 780s, syscost=1, KVM q35 smp2): census TERM 8 (6-10)/REFUSED 32 (28-36)/STRANDED no-1001ms-class, ticks >=99.5/s sustained, 0 panics/new OOM, syscall volume (load-gated window: load1<=9, foreign qemus<=8 — OTHER LANES RUN QEMUs; gate your enforcement window and prefer quiet windows), per-op avgs (clock_gettime 3-4us +-20%, nanosleep <=244ms). Then Tier-2 pbench fs-family cells (test/pbench_boot.py --bzimage <main bzImage>). Deliverable: refresh the Tier-1 table in docs/development/perf-gate-baseline.md (whole-table rule; provenance + load window per row) + written comparison vs the 2026-10-25 pa50main anchor. Out-of-band rows: rerun once in a quieter window before calling regression; root-cause regressions with data (the aarch64 merge's shared deltas are per-arch constants/failure-only prints).
+
+## Discipline
+One QEMU at a time (check ps before booting); 780s windows — queue doc edits between boots; kill only yours; pkill FORBIDDEN. bzImage = debug class, consistent with the anchor. Push to your branch (or a fresh one). Quota deaths: commit the partial table with provenance as you go.
+Final message: lineage verdict (seed vs cooked), refreshed Tier-1 table w/ provenance, in/out-of-band verdicts + rerun evidence, commits.
