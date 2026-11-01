@@ -674,3 +674,51 @@ system-lb2.img + userdata-fresh2.img + dfx=ams46,txnhunt LOGLEVEL=6 SMP=2):
    client proxy death). If the server-side 32 is rare on a healthy
    boot, the ladder may complete by luck: watch for appspawn
    com.ohos.launcher + pixel md5 change; report IMMEDIATELY.
+
+### lb59 — THE LADDER'S REAL ENGINE DECODED (SwitchToUser reached; silent empty user)
+With the pcp fix + tap kernel (healthy boot, 76 SAs, 0 DEADLOCK/panic):
+- LADDER ADVANCED PAST THE OLD WALL: CheckUserParam PASSED (no osaccount
+  poison at the decision on this boot), foregroundUserId printed,
+  SwitchToUser(old=0,new=100,isAppRecovery=1) EXECUTED at 251.6 —
+  further than any boot in campaign history.
+- Then the lb40 shape live: `ImplicitQueryInfoByPriority: can't find
+  target AbilityInfo` x154 + `waiting query highest priority ability
+  info completed` x151, spinning from 251.6s past 900s (no exit).
+- ENGINE (source + log bracketed):
+  1. CreateNewUser(100) start 189.054, end 218.643 (29.6s) — and the
+     binder call itself is SLOW-TXN txn14922 accountmgr->foundation
+     exec 29610ms.
+  2. The handler NEVER printed `create user:100 bundle size:N`
+     (LOG_NOFUNC_I INFO — INFO lines DO flow through the hilog tap:
+     "startUser in service" I0 came through; key 'bundle size:' is in
+     AMS_KEYS and the budget was alive at [274]) → the line never ran.
+  3. OH source (bundle_user_mgr_host_impl.cpp): OnCreateNewUser's
+     early leg — if GetAllPreInstallBundleInfos(...) returns FALSE:
+     LOGE + `return ERR_OK` — CreateNewUser still prints "end" SUCCESS.
+     That function's ONLY other false: `return !preInstallBundleInfos
+     .empty()` — the filtered preinstall set came out EMPTY.
+  4. The set comes from dataMgr->GetAllPreInstallBundleInfos() ->
+     LoadAllPreInstallBundleInfos -> preInstallDataStorage_ (the
+     distributeddata KVS). bootevent.bms.main.bundles.ready only set at
+     217.2s — the first-boot scan was still running when CreateNewUser
+     read the store. Under our kernel the KVS read inside the 29.6s
+     exec never produced records (the ~30s exec = the KVS timeout
+     class; 5th successor's distributeddata KV coin-flip, same family).
+  => USER 100 IS CREATED WITH ZERO BUNDLE RECORDS. The launcher's
+     AbilityInfo cannot exist for user 100; the AMS isBoot retry ladder
+     (no attempt limit) spins forever. Screen stays frozen logo.
+  5. Image-side verified (debugfs on system-lb2.img + hap unpack):
+     Launcher.hap's home ability is an extensionAbility
+     (com.ohos.launcher.MainAbility, type service, action.system.home),
+     module.json declares NO u1enable -> NOT skipped by the U1 filter
+     (U1==1 anyway) — the miss is the EMPTY SET, not the filters.
+- PIXEL PLAY (in flight): a WARM /data. Real devices boot this way
+  after first provisioning: boot once on a writable copy
+  (userdata-warm.img, NOSNAP=1 added to lb-boot.py) so the first-boot
+  scan PERSISTS the pre-install records; the next boot's CreateNewUser
+  reads a populated local store (fast path, no first-population) ->
+  per-user install stream runs -> AbilityInfo for user 100 exists ->
+  appspawn spawns com.ohos.launcher -> pixels.
+  lbwarm (population boot) running at write time; lb60 = warm+snapshot.
+- GATES for the pcp fix + taps: make test ALL PASSED (lb59-maketest.log);
+  x86_64 release + riscv64 + aarch64 builds rc=0.
