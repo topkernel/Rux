@@ -2448,6 +2448,16 @@ pub fn vw_lag_watchdog(now: u64) {
             crate::interrupt::softirq::softirq_pending_raw(0),
             crate::interrupt::softirq::softirq_pending_raw(1),
         );
+        // One-shot full task dump at the FIRST wedge of the boot: names the
+        // stranded waiters' states (polling with a guard vs asleep on the
+        // sync queue), any preempt-marked incumbent, and ksoftirqd's
+        // runnability — the candidate engines of this wedge (lb66 installs
+        // mkdir/journal hang + make-test sgid_mode VW-WEDGE used=28).
+        static WEDGE_DUMPED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !WEDGE_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+            crate::dfx::taskdump::dump_all_tasks("vw-wedge");
+        }
     }
 }
 

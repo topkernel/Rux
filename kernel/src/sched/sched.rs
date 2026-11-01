@@ -4727,13 +4727,21 @@ pub fn scheduler_tick() {
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
-                // Per-field contiguity stamps (phantom-bits round 2): a
-                // field's liveness is proven only by its OWN absences.
-                // Stamped BEFORE the pc != 0 gate so an entirely-zero
-                // count refreshes every field. Two relaxed stores per
-                // tick; only the task's own CPU writes these.
+                // Per-field contiguity stamps (phantom-bits round 2/3): a
+                // field's liveness is proven only by its OWN absences —
+                // a field observed PRESENT at 200 consecutive ticks is
+                // phantom (every legal bracket is microseconds, so 2 s of
+                // tick-observed presence is five orders beyond any live
+                // hold), and a field observed ABSENT refreshes its stamp
+                // no matter how hot the OTHER fields churn. Stamped BEFORE
+                // the pc != 0 gate so an entirely-zero count refreshes
+                // every field. Three relaxed stores per tick; only the
+                // task's own CPU writes these.
                 {
                     let now = crate::drivers::timer::get_jiffies();
+                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0 {
+                        unsafe { (*cur).ti_pc_pirq_zero_jif_stamp(now) };
+                    }
                     if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0 {
                         unsafe { (*cur).ti_pc_sirq_zero_jif_stamp(now) };
                     }
@@ -4787,47 +4795,38 @@ pub fn scheduler_tick() {
                     if t0 == 0 {
                         t0 = now;
                     }
-                    // Contiguity bar REVERTED to the sc42 cumulative bar
-                    // (lb59-lb66 evidence, 2026-11-01): d2381bf9 re-armed
-                    // the window on any completed PREEMPT pair, which
-                    // shielded leaked counts on lock-hot carriers — on
-                    // the OH image the carriers ARE the monopolists (OS_IPC
-                    // workers live in spinlock loops), so from lb61 on
-                    // ZERO heals fired and every boot froze at the
-                    // monopolist wall (lb64: systemui 0x100 in exit_group
-                    // 600 s; lb66: init 0x10000 + el5_filekey_man 0x100,
-                    // installs' mkdir never scheduled, WAKE-STRANDED
-                    // incumbents at pc=1). lb59, the last cumulative-bar
-                    // boot, fired 1784 heals and made the furthest ladder
-                    // progress of the whole campaign (SwitchToUser
-                    // reached). pb3's false-heal cost (887 heals/boot on
-                    // 4 lock-hot pids, guards stripped mid-section) is
-                    // now bounded: spin-waiting is preemptible at the
-                    // outermost depth (5f0537a8) so a stranded holder no
-                    // longer both-CPU-deadlocks, and a false heal's later
-                    // release underflow-clamps at zero and REPORTS
-                    // instead of poisoning. If pb3-class false heals ever
-                    // dominate again, the discriminator to build is
-                    // per-acquire (leakorigin outermost-record age), not
-                    // tick-sampled count continuity — sc42/pb3 proved the
-                    // count observable itself cannot split the shapes.
-                    //
-                    // Per-field faces (phantom-bits round 2): a stranded
-                    // SOFTIRQ bit or extra HARDIRQ levels have their OWN
-                    // honest bar below (their fields never churn under
-                    // lock traffic), so they neither need nor honor a
-                    // PREEMPT-pair re-arm.
+                    // Per-field adjudication (phantom-bits round 3,
+                    // supersedes BOTH bars): the sc42 cumulative window
+                    // and d2381bf9's PREEMPT-pair re-arm were two wrong
+                    // answers to the same question — "has THIS field been
+                    // held continuously?" — asked through a shared
+                    // window that any field's activity (or inactivity)
+                    // answered for all of them. The cumulative bar
+                    // false-healed live softirq windows and guards
+                    // (make-test sgid_mode VW-WEDGE: the window's pending
+                    // bits clear before its handlers run; a heal mid-
+                    // window makes it preemptible, the handler never
+                    // finishes, 29 completions lost, both CPUs idle
+                    // forever — 3112b576 passes the same boot, the only
+                    // delta is the heal policy); the pair-based re-arm
+                    // shielded stranded S/H bits on lock-hot carriers
+                    // (lb61-lb66: ZERO heals, every CPU monopolized).
+                    // The stamps above answer the question per field:
+                    // stale stamp = present at 200 consecutive ticks.
                     let s_set = pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0;
+                    let p_set = pc & crate::interrupt::preempt::PREEMPT_MASK != 0;
                     let h_extra =
                         (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
                             2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
+                    let stale_200 = |j: u64| j == 0 || now.wrapping_sub(j) >= 200;
+                    let p_stale = p_set && {
+                        stale_200(unsafe { (*cur).ti_pc_pirq_zero_jif() })
+                    };
                     let s_stale = s_set && {
-                        let j = unsafe { (*cur).ti_pc_sirq_zero_jif() };
-                        j == 0 || now.wrapping_sub(j) >= 200
+                        stale_200(unsafe { (*cur).ti_pc_sirq_zero_jif() })
                     };
                     let h_stale = h_extra && {
-                        let j = unsafe { (*cur).ti_pc_hirq_zero_jif() };
-                        j == 0 || now.wrapping_sub(j) >= 200
+                        stale_200(unsafe { (*cur).ti_pc_hirq_zero_jif() })
                     };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
@@ -4947,7 +4946,7 @@ pub fn scheduler_tick() {
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && now.wrapping_sub(t0) >= 200 {
+                        if base != 0 && (p_stale || s_stale) {
                             // Fleet session 3 (2026-10-25): clear base bits
                             // ONLY. This heal runs inside the timer IRQ
                             // bracket, so cur's count at this exact moment
@@ -5065,10 +5064,7 @@ pub fn scheduler_tick() {
                         // held across 200 consecutive ticks is phantom;
                         // the kept single level pairs the observer's own
                         // still-pending irq_exit sub.
-                        if base == 0
-                            && (s_stale || h_stale)
-                            && now.wrapping_sub(t0) >= 200
-                        {
+                        if base == 0 && h_stale {
                             unsafe {
                                 (*cur).ti_preempt_count_keep_tick_nesting();
                             }

@@ -3542,6 +3542,13 @@ pub fn txn_hang_audit() {
                 core::sync::atomic::AtomicBool::new(false);
             if !HANG_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
                 crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
+                // -> wait_for_used_interruptible, 441 s): capture the
+                // virtio ring state at the hang moment — at_device vs
+                // used-ahead-of-walker vs matched-but-undelivered splits
+                // the engine (lost kick / deferred softirq / descriptor
+                // window) in one line.
+                crate::drivers::virtio::vw_report("txn-hang-20s");
             }
         }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server

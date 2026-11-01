@@ -859,6 +859,16 @@ pub struct Task {
     /// the still-pending irq_exit sub pairs against the kept level).
     ti_pc_hirq_zero_jif: AtomicU64,
 
+    /// Same per-field stamp for the base PREEMPT field (round 3): the
+    /// pb3 lock-hot false-heal family and the sc42 re-leak carriers are
+    /// both distinguished from true base phantoms by exactly this — a
+    /// legal guard pair is microseconds, so a PREEMPT field observed
+    /// ABSENT at most ticks (fresh stamp) is lock churn, protected; a
+    /// field observed PRESENT at 200 consecutive ticks (stale stamp) is
+    /// a stranded +1. Replaces both the sc42 cumulative window and
+    /// d2381bf9's PREEMPT-pair re-arm in the tick-side heal gate.
+    ti_pc_pirq_zero_jif: AtomicU64,
+
     /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
     /// Per-task storage replaces the old pid-indexed side table — real pids
@@ -1563,6 +1573,7 @@ impl Task {
             ti_pc_zero_jif: AtomicU64::new(0),
             ti_pc_sirq_zero_jif: AtomicU64::new(0),
             ti_pc_hirq_zero_jif: AtomicU64::new(0),
+            ti_pc_pirq_zero_jif: AtomicU64::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -4268,6 +4279,21 @@ impl Task {
     #[inline]
     pub fn ti_pc_hirq_zero_jif_stamp(&self, jif: u64) {
         self.ti_pc_hirq_zero_jif
+            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// jiffies of the most recent tick observation of the PREEMPT field
+    /// ABSENT (per-field contiguity bar; 0 = never).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif(&self) -> u64 {
+        self.ti_pc_pirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stamp the PREEMPT-field-absent observation (caller: scheduler_tick
+    /// on the task's own CPU).
+    #[inline]
+    pub fn ti_pc_pirq_zero_jif_stamp(&self, jif: u64) {
+        self.ti_pc_pirq_zero_jif
             .store(jif, core::sync::atomic::Ordering::Relaxed);
     }
 
