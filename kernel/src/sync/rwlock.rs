@@ -20,13 +20,28 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 const WRITER_BIT: u32 = 1u32 << 31;
-const READER_MASK: u32 = !WRITER_BIT;
+/// Writer-pending bit: set by the FIRST contended writer while readers
+/// still hold the lock (the reference qrwlock's queued-writer discipline
+/// — see `write()` below). New readers block on it, so a continuous
+/// cross-CPU stream of short readers cannot starve a waiting writer out
+/// of the lock (the post-realign hazard: with the yielding slowpath
+/// deleted, a preempt-disabled writer could only spin while readers on
+/// other CPUs kept re-acquiring forever).
+const WRITER_PENDING_BIT: u32 = 1u32 << 30;
+const READER_MASK: u32 = !(WRITER_BIT | WRITER_PENDING_BIT);
 
 /// Raw read-write spinlock.
 ///
 /// Bit layout of the `state` word:
 /// - `[31]`    — writer held flag
-/// - `[30:0]`  — active reader count
+/// - `[30]`    — writer pending flag (one waiting writer owns it)
+/// - `[29:0]`  — active reader count
+///
+/// Writer fairness (reference qrwlock discipline, sync-realign followup):
+/// a contended writer first registers WRITER_PENDING_BIT — readers still
+/// holding the lock drain normally, but NEW readers block, so the writer
+/// is handed the lock after at most one reader-generation instead of
+/// competing forever against a cross-CPU reader stream.
 pub struct RawRwSpinlock {
     state: AtomicU32,
 }
@@ -44,11 +59,13 @@ impl RawRwSpinlock {
     pub fn read(&self) {
         loop {
             let s = self.state.load(Ordering::Acquire);
-            if s & WRITER_BIT != 0 {
+            // A HELD writer excludes; a PENDING writer also blocks new
+            // readers (writer fairness — see the struct doc).
+            if s & (WRITER_BIT | WRITER_PENDING_BIT) != 0 {
                 core::hint::spin_loop();
                 continue;
             }
-            // Guard against reader count overflow into writer bit.
+            // Guard against reader count overflow into the flag bits.
             if (s & READER_MASK) >= READER_MASK {
                 core::hint::spin_loop();
                 continue;
@@ -68,7 +85,7 @@ impl RawRwSpinlock {
     #[inline]
     pub fn try_read(&self) -> bool {
         let s = self.state.load(Ordering::Acquire);
-        if s & WRITER_BIT != 0 {
+        if s & (WRITER_BIT | WRITER_PENDING_BIT) != 0 {
             return false;
         }
         if (s & READER_MASK) >= READER_MASK {
@@ -85,21 +102,66 @@ impl RawRwSpinlock {
         self.state.fetch_sub(1, Ordering::Release);
     }
 
-    /// Acquire an exclusive (writer) lock.
+    /// Acquire an exclusive (writer) lock (two-phase, writer-fair).
+    ///
+    /// Phase 1 — register PENDING: exactly ONE waiting writer owns the
+    /// pending bit at a time (a second writer sees it set and waits for
+    /// it to clear, which its owner's phase-2 CAS guarantees). Setting
+    /// PENDING is allowed while readers still hold the lock; it blocks
+    /// only NEW readers, so the current reader generation drains.
+    ///
+    /// Phase 2 — wait for the reader count to reach zero, then flip
+    /// PENDING → WRITER. Once we own PENDING, no new reader can enter
+    /// (they block on it) and no other writer can take WRITER (they
+    /// cannot reach phase 2 without owning PENDING), so the flip's CAS
+    /// races nothing; the loop keeps its retry shape for the same
+    /// defensive reason RawSpinlock::lock does.
     #[inline]
     pub fn write(&self) {
+        // Phase 1: become the one pending writer.
         loop {
             let s = self.state.load(Ordering::Acquire);
-            if s != 0 {
+            if s & WRITER_BIT != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if s & WRITER_PENDING_BIT != 0 {
+                // Another writer already queued — wait for its turn to
+                // complete (it WILL take the lock: readers drain and the
+                // flip races nothing).
                 core::hint::spin_loop();
                 continue;
             }
             if self
                 .state
-                .compare_exchange_weak(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
+                .compare_exchange_weak(
+                    s,
+                    s | WRITER_PENDING_BIT,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
                 .is_ok()
             {
-                return;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // Phase 2: drain wait + flip.
+        loop {
+            let s = self.state.load(Ordering::Acquire);
+            if s & READER_MASK == 0 {
+                if self
+                    .state
+                    .compare_exchange_weak(
+                        s,
+                        (s | WRITER_BIT) & !WRITER_PENDING_BIT,
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return;
+                }
             }
             core::hint::spin_loop();
         }
@@ -124,14 +186,12 @@ impl RawRwSpinlock {
         self.state.load(Ordering::Acquire) != 0
     }
 
-    /// A writer holds (or is acquiring) — readers may still enter.
-    /// Diagnostic/probe helper (the deleted preemptible read-wait path
-    /// was its only internal consumer): a reader only ever blocks on
-    /// the writer bit, so waiting for full `is_locked() == false` would
-    /// stall behind unrelated readers.
+    /// A writer holds the lock or has registered pending (readers may
+    /// not enter either way). Diagnostic/probe helper (the deleted
+    /// preemptible read-wait path was its only internal consumer).
     #[inline]
     pub fn has_writer(&self) -> bool {
-        self.state.load(Ordering::Acquire) & WRITER_BIT != 0
+        self.state.load(Ordering::Acquire) & (WRITER_BIT | WRITER_PENDING_BIT) != 0
     }
 }
 
