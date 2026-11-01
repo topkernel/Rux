@@ -387,6 +387,107 @@ impl VirtQueue {
         self.avail_shadow.load(core::sync::atomic::Ordering::Acquire)
     }
 
+    /// Direct-console one-line snapshot of a stalling poller's world (the
+    /// VW-POLLSTALL family): the poller's own response byte, the device's
+    /// used-ring index, the caller's prev_used ordinal, the walker's
+    /// position, the submission shadow, and the un-kicked chain count.
+    /// Direct console (putchar_no_lock) because pr_err is silently dropped
+    /// on the OH boots (lb70/lb71 lesson).
+    ///
+    /// Class split, one line:
+    /// - used > prev_used, resp still 0xFF: the device completed entries
+    ///   past our ordinal but never wrote OUR byte — completion attribution
+    ///   or window-reuse corruption;
+    /// - used == prev_used, shadow > used: chains are published but the
+    ///   device never consumed them — lost kick (or a wedged ring);
+    /// - used > prev_used with resp written is unreachable here (the loop
+    ///   exits on the byte).
+    #[allow(clippy::too_many_arguments)]
+    fn vw_pollstall_print(
+        blk_slot: usize,
+        resp_status: *const u8,
+        used_ring: *const UsedRing,
+        prev_used: u16,
+        tag: &[u8],
+    ) {
+        use crate::console::putchar_no_lock as putchar;
+        fn pdec(mut v: u64) {
+            use crate::console::putchar_no_lock as putchar;
+            let mut buf = [0u8; 20];
+            let mut n = 0usize;
+            if v == 0 {
+                putchar(b'0');
+                return;
+            }
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            let mut i = n;
+            while i > 0 {
+                i -= 1;
+                putchar(buf[i]);
+            }
+        }
+        for &c in b"\nVW-" {
+            putchar(c);
+        }
+        for &c in tag {
+            putchar(c);
+        }
+        for &c in b" slot=" {
+            putchar(c);
+        }
+        pdec(blk_slot as u64);
+        let rv = if resp_status.is_null() {
+            0xFFu8
+        } else {
+            // SAFETY: diagnostic volatile read of the caller-owned
+            // response byte.
+            unsafe { core::ptr::read_volatile(resp_status) }
+        };
+        for &c in b" resp=0x" {
+            putchar(c);
+        }
+        pdec(rv as u64);
+        // SAFETY: used_ring offset 2 is the idx field (same read as the
+        // poll loop).
+        let used_idx = unsafe {
+            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+        };
+        for &c in b" used=" {
+            putchar(c);
+        }
+        pdec(used_idx as u64);
+        for &c in b" prev_used=" {
+            putchar(c);
+        }
+        pdec(prev_used as u64);
+        let (walker_last, unkicked) =
+            crate::drivers::virtio::pci_blk_lag_snapshot(blk_slot);
+        for &c in b" walker=" {
+            putchar(c);
+        }
+        pdec(walker_last as u64);
+        let shadow = crate::drivers::virtio::get_pci_device_queue_at(blk_slot)
+            .map(|q| q.avail_shadow_snapshot())
+            .unwrap_or(0);
+        for &c in b" shadow=" {
+            putchar(c);
+        }
+        pdec(shadow as u64);
+        for &c in b" unkicked=" {
+            putchar(c);
+        }
+        pdec(unkicked as u64);
+        for &c in b" pc=0x" {
+            putchar(c);
+        }
+        pdec(crate::interrupt::preempt::preempt_count() as u32 as u64);
+        putchar(b'\n');
+    }
+
     /// Wait for device to complete request using interrupt-driven sleep.
     ///
     /// Instead of busy-wait polling, the current task sleeps on a wait queue
@@ -453,6 +554,41 @@ impl VirtQueue {
         let poll_only =
             is_early_boot || crate::interrupt::preempt::preempt_count() != 0;
 
+        // POLL-PATH DEADLINE + PERIODIC RECOVERY (the lb66 installs stall):
+        // a preempt-guarded poller cannot sleep, but it CAN burn its whole
+        // iteration budget (and the caller's retry stack, 441s observed)
+        // when the completion never lands. The sleep path escapes via its
+        // 10s deadline + kick-and-walk leg; the poll path had NEITHER —
+        // poll_only skipped the deadline entirely and its only "recovery"
+        // was the caller's post-timeout retry, which re-poll the same dead
+        // ring. Now the poll path gets the same discipline, wall-clock
+        // based (read_time: TSC-derived, IRQ-independent — a deadline on
+        // jiffies would never fire under an irqsave guard):
+        //   - every 10 ms: re-kick the device (covers a lost/quiet kick —
+        //     an un-kicked chain's completion NEVER arrives no matter how
+        //     long we spin) and run the completion walker in this task's
+        //     context (covers irq_exit softirq deferral: with a preempt
+        //     guard held, irq_exit defers Block softirqs to ksoftirqd,
+        //     and ksoftirqd cannot run under our guard on this CPU — the
+        //     walker is the last-line consumer when no interrupt dispatch
+        //     will ever come; process-context calls take the blocking
+        //     acquire, exactly like the drain/rescue paths);
+        //   - at the 10 s deadline: same terminal behavior as the sleep
+        //     path — return the prev_used sentinel so the caller runs its
+        //     bounded late-drain, flags the tombstone, and fails loudly.
+        // Early-boot polling keeps the pure spin (no scheduler, no IRQ
+        // machinery up yet; its budget stays the 5M-lap cap).
+        const POLL_RECOVER_TICKS: u64 =
+            10 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+        const POLL_DEADLINE_TICKS: u64 = 10 * crate::config::TIMER_CLOCK_FREQ_HZ;
+        let poll_recover = poll_only && !is_early_boot;
+        let poll_t0 = if poll_recover {
+            Some(crate::drivers::timer::read_time())
+        } else {
+            None
+        };
+        let mut poll_next_recover = poll_t0.map(|t0| t0 + POLL_RECOVER_TICKS);
+
         // Early boot / lock holders: large timeout for reliable synchronous
         // polling. Under TCG a completion lands within ~10-20ms (device BH
         // runs on the timer cadence); the budget must comfortably exceed
@@ -462,7 +598,8 @@ impl VirtQueue {
         // an iteration count — every Block softirq wakes the whole sync
         // queue, so a 5000-wake cap could expire in well under a second of
         // false wakes and convert healthy I/O into timeout+EIO storms (the
-        // AC-2 "leaked multi-block read" failure family).
+        // AC-2 "leaked multi-block read" failure family). The preempt-guard
+        // poll is bounded by POLL_DEADLINE_TICKS above.
         let max_iterations: u64 = if poll_only {
             5_000_000
         } else {
@@ -500,6 +637,52 @@ impl VirtQueue {
                             core::ptr::read_volatile(used_idx_ptr)
                         };
                     }
+
+                    // Wall-clock recovery + deadline (see the constants
+                    // block above): every 4096 laps read the TSC clock —
+                    // a few ns of overhead per µs of spin — and at each
+                    // 10ms boundary re-kick + walk + re-check; at the 10s
+                    // deadline give up with the sentinel, exactly like
+                    // the sleeping path's sync-deadline leg.
+                    if let Some(next_recover) = poll_next_recover.as_mut() {
+                        if _iteration & 0xFFF == 0 {
+                            let now = crate::drivers::timer::read_time();
+                            if now >= *next_recover {
+                                let t0 = poll_t0.unwrap_or(now);
+                                if now.saturating_sub(t0) >= POLL_DEADLINE_TICKS {
+                                    // Terminal: direct-console verdict line
+                                    // (pr_err is dropped on the OH boots —
+                                    // lb70/lb71 lesson), then the sentinel.
+                                    // SAFETY: same reads as the loop above.
+                                    Self::vw_pollstall_print(
+                                        blk_slot,
+                                        resp_status,
+                                        used_ring,
+                                        prev_used,
+                                        b"POLLSTALL-DL",
+                                    );
+                                    break 'wait_done prev_used;
+                                }
+                                // Recovery pass: lost/quiet kick, or a
+                                // completion the deferred softirq never
+                                // consumed. Cheap when caught up.
+                                crate::drivers::virtio::pci_blk_kick(blk_slot);
+                                crate::drivers::virtio::pci_process_async_completions_slot(
+                                    blk_slot,
+                                );
+                                if unsafe { resp_done(resp_status) } {
+                                    // SAFETY: used_ring offset 2 is the idx field.
+                                    break 'wait_done unsafe {
+                                        let used_idx_ptr =
+                                            (used_ring as usize + 2) as *const u16;
+                                        core::ptr::read_volatile(used_idx_ptr)
+                                    };
+                                }
+                                *next_recover = now + POLL_RECOVER_TICKS;
+                            }
+                        }
+                    }
+
                     // lb66 installs hang instrument (2M laps ≈ 40% of the
                     // poll budget with no completion): one direct-console
                     // snapshot per call — the poller's own view of the
@@ -508,59 +691,13 @@ impl VirtQueue {
                     // submission/kick loss; resp byte stuck at 0xFF with
                     // the ring drained = descriptor-window reuse).
                     if _iteration == 2_000_000 {
-                        use crate::console::putchar_no_lock as putchar;
-                        fn pdec(mut v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
-                            let mut buf = [0u8; 20];
-                            let mut n = 0usize;
-                            if v == 0 {
-                                putchar(b'0');
-                                return;
-                            }
-                            while v > 0 && n < buf.len() {
-                                buf[n] = b'0' + (v % 10) as u8;
-                                v /= 10;
-                                n += 1;
-                            }
-                            let mut i = n;
-                            while i > 0 {
-                                i -= 1;
-                                putchar(buf[i]);
-                            }
-                        }
-                        for &c in b"\nVW-POLLSTALL slot=" {
-                            putchar(c);
-                        }
-                        pdec(blk_slot as u64);
-                        for &c in b" resp=0x" {
-                            putchar(c);
-                        }
-                        let rv = if resp_status.is_null() {
-                            0xFFu8
-                        } else {
-                            // SAFETY: diagnostic volatile read of the
-                            // caller-owned response byte.
-                            unsafe { core::ptr::read_volatile(resp_status) }
-                        };
-                        pdec(rv as u64);
-                        for &c in b" used=" {
-                            putchar(c);
-                        }
-                        // SAFETY: same idx read as the loop above.
-                        pdec(unsafe {
-                            core::ptr::read_volatile(
-                                (used_ring as usize + 2) as *const u16,
-                            ) as u64
-                        });
-                        for &c in b" prev_used=" {
-                            putchar(c);
-                        }
-                        pdec(prev_used as u64);
-                        for &c in b" pc=0x" {
-                            putchar(c);
-                        }
-                        pdec(crate::interrupt::preempt::preempt_count() as u32 as u64);
-                        putchar(b'\n');
+                        Self::vw_pollstall_print(
+                            blk_slot,
+                            resp_status,
+                            used_ring,
+                            prev_used,
+                            b"POLLSTALL",
+                        );
                     }
                     core::hint::spin_loop();
                     continue;

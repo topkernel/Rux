@@ -3060,6 +3060,21 @@ pub fn get_expected_used_idx_at(slot: usize) -> u16 {
     PCI_BLK_EXPECTED_USED_IDX[slot].load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Walker-lag snapshot for one slot's forensic prints (VW-POLLSTALL
+/// family): (walker position in the used ring, quietly-submitted-but-
+/// unkicked chain count). Splits "the device completed it" from "the
+/// completion walker never consumed it" and "nobody ever kicked" in a
+/// single line.
+pub fn pci_blk_lag_snapshot(slot: usize) -> (u16, usize) {
+    if slot >= MAX_PCI_BLK_DISKS {
+        return (0, 0);
+    }
+    (
+        PCI_BLK_PENDING_LAST[slot].load(core::sync::atomic::Ordering::Acquire),
+        PCI_BLK_UNKICKED[slot].load(core::sync::atomic::Ordering::Acquire),
+    )
+}
+
 /// Increment a slot's expected used.idx (called after submitting request,
 /// under that slot's BLK lock).
 pub fn increment_expected_used_idx_at(slot: usize) {
