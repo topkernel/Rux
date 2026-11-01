@@ -1299,6 +1299,28 @@ pub fn socket_recv_ctl(
     }
 }
 
+/// review F10: inet_shutdown's ENOTCONN discipline for TCP sockets —
+/// the reference rejects shutdown() with ENOTCONN when the socket's
+/// protocol state is TCP_CLOSE (never connected — the check runs before
+/// the how dispatch, so it covers SHUT_RD too), and for a LISTENING
+/// socket every how that includes SEND_SHUTDOWN (SHUT_WR / SHUT_RDWR);
+/// only a pure SHUT_RD on a listener is a no-op success. The old path
+/// returned 0 for all of these and additionally flipped a listener's
+/// protocol slot to TCP_CLOSE (tcp_sock.close() default arm), killing
+/// the listener for its other waiters.
+pub fn socket_shutdown_check(socket: &Socket, how: i32) -> Result<(), i32> {
+    if socket.sock_type == SocketType::Tcp {
+        match *socket.state.lock() {
+            SocketState::Unconnected => return Err(-107), // ENOTCONN
+            SocketState::Listening if how == 1 || how == 2 => {
+                return Err(-107) // ENOTCONN
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// W3: one wait round for a blocking accept — sleeps on the listener's
 /// wait queue (woken by the RX path when a child establishes) until a
 /// connection is pending, the deadline expires, or a signal arrives.

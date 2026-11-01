@@ -2883,6 +2883,13 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
     }
 
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
+        // review F10: reference inet_shutdown returns ENOTCONN for a TCP
+        // socket that was never connected (any how), and for SHUT_WR /
+        // SHUT_RDWR on a listener — before this the call reported 0 and
+        // the listener's protocol slot got killed.
+        if let Err(e) = crate::net::socket::socket_shutdown_check(&socket, how) {
+            return e as i64;
+        }
         if how == 0 || how == 2 {
             // SHUT_RD (alone or in SHUT_RDWR): mark the read side shut
             // (Linux sk_shutdown |= RCV_SHUTDOWN) — poll/epoll asking for
