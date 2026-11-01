@@ -299,6 +299,11 @@ static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
     [const { core::sync::atomic::AtomicUsize::new(0) };
         crate::config::MAX_CPUS];
 
+/// Softirq starvation bound for the irq_exit deferral gate (phantom-bits):
+/// 20 ms of the timer timebase. See irq_exit.
+const SOFTIRQ_STARVE_TICKS: u64 =
+    20 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+
 /// Exit IRQ context — decrement hardirq count and process softirqs
 ///
 /// Called at the end of hardware interrupt handling.
@@ -361,9 +366,35 @@ pub fn irq_exit() {
     // ksoftirqd wake — it expects THIS path to run them). Every deferral
     // branch therefore wakes ksoftirqd: the pending bits stay set, and
     // the woken kthread drains them as soon as the scheduler picks it.
+    //
+    // phantom-bits starvation bound: deferral assumes ksoftirqd can
+    // eventually run on this CPU. A task busy-polling I/O completion
+    // with a guard held (bio/queue waiters hold lock_irqsave — base != 0)
+    // never yields, ksoftirqd never runs, and the completions the poller
+    // waits for ARE the deferred softirqs — a deadlock the make-test
+    // boot caught live (VW-WEDGE disk=0 used=28 irqs=0 at sgid_mode).
+    // Escape hatch: when this CPU has not run ANY softirq window for 20 ms
+    // (SOFTIRQ_WIN_T0 stamps every dispatch, inline or ksoftirqd), force
+    // the inline dispatch anyway. Strictly no worse than the old
+    // unconditional inline dispatch: a holder still spinning after 20 ms
+    // of protected deferral is exactly the case the old behavior wedged
+    // on; every shorter hold — the overwhelming majority — keeps the
+    // protection.
     if crate::sched::current().is_some() {
+        let cpu = crate::arch::cpu_id() as usize;
+        let mut starved = false;
+        if cpu < crate::config::MAX_CPUS {
+            let t0 = crate::interrupt::softirq::SOFTIRQ_WIN_T0[cpu]
+                .load(core::sync::atomic::Ordering::Acquire);
+            let now = crate::drivers::timer::read_time();
+            if t0 == 0 || now.saturating_sub(t0) >= SOFTIRQ_STARVE_TICKS {
+                starved = true;
+            }
+        } else {
+            starved = true;
+        }
         let base = preempt_count() & PREEMPT_MASK;
-        if !in_irq() && !in_softirq() && base == 0 {
+        if !in_irq() && !in_softirq() && (base == 0 || starved) {
             crate::interrupt::softirq::invoke_softirq();
         } else if !in_irq() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
