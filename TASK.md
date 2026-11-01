@@ -678,3 +678,36 @@ lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
   (launcher marker reached at 120.65s in wfF). sched/ code is
   unchanged vs the clean anchor — the dynamics shift comes from the
   window's non-sched changes (bio batching, ext4 namei, vfs, uaccess).
+
+### wf close-out — gates and final verdict (branch wedge-fix, pushed)
+- WF KERNEL = main tip 4a757d6e + 28b1afca (kpreempt default OFF) +
+  35336eb1 (mm/pcp IRQ-window overflow). Release bzImage md5
+  ff9912bb42df3560f8e05221e54e8fbe.
+- Gate evidence:
+  - x86_64 debug build rc=0; riscv64 debug build rc=0 (build/.config
+    removed first); aarch64 debug build rc=0; x86_64 release rc=0.
+  - make test (riscv64, ROOTFS_IMG=worktree-local reflink copy):
+    "ALL TESTS PASSED", suite verdict green (wrapper rc=124 is the
+    known post-halt QEMU idle under timeout).
+  - riscv64 minimal-rootfs regression boot (run/rv-smoke-wf-serial.log):
+    KERNPANIC/ALLOCTHROW 0, shell prompt reached, /proc present.
+    (PREEMPT-UNDERFLOW lines are 5f0537a8's record-only clamped
+    diagnostic, pre-existing on main — not from this branch.)
+  - RELEASE OH SA-storm boots: wfH (NO cmdline, 300s): armed=0,
+    DEADLOCK 0, BIGLOCK 0, PANIC 0, init alive at 264s, serial live to
+    300s. wfI (kpreempt=1, 60s): 7 DEADLOCK prints on binder::WORLD
+    (0xffffffff8095a2d0) — the opt-in path arms and the wedge
+    reproduces on the IDENTICAL build (same md5), confirming causation
+    from both directions. Note: the "kernel-preempt armed" pr_info
+    never appears in ANY release serial (also absent in lb48/lb52 which
+    had the hook ON and wedged) — release log filtering, not a wiring
+    signal; the wedge is the behavioral proof.
+- Handoff: OH lane can resume main release boots once this merges
+  (branch wedge-fix: 28b1afca + 35336eb1 + docs). Perf lane note: the
+  kpreempt default-off intentionally reverts the p2f futex wake->run
+  gain until the hook's count/starvation interaction is fixed — re-land
+  conditions are in kernel/src/arch/x86_64/trap.rs. Open remnant for a
+  future hunt: init vruntime-stranding (60-90s self-healing gaps,
+  wfE/wfF evidence) — sched/ code is identical to the clean anchor, so
+  the dynamics shift is in the window's non-sched changes (bio
+  batching, ext4 namei, vfs, uaccess).
