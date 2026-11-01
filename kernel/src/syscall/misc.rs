@@ -481,6 +481,9 @@ pub fn epoll_interest_snapshot() {
 
 /// Epoll file close callback
 fn epoll_file_close(file: &crate::fs::File) -> i32 {
+    // (review-s2b perf) this instance is gone — release the purge gate's
+    // reference (see EPOLL_INSTANCES).
+    EPOLL_INSTANCES.fetch_sub(1, core::sync::atomic::Ordering::Release);
     // R20-5: free the boxed EpollFile. The close op only runs on the LAST
     // Arc reference (close_fd decides under the entry lock), so no
     // epoll_ctl/epoll_wait can be dereferencing it — every path that
@@ -1554,7 +1557,10 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     };
 
     match fdtable.install_fd(epoll_fd, file) {
-        Ok(()) => epoll_fd as i64,
+        Ok(()) => {
+            EPOLL_INSTANCES.fetch_add(1, core::sync::atomic::Ordering::Release);
+            epoll_fd as i64
+        }
         Err(()) => {
             // SAFETY: epoll_ptr was created via Box::into_raw above; reclaim to free.
             unsafe {
@@ -4020,7 +4026,21 @@ static GETRANDOM_CRNG: crate::sync::spinlock::Spinlock<Option<ChaCha20Crng>> =
 /// process, so stale entries cannot report EPOLLERR|EPOLLHUP forever
 /// (review批次1: close 后 epoll 条目不删; Linux removes entries on the
 /// file's last release).
+/// (review-s2b perf) Live epoll instances in the whole system. Pure fast-out
+/// gate for epoll_purge_closed_fd: when zero, no interest entries can exist
+/// anywhere, so the per-close for_each_file walk (entry-lock irqsave pair +
+/// slot clones) is pure overhead — the lmbench open case (open+close of a
+/// plain file, no epoll in the image) paid it on EVERY close. Inc'd after a
+/// successful install in sys_epoll_create, dec'd in epoll_file_close (the
+/// last-reference close op — R20-5 discipline). A stale nonzero value (a
+/// leaked epoll File) only keeps the purge walk alive, never wrong.
+static EPOLL_INSTANCES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 pub fn epoll_purge_closed_fd(fd: usize) {
+    if EPOLL_INSTANCES.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     // Linux eventpoll_release: closing a file descriptor removes every
     // epoll interest still keyed to that fd number and open file
     // description. The old stub left the entry in place, and the wait

@@ -1281,7 +1281,11 @@ impl FdTable {
             let mut r = self.retired.lock_irqsave();
             r.push(file);
         }
-        self.drain_retired(false);
+        // (review-s2b perf) this caller just parked, so the vec cannot be
+        // empty — drain_retired's emptiness check would only re-take the
+        // irqsave lock pair to rediscover that. `parked: true` skips it
+        // (one lock round-trip off every close).
+        self.drain_retired(false, true);
     }
 
     /// Drop retired slot occupants once no reader can be mid-clone.
@@ -1297,8 +1301,11 @@ impl FdTable {
     ///
     /// `final_drop`: at FdTable::drop no &self borrowers can exist, so no
     /// reader can run at all — skip the wait.
-    fn drain_retired(&self, final_drop: bool) {
-        {
+    ///
+    /// `parked`: the caller just pushed an entry under the retired lock
+    /// (park_and_drain) — the emptiness pre-check is skipped.
+    fn drain_retired(&self, final_drop: bool, parked: bool) {
+        if !parked {
             // Cheap emptiness check first: most writers park nothing and
             // most drains find a previous drain already took the vec.
             let r = self.retired.lock_irqsave();
@@ -1554,7 +1561,7 @@ impl Drop for FdTable {
             let mut r = self.retired.lock_irqsave();
             r.extend(to_close);
         }
-        self.drain_retired(true);
+        self.drain_retired(true, true);
         // Boxes are deallocated automatically after this.
     }
 }
