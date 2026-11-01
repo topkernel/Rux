@@ -98,6 +98,10 @@ pub mod treehunt;
 /// kernel-stack chain — attributes the leaf of nested-call cascades
 /// (fs stalls behind binder reader exhaustion). See dfx/slowtask.rs.
 pub mod slowtask;
+/// SCM_RIGHTS relay tap (dfx=scmtap, gdm session-fifo hunt): one line
+/// per unix-fd hop/drop plus the fifo last-writer-close line; see
+/// dfx/scmtap.rs.
+pub mod scmtap;
 
 /// Initialize the DFX subsystem.
 ///

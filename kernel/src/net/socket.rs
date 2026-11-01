@@ -504,18 +504,21 @@ impl Socket {
                     let mut established = false;
                     let mut refused = 0u32;
                     for _ in 0..8 {
-                        let done = crate::net::tcp::tcp_socket_get(tcp_fd)
-                            .map(|ts| {
-                                if ts.state == crate::net::tcp::TcpState::TCP_CLOSE {
+                        // Review finding 7: state/errno are mutated under
+                        // TCP_TABLE_LOCK on other CPUs — read them through
+                        // the locked snapshot, not the unlocked handle.
+                        let done = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                            .map(|(st, err)| {
+                                if st == crate::net::tcp::TcpState::TCP_CLOSE {
                                     // RST in SYN_SENT (no listener on the
                                     // loopback target) records ECONNREFUSED —
                                     // surface it, connect() must not report
                                     // success for a refused connection (LTP
                                     // connect01 "connection refused").
-                                    refused = ts.pending_error as u32;
+                                    refused = err as u32;
                                 }
-                                ts.state == crate::net::tcp::TcpState::TCP_ESTABLISHED
-                                    || ts.state == crate::net::tcp::TcpState::TCP_CLOSE
+                                st == crate::net::tcp::TcpState::TCP_ESTABLISHED
+                                    || st == crate::net::tcp::TcpState::TCP_CLOSE
                             })
                             .unwrap_or(true);
                         if done {
@@ -555,8 +558,8 @@ impl Socket {
                             // Drain the loopback backlog ourselves: with
                             // this task asleep nothing else polls.
                             crate::net::ethernet::ethernet_poll();
-                            let resolved = crate::net::tcp::tcp_socket_get(tcp_fd)
-                                .map(|ts| match ts.state {
+                            let resolved = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                .map(|(st, _)| match st {
                                     crate::net::tcp::TcpState::TCP_ESTABLISHED => {
                                         Some(true)
                                     }
@@ -574,8 +577,8 @@ impl Socket {
                                     // CLOSED: refused (111) or SYN-retry
                                     // exhaustion (ETIMEDOUT 110) — take the
                                     // protocol's errno.
-                                    let err = crate::net::tcp::tcp_socket_get(tcp_fd)
-                                        .map(|ts| ts.pending_error)
+                                    let err = crate::net::tcp::tcp_connect_snapshot(tcp_fd)
+                                        .map(|(_, err)| err)
                                         .filter(|e| *e != 0)
                                         .unwrap_or(110) as i32;
                                     *self.state.lock() = SocketState::Unconnected;
@@ -1178,9 +1181,9 @@ fn socket_accept_ready(socket: &Socket) -> bool {
 fn socket_connect_ready(socket: &Socket) -> bool {
     let fd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
     if fd < 0 { return true; }
-    crate::net::tcp::tcp_socket_get(fd)
-        .map(|ts| !matches!(
-            ts.state,
+    crate::net::tcp::tcp_connect_snapshot(fd)
+        .map(|(st, _)| !matches!(
+            st,
             crate::net::tcp::TcpState::TCP_SYN_SENT
                 | crate::net::tcp::TcpState::TCP_SYN_RECV))
         .unwrap_or(true)
@@ -1601,6 +1604,62 @@ pub static SOCKET_OPS: FileOps = FileOps::builder()
     .close(socket_close)
     .poll(socket_file_poll)
     .build();
+
+/// Pseudo-device id for sockfs-style stat identities (the pipe analog:
+/// PIPE_STAT_DEV). Sockets created by socket(2)/accept(2) have no VFS
+/// inode, so fstat(2) needs the anonymous-file branch of
+/// fs::vfs::file_stat to answer for them — Linux stats sockets on
+/// sockfs with mode S_IFSOCK|0777 and a distinct st_ino.
+pub const SOCK_STAT_DEV: u64 = 0x736f_636b_7300_0001;
+
+/// fstat(2) on an anonymous socket File: report S_IFSOCK.
+///
+/// Every socket family installs its File without an inode (unix,
+/// netlink, raw, and the AF_INET SOCKET_OPS here), so file_stat's
+/// no-inode branch dispatches here. Returning None lets non-socket
+/// Files fall through to the next helper.
+///
+/// Without this, fstat(socketfd) failed with EBADF — and sd-bus's
+/// sd_is_socket() probe (fstat + S_ISSOCK + SO_DOMAIN) then returned
+/// <= 0, so bus_socket_start_auth() cleared accept_fd BEFORE the auth
+/// write: the client never sent NEGOTIATE_UNIX_FD, the daemon never
+/// answered AGREE_UNIX_FD, can_fds stayed false, and EVERY fd-carrying
+/// sd-bus send returned -EOPNOTSUPP. On this image that killed gdm at
+/// the last seam: logind's CreateSession reply (session fifo fd) was
+/// refused silently from the JobRemoved match callback — pam timed
+/// out ("Connection timed out"), the fifo's only writer closed, and
+/// logind logged "Session c1 logged out" milliseconds after the
+/// create (gdmr64-r71, session-21 hunt).
+pub fn socket_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    let ops = file.get_ops()?;
+    let is_socket = core::ptr::eq(ops as *const _, &SOCKET_OPS as *const _)
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::unix::UNIX_SOCKET_OPS as *const _,
+        )
+        || core::ptr::eq(
+            ops as *const _,
+            &crate::net::netlink::NETLINK_OPS as *const _,
+        )
+        || core::ptr::eq(ops as *const _, &crate::net::raw::RAW_OPS as *const _);
+    if !is_socket {
+        return None;
+    }
+    stat.st_dev = SOCK_STAT_DEV;
+    // Distinct identity per file description (Linux: one sockfs inode
+    // per socket); file_id is the kernel's unique description id.
+    stat.st_ino = file.file_id;
+    stat.st_nlink = 1;
+    stat.st_uid = 0;
+    stat.st_gid = 0;
+    stat.st_rdev = 0;
+    stat.st_size = 0;
+    stat.st_blocks = 0;
+    stat.st_blksize = 4096;
+    stat.set_socket();
+    stat.st_mode |= 0o777;
+    Some(0)
+}
 
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)

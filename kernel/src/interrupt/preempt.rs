@@ -163,6 +163,36 @@ pub fn preempt_count_add(val: i32) {
     }
 }
 
+/// Add with an explicit captured acquire-site location — used by
+/// #[track_caller] inline lock helpers (Spinlock::lock and friends) so
+/// the leakorigin shadow records the LOCK CALLER's file:line, not the
+/// helper's own line (preempt-hunt: the omis=1 phantom faces all
+/// recorded as spinlock.rs:292 / rwlock.rs:450, which name the helper
+/// for every caller and so could not distinguish producers).
+#[inline]
+pub fn preempt_count_add_at(
+    val: i32,
+    loc: &'static core::panic::Location<'static>,
+) {
+    if let Some(task) = crate::sched::current() {
+        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
+            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            let c0 = task.preempt_count();
+            if val == PREEMPT_OFFSET {
+                crate::dfx::leakorigin::note_acquire(task, loc, c0.wrapping_add(1));
+            } else {
+                crate::dfx::leakorigin::note_hardirq_acquire(
+                    task,
+                    loc,
+                    c0.wrapping_add(HARDIRQ_OFFSET),
+                );
+            }
+        }
+        task.add_preempt_count(val);
+    }
+}
+
 /// Subtract value from current task's preempt_count
 ///
 /// #[track_caller]: on underflow the report names the guard's drop site

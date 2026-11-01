@@ -1,0 +1,51 @@
+aa64-ltp lane state (2026-10-31)
+================================
+
+Mission outcome: the "34/35 all one class" SIGSEGV family is fixed.
+LTP smoke subset on aarch64: 1/33 unique binaries -> 31/33
+(best-evidence across final boots; the original "35" included two
+entries that were never built and one duplicated line).
+
+Root cause 1 (the 34-crash class) — FIXED, commit 7d605228
+  setup_frame_aarch64 used sa_restorer whenever nonzero. glibc's
+  aarch64 sigaction leaves the restorer slot UNINITIALIZED unless the
+  app set SA_RESTORER (glibc aarch64 libc_sigaction.c), so handlers
+  were entered with lr = random stack garbage (observed mid-_IO_setb).
+  The handler's ret then executed stdio code with the sigframe's
+  siginfo as operands: fp=0x132 (si_pid=306), fault at fp+56=0x16a,
+  "FILE* garbage" and "0x132-class values" in the original finding.
+  Fix mirrors the reference kernel: honor sa_restorer only under
+  SA_RESTORER; otherwise return through the kernel SIGTRAMP page.
+  Diagnosed with a new gated dfx=sigtrace switch (setup/restore lines).
+
+Root cause 2 (read02/lseek02/mmap01/write05 layer) — FIXED, 2833a267
+  arm64 uapi/asm/fcntl.h overrides four open() flag bits vs x86/
+  asm-generic: O_DIRECTORY 040000, O_NOFOLLOW 0100000, O_DIRECT
+  0200000, O_LARGEFILE 0400000. Rux used one table everywhere, so on
+  aarch64 O_DIRECT and O_DIRECTORY were swapped: read02's
+  open(O_RDWR|O_DIRECT)=0x10002 hit the O_DIRECTORY bit -> TBROK
+  ENOTDIR on a regular file. Constants are now cfg-gated per arch.
+
+Remaining, in priority order
+  1. FLAKY KERNEL BUG (next hunt): rare EL1 sync exception
+     "cause=Unknown ec=0x0 iss=0x0 esr=0x2000000 pc=0xffffffff8023dd40"
+     (= `msr spsr_el1, x20` in restore_and_eret, trap.S). The kernel
+     SIGILLs the CURRENT task though the fault is at a kernel pc; two
+     occurrences killed an innocent serial shell mid-run (finalB log,
+     listrun log). Fires under heavy fork+signal+timer load, ~2 hits
+     in ~12 loaded boots, always the same pc. QEMU TCG MTTCG 9.x,
+     -cpu cortex-a72, gic-v3, 2 vCPU.
+  2. nanosleep01: TFAIL is tst_timer precision thresholds (450us) vs
+     TCG jitter; environment-limited, not obviously a kernel bug.
+  3. close02/write01 occasionally exit 2 under load (pass standalone
+     and in most boots); the known flaky-vs-regression rerun rule
+     applies.
+  4. mkdir01/unlink01 were never produced by aa64-ltp-build.sh's
+     subset build (staging has mkdir02+ / unlink05+); the smoke
+     runner's original 1/35 summary silently skipped them.
+
+Discipline status
+  x86_64 build rc=0 (with both fixes); aarch64 make test 1135/1135
+  green; riscv64 make test (see repo log); riscv64 regression boot
+  not run by this lane (no riscv runtime flow here; make test boots
+  covered the suite).

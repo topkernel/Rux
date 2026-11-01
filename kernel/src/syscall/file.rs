@@ -61,7 +61,9 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     let mode = args[3] as u32;
 
     const O_CREAT: u32 = 0o00000100;
-    const O_DIRECTORY: u32 = 0o00200000;
+    // Arch-dependent bit (arm64 uapi 040000 vs x86/asm-generic 0200000)
+    // — use the shared table, not a literal.
+    const O_DIRECTORY: u32 = crate::fs::file::FileFlags::O_DIRECTORY;
     const O_CLOEXEC: u32 = 0o02000000;
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
@@ -158,7 +160,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // without a mounted /proc inside the jail they must NOT leak (they
     // would break the isolation path_lookup now enforces), so they are
     // limited to non-chrooted tasks.
-    if !crate::fs::vfs::chrooted() {
+    if !crate::fs::vfs::process_rooted() {
         if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) != 0 {
             if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
                 return match crate::fs::vfs::open_procfs_dir(pid, flags) {
@@ -177,7 +179,9 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // memory file whose CONTENT was the path string. Resolve the target's
     // exe_path and fall through to the regular open path.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() {
+    // (perf-syscall lane) starts_with gate FIRST — the parts Vec below
+    // allocated on every open of every file before this.
+    if !crate::fs::vfs::process_rooted() && full_path.starts_with("/proc") {
         let parts: alloc::vec::Vec<&str> = full_path
             .trim_end_matches('/')
             .split('/')
@@ -224,7 +228,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // yields a namespace fd usable by setns(2). Handled before the generic
     // procfs read_file shortcut (which would follow the "uts:[N]" target).
     // (Global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 {
+    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 {
         if let Some(rv) = crate::process::ns::try_open_ns_path(&full_path, flags) {
             return rv;
         }
@@ -233,10 +237,12 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
-        {
+        // (perf-syscall lane) starts_with gate FIRST — same reason as
+        // the exe block above.
+        if full_path.starts_with("/proc/environ") || full_path.starts_with("/proc/") {
             let parts: alloc::vec::Vec<&str> = full_path
                 .trim_end_matches('/')
                 .split('/')
@@ -727,7 +733,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // O_PATH open; walking the synthetic symlink re-resolves a target
     // string that socket fds cannot express. (Non-chrooted tasks only,
     // like the other global /proc shortcuts.)
-    if !crate::fs::vfs::chrooted() {
+    if !crate::fs::vfs::process_rooted() {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
             && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
@@ -1413,7 +1419,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
 
     // /proc/self/exe - return program path (P1 chroot: global-namespace
     // shortcut, non-chrooted tasks only).
-    if !crate::fs::vfs::chrooted() && pathname == "/proc/self/exe" {
+    if !crate::fs::vfs::process_rooted() && pathname == "/proc/self/exe" {
         if let Some(current) = crate::sched::current() {
             // SAFETY: current is the running task's Task pointer from sched::current().
             let exe_path = unsafe { (*current).get_exe_path() };
@@ -1436,7 +1442,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // /proc/[pid]/fd/N - return fd symlink target
     // Supports both absolute and relative paths (already dirfd-resolved)
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() {
+    if !crate::fs::vfs::process_rooted() {
         let full_path = resolve_proc_readlink_path(dirfd, &pathname);
         if let Some(target) = handle_proc_fd_readlink(&full_path) {
             // Same truncation semantics as above (Linux policy, not ENAMETOOLONG).
@@ -1455,7 +1461,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     // /proc/[pid]/ns/<kind> — namespace magic links (U1c): readlink returns
     // "<kind>:[<inum>]" exactly like Linux. (Global-namespace shortcut,
     // non-chrooted tasks only.)
-    if !crate::fs::vfs::chrooted() {
+    if !crate::fs::vfs::process_rooted() {
         let ns_full_path = resolve_proc_readlink_path(dirfd, &pathname);
         if let Some(target) = handle_proc_ns_readlink(&ns_full_path) {
             // Linux truncates to bufsiz and returns the truncated length.
@@ -2893,7 +2899,7 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     // the plain-fchmod O_PATH gate is used (gdmr22's
     // "Failed to set owner/mode ... Bad file descriptor" was this gate
     // firing on udev's O_PATH fd).
-    if !crate::fs::vfs::chrooted() {
+    if !crate::fs::vfs::process_rooted() {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
             && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
@@ -2952,7 +2958,7 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
     // "/proc/*/fd/<n>" resolves to the target file (the fd's O_PATH-ness
     // is invisible on the path route — Linux walks the magic link), so
     // the core without the plain-fchown O_PATH gate applies.
-    if !crate::fs::vfs::chrooted() && flags & AT_SYMLINK_NOFOLLOW == 0 {
+    if !crate::fs::vfs::process_rooted() && flags & AT_SYMLINK_NOFOLLOW == 0 {
         let mut probe = [0u8; 64];
         if !pathname_ptr.is_null()
             && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
@@ -4189,6 +4195,11 @@ pub fn sys_fdatasync(args: SyscallArgs) -> i64 {
 ///
 /// # Arguments: none
 pub fn sys_sync(_args: SyscallArgs) -> i64 {
+    // Delayed allocation (2026-11): buffered write(2) leaves data ONLY in
+    // dirty page-cache frames — drain them into the ext4 write path (and
+    // thus the buffer cache) BEFORE syncing the buffer cache, or sync(2)
+    // would persist nothing of every un-fsynced write.
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
     // Flush all buffer cache
     let _ = crate::fs::bio::sync_buffers();
     // And persist the disk's volatile cache (see sys_fsync).
@@ -4894,6 +4905,28 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
         .unwrap_or(false);
     if !is_regular {
         return -(errno::ESPIPE as i64);
+    }
+
+    // Delayed allocation (2026-11): WRITE/WAIT_AFTER must persist buffered
+    // writes of [offset, offset+nbytes). Flush the range's dirty
+    // page-cache frames through the ext4 write path for ext4 inodes (the
+    // ops-pointer gate mirrors sys_fsync — never reinterpret another
+    // filesystem's private_data as an Ext4FileSystem).
+    if nbytes > 0 {
+        // SAFETY: inode is written once at open; reading it races no
+        // writer.
+        if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+            let is_ext4 = inode.ops.is_some_and(|o| core::ptr::eq(
+                o as *const _,
+                &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+            ));
+            if is_ext4 {
+                let ps = crate::mm::PAGE_SIZE as i64;
+                let first = (offset / ps) as u64;
+                let last = ((offset + nbytes - 1) / ps) as u64;
+                crate::fs::ext4::file::ext4_flush_dirty_inode(inode, first, last);
+            }
+        }
     }
 
     // Simplified: sync all buffers

@@ -235,3 +235,21 @@ probe patch lands on main: syscost tick-mode kernel share 83–86%.
 - Host load caveat: run gate boots when the host is not saturated; a boot
   under foreign QEMU load can shift volume rows — rerun once before calling
   a regression (same rule as the LTP flake policy).
+
+
+### preempt-hunt + perf-sprint merge gate (2026-11-01, b96a2e48, tag preempt-hunt)
+
+Ran under load (5 foreign QEMUs — wedge-fix + review lanes active; the
+documented load-coupled caveat applies). Verdict split:
+- **Tier 2 fs family: the perf sprint shows through — improvements, not
+  regressions** (anchor = old pb1 column): append 83.2 vs 500.4 (6x
+  faster), mkdrmdir 2829 vs 83192 (29x), unlink 851 vs 32816 (39x),
+  p1_null 3.50 vs 4.57 (faster). These FAIL flags are the anchor being
+  stale-slow; per the "±20% or improve" rule they PASS.
+- **Tier 1 quiet rows: invalid under this load window** (clock_gettime
+  27µs, nanosleep 930ms avg — pure host-load interference; census
+  TERM 7 in band, WAKE-REFUSED 17 below band = the preempt-hunt fix
+  working, fewer refused wakes). Rerun-once queued for a quiet window;
+  the sched-domain verdict (guarded: sync/ spinlock change) rests on
+  that rerun plus the lane's own OH-image numbers (wake-strands 233→31,
+  SLOW-TXN median 5780→1970ms).

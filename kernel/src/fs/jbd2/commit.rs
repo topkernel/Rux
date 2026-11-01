@@ -66,11 +66,12 @@ pub fn jbd2_journal_commit_transaction(
         core::hint::spin_loop();
     }
 
-    // Collect dirty buffers
-    let dirty_buffers: Vec<(u64, super::journal::TxnBufferKind)>;
+    // Collect dirty buffers (keyed map — block order; see the field doc
+    // on Transaction::t_dirty_buffers for why order carries no weight).
+    let dirty_map: alloc::collections::BTreeMap<u64, super::journal::TxnBufferKind>;
     {
         let mut bufs = commit_transaction.t_dirty_buffers.lock();
-        dirty_buffers = core::mem::take(&mut *bufs);
+        dirty_map = core::mem::take(&mut *bufs);
     }
 
     // R20-FS6 (F4): create-access entries are tracked with the Created
@@ -80,7 +81,7 @@ pub fn jbd2_journal_commit_transaction(
     // shifting every subsequent tag↔journal-block pairing by one —
     // replay then wrote buffer N's data over the block named by tag N+1.
     // Drop them up front so tags and data blocks stay 1:1.
-    let dirty_buffers: Vec<(u64, super::journal::TxnBufferKind)> = dirty_buffers
+    let dirty_buffers: Vec<(u64, super::journal::TxnBufferKind)> = dirty_map
         .into_iter()
         .filter(|(_, kind)| *kind == super::journal::TxnBufferKind::Live)
         .collect();

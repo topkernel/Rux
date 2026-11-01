@@ -696,14 +696,20 @@ pub fn sys_getitimer(args: SyscallArgs) -> i64 {
     // Write struct itimerval
     // SAFETY: curr_value validated with access_ok(32); put_user goes through
     // the exception-table copy path (SUM=0 safe).
+    // uafault probe (2026-10-31): the put_user results used to be
+    // discarded — getitimer with an unmapped user pointer returned 0
+    // while writing nothing. The reference reports the failed
+    // copy_to_user as -EFAULT.
     unsafe {
         // it_interval (offset 0)
         let p = curr_value as *mut i64;
-        let _ = crate::arch::uaccess::put_user(p, interval_sec);
-        let _ = crate::arch::uaccess::put_user(p.add(1), interval_usec);
-        // it_value (offset 16)
-        let _ = crate::arch::uaccess::put_user(p.add(2), value_sec);
-        let _ = crate::arch::uaccess::put_user(p.add(3), value_usec);
+        let ok = crate::arch::uaccess::put_user(p, interval_sec)
+            && crate::arch::uaccess::put_user(p.add(1), interval_usec)
+            && crate::arch::uaccess::put_user(p.add(2), value_sec)
+            && crate::arch::uaccess::put_user(p.add(3), value_usec);
+        if !ok {
+            return -(crate::syscall::errno::EFAULT as i64);
+        }
     }
 
     0
@@ -777,12 +783,18 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
         };
         // SAFETY: old_value validated with access_ok(32); put_user is the
         // exception-table copy path (SUM=0 safe).
+        // uafault probe (2026-10-31): discarded put_user results made a
+        // bad old_value pointer "succeed" silently; the reference
+        // reports the failed copy_to_user as -EFAULT.
         unsafe {
             let p = old_value as *mut i64;
-            let _ = crate::arch::uaccess::put_user(p, i_sec);
-            let _ = crate::arch::uaccess::put_user(p.add(1), i_usec);
-            let _ = crate::arch::uaccess::put_user(p.add(2), v_sec);
-            let _ = crate::arch::uaccess::put_user(p.add(3), v_usec);
+            let ok = crate::arch::uaccess::put_user(p, i_sec)
+                && crate::arch::uaccess::put_user(p.add(1), i_usec)
+                && crate::arch::uaccess::put_user(p.add(2), v_sec)
+                && crate::arch::uaccess::put_user(p.add(3), v_usec);
+            if !ok {
+                return -(crate::syscall::errno::EFAULT as i64);
+            }
         }
     }
 

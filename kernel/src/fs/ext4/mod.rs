@@ -1250,6 +1250,12 @@ pub fn is_mounted() -> bool {
 pub fn ext4_shutdown_sync() -> Result<(), i32> {
     use core::sync::atomic::Ordering;
 
+    // 0. Delayed allocation (2026-11): buffered write(2) leaves data only
+    // in dirty page-cache frames — drain them into the ext4 write path
+    // BEFORE the buffer-cache sync, or reboot/halt would drop every
+    // un-fsynced write (write-through used to make this a no-op need).
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
+
     // 1. All dirty data/metadata buffers.
     crate::fs::bio::sync_buffers()?;
 
@@ -3447,6 +3453,35 @@ pub fn create_vfs_inode_in(
     // This avoids re-reading from disk on every read/write/stat/lseek
     let ext4_copy = alloc::boxed::Box::new(ext4_inode.clone());
     inode.sb = Some(Box::into_raw(ext4_copy) as *mut u8);
+
+    // Buffered-write revival guard (delayed allocation, 2026-11): dirty
+    // page-cache frames of this (fs, ino) can OUTLIVE the VFS inode's
+    // icache entry — write(2) deferred their writeback, then the icache
+    // evicted the inode. The fresh copy above carries the ON-DISK size,
+    // which lags those frames: every read would clamp at the stale size
+    // and the written bytes stay invisible until writeback happens to
+    // run. Lift the cached size to the EXACT dirty-tail EOF
+    // (dirty_tail_eof: the publish-time watermark clamped to the
+    // surviving dirty extent — a page-rounded extent would report 4096
+    // for a 1000-byte appended file) so reads reach the frames without
+    // exposing phantom zeros (the reference kernel keeps a dirty inode
+    // pinned in its inode cache until writeback finishes — same
+    // contract, different mechanism).
+    if inode.mode.is_regular_file() {
+        let fs_id = fs_ptr as u64;
+        if let Some(tail_eof) = crate::fs::page_cache::get_page_cache()
+            .dirty_tail_eof(fs_id, ino as u64)
+        {
+            if tail_eof > inode.size.load(core::sync::atomic::Ordering::Relaxed) {
+                inode.size.store(tail_eof, core::sync::atomic::Ordering::Relaxed);
+                // SAFETY: sb was just installed above (Box::into_raw) and
+                // the Arc is not shared yet — exclusive plain field write.
+                unsafe {
+                    (*(inode.sb.unwrap() as *mut inode::Ext4Inode)).size = tail_eof;
+                }
+            }
+        }
+    }
 
     alloc::sync::Arc::new(inode)
 }

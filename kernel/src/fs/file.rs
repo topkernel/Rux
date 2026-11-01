@@ -36,9 +36,29 @@ impl FileFlags {
     pub const O_APPEND: u32 = 0o00002000;
     pub const O_NONBLOCK: u32 = 0o00004000;
     pub const O_DSYNC: u32 = 0o00010000;
+    // O_DIRECT/O_LARGEFILE/O_DIRECTORY/O_NOFOLLOW are arch-dependent:
+    // x86_64 and the plain asm-generic table (riscv64) share one set,
+    // but the arm64 uapi/asm/fcntl.h overrides all four with the
+    // AArch32-compat bit positions (O_DIRECTORY 040000, O_NOFOLLOW
+    // 0100000, O_DIRECT 0200000, O_LARGEFILE 0400000). With the x86
+    // values on aarch64, O_DIRECT and O_DIRECTORY are effectively
+    // SWAPPED — LTP read02's open(O_RDWR|O_DIRECT)=0x10002 hit the
+    // O_DIRECTORY bit and returned ENOTDIR on a regular file.
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECT: u32 = 0o00200000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_DIRECT: u32 = 0o00040000;
+    #[cfg(feature = "aarch64")]
+    pub const O_LARGEFILE: u32 = 0o00400000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_LARGEFILE: u32 = 0o00100000;
+    #[cfg(feature = "aarch64")]
+    pub const O_DIRECTORY: u32 = 0o00040000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_DIRECTORY: u32 = 0o00200000;
+    #[cfg(feature = "aarch64")]
+    pub const O_NOFOLLOW: u32 = 0o00100000;
+    #[cfg(not(feature = "aarch64"))]
     pub const O_NOFOLLOW: u32 = 0o00400000;
     pub const O_NOATIME: u32 = 0o01000000;
     pub const O_CLOEXEC: u32 = 0o02000000;
@@ -853,6 +873,16 @@ struct FdTableEntry {
     /// FdTable::slots — a lock-free AtomicPtr array the read path never
     /// takes the entry lock for. This struct now holds only metadata.)
     cloexec_bits: [u64; MAX_FDS / 64],
+    /// Occupancy bitmap (perf-gaps G2, 2026-11): one bit per slot,
+    /// maintained inside the SAME entry-lock sections that publish or
+    /// clear the slot itself (install_fd / close_fd / dup2_fd / fork_from)
+    /// — never read outside the entry lock, where it is exact by
+    /// construction. Full-table walkers (`for_each_file`, the close-time
+    /// epoll purge) iterate these 16 words instead of polling 1024
+    /// lock-free slots: epoll_purge_closed_fd's scan was measured at
+    /// ~8.9 us per close under KVM — nearly the whole p6_openclose gap —
+    /// and it runs on the last-reference close of EVERY file.
+    open_bits: [u64; MAX_FDS / 64],
     next_fd: usize,
     count: usize,
 }
@@ -927,6 +957,7 @@ impl FdTable {
             entry: crate::sync::spinlock::Spinlock::new(Box::new(
                 FdTableEntry {
                     cloexec_bits: [0; MAX_FDS / 64],
+                    open_bits: [0; MAX_FDS / 64],
                     next_fd: 0,
                     count: 0,
                 },
@@ -964,6 +995,7 @@ impl FdTable {
         {
             let mut ce = child.entry.lock_irqsave();
             ce.cloexec_bits = g.cloexec_bits;
+            ce.open_bits = g.open_bits;
             ce.count = g.count;
             ce.next_fd = g.next_fd;
         }
@@ -1043,6 +1075,7 @@ impl FdTable {
         // number (regression round 5, MED: closed CLOEXEC fds leaked the
         // bit to the next file that reused the number).
         entry.cloexec_bits[fd / 64] &= !(1u64 << (fd % 64));
+        entry.open_bits[fd / 64] |= 1u64 << (fd % 64);
         entry.count += 1;
         Ok(())
     }
@@ -1120,19 +1153,30 @@ impl FdTable {
     /// where possible, and must NOT call back into FdTable mutators.
     pub fn for_each_file(&self, mut f: impl FnMut(usize, &Arc<File>)) {
         let entry = self.entry.lock_irqsave();
-        // Slots are stable under the entry lock (every writer serializes
-        // there), so each non-null pointer still has its table reference;
-        // present it through a temporary owning clone.
-        for (fd, slot) in self.slots.iter().enumerate() {
-            let p = slot.0.load(Ordering::Acquire);
-            if !p.is_null() {
-                // SAFETY: published by a writer; the table's reference is
-                // held by the slot for the duration of our lock.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    let file = Arc::from_raw(p);
-                    f(fd, &file);
-                    drop(file);
+        // Occupancy bitmap walk (perf-gaps G2): open_bits is exact under
+        // the entry lock (every publisher/clearer updates it inside the
+        // same critical section), so iterate its 16 words and visit only
+        // present slots — the old 1024-slot poll was ~9 us under KVM and
+        // sat on the close path of every last-reference file (the epoll
+        // purge scan).
+        for (word_idx, &bits) in entry.open_bits.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let fd = word_idx * 64 + bits.trailing_zeros() as usize;
+                bits &= !(1u64 << (fd % 64));
+                // Slots are stable under the entry lock (every writer
+                // serializes there), so the pointer still has its table
+                // reference; present it through a temporary owning clone.
+                let p = self.slots[fd].0.load(Ordering::Acquire);
+                if !p.is_null() {
+                    // SAFETY: published by a writer; the table's reference
+                    // is held by the slot for the duration of our lock.
+                    unsafe {
+                        Arc::increment_strong_count(p);
+                        let file = Arc::from_raw(p);
+                        f(fd, &file);
+                        drop(file);
+                    }
                 }
             }
         }
@@ -1178,6 +1222,7 @@ impl FdTable {
             if fd < entry.next_fd {
                 entry.next_fd = fd;
             }
+            entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
             Some(unsafe { Arc::from_raw(p) })
         };
         if let Some(file) = removed {
@@ -1375,6 +1420,7 @@ impl FdTable {
             // install_fd already cleared the stale bit only when the slot
             // was empty, so clear it here unconditionally.
             entry.cloexec_bits[newfd / 64] &= !(1u64 << (newfd % 64));
+            entry.open_bits[newfd / 64] |= 1u64 << (newfd % 64);
             entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
             entry.count += 1;
             if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
@@ -1495,6 +1541,33 @@ pub fn alloc_staging_buf(n: usize) -> alloc::vec::Vec<u8> {
     // is filled by the caller before any read of its contents (see doc).
     unsafe { v.set_len(n); }
     v
+}
+
+/// Append `len` bytes from user address `src_user` to `dst`, one copy,
+/// no zero-fill of the appended window (perf-ipc: the writev gather used
+/// to resize(+0) — a memset of every iovec — before copy_in overwrote
+/// it). Returns false on a faulting user range or a failed reservation
+/// with NOTHING appended (the uncopied tail is discarded unexposed).
+pub fn gather_append_user(dst: &mut alloc::vec::Vec<u8>, src_user: usize, len: usize) -> bool {
+    let start = dst.len();
+    if dst.try_reserve_exact(len).is_err() {
+        return false;
+    }
+    // SAFETY: capacity covers start..start+len; copy_from_user fills all
+    // of it or we return without exposing the bytes (set_len runs only
+    // on the fully-copied path).
+    unsafe {
+        let copied_ok = crate::arch::uaccess::copy_from_user(
+            dst.as_mut_ptr().add(start),
+            src_user as *const u8,
+            len,
+        ) == 0;
+        if !copied_ok {
+            return false;
+        }
+        dst.set_len(start + len);
+    }
+    true
 }
 
 pub unsafe fn get_file_fd(fd: usize) -> Option<Arc<File>> {

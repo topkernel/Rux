@@ -1191,16 +1191,48 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
     // stay as the safety net either way.
     //
-    // kpreempt=1 (cmdline, 2026-10-31 launcher perf wall): runtime arm of
-    // the same hook, for A/B boots. The sc70-era amplification predates
-    // the WAKE-HEAL (parked phantom counts now zeroed at wake before the
-    // monopoly can form) and the rotation-proof 2 s tick heal; the OH
-    // census pins the master boot multiplier on tick-quantized futex
-    // wake→run latency (every IPC handoff waits for the incumbent's next
-    // preempt point — syscall return at best), which only this hook (on
-    // the wake IPI's irq-exit) can collapse. The verdict-cache discipline
-    // mirrors syscost::on(): never cache a verdict before the cmdline
-    // exists (the first vector can fire pre-cmdline::init).
+    // kpreempt (cmdline): runtime arm of this hook. Same contract on
+    // every arch: kpreempt=1 arms, kpreempt=0 disarms, ABSENT takes the
+    // arch default. x86_64 default: OFF (wedge-fix lane, 2026-11-01;
+    // was ON since the perf-sched lane, 2026-10-31). The riscv64 twin
+    // also defaults OFF (frame discipline unstabilized).
+    //
+    // WHY the default went back to OFF: release builds with the hook
+    // armed wedge the OH SA storm (wedge-fix lane, 2026-11-01). At the
+    // perf-sched merge (192bfdce, hook ON by default, release build) the
+    // early SA storm produced 66 both-CPU `DEADLOCK: spinlock stuck`
+    // prints on binder::WORLD with waiters in world_lock(); the SAME
+    // tree booted with `kpreempt=0` shows ZERO deadlock prints and
+    // clean-anchor-level SA progress (SAREG txn 7266 vs clean anchor
+    // 33d007fe's 7213 at 120 s). Same verdict on main tip 4a757d6e
+    // (wfB wedge on binder::WORLD vs wfC clean). The mechanism family
+    // is the documented one below (sc70: hook ON + count leaks =
+    // monopolies) resurfacing under the storm's timing — the hook needs
+    // its own fix before it can be the default again. Re-land
+    // conditions: (1) a release OH SA-storm boot with the hook ON
+    // survives 600 s with zero DEADLOCK prints; (2) the p2f futex
+    // wake->run gains (KVM med 163us -> 9.5us) still hold.
+    //
+    // The sc70-era amplification verdict (hook ON + preempt_count leaks
+    // = 309s kernel monopolies) predates the WAKE-HEAL (parked phantom
+    // counts zeroed at wake before the monopoly can form) and the
+    // rotation-proof 2s tick heal, so the amplifier's fuel is bounded.
+    //
+    // Default-ON evidence (perf-sched lane, pbench p2f futex battery,
+    // TCG q35 smp2/2G and KVM, kernel = 159111af lineage + mprotect fix):
+    // with a pread(4MB)-cached hog pinned to the woken waiter's CPU (one
+    // syscall = one contiguous kernel stretch; hogcal TCG 5.5ms / KVM
+    // 160us), futex wake->run was syscall-length-quantized:
+    //   TCG: med 5608us (97% of wakes 1-10ms) vs reference 86us = 65x
+    //   KVM: med 163us vs reference 8.2us = 20x
+    // kpreempt=1 collapses it to reference parity (TCG 23us, KVM 9.5us)
+    // and the full P1-P7 battery shows no row moved beyond noise
+    // (KVM kp=0 vs kp=1 back-to-back: all rows within ±5%, p2_ctxsw
+    // 0.18->0.175). Boot beacon delta on the same battery: PREEMPT-HEAL
+    // events went DOWN with the hook on (49 -> 2), zero WAKE-STRANDED.
+    // The verdict-cache discipline mirrors syscost::on(): never cache a
+    // verdict before the cmdline exists (the first vector can fire
+    // pre-cmdline::init).
     static KP_ARMED: core::sync::atomic::AtomicU8 =
         core::sync::atomic::AtomicU8::new(0);
     match KP_ARMED.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1226,7 +1258,7 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
                 }
             }
         }
-        1 => return, // cmdline says off
+        1 => return, // disarmed (cmdline off OR the OFF default; kpreempt=1 arms)
         _ => {}
     }
     // Early-boot / WFI secondaries have no current task: __schedule
@@ -1443,6 +1475,15 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
 
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
+
+    // 1.1 Re-arm the LAPIC timer BEFORE anything below can switch tasks
+    // or block: once x86_64 arms one-shot mode (set_next_trigger via
+    // apic::timer_arm_oneshot, perf lane pd), a tick that fails to
+    // re-arm leaves this CPU tick-less forever. Grid-glued to the next
+    // nominal tick, pulled earlier by any due hres deadline. No-op
+    // while the timebase is not precise (periodic tick still running)
+    // and on the PIT fallback path.
+    crate::drivers::timer::set_next_trigger();
 
     // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
     // timekeeper (offset-only forward steps, clamped; see

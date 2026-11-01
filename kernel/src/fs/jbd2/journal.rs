@@ -529,7 +529,18 @@ pub struct Transaction {
     /// buffer-cache content (R20: never the snapshot), and the
     /// journal-area path now also snapshots the live buffer at commit
     /// time (content >= any registration image by the same argument).
-    pub t_dirty_buffers: Spinlock<alloc::vec::Vec<(u64, TxnBufferKind)>>,
+    ///
+    /// Keyed map, not a Vec (perf-gaps G3, 2026-11): every registration
+    /// (get_write/create_access, dirty_metadata) used to dedup with a
+    /// LINEAR scan under this spinlock — O(set) per registration,
+    /// O(set^2) per lazy-commit batch, and the batch grows to
+    /// LAZY_COMMIT_MAX_BUFFERS (1024). Measured 3.18M scan iterations
+    /// over 14k metadata ops (~227 avg, growing with batch position) —
+    /// a double-digit-us per-op CPU tax on every mkdir/rmdir/unlink/
+    /// create. The map keys on block number; commit iterates in block
+    /// order (dedup guarantees each block appears once, so iteration
+    /// order carries no semantic weight — replay applies whole blocks).
+    pub t_dirty_buffers: Spinlock<alloc::collections::BTreeMap<u64, TxnBufferKind>>,
     /// Revoke records issued into THIS transaction: (blocknr, issuing
     /// tid), deduped per pair. Arm-2 (f4-ext4-route-map.md §6): revokes
     /// ride the transaction that issued them and are logged by its
@@ -610,7 +621,7 @@ impl Transaction {
             t_start_time: 0,
             t_synchronous_commit: false,
             t_need_data_flush: 0,
-            t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
+            t_dirty_buffers: Spinlock::new(alloc::collections::BTreeMap::new()),
             t_revoke_records: Spinlock::new(alloc::vec::Vec::new()),
         }
     }

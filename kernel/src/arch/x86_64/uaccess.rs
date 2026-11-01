@@ -43,6 +43,9 @@ __x64_copy_to_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     cld
 1:  rep movsb
     .pushsection __ex_table, "a"
@@ -51,8 +54,14 @@ __x64_copy_to_user:
     .quad 3f
     .popsection
 2:  movq %rcx, %rax          /* rcx == 0 on completion */
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax          /* fault mid-copy: rcx = remaining */
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 
 /* __x64_copy_from_user: rdi = kernel dst, rsi = user src, rdx = n.
@@ -63,6 +72,9 @@ __x64_copy_from_user:
     movq %rdx, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     cld
 1:  rep movsb
     .pushsection __ex_table, "a"
@@ -71,8 +83,14 @@ __x64_copy_from_user:
     .quad 3f
     .popsection
 2:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 
 /* __x64_clear_user: rdi = user dst, rsi = n.
@@ -83,6 +101,9 @@ __x64_clear_user:
     movq %rsi, %rcx
     testq %rcx, %rcx
     jz 2f
+    pushfq
+    orq $0x40000, (%rsp)
+    popfq
     xorl %eax, %eax
     cld
 1:  rep stosb
@@ -92,8 +113,14 @@ __x64_clear_user:
     .quad 3f
     .popsection
 2:  xorl %eax, %eax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 3:  movq %rcx, %rax
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     ret
 "#,
     options(att_syntax)
@@ -389,25 +416,49 @@ pub fn strncpy_from_user<'a>(
     let limit = core::cmp::min(max_len, buf.len());
     let limit = core::cmp::min(limit, max);
 
-    let mut i = 0;
-    while i < limit {
-        // get_user goes through __x64_copy_from_user (assembly) which has
-        // exception table entries, so page faults are handled safely.
-        // Note: a NUL at index 0 (empty string) is a SUCCESS returning an
-        // empty slice — rejecting it breaks empty-argument execs.
-        match unsafe { get_user(from.add(i)) } {
-            Some(byte) => {
-                buf[i] = byte;
-                if byte == 0 {
-                    break;
-                }
-                i += 1;
-            }
-            None => return Err(-EFAULT),
+    // Note (kept from the byte-loop era): a NUL at index 0 (empty string)
+    // is a SUCCESS returning an empty slice — callers rely on it for
+    // empty-argument execs and openat("") -> ENOENT.
+    // (perf-syscall lane) CHUNKED copy, scanning kernel memory for the
+    // NUL after each chunk. The old byte-at-a-time loop paid one
+    // exception-safe accessor call PER CHARACTER (each with its own AC
+    // bracket on x86_64 after SMAP) — ~30 instructions per path byte on
+    // every openat/stat/exec. Copying the whole `limit` in one shot
+    // regressed instead (a PATH_MAX window of 4 KiB memcpy for a
+    // 20-byte name): chunks of 64 bytes bound both sides — short names
+    // cost ONE chunk, long names never copy more than 63 bytes past
+    // their NUL. A fault mid-chunk leaves the tail zeroed and the scan
+    // either finds the NUL first (the old loop also succeeded there) or
+    // reports EFAULT exactly where the old loop did.
+    const CHUNK: usize = 64;
+    let mut done: usize = 0;
+    while done < limit {
+        let want = core::cmp::min(CHUNK, limit - done);
+        // SAFETY: buf is `limit` bytes; done+want stays inside it. The
+        // raw exception-table copy handles user faults: it returns the
+        // bytes NOT copied of this chunk.
+        let uncopied = unsafe {
+            __x64_copy_from_user(buf.as_mut_ptr().add(done), from.add(done), want)
+        };
+        let got = want - uncopied;
+        if uncopied > 0 {
+            // SAFETY: zero the never-written tail so the NUL scan below
+            // cannot see stale kernel bytes.
+            unsafe {
+                core::ptr::write_bytes(buf.as_mut_ptr().add(done + got), 0, uncopied)
+            };
         }
+        if let Some(rel) = buf[done..done + got].iter().position(|&b| b == 0) {
+            return Ok(&buf[..done + rel]);
+        }
+        if uncopied > 0 {
+            // Faulted with no NUL in the readable window so far.
+            return Err(-EFAULT);
+        }
+        done += want;
     }
-
-    Ok(&buf[..i])
+    // No NUL within `limit` bytes: same shape the old loop returned.
+    Ok(&buf[..limit])
 }
 
 /// Get length of null-terminated string in user space

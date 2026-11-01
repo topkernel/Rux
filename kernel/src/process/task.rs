@@ -982,6 +982,14 @@ pub struct Task {
     pub sigmask_restore: u64,
     pub sigmask_restore_valid: bool,
 
+    /// Futex waiter residency flag (perf-mm lane, 2026-10-31): set while
+    /// this task's waiter entry is linked into a futex bucket chain,
+    /// cleared by every unlink/free path. do_exit's futex_cleanup scans
+    /// the 512-bucket hash ONLY when this is set — the common task (never
+    /// parked on a futex at its last schedule, or one whose sleeper-side
+    /// return already unlinked it) skips 512 irqsave lock pairs per exit.
+    pub futex_wait_enqueued: AtomicBool,
+
     /// Scheduling policy
     policy: SchedPolicy,
 
@@ -1556,6 +1564,7 @@ impl Task {
             pid,
             sigmask_restore: 0,
             sigmask_restore_valid: false,
+            futex_wait_enqueued: AtomicBool::new(false),
             pid_hash_next: ptr::null_mut(),
             tgid: pid, // Single-threaded process tgid == pid
             group_leader: ptr::null_mut(), // fixed up by group_leader_ptr() / new_task_at
@@ -2285,6 +2294,17 @@ impl Task {
             (ptr as usize + offset_of!(Task, init_calls))
                 as *mut [AtomicU32; INIT_CALLS_LEN],
             [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
+        );
+        // Futex residency flag (perf-mm lane, sc130-pattern twin): without
+        // this init, a fork-allocated Task read the recycled heap page's
+        // stale bit — every exit then took futex_cleanup's full 512-bucket
+        // scan (measured: all 64/64 exits of a fork+exec loop flagged,
+        // diag4/diag5 counters; the -at-construction init in Task::new
+        // covers only first construction).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, futex_wait_enqueued))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
@@ -3164,8 +3184,44 @@ impl Task {
                     return false;
                 }
 
-                // Set need_resched flag on target CPU and send IPI if cross-CPU
-                crate::sched::resched_cpu(target_cpu as usize);
+                // Dispatch the woken task: prefer an idle CPU within the
+                // wakee's affinity (the reference's select_idle_sibling +
+                // remote-enqueue shape); only when none is idle, set
+                // need_resched on the wakee's previous CPU.
+                //
+                // Why this matters for IPC throughput (perf-ipc lane,
+                // ipcdisc2 timeline evidence): the old unconditional
+                // resched of the previous CPU pokes the WAKER's own (busy)
+                // CPU, which preempts the sender at trap-exit and
+                // serializes sender and receiver into a preempt ping-pong
+                // on one CPU while the other CPU stays parked — a
+                // 74-byte unix-stream record cost ~275 us of dance
+                // (wake 19us + preempt-switch 56us + receiver cycle
+                // 131us + sender cycle 86us) against the reference's
+                // ~2.5 us with the receiver drained concurrently on the
+                // idle CPU. Dispatching the wakee to the idle CPU lets
+                // the sender run unmolested (its trap-exit preempt never
+                // fires — no NEED_RESCHED on its CPU) and the receiver
+                // runs in parallel. The GLOBAL run queue keeps the IPI
+                // advisory: whichever CPU schedules first picks the task,
+                // so a sender that blocks immediately after the wake
+                // (pipe echo, futex handoff) still gets the in-place
+                // handoff from its own schedule().
+                let allowed = (*task).cpus_allowed();
+                match crate::sched::claim_idle_cpu_for(allowed) {
+                    Some(idle_cpu) => {
+                        crate::sched::resched_cpu(idle_cpu);
+                    }
+                    None => {
+                        // No idle CPU: poke a busy CPU only when the wakee
+                        // wins the wakeup-preemption comparison (see
+                        // preempt_check_wake) — the old unconditional
+                        // resched of the previous CPU forced a preempt
+                        // dance per record on same-CPU sender/receiver
+                        // pairs.
+                        crate::sched::preempt_check_wake(task);
+                    }
+                }
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue
@@ -3853,6 +3909,19 @@ fn preempt_underflow_report(
         ph(site as u32);
     }
     putchar(b'\n');
+    // preempt-hunt (2026-11-01): the outermost-acquire record for this
+    // task names the acquire whose 1->0 release this clamp adjudicates —
+    // for a post-heal underflow that is the REAL guard the heal zeroed
+    // (a guard held across a scheduler point); for a booking split it is
+    // the phantom's home site. Rate-gate already passed above.
+    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(task) = crate::sched::current() {
+            crate::dfx::leakorigin::report_outermost(
+                b"UNDERFLOW-ORIGIN",
+                task as *mut Task,
+            );
+        }
+    }
 }
 
 impl Task {
@@ -3986,6 +4055,14 @@ impl Task {
         loc: &'static core::panic::Location<'static>,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        // Outermost base release (base field 1->0): clear the
+        // leakorigin outermost-acquire record (preempt-hunt tap). One
+        // relaxed load + compare when the probe is off.
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
@@ -4003,6 +4080,11 @@ impl Task {
         site: usize,
     ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        if val == crate::interrupt::preempt::PREEMPT_OFFSET
+            && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
+        {
+            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);

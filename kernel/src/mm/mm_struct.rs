@@ -34,10 +34,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
 use crate::sync::rwlock::RwSpinlock;
-#[cfg(feature = "x86_64")]
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
-#[cfg(not(feature = "x86_64"))]
-use crate::sync::spinlock::Spinlock;
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
@@ -103,60 +100,43 @@ impl PteLock {
     /// Writers of this mm serialize on the spin; writers of other mms
     /// run concurrently (shared epoch); global-mode writers still
     /// exclude (they need the epoch exclusive).
+    ///
+    /// Split mode on ALL architectures since the 2026-10-31 perf review:
+    /// riscv64 (the primary target) previously degraded to the global
+    /// exclusive section, serializing every PTE writer of every mm
+    /// system-wide — demand faults, COW faults, brk, unmap and the fork
+    /// walk all queued on one spinlock. The arch hooks that still need
+    /// whole-domain exclusion (map_user_region, foreign IPC installs)
+    /// keep calling GlobalPteLock::lock* directly.
     #[inline]
     pub fn lock(&self) -> PteGuard<'_> {
-        #[cfg(feature = "x86_64")]
-        {
-            let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read();
-            let spin = self.spin.lock();
-            PteGuard { _spin: spin, _epoch: read }
-        }
-        #[cfg(not(feature = "x86_64"))]
-        {
-            PteGuard { _epoch: crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock() }
-        }
+        let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read();
+        let spin = self.spin.lock();
+        PteGuard { _spin: spin, _epoch: read }
     }
 
     /// `lock()` with IRQs saved for the whole section.
     #[inline]
     #[track_caller]
     pub fn lock_irqsave(&self) -> PteIrqGuard<'_> { // track_caller: syscost site attribution
-        #[cfg(feature = "x86_64")]
-        {
-            let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read_irqsave();
-            let spin = self.spin.lock_irqsave();
-            PteIrqGuard { _spin: spin, _epoch: read }
-        }
-        #[cfg(not(feature = "x86_64"))]
-        {
-            PteIrqGuard { _epoch: crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave() }
-        }
+        let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read_irqsave();
+        let spin = self.spin.lock_irqsave();
+        PteIrqGuard { _spin: spin, _epoch: read }
     }
 }
 
 /// Guard of a `PteLock::lock()` section. Fields drop innermost-first
 /// (declaration order): the mm spin releases before the epoch.
-#[cfg(feature = "x86_64")]
+/// Split mode on all architectures (see PteLock::lock).
 pub struct PteGuard<'a> {
     _spin: SpinlockGuard<'a, ()>,
     _epoch: crate::sync::rwlock::RwSpinlockReadGuard<'a, ()>,
 }
 
-#[cfg(not(feature = "x86_64"))]
-pub struct PteGuard<'a> {
-    _epoch: crate::sync::rwlock::RwSpinlockWriteGuard<'a, ()>,
-}
-
 /// Guard of a `PteLock::lock_irqsave()` section.
-#[cfg(feature = "x86_64")]
 pub struct PteIrqGuard<'a> {
     _spin: SpinlockIrqGuard<'a, ()>,
     _epoch: crate::sync::rwlock::RwSpinlockIrqReadGuard<'a, ()>,
-}
-
-#[cfg(not(feature = "x86_64"))]
-pub struct PteIrqGuard<'a> {
-    _epoch: crate::sync::rwlock::RwSpinlockIrqWriteGuard<'a, ()>,
 }
 
 /// PTE-section handle for page-table trees that have NO owning MmStruct:

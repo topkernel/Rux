@@ -305,6 +305,7 @@ impl<T> Spinlock<T> {
     /// keep the legacy preempt-off acquire: scheduling mid-nesting would
     /// strand the outer section's waiters (the LTP r2 WEDGE family).
     #[inline]
+    #[track_caller]
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
         // Outermost-in-task-context test BEFORE our own disable books +1.
         // Brackets (hardirq/softirq/NMI) restore the count on exit, so a
@@ -369,6 +370,7 @@ impl<T> Spinlock<T> {
     ///
     /// NOT for IRQ context or short critical sections — schedule() from
     /// interrupt context is illegal; use plain lock()/lock_irq() there.
+    #[track_caller]
     pub fn lock_fair(&self) -> SpinlockGuard<'_, T> {
         const FAIR_SPIN_BUDGET: u32 = 1_000_000;
         loop {
@@ -398,7 +400,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irq(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -409,7 +411,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn lock_irqsave(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.lock();
         SpinlockIrqGuard { lock: self, flags }
     }
@@ -426,8 +428,9 @@ impl<T> Spinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockGuard { lock: self })
         } else {
@@ -440,7 +443,7 @@ impl<T> Spinlock<T> {
     #[track_caller]
     pub fn try_lock_irqsave(&self) -> Option<SpinlockIrqGuard<'_, T>> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_lock() {
             Some(SpinlockIrqGuard { lock: self, flags })
         } else {
@@ -622,8 +625,20 @@ impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
 #[inline]
 #[track_caller]
 fn preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add(
+    crate::interrupt::preempt::preempt_count_add_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
+    );
+}
+
+/// As `preempt_disable`, booking the CALLER-of-the-lock's location (the
+/// #[track_caller] lock helpers forward their own caller down so the
+/// leakorigin shadow names the real acquire site).
+#[inline]
+fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
+    crate::interrupt::preempt::preempt_count_add_at(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+        loc,
     );
 }
 

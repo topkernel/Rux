@@ -42,13 +42,22 @@ macro_rules! test_println {
 
 #[cfg(feature = "unit-test")]
 fn test_println_str(s: &str) {
-    let mut uart = crate::console::lock();
-    for b in s.bytes() {
-        uart.putc(b);
-        if b == b'\n' {
-            uart.putc(b'\r');
+    // Same byte stream as the old per-byte loop: raw bytes, with a '\r'
+    // AFTER each '\n' (the original emitted b then '\r').
+    let mut buf = [0u8; 64];
+    let mut n = 0usize;
+    for &b in s.as_bytes() {
+        if n < buf.len() {
+            buf[n] = b;
+            n += 1;
+        }
+        if b == b'\n' && n < buf.len() {
+            buf[n] = b'\r';
+            n += 1;
         }
     }
+    let uart = crate::console::lock();
+    uart.puts_batch(&buf[..n]);
 }
 
 /// Maximum number of failed tests to record
@@ -205,6 +214,8 @@ pub mod small_alloc;
 #[cfg(feature = "unit-test")]
 pub mod page_allocator;
 #[cfg(feature = "unit-test")]
+pub mod mm_pcp;
+#[cfg(feature = "unit-test")]
 pub mod buffer_state;
 #[cfg(feature = "unit-test")]
 pub mod file_buffer;
@@ -292,6 +303,8 @@ pub mod mem_cow;
 // ===== Network =====
 #[cfg(feature = "unit-test")]
 pub mod tcp_handshake;
+#[cfg(feature = "unit-test")]
+pub mod tcp_semantics;
 #[cfg(feature = "unit-test")]
 pub mod virtio_net;
 #[cfg(feature = "unit-test")]
@@ -489,6 +502,9 @@ pub fn run_all_tests() {
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();
 
+    test_group_start("mm_pcp");
+    mm_pcp::test_pcp_pagesets();
+
     test_group_start("buffer_state");
     buffer_state::test_buffer_state();
 
@@ -600,6 +616,9 @@ pub fn run_all_tests() {
     // ===== 10. Network =====
     test_group_start("tcp_handshake");
     tcp_handshake::test_tcp_handshake();
+
+    test_group_start("tcp_semantics");
+    tcp_semantics::test_tcp_semantics();
 
     test_group_start("virtio_net");
     virtio_net::test_virtio_net();

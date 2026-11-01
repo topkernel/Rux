@@ -80,6 +80,67 @@ pub fn test_mmap_syscalls() {
     // Should return error (ENOMEM or EINVAL)
     test_assert!(result != 0, "sys_mprotect invalid address returns error");
 
+    // Test 8b: sys_mprotect INTERIOR range — the musl pthread-stack
+    // shape (mmap PROT_NONE whole, mprotect RW past a one-page guard).
+    // Regression guard (perf-sched lane, 2026-10-31): the bounded
+    // coverage walk once skips the VMA CONTAINING addr, so any range
+    // not starting exactly at a VMA start failed ENOMEM — pthread_create
+    // broke for every threaded musl binary.
+    {
+        const PAGE: u64 = 4096;
+        let base = sys_mmap([0, 3 * PAGE, 0x0, 0x22, !0u64, 0]); // PROT_NONE
+        if base > 0 && base != -1 {
+            // whole-VMA upgrade must work (control)
+            let whole = sys_mprotect([base as u64, 3 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(whole == 0, "sys_mprotect whole-VMA RW succeeds");
+            // interior range: pages [1,3) of the same VMA
+            let interior = sys_mprotect([(base as u64) + PAGE, 2 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(interior == 0, "sys_mprotect interior range succeeds");
+            // interior range with a left guard hole stays RW on the rest
+            // (page 0 was PROT_NONE; upgrading [1,3) must not touch it)
+            let interior_mid = sys_mprotect([(base as u64) + 2 * PAGE, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(interior_mid == 0, "sys_mprotect last-page downgrade succeeds");
+            // unmapped gap inside the range must fail (ENOMEM)
+            let unmapped = sys_mprotect([base as u64 + 3 * PAGE + 16 * PAGE, PAGE, 0x3, 0, 0, 0]);
+            test_assert!(unmapped == -12, "sys_mprotect unmapped range returns ENOMEM");
+            let _ = sys_munmap([base as u64, 3 * PAGE, 0, 0, 0, 0]);
+        } else {
+            test_skip("sys_mprotect interior", "no VMA context in test");
+        }
+    }
+
+    // Test 8c: sys_mprotect across a HOLE — two mapped pieces with an
+    // unmapped gap between them; the span covering both plus the gap
+    // must fail ENOMEM (Linux mprotect_fixup walks until the VMA list
+    // stops covering the range). Pins the 2026-10-31 allocation-free
+    // coverage walk's span bound (commit 1f2f18cb): the walk must run
+    // to addr+length, not stop at the first covering VMA's end — an
+    // early exit at a VMA boundary would miss the hole and return 0.
+    {
+        const PAGE: u64 = 4096;
+        let base = sys_mmap([0, 4 * PAGE, 0x3, 0x22, !0u64, 0]); // RW whole
+        if base > 0 && base != -1 {
+            let hole_ok = sys_munmap([base as u64 + PAGE, 2 * PAGE, 0, 0, 0, 0]);
+            test_assert!(hole_ok == 0, "sys_mprotect-hole hole punched");
+            // [base, base+4P) = mapped | hole | mapped
+            let span = sys_mprotect([base as u64, 4 * PAGE, 0x1, 0, 0, 0]);
+            test_assert!(span == -12, "sys_mprotect span over hole returns ENOMEM");
+            // Each side alone still succeeds (the failed call changed
+            // nothing and the walk is exact).
+            let left = sys_mprotect([base as u64, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(left == 0, "sys_mprotect left piece succeeds");
+            let right = sys_mprotect([base as u64 + 3 * PAGE, PAGE, 0x1, 0, 0, 0]);
+            test_assert!(right == 0, "sys_mprotect right piece succeeds");
+            // A span reaching PAST the last mapped page also fails.
+            let overrun = sys_mprotect([base as u64 + 3 * PAGE, 2 * PAGE, 0x3, 0, 0, 0]);
+            test_assert!(overrun == -12, "sys_mprotect overrun past mapping returns ENOMEM");
+            let _ = sys_munmap([base as u64, PAGE, 0, 0, 0, 0]);
+            let _ = sys_munmap([base as u64 + 3 * PAGE, PAGE, 0, 0, 0, 0]);
+        } else {
+            test_skip("sys_mprotect hole span", "no VMA context in test");
+        }
+    }
+
     // Test 9: Multiple mmap calls return different addresses
     let a1 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);
     let a2 = sys_mmap([0, 4096, 0x3, 0x22, !0u64, 0]);

@@ -62,6 +62,38 @@ struct LoSlot {
     hjif: AtomicU64,
     /// One report per leak episode (cleared on each new acquire).
     reported: AtomicBool,
+    // ---- preempt-hunt (2026-11-01): OUTERMOST acquire tap ----
+    // The `site` shadow above is last-acquire-wins: after a leak, any
+    // correctly-paired inner guard pair (1->2->1) overwrites it, so the
+    // reported site is dominated by the hottest lock family (the four
+    // allocator sites) even when the leak's acquire was elsewhere. The
+    // OUTERmost acquire (base-field 0->1) whose matching 1->0 release
+    // never ran is, by construction, the leak's origin: the base count
+    // is still nonzero precisely because THAT release never executed.
+    // Inner pairs (1->2->1) do not touch these fields, so the record is
+    // stable from the leaking acquire until the count returns to zero
+    // (or a heal zeroes it — at which point the WAKE-HEAL report prints
+    // this record and names the producer's home site directly).
+    /// Task that executed the outermost base acquire (0 = none).
+    otask: AtomicUsize,
+    /// `&'static Location` of that outermost acquire.
+    osite: AtomicUsize,
+    /// jiffies at that acquire.
+    ojif: AtomicU64,
+    /// CPU id where it ran.
+    ocpu: AtomicU32,
+    /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
+    /// (tp vs slot divergence — the stale-tp / mid-switch window family).
+    omis: AtomicU32,
+    /// When omis=1: the task pointer the sched slot named at acquire
+    /// time (0 = unreadable). Identifies WHICH window the divergent
+    /// booking ran in (preempt-hunt).
+    oslot: AtomicUsize,
+    /// jiffies of the last user-return report for this slot
+    /// (preempt-hunt rate gate: one stuck +1 re-reports on every guard
+    /// re-acquire; 50-jiffy spacing keeps the episode signature without
+    /// flooding the budget).
+    urrep_jif: AtomicU64,
 }
 
 static TABLE: [LoSlot; SLOTS] = {
@@ -74,6 +106,13 @@ static TABLE: [LoSlot; SLOTS] = {
         hsite: AtomicUsize::new(0),
         hjif: AtomicU64::new(0),
         reported: AtomicBool::new(false),
+        otask: AtomicUsize::new(0),
+        osite: AtomicUsize::new(0),
+        ojif: AtomicU64::new(0),
+        ocpu: AtomicU32::new(0),
+        omis: AtomicU32::new(0),
+        oslot: AtomicUsize::new(0),
+        urrep_jif: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -81,7 +120,12 @@ static TABLE: [LoSlot; SLOTS] = {
 #[inline]
 fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
     let a = task as usize;
-    &TABLE[(a >> 6 ^ a >> 12) & SLOT_MASK]
+    // preempt-hunt: XOR-of-shifts mixes alias — for every shift set there
+    // are address strides (observed live: 0x1000000, then 0x2080000)
+    // whose contributions XOR to zero, making distinct task structs share
+    // slots (bogus ACQUIRE-PAIR-SPLITs, shadowed records). Fibonacci
+    // multiplication: no constant stride aliases.
+    &TABLE[(a.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 53) & SLOT_MASK]
 }
 
 /// Record a PREEMPT_OFFSET acquire (last wins). Called from
@@ -99,6 +143,275 @@ pub fn note_acquire(
         .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
     slot.cnt_after.store(cnt_after, Ordering::Release);
     slot.reported.store(false, Ordering::Release);
+    // Outermost base acquire (base field 0->1): record the leak-origin
+    // candidate. `cnt_after & 0xFF == 1` also matches base transitions
+    // made under a live softirq field (0x100 -> 0x101).
+    if (cnt_after & crate::interrupt::preempt::PREEMPT_MASK) == 1 {
+        slot.otask.store(task as usize, Ordering::Release);
+        slot.osite.store(loc as *const Location as usize, Ordering::Release);
+        slot.ojif
+            .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+        let cpu = crate::arch::cpu_id() as u32;
+        slot.ocpu.store(cpu, Ordering::Release);
+        // tp-vs-slot divergence at acquire time: the sched slot names
+        // another task than tp does. In the steady state these agree;
+        // they diverge only inside the pick-publish -> __switch_to
+        // window (IRQs off — no acquire can run there) and in the
+        // stale-tp / aborted-switch families. A set flag on a leak line
+        // is strong stale-booking evidence.
+        let mis = if (cpu as usize) < crate::config::MAX_CPUS {
+            // Volatile: the sched slot is written by its owning CPU under
+            // the GRQ; this is a racy diagnostic read (same discipline as
+            // r83hunt's header reads).
+            let slot_task = unsafe {
+                core::ptr::read_volatile(
+                    &crate::sched::sched::cpu_state(cpu as usize).current
+                        as *const *mut crate::process::Task
+                ) as usize
+            };
+            if slot_task != task as usize {
+                slot.oslot.store(slot_task, Ordering::Release);
+                // ph5/ph5b verdict (2/2 boots wedged vs ph3's clean 1200s
+                // with this print's absence as the only tree delta): the
+                // LIVE print from inside the acquire path is wedged-boot
+                // correlated — record-only now. The data still surfaces
+                // at adjudication time (oslot= on the ORIGIN lines).
+                report_acquire_divergent(task, loc, cpu, slot_task);
+                1
+            } else {
+                0
+            }
+        } else {
+            2
+        };
+        slot.omis.store(mis, Ordering::Release);
+    }
+}
+
+/// Live report of a divergent outermost acquire (preempt-hunt). DISABLED
+/// (record-only): ph5/ph5b — the only boots carrying this print — both
+/// wedged (UNIX_TABLE both-CPU deadlock at 18s/90s) while ph3, without
+/// it, completed 1200s cleanly; by elimination the print from inside
+/// the acquire path (it fires between the count read and the booking,
+/// from any context a lock acquire can run in) is wedge-correlated. The
+/// oslot record + ORIGIN lines at adjudication time carry the same
+/// data. The body is kept behind this switch for one gated re-trial.
+static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
+
+#[allow(unsafe_code)]
+fn report_acquire_divergent(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cpu: u32,
+    slot_task: usize,
+) {
+    if !DIVERGENT_PRINT.load(Ordering::Relaxed) {
+        let _ = (task, loc, cpu, slot_task);
+        return;
+    }
+    static N: AtomicU32 = AtomicU32::new(60);
+    let b = N.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if N.compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    // SAFETY: diagnostic scalar reads of stable Task fields; `task` is
+    // current on this CPU (pinned by execution), `slot_task` was this
+    // CPU's slot content moments before (same discipline as the s14
+    // IRQ-PAIR report).
+    unsafe {
+        let pid = (*task).pid();
+        let pc = (*task).preempt_count();
+        let slot_pid = if slot_task >= 0x80000000 {
+            (*(slot_task as *mut crate::process::Task)).pid()
+        } else {
+            0
+        };
+        for &c in b"\nACQUIRE-DIVERGENT pid=" {
+            putchar(c);
+        }
+        let mut v = pid as u64;
+        let mut buf = [0u8; 12];
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" pc=0x" {
+            putchar(c);
+        }
+        let mut x = pc as u32 as u64;
+        for sh in (0..8).rev() {
+            let d = ((x >> (sh * 4)) & 0xF) as u8;
+            putchar(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        }
+        for &c in b" cpu=" {
+            putchar(c);
+        }
+        let mut v = cpu as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" site=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        let mut v = loc.line() as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        for &c in b" slotpid=" {
+            putchar(c);
+        }
+        let mut v = slot_pid as u64;
+        let mut n = 0;
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        if n == 0 {
+            putchar(b'0');
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+        putchar(b'\n');
+    }
+}
+
+/// Outermost base release (base field 1->0): clears the leak-origin
+/// record — that acquire paired. Called from `Task::sub_preempt_count_at`
+/// / `sub_preempt_count2_at` when val == PREEMPT_OFFSET and the base
+/// field transitions 1->0.
+///
+/// Pair-split face: if the recorded outermost acquire names a DIFFERENT
+/// task than the releaser, the acquire's 1->0 never ran on its own task
+/// — either a slot collision (two tasks hashing to one slot; the report
+/// carries both pointers so collisions are identifiable) or a genuine
+/// cross-task booking split. Budgeted; the flag is evidence, not proof.
+#[inline]
+pub fn note_release(task: *mut crate::process::Task) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let slot = slot_of(task);
+    let ot = slot.otask.load(Ordering::Acquire);
+    if ot == 0 {
+        return;
+    }
+    if ot == task as usize {
+        slot.otask.store(0, Ordering::Release);
+        return;
+    }
+    // Split: budgeted direct console (may fire from IRQ-laden contexts).
+    static SPLIT_N: AtomicU32 = AtomicU32::new(40);
+    let b = SPLIT_N.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if SPLIT_N
+        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(v: usize) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    for &c in b"\nACQUIRE-PAIR-SPLIT releaser=0x" {
+        putchar(c);
+    }
+    ph(task as usize);
+    for &c in b" recorded=0x" {
+        putchar(c);
+    }
+    ph(ot);
+    // The recorded acquire's site + cpu identify where the orphan 0->1
+    // came from.
+    let site = slot.osite.load(Ordering::Acquire) as *const Location;
+    if !site.is_null() {
+        // SAFETY: stored from a &'static Location (see note_acquire).
+        let loc = unsafe { &*site };
+        for &c in b" osite=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        let mut v = loc.line() as u64;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(buf[n]);
+        }
+    }
+    for &c in b" ocpu=" {
+        putchar(c);
+    }
+    let mut v = slot.ocpu.load(Ordering::Acquire) as u64;
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    if v == 0 {
+        putchar(b'0');
+    }
+    while v > 0 {
+        buf[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    while n > 0 {
+        n -= 1;
+        putchar(buf[n]);
+    }
+    putchar(b'\n');
 }
 
 /// Record a HARDIRQ_OFFSET acquire (last wins; s14 extension — the
@@ -123,6 +436,12 @@ pub fn note_hardirq_acquire(
 /// User-mode return tripwire. Call at the trap-handler tail when the
 /// frame returns to userspace: preempt_count MUST be 0 there. Direct
 /// console, latched per episode, budgeted.
+///
+/// preempt-hunt rate gate: a task carrying a stuck +1 re-acquires inner
+/// guards constantly (every lock it touches re-arms the episode latch),
+/// which flooded the shared budget within seconds (374 lines for one
+/// carrier in the first 20s of ph1). Space reports 50 jiffies apart per
+/// task and give the face its own budget.
 pub fn check_user_return() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -142,6 +461,12 @@ pub fn check_user_return() {
     if slot.reported.swap(true, Ordering::AcqRel) {
         return;
     }
+    let now = crate::drivers::timer::get_jiffies();
+    let last = slot.urrep_jif.load(Ordering::Acquire);
+    if now.wrapping_sub(last) < 50 {
+        return;
+    }
+    slot.urrep_jif.store(now, Ordering::Release);
     emit(b"\nLEAK-ORIGIN user-return", task, pc);
 }
 
@@ -212,6 +537,108 @@ pub fn report_incumbent_site(task: *mut crate::process::Task) {
         return;
     }
     emit(b"\nLEAK-ORIGIN running", task, unsafe { (*task).preempt_count() });
+}
+
+/// Print the OUTERMOST-acquire record for `task` (the preempt-hunt tap):
+/// names the site whose 1->0 release never ran. Called from the
+/// WAKE-HEAL zeroing (sched.rs, GRQ held — direct console only) and the
+/// underflow clamp report: the two points where a nonzero base count is
+/// adjudicated. Budgeted separately from BUDGET (the origin line is the
+/// hunt's primary output; it must not be starved by parked-adjacent
+/// noise).
+pub fn report_outermost(tag: &[u8], task: *mut crate::process::Task) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let slot = slot_of(task);
+    if slot.otask.load(Ordering::Acquire) != task as usize {
+        return; // no outermost record for this task (armed late / healed)
+    }
+    static OBUDGET: AtomicU32 = AtomicU32::new(200);
+    let b = OBUDGET.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if OBUDGET
+        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn putd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    for &c in b"\n" {
+        putchar(c);
+    }
+    for &c in tag {
+        putchar(c);
+    }
+    for &c in b" pid=" {
+        putchar(c);
+    }
+    putd(unsafe { (*task).pid() } as u64);
+    let site = slot.osite.load(Ordering::Acquire) as *const Location;
+    if !site.is_null() {
+        // SAFETY: stored from a &'static Location (see note_acquire).
+        let loc = unsafe { &*site };
+        for &c in b" osite=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        putd(loc.line() as u64);
+    } else {
+        for &c in b" osite=?" {
+            putchar(c);
+        }
+    }
+    for &c in b" ocpu=" {
+        putchar(c);
+    }
+    putd(slot.ocpu.load(Ordering::Acquire) as u64);
+    let mis = slot.omis.load(Ordering::Acquire);
+    if mis != 0 {
+        for &c in b" omis=" {
+            putchar(c);
+        }
+        putd(mis as u64);
+        let osl = slot.oslot.load(Ordering::Acquire);
+        if osl != 0 {
+            for &c in b" oslot=0x" {
+                putchar(c);
+            }
+            for sh in (0..16).rev() {
+                let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+            }
+        }
+    }
+    for &c in b" oage_jif=" {
+        putchar(c);
+    }
+    putd(
+        crate::drivers::timer::get_jiffies()
+            .wrapping_sub(slot.ojif.load(Ordering::Acquire)),
+    );
+    putchar(b'\n');
 }
 
 /// One report line: tag, pid, pc, site=<file>:<line> cnt_after=<n>
@@ -304,5 +731,43 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         putchar(c);
     }
     put_i64(now.wrapping_sub(slot.jif.load(Ordering::Acquire)) as i64);
+    // Outermost-acquire tap: when the reported task is the one holding
+    // the unreturned 0->1, its site is the leak's origin (stable across
+    // inner 1->2->1 pairs; see LoSlot.otask).
+    if slot.otask.load(Ordering::Acquire) == task as usize {
+        let osite = slot.osite.load(Ordering::Acquire) as *const Location;
+        if !osite.is_null() {
+            // SAFETY: stored from a &'static Location (see note_acquire).
+            let loc = unsafe { &*osite };
+            for &c in b" osite=" {
+                putchar(c);
+            }
+            for &c in loc.file().as_bytes() {
+                putchar(c);
+            }
+            putchar(b':');
+            put_i64(loc.line() as i64);
+        }
+        for &c in b" ocpu=" {
+            putchar(c);
+        }
+        put_i64(slot.ocpu.load(Ordering::Acquire) as i64);
+        if slot.omis.load(Ordering::Acquire) != 0 {
+            for &c in b" omis=" {
+                putchar(c);
+            }
+            put_i64(slot.omis.load(Ordering::Acquire) as i64);
+            let osl = slot.oslot.load(Ordering::Acquire);
+            if osl != 0 {
+                for &c in b" oslot=0x" {
+                    putchar(c);
+                }
+                for sh in (0..16).rev() {
+                    let n = ((osl >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
+        }
+    }
     putchar(b'\n');
 }

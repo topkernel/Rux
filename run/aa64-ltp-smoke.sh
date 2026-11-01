@@ -4,14 +4,14 @@
 # Copy + debugfs inject (aarch64-port/run/aa64-sigtest.sh pattern);
 # boot discipline: -smp 2 -m 1G, snapshot+locking-off on the COPY.
 set -u
-RUN=/home/william/rux-agents/aa64-tail/run
+RUN=/home/william/rux-agents/aa64-ltp/run
 STAGE="$RUN/ltp-aa64/disk-root/ltp"
 IMG="$RUN/a64-ltpsmoke.img"
-KERNEL="${1:-/home/william/rux-agents/aa64-tail/target/aarch64-unknown-none/debug/rux}"
+KERNEL="${1:-/home/william/rux-agents/aa64-ltp/target/aarch64-unknown-none/debug/rux}"
 OUT="${2:-$RUN/ltpsmoke-serial.log}"
 
 # The runner's test list (must match run.sh in aa64-ltp-build.sh).
-TESTS="getpid01 getpid02 fork01 write01 write05 read01 read02 open01 open02 \
+TESTS="aa64probe getpid01 getpid02 fork01 write01 write05 read01 read02 open01 open02 \
 close01 close02 pipe01 pipe02 mkdir01 pipe02 rmdir01 unlink01 unlink05 \
 stat01 stat02 lseek01 lseek02 dup01 dup02 dup203 mmap01 brk01 \
 nanosleep01 nanosleep02 wait01 wait02 exit01 getuid01 geteuid01 \
@@ -37,8 +37,8 @@ fi
 
 ( sleep 28
   printf '/ltp/run.sh\n'
-  sleep 90
-) | timeout -k 5 150 qemu-system-aarch64 \
+  sleep 560
+) | timeout -k 5 640 qemu-system-aarch64 \
     -M virt,gic-version=3 -cpu cortex-a72 -accel tcg,thread=multi \
     -m 1G -smp 2 -nographic -no-reboot \
     -kernel "$KERNEL" \

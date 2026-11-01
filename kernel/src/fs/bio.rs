@@ -607,6 +607,89 @@ impl BlockCache {
         true
     }
 
+    /// Discard ONE dirty buffer without writing it (freed-block forget).
+    ///
+    /// Called by the block allocator when it frees a block: the freed
+    /// block's cached content is DEAD — leaving the dirty buffer in the
+    /// cache means the next publication drain / eviction / commit writes
+    /// dead data to disk (the P6 mkdrmdir battery dirtied one fresh dir
+    /// block per mkdir and freed it in the paired rmdir: every ordered
+    /// drain then synchronously wrote ~64 already-freed blocks — the
+    /// 3.1ms/pair amortized floor after the publication-batching fix).
+    ///
+    /// Drops the buffer ONLY when it is dirty and unreferenced; a clean
+    /// or pinned buffer is left alone (clean costs nothing, pinned
+    /// belongs to a live user — it will be written later, which is
+    /// correct, just not optimal).
+    ///
+    /// Protocol: R7-C1-shaped like evict_one, minus the Phase-4 sync:
+    ///   Phase 1 (bucket lock): find the entry, verify !evicting,
+    ///     dirty, count==0; unhash and set evicting — one lock hold, no
+    ///     pick/re-verify window (we address the block by key, and a
+    ///     count!=0 entry simply aborts).
+    ///   Phase 2 (LRU lock): unlink from the LRU.
+    ///   Phase 3 (no locks): free.
+    /// A pending publication record referencing the dropped blockno
+    /// already no-ops: sync_block_ordered peeks by key, misses, returns
+    /// Ok — the H1/H2 plans degrade exactly as they do for a block that
+    /// was never cached. The bitmap free (which carries the semantics)
+    /// rides its own deferred write with its own ordering record.
+    fn drop_block(&self, mj: u32, mi: u32, blocknr: u64) {
+        let index = self.hash_index(mj, mi, blocknr);
+        let victim: *mut CacheEntry;
+        {
+            let mut bucket = self.buckets[index].lock();
+            let mut found: Option<*mut CacheEntry> = None;
+            let mut prev: Option<*mut CacheEntry> = None;
+            let mut current = bucket.head;
+            while let Some(cp) = current {
+                // SAFETY: chain pointers are valid under the bucket lock
+                // (created by Box::into_raw, freed only under this lock).
+                unsafe {
+                    if (*cp).key == (mj, mi, blocknr) {
+                        found = Some(cp);
+                        break;
+                    }
+                    prev = Some(cp);
+                    current = (*cp).hash_next;
+                }
+            }
+            let cp = match found {
+                Some(cp) => cp,
+                None => return, // nothing cached for this block
+            };
+            // SAFETY: cp was found in the chain under this lock.
+            unsafe {
+                if (*cp).evicting || (*cp).bh.is_null() {
+                    return; // mid-eviction / dead — nothing to drop
+                }
+                let bh = &*(*cp).bh;
+                if bh.count() != 0 || !bh.is_dirty() {
+                    return; // pinned or clean — leave it
+                }
+                // Unhash under the same lock that get() pins under:
+                // after this, no new pins can arrive.
+                (*cp).evicting = true;
+                if let Some(pp) = prev {
+                    (*pp).hash_next = (*cp).hash_next;
+                } else {
+                    bucket.head = (*cp).hash_next;
+                }
+            }
+            victim = cp;
+        }
+        // Bucket lock released; victim unhashed and unpinnable.
+        {
+            let mut lru = self.lru.lock_irqsave();
+            // SAFETY: victim was LRU-linked; LRU lock held for the unlink.
+            unsafe { Self::remove_from_lru(&mut lru, victim); }
+        }
+        crate::dfx::fsw::note_drop_block();
+        // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
+        unsafe { let _ = Box::from_raw(victim); }
+        self.count.fetch_sub(1, Ordering::Release);
+    }
+
     /// Get or create buffer (synchronous read on cache miss).
     fn get(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
         // SAFETY: device is a valid GenDisk pointer passed from the block device layer;
@@ -834,6 +917,27 @@ impl BlockCache {
     /// contents are irrelevant (freshly allocated blocks being zeroed) —
     /// reading through this API would fabricate zeros for real data.
     fn get_zero(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+        self.get_zero_impl(device, blocknr, true)
+    }
+
+    /// Full-block-overwrite fetch, no disk read on miss and NO zeroing on
+    /// hit: the caller overwrites every byte before anyone can observe the
+    /// buffer (same visibility class as any in-place metadata edit — this
+    /// is exactly what the plain bread + copy path did, minus the read of
+    /// data that is about to be discarded). Used by metadata writers that
+    /// rewrite whole blocks (directory blocks, bitmaps, group descriptors):
+    /// reading a just-allocated directory block from disk before rewriting
+    /// it cost one synchronous round trip per create.
+    fn get_overwrite(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+        self.get_zero_impl(device, blocknr, false)
+    }
+
+    fn get_zero_impl(
+        &self,
+        device: *const blkdev::GenDisk,
+        blocknr: u64,
+        zero_on_hit: bool,
+    ) -> Option<*mut BufferHead> {
         // SAFETY: same entry-lifetime guarantees as get(); the BufferHead is
         // either found in the cache (pinned via get()) or freshly created and
         // inserted below, never freed while the caller holds a reference.
@@ -862,18 +966,22 @@ impl BlockCache {
                         if !(*entry.bh).get_state().is_uptodate() {
                             continue;
                         }
-                        // HIT: zero it. The caller just ALLOCATED this
-                        // block for a partial-block first write and needs
-                        // the unwritten span to read back as zeros — the
-                        // cache may still hold the block's PREVIOUS life
-                        // (freed by truncate, reallocated from the bitmap
-                        // without an intervening eviction), and returning
-                        // that stale content spliced old file data around
-                        // the new write (LTP ftest05 "bad verify should be
-                        // 0" read back a previous iteration's pattern).
-                        // Dirty so the zeros also reach disk.
-                        (*entry.bh).b_data.fill(0);
-                        (*entry.bh).set_state_bit(BufferState::BH_Dirty);
+                        // HIT: for get_zero callers, zero it. The caller just
+                        // ALLOCATED this block for a partial-block first
+                        // write and needs the unwritten span to read back
+                        // as zeros — the cache may still hold the block's
+                        // PREVIOUS life (freed by truncate, reallocated from
+                        // the bitmap without an intervening eviction), and
+                        // returning that stale content spliced old file
+                        // data around the new write (LTP ftest05 "bad
+                        // verify should be 0" read back a previous
+                        // iteration's pattern). Dirty so the zeros also
+                        // reach disk. get_overwrite callers skip this —
+                        // they rewrite every byte themselves.
+                        if zero_on_hit {
+                            (*entry.bh).b_data.fill(0);
+                            (*entry.bh).set_state_bit(BufferState::BH_Dirty);
+                        }
                         (*entry.bh).get();
                         return Some(entry.bh);
                     }
@@ -917,10 +1025,13 @@ impl BlockCache {
                             current = (*cp).hash_next;
                             continue;
                         }
-                        // Duplicate insert lost the race: same zero-on-hit
-                        // contract as Phase 1 (see the comment there).
-                        (*(*cp).bh).b_data.fill(0);
-                        (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
+                        // Duplicate insert lost the race: same contract as
+                        // Phase 1 (zero for get_zero callers; untouched for
+                        // get_overwrite callers, who rewrite every byte).
+                        if zero_on_hit {
+                            (*(*cp).bh).b_data.fill(0);
+                            (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
+                        }
                         (*(*cp).bh).get();
                         let _ = Box::from_raw(entry_ptr);
                         return Some((*cp).bh);
@@ -1175,7 +1286,19 @@ fn get_block_cache() -> &'static BlockCache {
     if !CACHE_INIT.load(Ordering::Acquire) {
         let _guard = CACHE_INIT_LOCK.lock();
         if !CACHE_INIT.load(Ordering::Acquire) {
-            let cache = BlockCache::new(64, 1024, 4096);
+            // Capacity: 8192 entries (32 MiB at 4K blocks, allocated ON
+            // DEMAND — an entry exists only once its block is first read).
+            // The old 1024-entry/4 MiB cache evicted constantly under any
+            // real metadata working set (pbench P6 tree ~1300 blocks:
+            // ~2.5 evictions per mkdir+rmdir pair, ~46% of victims dirty —
+            // each dirty eviction is a synchronous round trip INSIDE the
+            // caller's bread, plus a publication-constraint guard pass).
+            // The reference kernel caches all free memory; 8 MiB/2048 was
+            // still churny, 32 MiB/8192 covers GNOME-class small loads.
+            // Buckets 64 -> 2048 (power of two for the hash mask): at 8192
+            // entries the old 64 buckets averaged 128-long chains, making
+            // every bread/get/peek walk tens of pointers.
+            let cache = BlockCache::new(2048, 8192, 4096);
             // SAFETY: we hold the lock and CACHE_INIT is false, so no other
             // CPU can access BLOCK_CACHE concurrently.
             unsafe { BLOCK_CACHE = Some(cache); }
@@ -1201,6 +1324,51 @@ pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut Buffer
 /// must overwrite the whole block (or rely on the zeros).
 pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     get_block_cache().get_zero(device, blocknr)
+}
+
+/// Fetch a block for a full-block overwrite: no disk read on a miss (the
+/// buffer is created zeroed and dirty) and no zeroing on a hit. The caller
+/// MUST overwrite the whole block before the buffer becomes observable.
+/// See BlockCache::get_overwrite.
+pub fn getblk_overwrite(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    get_block_cache().get_overwrite(device, blocknr)
+}
+
+/// Forget a FREED block's dirty buffer without writing it (see
+/// BlockCache::drop_block). Best-effort: pinned or clean buffers are
+/// left in place.
+pub fn drop_freed_block(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
+    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
+    // fields are read.
+    unsafe {
+        get_block_cache().drop_block((*device).major, (*device).first_minor, blocknr);
+    }
+}
+
+/// Forget a FREED block's dirty buffer AND its jbd2 registration: same as
+/// drop_freed_block, but first removes the buffer from the CURRENT task's
+/// running transaction (jbd2_journal_forget) so a later commit does not
+/// re-read the dead block from disk and write its stale content back (or
+/// into the journal area on the revoke slow path). Called from the block
+/// allocator's free path, which always runs inside the freeing op's
+/// journal bracket.
+pub fn drop_freed_block_forgotten(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) {
+    // SAFETY: device is a valid GenDisk pointer; only its major/first_minor
+    // fields are read.
+    unsafe {
+        let (mj, mi) = ((*device).major, (*device).first_minor);
+        // Forget under NO bio locks (peek pins, jbd2 locks only its own
+        // transaction lists — no bucket->t_dirty nesting exists).
+        if let Some(bh) = get_block_cache().peek_buffer((mj, mi), blocknr) {
+            // SAFETY: get_current_handle is task-local and null-safe; the
+            // handle outlives this call (the freeing op's bracket).
+            if let Some(h) = crate::fs::ext4::namei::get_current_handle() {
+                let _ = crate::fs::jbd2::jbd2_journal_forget(&mut *h, bh);
+            }
+            get_block_cache().put(bh);
+        }
+        get_block_cache().drop_block(mj, mi, blocknr);
+    }
 }
 
 /// Invalidate every cached buffer of `device` without writing anything
@@ -1926,6 +2094,39 @@ static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
 /// scans of every scoped flush) without bound. The creator pays — it is
 /// the task generating the backlog.
 const PUB_HIGH_WATER: usize = 2048;
+
+/// Op-boundary batch threshold (the fab0e029 prescription: records batch
+/// per transaction window). With the per-mkdir scoped drain deleted, the
+/// queue legitimately grows between durability points; this bounds it far
+/// below PUB_HIGH_WATER so that (a) an out-of-band writer that hits a
+/// constrained block (eviction victim, journal write-through) is
+/// constrained by at most this many records' worth of dirty blocks, and
+/// (b) the O(queue) snapshot scan of any scoped flush stays trivial.
+/// The entry op whose record crosses the line pays ONE ordered whole-queue
+/// drain (flush_publications) — amortized over PUB_BATCH operations, not
+/// per operation. 64: small enough that a constraint flush's residual
+/// I/O is a handful of unique blocks, large enough that the drain cost
+/// amortizes below 1 block-write per op.
+const PUB_BATCH: usize = 64;
+
+/// Op-boundary publication batch drain: called at every ext4 journal-stop
+/// bracket close (all entry mutations funnel through ext4_journal_stop).
+/// O(1) queue-length check; drains only when the batch threshold is
+/// crossed. See PUB_BATCH.
+pub fn publication_batch_drain() {
+    let over = {
+        let pend = PENDING_PUBLICATIONS.lock();
+        !pend.is_empty() && pend.len() >= PUB_BATCH
+    };
+    if over {
+        crate::dfx::fsw::note_pub_batch();
+        // Whole queue, append order (pre -> entry -> post per record).
+        // No ext4 locks are held by this path (PENDING is a leaf lock;
+        // the I/O runs lock-free), so this cannot deadlock against the
+        // caller's ENTRY_MUTEX/BIG_LOCK.
+        let _ = flush_publications();
+    }
+}
 /// Batches per high-water drain (each batch is one full ordered pass; see
 /// flush_publications_bounded). Leftover records stay pending, ordered.
 const PUB_HIWAT_BATCHES: u32 = 2;

@@ -556,6 +556,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         // Use a small stack buffer to avoid heap allocation
         const CHUNK_SIZE: usize = 256;
         let mut kernel_buf = [0u8; CHUNK_SIZE];
+        let mut expand_buf = [0u8; CHUNK_SIZE * 2];
         let mut remaining = count;
         let mut total_written = 0;
         let mut user_ptr = buf;
@@ -576,19 +577,26 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
                 break;
             }
 
-            // Output the copied bytes through the console UART
-            // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
-            // x86_64 — the old fixmap write_volatile addressed
-            // a riscv-only MMIO window and silently dumped
-            // user bytes into VA 0 on x86).
-            let uart = crate::console::lock();
+            // \n -> \r\n expansion (the unconditional OPOST translation
+            // this fast path has always applied, byte-for-byte), then ONE
+            // call into the chunked batched TX path (perf-console: the
+            // old inline loop held a single irqsave UART lock across the
+            // whole 256-byte chunk and pushed every byte through
+            // per-byte putc register traffic — the OH init/hilog boot
+            // volume, ~26k prints, rode exactly this loop. Delegating to
+            // char_dev::uart_write_kernel keeps the 32-byte
+            // lock/cond_resched discipline and the FIFO-burst TX of the
+            // shared path.)
+            let mut n = 0usize;
             for &b in &kernel_buf[..to_copy] {
                 if b == b'\n' {
-                    uart.putc(b'\r');
+                    expand_buf[n] = b'\r';
+                    n += 1;
                 }
-                uart.putc(b);
+                expand_buf[n] = b;
+                n += 1;
             }
-            drop(uart);
+            let _ = crate::fs::char_dev::uart_write_kernel(&expand_buf[..n]);
 
             total_written += to_copy;
             remaining -= to_copy;
@@ -616,6 +624,16 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // matching branch in sys_read).
     if crate::fs::pipe::is_pipe_file(&file) {
         return crate::fs::pipe::pipe_write_user(&file, buf as *const u8, count) as i64;
+    }
+    // AF_UNIX write fast path (perf-ipc): build the segment with the ONE
+    // user→kernel copy — the generic staging below paid an alloc + copy
+    // here and a SECOND alloc + copy at the segment enqueue
+    // (unix_send's data.to_vec()). Bounded at RW_CHUNK (heap discipline:
+    // no giant single segment); larger writes keep the generic chunked
+    // shape. Semantics identical (EFAULT on a faulting source with
+    // nothing sent; blocking/EPIPE per the engine).
+    if count <= RW_CHUNK && crate::net::unix::is_unix_file(&file) {
+        return crate::net::unix::unix_write_user(&file, buf as *const u8, count) as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write
@@ -771,13 +789,11 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                 if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
                     return -errno::EMSGSIZE as i64;
                 }
-                let start = gathered.len();
-                gathered.resize(start + len, 0);
-                let uncopied = crate::arch::uaccess_safe::copy_in(
-                    &mut gathered[start..start + len],
-                    base,
-                );
-                if uncopied > 0 {
+                // perf-ipc: reserve + copy over the reserved window — the
+                // old resize(start+len, 0) zero-filled every iov before
+                // copy_in overwrote it (hilogd's writev(h28, tag, content)
+                // paid a full memset of the record per call).
+                if !crate::fs::file::gather_append_user(&mut gathered, base, len) {
                     return -errno::EFAULT as i64;
                 }
             }
@@ -795,7 +811,9 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             if mode == crate::fs::file::FileFlags::O_RDONLY {
                 return -errno::EBADF as i64;
             }
-            return file.write_slice(&gathered) as i64;
+            // perf-ipc: hand the gathered buffer to the unix engine OWNED
+            // (write_slice would re-copy it into the segment).
+            return crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
         }
     }
 

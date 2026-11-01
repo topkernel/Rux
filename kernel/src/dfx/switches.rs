@@ -97,6 +97,9 @@ macro_rules! dfx_switch_table {
             RipSample => "ripsample",
             OhHunt => "ohhunt",
             TfdCensus => "tfdcensus",
+            ScmTap => "scmtap",
+            SigTrace => "sigtrace",
+            SysForensic => "sysforensic",
         }
     };
 }
@@ -448,9 +451,32 @@ pub enum DfxSwitch {
     /// every boot phase names its storm caller. Purely diagnostic; OFF
     /// by default.
     TfdCensus,
+    /// dfx=scmtap (gdm session-fifo hunt, session 21): SCM_RIGHTS relay
+    /// tap — one line per unix sendmsg that attaches fds (TX), per
+    /// recvmsg that installs them (RX with the new fd numbers), per
+    /// drop (no control room / EFAULT / EMFILE / queue orphaned at
+    /// socket close), plus the fifo last-writer-close line. Answers,
+    /// from the kernel side, where the CreateSession reply's session
+    /// fd dies between logind → dbus-daemon → pam (the "Session c1
+    /// logged out" milliseconds-after-create shape). OFF by default.
+    ScmTap,
+    /// dfx=sigtrace (aa64-ltp lane): aarch64 signal-delivery forensics —
+    /// one line per setup_frame_aarch64 (pid, sig, sp_before, frame_addr,
+    /// handler, restorer, pc) and one per restore_sigcontext_aarch64
+    /// (pid, frame_addr, restored pc/sp/x29). For hunting the LTP
+    /// tst_test parent SIGSEGV class (garbage FILE* = child pid). OFF by
+    /// default.
+    SigTrace,
+    /// dfx=sysforensic (perf-syscall lane): arms the per-syscall forensic
+    /// instruments the dispatcher carried unconditionally before the perf
+    /// sprint — the SYSCALL_RING double-record, the per-task fail rings,
+    /// the comm-scanning sc-hooks. OFF in production boots (p1_null paid
+    /// 12 atomics per syscall for them).
+    SysForensic,
 }
 
-const SWITCH_COUNT: usize = 49;
+const SWITCH_COUNT: usize = 52;
+
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -540,6 +566,9 @@ impl DfxSwitch {
             DfxSwitch::DbFileTrace => 46,
             DfxSwitch::OhHunt => 47,
             DfxSwitch::TfdCensus => 48,
+            DfxSwitch::ScmTap => 49,
+            DfxSwitch::SigTrace => 50,
+            DfxSwitch::SysForensic => 51,
         }
     }
 

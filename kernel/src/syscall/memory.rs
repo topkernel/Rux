@@ -1639,20 +1639,43 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
-                    .iter()
-                    .map(|v| (v.start().as_usize(), v.end().as_usize()))
-                    .collect();
-                spans.sort_unstable();
+                // Perf review 2026-10-31: the coverage walk used to
+                // collect EVERY VMA of the mm into a Vec and sort it
+                // under the write lock — a heap allocation plus an
+                // O(n log n) sort per mprotect, starving every
+                // concurrent fault on the mm — and the BTreeMap order
+                // is already sorted, so the sort never did anything.
+                // Walk the tree directly, bounded to the target span:
+                // no allocation, no sort, early exit at the span end.
+                //
+                // Regression fix (perf-sched lane, same day): the
+                // bounded walk MUST be seeded with the VMA CONTAINING
+                // addr. iter_after only yields VMAs with start >= addr,
+                // so without the seed every mprotect that starts INSIDE
+                // a VMA (not exactly at its start) saw a phantom gap at
+                // `addr` and failed ENOMEM — which is exactly musl
+                // pthread_create's stack construction (mmap PROT_NONE,
+                // then mprotect(base+guard, stack, RW)): every threaded
+                // musl static binary broke (pthread_create -> EAGAIN,
+                // errno ENOMEM). find() is the O(log n) containing-VMA
+                // lookup; a None leaves cursor at addr and the walk
+                // still fails with the correct ENOMEM for a real gap.
                 let mut cursor = addr;
-                for (s, e) in &spans {
-                    if *e <= cursor {
+                if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                    cursor = v.end().as_usize();
+                }
+                for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                    let (s, e) = (v.start().as_usize(), v.end().as_usize());
+                    if s >= addr + length {
+                        break; // past the span; covered so far is final
+                    }
+                    if e <= cursor {
                         continue;
                     }
-                    if *s > cursor {
+                    if s > cursor {
                         break; // gap at `cursor`
                     }
-                    cursor = *e;
+                    cursor = e;
                     if cursor >= addr + length {
                         break;
                     }
@@ -2265,6 +2288,27 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                     }
                 }
                 cursor += PAGE_SIZE as usize;
+            }
+
+            // Delayed-allocation tail (perf-gaps 2026-11): write_at above
+            // now routes plain writes through the buffered page-cache
+            // path — MS_SYNC semantics demand the dirty frames it left
+            // actually reach the file. Flush the span's page range for
+            // ext4 inodes (same machinery as the PCACHE flush above;
+            // no-op when nothing was dirtied).
+            {
+                // SAFETY: inode cell written at open time, read-only.
+                if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                    let off_lo = v_off + (span_lo - vma_start);
+                    let off_hi = v_off + (span_hi - vma_start);
+                    if off_hi > off_lo {
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(
+                            vinode,
+                            (off_lo / PAGE_SIZE) as u64,
+                            ((off_hi - 1) / PAGE_SIZE) as u64,
+                        );
+                    }
+                }
             }
         }
     }

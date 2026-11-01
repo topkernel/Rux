@@ -5343,9 +5343,16 @@ pub fn sys_getrlimit(args: SyscallArgs) -> i64 {
 
     // SAFETY: rlim_ptr validated with access_ok above; put_user is the
     // exception-table copy path.
+    // uafault probe (2026-10-31): the put_user results used to be
+    // discarded — getrlimit with an unmapped user pointer returned 0
+    // ("success") while writing nothing. The reference do_prlimit
+    // reports the failed copy_to_user as -EFAULT; so does prlimit64.
     unsafe {
-        let _ = crate::arch::uaccess::put_user(rlim_ptr, cur);
-        let _ = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        let ok_cur = crate::arch::uaccess::put_user(rlim_ptr, cur);
+        let ok_max = crate::arch::uaccess::put_user(rlim_ptr.add(1), max);
+        if !ok_cur || !ok_max {
+            return -(errno::EFAULT as i64);
+        }
     }
     0
 }
@@ -5694,7 +5701,12 @@ pub fn ctrl_alt_del_latch() {
 
 /// Execute any latched Ctrl-Alt-Del. Called in TASK context from
 /// check_and_deliver_signals (every return to user space).
+/// (perf-syscall lane) Load-first for the same reason as the ISIG
+/// latch: one plain load per return instead of an RMW.
 pub fn cad_deliver_pending() {
+    if !PENDING_CAD.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     if !PENDING_CAD.swap(false, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
@@ -6059,7 +6071,9 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
 /// # Arguments
 /// - args[0]: fd - file descriptor
 pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
-    // Flush all buffer cache (simplified: sync everything)
+    // Delayed allocation (2026-11): dirty page-cache frames first (see
+    // sys_sync), then the buffer cache (simplified: sync everything).
+    crate::fs::page_cache::get_page_cache().flush_all_dirty();
     let _ = crate::fs::bio::sync_buffers();
     0
 }

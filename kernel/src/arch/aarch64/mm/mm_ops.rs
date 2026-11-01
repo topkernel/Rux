@@ -284,7 +284,7 @@ impl MmStruct {
                     // Serialize the leaf-PTE write + rmap setup against a
                     // concurrent fork()/COW walk on this mm (riscv64 twin
                     // protocol, INV-LOCK-7 GLOBAL mode).
-                    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+                    let _pte_guard = pte_lock_for(self).lock_irqsave();
                     // Re-check under the lock: a racing CLONE_VM thread
                     // may have mapped this address between the walk and
                     // here; mapping again would orphan the winner's page.
@@ -721,8 +721,9 @@ impl MmStruct {
     /// Unmap physical pages in specified range (PTE teardown under
     /// PTE_MODIFY_LOCK; twin protocol)
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        // Serialize against fork's table walk and COW faults (PTE lock).
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // Serialize against fork's table walk and COW faults (per-mm PTE
+        // lock; other mms' writers proceed concurrently).
+        let _pte_guard = pte_lock_for(self).lock_irqsave();
         let mut addr = start.as_usize();
         let end = addr + size;
 
@@ -926,7 +927,9 @@ impl MmStruct {
         // SAFETY: self.pgd is a valid root PPN for the current address
         // space; the caller (fork) guarantees the parent is fully
         // initialized and consistent.
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // Per-mm section (split mode; riscv64 twin comment): the walk
+        // mutates only THIS mm's tables and the child's unpublished ones.
+        let _pte_guard = pte_lock_for(self).lock_irqsave();
         let new_root_ppn = unsafe {
             copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
@@ -1223,8 +1226,13 @@ pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
 /// Per-mm leaf-PTE section hook (INV-LOCK-7), GLOBAL mode like the
 /// riscv64 twin: every mm maps to the same global epoch section
 #[inline]
-pub fn pte_lock_for(_mm: &crate::mm::mm_struct::MmStruct) -> &'static crate::mm::mm_struct::PteLock {
-    &PTE_GLOBAL_HANDLE
+pub fn pte_lock_for(
+    mm: &crate::mm::mm_struct::MmStruct,
+) -> &crate::mm::mm_struct::PteLock {
+    // Split mode on all arches (perf review 2026-10-31): per-mm leaf-PTE
+    // spin; global-mode users keep the epoch exclusive. See
+    // docs/architecture/lock-ordering.md.
+    mm.pte_lock()
 }
 
 static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =

@@ -421,15 +421,47 @@ pub fn init() {
     }
 }
 
-/// Arm the tick deadline. The PIT free-runs at a fixed HZ cadence, so
-/// this is a no-op (kept for interface parity with the riscv64 twin).
-pub fn set_timer(_deadline: u64) {}
+/// Arm the LAPIC timer in one-shot mode at the absolute nominal-domain
+/// `deadline` (perf lane pd — see apic::timer_arm_oneshot). No-op on the
+/// PIT fallback path (channel 0 free-runs at a fixed HZ cadence).
+pub fn set_timer(deadline: u64) {
+    crate::drivers::intc::apic::timer_arm_oneshot(deadline);
+}
 
-/// Set next timer interrupt — no-op (PIT and LAPIC timer are periodic).
-pub fn set_next_trigger() {}
+/// Set the next timer interrupt: the NEXT NOMINAL GRID TICK, but never
+/// later than the earliest outstanding HIGH-RESOLUTION deadline (the
+/// riscv64 twin's discipline — precise sleeps must be able to fire
+/// BETWEEN grid ticks). Arming is skipped while no precise timebase is
+/// active: read_time() is then jiffies-derived and an one-shot armed
+/// from the coarse clock would mistime; the periodic LAPIC/PIT tick
+/// keeps the grid in that window (grid-only hres granularity, the
+/// pre-fix behavior, only on calibration-failed boots).
+pub fn set_next_trigger() {
+    if !timebase_precise() {
+        return;
+    }
+    // Grid-glued (review批次8 discipline): round UP to the next grid
+    // multiple so handler latency never accumulates into the cadence.
+    let current = read_time();
+    let mut deadline = (current / TIME_SLICE_TICKS + 1) * TIME_SLICE_TICKS;
+    let hres = crate::timer::hres_next_deadline();
+    if hres < deadline {
+        // Never arm in the past (a WRMSR count of 0 disarms; clamp to
+        // just-after-now so an already-expired hres deadline fires at
+        // once and the softirq sweep delivers it).
+        deadline = hres.max(current + 1);
+    }
+    set_timer(deadline);
+}
 
-/// Re-arm for a high-resolution deadline — no-op (tick is periodic).
-pub fn rearm_for_hres() {}
+/// Re-arm THIS CPU's timer to min(next grid tick, earliest hres
+/// deadline). Called by a task that just registered a high-resolution
+/// sleep so the already-armed (later) deadline does not delay its
+/// precise wake (perf lane pd: this used to be a no-op on x86_64 —
+/// every hres sleep waited for the next 10 ms grid tick).
+pub fn rearm_for_hres() {
+    set_next_trigger();
+}
 
 /// True when a precise (non-jiffies) timebase is active — the tick
 /// handler derives jiffies from it instead of counting IRQs.

@@ -1,0 +1,39 @@
+ISO20 epoll_wait05 a: RES|epoll_wait05|0|: Connecting to port 32768 epoll_wait05.c:72: TINFO: Polling on socket epoll_wait05.c:78: TINFO: Hang socket epoll_wait05.c:88: TPASS: Received EPOLLRDHUP  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 epoll_wait05 b: RES|epoll_wait05|0|: Connecting to port 32768 epoll_wait05.c:72: TINFO: Polling on socket epoll_wait05.c:78: TINFO: Hang socket epoll_wait05.c:88: TPASS: Received EPOLLRDHUP  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve02 a: RES|execve02|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve02.c:54: TPASS: execve() failed expectedly: EACCES (13)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve02 b: RES|execve02|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve02.c:54: TPASS: execve() failed expectedly: EACCES (13)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve03 a: RES|execve03|0|ailed as expected: EFAULT (14) execve03.c:124: TPASS: execve failed as expected: EACCES (13) execve03.c:124: TPASS: execve failed as expected: ENOEXEC (8)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve03 b: RES|execve03|0|ailed as expected: EFAULT (14) execve03.c:124: TPASS: execve failed as expected: EACCES (13) execve03.c:124: TPASS: execve failed as expected: ENOEXEC (8)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve04 a: RES|execve04|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve04.c:52: TPASS: execve failed as expected: ETXTBSY (26)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve04 b: RES|execve04|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve04.c:52: TPASS: execve failed as expected: ETXTBSY (26)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve05 a: RES|execve05|0|is canary, expected 'canary' execve_child.c:22: TPASS: argv[1] is canary, expected 'canary' execve_child.c:22: TPASS: argv[1] is canary, expected 'canary'  Summary: passed   8 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execve05 b: RES|execve05|0|is canary, expected 'canary' execve_child.c:22: TPASS: argv[1] is canary, expected 'canary' execve_child.c:22: TPASS: argv[1] is canary, expected 'canary'  Summary: passed   8 failed   0 broken   0 skipped  0 warnings 0
+ISO20 execveat01 a: RES|execveat01|1|t_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected execveat01.c:58: TFAIL: execveat() returns unexpected errno: ENOENT (2)  Summary: passed   3 failed   1 broken   0 skipped  0 warnings 0
+ISO20 execveat01 b: RES|execveat01|1|t_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected execveat01.c:58: TFAIL: execveat() returns unexpected errno: ENOENT (2)  Summary: passed   3 failed   1 broken   0 skipped  0 warnings 0
+ISO20 execveat02 a: RES|execveat02|1|edly execveat02.c:59: TFAIL: execveat() fails unexpectedly, expected: ELOOP: ENOENT (2) execveat02.c:63: TPASS: execveat() fails as expected: ENOTDIR (20)  Summary: passed   1 failed   3 broken   0 skipped  0 warnings 0
+ISO20 execveat02 b: RES|execveat02|1|edly execveat02.c:59: TFAIL: execveat() fails unexpectedly, expected: ELOOP: ENOENT (2) execveat02.c:63: TPASS: execveat() fails as expected: ENOTDIR (20)  Summary: passed   1 failed   3 broken   0 skipped  0 warnings 0
+ISO20 epoll-ltp a: RES|epoll-ltp|143|362791) epoll01    33  TPASS  :  epoll_create with random large set size (size = 1359594486) epoll01     0  TINFO  :  Summary: Of 33 tests, epoll_create failed 0 (100% passed). epoll01     0  TINFO  :  Testing epoll_ctl
+ISO20 epoll-ltp b: 
+ISO20 execveat03 a: RES|execveat03|32|op0' tst_test.c:1106: TINFO: Formatting /dev/loop0 with ext2 opts='' extra opts='' tst_cmd.c:75: TCONF: Couldn't find 'mkfs.ext2' in $PATH at tst_cmd.c:75  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 execveat03 b: RES|execveat03|32|op0' tst_test.c:1106: TINFO: Formatting /dev/loop0 with ext2 opts='' extra opts='' tst_cmd.c:75: TCONF: Couldn't find 'mkfs.ext2' in $PATH at tst_cmd.c:75  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 fsconfig01 a: RES|fsconfig01|32|t_test.c:1106: TINFO: Skipping mkfs for TMPFS filesystem ../../../../include/lapi/fsmount.h:65: TCONF: syscall(430) __NR_fsopen not supported on your arch  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 fsconfig01 b: RES|fsconfig01|32|t_test.c:1106: TINFO: Skipping mkfs for TMPFS filesystem ../../../../include/lapi/fsmount.h:65: TCONF: syscall(430) __NR_fsopen not supported on your arch  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 init_module01 a: RES|init_module01|32|un is 0h 00m 30s tst_kconfig.c:629: TINFO: module.sig_enforce is not found in /proc/cmdline tst_module.c:69: TCONF: Failed to find module 'init_module.ko'  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 init_module01 b: RES|init_module01|32|un is 0h 00m 30s tst_kconfig.c:629: TINFO: module.sig_enforce is not found in /proc/cmdline tst_module.c:69: TCONF: Failed to find module 'init_module.ko'  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+ISO20 mallocstress a: RES|mallocstress|2|t process... tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+ISO20 mallocstress b: RES|mallocstress|137|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 10m 30s Sending SIGKILL to test process...
+ISO20 ftest07 a: RES|ftest07|1|:  Test{308} failed, expected 0 exit. ftest07     3  TFAIL  :  ftest07.c:210:  Test{307} failed, expected 0 exit. ftest07     0  TINFO  :   term -[305]- got sig term. ftest07     4  TFAIL  :  ftest07.c:126: Test failed.
+ISO20 ftest07 b: RES|ftest07|1|:  Test{307} failed, expected 0 exit. ftest07     4  TFAIL  :  ftest07.c:210:  Test{310} failed, expected 0 exit. ftest07     0  TINFO  :   term -[305]- got sig term. ftest07     5  TFAIL  :  ftest07.c:126: Test failed.
+ISO20 proc01 a: RES|proc01|2|proc01      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 305). proc01      2  TBROK  :  tst_sig.c:232: Remaining cases broken
+ISO20 proc01 b: RES|proc01|2|proc01      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 305). proc01      2  TBROK  :  tst_sig.c:232: Remaining cases broken
+ISO20 cve-2017-17052 a: 
+ISO20 cve-2017-17052 b: 
+ISO20 shmat1 a: 
+ISO20 shmat1 b: 
+ISO20 ALL DONE
+ISO20-gain memfd_create02 a: RES|memfd_create02
+ISO20-gain memfd_create02 b: RES|memfd_create02
+ISO20-gain rmdir03 a: RES|rmdir03
+ISO20-gain rmdir03 b: RES|rmdir03
+ISO20-gain fork09 a: RES|fork09
+ISO20-gain fork09 b: RES|fork09

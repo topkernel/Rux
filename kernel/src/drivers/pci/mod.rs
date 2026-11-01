@@ -426,20 +426,21 @@ pub mod vendor {
 
 /// VirtIO device IDs (PCI)
 ///
-/// Transitional devices keep the legacy IDs (net 0x1000, blk 0x1001).
-/// Modern (virtio 1.0, non-transitional) devices carry 0x1040 + the
-/// virtio device id: net=1 -> 0x1041, blk=2 -> 0x1042, balloon=5 ->
-/// 0x1045, gpu=16 -> 0x1050, input=18 -> 0x1052. Verified against the
-/// transport itself: QEMU `info pci` reports a
-/// `virtio-blk-pci,disable-legacy=on` device as 1af4:1042 and a plain
-/// transitional one as 1af4:1001.
-///
-/// A 2026-10-30 commit (04e23b45) shifted these to net=0x1040/
-/// blk=0x1041 on the belief that 0x1040 is the net id; 0x1040 is the
-/// (reserved, id-0) base, so the shift made every modern-only block
-/// device (0x1042) invisible to the probe — a riscv64 boot with
-/// `virtio-blk-pci,disable-legacy=on` lost its root disk (init: /bin/sh
-/// not found) and a modern-only net device would have bound as BLK.
+/// Legacy/transitional devices answer with the 0x1000-series IDs.
+/// Modern (non-transitional, virtio 1.0) devices presented by QEMU
+/// answer `0x1040 + virtio device type`: net=1 -> 0x1041, blk=2 ->
+/// 0x1042, console=3, balloon=5, gpu=16 -> 0x1050, input=18 -> 0x1052.
+/// This is the mapping the reference kernel's virtio_pci driver uses
+/// (device_id = pci DID - 0x1040 for DID >= 0x1040), and it is what
+/// real device models expose: `virtio-blk-pci,disable-legacy=on` on
+/// the virt machine answers PCI 1af4:1042 (verified via the QEMU
+/// monitor `info pci`). The virtio spec appendix lists different IDs
+/// (0x1040 net / 0x1041 blk), but no real device presents those —
+/// setting the constants to the spec table makes every
+/// disable-legacy=on boot lose its disk (observed on main@82059759:
+/// the PCI blk probe found zero devices, root fell back, no init
+/// loadable). GPEX (aarch64) devices are transitional (0x1000/0x1001)
+/// and are unaffected by the modern entries.
 pub mod virtio_device {
     pub const VIRTIO_NET: u16 = 0x1000;
     pub const VIRTIO_NET_MODERN: u16 = 0x1041;

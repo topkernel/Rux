@@ -52,12 +52,16 @@ No userspace patches, rebuilds, or configuration changes.
 
 ---
 
-## Ubuntu 22.04 → GNOME Shell desktop
+## Ubuntu 22.04 → gdm login → GNOME Shell desktop
 
+![gdm login prompt on Rux](docs/images/gdm-greeter-login-2026-11-01.png)
 ![GNOME Shell desktop on Rux](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png)
 
 *Unmodified Ubuntu userland: glibc, Xorg, D-Bus, GNOME Shell, mutter,
-interactive xterm. Sessions hold 45 minutes with zero panics.*
+interactive xterm. The gdm greeter runs the stock chain end to end —
+udevd → logind (CreateSession with a real session fd) → gdm3 →
+PAM → gdm-x-session → gnome-session; the login prompt renders and
+holds (login: rux). Desktop sessions hold 45 minutes with zero panics.*
 
 ```bash
 make ubuntu-image && make ubuntu-run    # boot-to-login ~4.5 s, login: root / rux

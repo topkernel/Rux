@@ -179,6 +179,7 @@ impl<T> RwSpinlock<T> {
     /// the writer after a spin budget; nested/IRQ callers keep the
     /// legacy preempt-off acquire.
     #[inline]
+    #[track_caller]
     pub fn read(&self) -> RwSpinlockReadGuard<'_, T> {
         let pc0 = crate::interrupt::preempt::preempt_count();
         let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
@@ -188,7 +189,7 @@ impl<T> RwSpinlock<T> {
                     | crate::interrupt::preempt::NMI_MASK))
                 == 0
             && crate::sched::current().is_some();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_read() {
             return RwSpinlockReadGuard { lock: self };
         }
@@ -222,6 +223,7 @@ impl<T> RwSpinlock<T> {
     /// Guard drop: write unlock + preempt enable.
     /// Same preemptible-wait discipline as `read` (see there).
     #[inline]
+    #[track_caller]
     pub fn write(&self) -> RwSpinlockWriteGuard<'_, T> {
         let pc0 = crate::interrupt::preempt::preempt_count();
         let yieldable = (pc0 & crate::interrupt::preempt::PREEMPT_MASK) == 0
@@ -231,7 +233,7 @@ impl<T> RwSpinlock<T> {
                     | crate::interrupt::preempt::NMI_MASK))
                 == 0
             && crate::sched::current().is_some();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_write() {
             return RwSpinlockWriteGuard { lock: self };
         }
@@ -262,7 +264,7 @@ impl<T> RwSpinlock<T> {
     #[track_caller]
     pub fn read_irqsave(&self) -> RwSpinlockIrqReadGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.read();
         RwSpinlockIrqReadGuard { lock: self, flags }
     }
@@ -273,7 +275,7 @@ impl<T> RwSpinlock<T> {
     #[track_caller]
     pub fn write_irqsave(&self) -> RwSpinlockIrqWriteGuard<'_, T> {
         let flags = irq_save();
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         self.raw.write();
         RwSpinlockIrqWriteGuard { lock: self, flags }
     }
@@ -299,8 +301,9 @@ impl<T> RwSpinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_read(&self) -> Option<RwSpinlockReadGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_read() {
             Some(RwSpinlockReadGuard { lock: self })
         } else {
@@ -310,8 +313,9 @@ impl<T> RwSpinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_write(&self) -> Option<RwSpinlockWriteGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_at(core::panic::Location::caller());
         if self.raw.try_write() {
             Some(RwSpinlockWriteGuard { lock: self })
         } else {
@@ -528,9 +532,22 @@ impl<T: ?Sized> Drop for RwSpinlockBhWriteGuard<'_, T> {
 // ==================== Inline helpers ====================
 
 #[inline]
+#[track_caller]
 fn preempt_disable() {
-    crate::interrupt::preempt::preempt_count_add(
+    crate::interrupt::preempt::preempt_count_add_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
+    );
+}
+
+/// As `preempt_disable`, booking the caller-of-the-lock's location (the
+/// #[track_caller] lock helpers forward their own caller down so the
+/// leakorigin shadow names the real acquire site; preempt-hunt).
+#[inline]
+fn preempt_disable_at(loc: &'static core::panic::Location<'static>) {
+    crate::interrupt::preempt::preempt_count_add_at(
+        crate::interrupt::preempt::PREEMPT_OFFSET,
+        loc,
     );
 }
 

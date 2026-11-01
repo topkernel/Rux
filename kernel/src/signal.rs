@@ -1852,14 +1852,23 @@ unsafe fn setup_frame_aarch64(
         regs.regs[2] = 0;
     }
 
-    // Enter the handler: pc = handler, sp = frame. lr = the return path
-    // — the caller's sa_restorer when provided (arm64 glibc/musl ALWAYS
-    // pass their own `mov x8,#139; svc #0` stub via rt_sigaction), or
-    // the kernel trampoline page as the fallback for restorer-less raw
-    // callers (the reference kernel's vDSO sigtramp role).
+    // Enter the handler: pc = handler, sp = frame. lr = the return path.
+    // The arm64 contract (reference kernel setup_return): sa_restorer is
+    // honored ONLY when the action carries SA_RESTORER — glibc's aarch64
+    // libc_sigaction.c copies sa_restorer into the kernel struct just
+    // under that flag and otherwise leaves the slot UNINITIALIZED stack
+    // garbage (verified: LTP tst_test's SAFE_SIGNAL(SIGUSR1) delivered
+    // restorer=mid-_IO_setb garbage; the handler's ret landed there and
+    // executed stdio code with the sigframe's siginfo as operands — the
+    // whole 34-test SIGSEGV class, fp=child-pid-shaped 0x132 values).
+    // Restorer-less callers (every glibc/musl sigaction user on arm64)
+    // return through the kernel SIGTRAMP page, the reference kernel's
+    // vDSO-sigtramp role.
     regs.pc = action.sa_handler as u64;
     regs.sp = frame_addr;
-    regs.regs[30] = if action.sa_restorer != 0 {
+    regs.regs[30] = if action.sa_flags.bits() & SigFlags::SA_RESTORER != 0
+        && action.sa_restorer != 0
+    {
         action.sa_restorer as u64
     } else {
         SIGTRAMP_BASE
@@ -1867,6 +1876,19 @@ unsafe fn setup_frame_aarch64(
     // Terminate the frame-pointer chain: unwinders stop at a handler
     // frame boundary (arm64 ABI; the reference kernel zeroes x29 here).
     regs.regs[29] = 0;
+
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+        crate::pr_info!(
+            "SIGTRACE setup pid={} sig={} sp={:#x} frame={:#x} handler={:#x} restorer={:#x} ->pc={:#x}",
+            (*task).pid(),
+            sig,
+            user_sp,
+            frame_addr,
+            action.sa_handler,
+            regs.regs[30],
+            regs.pc
+        );
+    }
 
     true  // Success
 }
@@ -2196,6 +2218,19 @@ unsafe fn restore_sigcontext_aarch64(
 
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
     (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
+
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+        crate::pr_info!(
+            "SIGTRACE restore pid={} frame={:#x} copied={} ->pc={:#x} sp={:#x} x29={:#x} x0={:#x}",
+            (*task).pid(),
+            frame_addr,
+            copied,
+            regs.pc,
+            regs.sp,
+            regs.regs[29],
+            regs.regs[0]
+        );
+    }
 
     // Clear signal frame record
     (*task).sigframe = None;
