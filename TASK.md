@@ -628,3 +628,49 @@ system-lb2.img + userdata-fresh2.img + dfx=ams46,txnhunt LOGLEVEL=6 SMP=2):
   kernel-side there is nothing to fix on this leg — but the SERVER error's
   own origin (why accountmgr's osaccount handler returns 32 under load)
   is the next hop, and THAT one is perf-family.
+
+### lb58: a REAL KERNEL BUG found and fixed — pcp refill race (ON MAIN TOO)
+- lb58 (ladder rig + first STATUSCODE tap) panicked at 133.8s:
+  `PANIC: index out of bounds: the len is 32 but the index is 32
+   Location: kernel/src/mm/pcp.rs:153` under net-softirq alloc pressure
+  (stack: ipv4 defrag dispatch -> unix registry path). Console dead after.
+- Root cause: alloc_order0's miss check and its refill STORE run in two
+  SEPARATE irq-off windows; a nested irq-context alloc between them
+  refills the row on its own, so row.count is not the zero seen at the
+  miss — the unconditional store then indexed past list.len() (PCP_HIGH
+  = 32). Classic check-then-act across critical sections.
+- FIX (oh-ladder): cap the stored frames at remaining-room-minus-one
+  (never park count exactly ON PCP_HIGH — that would arm the next free
+  push), surplus batch frames returned via the zone free path
+  (INV-PCP-2 net-zero preserved). Same file is IDENTICAL on current
+  main (md5-verified) — coordinator should cherry-pick the oh-ladder
+  commit to main (mm guarded domain; needs its perf-gate rows).
+- Also on lb58: the first tap iteration burned its 200 budget on
+  samgr's boot-time status-7 storm in ~3s (samgr answers hundreds of
+  GetSystemAbility-null ERR_NULL_OBJECT status replies while SAs load);
+  budgets split now (poison-32 gets its own 400).
+- Poison(32) sightings on lb58 BEFORE any osaccount event: samgr itself
+  sent a status-32 POISON reply at 4.342 (tid 332), and device_manager's
+  IOsAccount proxy (handle:3) was marked at 133.17 right after an
+  accountmgr reply. The osaccount 32-authors are multiple processes.
+
+## EIGHTH-SUCCESSOR STATUS SNAPSHOT (for the next successor / coordinator)
+1. RIG: use oh-ladder (evidence-premerge + 5f0537a8 + taps + pcp fix),
+   release bzImages saved in run/ (bzImage-ladder-*). main release AND
+   debug both stall/wedge on the OH image (lb55/lb56) — UNIX_TABLE /
+   binder::WORLD DEADLOCK family, pre-existing, NOT cured by the
+   spinlock fix.
+2. lb57 (the healthy-boot shape): accountmgr SURVIVES with the spinlock
+   fix (no watchdog suicide); the ladder now dies ONLY at the osaccount
+   proxy poison: a TF_STATUS_CODE reply carrying 32 from the SERVER
+   side death-marks the caller's IOsAccount proxy permanently
+   (SendRequestInner marks on status==32; verified in the image's own
+   ipc source). Server-side authors are OH userspace (kernel relays
+   reply flags verbatim; kernel BR_DEAD_REPLY/errno never produce +32).
+3. NEXT: lb59 (sctap2+pcpfix kernel) — read STATUSCODE-REPLY POISON
+   lines at the ladder moment: names the exact server pid/tid and time;
+   correlate with accountmgr hilog to find which osaccount handler
+   returns ERR_DEAD_OBJECT (OH bug: transient server error -> permanent
+   client proxy death). If the server-side 32 is rare on a healthy
+   boot, the ladder may complete by luck: watch for appspawn
+   com.ohos.launcher + pixel md5 change; report IMMEDIATELY.
