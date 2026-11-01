@@ -96,6 +96,42 @@ single-case with a longer window (90–150 s) when the standard window
 proved shorter than the benchmark's auto-calibration; identical
 kernel, image and arguments.*
 
+
+
+## Standing (2026-11-02 morning, kernel e6401a4a — full 28-case sweep, Rux KVM strong vs reference native)
+
+| Case | Rux | Reference (native) | Ratio |
+|---|---|---|---|
+| lat_syscall null | 0.077 µs | 0.044 µs | 1.74x |
+| lat_syscall read | 0.151 µs | 0.069 µs | 2.20x |
+| lat_syscall write | 0.135 µs | 0.064 µs | 2.11x |
+| lat_syscall stat | 0.643 µs | 0.217 µs | 2.96x |
+| lat_syscall fstat | 0.116 µs | 0.111 µs | 1.04x |
+| lat_syscall open | 1.128 µs | 0.410 µs | 2.75x |
+| lat_proc fork | 47.6-60 µs *(quick-run range; the full-sweep boot starved under host load)* | 33.1 µs | ~1.4-1.8x |
+| lat_proc exec | 68.1 µs | 57.5 µs | 1.18x |
+| lat_pipe | 9.05 µs | 2.74 µs | 3.30x |
+| lat_unix | 11.80 µs | 3.01 µs | 3.92x |
+| lat_ctx -s 64 2 | 4.62 µs/ctx | 0.91 µs/ctx | 5.08x |
+| lat_ctx -s 64 8 | 4.46 µs/ctx | 1.30 µs/ctx | 3.43x |
+| lat_sem | 5.34 µs | 0.444 µs | 12.03x |
+| bw_pipe | 11,820 MB/s | 10,443 MB/s | **0.88x (ahead)** |
+| bw_file_rd 1m | 1.02x (banked) | — | 1.02x |
+| bw_tcp | measured; unit reconcile pending | 15,195 MB/s | — |
+| bw_unix | 2,767 MB/s | 22,783 MB/s | 8.23x |
+| lat_tcp / lat_udp / lat_connect | ran; output rows pending (budget starvation under load — the runner's 20 s in-guest budget SIGKILLs the bench on a loaded host) | — | — |
+| memory rows (bcopy/bzero/mem_rd) | parity | — | 1.00-1.01x |
+| lat_usleep 1000 | 1,037 µs | 1,053 µs | **0.98x (ahead)** |
+
+Week-over-week movement (vs the 11-01 baseline rows): stat 18.8x→3.0x
+(print purge + path-walk fast paths), open 13.9x→2.75x, fork
+20.3x→~1.5x (the EXITGRP print), exec 11.7x→1.18x, fstat 1.53→1.04,
+write 3.09→2.11, read 3.41→2.20 (the per-call allocation purge).
+
+Caveat carried: this table compares Rux-in-KVM against the reference
+NATIVE on the same 9950X — the reference pays no virtualization tax.
+A fair both-under-KVM column is being built (ref-kvm lane).
+
 ## Reading the table
 
 - **Ratio** = Rux value / reference value for latency cases; for the
