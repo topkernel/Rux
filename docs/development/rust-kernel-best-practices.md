@@ -307,7 +307,7 @@ The question this section answers: *are there architectures that get
 microkernel-grade safety without paying microkernel IPC cost — and
 what of them applies to Rux?*
 
-### 10.1 Safe-language isolation — the framekernel line
+### 10.1 Safe-language isolation — the kernel line
 
 The most direct answer for a Rust kernel: **let the compiler be the
 isolation boundary instead of address spaces**. A Linux-ABI-compatible
@@ -408,7 +408,7 @@ disciplined elsewhere: pointers derived once at the boundary
 
 ## Appendix: primary sources
 
-- Asterinas — [framekernel architecture](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html),
+- Asterinas — [kernel architecture](https://asterinas.github.io/book/kernel/the-kernel-architecture.html),
   [ATC'25 paper](https://www.usenix.org/system/files/atc25-peng-yuke.pdf),
   [arXiv:2506.03876](https://arxiv.org/abs/2506.03876), [LWN](https://lwn.net/Articles/1022920/)
 - Theseus — [theseus-os.com](https://www.theseus-os.com) (intralingual design, state-spill management)

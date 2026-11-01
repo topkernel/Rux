@@ -31,7 +31,7 @@
 //!   dbus-activation and reparent-safety investigations; they pollute
 //!   the structured boot table, so they are OFF unless requested.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

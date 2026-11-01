@@ -10,7 +10,7 @@
 //! The gzip blobs were produced by host python zlib (compresslevel 9) over
 //! deterministic content; the cpio archive is hand-built per cpio(5).
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

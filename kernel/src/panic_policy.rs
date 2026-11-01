@@ -21,7 +21,7 @@
 //! panic path reboots without touching the disks, because the panic may
 //! well be the storage stack itself.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

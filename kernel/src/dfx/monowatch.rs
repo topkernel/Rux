@@ -32,7 +32,7 @@
 //! update `last` (the next tick re-reports against the same baseline
 //! until the clock passes it, capped by the rate limit).
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

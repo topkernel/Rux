@@ -1,7 +1,7 @@
 # Security design — layered defense for a monolithic kernel
 
 *Status: design document, 2026-11-01. Companion documents:
-[framekernel-layers.md](framekernel-layers.md) (the layer taxonomy),
+[kernel-layers.md](kernel-layers.md) (the layer taxonomy),
 [design-divergences.md](design-divergences.md) (the divergence register),
 [../development/tcb-ledger.md](../development/tcb-ledger.md) (the generated
 unsafe accounting), [../development/security-posture.md](../development/security-posture.md)
@@ -87,7 +87,7 @@ an ordinary function call — no page-table switch, no TLB cost, no
 context switch.
 
 **How Rux already does it.** The layer map is the mechanism:
-`framekernel-layers.md` classifies every module as *framework*
+`kernel-layers.md` classifies every module as *framework*
 (the `unsafe` interior: mm, sync), *service* (everything that may be
 made safe), *diagnostics* (dfx) or *test*. A service file that carries
 no `unsafe` gets `#![forbid(unsafe_code)]` — the compiler then

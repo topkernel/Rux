@@ -1298,7 +1298,7 @@ pub fn socket_accept_wait_round(socket: &Socket, deadline: Option<u64>) -> Resul
 // ============================================================================
 
 /// Safe-typed socket introspection for the syscall capsule layer
-/// (framekernel): the socket type carried by an INET socket file.
+/// (kernel): the socket type carried by an INET socket file.
 /// `None` for non-INET files (ops identity gate) and for files whose
 /// private_data was never installed.
 pub fn inet_socket_type(file: &File) -> Option<SocketType> {

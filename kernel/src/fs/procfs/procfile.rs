@@ -57,7 +57,7 @@
 //! column order, rendered order and call order are one artifact.
 //! First conversions: /proc/stat + /proc/schedstat cpu rows.
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

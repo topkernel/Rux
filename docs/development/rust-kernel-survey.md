@@ -163,7 +163,7 @@ this for fixes; extend it to performance experiments.
 ## Part B — Rust kernel landscape, 2020–2026
 
 The mission closest to ours is **Asterinas**: a Linux-ABI-compatible
-Rust kernel ("framekernel" — one address space like a monolith, but a
+Rust kernel ("kernel" — one address space like a monolith, but a
 privileged framework / unprivileged services split enforced by safe
 Rust). At USENIX ATC 2025 it reported 210+ Linux system calls, Linux-par
 performance, and a memory-safety TCB of ~14% of the codebase, built on
@@ -176,7 +176,7 @@ user-memory access that returns `Result` instead of faulting, and
 deferred-work APIs with an explicit context. We are not adopting the
 framework itself (their architecture differs), but every new x86_64 file
 is written to those conventions. Sources:
-[The Framekernel Architecture](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html),
+[The Kernel Architecture](https://asterinas.github.io/book/kernel/the-kernel-architecture.html),
 [ATC'25 paper PDF](https://www.usenix.org/system/files/atc25-peng-yuke.pdf),
 [arXiv:2506.03876](https://arxiv.org/abs/2506.03876),
 [LWN coverage](https://lwn.net/Articles/1022920/).
@@ -277,7 +277,7 @@ Deferred (post-Uuntu-gate): A4 fast-path syscalls (ABI audit first),
 A6 fork family (each behind a measurement), full `Result`-ification of
 internal APIs (new code only — no retro-churn).
 
-Sources: [Asterinas book](https://asterinas.github.io/book/kernel/the-framekernel-architecture.html),
+Sources: [Asterinas book](https://asterinas.github.io/book/kernel/the-kernel-architecture.html),
 [Asterinas ATC'25 PDF](https://www.usenix.org/system/files/atc25-peng-yuke.pdf),
 [arXiv:2506.03876](https://arxiv.org/abs/2506.03876),
 [LWN: Asterinas](https://lwn.net/Articles/1022920/),

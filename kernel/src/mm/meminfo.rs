@@ -13,7 +13,7 @@
 //! - Per-CPU Pages cache
 //! - Page descriptor status
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

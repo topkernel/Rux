@@ -40,7 +40,7 @@
 //! truncated to their field widths (and NOT truncated for the
 //! superblock, which stores the full 32 bits).
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 

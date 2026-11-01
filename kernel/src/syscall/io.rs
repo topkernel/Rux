@@ -6,7 +6,7 @@
 //!
 //! Includes: read, write,writev, dup, dup2, fcntl, ioctl, flock, pipe2
 
-// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// Kernel layer policy (docs/architecture/kernel-layers.md):
 // the syscall layer is the capsule boundary — validate/translate user
 // args at entry (arch::uaccess_safe + access_ok), run on kernel-owned
 // types after. This module must stay Safe Rust: the user-memory
@@ -1311,7 +1311,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         // ext4: persist into the on-disk i_flags so the flags survive an
         // icache eviction (the VFS copy is reseeded from disk at iget).
         // The ops-identity gate and EXT4_BIG_LOCK discipline live in the
-        // ext4-owned entry (framekernel: fs internals behind a typed fn).
+        // ext4-owned entry (kernel: fs internals behind a typed fn).
         crate::fs::ext4::inode::persist_ioc_flags(inode, merged);
         return 0;
     }

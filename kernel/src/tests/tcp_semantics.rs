@@ -20,7 +20,7 @@
 //! — so reorder/duplicate/retransmit scenarios that the loopback wire
 //! cannot produce are exact and deterministic.
 //!
-//! Framekernel layer policy (docs/architecture/framekernel-layers.md):
+//! Kernel layer policy (docs/architecture/kernel-layers.md):
 //! this module must stay Safe Rust.
 #![forbid(unsafe_code)]
 
