@@ -822,6 +822,22 @@ pub struct Task {
     /// CPU affinity mask — bit i set = CPU i allowed
     cpus_allowed: core::sync::atomic::AtomicU32,
 
+    /// jiffies of this task's most recent task-context base-count DRAIN
+    /// (the outermost guard's 1->0 release — a live lock pair completing).
+    /// phantom-bits (2026-11-01): the tick-side PREEMPT-HEAL's cumulative
+    /// observation bar false-fired on hot lock users (pb3: 887 heals/boot,
+    /// 96% on 4 lock-hot pids, oage_jif=0-1 — a fresh 0->1 acquire inside
+    /// the "2 s hold", i.e. the base drained between ticks and the 100 Hz
+    /// sampler never caught the gaps). Every false heal strips a LIVE
+    /// guard, marks need_resched, and preempts the holder MID-SECTION —
+    /// stranding its lock for every other CPU (the both-CPU
+    /// spin/deadlock amplifier). The heal now requires the base to have
+    /// been nonzero CONTIGUOUSLY: any real 1->0 release stamps this field
+    /// and re-arms the window. Direct zeroings (heal paths) do NOT stamp
+    /// (they bypass sub_preempt_count_at), so genuine phantoms — whose
+    /// +1 never drains — still heal after 2 s.
+    ti_pc_zero_jif: AtomicU64,
+
     /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
     /// Per-task storage replaces the old pid-indexed side table — real pids
@@ -1523,6 +1539,7 @@ impl Task {
             // thread_info style fields
             ti_flags: AtomicU32::new(0),
             ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
+            ti_pc_zero_jif: AtomicU64::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -4062,6 +4079,21 @@ impl Task {
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
             crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits: a LIVE outermost pair just completed — stamp
+            // so the tick-side heal window restarts (hot lock users must
+            // not be adjudicated as phantom holders).
+            self.ti_pc_zero_jif.store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        // phantom-bits: softirq field drained to zero — the +0x100
+        // acquire paired; drop the shadow so a later orphan report names
+        // only still-unpaired bookings.
+        if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
+            && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
+        {
+            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
         }
         let after = prev.wrapping_sub(val);
         if after < 0 {
@@ -4084,6 +4116,12 @@ impl Task {
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
             crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            // phantom-bits: live pair completed — heal window re-arms
+            // (see sub_preempt_count_at).
+            self.ti_pc_zero_jif.store(
+                crate::drivers::timer::get_jiffies(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
         let after = prev.wrapping_sub(val);
         if after < 0 {
@@ -4171,6 +4209,13 @@ impl Task {
     #[inline]
     pub fn ti_cpu(&self) -> i32 {
         self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// jiffies of the most recent task-context base-count drain
+    /// (phantom-bits contiguity bar for the tick-side heal; 0 = never).
+    #[inline]
+    pub fn ti_pc_zero_jif(&self) -> u64 {
+        self.ti_pc_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set running CPU (thread_info.cpu)

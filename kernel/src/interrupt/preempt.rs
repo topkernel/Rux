@@ -139,7 +139,7 @@ pub fn preemptible() -> bool {
 #[track_caller]
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
-        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
+        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET || val == SOFTIRQ_OFFSET)
             && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         {
             let c0 = task.preempt_count();
@@ -149,13 +149,21 @@ pub fn preempt_count_add(val: i32) {
                     core::panic::Location::caller(),
                     c0.wrapping_add(1),
                 );
-            } else {
+            } else if val == HARDIRQ_OFFSET {
                 // s14 hardirq shadow: with irq_enter #[track_caller],
                 // Location::caller() names the trap dispatch site.
                 crate::dfx::leakorigin::note_hardirq_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(HARDIRQ_OFFSET),
+                );
+            } else {
+                // phantom-bits softirq shadow: names the +0x100 booker
+                // (__do_softirq bracket or SeqLock::write).
+                crate::dfx::leakorigin::note_softirq_acquire(
+                    task,
+                    core::panic::Location::caller(),
+                    c0.wrapping_add(SOFTIRQ_OFFSET),
                 );
             }
         }
@@ -291,6 +299,11 @@ static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
     [const { core::sync::atomic::AtomicUsize::new(0) };
         crate::config::MAX_CPUS];
 
+/// Softirq starvation bound for the irq_exit deferral gate (phantom-bits):
+/// 20 ms of the timer timebase. See irq_exit.
+const SOFTIRQ_STARVE_TICKS: u64 =
+    20 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+
 /// Exit IRQ context — decrement hardirq count and process softirqs
 ///
 /// Called at the end of hardware interrupt handling.
@@ -332,21 +345,58 @@ pub fn irq_exit() {
     // lock the interrupted holder owns (lock_bh was a lie before). Deferring
     // to ksoftirqd is always safe.
     //
+    // phantom-bits (2026-11-01): the same deferral now also applies when
+    // the interrupted task holds ANY task-context base count (a live
+    // spinlock guard books PREEMPT_OFFSET). Softirq handlers take the
+    // same locks syscall code takes (net rx → socket queues → unix
+    // registry); an inline dispatch over a spinning lock holder wedges
+    // the CPU forever: the handler spins with preemption disabled inside
+    // an IF=0 window — the tick cannot land (no heal, no preemption),
+    // the holder cannot resume (its CPU never exits the window), and the
+    // task shows up as the unpreemptible monopolist (preempt=0x100/0x101/
+    // 0x102, CFS-undefeatable, the lb60 pid-552 / lb55 UNIX_TABLE
+    // both-CPU DEADLOCK family). Deferring costs one ksoftirqd wake —
+    // the reference kernel's backlog-to-ksoftirqd behavior under the
+    // equivalent condition (its irq_exit runs softirqs inline only
+    // outside interrupt context; its task-side users of softirq-shared
+    // locks disable bh for exactly this reason).
+    //
     // Dispatch black hole fix (UART perf gate round 2, 2026-10-20): the
     // timer IRQ raises its softirqs via raise_softirq_irqoff (no
-    // ksoftirqd wake — it expects THIS path to run them). When the skip
-    // fires, nothing else ever dispatches them until some LATER IRQ
-    // happens to exit outside a bh section — a task looping through
-    // lock_bh sections with sub-tick iterations starved its CPU's
-    // Hrtimer softirq for seconds (TIMER-SOFTIRQ-STALL tick_age=0ms
-    // shape: ticks arriving, dispatch skipped). Linux drains at
-    // local_bh_enable(); until that exists here, waking ksoftirqd at the
-    // skip point closes the hole: the pending bits stay set, and the
-    // woken kthread drains them as soon as the scheduler picks it.
+    // ksoftirqd wake — it expects THIS path to run them). Every deferral
+    // branch therefore wakes ksoftirqd: the pending bits stay set, and
+    // the woken kthread drains them as soon as the scheduler picks it.
+    //
+    // phantom-bits starvation bound: deferral assumes ksoftirqd can
+    // eventually run on this CPU. A task busy-polling I/O completion
+    // with a guard held (bio/queue waiters hold lock_irqsave — base != 0)
+    // never yields, ksoftirqd never runs, and the completions the poller
+    // waits for ARE the deferred softirqs — a deadlock the make-test
+    // boot caught live (VW-WEDGE disk=0 used=28 irqs=0 at sgid_mode).
+    // Escape hatch: when this CPU has not run ANY softirq window for 20 ms
+    // (SOFTIRQ_WIN_T0 stamps every dispatch, inline or ksoftirqd), force
+    // the inline dispatch anyway. Strictly no worse than the old
+    // unconditional inline dispatch: a holder still spinning after 20 ms
+    // of protected deferral is exactly the case the old behavior wedged
+    // on; every shorter hold — the overwhelming majority — keeps the
+    // protection.
     if crate::sched::current().is_some() {
-        if !in_irq() && !in_softirq() {
+        let cpu = crate::arch::cpu_id() as usize;
+        let mut starved = false;
+        if cpu < crate::config::MAX_CPUS {
+            let t0 = crate::interrupt::softirq::SOFTIRQ_WIN_T0[cpu]
+                .load(core::sync::atomic::Ordering::Acquire);
+            let now = crate::drivers::timer::read_time();
+            if t0 == 0 || now.saturating_sub(t0) >= SOFTIRQ_STARVE_TICKS {
+                starved = true;
+            }
+        } else {
+            starved = true;
+        }
+        let base = preempt_count() & PREEMPT_MASK;
+        if !in_irq() && !in_softirq() && (base == 0 || starved) {
             crate::interrupt::softirq::invoke_softirq();
-        } else if !in_irq() && in_softirq() {
+        } else if !in_irq() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
         }
     }
@@ -391,6 +441,138 @@ pub fn irqentry_nmi_enter() {
 #[inline]
 pub fn irqentry_nmi_exit() {
     nmi_exit();
+}
+
+/// Tick-side orphan scan (phantom-bits, 2026-11-01): the interrupted
+/// task's preempt_count at tick ENTRY (TICK_ENTRY_PC — before this
+/// tick's own booking) names bits it carried INTO the tick. Two of
+/// those are always orphans — bookings whose release never executed:
+///   * the SOFTIRQ bit (0x100) while no softirq window is open on this
+///     CPU (a live __do_softirq bracket keeps in_progress set; a
+///     SeqLock::write section is irq-off, untickable) — the monopolist
+///     face of the lb60 dump;
+///   * ANY hardirq bit (the tick's own 0x10000 is not in the entry
+///     snapshot) — the stranded-0x10000 face.
+/// Prints (cpu, pid, pctick was -> pc now, sched-slot divergence) and
+/// asks the leakorigin shadow for the booking site (ssite/hsite: the
+/// producer's file:line). Per-CPU 50-jiffy spacing; the first firing
+/// after boot IS the producer's capture.
+///
+/// The one unsafe read (the sched slot's task pid) follows the
+/// irq_pair_report promotion discipline: a diagnostic scalar read of a
+/// pointer this CPU published moments before.
+#[allow(unsafe_code)]
+pub fn tick_orphan_scan(cpu_id: usize) {
+    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if cpu_id >= crate::config::MAX_CPUS {
+        return;
+    }
+    let entry = TICK_ENTRY_PC[cpu_id].load(core::sync::atomic::Ordering::Relaxed) as i32;
+    let soft_orphan = (entry & SOFTIRQ_MASK) != 0
+        && !crate::interrupt::softirq::in_progress_cpu(cpu_id);
+    let hard_orphan = (entry & HARDIRQ_MASK) != 0;
+    if !soft_orphan && !hard_orphan {
+        return;
+    }
+    let Some(task) = crate::sched::current() else {
+        return;
+    };
+    static LAST: [core::sync::atomic::AtomicU64; crate::config::MAX_CPUS] =
+        [const { core::sync::atomic::AtomicU64::new(0) };
+            crate::config::MAX_CPUS];
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST[cpu_id].load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 50 {
+        return;
+    }
+    if LAST[cpu_id]
+        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..8).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    fn pd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 12];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    let pc_now = task.preempt_count();
+    let pid = task.pid();
+    let slot_task = crate::sched::sched::cpu_state(cpu_id).current as usize;
+    let slot_pid = if slot_task >= 0x8000_0000_0000_0000 {
+        // SAFETY: diagnostic scalar read of the sched slot's task; it
+        // was this CPU's published pick.
+        unsafe { (*(slot_task as *mut crate::process::Task)).pid() }
+    } else {
+        0
+    };
+    for &c in b"\nBIT-ORPHAN cpu=" {
+        putchar(c);
+    }
+    pd(cpu_id as u64);
+    for &c in b" pid=" {
+        putchar(c);
+    }
+    pd(pid as u64);
+    for &c in b" pctick=0x" {
+        putchar(c);
+    }
+    ph(entry as u32 as u64);
+    for &c in b" pcnow=0x" {
+        putchar(c);
+    }
+    ph(pc_now as u32 as u64);
+    if soft_orphan {
+        for &c in b" soft=1" {
+            putchar(c);
+        }
+    }
+    if hard_orphan {
+        for &c in b" hard=1" {
+            putchar(c);
+        }
+    }
+    if slot_task != task as *mut _ as usize {
+        for &c in b" slotdiv=1 slotpid=" {
+            putchar(c);
+        }
+        pd(slot_pid as u64);
+    }
+    putchar(b'\n');
+    if soft_orphan {
+        crate::dfx::leakorigin::report_softirq_origin(
+            b"BIT-ORPHAN-SOFTIRQ",
+            task,
+        );
+    }
+    if hard_orphan {
+        crate::dfx::leakorigin::report_hardirq_origin(
+            b"BIT-ORPHAN-HARDIRQ",
+            task,
+        );
+    }
 }
 
 /// s14 IRQ-PAIR split report: the outermost hardirq bracket booked

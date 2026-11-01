@@ -60,6 +60,25 @@ struct LoSlot {
     hsite: AtomicUsize,
     /// jiffies at that HARDIRQ acquire.
     hjif: AtomicU64,
+    // ---- phantom-bits (2026-11-01): SOFTIRQ-bit shadow ----
+    // The monopolist face of the eighth successor's lb60 dump (pid 552,
+    // preempt=0x100, RUNNING, CFS-undefeatable) strands exactly ONE
+    // SOFTIRQ_OFFSET whose release never executed anywhere (zero
+    // sub=0x100 underflows all boot; SOFTIRQ-BRACKET-LEAK silent). Only
+    // two +0x100 bookers exist on this tree (__do_softirq's bracket and
+    // SeqLock::write's stats sections) — this shadow names which one
+    // booked a stranded bit, and the tick-side orphan scan
+    /// (preempt::tick_orphan_scan) reports it while the bit sits.
+    /// `&'static Location` of the most recent SOFTIRQ_OFFSET acquire.
+    ssite: AtomicUsize,
+    /// jiffies at that SOFTIRQ acquire.
+    sjif: AtomicU64,
+    /// CPU id where it ran.
+    scpu: AtomicU32,
+    /// 1 = at acquire time this CPU's sched slot named a DIFFERENT task
+    /// (booking resolved through tp; the slot is the heal's observer —
+    /// divergence means the heal watches the wrong task for this bit).
+    smis: AtomicU32,
     /// One report per leak episode (cleared on each new acquire).
     reported: AtomicBool,
     // ---- preempt-hunt (2026-11-01): OUTERMOST acquire tap ----
@@ -105,6 +124,10 @@ static TABLE: [LoSlot; SLOTS] = {
         cnt_after: AtomicI32::new(0),
         hsite: AtomicUsize::new(0),
         hjif: AtomicU64::new(0),
+        ssite: AtomicUsize::new(0),
+        sjif: AtomicU64::new(0),
+        scpu: AtomicU32::new(0),
+        smis: AtomicU32::new(0),
         reported: AtomicBool::new(false),
         otask: AtomicUsize::new(0),
         osite: AtomicUsize::new(0),
@@ -433,6 +456,206 @@ pub fn note_hardirq_acquire(
     slot.reported.store(false, Ordering::Release);
 }
 
+/// Record a SOFTIRQ_OFFSET acquire (last wins; phantom-bits extension —
+/// the stranded-0x100 monopolist face). `loc` is softirq.rs's
+/// `__do_softirq` entry or seqlock.rs's `write` with #[track_caller]
+/// propagation, so a stranded 0x100 names its booker directly. Also
+/// stamps tp-vs-sched-slot divergence at booking time: a divergent
+/// booking is the switch-window family (the release then lands on the
+/// task tp names at ITS time, splitting the pair).
+#[inline]
+pub fn note_softirq_acquire(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cnt_after: i32,
+) {
+    let slot = slot_of(task);
+    slot.task.store(task as usize, Ordering::Release);
+    slot.ssite.store(loc as *const Location as usize, Ordering::Release);
+    slot.sjif
+        .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+    let cpu = crate::arch::cpu_id() as u32;
+    slot.scpu.store(cpu, Ordering::Release);
+    let mis = if (cpu as usize) < crate::config::MAX_CPUS {
+        // Volatile racy diagnostic read (same discipline as note_acquire).
+        let slot_task = unsafe {
+            core::ptr::read_volatile(
+                &crate::sched::sched::cpu_state(cpu as usize).current
+                    as *const *mut crate::process::Task
+            ) as usize
+        };
+        if slot_task != task as usize { 1 } else { 0 }
+    } else {
+        2
+    };
+    slot.smis.store(mis, Ordering::Release);
+}
+
+/// Softirq field drained to zero: the acquire paired — drop the shadow.
+#[inline]
+pub fn note_softirq_release(task: *mut crate::process::Task) {
+    let slot = slot_of(task);
+    slot.ssite.store(0, Ordering::Release);
+}
+
+/// Hardirq orphan twin (phantom-bits): print the recorded hsite for a
+/// task observed carrying a hardirq bit at tick ENTRY (stranded from an
+/// earlier bracket — the tick's own booking is not in that snapshot).
+pub fn report_hardirq_origin(tag: &[u8], task: *mut crate::process::Task) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let slot = slot_of(task);
+    let site = slot.hsite.load(Ordering::Acquire) as *const Location;
+    if site.is_null() {
+        return;
+    }
+    static HBUDGET: AtomicU32 = AtomicU32::new(120);
+    let b = HBUDGET.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if HBUDGET
+        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn putd(mut v: u64) {
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    for &c in b"\n" {
+        putchar(c);
+    }
+    for &c in tag {
+        putchar(c);
+    }
+    for &c in b" pid=" {
+        putchar(c);
+    }
+    putd(unsafe { (*task).pid() } as u64);
+    // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
+    let loc = unsafe { &*site };
+    for &c in b" hsite=" {
+        putchar(c);
+    }
+    for &c in loc.file().as_bytes() {
+        putchar(c);
+    }
+    putchar(b':');
+    putd(loc.line() as u64);
+    for &c in b" hage_jif=" {
+        putchar(c);
+    }
+    putd(
+        crate::drivers::timer::get_jiffies()
+            .wrapping_sub(slot.hjif.load(Ordering::Acquire)),
+    );
+    putchar(b'\n');
+}
+
+/// Print the SOFTIRQ acquire record for `task` (the phantom-bits tap):
+/// names the site that booked a still-set 0x100. Called from the
+/// tick-side orphan scan (preempt.rs) and the heal reports. Budgeted
+/// separately so orphan lines cannot be starved.
+pub fn report_softirq_origin(tag: &[u8], task: *mut crate::process::Task) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let slot = slot_of(task);
+    let site = slot.ssite.load(Ordering::Acquire) as *const Location;
+    if site.is_null() {
+        return; // armed late / wild write (no booking record)
+    }
+    static SBUDGET: AtomicU32 = AtomicU32::new(240);
+    let b = SBUDGET.load(Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    if SBUDGET
+        .compare_exchange(b, b - 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn putd(mut v: u64) {
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    for &c in b"\n" {
+        putchar(c);
+    }
+    for &c in tag {
+        putchar(c);
+    }
+    for &c in b" pid=" {
+        putchar(c);
+    }
+    putd(unsafe { (*task).pid() } as u64);
+    for &c in b" pc=0x" {
+        putchar(c);
+    }
+    let pc = unsafe { (*task).preempt_count() } as u32 as u64;
+    for sh in (0..8).rev() {
+        let n = ((pc >> (sh * 4)) & 0xF) as u8;
+        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+    }
+    // SAFETY: stored from a &'static Location (see note_softirq_acquire).
+    let loc = unsafe { &*site };
+    for &c in b" ssite=" {
+        putchar(c);
+    }
+    for &c in loc.file().as_bytes() {
+        putchar(c);
+    }
+    putchar(b':');
+    putd(loc.line() as u64);
+    for &c in b" scpu=" {
+        putchar(c);
+    }
+    putd(slot.scpu.load(Ordering::Acquire) as u64);
+    if slot.smis.load(Ordering::Acquire) != 0 {
+        for &c in b" smis=1" {
+            putchar(c);
+        }
+    }
+    for &c in b" sage_jif=" {
+        putchar(c);
+    }
+    putd(
+        crate::drivers::timer::get_jiffies()
+            .wrapping_sub(slot.sjif.load(Ordering::Acquire)),
+    );
+    putchar(b'\n');
+}
+
 /// User-mode return tripwire. Call at the trap-handler tail when the
 /// frame returns to userspace: preempt_count MUST be 0 there. Direct
 /// console, latched per episode, budgeted.
@@ -722,6 +945,26 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
             putchar(c);
         }
         put_i64(now.wrapping_sub(slot.hjif.load(Ordering::Acquire)) as i64);
+    }
+    // phantom-bits: the SOFTIRQ acquire shadow — names which +0x100
+    // booker (__do_softirq bracket vs SeqLock::write) owns a stranded
+    // softirq bit on this task, and when.
+    let ssite = slot.ssite.load(Ordering::Acquire) as *const Location;
+    if slot.task.load(Ordering::Acquire) == task as usize && !ssite.is_null() {
+        // SAFETY: stored from a &'static Location (see note_softirq_acquire).
+        let loc = unsafe { &*ssite };
+        for &c in b" ssite=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        put_i64(loc.line() as i64);
+        for &c in b" sage_jif=" {
+            putchar(c);
+        }
+        put_i64(now.wrapping_sub(slot.sjif.load(Ordering::Acquire)) as i64);
     }
     for &c in b" cnt_after=" {
         putchar(c);

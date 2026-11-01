@@ -1094,6 +1094,16 @@ pub fn rust_main_tail() -> ! {
             } else {
                 // All tests passed, normal exit
                 println!("\nAll tests passed! Halting...");
+                // phantom-bits: drain pending softirqs before parking.
+                // The irq-exit deferral gate may have left completions
+                // armed for ksoftirqd — which can never run inside a
+                // pure WFI loop (no schedule() ever happens again), so
+                // in-flight block completions stall forever with the
+                // virtio wedge watchdog printing until the wrapper
+                // timeout (the make-test halt-time VW-WEDGE spam).
+                while crate::interrupt::softirq::has_pending_softirqs() {
+                    let _ = crate::interrupt::softirq::__do_softirq();
+                }
                 loop {
                     crate::arch::cpu::wfi();
                 }
