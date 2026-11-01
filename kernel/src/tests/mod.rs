@@ -224,6 +224,8 @@ pub mod mount_flags;
 #[cfg(feature = "unit-test")]
 pub mod percpu;
 pub mod lockkey;
+#[cfg(feature = "unit-test")]
+pub mod sync_locks;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -500,6 +502,11 @@ pub fn run_all_tests() {
     // mechanics + the GRQ claim pattern.
     test_group_start("lockkey");
     lockkey::test_lockkey();
+
+    // Sync primitives (review-s2-c): SeqLock writer-guard accounting
+    // (the try_write fix) + RwSpinlock two-phase write mechanics.
+    test_group_start("sync_locks");
+    sync_locks::test_sync_locks();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();

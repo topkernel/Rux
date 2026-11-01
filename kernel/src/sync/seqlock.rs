@@ -143,13 +143,22 @@ impl<T: Copy> SeqLock<T> {
     }
 
     /// Try to acquire the writer lock. Returns None if a writer is active.
+    ///
+    /// Accounting must mirror `write()`/`Drop` exactly (R21-N5): the old
+    /// body added PREEMPT_OFFSET here while the guard's Drop subtracts
+    /// SOFTIRQ_OFFSET — a successful try_write left preempt_count at
+    /// 1 − 256 = −255 (underflow: the task looked in_interrupt() forever
+    /// after; the leakorigin user-return tripwire would have flagged it).
+    /// No in-tree caller existed yet, so the bug was latent.
     #[inline]
     pub fn try_write(&self) -> Option<SeqLockWriteGuard<'_, T>> {
-        preempt_disable();
+        preempt_disable_bh();
+        let irq_state = crate::arch::cpu::save_and_disable_irq();
         if self.raw.try_write_lock() {
-            Some(SeqLockWriteGuard { lock: self, irq_state: crate::arch::cpu::save_and_disable_irq() })
+            Some(SeqLockWriteGuard { lock: self, irq_state })
         } else {
-            preempt_enable();
+            crate::arch::cpu::restore_irq(irq_state);
+            preempt_enable_bh();
             None
         }
     }
@@ -257,4 +266,17 @@ fn preempt_disable() {
 #[inline]
 fn preempt_enable() {
     crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::PREEMPT_OFFSET);
+}
+
+/// BH-variant bracket used by the writer guards (R21-N5): `write()` and
+/// `try_write()` add SOFTIRQ_OFFSET (which also disables preemption) and
+/// `SeqLockWriteGuard::drop` subtracts the same — see there.
+#[inline]
+fn preempt_disable_bh() {
+    crate::interrupt::preempt::preempt_count_add(crate::interrupt::preempt::SOFTIRQ_OFFSET);
+}
+
+#[inline]
+fn preempt_enable_bh() {
+    crate::interrupt::preempt::preempt_count_sub(crate::interrupt::preempt::SOFTIRQ_OFFSET);
 }
