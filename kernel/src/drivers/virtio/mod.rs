@@ -2360,6 +2360,74 @@ pub fn vw_report(tag: &str) {
     }
 }
 
+/// One-line direct-console virtio ring snapshot (VW-SNAP): the same
+/// fields as the watchdog's VW-WEDGE, printed through putchar_no_lock —
+/// pr_err-based reports were silently dropped from the audit context on
+/// the OH boots (lb70/lb71: dump printed, VW-REPORT never landed).
+/// Called from the txn-hang-20s trigger.
+pub fn vw_snap_direct() {
+    use crate::console::putchar_no_lock as putchar;
+    fn pd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut b = [0u8; 20];
+        let mut n = 0usize;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < b.len() {
+            b[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            putchar(b[i]);
+        }
+    }
+    fn ps(s: &[u8]) {
+        use crate::console::putchar_no_lock as putchar;
+        for &c in s {
+            putchar(c);
+        }
+    }
+    ps(b"\nVW-SNAP pending=0x");
+    pd(crate::interrupt::softirq::softirq_pending_raw(0) as u64);
+    putchar(b'/');
+    pd(crate::interrupt::softirq::softirq_pending_raw(1) as u64);
+    ps(b" walks=");
+    pd(VW_WALKS.load(core::sync::atomic::Ordering::Acquire));
+    for disk in 0..MAX_PCI_BLK_DISKS {
+        if !PCI_BLK_READY[disk].load(core::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        let (used_ring, _qsz) = match get_pci_device_queue_at(disk) {
+            Some(q) => (q.used_ring_ptr(), q.queue_size),
+            None => continue,
+        };
+        // SAFETY: same idx read as the walker's fast path.
+        let used_idx = unsafe {
+            core::ptr::read_volatile((used_ring as usize + 2) as *const u16)
+        };
+        ps(b" | d");
+        pd(disk as u64);
+        ps(b" used=");
+        pd(used_idx as u64);
+        ps(b" last=");
+        pd(PCI_BLK_PENDING_LAST[disk].load(core::sync::atomic::Ordering::Acquire) as u64);
+        ps(b" shadow=");
+        pd(get_pci_device_queue_at(disk)
+            .map(|q| q.avail_shadow_snapshot())
+            .unwrap_or(0) as u64);
+        ps(b" unkicked=");
+        pd(PCI_BLK_UNKICKED[disk].load(core::sync::atomic::Ordering::Acquire) as u64);
+        ps(b" irqs=");
+        pd(VW_IRQS[disk].load(core::sync::atomic::Ordering::Acquire));
+    }
+    putchar(b'\n');
+}
+
 /// Timer-cadence lag watchdog: called once per jiffy from the Timer
 /// softirq (the context that keeps running when everything else wedges).
 /// When a ready disk's used ring runs ahead of the walker for >= 3s,
