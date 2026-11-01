@@ -4,27 +4,26 @@ lat_syscall write
 lat_syscall stat
 lat_syscall fstat
 lat_syscall open
-lat_pagefault 1M
-lat_mmap 1M
+lat_pagefault /tmp/lmbench.file
+lat_mmap 1m /tmp/lmbench.file
 lat_pipe
 lat_unix
-lat_fifo
-lat_ctx 2 4 8
+lat_ctx -s 64 2
+lat_ctx -s 64 8
 lat_proc fork
 lat_proc exec
 lat_sem
-lat_fs 1k
-lat_mem_rd 512
-lat_mem_rd 1m
-bw_mem 1m
-bw_mem 4m
+lat_fs -s 1k
+lat_mem_rd -s 1048576 -e 1048576 1
+lat_mem_rd -s 268435456 -e 268435456 256
+bw_mem 1m bcopy
+bw_mem 4m bzero
 bw_pipe
 bw_unix
-bw_file_rd 1m
-bw_mmap_rd 1m
-lat_tcp
-lat_udp
-lat_connect
-bw_tcp
-bw_udp
-lat_usleep
+bw_file_rd 1m io_only /tmp/lmbench.file
+bw_mmap_rd 1m mmap_only /tmp/lmbench.file
+lat_tcp 127.0.0.1
+lat_udp 127.0.0.1
+lat_connect 127.0.0.1
+bw_tcp 127.0.0.1
+lat_usleep 1000
