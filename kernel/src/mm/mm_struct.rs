@@ -1173,7 +1173,12 @@ impl Drop for MmStruct {
             if crate::interrupt::preempt::preempt_count() == 0
                 && crate::arch::cpu::get_interrupts_state()
             {
-                crate::sync::rcu::synchronize_rcu();
+                // BOUNDED (lb125 decode): the unbounded wait froze every
+                // exit — and init, and the whole service graph — behind
+                // monopolist windows; see synchronize_rcu_bounded. The
+                // bound matches the deferred_free wall-clock discipline
+                // (1.5 s) that still holds the struct free afterwards.
+                crate::sync::rcu::synchronize_rcu_bounded(1500, "mm-drop");
             }
             if fp {
                 crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_RCU, fp_t_rcu);

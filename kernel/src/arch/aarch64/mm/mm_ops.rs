@@ -475,82 +475,42 @@ impl MmStruct {
         if is_fixed {
             // Reference-kernel semantics: MAP_FIXED replaces only the
             // covered range; overlapping VMAs are SPLIT with
-            // type/flags/fd/offset preserved, and the whole surgery —
-            // snapshot, remove, piece re-add, PTE zap, replacement
-            // install — runs under ONE vma_write guard (twin ATOMICITY
-            // note; unmap_pages takes no VMA lock, so the extended hold
-            // is safe).
-            let fixed_end = PageVirtAddr::new(start.as_usize() + aligned_size);
-            let test_vma = Vma::new(start, fixed_end, flags);
-
-            let mut vma_mgr = self.vma_write();
-
-            let overlapping: Vec<(
-                Vma,
-                Option<alloc::sync::Arc<crate::fs::file::File>>,
-            )> = vma_mgr
-                .iter()
-                .filter(|v| v.overlaps(&test_vma))
-                .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
-                .collect();
-
-            let mut kept: Vec<(
-                Vma,
-                Option<alloc::sync::Arc<crate::fs::file::File>>,
-            )> = Vec::new();
-            for (vma, file) in overlapping.iter() {
-                if vma.start().as_usize() < start.as_usize() {
-                    if let Some((head, _)) =
-                        vma.split(PageVirtAddr::new(start.as_usize()))
-                    {
-                        kept.push((head, file.clone()));
+            // type/flags/fd/offset preserved. Whole-range teardown via
+            // the CHUNKED munmap loop (the same bounded-hold discipline
+            // as sys_munmap — see munmap; the old shape held vma_write
+            // across the ENTIRE fixed range's surgery AND PTE-zap walk,
+            // the whole-range VMA-lock convoy shape). The install
+            // re-checks under its own guard; a same-mm racer landing in
+            // the cleared gap is cleared by one bounded retry (a legal
+            // linearization for concurrent mmap/MAP_FIXED on the same
+            // range). Split head/tail preservation and pin (vm_file)
+            // discipline are munmap's own.
+            let mut attempts = 0;
+            loop {
+                self.munmap(start, aligned_size)?;
+                let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+                let mut vma_mgr = self.vma_write();
+                let test_vma = Vma::new(start, end, flags);
+                if vma_mgr.iter().any(|v| v.overlaps(&test_vma)) {
+                    // a same-mm racer mapped into the gap after the last
+                    // teardown pass; drop the guard and clear it too
+                    drop(vma_mgr);
+                    attempts += 1;
+                    if attempts >= 8 {
+                        return Err(MapError::OutOfMemory);
                     }
+                    continue;
                 }
-                if vma.end().as_usize() > fixed_end.as_usize() {
-                    let mut tail = Vma::new(fixed_end, vma.end(), vma.flags());
-                    tail.set_type(vma.vma_type());
-                    tail.set_origin(vma.origin());
-                    tail.set_file_fd(vma.file_fd());
-                    tail.set_file_size(vma.file_size());
-                    tail.set_offset(
-                        vma.offset() + (fixed_end.as_usize() - vma.start().as_usize()),
-                    );
-                    kept.push((tail, file.clone()));
-                }
+                let mut vma = Vma::new(start, end, flags);
+                vma.set_type(vma_type);
+                vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
+                vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
+                drop(vma_mgr);
+                self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+                self.update_highest_vm_end(end.as_usize());
+                vma_installed = true;
+                break;
             }
-
-            for (vma, _) in overlapping.iter() {
-                // The replaced range leaves the mapping: release its
-                // virtual-size charge (head/tail pieces stay charged).
-                self.release_unmapped_pages(
-                    vma.start().as_usize(),
-                    vma.end().as_usize(),
-                    start.as_usize(),
-                    fixed_end.as_usize(),
-                );
-                let _ = vma_mgr.remove(vma.start());
-                self.unpin_vma_file(vma.start().as_usize());
-            }
-            for (piece, file) in kept {
-                let _ = vma_mgr.add(piece.clone());
-                if let Some(f) = file {
-                    self.pin_vma_file(piece.start().as_usize(), f);
-                }
-            }
-
-            // PTE teardown under PTE_MODIFY_LOCK (unmap_pages).
-            self.unmap_pages(start, aligned_size)?;
-
-            // Install the replacement VMA under the SAME guard.
-            let end = PageVirtAddr::new(start.as_usize() + aligned_size);
-            let mut vma = Vma::new(start, end, flags);
-            vma.set_type(vma_type);
-            vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
-            vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
-            drop(vma_mgr);
-            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
-            self.update_highest_vm_end(end.as_usize());
-            vma_installed = true;
         }
 
         if !vma_installed {
@@ -642,64 +602,101 @@ impl MmStruct {
             }
         }
 
-        let end_addr = addr.as_usize() + aligned_size;
+        let addr_us = addr.as_usize();
+        let end_addr = addr_us + aligned_size;
 
-        // VMA surgery AND PTE zap under ONE vma_write guard (twin
-        // mm-audit: releasing the guard between the two exposes the range
-        // as free while its PTEs are still live). Pin-table discipline:
-        // a split FILE VMA's tail re-pins at its own start.
-        {
+        // VMA-lock convoy bound (twin of the x86_64 fix; the OH
+        // service-graph crawl): the old shape collected the surgery for
+        // the WHOLE range and ran the entire PTE-zap walk under ONE
+        // vma_write() hold — a multi-MB unmap parked every same-mm VMA
+        // user (sys_brk above all) for the full zap PLUS scheduler
+        // starvation of the holder. The surgery is CHUNKED: each
+        // iteration removes at most MUNMAP_CHUNK_BYTES of ONE VMA — that
+        // piece's surgery AND its PTE zap still share ONE guard
+        // (mm-audit rule: a racing mmap may only land in a
+        // FULLY-CONSISTENT hole — VMA gone implies PTEs cleared at every
+        // guard drop) — then the guard is dropped, cond_resched()
+        // yields, and the tree walk is RE-DERIVED (the tree can change
+        // under us between holds). unmap_pages takes no VMA lock (PTE
+        // lock only, nested one-way), so the hold is safe.
+        //
+        // Pin-table discipline (vm_file semantics): a split FILE VMA's
+        // tail re-pins at its own start (vm_file follows the VMA).
+        const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
+
+        loop {
             let mut vma_mgr = self.vma_write();
-            let mut rm = Vec::new();
-            let mut add = Vec::new();
-            for vma in vma_mgr.iter() {
-                let vs = vma.start().as_usize();
-                let ve = vma.end().as_usize();
-                if ve <= addr.as_usize() || vs >= end_addr {
-                    continue;
-                }
-                self.release_unmapped_pages(vs, ve, addr.as_usize(), end_addr);
-                let pinned = self.get_vma_file(vs);
-                rm.push(vma.start());
-                if vs < addr.as_usize() {
-                    let mut head = Vma::new(
-                        PageVirtAddr::new(vs),
-                        PageVirtAddr::new(addr.as_usize()),
-                        vma.flags(),
-                    );
-                    head.set_type(vma.vma_type());
-                    head.set_origin(vma.origin());
-                    head.set_file_fd(vma.file_fd());
-                    head.set_file_size(vma.file_size());
-                    head.set_offset(vma.offset());
-                    add.push((head, pinned.clone()));
-                }
-                if ve > end_addr {
-                    let mut tail = Vma::new(
-                        PageVirtAddr::new(end_addr),
-                        PageVirtAddr::new(ve),
-                        vma.flags(),
-                    );
-                    tail.set_type(vma.vma_type());
-                    tail.set_origin(vma.origin());
-                    tail.set_file_fd(vma.file_fd());
-                    tail.set_file_size(vma.file_size());
-                    tail.set_offset(vma.offset() + (end_addr - vs));
-                    add.push((tail, pinned.clone()));
+
+            // First VMA overlapping [addr_us, end_addr): the one
+            // CONTAINING addr, else the first starting inside the range.
+            // Re-derived every iteration — revalidation after the relock.
+            let hit = vma_mgr
+                .last_at_or_before(PageVirtAddr::new(addr_us))
+                .filter(|v| v.end().as_usize() > addr_us)
+                .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(addr_us)))
+                .filter(|v| v.start().as_usize() < end_addr);
+            let Some(vma) = hit else {
+                break;
+            };
+
+            let vkey = vma.start();
+            let vs = vma.start().as_usize();
+            let ve = vma.end().as_usize();
+            let vflags = vma.flags();
+            let vtype = vma.vma_type();
+            let vorigin = vma.origin();
+            let vfd = vma.file_fd();
+            let vfsz = vma.file_size();
+            let voff = vma.offset();
+
+            let seg_start = vs.max(addr_us);
+            let seg_end = ve.min(end_addr);
+            let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
+
+            self.release_unmapped_pages(vs, ve, seg_start, chunk_end);
+
+            let pinned = self.get_vma_file(vs);
+            let _ = vma_mgr.remove(vkey);
+            self.unpin_vma_file(vs);
+            if vs < seg_start {
+                let mut head = Vma::new(
+                    PageVirtAddr::new(vs),
+                    PageVirtAddr::new(seg_start),
+                    vflags,
+                );
+                head.set_type(vtype);
+                head.set_origin(vorigin);
+                head.set_file_fd(vfd);
+                head.set_file_size(vfsz);
+                head.set_offset(voff);
+                let _ = vma_mgr.add(head);
+                if let Some(f) = pinned.clone() {
+                    self.pin_vma_file(vs, f);
                 }
             }
-            for start in &rm {
-                let _ = vma_mgr.remove(*start);
-                self.unpin_vma_file(start.as_usize());
-            }
-            for (vma, file) in &add {
-                let _ = vma_mgr.add(vma.clone());
-                if let Some(f) = file {
-                    self.pin_vma_file(vma.start().as_usize(), f.clone());
+            if chunk_end < ve {
+                let mut tail = Vma::new(
+                    PageVirtAddr::new(chunk_end),
+                    PageVirtAddr::new(ve),
+                    vflags,
+                );
+                tail.set_type(vtype);
+                tail.set_origin(vorigin);
+                tail.set_file_fd(vfd);
+                tail.set_file_size(vfsz);
+                tail.set_offset(voff + (chunk_end - vs));
+                let _ = vma_mgr.add(tail);
+                if let Some(f) = pinned.clone() {
+                    self.pin_vma_file(chunk_end, f);
                 }
             }
 
-            self.unmap_pages(addr, aligned_size)?;
+            self.unmap_pages(PageVirtAddr::new(seg_start), chunk_end - seg_start)?;
+
+            // Drop the guard BEFORE yielding: the write lock must never
+            // be held across schedule().
+            drop(vma_mgr);
+            crate::sched::cond_resched();
         }
 
         Ok(())

@@ -215,6 +215,73 @@ pub fn synchronize_rcu() {
     }
 }
 
+/// Bounded grace-period wait — the exit-path liveness fix (lb125 decode).
+///
+/// The single sticking point of the bimodal OH boots: a CPU whose current
+/// task runs unpreemptible for a long window (phantom preempt counts, the
+/// monopolist family, or any long preempt-off kernel loop) reports NO
+/// quiescent state, so an UNBOUNDED synchronize_rcu() stalls for the whole
+/// window. The exit path waits it in THREE places (MmStruct::drop's raw-
+/// borrower grace wait, thread kernel-stack free, release_task's task-
+/// memory free) — a stalled exit cannot reach ZOMBIE + the deferred
+/// SIGCHLD, and init — whose whole loop serializes on child exits —
+/// freezes with it: no params, no service starts, no reaping. On lb125
+/// the chipset_init child (pid 466) exited at 42.03s and init learned at
+/// 105.39s (63s inside the grace wait): every service-start freeze,
+/// device_manager 15s-timeout chain and the crawl-vs-healthy bimodality
+/// of the whole campaign queued behind that one wait.
+///
+/// Our RCU read sections are preempt-disable-based and microseconds long
+/// (pid_hash lookups); every real reader is done in far less than the
+/// bound. A wait that exceeds it is by construction a monopolist window,
+/// not a reader — proceed and NAME it. The wall-clock protections the
+/// exit path already stacks on top (vma_write walker exclusion leaves an
+/// empty tree for late readers; deferred_free holds the struct free
+/// another 1.5 s) are unchanged.
+pub fn synchronize_rcu_bounded(max_ms: u64, site: &'static str) {
+    let gen = RCU_GEN.load(Ordering::Acquire);
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+    rcu_note_context_switch();
+
+    let hz = crate::drivers::timer::HZ as u64;
+    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+
+    loop {
+        let mut all_qs = true;
+        let mut stuck_cpu = 0usize;
+        for i in 0..MAX_CPUS {
+            if !crate::sched::sched::cpu_online(i) {
+                continue;
+            }
+            if RCU_QS_GEN[i].load(Ordering::Acquire) < gen {
+                all_qs = false;
+                stuck_cpu = i;
+                break;
+            }
+        }
+        if all_qs {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        if crate::drivers::timer::get_jiffies() >= deadline {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            static GPB_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = GPB_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 200 {
+                crate::pr_warn!(
+                    "RCU-GP-BOUND site={} waited>{}ms: cpu{} reports no quiescent state (monopolist window)",
+                    site,
+                    max_ms,
+                    stuck_cpu
+                );
+            }
+            return;
+        }
+        crate::sched::schedule();
+    }
+}
+
 // ============================================================================
 // Softirq handler
 // ============================================================================

@@ -5100,6 +5100,21 @@ impl Task {
         &self.comm
     }
 
+    /// Print-safe comm as a str: NUL-terminated slice, lossy-decoded.
+    ///
+    /// A comm holds ARBITRARY bytes (prctl PR_SET_NAME copies raw, and a
+    /// >15-byte UTF-8 thread name truncates MID-CHARACTER), so the old
+    /// `from_utf8_unchecked(comm).trim_end_matches('\0')` sites handed
+    /// char-aware formatting (Debug escaping, truncation) an invalid &str
+    /// and panicked the kernel ("start byte index N is not a char
+    /// boundary", lb120 @672s in a KOT-KILL vnames Debug print).
+    /// Zero-copy when the bytes are valid UTF-8.
+    pub fn comm_str(&self) -> alloc::borrow::Cow<'_, str> {
+        let raw: &[u8] = self.comm();
+        let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        alloc::string::String::from_utf8_lossy(&raw[..len])
+    }
+
     /// Set process name (comm), max 15 chars + NUL
     #[inline]
     pub fn set_comm(&mut self, name: &[u8]) {

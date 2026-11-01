@@ -196,10 +196,8 @@ pub fn kill_other_threads(current: *mut Task) {
     // thread group, the thread ring is corrupt — this print names the
     // caller and victims directly.
     if !victims.is_empty() {
-        let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
-                .trim_end_matches('\0')
-        };
+        // SAFETY: current is a valid, running task.
+        let ccomm = unsafe { (*current).comm_str() };
         let mut vnames: alloc::vec::Vec<alloc::string::String> =
             alloc::vec::Vec::new();
         for v in victims.iter().take(20) {
@@ -207,8 +205,7 @@ pub fn kill_other_threads(current: *mut Task) {
             if !t.is_null() {
                 unsafe {
                     vnames.push(alloc::string::String::from(
-                        core::str::from_utf8_unchecked((*t).comm())
-                            .trim_end_matches('\0'),
+                        (*t).comm_str(),
                     ));
                 }
             }
@@ -325,7 +322,9 @@ unsafe fn free_dead_member(member: *mut Task) {
             core::hint::spin_loop();
         }
     }
-    crate::sync::rcu::synchronize_rcu();
+    // BOUNDED (lb125 decode): monopolist windows stalled this wait for
+    // tens of seconds, freezing the exit — and every parent behind it.
+    crate::sync::rcu::synchronize_rcu_bounded(1500, "thread-stack-free");
 
     (*member).free_kernel_stack();
 
@@ -482,7 +481,10 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 
     // Wait for any RCU readers that may still be traversing this task's
     // pid_hash_links node to finish before we free the task memory.
-    crate::sync::rcu::synchronize_rcu();
+    // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
+    // and microseconds long; an unbounded wait here parked init's reaping
+    // behind monopolist windows. 1.5 s is ~1000x any real reader.
+    crate::sync::rcu::synchronize_rcu_bounded(1500, "release-task");
 
     // Detach from parent's children list (must happen before freeing task memory)
     // E8-REPAR: screen the parent pointer first — do_wait claimed the
@@ -1148,12 +1150,9 @@ pub fn do_exit(exit_code: i32) -> ! {
             // SIGKILL-SEND trace — this loop is the only silent kernel
             // SIGKILL fan-out. Name the namespace init and every victim
             // until this is root-caused.
-            let ccomm = unsafe {
-                alloc::string::String::from(
-                    core::str::from_utf8_unchecked((*current).comm())
-                        .trim_end_matches('\0'),
-                )
-            };
+            // SAFETY: current is the raw pointer to the calling task,
+            // valid because we are it.
+            let ccomm = unsafe { alloc::string::String::from((*current).comm_str()) };
             let ns_addr = dying_ns
                 .as_ref()
                 .map(|d| alloc::sync::Arc::as_ref(d) as *const _ as usize)
@@ -1181,8 +1180,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     victims.push((
                         t.pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked(t.comm())
-                                .trim_end_matches('\0'),
+                            t.comm_str(),
                         ),
                     ));
                 }
@@ -1286,10 +1284,8 @@ pub fn do_exit_group(exit_code: i32) -> ! {
     // pr_debug (hidden by the default loglevel, raisable for the next
     // hunt) so the exit path stays off the console.
     {
-        let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
-                .trim_end_matches('\0')
-        };
+        // SAFETY: current is the raw pointer to the calling task.
+        let ccomm = unsafe { (*current).comm_str() };
         let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };
         crate::pr_debug!(
             "EXITGRP: pid={} comm='{}' code={} pending=0x{:x}",

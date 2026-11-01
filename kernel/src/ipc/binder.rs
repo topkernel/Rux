@@ -1061,7 +1061,7 @@ fn sendfail_reason_name(code: u64) -> &'static str {
         2 => "child-node-dead",
         3 => "owner-proc-dead",
         4 => "no-ctxmgr",
-        5 => "self-ctxmgr",
+        5 => "self-ctxmgr (removed: mainline delivers mgr self-sends)",
         6 => "reply-empty-stack",
         7 => "reply-stack-top",
         8 => "reply-oneway",
@@ -6430,13 +6430,19 @@ fn binder_transaction(
                     app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
                     return;
                 };
-                if mgr.proc_id == proc.id {
-                    // Linux: a transaction to the context manager from its
-                    // own process is a protocol error.
-                    sendfail_why(5);
-                    *err_cmd = BR_FAILED_REPLY;
-                    return;
-                }
+                // Reference-ABI note (lb122 @4.09s): mainline
+                // binder_transaction has NO self-send refusal for handle
+                // 0 — only the no-context-manager leg fails (BR_DEAD_REPLY
+                // above). The context manager's own process MAY send to
+                // handle 0; mainline delivers it to the mgr node like any
+                // other transaction (the S1-era BR_FAILED_REPLY refusal
+                // was an unverified port assumption, and it broke OH
+                // samgr's early self-registration oneway — code
+                // 0x5f504e47, refused at 4.09s on every ams46 boot, with
+                // the registry degradation cascade behind it). Safe here:
+                // the delivery thread picker only hands work to threads
+                // WAITING for proc work — never the sender — so even a
+                // sync self-send cannot self-deadlock.
                 target_node = Some(mgr);
             }
 

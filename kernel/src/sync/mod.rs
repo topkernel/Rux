@@ -30,6 +30,6 @@ pub use rwlock::{
     RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard,
     RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,
 };
-pub use rcu::{RcuHead, RcuCallback, rcu_read_lock, rcu_read_unlock, call_rcu, synchronize_rcu};
+pub use rcu::{RcuHead, RcuCallback, rcu_read_lock, rcu_read_unlock, call_rcu, synchronize_rcu, synchronize_rcu_bounded};
 pub use percpu::{CpuLocal, CpuLocalRef};
 pub use seqlock::{SeqLock, SeqLockWriteGuard, RawSeqLock};

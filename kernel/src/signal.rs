@@ -1348,8 +1348,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                     "DEQUEUE sig={} pid={} comm='{}' info={}",
                     sig,
                     (*current).pid(),
-                    core::str::from_utf8_unchecked((*current).comm())
-                        .trim_end_matches('\0'),
+                    (*current).comm_str(),
                     match &qi {
                         Some(i) => {
                             let st = unsafe {
@@ -1360,8 +1359,7 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                             } else {
                                 unsafe {
                                     alloc::string::String::from(
-                                        core::str::from_utf8_unchecked((*st).comm())
-                                            .trim_end_matches('\0'),
+                                        (*st).comm_str(),
                                     )
                                 }
                             };
@@ -2882,8 +2880,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
-                                .trim_end_matches('\0'),
+                            (*t).comm_str(),
                         ),
                     )
                 })
@@ -3020,8 +3017,7 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
-                                .trim_end_matches('\0'),
+                            (*t).comm_str(),
                         ),
                     )
                 })
@@ -3484,8 +3480,7 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
-                                .trim_end_matches('\0'),
+                            (*t).comm_str(),
                         ),
                     )
                 })
