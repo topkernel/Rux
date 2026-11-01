@@ -595,3 +595,86 @@ lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
   e1e7d8f9 in perf-ipc (22db8f0f), e22f72a8 content in 32958f4b
   ("drop the bootstrap identity map"), 6cd3c9b8 in the perf-sched or
   ltp-r20 family. Bisect: good=33d007fe bad=dd94e441 --first-parent.
+### wf bisect legs — kpreempt named as major factor
+- edgeDD (dd94e441 release): BAD — init silent from 3.99s (samgr present,
+  no DEADLOCK prints this boot; the wfA silent shape). Bad bound solid.
+- bs1 (ad681e09, pre-perf-sched): SKIP — init MPROTECT-FAIL x2, EXITGRP
+  32512 at 0.96s, power down. Real intermediate-tree boot breakage
+  (matches s977 shape), not the wedge; also rules ad681e09-class trees
+  unbootable — bisect must skip past them.
+- bs2 (192bfdce = perf-sched merge): BAD — 66 DEADLOCK prints, both CPUs,
+  lock=0xffffffff809432d0 = binder::WORLD (exact symbol), ra in
+  world_lock(). THE ORIGINAL WEDGE SHAPE, present WITHOUT 977adb51 and
+  e1e7d8f9 (both merge later in perf-ipc 22db8f0f). The charter's prime
+  suspect 977adb51 is EXONERATED for introduction.
+- perf-sched contents vs x86: 6ab42522 arms the IRQ-exit kernel-preempt
+  hook (kpreempt) BY DEFAULT on x86_64 (kpreempt=0 opts out). Prior art:
+  oh-launcher lane TASK.md "kpreempt is NEGATIVE in the current tree"
+  (lb19/lb19b both-CPU DEADLOCK under kpreempt); sc70-era verdict: hook ON
+  + preempt_count leaks = 309s kernel monopolies.
+- wfC (main tip 4a757d6e + cmdline kpreempt=0, no rebuild): NO DEADLOCK,
+  NO BIGLOCK-STALL, boot CRAWLS BUT PROGRESSES — SAREG txn7446 still
+  moving at 120s (wedge boots stall at txn~37-50 / SA insert 15);
+  PREEMPT-HEAL/WAKE-HEAL still firing (held_jiffies=218j class).
+  kpreempt=0 converts hard wedge into a slow-but-live boot.
+- Next: bs3 at 53226a33 decides whether kpreempt is the introducer
+  (53226a33 GOOD => first-bad in perf-sched, likely 6ab42522) or an
+  amplifier on an earlier-introduced break.
+
+### bs3 + the kpreempt verdict (wedge localized, fix written)
+- bs3 (53226a33): SKIP twice — another unbootable intermediate (same
+  init MPROTECT-FAIL power-down family). Bisect drift risk high.
+- PIVOT to the decisive experiment instead of grinding skips:
+  wfD (192bfdce + cmdline kpreempt=0): ZERO DEADLOCK, ZERO BIGLOCK
+  stall, SA progress at CLEAN-ANCHOR LEVELS (SAREG 112 vs base33's 114,
+  SACB 78 vs 83, txn 7266 vs 7213 at 120s). The wedge at 192bfdce is
+  100% attributable to kpreempt armed by default (6ab42522).
+- git diff 33d007fe..192bfdce -- kernel/src/sched/ process/task.rs:
+  EMPTY — the scheduler code is IDENTICAL between clean base and wedge;
+  the wedge is the kpreempt hook interacting with the storm, not a
+  sched/ change. (Also: 977adb51 and e1e7d8f9 both merge AFTER
+  192bfdce — exonerated for the introduction.)
+- REMNANT face (needs its own hunt, milder): with kpreempt=0, init
+  still goes silent at ~10s (clean anchor init alive at 118.9s).
+  wfE (192bfdce kpreempt=0 dfx=periodic) task dumps at 30/60/90s: init
+  state=RUNNING on_rq=1 linked=1, vruntime FROZEN at 880459896 while
+  os_ds_serv sits at 409465660 and khungtaskd at 0 — init is runnable
+  but never picked; lastsys=1(write). The SA storm itself proceeds at
+  clean volumes. Not introduced by sched/ changes (no diff); a
+  wake/enqueue-dynamics shift from the window's non-sched changes
+  (bio batching +235, ext4 namei, vfs, uaccess/SMAP are candidates).
+- FIX LANDED (wedge): x86_64 kpreempt default flipped OFF (opt-in
+  kpreempt=1), re-land conditions documented in trap.rs. riscv64 twin
+  already defaults OFF. wfF (400s, main tip, kpreempt=0) probes whether
+  the init-freeze heals within the ladder window.
+
+### Second boot-killer found and fixed: mm/pcp IRQ-window overflow
+- wfG (main tip + kpreempt fix, NO cmdline, release): clean to 106s
+  (best ladder yet: SAREG 221 in 120s, bootanimation.ready marker),
+  then `Kernel panic: index out of bounds: len 32 but index 32,
+  kernel/src/mm/pcp` at 108.6s under a page fault. wfF ran the same
+  functional kernel 400s clean — 1-in-N IRQ-timing race.
+- Root cause: free_order0's spill detection and drain ran in TWO
+  separate with_row IRQ-off windows; between them an interrupt-context
+  free_order0 wrote row.list[32] on the 32-slot array (count had
+  reached PCP_HIGH). alloc_order0's refill had the same latent shape.
+- Fix (35336eb1): spill detect + batch copy-out + count fixup in ONE
+  window (zone accounting stays outside, as before); refill store loop
+  bounded, overflow frames returned to the zone directly. Every list
+  write is now inside a single window with a bound check.
+
+### Final validation (fixes 28b1afca + 35336eb1)
+- wfH (release, NO cmdline, 300s): kernel-preempt NOT armed (default-off
+  works), DEADLOCK 0, EXT4-BIGLOCK-STALL 0, PANIC 0, init kmsgs alive
+  at 264s, serial live to 300s. Release OH boots no longer wedge.
+- Perf-gate honesty: the kpreempt default-off reverts the perf-sched
+  lane's p2f futex wake->run gain (KVM med 163us->9.5us needed the
+  hook); that row regresses until the hook is fixed and re-landed per
+  the conditions in trap.rs (600s release SA-storm boot with hook ON,
+  zero DEADLOCK, gains held). A wedging kernel ships no perf rows.
+- Remaining known face (NOT a boot-killer, separate hunt): init can be
+  vruntime-stranded ~60-90s stretches mid-boot (wfE/wfF kmsg gaps
+  8.7->98.5s, 122.5->200.9s) but self-heals and the ladder progresses
+  (launcher marker reached at 120.65s in wfF). sched/ code is
+  unchanged vs the clean anchor — the dynamics shift comes from the
+  window's non-sched changes (bio batching, ext4 namei, vfs, uaccess).
