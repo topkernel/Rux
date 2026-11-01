@@ -241,3 +241,118 @@ per call) and net/tcp guarded domains — merge should run the Tier-2
 gate (pbench + syscost quiet boot); this lane measured Geekbench
 before/after instead (the run completing at all is the functional
 signal; per-workload parity above is the performance signal).
+
+---
+
+# 2026-11-02 standing — rerun on main@e6401a4a (lane geekbench2)
+
+Same rig, same protocol, same reference columns (banked native runs of
+2026-11-01; single-core reference noise band ~15% applies). Kernel:
+strong-profile `build-release-opt` off main e6401a4a — i.e. AFTER the
+serial-print purge (4ce0cda5, e2717687), the per-call allocation purge
+(cbfe975e), SleepMutex realignment, the lost-park fix, and the path-walk
+fast paths landed. One scored run (rux-serial-3.log; upload captured at
+07:23:15, host load ~6.8-7.4 including the guest itself).
+
+## Headline
+
+| | Rux 11-02 | Rux 11-02 confirm | Rux 11-01 | Reference, 4-CPU pinned | vs 11-01 | vs 4-CPU ref |
+|---|---|---|---|---|---|---|
+| **Single-Core Score** | **2274** | 2297 | 1941 | 2165 | +17% | 105% |
+| **Multi-Core Score** | **7114** | 7458 | 7139 | 7027 | -0.4% | 101% |
+
+Confirm run (rux-serial-4.log, 07:47, host load ~7.4-8.1) repeats the
+scored run within 1% single-core (2297 vs 2274) and +4.8% multi-core;
+AES-XTS SC repeats at 8140 (vs 8047) with the same flat 0.009 s
+iterations — the fix is stable, not a lucky run.
+
+## Top movers vs 11-01
+
+| Section | Workload | 11-01 | 11-02 | delta | vs 4-CPU ref |
+|---|---|---|---|---|---|
+| SC | **AES-XTS** | 1219 | **8047** | **+560%** | 105% |
+| SC | Text Compression | 805 | 1427 | +77% | 93% |
+| MC | Text Rendering | 4569 | 5563 | +22% | 94% |
+| MC | Speech Recognition | 5869 | 6757 | +15% | 149% |
+| MC | N-Body Physics | 6484 | 7259 | +12% | 97% |
+| MC | Machine Learning | 5005 | 5576 | +11% | 99% |
+| MC | AES-XTS | 9278 | 9962 | +7% | 111% |
+
+The two former early-section laggards (AES-XTS 16%, Text Compression
+52%) are gone: their per-iteration runtimes went bimodal/warmup-shaped
+([0.082, 0.051, 0.026, 0.081] s and [2.185, 1.083, 0.682, 0.652] s) to
+flat at reference speed ([0.009 x4] s and [0.64-0.66] s). The
+multi-core thread-heavy rows (Text Rendering, N-Body, ML, Speech
+Recognition — the create/join/futex-heavy family) moved up 11-22%,
+consistent with the scheduling/futex/lost-park work that landed.
+Remaining below-90% rows: SC Navigation 77%, SC Clang 86%, MC Camera
+76%, MC Face Detection 79%, MC SQLite 86% — all single-run numbers
+under load 7-8; the 11-01 flake guidance (rerun in isolation before
+calling regression) applies, and several other SC rows softened 2-13%
+in the same band, so treat sub-15% SC deltas as noise until re-run.
+
+## The AES-XTS 16% row: root cause (kernel-side, already fixed on main)
+
+The 11-01 kernel printed per-operation diagnostics from the exact
+syscalls Geekbench's AES-XTS section issues between iterations:
+`MPROTECT-RW` (every PROT_WRITE mprotect — buffer re-protection,
+thread create, malloc growth), `BIGMUNMAP` (every >=512K munmap —
+every thread exit), `thead-exit` lines with full syscall histograms,
+plus `PREEMPT-*` warnings — 656 prints / ~39 KB of console output
+during the 11-01 run phase alone. The console TX is polled and
+byte-at-a-time: ~0.4-0.7 ms+ per print (commit 4ce0cda5's census).
++51 ms of that per iteration turns the reference's flat 0.009 s into
+the observed bimodal 0.026-0.082 s — a 6.2x score drop isolated to
+whichever sections carried the mprotect/munmap/thread churn.
+
+AES-NI itself was never broken. From-our-side evidence (probe
+`userspace/geekbench/aes_probe.c`, booted as PID 1 in the same QEMU
+shape; full notes in `run/aesxts-notes.md`):
+
+- Guest CPUID exposes AES-NI/VAES/AVX2/AVX512F; Rux XCR0=0xe7 (SSE
+  domain on — AES-NI needs no further enable); `aesenc` executes
+  untrapped.
+- aesenc 8-chain issue rate: 1268 M rounds/s in-guest vs 1244
+  reference-kernel-in-guest vs 1311 native.
+- AES-XTS-shaped 128 MB walk: 19.3-19.5 GB/s in-guest vs 20.1-20.4
+  reference-kernel-in-guest vs 19.7-20.2 native — 96-97% parity.
+- Streaming read/write/memset and 4-thread aggregates: parity with the
+  reference kernel in the same QEMU. (This also disproves the
+  4K-page/EPT-amplification theory for this workload: Rux's 4K-only
+  user mappings stream at reference rates; no THP needed at these
+  working sets.)
+
+No kernel change was required on this lane for AES-XTS — the purge
+that fixed it is already on main; this lane supplies the evidence and
+the quantified before/after (1219 -> 8047, 105% of the 4-CPU pinned
+reference).
+
+Residual divergences noticed while probing (logged as follow-ups in
+`run/aesxts-notes.md`, none block Geekbench): no vDSO clock_gettime
+(82 ns vs 19 ns per read), getrusage ru_minflt stays 0, AT_HWCAP
+auxv is 0 on x86_64 (reference kernels report CPUID feature bits),
+and one TIMER-LATE-FIRE late=44 ms during the standing run.
+
+## Rig notes for this run
+
+- The 11-01 capture server had outlived its working directory (deleted
+  — captures unrecoverable). Replaced from this lane's worktree
+  (PIDs of the old one, 3973065/3973089, killed individually and
+  recorded in run/aesxts-notes.md; the new one serves the same
+  /tmp/gb-ca certs).
+- The banked image carried a stale capture CA; the reflink copy used
+  here had /etc/ssl/certs/ca-certificates.crt swapped to the current
+  CA via debugfs before the scored run.
+- New rig pieces: `aes_probe.c` + `run-probe.sh` (probe boots, Rux or
+  reference kernel — the host's 7.0.0-38-generic boots the probe image
+  without initrd since VIRTIO_BLK=y).
+
+## Artifacts
+
+`run/geekbench/`: rux-serial-2.log (first attempt, upload lost to the
+dead server), rux-serial-3.log (scored), rux-serial-4.log (confirm),
+probe-rux.log, probe-rux2.log (final binary), probe-ref.log,
+captures.log (entries 2026-11-02T07:23:15 scored and 07:47:04 confirm),
+scores-11-02.txt (both uploads' per-workload scores + per-iteration
+runtimes, committed), build-gb2.log. Worktree: work/bzImage (the
+measured kernel), work/geekbench-x86.img, work/probe-x86.img.
