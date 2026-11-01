@@ -812,7 +812,11 @@ impl Socket {
     }
 
     /// Receive data
-    pub fn recv(&self, buf: &mut [u8]) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
+    pub fn recv(
+        &self,
+        buf: &mut [u8],
+        peek: bool,
+    ) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
         match self.sock_type {
             SocketType::Tcp => {
                 let state = *self.state.lock();
@@ -871,7 +875,7 @@ impl Socket {
                             if socket.pending_error != 0 {
                                 Some(Err(-socket.pending_error))
                             } else {
-                                match socket.recv(buf, buf.len(), &mut tx) {
+                                match socket.recv(buf, buf.len(), &mut tx, peek) {
                                     Ok(len) if len > 0 => {
                                         let src = if socket.is_v6 {
                                             crate::net::ipv6::IpAddr::V6(socket.remote_ip6)
@@ -924,10 +928,17 @@ impl Socket {
                 // R34: irqsave — pairs with enqueue_packet() from the NetRx
                 // softirq (same-CPU plain-lock reentrancy wedge; see the TCP
                 // branch comment above).
+                // review F7: peek clones the head packet and leaves it
+                // queued; the consuming arm clones too and pops after (a
+                // plain pop_front borrows the guard mutably across the
+                // copy — same effect, one shape).
                 let mut queue = self.recv_queue.lock_irqsave();
-                if let Some(packet) = queue.pop_front() {
+                if let Some(packet) = queue.front().cloned() {
                     let len = packet.data.len().min(buf.len());
                     buf[..len].copy_from_slice(&packet.data[..len]);
+                    if !peek {
+                        queue.pop_front();
+                    }
                     return Ok((len, Some((packet.src_addr, packet.src_port))));
                 }
                 drop(queue);
@@ -940,13 +951,15 @@ impl Socket {
                 // UDP socket used to always get None (no msg_name written).
                 // P1 IPv6: family-aware source reporting (v6 sockets see the
                 // datagram's v6 address; v4 sockets see the u32).
-                match crate::net::udp::udp_recvfrom_ext(udp_fd, buf) {
+                match crate::net::udp::udp_recvfrom_ext(udp_fd, buf, peek) {
                     Ok((len, src_addr, src_port)) => {
-                        if len > 0 {
-                            Ok((len as usize, Some((src_addr, src_port))))
-                        } else {
-                            Err(-11) // EAGAIN
-                        }
+                        // review F8: a REAL zero-length datagram (already
+                        // consumed above!) reports 0 with its source — the
+                        // old `len > 0` gate turned it into EAGAIN while
+                        // the datagram was gone (recvmmsg batches of
+                        // 0-length messages then lost the whole batch).
+                        // "No data yet" is the None arm's Err(-11) above.
+                        Ok((len as usize, Some((src_addr, src_port))))
                     }
                     Err(e) => Err(e as i32),
                 }
@@ -1263,17 +1276,20 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
 /// W3: shared recv engine — try recv(), on would-block either return
 /// EAGAIN (non-blocking) or wait on the socket's wait queue and retry.
 /// `deadline` is an absolute jiffies deadline (SO_RCVTIMEO).
+/// `peek` (review F7): MSG_PEEK — serve the data without consuming it;
+/// blocking still waits for the first byte, repeated peeks re-read.
 pub fn socket_recv_ctl(
     socket: &Socket,
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
+    peek: bool,
 ) -> Result<(usize, Option<(crate::net::ipv6::IpAddr, u16)>), i32> {
     loop {
         // Loopback TX only queues; drain so in-machine peers' data lands
         // before the would-block decision (same rationale as sys_accept).
         crate::net::ethernet::ethernet_poll();
-        match socket.recv(buf) {
+        match socket.recv(buf, peek) {
             Ok(r) => return Ok(r),
             Err(e) if e != -11 => return Err(e),
             Err(_) => {}
@@ -1283,6 +1299,28 @@ pub fn socket_recv_ctl(
         }
         socket_wait_round(socket, WaitKind::Recv, deadline)?;
     }
+}
+
+/// review F10: inet_shutdown's ENOTCONN discipline for TCP sockets —
+/// the reference rejects shutdown() with ENOTCONN when the socket's
+/// protocol state is TCP_CLOSE (never connected — the check runs before
+/// the how dispatch, so it covers SHUT_RD too), and for a LISTENING
+/// socket every how that includes SEND_SHUTDOWN (SHUT_WR / SHUT_RDWR);
+/// only a pure SHUT_RD on a listener is a no-op success. The old path
+/// returned 0 for all of these and additionally flipped a listener's
+/// protocol slot to TCP_CLOSE (tcp_sock.close() default arm), killing
+/// the listener for its other waiters.
+pub fn socket_shutdown_check(socket: &Socket, how: i32) -> Result<(), i32> {
+    if socket.sock_type == SocketType::Tcp {
+        match *socket.state.lock() {
+            SocketState::Unconnected => return Err(-107), // ENOTCONN
+            SocketState::Listening if how == 1 || how == 2 => {
+                return Err(-107) // ENOTCONN
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// W3: one wait round for a blocking accept — sleeps on the listener's
@@ -1331,7 +1369,7 @@ fn socket_read(file: &File, buf: &mut [u8]) -> isize {
     // read() EAGAIN forever.
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     let deadline = socket.rcvtimeo_deadline();
-    match socket_recv_ctl(socket, buf, nonblock, deadline) {
+    match socket_recv_ctl(socket, buf, nonblock, deadline, false) {
         Ok((len, _)) => len as isize,
         Err(e) => e as isize,
     }

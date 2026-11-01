@@ -2166,7 +2166,13 @@ impl TcpSocket {
     ///   user OUTSIDE the table lock, R35)
     /// - `len`: Buffer length
     /// - `tx`: R35 deferred-TX batch for the window-update ACK
-    pub fn recv(&mut self, buf: &mut [u8], _len: usize, tx: &mut TcpTxBatch) -> Result<usize, ()> {
+    pub fn recv(
+        &mut self,
+        buf: &mut [u8],
+        _len: usize,
+        tx: &mut TcpTxBatch,
+        peek: bool,
+    ) -> Result<usize, ()> {
         // Allow reading in ESTABLISHED and CLOSE_WAIT (peer sent FIN but
         // data may still be buffered). Also FIN_WAIT1/FIN_WAIT2 for half-close.
         match self.state {
@@ -2186,6 +2192,18 @@ impl TcpSocket {
 
         // Read data from receive buffer
         let mut read = 0;
+        if peek {
+            // MSG_PEEK (review F7): copy from the head of the receive
+            // buffer WITHOUT consuming — the reference tcp_recvmsg leaves
+            // sk_receive_queue intact under peek, so a following recv()
+            // returns the same bytes again. No window update and no ACK:
+            // nothing was freed.
+            for (slot, byte) in buf.iter_mut().zip(self.recv_buffer.iter()) {
+                *slot = *byte;
+                read += 1;
+            }
+            return Ok(read);
+        }
         while read < buf.len() && !self.recv_buffer.is_empty() {
             if let Some(byte) = self.recv_buffer.pop_front() {
                 buf[read] = byte;

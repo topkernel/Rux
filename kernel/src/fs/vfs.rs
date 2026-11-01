@@ -174,8 +174,55 @@ static VFS_STATE: Spinlock<VfsState> = Spinlock::new(VfsState {
     mount_chain_index: BTreeMap::new(),
 });
 
+/// (review-s2b perf) Pinned mirror of `VFS_STATE.root_dentry` for lock-free
+/// reads. The root dentry is WRITE-ONCE: only vfs::init() and vfs_mount's
+/// ensure-root arm assign the slot (both before any thread can race), and
+/// every later "/" overlay (vfs_mount("/"), vfs_move_mount to "/") replaces
+/// the root's INODE in place — the dentry object, and therefore the Arc's
+/// address, is stable for the kernel's lifetime. The publish installs a
+/// deliberately-leaked extra reference, so the object can never be freed
+/// while the pointer is readable; same mirror discipline as
+/// Dentry::has_mount (the authoritative field stays VFS_STATE.root_dentry).
+static VFS_ROOT_PINNED: core::sync::atomic::AtomicPtr<Dentry> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// (review-s2b perf) Publish the root pin. Callers hold VFS_STATE (the
+/// serialized writer side of VfsState.root_dentry).
+fn vfs_root_publish(root: &Arc<Dentry>) {
+    if VFS_ROOT_PINNED
+        .load(core::sync::atomic::Ordering::Acquire)
+        .is_null()
+    {
+        // Keep a leaked strong reference: the slot in VFS_STATE also holds
+        // one forever, but the pin's guarantee must not depend on it.
+        let leaked = Arc::into_raw(Arc::clone(root));
+        VFS_ROOT_PINNED.store(leaked as *mut Dentry, core::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Get the global VFS root dentry.
+///
+/// (review-s2b perf) Fast path: one Acquire load — the old
+/// `VFS_STATE.lock().root_dentry.clone()` paid a global spinlock pair
+/// (preempt bookkeeping + CAS) on the prologue of every path walk; the
+/// reference kernel's walk-start root read is lock-free (current->fs->root
+/// under RCU). Early boot (pin not yet installed) falls back to the
+/// authoritative slot under the lock.
 pub fn get_vfs_root() -> Option<Arc<Dentry>> {
+    let p = VFS_ROOT_PINNED.load(core::sync::atomic::Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: the pointer carries the deliberately-leaked reference
+        // installed by vfs_root_publish (never dropped), so the Dentry is
+        // alive for the whole read. Building a temporary Arc from it and
+        // forgetting the temporary leaves the leaked count untouched; the
+        // clone handed out owns its own balanced increment.
+        unsafe {
+            let tmp = Arc::from_raw(p as *const Dentry);
+            let out = Arc::clone(&tmp);
+            core::mem::forget(tmp);
+            return Some(out);
+        }
+    }
     VFS_STATE.lock().root_dentry.clone()
 }
 
@@ -397,6 +444,7 @@ pub fn vfs_mount(
             let d = Arc::new(Dentry::new(String::from("/")));
             d.set_hashed();
             state.root_dentry = Some(d.clone());
+            vfs_root_publish(&d);
             d
         }
     };
@@ -1318,7 +1366,8 @@ pub fn init() {
         // Create VFS root dentry (inode will be set by first vfs_mount("/"))
         let root = Arc::new(Dentry::new(String::from("/")));
         root.set_hashed();
-        state.root_dentry = Some(root);
+        state.root_dentry = Some(root.clone());
+        vfs_root_publish(&root);
         state.initialized = true;
     }
 
@@ -1582,9 +1631,7 @@ fn normalize_with_root(abs: &str, root: &str) -> String {
 /// process root. Used to find the task's root dentry for absolute-symlink
 /// resolution under chroot.
 fn dentry_walk_no_symlink(path: &str) -> Option<Arc<Dentry>> {
-    let mut current = follow_mount(
-        VFS_STATE.lock().root_dentry.clone()?,
-    );
+    let mut current = follow_mount(get_vfs_root()?);
     for comp in path.split('/').filter(|s| !s.is_empty() && *s != ".") {
         if comp == ".." {
             let parent = current.parent.lock().clone()?;
@@ -1814,7 +1861,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     }
 
     // Get VFS root dentry
-    let vfs_root = VFS_STATE.lock().root_dentry.clone()
+    // (review-s2b perf) lock-free pinned read — was the walk's only
+    // remaining global-lock pair in the prologue.
+    let vfs_root = get_vfs_root()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
     // Start from root, follow mount. P1 chroot: also resolve the task's

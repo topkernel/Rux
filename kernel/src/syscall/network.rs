@@ -299,8 +299,14 @@ pub fn sys_bind(args: SyscallArgs) -> i64 {
                         )
                     } == 0
                     {
+                        let nl_pid = u32::from_le_bytes([nl[4], nl[5], nl[6], nl[7]]);
                         let groups = u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]]);
-                        sock.bind_groups(groups);
+                        // review F11: adopt a chosen nl_pid (portid-routed
+                        // unicast); a taken port id is EADDRINUSE.
+                        return match crate::net::netlink::netlink_bind(&sock, nl_pid, groups) {
+                            Ok(()) => 0,
+                            Err(e) => e as i64,
+                        };
                     }
                 }
                 0
@@ -1211,11 +1217,23 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
 /// nonzero group destination is a monitor multicast (libudev header +
 /// property blob, no nlmsghdr), not an rtnetlink request.
 fn parse_netlink_dest_groups(addr_ptr: *const u8, addrlen: u32) -> u32 {
+    parse_netlink_dest(addr_ptr, addrlen).1
+}
+
+/// Parse (nl_pid, nl_groups) — offsets 4 and 8 — of a sockaddr_nl
+/// DESTINATION supplied as a sendmsg msg_name / sendto addr. Returns
+/// (0, 0) when no full 12-byte sockaddr_nl is supplied (rtnetlink
+/// requests send with no or a pid-only destination). Used to route
+/// netlink sends: a nonzero group destination is a monitor multicast
+/// (libudev header + property blob, no nlmsghdr), not an rtnetlink
+/// request; a nonzero nl_pid with groups == 0 is a user-to-user
+/// UNICAST to the socket bound at that port id (review F11).
+fn parse_netlink_dest(addr_ptr: *const u8, addrlen: u32) -> (u32, u32) {
     if addr_ptr.is_null() || addrlen < 12 {
-        return 0;
+        return (0, 0);
     }
     if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
-        return 0;
+        return (0, 0);
     }
     let mut nl = [0u8; 12];
     // SAFETY: addr_ptr validated with access_ok(12) above.
@@ -1223,14 +1241,17 @@ fn parse_netlink_dest_groups(addr_ptr: *const u8, addrlen: u32) -> u32 {
         crate::arch::uaccess::copy_from_user(nl.as_mut_ptr(), addr_ptr, 12)
     } != 0
     {
-        return 0;
+        return (0, 0);
     }
     // struct sockaddr_nl { sa_family_t nl_family; u16 pad;
     //                      u32 nl_pid; u32 nl_groups; }
     if u16::from_le_bytes([nl[0], nl[1]]) != crate::net::netlink::AF_NETLINK as u16 {
-        return 0;
+        return (0, 0);
     }
-    u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]])
+    (
+        u32::from_le_bytes([nl[4], nl[5], nl[6], nl[7]]),
+        u32::from_le_bytes([nl[8], nl[9], nl[10], nl[11]]),
+    )
 }
 
 pub fn sys_sendto(args: SyscallArgs) -> i64 {
@@ -1371,10 +1392,17 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         {
             return -(errno::EFAULT as i64);
         }
-        let dest_groups = parse_netlink_dest_groups(addr_ptr, _addrlen);
+        let (dest_pid, dest_groups) = parse_netlink_dest(addr_ptr, _addrlen);
         if dest_groups != 0 {
             let _ = crate::net::netlink::netlink_multicast_send(&nlsock, &kbuf, dest_groups);
             return kbuf.len() as i64;
+        }
+        if dest_pid != 0 {
+            // review F11: user-to-user unicast to the port id.
+            return match crate::net::netlink::netlink_send_unicast(&nlsock, &kbuf, dest_pid) {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            };
         }
         return match crate::net::netlink::netlink_send(&nlsock, &kbuf) {
             Ok(n) => n as i64,
@@ -1600,15 +1628,21 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     // monitor died at "Failed to set address: Invalid argument" and
     // took the whole gdm login chain down with it (gdm bring-up r3).
     if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
-        if addrlen_early < 12 {
-            return -(errno::EINVAL as i64);
-        }
+        // review F6: no 12-byte floor — the reference move_addr_to_user
+        // clamps the copy to the caller's *addrlen and stores the full 12
+        // (a 6-byte caller object gets 6 bytes, then nl_pid stays visible
+        // in the stored length). The old gate returned EINVAL for every
+        // short caller object.
         if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
             return -(errno::EFAULT as i64);
         }
         // SAFETY: addr_ptr validated with access_ok; exception-table copy.
         unsafe {
-            crate::net::netlink::put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, nlsock.portid);
+            crate::net::netlink::put_sockaddr_nl_bound(
+                addr_ptr,
+                addrlen_ptr,
+                nlsock.portid.load(core::sync::atomic::Ordering::Acquire),
+            );
         }
         return 0;
     }
@@ -2883,6 +2917,13 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
     }
 
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
+        // review F10: reference inet_shutdown returns ENOTCONN for a TCP
+        // socket that was never connected (any how), and for SHUT_WR /
+        // SHUT_RDWR on a listener — before this the call reported 0 and
+        // the listener's protocol slot got killed.
+        if let Err(e) = crate::net::socket::socket_shutdown_check(&socket, how) {
+            return e as i64;
+        }
         if how == 0 || how == 2 {
             // SHUT_RD (alone or in SHUT_RDWR): mark the read side shut
             // (Linux sk_shutdown |= RCV_SHUTDOWN) — poll/epoll asking for
@@ -3120,10 +3161,17 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     // property blob with NO nlmsghdr — gdmr22's EINVAL). Route on the
     // destination's nl_groups.
     if let Some((nlsock, _)) = file_opt.as_ref().and_then(crate::net::netlink::netlink_file_of_file) {
-        let dest_groups = parse_netlink_dest_groups(msg_name_ptr, msg_namelen);
+        let (dest_pid, dest_groups) = parse_netlink_dest(msg_name_ptr, msg_namelen);
         if dest_groups != 0 {
             let _ = crate::net::netlink::netlink_multicast_send(&nlsock, &buf, dest_groups);
             return buf.len() as i64;
+        }
+        if dest_pid != 0 {
+            // review F11: user-to-user unicast to the port id.
+            return match crate::net::netlink::netlink_send_unicast(&nlsock, &buf, dest_pid) {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            };
         }
         return match crate::net::netlink::netlink_send(&nlsock, &buf) {
             Ok(n) => n as i64,
@@ -3148,10 +3196,13 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         };
     }
 
-    if total_len == 0 {
-        return 0;
-    }
-
+    // review F8: NO zero-length early return — the reference sendmsg with
+    // an empty iovec set TRANSMITS (a header-only UDP datagram crosses the
+    // wire, udp_send_locked's U1 contract) and returns 0. The old gate
+    // reported success without sending, so a leading empty message in a
+    // sendmmsg batch was swallowed (musl's sendmmsg fallback loops over
+    // sendmsg — msg 0 reported 0 and never reached the wire).
+    //
     // W3: parse the destination from msg_name (same path as sendto's
     // addr_ptr) — UDP sendmsg used to pass NULL and could never send a
     // datagram; TCP ignores it.
@@ -3607,8 +3658,11 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         false
     };
 
+    // review F7: MSG_PEEK — inet sockets honor it now (the flag is plumbed
+    // into socket_recv_ctl; the AF_UNIX branch above already did).
+    let peek = (flags & MSG_PEEK) != 0;
     let (bytes_read, src_addr) =
-        match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+        match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline, peek) {
             Ok(r) => r,
             Err(e) => return e as i64,
         };
@@ -3830,9 +3884,9 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                 let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
             }
             total_sent += 1;
-            if ret == 0 {
-                break;
-            }
+            // review F8: a zero-length send COUNTS (msg_len=0) and the
+            // batch continues — the reference __sys_sendmmsg only stops
+            // on an error or vlen exhaustion.
         }
         return total_sent as i64;
     }
@@ -3923,9 +3977,11 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
             }
         }
 
-        if total_len == 0 {
-            break;
-        }
+        // review F8: a zero-length message is SENT (the reference sends a
+        // 0-byte datagram / 0-byte stream write, reports msg_len=0, and
+        // continues) — the old break skipped the message entirely.
+        // (Fall through with the empty buffer; socket_send_ctl handles a
+        // 0-byte send on every family.)
 
         // W3: UDP above 65507 → EMSGSIZE (first failure semantics).
         if socket.sock_type == crate::net::socket::SocketType::Udp
@@ -3939,6 +3995,9 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
 
         // W3: per-message msg_name destination (same parse as sendmsg).
         // P1 IPv6: family-aware parse (v4-mapped normalizes to V4).
+        // review F9: a family that does not parse is EAFNOSUPPORT — the
+        // same contract sys_sendmsg enforces; the old `Err(_) => None`
+        // silently sent the message UNADDRESSED.
         let dest_addr = if !msg_name_ptr.is_null()
             && crate::arch::uaccess::access_ok(msg_name_ptr as usize, 16)
         {
@@ -3949,7 +4008,12 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
                 Ok(ParsedSockAddr::V6 { addr, port }) => {
                     Some((crate::net::ipv6::IpAddr::V6(addr), port))
                 }
-                Err(_) => None,
+                Err(_) => {
+                    if total_sent == 0 {
+                        return -(errno::EAFNOSUPPORT as i64);
+                    }
+                    break;
+                }
             }
         } else {
             None
@@ -4041,9 +4105,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, ret as u32);
             }
             total_recv += 1;
-            if ret == 0 {
-                break; // EOF
-            }
+            // review F8: a zero-length receive COUNTS and the batch
+            // continues (a 0-length datagram, or stream EOF — the next
+            // round decides); the reference __sys_recvmmsg only stops on
+            // error / EAGAIN / vlen exhaustion.
         }
         return total_recv as i64;
     }
@@ -4124,13 +4189,19 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
             }
         }
 
-        if total_buf_len == 0 {
-            break;
-        }
+        // review F8: a zero-length buffer still RECEIVES (and consumes) a
+        // zero-length datagram / stream chunk — the reference recvmmsg
+        // counts msg_len=0 messages and continues; only error / EAGAIN /
+        // vlen exhaustion stops the batch. The old break made a leading
+        // empty iovec abort the whole batch (socket_recv_ctl consumes the
+        // head datagram even when the copy length is 0).
 
         let mut buf = alloc::vec![0u8; total_buf_len];
+        // review F7: MSG_PEEK plumbed through the inet engines (recvmmsg
+        // applies its flags to every message, like the reference).
+        let peek = (flags & MSG_PEEK) != 0;
         let (bytes_read, _src) =
-            match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline) {
+            match crate::net::socket::socket_recv_ctl(&socket, &mut buf, nonblock, deadline, peek) {
                 Ok(r) => r,
                 Err(e) => {
                     // W3: first would-block/error with nothing received
@@ -4173,9 +4244,8 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
             let _ = crate::arch::uaccess::put_user(mm.add(56) as *mut u32, bytes_read as u32);
         }
         total_recv += 1;
-        if bytes_read == 0 {
-            break; // EOF
-        }
+        // review F8: a 0-length message (empty datagram / stream EOF)
+        // counts and the batch continues — the loop is bounded by vlen.
     }
     total_recv as i64
 }
@@ -4474,8 +4544,10 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
 
     // W3: the blocking engine also drains loopback between attempts (the
     // explicit ethernet_poll the old code did is folded in).
+    // review F7: MSG_PEEK plumbed through the inet engines.
+    let peek = (flags & MSG_PEEK) != 0;
     let (bytes_read, src_addr) =
-        match crate::net::socket::socket_recv_ctl(&socket, kbuf.as_mut_slice(), nonblock, deadline)
+        match crate::net::socket::socket_recv_ctl(&socket, kbuf.as_mut_slice(), nonblock, deadline, peek)
         {
             Ok(r) => r,
             Err(e) => return e as i64,

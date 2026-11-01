@@ -481,8 +481,12 @@ fn read_u32(data: &[u8]) -> Option<u32> {
 pub struct NetlinkSocket {
     /// NETLINK_ROUTE
     pub protocol: i32,
-    /// Assigned port id (the creating pid, or the bind-time nl_pid)
-    pub portid: u32,
+    /// Assigned port id (the creating pid, or the bind-time nl_pid —
+    /// review F11: bind now ADOPTS a nonzero nl_pid, getsockname
+    /// reports it, and sends route to it through NETLINK_PORTID_TABLE).
+    /// Atomic: written at bind (syscall context), read by getsockname
+    /// and the send routing on any CPU.
+    pub portid: core::sync::atomic::AtomicU32,
     /// Multicast subscription mask (bit N-1 set = group N joined).
     /// Linux keeps this in nlk->groups and netlink_broadcast delivers
     /// only to sockets whose mask covers the destination group
@@ -503,14 +507,16 @@ pub struct NetlinkSocket {
     pub options: Spinlock<SocketOptions>,
 }
 
-// SAFETY: all mutable state is behind Spinlocks.
+// SAFETY: all mutable state is behind Spinlocks / atomics.
 unsafe impl Sync for NetlinkSocket {}
 
 impl NetlinkSocket {
     pub fn new(protocol: i32) -> Self {
         Self {
             protocol,
-            portid: crate::sched::get_current_pid(),
+            portid: core::sync::atomic::AtomicU32::new(
+                crate::sched::get_current_pid(),
+            ),
             groups: core::sync::atomic::AtomicU32::new(0),
             recv_queue: Spinlock::new(VecDeque::new()),
             closed: Spinlock::new(false),
@@ -520,10 +526,7 @@ impl NetlinkSocket {
     }
 
     /// bind(2): adopt the sockaddr_nl multicast subscription mask
-    /// (nlk->groups). The nl_pid is NOT adopted: kernel-side portid
-    /// tracking is implicit (no portid-routed unicast table exists —
-    /// sends route by protocol), and callers here always bind pid=0
-    /// (kernel-assigned), which must not overwrite the creating pid.
+    /// (nlk->groups).
     pub fn bind_groups(&self, groups: u32) {
         self.groups
             .store(groups, core::sync::atomic::Ordering::Release);
@@ -885,6 +888,98 @@ pub fn netlink_send(sock: &Arc<NetlinkSocket>, buf: &[u8]) -> Result<usize, i32>
     Ok(buf.len())
 }
 
+// ============================================================================
+// review F11: portid-routed unicast
+// ============================================================================
+
+/// (protocol, nl_pid) -> the socket bound at that port id (Weak: the
+/// table must not keep closed sockets alive; dead entries are pruned on
+/// every access — netlink tables hold at most a handful of sockets).
+/// This is the netlink_table portid half of the reference
+/// (netlink_insert / netlink_lookup / netlink_getsockbyportid).
+static NETLINK_PORTID_TABLE: Spinlock<
+    alloc::collections::BTreeMap<(i32, u32), Weak<NetlinkSocket>>,
+> = Spinlock::new(alloc::collections::BTreeMap::new());
+
+/// Register `sock` at (protocol, portid) — no collision check: the caller
+/// (netlink_bind) has already verified the slot, and creation-time
+/// registration only runs when the slot is free (two sockets created by
+/// one task share the creating pid — the second simply stays unregistered
+/// and keeps today's behavior instead of evicting the first).
+fn portid_register(sock: &Arc<NetlinkSocket>, protocol: i32, portid: u32) {
+    let mut t = NETLINK_PORTID_TABLE.lock();
+    t.retain(|_, w| w.upgrade().is_some());
+    t.insert((protocol, portid), Arc::downgrade(sock));
+}
+
+/// Drop the (protocol, portid) entry if it still points at `sock`.
+fn portid_unregister(sock: &Arc<NetlinkSocket>, protocol: i32, portid: u32) {
+    let mut t = NETLINK_PORTID_TABLE.lock();
+    if let Some(w) = t.get(&(protocol, portid)) {
+        if let Some(cur) = w.upgrade() {
+            if Arc::ptr_eq(&cur, sock) {
+                t.remove(&(protocol, portid));
+            }
+        }
+    }
+}
+
+/// The live socket registered at (protocol, portid), if any.
+fn portid_lookup(protocol: i32, portid: u32) -> Option<Arc<NetlinkSocket>> {
+    let t = NETLINK_PORTID_TABLE.lock();
+    t.get(&(protocol, portid)).and_then(|w| w.upgrade())
+}
+
+/// bind(2) with a destination nl_pid: adopt it into the socket (Linux
+/// netlink_bind -> netlink_insert), refusing a port id another LIVE
+/// socket of the same protocol already holds (EADDRINUSE, the man 7
+/// netlink collision contract). pid=0 keeps the kernel-assigned id.
+pub fn netlink_bind(
+    sock: &Arc<NetlinkSocket>,
+    nl_pid: u32,
+    groups: u32,
+) -> Result<(), i32> {
+    sock.bind_groups(groups);
+    if nl_pid != 0 {
+        let old = sock.portid.load(core::sync::atomic::Ordering::Relaxed);
+        if nl_pid != old {
+            if let Some(other) = portid_lookup(sock.protocol, nl_pid) {
+                if !Arc::ptr_eq(&other, sock) {
+                    return Err(-98); // EADDRINUSE
+                }
+            }
+            portid_unregister(sock, sock.protocol, old);
+            sock.portid.store(nl_pid, core::sync::atomic::Ordering::Release);
+            portid_register(sock, sock.protocol, nl_pid);
+        } else {
+            // Re-bind of the current id: make sure the registration
+            // exists (idempotent).
+            portid_register(sock, sock.protocol, nl_pid);
+        }
+    }
+    Ok(())
+}
+
+/// User-to-user UNICAST: a sendmsg addressed to sockaddr_nl{nl_pid = P}
+/// delivers the buffer verbatim to the socket bound at P (one recvmsg
+/// per message — same contract as the multicast fanout). A dead or
+/// never-bound port id is ECONNREFUSED, matching the reference
+/// netlink_getsockbyportid miss in netlink_unicast.
+pub fn netlink_send_unicast(
+    sock: &Arc<NetlinkSocket>,
+    buf: &[u8],
+    dst_portid: u32,
+) -> Result<usize, i32> {
+    let dst = match portid_lookup(sock.protocol, dst_portid) {
+        Some(d) => d,
+        None => return Err(-111), // ECONNREFUSED
+    };
+    // Self-unicast is legal (Linux delivers to the sender's own queue).
+    dst.recv_queue.lock().push_back(buf.to_vec());
+    dst.wait_queue.wake_up_all();
+    Ok(buf.len())
+}
+
 /// recvmsg/recvfrom/read: pop exactly one response message (blocking
 /// per `nonblock`/`deadline`).
 pub fn netlink_recv(
@@ -911,6 +1006,13 @@ pub fn netlink_recv(
 
 /// close(): mark EOF and wake blocked receivers.
 pub fn netlink_close(sock: &Arc<NetlinkSocket>) {
+    // review F11: drop the portid registration (the Weak would prune it
+    // too; doing it here keeps the table exact for collision checks).
+    portid_unregister(
+        sock,
+        sock.protocol,
+        sock.portid.load(core::sync::atomic::Ordering::Relaxed),
+    );
     *sock.closed.lock() = true;
     sock.wait_queue.wake_up_all();
 }
@@ -1135,6 +1237,19 @@ pub fn netlink_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
     if protocol == NETLINK_KOBJECT_UEVENT {
         UEVENT_LISTENERS.lock().push(Arc::downgrade(&socket));
     }
+    // review F11: register for portid-routed unicast when the
+    // creating-pid key is free (a second socket from the same task
+    // stays unregistered — see portid_register).
+    {
+        let pid = socket
+            .portid
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let mut t = NETLINK_PORTID_TABLE.lock();
+        t.retain(|_, w| w.upgrade().is_some());
+        if !t.contains_key(&(protocol, pid)) {
+            t.insert((protocol, pid), Arc::downgrade(&socket));
+        }
+    }
     Ok(fd)
 }
 
@@ -1200,6 +1315,11 @@ pub unsafe fn put_sockaddr_nl_bound(addr_ptr: *mut u8, addrlen_ptr: *mut u32, po
 }
 
 /// Write a full sockaddr_nl { AF_NETLINK, pid=portid, groups=groups }.
+/// review F6: move_addr_to_user discipline — the copy is clamped to the
+/// CALLER's buffer length (the *addrlen value read here) while the stored
+/// length is the full 12-byte kernel size; the old form wrote all 12
+/// bytes unconditionally, clobbering whatever followed a short caller
+/// object.
 /// SAFETY: addr_ptr/addrlen_ptr access_ok-validated for 12/4 bytes.
 pub unsafe fn put_sockaddr_nl_bound_groups(
     addr_ptr: *mut u8,
@@ -1207,12 +1327,17 @@ pub unsafe fn put_sockaddr_nl_bound_groups(
     portid: u32,
     groups: u32,
 ) {
-    use crate::arch::uaccess::{copy_to_user, put_user};
+    use crate::arch::uaccess::{copy_to_user, get_user, put_user};
     let mut buf = [0u8; SOCKADDR_NL_LEN];
     buf[0] = AF_NETLINK as u8;
     buf[4..8].copy_from_slice(&portid.to_le_bytes());
     buf[8..12].copy_from_slice(&groups.to_le_bytes());
-    let _ = copy_to_user(addr_ptr, buf.as_ptr(), SOCKADDR_NL_LEN);
+    // review F6: clamp to the caller's object (a faulting length read
+    // falls back to the full write; the put_user below reports it).
+    let copy_len = get_user::<u32>(addrlen_ptr)
+        .map(|v| (v as usize).min(SOCKADDR_NL_LEN))
+        .unwrap_or(SOCKADDR_NL_LEN);
+    let _ = copy_to_user(addr_ptr, buf.as_ptr(), copy_len);
     let _ = put_user(addrlen_ptr, SOCKADDR_NL_LEN as u32);
 }
 
