@@ -4773,6 +4773,26 @@ pub fn scheduler_tick() {
                     if t0 == 0 {
                         t0 = now;
                     }
+                    // phantom-bits contiguity bar: a task-context base
+                    // DRAIN (a live outermost guard pair completing)
+                    // re-arms the window. The sc41/sc42 cumulative bar
+                    // could not tell a hot lock user from a phantom —
+                    // at 100 Hz the sampler never catches a lock-hot
+                    // task's microsecond gaps between guards, so the
+                    // window matured on LIVE holders (pb3: 887
+                    // heals/boot, 96% on 4 lock-hot pids, each with a
+                    // fresh 0->1 acquire inside the "2 s hold"), and
+                    // every false heal stripped a live guard + set
+                    // need_resched, preempting the holder MID-SECTION —
+                    // stranding its lock for every spinner (the
+                    // both-CPU spin/deadlock amplifier). Direct
+                    // zeroings (heal paths bypass the sub path) do not
+                    // stamp ti_pc_zero_jif, so a genuine phantom — whose
+                    // base never drains — still heals after 2 s.
+                    let zero_jif = unsafe { (*cur).ti_pc_zero_jif() };
+                    if zero_jif != 0 && now.wrapping_sub(zero_jif) < 200 {
+                        t0 = now;
+                    }
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
                     w.last.store(now, core::sync::atomic::Ordering::Relaxed);
