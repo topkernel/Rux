@@ -364,7 +364,7 @@ EOF
 
 # ---- preflight: sequential boots, at most this script's own QEMU ----
 foreign=$(pgrep -c qemu-system 2>/dev/null || echo 0)
-if [ "$SKIP_BOOT" = "0" ] && [ "${foreign:-0}" -ge 2 ]; then
+if [ "$SKIP_BOOT" = "0" ] && [ "${foreign:-0}" -ge "${GATE_MAX_FOREIGN:-2}" ]; then
     echo "refusing to boot: $foreign foreign QEMUs already running (host capacity)" >&2
     exit 3
 fi
