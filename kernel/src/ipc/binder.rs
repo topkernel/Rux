@@ -576,6 +576,15 @@ impl BinderAlloc {
             b.offsets_size = offsets_size;
             b.extra_size = extra_size;
             b.buf_id = buf_id;
+            // Recycled block hygiene: free_buf/sweep take `txn` but never
+            // clear `reply_done`, so a replied-then-BC_FREE'd sync block
+            // kept reply_done=true into its next life — sweep_stale_async
+            // treats txn==None && reply_done as "stale, reclaim NOW" (no
+            // grace window) and would hand the block to a third txn while
+            // the second was still being processed (parcel data
+            // corruption). Reset both stale markers on every reuse.
+            b.txn = None;
+            b.reply_done = false;
             if b.len > need {
                 let rest = BufBlock {
                     off: o + need,
@@ -1883,12 +1892,13 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // limited budget so a chatty boot cannot flood the UART.
             {
                 use core::sync::atomic::Ordering::Relaxed;
-                static CLOSE_PROBE_BUDGET: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(24);
+                static CLOSE_PROBE_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
                 let owned = proc.im().nodes.len();
-                if owned > 0
-                    && CLOSE_PROBE_BUDGET.fetch_sub(1, Relaxed) > 0
-                {
+                // fetch_add (monotone), never fetch_sub: a fetch_sub gate
+                // wraps at 0 and then prints on EVERY close forever (budget
+                // underflow — binder audit).
+                if owned > 0 && CLOSE_PROBE_N.fetch_add(1, Relaxed) < 24 {
                     let mut victims = alloc::vec::Vec::new();
                     for q in world.procs.iter() {
                         if q.id == proc.id {
@@ -6688,7 +6698,13 @@ fn binder_transaction(
             let obj_off = unsafe {
                 core::ptr::read_volatile((kvirt.add(block_off + align8(data_size)) as *const u64).add(i)) as usize
             };
-            if obj_off + 4 > data_size {
+            // The offsets array is SENDER-controlled: every offset must be
+            // bounds-checked with wrapping-proof arithmetic. The old
+            // `obj_off + N > data_size` form let obj_off near usize::MAX
+            // wrap past the check and point the reads below at
+            // kvirt + block_off - 4 (binder audit: offsets-entry wrap).
+            let obj_end4 = obj_off.checked_add(4).filter(|&e| e <= data_size);
+            if obj_end4.is_none() {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
@@ -6696,7 +6712,7 @@ fn binder_transaction(
             // SAFETY: header word validated within the data area.
             let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
             let osz = binder_object_size(ty);
-            if osz == 0 || obj_off + osz > data_size {
+            if osz == 0 || !obj_off.checked_add(osz).map_or(false, |e| e <= data_size) {
                 fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
                 crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
                 return;
@@ -7827,7 +7843,13 @@ unsafe fn resolve_parent_ptr(
     // bounds it within offsets_size (validated 8-aligned at resolve time).
     let parent_off =
         core::ptr::read_volatile((kvirt.add(block_off + offsets_at) as *const u64).add(parent_idx as usize)) as usize;
-    if parent_off + core::mem::size_of::<BinderBufferObject>() > data_size {
+    // Sender-controlled offsets entry: wrapping-proof bounds check (the old
+    // `parent_off + size > data_size` form let near-u64::MAX offsets wrap
+    // through — binder audit, same class as the obj_off fixup check).
+    if !parent_off
+        .checked_add(core::mem::size_of::<BinderBufferObject>())
+        .map_or(false, |e| e <= data_size)
+    {
         return None;
     }
     // SAFETY: validated within the data area.
@@ -7840,7 +7862,11 @@ unsafe fn resolve_parent_ptr(
     // it inside the sg area.
     let extra_base = offsets_at + align8(offsets_size);
     let rel = p.buffer.checked_sub(block_user)? as usize;
-    if rel < extra_base || rel + p.length as usize > extra_base + sg_size {
+    if rel < extra_base
+        || !rel
+            .checked_add(p.length as usize)
+            .map_or(false, |e| e <= extra_base + sg_size)
+    {
         return None;
     }
     Some((kvirt.add(block_off + rel), p.length as usize))
@@ -8786,4 +8812,100 @@ pub fn binder_dfx_dump() {
             }
         }
     }
+}
+
+// ============================================================================
+// unit-test: binder buffer lifecycle (review s2-a)
+// ============================================================================
+//
+// Pins the recycled-block hygiene fix in BinderAlloc::new_buf's sync arm:
+// a replied-then-BC_FREE'd sync block must NOT carry reply_done into its
+// next allocation — sweep_stale_async treats txn==None && reply_done as
+// "reclaim NOW (no grace)", so a stale marker handed the block to a third
+// transaction while the second was still being processed.
+#[cfg(feature = "unit-test")]
+pub fn test_binder_alloc_recycle() {
+    crate::tests::test_group_start("binder_alloc_recycle");
+
+    let mut alloc = BinderAlloc {
+        // new_buf/free_buf never dereference kvirt; phys stays 0 so Drop
+        // would be a no-op-free — but Drop runs put_page on null pages and
+        // skips free_pages when still_pinned stays false... a zeroed phys
+        // would free_pages(0, order). Leak the alloc instead: forget it.
+        kvirt: core::ptr::null_mut(),
+        phys: 0,
+        npages: 4,
+        order: 2,
+        user_base: 0x1000,
+        blocks: Vec::new(),
+        free_async_space: 8192,
+        last_sweep_j: 0,
+        next_buf_id: 1,
+    };
+    alloc.blocks.push(BufBlock {
+        off: 0,
+        len: 16384,
+        free: true,
+        async_block: false,
+        allow_user_free: false,
+        data_size: 0,
+        offsets_size: 0,
+        extra_size: 0,
+        buf_id: 0,
+        txn: None,
+        reply_done: false,
+    });
+
+    // Life 1: sync txn buffer, delivered (allow_user_free), replied
+    // (reply_done), then freed by the server's BC_FREE_BUFFER — the
+    // standard request-buffer flow of every binder server.
+    let off1 = match alloc.new_buf(100, 0, 0, false) {
+        Some(o) => o,
+        None => {
+            crate::tests::test_fail("binder_alloc_l1", "first sync alloc failed");
+            return;
+        }
+    };
+    {
+        let b = alloc.blocks.iter_mut().find(|b| b.off == off1).unwrap();
+        b.allow_user_free = true;
+        b.reply_done = true; // set by the reply path (BC_REPLY)
+    }
+    match alloc.free_buf(alloc.user_base + off1 as u64) {
+        Some(t) if t.is_none() => {}
+        _ => {
+            crate::tests::test_fail("binder_alloc_l1", "free of sync buffer failed");
+            return;
+        }
+    }
+    crate::tests::test_pass("binder_alloc_l1");
+
+    // Life 2: the SAME block (first-fit from the low end) serves a new
+    // sync txn. It must come back clean: reply_done false, no stale txn.
+    let off2 = match alloc.new_buf(100, 0, 0, false) {
+        Some(o) => o,
+        None => {
+            crate::tests::test_fail("binder_alloc_l2", "second sync alloc failed");
+            return;
+        }
+    };
+    crate::test_assert_eq!(off2, off1, "first-fit recycles the same block");
+    let clean = alloc
+        .blocks
+        .iter()
+        .find(|b| b.off == off2)
+        .map(|b| !b.reply_done && b.txn.is_none() && !b.free)
+        .unwrap_or(false);
+    if clean {
+        crate::tests::test_pass("binder_alloc_l2_clean");
+    } else {
+        crate::tests::test_fail(
+            "binder_alloc_l2_clean",
+            "recycled sync block carries stale reply_done/txn (sweep would reclaim an in-flight buffer)",
+        );
+    }
+
+    // The allocation must never escape this test (phys==0 would hand the
+    // buddy allocator a bogus block on Drop).
+    core::mem::forget(alloc);
 }

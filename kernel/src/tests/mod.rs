@@ -550,6 +550,7 @@ pub fn run_all_tests() {
 
     test_group_start("futex");
     futex_test::test_futex();
+    futex_test::test_futex_wake_op_decode();
 
     // ===== 6. Scheduler =====
     test_group_start("smp");
@@ -611,6 +612,8 @@ pub fn run_all_tests() {
     // R40: semop blocking contract (block-until-post, EAGAIN only with
     // IPC_NOWAIT) — runs AFTER the pure-logic ipc_sysv rows; it spawns
     // helper kthreads and sleeps the boot task.
+    crate::ipc::binder::test_binder_alloc_recycle();
+
     test_group_start("sysv_sem_block");
     sysv_sem_block::test_sysv_sem_block();
 
