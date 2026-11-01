@@ -196,10 +196,8 @@ pub fn kill_other_threads(current: *mut Task) {
     // thread group, the thread ring is corrupt — this print names the
     // caller and victims directly.
     if !victims.is_empty() {
-        let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
-                .trim_end_matches('\0')
-        };
+        // SAFETY: current is a valid, running task.
+        let ccomm = unsafe { (*current).comm_str() };
         let mut vnames: alloc::vec::Vec<alloc::string::String> =
             alloc::vec::Vec::new();
         for v in victims.iter().take(20) {
@@ -207,8 +205,7 @@ pub fn kill_other_threads(current: *mut Task) {
             if !t.is_null() {
                 unsafe {
                     vnames.push(alloc::string::String::from(
-                        core::str::from_utf8_unchecked((*t).comm())
-                            .trim_end_matches('\0'),
+                        (*t).comm_str(),
                     ));
                 }
             }
@@ -1111,12 +1108,9 @@ pub fn do_exit(exit_code: i32) -> ! {
             // SIGKILL-SEND trace — this loop is the only silent kernel
             // SIGKILL fan-out. Name the namespace init and every victim
             // until this is root-caused.
-            let ccomm = unsafe {
-                alloc::string::String::from(
-                    core::str::from_utf8_unchecked((*current).comm())
-                        .trim_end_matches('\0'),
-                )
-            };
+            // SAFETY: current is the raw pointer to the calling task,
+            // valid because we are it.
+            let ccomm = unsafe { alloc::string::String::from((*current).comm_str()) };
             let ns_addr = dying_ns
                 .as_ref()
                 .map(|d| alloc::sync::Arc::as_ref(d) as *const _ as usize)
@@ -1144,8 +1138,7 @@ pub fn do_exit(exit_code: i32) -> ! {
                     victims.push((
                         t.pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked(t.comm())
-                                .trim_end_matches('\0'),
+                            t.comm_str(),
                         ),
                     ));
                 }
@@ -1234,10 +1227,8 @@ pub fn do_exit_group(exit_code: i32) -> ! {
     // storm's first domino and the TERM->st=9 status overwrite both
     // decode from this one print.
     {
-        let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
-                .trim_end_matches('\0')
-        };
+        // SAFETY: current is the raw pointer to the calling task.
+        let ccomm = unsafe { (*current).comm_str() };
         let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };
         crate::pr_err!(
             "EXITGRP: pid={} comm='{}' code={} pending=0x{:x}",
