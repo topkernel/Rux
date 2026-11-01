@@ -44,7 +44,15 @@ APPEND = ("ip=dhcp loglevel=" + os.environ.get("LOGLEVEL", "7") + " console=ttyS
           "ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required" + EXTRA)
 
 cmd = ["qemu-system-x86_64", "-M", "q35", "-accel", "kvm", "-cpu", "max",
-       "-m", "4G", "-smp", os.environ.get("SMP", "2"), "-snapshot", "-display", "none", "-vga", "none",
+       "-m", "4G", "-smp", os.environ.get("SMP", "2")]
+# The global -snapshot flag snapshots EVERY drive regardless of the
+# per-drive snapshot=on/off — the eighth successor's NOSNAP population
+# boot (lbwarm) removed only the per-drive flag and silently discarded
+# all /data writes (userdata-warm.img mtime never moved; image stayed
+# empty). Gate the global flag on NOSNAP too.
+if os.environ.get("NOSNAP") != "1":
+    cmd.append("-snapshot")
+cmd += ["-display", "none", "-vga", "none",
        "-device", "virtio-gpu-pci,id=ohgpu,xres=720,yres=1280",
        "-serial", "stdio", "-monitor", f"unix:{MON},server=on,wait=off",
        "-kernel", KERNEL,
