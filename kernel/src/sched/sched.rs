@@ -4629,6 +4629,10 @@ pub fn scheduler_tick() {
     crate::dfx::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
+    // phantom-bits orphan scan: bits the interrupted task carried INTO
+    // the tick whose release never executed (softirq bit outside any
+    // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
+    crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
     // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
     // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
@@ -4967,6 +4971,17 @@ pub fn scheduler_tick() {
                                 b"PREEMPT-HEAL-ORIGIN",
                                 cur,
                             );
+                            // phantom-bits: when the healed count carried
+                            // the SOFTIRQ bit, name its +0x100 booker
+                            // (the monopolist face — the release never
+                            // executed anywhere: no sub=0x100 underflow
+                            // exists to point at it instead).
+                            if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
+                                crate::dfx::leakorigin::report_softirq_origin(
+                                    b"PREEMPT-HEAL-SOFTIRQ",
+                                    cur,
+                                );
+                            }
                         }
                     }
                 }

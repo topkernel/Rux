@@ -4063,6 +4063,14 @@ impl Task {
         {
             crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
         }
+        // phantom-bits: softirq field drained to zero — the +0x100
+        // acquire paired; drop the shadow so a later orphan report names
+        // only still-unpaired bookings.
+        if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
+            && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
+        {
+            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+        }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);

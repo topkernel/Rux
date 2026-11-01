@@ -358,6 +358,19 @@ pub fn softirq_pending_raw(cpu: usize) -> u32 {
     unsafe { SOFTIRQ_PENDING[cpu].load(Ordering::Acquire) }
 }
 
+/// Is a softirq processing window open on `cpu`? (phantom-bits orphan
+/// scan: a task observed with the SOFTIRQ bit set while NO window is
+/// open on its CPU carries a stranded booking — the 0x100 monopolist
+/// face. A SeqLock::write section is irq-off, so a tick can never land
+/// inside one; __do_softirq sets the flag before booking.)
+pub fn in_progress_cpu(cpu: usize) -> bool {
+    if cpu >= MAX_CPUS {
+        return false;
+    }
+    // SAFETY: per-CPU static read, bounded index.
+    unsafe { SOFTIRQ_IN_PROGRESS[cpu].load(Ordering::Acquire) != 0 }
+}
+
 /// Run `__do_softirq()` on the per-CPU interrupt stack.
 ///
 /// Process softirqs on a separate stack.
