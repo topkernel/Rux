@@ -152,3 +152,67 @@ window and the documented prlimit64 EFAULT gap.
 Also confirmed this round: STAC/CLAC #UD under QEMU TCG is CR4-invariant,
 and the syscall layer has ZERO raw user-pointer dereferences (SMAP-VIOL
 beacons silent across the full x86_64 suite with CR4.SMAP on).
+
+## Round 3 (2026-11-01): syscall entry/exit overhead — queue item 1
+
+Audit of the x86_64 round trip (trap.S syscall_entry/trap_exit,
+trap.rs handle_syscall + trap_handler tail, dispatch.rs wrapper,
+signal.rs check_and_deliver_signals):
+
+Always-on per-syscall costs found (everything else verified lazy):
+- ENTRY+EXIT: the forensic SYSCALL_RING was recorded TWICE per call
+  (entry sentinel + exit record): 2 global fetch_adds, 10 atomic
+  stores into a rotating 64 KiB buffer, 2 current_pid() calls.
+- EXIT tail: check_and_deliver_signals paid TWO locked RMWs on every
+  user return — PENDING_ISIG_SIGNO.swap(0, AcqRel) and
+  PENDING_CAD.swap(false, AcqRel), both almost always on the empty
+  path.
+- Verified cheap (one load each on the disabled path): syscost
+  enter/exit, trace_sys_enter/exit (armed() inside), the seccomp gate
+  (one Acquire load), rcu_note_context_switch (one Relaxed load),
+  leakhunt check_user_return, steptrace gate, x86_compat::translate
+  (dense match -> jump table).
+
+Commits (feature/review-perf2):
+- ff791c2b load-first ISIG/CAD pending checks (claim semantics kept:
+  only the CPU whose swap sees the pending value delivers it)
+- aefbf2db gate the forensic SYSCALL_RING behind dfx=sysring
+  (default off; per-task LASTSYS latch stays unconditional; readers
+  say the ring is off instead of replaying a stale one)
+
+A/B (lmbench lat_syscall, KVM strong profile, one boot per case,
+interleaved base->fix1->fix12 per sweep, 5 sweeps total across two
+runs; med-of-runs; rig: run/sysab-abc.sh, banks
+run/sysab-abc{,2}.txt; host load 3.2-10.4, foreign_qemus 0-14 —
+columns interleaved at equal load per the round-2 protocol; the
+KVM numbers proved load-insensitive across that band: base null
+0.0901-0.0980 with no load correlation):
+
+  case           base     fix1     fix12    fix12 vs base
+  null(getppid)  0.0929   0.0803   0.0787   -15.3%
+  read           0.2239   0.2058   0.2071   -7.5%
+  write          0.1965   0.1833   0.1811   -7.8%
+  fstat          0.1755   0.1677   0.1654   -5.8%
+  open/close     5.658    5.591    5.580    -1.4%
+
+Attribution: fix1 (the two locked xchg) carries most of the gain —
+consistent with ~2 locked RMW ~= 10-15 ns under KVM; fix12's sysring
+gate is small/within-noise single-threaded (the 64 KiB ring rotates
+inside L2 on this host) but removes a globally-contended fetch_add
+pair from every syscall under SMP and matches the mm-forensics
+default-off policy. open/close is path-lookup dominated (queue item
+3).
+
+vs the native reference column: null 0.0909 -> 0.0787 us; ratio vs
+reference 0.0398 improves 2.28x -> 1.98x. Remaining delta
+attribution for the next pass: getppid's body walks the pid hash per
+call (the reference reads a cached field) — a per-syscall-body cost,
+not entry/exit; candidate for a follow-up micro-lever (cache ppid,
+invalidate on reparent — bug-dense, needs LTP fork-family gate).
+
+Gates: x86_64 + riscv64 builds rc=0 (strong profile x86); make test
+1204/1204 ALL PASSED on the fix1+2 tree; every lmbench boot is a
+full PID-1 functional boot (ext4, virtio, timer) — all clean.
+Worktree note: toolchain/riscv64-rux-linux-musl was a dangling
+symlink to the deleted ltp-r20 lane; rebuilt locally (make rootfs
+failed until then).
