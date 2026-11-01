@@ -13,6 +13,60 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/reboot.h>
+
+/* Benchmarks needing a scratch file (lat_pagefault / lat_mmap /
+ * bw_file_rd / bw_mmap_rd) all use this one: 16 MiB is comfortably
+ * above lat_pagefault's 1 MiB minimum and above the 1m read sizes. */
+#define SCRATCH "/tmp/lmbench.file"
+#define SCRATCH_SZ (16UL * 1024 * 1024)
+
+/* Client/server benchmarks: the runner starts the "<bench> -s" server
+ * locally before exec'ing the client against 127.0.0.1 (the upstream
+ * harness starts these servers remotely; there is no rsh path here, so
+ * the runner owns the server lifetime). */
+static int is_net_bench(const char *b)
+{
+    return !strcmp(b, "lat_tcp") || !strcmp(b, "lat_udp") ||
+           !strcmp(b, "lat_connect") || !strcmp(b, "bw_tcp") ||
+           !strcmp(b, "bw_udp");
+}
+
+static void make_scratch(void)
+{
+    int fd = open(SCRATCH, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (fd < 0)
+        return;
+    if (ftruncate(fd, (off_t)SCRATCH_SZ) != 0) {
+        /* no sparse support: extend the hard way via one dummy write */
+        ssize_t w = 0;
+        if (lseek(fd, (off_t)SCRATCH_SZ - 1, SEEK_SET) >= 0)
+            w = write(fd, "", 1);
+        (void)w;
+    }
+    close(fd);
+}
+
+static pid_t start_server(const char *bench)
+{
+    char abs[192];
+    snprintf(abs, sizeof(abs), "/test/%s", bench);
+    char *sargv[3];
+    sargv[0] = (char *)bench;
+    sargv[1] = (char *)"-s";
+    sargv[2] = NULL;
+    pid_t sp = fork();
+    if (sp == 0) {
+        int nfd = open("/dev/null", O_WRONLY);
+        if (nfd >= 0) { dup2(nfd, 1); dup2(nfd, 2); }
+        execve(abs, sargv, NULL);
+        _exit(127);
+    }
+    /* give the server a second to bind before the client connects */
+    usleep(1000000);
+    return sp;
+}
 
 static int read_spec(char *out, size_t cap)
 {
@@ -48,6 +102,7 @@ static int read_spec(char *out, size_t cap)
 int main(void)
 {
     chdir("/test");
+    make_scratch();
 
     char spec[160];
     if (read_spec(spec, sizeof(spec)) != 0 || spec[0] == 0) {
@@ -65,21 +120,26 @@ int main(void)
         tok = strtok(NULL, " ");
     }
 
-    /* argv: <bench> -N <reps> -W <warmup> [bench args]
-     * lmbench measures nothing without an explicit repetition count. */
+    /* argv: <bench> -N <reps> [-W <warmup>] [bench args]
+     * lmbench measures nothing without an explicit repetition count.
+     * lat_connect's getopt has no -W, everyone else gets warmup 1. */
     char *real_argv[16];
     int argc2 = 0;
     real_argv[argc2++] = bench;
     real_argv[argc2++] = (char *)"-N";
     real_argv[argc2++] = (char *)"3";
-    real_argv[argc2++] = (char *)"-W";
-    real_argv[argc2++] = (char *)"1";
+    if (strcmp(bench, "lat_connect") != 0) {
+        real_argv[argc2++] = (char *)"-W";
+        real_argv[argc2++] = (char *)"1";
+    }
     for (int k = 0; k < bn; k++)
         real_argv[argc2++] = bargs[k];
     real_argv[argc2] = NULL;
 
     printf("LMBENCH RUN %s\n", spec);
     fflush(stdout);
+
+    pid_t server = is_net_bench(bench) ? start_server(bench) : -1;
 
     int pfd[2];
     if (pipe(pfd) != 0) {
@@ -121,7 +181,9 @@ int main(void)
                 write(1, buf, (size_t)n);
             break;
         }
-        if (++ticks >= 2000) {   /* 20 s */
+        if (++ticks >= 3500) {   /* 35 s: enough for the slow cases
+                                  * (lat_mem_rd 256M) under KVM; real
+                                  * hangs still hit the outer 60 s cap */
             kill(p, SIGTERM);
             usleep(200000);
             kill(p, SIGKILL);
@@ -134,8 +196,14 @@ int main(void)
     close(pfd[0]);
     int st = 0;
     waitpid(p, &st, 0);
+    if (server > 0) {
+        kill(server, SIGKILL);
+        waitpid(server, NULL, 0);
+    }
     printf("LMBENCH DONE %s\n", bench);
     fflush(stdout);
     sync();
+    /* end the boot immediately instead of idling to the outer cap */
+    reboot(RB_POWER_OFF);
     return 0;
 }
