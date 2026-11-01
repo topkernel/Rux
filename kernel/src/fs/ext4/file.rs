@@ -580,8 +580,16 @@ fn fill_page_cache_batch(
                 &inode.block,
                 idx,
             );
-            idx += 1;
-            continue;
+            // STOP the read-ahead window at the first hole — the
+            // reference kernel's readahead discipline. Holes are never
+            // page-cache entries, so walking past one only re-resolves
+            // extents (and cache probes) for pages that can never be
+            // filled: a fully-sparse scratch file paid 512 lookups per
+            // read(2) here (the lmbench bw_file_rd "50x" was exactly
+            // this — 611 MB/s hole reads vs a 33.6 GB/s reference).
+            // Demand pages after a hole still get served one at a time
+            // by the caller's sync fallback, which handles holes.
+            break;
         }
 
         // Coalesce the following pages while their physical blocks stay
