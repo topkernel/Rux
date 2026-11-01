@@ -395,6 +395,20 @@ pub fn heartbeat() {
     let pick_n = PICK_N.load(Ordering::Relaxed);
     let sum_ms = ticks_to_ms(DELTA_SUM_TICKS.load(Ordering::Relaxed));
     let avg = if pick_n > 0 { sum_ms / pick_n } else { 0 };
+    // Lost-park frozen-state detection (fix-lostpark lane): a second with
+    // ZERO wake transitions and an empty global queue while wake activity
+    // existed before is the wedge signature — dump the event ring once so
+    // the final window names the producer.
+    {
+        static LAST_WN: AtomicU64 = AtomicU64::new(0);
+        let last = LAST_WN.swap(wake_n, Ordering::AcqRel);
+        if wake_n > 0
+            && wake_n == last
+            && crate::sched::sched::GlobalRunQueue::grq_nr_running() == 0
+        {
+            crate::dfx::lostpark::dump_once(b"frozen");
+        }
+    }
     crate::pr_info!(
         "WW: wakes={} picks={} avg_run={}ms stranded={} strand_max={}ms",
         wake_n,

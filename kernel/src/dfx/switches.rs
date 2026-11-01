@@ -102,6 +102,7 @@ macro_rules! dfx_switch_table {
             SysForensic => "sysforensic",
             SysRing => "sysring",
             FilerdProbe => "filerd",
+            LostParkTrace => "lostpark",
         }
     };
 }
@@ -488,9 +489,16 @@ pub enum DfxSwitch {
     /// read fast path, reported via /proc/filerd. Built to attribute the
     /// bw_file_rd 50x lmbench gap; see dfx/filerd.rs.
     FilerdProbe,
+    /// dfx=lostpark (fix-lostpark lane): SMP lost-park forensics — the
+    /// idle-loop lie detector (a CPU about to idle while its per-CPU
+    /// current slot still names a real task, with the SLOT_WRITER tag
+    /// that names the slot's last writer) plus the wake-skip census for
+    /// wakes refused while nothing is runnable. Rate-limited direct-
+    /// console lines; OFF by default.
+    LostParkTrace,
 }
 
-const SWITCH_COUNT: usize = 54;
+const SWITCH_COUNT: usize = 55;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -585,6 +593,7 @@ impl DfxSwitch {
             DfxSwitch::SysForensic => 51,
             DfxSwitch::SysRing => 52,
             DfxSwitch::FilerdProbe => 53,
+            DfxSwitch::LostParkTrace => 54,
         }
     }
 
@@ -614,7 +623,10 @@ pub fn set(switch: DfxSwitch, on: bool) {
     }
     if let DfxSwitch::Scribble = switch {
         #[cfg(feature = "x86_64")]
-        super::scribble::ENABLED.store(on, Ordering::Relaxed);
+        super::scribble::ENABLED.store(on, core::sync::atomic::Ordering::Relaxed);
+    }
+    if let DfxSwitch::LostParkTrace = switch {
+        super::lostpark::arm();
     }
     if let DfxSwitch::ScribblePark = switch {
         #[cfg(feature = "x86_64")]

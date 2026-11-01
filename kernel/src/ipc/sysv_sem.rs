@@ -1155,7 +1155,27 @@ fn semop_blocking_loop(
                                 crate::sched::dequeue_task(&*current);
                                 return -(errno::ENOMEM as i64);
                             }
+                            // Lost-park ring (dfx=lostpark): park-enter
+                            // snapshot — pid, preempt_count, state bits.
+                            if crate::dfx::lostpark::armed() {
+                                crate::dfx::lostpark::record(
+                                    1,
+                                    (*current).pid() as u64,
+                                    (*current).preempt_count() as u32 as u64,
+                                    (*current).state().bits() as u64,
+                                    crate::drivers::timer::get_jiffies(),
+                                );
+                            }
                             crate::sched::schedule();
+                            if crate::dfx::lostpark::armed() {
+                                crate::dfx::lostpark::record(
+                                    2,
+                                    (*current).pid() as u64,
+                                    (*current).preempt_count() as u32 as u64,
+                                    (*current).state().bits() as u64,
+                                    crate::drivers::timer::get_jiffies(),
+                                );
+                            }
                             if timer_id != 0 {
                                 crate::timer::del_timer(timer_id);
                             }
@@ -1301,6 +1321,31 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
 
         entry.inner.sem_otime.store(ipc_current_time(), Ordering::Relaxed);
         entry.inner.sem_padid.store(get_current_pid(), Ordering::Relaxed);
+
+        // Lost-park ring (dfx=lostpark): the value transition of a
+        // successful apply — a=sem0 value, b=sem1 value (2-sem probe
+        // sets; more/less record what exists).
+        if crate::dfx::lostpark::armed() && sems.len() >= 1 {
+            let v0 = sems[0].value.load(Ordering::Relaxed) as u64;
+            let n0 = sems[0].ncnt.load(Ordering::Relaxed) as u64;
+            let v1 = if sems.len() >= 2 {
+                sems[1].value.load(Ordering::Relaxed) as u64
+            } else {
+                0
+            };
+            let n1 = if sems.len() >= 2 {
+                sems[1].ncnt.load(Ordering::Relaxed) as u64
+            } else {
+                0
+            };
+            crate::dfx::lostpark::record(
+                3,
+                caller_pid as u64,
+                v0 | (n0 << 8),
+                v1 | (n1 << 8),
+                crate::drivers::timer::get_jiffies(),
+            );
+        }
 
         // Wake up other processes waiting on this semaphore set
         entry.inner.wq.wake_up_all();

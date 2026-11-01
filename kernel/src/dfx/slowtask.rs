@@ -139,8 +139,65 @@ unsafe fn audit(now: u64) {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = unsafe { &*task };
         let st_bits = tk.state().bits();
+        // Lost-park all-task census (dfx=lostpark): one unfiltered row
+        // per task every audit round while wedged-hunting — answers
+        // "which bookkeeping class does the vanished task rest in"
+        // (runqueue, slots, wakeable state, pid-hash presence).
+        if crate::dfx::switches::enabled(
+            crate::dfx::switches::DfxSwitch::LostParkTrace,
+        ) && tk.pid() != 0
+            && tk.pid() != u32::MAX
+        {
+            static LPALL_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if LPALL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                < 24
+            {
+                let claim = tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+                crate::pr_warn!(
+                    "LP-CENSUS pid={} state={:#x} pc={:#x} oncpu={} pk={} cl={} onrq={} j={}",
+                    tk.pid(),
+                    st_bits,
+                    tk.preempt_count() as u32 as u64,
+                    tk.on_cpu() as u64,
+                    tk.pick_state() as u64,
+                    claim as i64,
+                    tk.sched_entity().is_on_rq() as u64,
+                    now
+                );
+                // The parked chain names the exact park site (the
+                // unregistered-park signature hunt).
+                print_parked_chain(tk.pid(), 0);
+            }
+        }
         let sleeping = st_bits & 0x3 != 0; // INTERRUPTIBLE | UNINTERRUPTIBLE
         if !sleeping {
+            // Lost-park census (fix-lostpark, dfx=lostpark): a RUNNING
+            // task owned by no CPU slot is the R46 phantom family — on
+            // x86_64 the idle-loop harvester is riscv64-gated, so nothing
+            // else ever names or heals it. Report it with the same
+            // aging/chain discipline so the wedge capture names the
+            // vanished poster.
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            ) && tk.pid() != 0
+                && tk.pid() != u32::MAX
+            {
+                let owned = (0..crate::config::MAX_CPUS)
+                    .any(|c| crate::sched::sched::cpu_state(c).current == task);
+                if !owned {
+                    notes.push(Note {
+                        pid: tk.pid(),
+                        sys: 0xFFFF_FFFF_0000_0001, // marker: non-sleeping, slotless
+                        epc: 0,
+                        state: st_bits,
+                        a0: tk.preempt_count() as u64,
+                        a1: (tk.on_cpu() as u64) | ((owned as u64) << 8),
+                        age_j: 0,
+                    });
+                    print_parked_chain(tk.pid(), 0);
+                }
+            }
             return;
         }
         let Some(top) = tk.kernel_stack_top_checked() else {
@@ -174,7 +231,28 @@ unsafe fn audit(now: u64) {
             (r.syscallno, r.pc, r.regs[0], r.regs[1])
         };
         if sys == 0 {
-            // Not a syscall entry (interrupt frame) — skip.
+            // Not a syscall entry (interrupt frame) — skip, except for
+            // the lost-park census (dfx=lostpark): a USER task parked
+            // under an interrupt frame never re-enters its wait loop's
+            // recheck and no wake path names it — the vanished-task
+            // signature of the ping-pong wedge. Name it once per audit
+            // round with its parked chain.
+            if crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            ) && tk.pid() != 0
+                && tk.pid() != u32::MAX
+            {
+                notes.push(Note {
+                    pid: tk.pid(),
+                    sys: 0xFFFF_FFFF_0000_0002, // marker: sleeping, IRQ frame
+                    epc: 0,
+                    state: st_bits,
+                    a0: tk.preempt_count() as u64,
+                    a1: tk.on_cpu() as u64,
+                    age_j: 0,
+                });
+                print_parked_chain(tk.pid(), 0);
+            }
             return;
         }
         let pid = tk.pid();
@@ -257,8 +335,11 @@ unsafe fn audit(now: u64) {
     for n in notes.iter().take(20) {
         let fs = fs_family(n.sys);
         // Lock-family waits: only the single oldest entry gets a full
-        // line; the rest are counted for the summary.
-        if !fs && !(n.pid == oldest_pid && n.sys == oldest_sys) {
+        // line; the rest are counted for the summary. Lost-park census
+        // markers (high sentinel word) always print — they are one-shot
+        // wedge captures, not recurring lock waits.
+        let is_lp_marker = n.sys >> 32 == 0xFFFF_FFFF;
+        if !fs && !(n.pid == oldest_pid && n.sys == oldest_sys) && !is_lp_marker {
             lock_lines += 1;
             continue;
         }
