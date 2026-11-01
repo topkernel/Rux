@@ -225,17 +225,17 @@ Rules (INV-LOCK-7):
    rmap/compact (per-mm, one mm section at a time, mm Arc-pinned),
    ashmem, and mm teardown via the dying mm's own lock
    (uncontended by construction: last-Arc + synchronize_rcu drain).
-2. **Global mode (riscv64, and x86_64 users without an mm)**:
-   `PTE_MODIFY_LOCK` (GlobalPteLock) held exclusive. On riscv64 ALL
-   PTE sites (arch files and `pte_lock_for` handles alike) map to the
-   same global write — riscv64 keeps today's exact whole-domain
-   serialization until its own split-mode migration.
-   On x86_64 the remaining global users are: ipc/binder.rs +
-   ipc/sysv_shm.rs installs (IPC line's files — excluded against
-   per-mm readers by the epoch, no code change needed there),
-   `map_user_region`/kernel-root maps (exec/fresh-table/device
-   cold paths), and the unpublished-tree teardown handle
-   (`FRESH_TREE_PTE_LOCK`).
+2. **Global mode (sites without a reachable mm — all arches)**:
+   `PTE_MODIFY_LOCK` (GlobalPteLock) held exclusive. Split mode went
+   live on ALL architectures with the 2026-10-31 perf review
+   (`PteLock::lock` in mm/mm_struct.rs, adopted by `pte_lock_for` on
+   riscv64/x86_64/aarch64 alike) — per-mm PTE writers of different mms
+   now run concurrently on every arch. The remaining direct global
+   users are: ipc/binder.rs + ipc/sysv_shm.rs installs (IPC line's
+   files — excluded against per-mm readers by the epoch, no code
+   change needed there), `map_user_region`/kernel-root maps
+   (exec/fresh-table/device cold paths), and the unpublished-tree
+   teardown handle (`FRESH_TREE_PTE_LOCK`).
 3. **Nesting**: global-epoch WRITE never nests inside any PTE
    section (write-inside-read is a self-deadlock; write-inside-write
    likewise). Two per-mm sections may only overlap when they hold
