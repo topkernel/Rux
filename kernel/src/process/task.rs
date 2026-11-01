@@ -5536,6 +5536,16 @@ impl Task {
         self.fs.clone()
     }
 
+    /// (perf-path lane) Chroot probe WITHOUT cloning the fs Arc — the
+    /// fs_arc() clone (an atomic refcount pair) ran once per path walk
+    /// and several times per open's shortcut gates.
+    pub fn process_rooted_cheap(&self) -> bool {
+        match self.fs.as_ref() {
+            Some(fs) => !fs.root_is_slash(),
+            None => false,
+        }
+    }
+
     /// Set fs_struct
     pub fn set_fs(&mut self, fs: Option<alloc::sync::Arc<crate::fs::FsStruct>>) {
         self.fs = fs;

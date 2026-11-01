@@ -60,42 +60,89 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     let flags = args[2] as u32;
     let mode = args[3] as u32;
 
+    // pathcost: entry bracket; PRE closes at the dispatch call below,
+    // TAIL covers File creation + fd install + return path.
+    let pc_pre = crate::dfx::fsw::pc_now();
+    if pc_pre != 0 {
+        crate::dfx::fsw::OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    // (perf-path lane) Chroot verdict computed ONCE — the shortcut gates
+    // below each re-probed it (sched::current + RwSpinlock read each).
+    let not_rooted = !crate::fs::vfs::process_rooted();
+
+    // (perf-path lane) Fast path: absolute path fully captured by one
+    // bounded user copy, task not chrooted — skips resolve_user_path's
+    // second copy_from_user + String allocation (for absolute paths it
+    // is exactly String::from(pathname)). Everything else keeps the full
+    // resolution (cwd/dirfd join, chroot prefix, >127-byte paths).
+    let mut probe = [0u8; 128];
+    let mut probe_str: Option<&str> = None;
+    if not_rooted
+        && !pathname_ptr.is_null()
+        && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+        && unsafe {
+            crate::arch::uaccess::copy_from_user(
+                probe.as_mut_ptr(), pathname_ptr, probe.len())
+        } == 0
+    {
+        // nul_found gate: never walk a probe-TRUNCATED prefix of a
+        // longer path (falls back to resolve_user_path instead).
+        if let Some(len) = probe.iter().position(|&b| b == 0) {
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if p.starts_with('/') {
+                    probe_str = Some(p);
+                }
+            }
+        }
+    }
+    let fast_path = probe_str;
+
     const O_CREAT: u32 = 0o00000100;
     // Arch-dependent bit (arm64 uapi 040000 vs x86/asm-generic 0200000)
     // — use the shared table, not a literal.
     const O_DIRECTORY: u32 = crate::fs::file::FileFlags::O_DIRECTORY;
     const O_CLOEXEC: u32 = 0o02000000;
 
-    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
-        Ok(p) => p,
-        Err(e) => {
-            // OH DRM bring-up (rs-egl): the composer VDI's
-            // FindAndOpenKmsCard openat(dirfd, "card0") died silently —
-            // resolution failures return before every later trace, so
-            // name the dirfd-relative resolution failure directly.
-            if dirfd != -100 {
-                let mut pb = [0u8; PATH_MAX];
-                let name = match strncpy_from_user(pathname_ptr, pb.len(), &mut pb) {
-                    Ok(s) => core::str::from_utf8(s).unwrap_or(""),
-                    Err(_) => "",
-                };
-                if name.starts_with("card") || name.starts_with("renderD") {
-                    static ATRES_FAIL_N: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    let n = ATRES_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 16 {
-                        crate::pr_warn!(
-                            "openat-resolve-fail[{}] dirfd {} '{}' -> errno {} (pid {})",
-                            n,
-                            dirfd,
-                            name,
-                            -(e as i64),
-                            unsafe { crate::process::current_pid() }
-                        );
+    let full_path_owned: alloc::string::String;
+    let full_path: &str = match fast_path {
+        Some(p) => p,
+        None => {
+            match resolve_user_path(dirfd, pathname_ptr) {
+                Ok(p) => {
+                    full_path_owned = p;
+                    &full_path_owned
+                }
+                Err(e) => {
+                    // OH DRM bring-up (rs-egl): the composer VDI's
+                    // FindAndOpenKmsCard openat(dirfd, "card0") died silently —
+                    // resolution failures return before every later trace, so
+                    // name the dirfd-relative resolution failure directly.
+                    if dirfd != -100 {
+                        let mut pb = [0u8; PATH_MAX];
+                        let name = match strncpy_from_user(pathname_ptr, pb.len(), &mut pb) {
+                            Ok(s) => core::str::from_utf8(s).unwrap_or(""),
+                            Err(_) => "",
+                        };
+                        if name.starts_with("card") || name.starts_with("renderD") {
+                            static ATRES_FAIL_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            let n = ATRES_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if n < 16 {
+                                crate::pr_warn!(
+                                    "openat-resolve-fail[{}] dirfd {} '{}' -> errno {} (pid {})",
+                                    n,
+                                    dirfd,
+                                    name,
+                                    -(e as i64),
+                                    unsafe { crate::process::current_pid() }
+                                );
+                            }
+                        }
                     }
+                    return e as i64;
                 }
             }
-            return e as i64;
         }
     };
 
@@ -160,7 +207,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // without a mounted /proc inside the jail they must NOT leak (they
     // would break the isolation path_lookup now enforces), so they are
     // limited to non-chrooted tasks.
-    if !crate::fs::vfs::process_rooted() {
+    if not_rooted {
         if (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) != 0 {
             if let Some(pid) = parse_proc_fd_dir_path(&full_path) {
                 return match crate::fs::vfs::open_procfs_dir(pid, flags) {
@@ -181,7 +228,7 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
     // (perf-syscall lane) starts_with gate FIRST — the parts Vec below
     // allocated on every open of every file before this.
-    if !crate::fs::vfs::process_rooted() && full_path.starts_with("/proc") {
+    if not_rooted && full_path.starts_with("/proc") {
         let parts: alloc::vec::Vec<&str> = full_path
             .trim_end_matches('/')
             .split('/')
@@ -294,11 +341,14 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         };
     }
 
+    crate::dfx::fsw::pc_add(&crate::dfx::fsw::OPEN_PRE_NS, pc_pre);
+    let pc_tail = crate::dfx::fsw::pc_now();
     let result = if (flags & O_DIRECTORY) != 0 {
         crate::fs::vfs::file_opendir(&full_path, flags)
     } else {
         crate::fs::file_open(&full_path, flags, mode)
     };
+    crate::dfx::fsw::pc_add(&crate::dfx::fsw::OPEN_TAIL_NS, pc_tail);
 
     // sc33/sc34 hunt: the pivoted appspawn child dies at
     // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
@@ -531,8 +581,8 @@ if is_lib_probe {
                     let mut seen = ENO_SEEN.lock_irqsave();
                     let list = seen.get_or_insert_with(alloc::vec::Vec::new);
                     if list.len() < 96 {
-                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
-                            list.push(alloc::string::String::from(full_path.as_str()));
+                        if !list.iter().any(|p| p.as_str() == full_path) {
+                            list.push(alloc::string::String::from(full_path));
                             crate::pr_info!(
                                 "open ENOENT: '{}' (pid {})",
                                 full_path,
@@ -720,11 +770,38 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     let statbuf = args[2] as *mut Stat;
     let flags = args[3] as u32;
 
+    // pathcost: entry bracket (closed just before the lookup below).
+    let pc_pre = crate::dfx::fsw::pc_now();
+
     if statbuf.is_null() {
         return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
+    }
+
+    // (perf-path lane) ONE bounded user copy feeds every pre-lookup
+    // consumer: the /proc magic-link scan, the empty-path probe, and —
+    // when the path is absolute, fully captured and the task is not
+    // chrooted — the lookup itself (skipping resolve_user_path's second
+    // copy_from_user + String allocation; for absolute paths that
+    // function is exactly String::from(pathname)).
+    // nul_found gates the fast uses: a path longer than the probe must
+    // NOT be walked truncated.
+    let mut probe = [0u8; 128];
+    let mut probe_str: Option<&str> = None;
+    if !pathname_ptr.is_null()
+        && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+        && unsafe {
+            crate::arch::uaccess::copy_from_user(
+                probe.as_mut_ptr(), pathname_ptr, probe.len())
+        } == 0
+    {
+        if let Some(len) = probe.iter().position(|&b| b == 0) {
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                probe_str = Some(p);
+            }
+        }
     }
 
     // Magic-link shortcut: stat("/proc/[self|<pid>]/fd/<n>") stats the
@@ -734,16 +811,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // string that socket fds cannot express. (Non-chrooted tasks only,
     // like the other global /proc shortcuts.)
     if !crate::fs::vfs::process_rooted() {
-        let mut probe = [0u8; 64];
-        if !pathname_ptr.is_null()
-            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-            && unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    probe.as_mut_ptr(), pathname_ptr, probe.len())
-            } == 0
-        {
-            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
-            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+        if let Some(p) = probe_str {
                 // oh-svc wedge hunt (2026-10-31): init (pid 1) enters an
                 // infinite fstatat(fd=11, "#<n>") loop the instant
                 // check_module_update reaps on a writable-/data boot. The
@@ -837,7 +905,6 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
                         Err(e) => return e as i64,
                     }
                 }
-            }
         }
     }
 
@@ -860,19 +927,8 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // and every dynamically linked binary died with "cannot stat shared
     // object" before ld.so finished loading libc.
     let mut stat = Stat::new();
-    let empty_path = {
-        let mut probe = [0u8; 1];
-        !pathname_ptr.is_null()
-            && crate::arch::uaccess::access_ok(pathname_ptr as usize, 1)
-            && unsafe {
-                crate::arch::uaccess::copy_from_user(
-                    probe.as_mut_ptr(),
-                    pathname_ptr,
-                    1,
-                )
-            } == 0
-            && probe[0] == 0
-    };
+    // (perf-path lane) the hoisted probe already answers the empty check.
+    let empty_path = probe_str == Some("");
     if empty_path && (flags & AT_EMPTY_PATH) != 0 {
         // fstat(dirfd)
         if dirfd < 0 {
@@ -900,34 +956,53 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
     }
 
-    let full_path = match resolve_user_path(dirfd, pathname_ptr) {
-        Ok(p) => p,
-        Err(e) => {
-            // OH bring-up: init's service-socket chmod path dies with
-            // ENOTDIR — name the failing call.
-            {
-                static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                let pid = unsafe { crate::process::current_pid() };
-                let n = if pid >= 300 {
-                    FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                } else {
-                    FSTATAT_ERR_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
-                };
-                if n < 40 && pid >= 300 {
-                    let mut pb = [0u8; 96];
-                    let shown = crate::arch::uaccess::strncpy_from_user(
-                        pathname_ptr, pb.len(), &mut pb)
-                        .map(|s| core::str::from_utf8(s).unwrap_or("?"))
-                        .unwrap_or("?");
-                    crate::pr_info!(
-                        "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
-                        dirfd, shown, flags, e,
-                        pid
-                    );
+    // (perf-path lane) Fast path: absolute path, fully captured by the
+    // probe, task not chrooted — resolve_user_path would do exactly
+    // String::from(pathname) here; use the captured &str instead (no
+    // second user copy, no heap String). Everything else keeps the full
+    // resolution (relative paths need the cwd/dirfd join, chrooted tasks
+    // need the root prefix, >127-byte paths were not captured).
+    let full_path_owned: alloc::string::String;
+    let full_path: &str = match probe_str {
+        Some(p)
+            if p.starts_with('/') && !crate::fs::vfs::process_rooted() =>
+        {
+            p
+        }
+        _ => {
+            match resolve_user_path(dirfd, pathname_ptr) {
+                Ok(p) => {
+                    full_path_owned = p;
+                    &full_path_owned
+                }
+                Err(e) => {
+                    // OH bring-up: init's service-socket chmod path dies with
+                    // ENOTDIR — name the failing call.
+                    {
+                        static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let pid = unsafe { crate::process::current_pid() };
+                        let n = if pid >= 300 {
+                            FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                        } else {
+                            FSTATAT_ERR_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+                        };
+                        if n < 40 && pid >= 300 {
+                            let mut pb = [0u8; 96];
+                            let shown = crate::arch::uaccess::strncpy_from_user(
+                                pathname_ptr, pb.len(), &mut pb)
+                                .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                                .unwrap_or("?");
+                            crate::pr_info!(
+                                "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
+                                dirfd, shown, flags, e,
+                                pid
+                            );
+                        }
+                    }
+                    return e as i64;
                 }
             }
-            return e as i64;
         }
     };
 
@@ -938,9 +1013,17 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         0
     };
 
+    // pathcost: PRE = syscall entry (copies, magic-link/empty-path probes,
+    // resolve_user_path) up to the lookup; TAIL = getattr + copyout.
+    if pc_pre != 0 {
+        crate::dfx::fsw::STAT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    crate::dfx::fsw::pc_add(&crate::dfx::fsw::STAT_PRE_NS, pc_pre);
+    let pc_tail = crate::dfx::fsw::pc_now();
     let ret = match crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
         Ok(()) => {
             let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
+            crate::dfx::fsw::pc_add(&crate::dfx::fsw::STAT_TAIL_NS, pc_tail);
             if result != 0 {
                 -(errno::EFAULT as i64)
             } else {
@@ -1515,7 +1598,7 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
         {
             let mut seen = RL_SEEN.lock_irqsave();
             let list = seen.get_or_insert_with(alloc::vec::Vec::new);
-            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path) {
                 list.push(alloc::string::String::from(full_path.as_str()));
                 print_it = true;
             }

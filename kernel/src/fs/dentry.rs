@@ -131,6 +131,20 @@ pub struct Dentry {
     ref_count: AtomicU64,
     /// Negative dentry: lookup found no file on disk
     pub negative: AtomicBool,
+    /// (perf-path lane) Mirror of `vfsmount.is_some()`: lets the walk's
+    /// per-component mount test run as ONE Relaxed load instead of the
+    /// vfsmount spinlock + Option<Arc> clone. Maintained by
+    /// set_mount/clear_mount, which remain the serialized writers of the
+    /// authoritative field.
+    is_mountpoint: AtomicBool,
+    /// (perf-path lane) icache identity generation at the time `inode`
+    /// was last refreshed against the icache (see inode::icache_regen).
+    /// When it equals the current generation, the cached Arc IS the
+    /// icache's current object for (ino, fs_id) and the walk skips the
+    /// global-lock re-check. Relaxed is sufficient: the load only decides
+    /// whether to take the SLOW path — a stale "current" verdict is
+    /// caught on the next walk after the generation bumps.
+    inode_gen: AtomicU64,
 }
 
 unsafe impl Send for Dentry {}
@@ -150,6 +164,8 @@ impl Dentry {
             flags: Spinlock::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
             ref_count: AtomicU64::new(1),
             negative: AtomicBool::new(false),
+            is_mountpoint: AtomicBool::new(false),
+            inode_gen: AtomicU64::new(0),
         }
     }
 
@@ -161,6 +177,21 @@ impl Dentry {
     /// Set inode
     pub fn set_inode(&self, inode: Arc<Inode>) {
         *self.inode.lock() = Some(inode);
+        // (perf-path lane) stamp the icache generation this Arc was made
+        // current at — see inode_gen.
+        self.inode_gen
+            .store(crate::fs::inode::icache_regen(), Ordering::Relaxed);
+    }
+
+    /// The icache generation `inode` was last refreshed at (see inode_gen).
+    pub fn get_inode_gen(&self) -> u64 {
+        self.inode_gen.load(Ordering::Relaxed)
+    }
+
+    /// (perf-path lane) Stamp the icache generation without touching the
+    /// inode slot (the walk's refreshed-with-same-Arc case).
+    pub fn set_inode_gen(&self, gen: u64) {
+        self.inode_gen.store(gen, Ordering::Relaxed);
     }
 
     /// Get inode
@@ -355,19 +386,45 @@ impl Dentry {
     /// mountpoint it no longer occupies.
     pub fn clear_mount(&self) {
         let mnt = self.vfsmount.lock().take();
+        self.is_mountpoint.store(false, Ordering::Release);
         if let Some(mnt) = mnt {
             mnt.root.clear_mountpoint_back();
         }
     }
 
+    /// (perf-path lane) Take the mount descriptor out and update the
+    /// presence mirror — for teardown paths that handle the mountpoint
+    /// back-reference themselves (identical to clear_mount otherwise).
+    pub fn take_mount(&self) -> Option<Arc<VfsMountInternal>> {
+        let mnt = self.vfsmount.lock().take();
+        self.is_mountpoint.store(mnt.is_some(), Ordering::Release);
+        mnt
+    }
+
     /// Set the mount descriptor (marks this dentry as a mount point).
     pub fn set_mount(&self, mount: Arc<VfsMountInternal>) {
         *self.vfsmount.lock() = Some(mount);
+        self.is_mountpoint.store(true, Ordering::Release);
     }
 
     /// Get the mount descriptor (if this is a mount point).
     pub fn get_mount(&self) -> Option<Arc<VfsMountInternal>> {
         self.vfsmount.lock().clone()
+    }
+
+    /// (perf-path lane) Lock-free mount-point presence test — the
+    /// authoritative field stays `vfsmount` (set_mount/clear_mount keep
+    /// this mirror in step; flag first, descriptor second on set;
+    /// descriptor first, flag second on clear — a transient mismatch is
+    /// impossible to observe worse than taking the slow lock path).
+    pub fn has_mount(&self) -> bool {
+        self.is_mountpoint.load(Ordering::Acquire)
+    }
+
+    /// (perf-path lane) Presence-mirror writer for teardown paths that
+    /// mutate `vfsmount` under its own lock (see vfs_umount_object).
+    pub fn set_mount_flag(&self, on: bool) {
+        self.is_mountpoint.store(on, Ordering::Release);
     }
 
     /// Record the mountpoint dentry on a mounted filesystem's ROOT dentry
