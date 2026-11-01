@@ -156,18 +156,38 @@ fn test_ipc_id_encoding() {
 }
 
 fn test_ipc_uapi_struct_sizes() {
-    // All UAPI struct sizes must match Linux ABI for RV64
+    // All UAPI struct sizes must match the target's Linux ABI.
+    // x86_64 semid64_ds carries the x86-only time_t high words
+    // (arch/x86/include/uapi/asm/sembuf.h): 104 bytes, nsems@80 —
+    // what musl/glibc on x86_64 read (bits/sem.h). The asm-generic
+    // arches (riscv64/aarch64) have no high words: 88 bytes, nsems@64.
+    // Commit 44b70b26 forced asm-generic on x86_64 too, putting
+    // sem_nsems where x86_64 userspace reads __unused2 — LTP r21
+    // semget01 `sem_nsems (0) != PSEMS (10)`; restored per-arch here.
+    #[cfg(feature = "x86_64")]
+    {
+        test_assert_eq!(
+            core::mem::size_of::<SemidDsUapi>(), 104,
+            "SemidDsUapi size == 104 (x86_64)"
+        );
+        test_assert_eq!(
+            core::mem::offset_of!(SemidDsUapi, sem_nsems), 80,
+            "SemidDsUapi sem_nsems @80 (x86_64)"
+        );
+        test_assert_eq!(
+            core::mem::offset_of!(SemidDsUapi, sem_ctime), 64,
+            "SemidDsUapi sem_ctime @64 (x86_64)"
+        );
+    }
+    #[cfg(not(feature = "x86_64"))]
     test_assert_eq!(core::mem::size_of::<SemidDsUapi>(), 88, "SemidDsUapi size == 88");
     test_assert_eq!(core::mem::size_of::<MsqidDsUapi>(), 120, "MsqidDsUapi size == 120");
     test_assert_eq!(core::mem::size_of::<ShmidDsUapi>(), 112, "ShmidDsUapi size == 112");
     test_assert_eq!(core::mem::size_of::<MqAttr>(), 64, "MqAttr size == 64");
     test_assert_eq!(core::mem::size_of::<SemUndoEntry>(), 12, "SemUndoEntry size == 12");
 
-    // semid64_ds field offsets — the 88-byte asm-generic contract
-    // (uapi/asm-generic/sembuf.h) restored on x86_64 by the 2026-10-31
-    // layout fix (commit 44b70b26): the kernel-side _high padding
-    // fields put ctime at 64 where musl reads 56. The offsets are the
-    // ABI — LTP semget01 read nsems where the kernel wrote ctime.
+    // semid64_ds field offsets — otime always follows the 48-byte
+    // perm header; after that the arches diverge (x86 high words).
     test_assert_eq!(
         core::mem::offset_of!(SemidDsUapi, sem_perm), 0,
         "SemidDsUapi sem_perm @0"
@@ -176,14 +196,17 @@ fn test_ipc_uapi_struct_sizes() {
         core::mem::offset_of!(SemidDsUapi, sem_otime), 48,
         "SemidDsUapi sem_otime @48"
     );
-    test_assert_eq!(
-        core::mem::offset_of!(SemidDsUapi, sem_ctime), 56,
-        "SemidDsUapi sem_ctime @56"
-    );
-    test_assert_eq!(
-        core::mem::offset_of!(SemidDsUapi, sem_nsems), 64,
-        "SemidDsUapi sem_nsems @64"
-    );
+    #[cfg(not(feature = "x86_64"))]
+    {
+        test_assert_eq!(
+            core::mem::offset_of!(SemidDsUapi, sem_ctime), 56,
+            "SemidDsUapi sem_ctime @56 (asm-generic)"
+        );
+        test_assert_eq!(
+            core::mem::offset_of!(SemidDsUapi, sem_nsems), 64,
+            "SemidDsUapi sem_nsems @64 (asm-generic)"
+        );
+    }
 
     // The perm header that pins those offsets (asm-generic ipc64_perm:
     // key/uid/gid/cuid/cgid as u32, mode+seq, padded to 48).

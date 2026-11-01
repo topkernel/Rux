@@ -46,26 +46,63 @@ pub struct SemInfoUapi {
 
 /// struct semid64_ds — returned by IPC_STAT, IPC_SET
 ///
-/// riscv64: asm-generic/sembuf.h — perm(48) + otime + ctime + nsems + 2
-/// unused = 88 bytes, sem_nsems at offset 64.
+/// riscv64/aarch64: asm-generic/sembuf.h — perm(48) + otime + ctime +
+/// nsems + 2 unused = 88 bytes, sem_nsems at offset 64.
 ///
 /// x86_64: the x86 uapi (arch/x86/include/uapi/asm/sembuf.h) pads EACH
 /// time_t with a high word, so glibc/musl `struct semid_ds` on x86_64
-/// reads sem_nsems at offset 80 in a 104-byte struct (verified against a
-/// real x86_64 host: semctl(IPC_STAT) fills nsems@80). Writing the
+/// reads sem_nsems at offset 80 in a 104-byte struct (verified against
+/// the musl x86_64 bits/sem.h used by the LTP build:
+/// perm(48) + otime + pad + ctime + pad + nsems@80). Writing the
 /// asm-generic layout put nsems where x86_64 userspace sees
-/// __sem_ctime_high — LTP semget01 read 0 where the kernel wrote 10.
-/// The high words are pure padding on x86_64 (time_t is 64-bit), so they
-/// stay zero.
+/// __unused2 — LTP r21 semget01 read 0 where the kernel wrote 10
+/// (`sem_nsems (0) != PSEMS (10)` from IPC_STAT). The high words are
+/// pure padding on x86_64 (time_t is 64-bit), so they stay zero.
 #[repr(C)]
 pub struct SemidDsUapi {
     pub sem_perm: IpcPermUapi,
     pub sem_otime: i64,
+    /// x86 uapi high words (32-bit compat heritage): always zero on
+    /// x86_64, absent from the asm-generic layout.
+    #[cfg(feature = "x86_64")]
+    pub __sem_otime_high: u64,
     pub sem_ctime: i64,
+    #[cfg(feature = "x86_64")]
+    pub __sem_ctime_high: u64,
     pub sem_nsems: u64,
     pub __unused3: u64,
     pub __unused4: u64,
 }
+
+impl SemidDsUapi {
+    /// All-zero struct — the base the IPC_STAT / IPC_SET / SEM_STAT
+    /// paths fill in.
+    fn zeroed() -> Self {
+        Self {
+            sem_perm: IpcPermUapi::default(),
+            sem_otime: 0,
+            #[cfg(feature = "x86_64")]
+            __sem_otime_high: 0,
+            sem_ctime: 0,
+            #[cfg(feature = "x86_64")]
+            __sem_ctime_high: 0,
+            sem_nsems: 0,
+            __unused3: 0,
+            __unused4: 0,
+        }
+    }
+}
+
+// Layout contracts, checked at compile time: the offsets x86_64 and
+// asm-generic userspace actually read.
+#[cfg(feature = "x86_64")]
+const _: () = assert!(core::mem::size_of::<SemidDsUapi>() == 104);
+#[cfg(feature = "x86_64")]
+const _: () = assert!(core::mem::offset_of!(SemidDsUapi, sem_nsems) == 80);
+#[cfg(not(feature = "x86_64"))]
+const _: () = assert!(core::mem::size_of::<SemidDsUapi>() == 88);
+#[cfg(not(feature = "x86_64"))]
+const _: () = assert!(core::mem::offset_of!(SemidDsUapi, sem_nsems) == 64);
 
 /// struct sembuf — passed by userspace to semop/semtimedop
 /// Total: 6 bytes, no padding
@@ -273,14 +310,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if buf_ptr.is_null() || !access_ok(buf_ptr as usize, core::mem::size_of::<SemidDsUapi>()) {
                 return -(errno::EFAULT as i64);
             }
-            let mut ds = SemidDsUapi {
-                sem_perm: IpcPermUapi::default(),
-                sem_otime: 0,
-                sem_ctime: 0,
-                sem_nsems: 0,
-                __unused3: 0,
-                __unused4: 0,
-            };
+            let mut ds = SemidDsUapi::zeroed();
             {
                 let slots = SEM_IDS.slots.lock();
                 if let Some(ref entry) = slots[idx2] {
@@ -327,14 +357,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             }
             // Copy the whole struct from user memory through the
             // exception-table path (review IPC M: uaccess 裸访改 copy_from_user).
-            let mut ds = SemidDsUapi {
-                sem_perm: IpcPermUapi::default(),
-                sem_otime: 0,
-                sem_ctime: 0,
-                sem_nsems: 0,
-                __unused3: 0,
-                __unused4: 0,
-            };
+            let mut ds = SemidDsUapi::zeroed();
             // SAFETY: buf_ptr was access_ok-validated above; ds is a
             // stack-local repr(C) struct of exactly that size.
             if unsafe {
@@ -625,14 +648,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if raw_idx >= IPC_IDS_MAX {
                 return -(errno::EINVAL as i64);
             }
-            let mut ds = SemidDsUapi {
-                sem_perm: IpcPermUapi::default(),
-                sem_otime: 0,
-                sem_ctime: 0,
-                sem_nsems: 0,
-                __unused3: 0,
-                __unused4: 0,
-            };
+            let mut ds = SemidDsUapi::zeroed();
             let result_id: i32;
             {
                 let slots = SEM_IDS.slots.lock();
@@ -681,14 +697,7 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             if raw_idx >= IPC_IDS_MAX {
                 return -(errno::EINVAL as i64);
             }
-            let mut ds = SemidDsUapi {
-                sem_perm: IpcPermUapi::default(),
-                sem_otime: 0,
-                sem_ctime: 0,
-                sem_nsems: 0,
-                __unused3: 0,
-                __unused4: 0,
-            };
+            let mut ds = SemidDsUapi::zeroed();
             let result_id: i32;
             {
                 let slots = SEM_IDS.slots.lock();
