@@ -154,6 +154,33 @@ and the kernel must never allocate while reporting its own death.*
 boot; denied elsewhere by clippy (§9-F6). Where an invariant genuinely
 holds, write `debug_assert!` + a graceful path anyway.
 
+### 2.4 Print discipline on hot paths (the serial-print tax)
+
+Console TX is polled and byte-at-a-time (`kernel/src/console.rs`):
+**one `pr_err!`/`pr_warn!`/`pr_info!`/`println!` line costs ~0.4–0.7 ms
+of UART per hit** at the default loglevel (6), and `pr_debug!` is
+compiled out in release. A print that fires per syscall, per fault, per
+signal, per switch, per page, or per IPC op is therefore a performance
+bug, not a log line — one such line on the exit path cost lmbench
+`lat_proc,fork` a 20x regression (commit e2717687). Rules for the files
+listed in `scripts/hotpath_print_check.py` (futex, binder, syscall
+dispatchers, mm alloc, signal, sched, arch trap paths):
+
+- Legitimate prints: boot-time one-shots, panic/oops/trap printers,
+  fatal-error paths (a line per *death* is fine; a line per *surviving
+  fault* is not), and prints behind an explicit `DfxSwitch` gate or a
+  boot-budget counter.
+- Adding a print to those files requires a `// HOTPATH-PRINT: <why>`
+  annotation on the line above; `scripts/hotpath_print_check.py` (wired
+  into `scripts/review_coverage.py --check`) fails the ratchet on any
+  un-annotated growth.
+- Temporary hunt-widenings (`if true { pr_err!(...) }`) must carry their
+  revert condition in a comment and be reverted when the hunt closes —
+  the TKSIG/KSIG/EXITGRP family shows these survive merges if left.
+- Hunt prints that churned during a closed investigation get gated
+  behind their switch (text unchanged), not deleted: the next hunt
+  re-arms them with a boot flag.
+
 ---
 
 ## 3. `unsafe` discipline and the TCB ledger

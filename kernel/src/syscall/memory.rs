@@ -1394,13 +1394,21 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
     // __unmapself) or mallocng group frees — the counterparts of
     // PROTNONE-MAP/MPROTECT-RW above.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): glibc/musl thread
+    // stacks are 8 MiB, so this fired UNGATED on EVERY thread exit —
+    // one pr_info per join at ~0.5 ms of polled-16550 time each. Joins
+    // the dfx=vmap budget family (VmaProbe switch + the shared 600-line
+    // cap); the b91/b92 hunts re-arm with dfx=vmap.
     if length >= 0x8_0000 {
-        crate::pr_info!(
-            "BIGMUNMAP pid {} addr {:#x} len {:#x}",
-            crate::process::current_pid(),
-            addr,
-            length
-        );
+        vmap_budget_line(|| {
+            crate::pr_info!(
+                "BIGMUNMAP pid {} addr {:#x} len {:#x}",
+                crate::process::current_pid(),
+                addr,
+                length
+            );
+        });
     }
 
     // Validate arguments
@@ -1504,15 +1512,24 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // b91-b92 forensics: PROT_WRITE mprotects cover the pthread-stack
     // upgrade (musl maps PROT_NONE, then mprotects RW before clone) AND
     // the reserve-carve pattern (b93: hilogd's 2GB PROT_NONE arena carved
-    // by RW mprotects — the crash memset targets the reserve base). Log
-    // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
+    // by RW mprotects — the crash memset targets the reserve base).
+    // RELRO downgrades are PROT_READ and stay quiet.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): this fired
+    // UNGATED on EVERY writable mprotect — one per thread-stack upgrade
+    // (thread create), malloc arena extension and JIT RW flip, at
+    // ~0.4 ms of polled-16550 time per line. It joins the dfx=vmap
+    // budget family below (VmaProbe switch + shared 600-line cap); the
+    // b91-b93 hunts re-arm with dfx=vmap.
     if prot & 0x2 != 0 {
-        crate::pr_info!(
-            "MPROTECT-RW pid {} addr {:#x} len {:#x}",
-            crate::process::current_pid(),
-            addr,
-            length
-        );
+        vmap_budget_line(|| {
+            crate::pr_info!(
+                "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+                crate::process::current_pid(),
+                addr,
+                length
+            );
+        });
     }
 
     // dfx=vmap (leg-31B): the PROT_NONE mprotect family — guard
@@ -1605,13 +1622,19 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         && v.end().as_usize() - v.start().as_usize() >= 0x10_0000
                 });
                 if hits_big_protnone {
-                    crate::pr_info!(
-                        "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
-                        crate::process::current_pid(),
-                        addr,
-                        length,
-                        prot
-                    );
+                    // Serial-cleanliness (print-audit lane, 2026-11):
+                    // every DSO's RELRO finalize walks this arm; a
+                    // dlopen loop printed one line per load. Joins the
+                    // dfx=vmap budget family.
+                    vmap_budget_line(|| {
+                        crate::pr_info!(
+                            "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
+                            crate::process::current_pid(),
+                            addr,
+                            length,
+                            prot
+                        );
+                    });
                 }
             }
 

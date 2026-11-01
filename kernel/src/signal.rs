@@ -2865,7 +2865,15 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     // tkill(ANY_PID, SIGKILL)). Name caller + target for fatal signals.
     // gdmr29 (TEMPORARY widening to every signal): catch the SIGTRAP
     // sender that kills gdm-session-worker. Revert to 9/15 before merge.
-    if true {
+    //
+    // Reverted (print-audit lane, 2026-11, same revert as the KSIG twin
+    // in send_signal_g): the widened `if true` put a ~40-char pr_err on
+    // EVERY tkill/tgkill — pthread_kill, raise(), LTP thread tests —
+    // 4000 budgeted lines ≈ 2.4 s of polled-16550 serial per boot (the
+    // EXITGRP class, e2717687). The SIGTRAP hunt is closed; the 9/15
+    // filter is restored. The next every-signal hunt should use a
+    // dfx-switched tracepoint instead.
+    if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4000 {

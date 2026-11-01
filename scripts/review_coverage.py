@@ -745,7 +745,17 @@ def main():
             print("map has entries for files that no longer exist:")
             for rel in stale:
                 print("  " + rel)
-        return 1 if (unknown or stale) else 0
+        # Hot-path print ratchet (print-audit lane, 2026-11): one more
+        # un-annotated pr_err/pr_warn/pr_info in a hot-path file fails
+        # the check — see scripts/hotpath_print_check.py.
+        import hotpath_print_check
+        save_argv = sys.argv
+        sys.argv = [sys.argv[0]]
+        try:
+            hot_rc = hotpath_print_check.main()
+        finally:
+            sys.argv = save_argv
+        return 1 if (unknown or stale or hot_rc) else 0
 
     # Per-directory tables.
     groups = {}

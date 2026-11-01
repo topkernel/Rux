@@ -1820,12 +1820,19 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
     crate::dfx::schb::note_proc_open(pid);
-    crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
+    // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
+    // once per binder-using process start — on OH boots that is nearly
+    // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
+    // per process start (the EXITGRP class, e2717687). The info line is
+    // demoted to pr_debug; the sc157 open-probe joins the dfx=syscalltrace
+    // family (the sc156/sc157 hunts re-arm with the flag).
+    crate::pr_debug!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
     // the info line). Decides in one boot whether forked appspawn
     // children EVER open /dev/binder themselves (own proc, own pid) or
     // reuse the daemon's inherited fd (shared proc — the sc156 APPTXN
     // "from pid=330 comm='m.ohos.systemui'" shape).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
     {
         static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2608,6 +2615,13 @@ pub fn binder_mmap_handler(
     // DONTFORK drop of the daemon's binder VMA is the prime suspect;
     // the daemon's [base, base+size) vs the crash VA decides it in one
     // boot without a guest-side maps dump.
+    //
+    // Serial-cleanliness (print-audit lane, 2026-11): binder_mmap runs
+    // once per binder-using process start — two lines per spawn through
+    // the polled UART (the EXITGRP class, e2717687). The sc160 probe
+    // joins the dfx=syscalltrace family (the hunt re-arms with the
+    // flag); the info line is demoted to pr_debug.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
     {
         static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2621,7 +2635,7 @@ pub fn binder_mmap_handler(
             );
         }
     }
-    crate::pr_info!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
+    crate::pr_debug!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
     Ok(vaddr)
 }
 
