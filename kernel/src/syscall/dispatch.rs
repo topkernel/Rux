@@ -307,12 +307,15 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // parked INSIDE a syscall (epoll_wait/binder ioctl/futex/read on a
     // slow fd) never reaches the exit-side record below, so the exit-only
     // ring showed its last COMPLETED call instead of the blocking one.
-    // Also latched into the task itself (last_syscall_*) — the ring is
-    // only 2048 entries, so a parked waiter's record is overwritten
-    // within milliseconds under system-wide traffic; the taskdump's
-    // lastsys= field reads the per-task latch.
-    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+    // Gated behind dfx=sysring (perf lane 2026-11): the global ring costs
+    // a fetch_add + five stores into a rotating 64 KiB buffer on EVERY
+    // syscall. The per-task latch below stays unconditional — it is
+    // three stores into the task's own hot cache line and feeds the
+    // taskdump's lastsys= attribution of parked tasks.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+        SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+    }
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
         // SAFETY: cur is the running task.
@@ -750,8 +753,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     syscall_set_return_value(regs, result);
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
-    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
-        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
+    // Same dfx=sysring gate as the entry-side record — see above.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+        SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+            .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
+    }
 
     // sc128 (Session P): per-task nr-only ring of the last syscalls
     // (successes included) — read at APP-PARK to see the child's final

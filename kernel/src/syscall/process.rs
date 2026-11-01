@@ -1412,37 +1412,47 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .filter(|s| !s.is_empty())
             .count() >= 4;
         if deep {
-            use core::sync::atomic::Ordering::Relaxed;
-            let pid = unsafe { crate::process::current_pid() } as u32;
-            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
-            let mut n = 0usize;
-            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
-                if e.pid.load(Relaxed) == pid && n < picks.len() {
-                    picks[n] = (
-                        e.nr.load(Relaxed),
-                        e.a0.load(Relaxed),
-                        e.a1.load(Relaxed),
-                        e.ret.load(Relaxed),
-                    );
-                    n += 1;
+            // Ring recorded only under dfx=sysring (perf lane 2026-11).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+                use core::sync::atomic::Ordering::Relaxed;
+                let pid = unsafe { crate::process::current_pid() } as u32;
+                let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+                let mut n = 0usize;
+                for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                    if e.pid.load(Relaxed) == pid && n < picks.len() {
+                        picks[n] = (
+                            e.nr.load(Relaxed),
+                            e.a0.load(Relaxed),
+                            e.a1.load(Relaxed),
+                            e.ret.load(Relaxed),
+                        );
+                        n += 1;
+                    }
                 }
-            }
-            crate::pr_warn!(
-                "childexit pid={} root='{}' status={:#x} last{}:",
-                pid,
-                root_str,
-                args[0] as u32,
-                n
-            );
-            for i in (0..n).rev() {
-                let (nr, a0, a1, ret) = picks[i];
                 crate::pr_warn!(
-                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
-                    i,
-                    nr,
-                    a0,
-                    a1,
-                    ret as i64
+                    "childexit pid={} root='{}' status={:#x} last{}:",
+                    pid,
+                    root_str,
+                    args[0] as u32,
+                    n
+                );
+                for i in (0..n).rev() {
+                    let (nr, a0, a1, ret) = picks[i];
+                    crate::pr_warn!(
+                        "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                        i,
+                        nr,
+                        a0,
+                        a1,
+                        ret as i64
+                    );
+                }
+            } else {
+                crate::pr_warn!(
+                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
+                    unsafe { crate::process::current_pid() },
+                    root_str,
+                    args[0] as u32
                 );
             }
         }

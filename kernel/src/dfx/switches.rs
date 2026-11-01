@@ -96,6 +96,7 @@ macro_rules! dfx_switch_table {
             ThPark => "thpark",
             RipSample => "ripsample",
             OhHunt => "ohhunt",
+            SysRing => "sysring",
         }
     };
 }
@@ -439,9 +440,20 @@ pub enum DfxSwitch {
     /// pollute the structured boot table. OFF by default — enable with
     /// `dfx=ohhunt` when the graphics lanes are hunting.
     OhHunt,
+
+    /// Forensic SYSCALL_RING (dispatch.rs): the global 2048-entry ring
+    /// of (pid, nr, a0, a1, ret) recorded at syscall ENTRY and EXIT,
+    /// replayed by the KERNPANIC printer and the NOVMA handlers to
+    /// reconstruct the victim's final syscall sequence. The ring costs
+    /// two global atomic RMWs plus ten atomic stores into a rotating
+    /// 64 KiB buffer on EVERY syscall — a measurable share of the
+    /// null-syscall floor (perf lane 2026-11: gating it moved
+    /// lat_syscall null/read/write). OFF in production and benchmark
+    /// boots; enable with `dfx=sysring` on hunts that need the replay.
+    SysRing,
 }
 
-const SWITCH_COUNT: usize = 48;
+const SWITCH_COUNT: usize = 49;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -530,6 +542,7 @@ impl DfxSwitch {
             DfxSwitch::RipSample => 45,
             DfxSwitch::DbFileTrace => 46,
             DfxSwitch::OhHunt => 47,
+            DfxSwitch::SysRing => 48,
         }
     }
 
