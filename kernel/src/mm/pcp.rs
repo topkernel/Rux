@@ -146,19 +146,46 @@ pub fn alloc_order0(zone: &Zone) -> Option<usize> {
     }
     PCP_REFILLS.fetch_add(1, Ordering::Relaxed);
     let pfn = batch[0];
+    // Overflow list: frames that no longer fit (an interrupt-context
+    // free_order0 storm between the miss window and this refill window
+    // can leave count>0 — up to PCP_HIGH after the spill fixup). Rows
+    // that fit go to the row; the rest return to the zone directly,
+    // keeping every list index < PCP_HIGH (the wfG panic class).
+    let mut overflow = [0usize; PCP_BATCH];
+    let mut n_overflow = 0usize;
+    let keep = n - 1;
     with_row(|row| {
-        let keep = n - 1;
         for i in 0..keep {
             let p = batch[1 + i];
-            row.list[row.count] = p;
-            row.count += 1;
-            to_cached(p);
+            if row.count < PCP_HIGH {
+                row.list[row.count] = p;
+                row.count += 1;
+                to_cached(p);
+            } else {
+                overflow[n_overflow] = p;
+                n_overflow += 1;
+            }
         }
     });
     if n > 1 {
         // INV-PCP-2: n-1 frames are back to "free" (cached) state; the
         // handed-out frame was already decremented by alloc_pages_locked.
         zone.free_pages_add(n - 1);
+    }
+    if n_overflow > 0 {
+        // The overflow frames were counted free above; return them to
+        // the buddy now (they were never cached in a row).
+        zone.free_pages_sub(n_overflow);
+        for i in 0..n_overflow {
+            let pg = pfn_to_page_mut(overflow[i]);
+            if !pg.is_null() {
+                unsafe {
+                    (*pg).set_refcount(1);
+                    (*pg).clear_flag(PageFlag::OnPcp);
+                }
+            }
+            zone.free_pages(overflow[i], 0);
+        }
     }
     to_in_use(pfn);
     Some(pfn)
@@ -205,29 +232,37 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
     // INV-PCP-2: the frame is free again (cached).
     zone.free_pages_add(1);
 
-    let spill = with_row(|row| {
+    // Spill handling is ONE irq-off window: detect the high-water mark,
+    // copy the drain batch out, and fix `count` up atomically. The old
+    // two-window form (detect, then drain in a second with_row) left
+    // `count == PCP_HIGH == list.len()` visible with IRQs enabled
+    // between the windows; an interrupt-context free_order0 in that gap
+    // executed `row.list[row.count] = pfn` with count==32 — the release
+    // OH boot wfG panic "index out of bounds: the len is 32 but the
+    // index is 32" at 108.6 s. Zone-side accounting (free_pages_sub +
+    // the 16 zone.free_pages calls) stays OUTSIDE the window exactly as
+    // before — only the 16 usize copies moved inside, and a nested
+    // same-CPU entry remains serial (INV-PCP-3).
+    let mut pfns = [0usize; PCP_BATCH];
+    let mut do_drain = false;
+    with_row(|row| {
         row.list[row.count] = pfn;
         row.count += 1;
         if row.count >= PCP_HIGH {
-            Some(row.count - PCP_BATCH)
-        } else {
-            None
+            let first = row.count - PCP_BATCH;
+            for i in 0..PCP_BATCH {
+                pfns[i] = row.list[first + i];
+            }
+            row.count = first;
+            do_drain = true;
         }
-    })
-    .flatten();
+    });
 
-    if let Some(first_spill) = spill {
+    if do_drain {
         // Drain PCP_BATCH frames back to the buddy: undo the pcp-side
         // +1 per frame, then let zone.free_pages re-add them (its own
         // merge/list logic untouched).
         PCP_DRAINS.fetch_add(1, Ordering::Relaxed);
-        let mut pfns = [0usize; PCP_BATCH];
-        with_row(|row| {
-            for i in 0..PCP_BATCH {
-                pfns[i] = row.list[first_spill + i];
-            }
-            row.count = first_spill;
-        });
         zone.free_pages_sub(PCP_BATCH);
         for p in pfns.iter() {
             // SAFETY: frame was cached (OnPcp) — transition back through
