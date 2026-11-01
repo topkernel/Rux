@@ -167,3 +167,6 @@ test/**/*.c
 run/*.c
 run/oh-x/
 userspace/tests/smoke_test/*.c
+
+# lmbench benchmark sources are tarball-packed, not tracked (2026-10-31)
+userspace/lmbench/src/

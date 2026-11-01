@@ -1,0 +1,30 @@
+lat_syscall null
+lat_syscall read
+lat_syscall write
+lat_syscall stat
+lat_syscall fstat
+lat_syscall open
+lat_pagefault 1M
+lat_mmap 1M
+lat_pipe
+lat_unix
+lat_fifo
+lat_ctx 2 4 8
+lat_proc fork
+lat_proc exec
+lat_sem
+lat_fs 1k
+lat_mem_rd 512
+lat_mem_rd 1m
+bw_mem 1m
+bw_mem 4m
+bw_pipe
+bw_unix
+bw_file_rd 1m
+bw_mmap_rd 1m
+lat_tcp
+lat_udp
+lat_connect
+bw_tcp
+bw_udp
+lat_usleep
