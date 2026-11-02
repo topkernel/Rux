@@ -1484,3 +1484,107 @@ watchdog-restart path) — then wedged at 107s (the fix's target).
   avg 1.56s (waits); nr=77 futex avg 15ms (condvar waits). The vm-op family
   (mmap+mprotect: 210k ops, ~15s wall per CPU-minute) is the concrete
   per-op lever candidate behind distributeddata's 27-32s SA init.
+
+## NINETEENTH-SUCCESSOR SESSION (2026-11-03 01:30-.., branch biofix-fieldpoll @ 60e223dd)
+Mission: the perf handoff — WHY is mmap 72µs when the reference is 1-5µs? Outcome:
+ATTRIBUTED TO ITS LAST LAYER and FIXED (mm guarded domain); the per-op mmap wall
+dropped 72->30µs under OH load (fixmun 210->40-45µs, -79%); P8 A/B and the full
+stage table below. Same image, same accel (KVM), reference vs ours, same binary
+(work/pbench + test/pbench.c P8 case).
+
+### Merge + instrumentation landed (all pushed)
+- 3587fd4b = origin/main merged (d2be598d: the dfx-trace lane — tracefs +
+  reference-exact set_event grammar; TASK.md resolved ours-by-intent per the
+  standing rule; main's copy is the dfx-trace charter).
+- f3bf6d8b dfx(mmprof): cmdline `mmprof=1` (forkprof pattern, zero cost when
+  off) — TSC stage brackets: mmap {tot, vma_write lockwait, find_free_area,
+  VmaManager::add, MAP_FIXED's munmap+install}, munmap {body, surgery, walk,
+  tlb, cond_resched yields}, mprotect {tot, lock, coverage+EACCES, pte walk,
+  tlb}; scalars {fixed/hint/anon0 placement, unmap pages+empties, mprotect
+  pages, vma adds, munmap chunks}; mmap length buckets; per-comm issuer table.
+  Dumps from a 60s cadence.
+- f1606bb8: scalar-slot namespace fix (the first boot panicked at 1.0s —
+  bump() indexed the phase array; bounds-tolerant counters now).
+- 1feb7e20 + 60e223dd: console discipline — the printk emit-lock gives
+  softirq emitters 100µs while the OH hilog flood holds the console ~17ms
+  per 256B line (emulated baud): a 6-line burst lost all but 1-2 lines
+  (lb332/333), and even one 60s line raced (lb336). Final form: ONE compact
+  line per dump rotating A/B/C, emitted by a task-context kthread "mmprofd"
+  (2s emit budget — always gets through).
+
+### THE ATTRIBUTION (the 18th's handoff question, answered layer by layer)
+lb335 t=60s (pre-fix, fresh2, syscost window): mmap tot=84µs avg (n=154k,
+max 749.9ms); **fixmun=210µs avg (n=51k) carries everything**; the non-fixed
+path is CHEAP (vma_write lockwait 0µs at 3k mmap/s — the RwSpinlock TTAS is
+NOT the story; find=7µs; add=2µs); mprot-tot=47µs (n=26.6k).
+Inside munmap (lb333): body=177µs = **yld 132µs (the per-chunk cond_resched
+ACTUALLY SCHEDULES — need_resched is set at ~3.5k chunks/s under the churn,
+each yield a full re-queue: the 722ms-class mmap max is a yield that waited
+behind the storm) + walk 23µs (a full 4-level PageTableWalker::walk PER PAGE
+— 4 dependent memory refs per 4KB) + surg 4µs + tlb 2µs**.
+Reference A/B (pbench P8, quiet, same rootfs/binary/KVM): ref 0.22 (mmap0 4k/
+128k) / 1.24 (fixed-cold) / 3.42µs (fixed-hot) vs ours 6.10 / 24.4 / 64.3µs;
+mprotect 0.51/0.53 vs 3.77/5.84µs. The mission's 50-70x load class = these
+19-28x quiet per-op ratios x the yield amplification under load.
+
+### THE FIX (f1daca15, mm guarded domain, reference-shape semantics)
+1. unmap_pages: resolve the upper chain ONCE per 2MB block and iterate the
+   leaf PTEs directly (the reference's walk shape). Per-page semantics
+   bit-exact with the old body (swap/P=0-marker/U-bit/foreign-frame/rmap/
+   refcount/PCACHE-pin/device-window-restore discipline); upper-level-leaf
+   shapes fall back to the old per-page walk (unmap_pages_slow). Also kills
+   the old double walk (walk None -> read_pte_raw).
+2. munmap: the per-chunk cond_resched is GONE — the reference does not
+   schedule inside munmap; every chunk boundary still drops vma_write (the
+   same-mm racer handoff points, mm-audit invariant intact); ONE yield at
+   the operation boundary.
+3. mprotect: the EACCES pre-check walks the RANGE only (seed containing-VMA
+   + iter_after, break past span) instead of every VMA of the mm under the
+   write lock (reference mprotect_fixup shape).
+Gates: x3 builds rc=0 (x86_64/riscv64/aarch64), make test ALL PASSED
+(cg19-maketest.log; the tail VW-WEDGE prints are post-halt noise).
+
+### Verification numbers
+- pbench P8 quiet A/B (same binary/rootfs/KVM): fixed-cold 24.4->17.0µs,
+  fixed-hot 64.3->59.3µs, mmap0/mprotect unchanged (untouched paths; their
+  residual is BTreeMap+split surgery + 3 lock acquires + IPI+CR3 pair).
+- Under OH load (lb337/lb338 t=60s): mmap tot 84->22-30µs, fixmun
+  210->40-45µs, mprot-tot 47->32µs, mpcov 1µs, mplock 0. syscost cross-check
+  (lb336): nr=9 n=270,912 avg 45µs (lb325: n=179,154 avg 72µs — -37% per-op,
+  +51% ops throughput). The vm-op family wall: ~15s/CPU-min -> ~5s/CPU-min.
+- distributeddata SA:1301 init did NOT compress (lb336: 29,443ms vs the
+  28.3-31.8s family) — the SA init wall is NOT the vm-op per-op cost; the
+  KVS txns' deferred-reply/FFRT-pool family (17th's decode) stands as the
+  next candidate. The issuers table (C-line) on the next healthy boot names
+  who churns the 100-270k mmaps.
+
+### Boot classes this session (system-lb5 + fresh2, SMP2, LOGLEVEL6)
+lb330 (panic 1.0s = my slot bug), lb331/332/333 (pre-fix: race lost, ladder
+spin; lb333 wedged 181->473s then recovered; lb332 bootanimation.ready 51s),
+lb334/337/338 (ExecReboot panic 27-56s: lb334 storage_manager, lb338
+hdf_devmgr crash + audio_host watchdog SIGKILLs — the 16th's lb314 spiral
+class, ~50% rate, NOT attributed to the fix; lb337's dump thread landed its
+line from the SECOND boot after reboot), lb335/336/338-second (healthy,
+evidence above), lb339 rolling at close. NO PIXELS yet: the two structural
+losers remain (BMS trigger ~40-82s vs store ready ~104-113s; the early-death
+spiral class).
+
+### Successor entry points (in order)
+1. The remaining vm-op gap (fixmun 40µs vs ref ~3µs): the fixed path runs 3
+   vma_write acquires + 2 BTreeMap removes + 1 add + pin/unpin + 2 Vma::new
+   + IPI+CR3 pair per re-map. A single-hold unified MAP_FIXED surgery (the
+   reference mmap_region shape) would chase it — but the chunked-munmap
+   discipline is load-bearing (mm-audit invariant comments); design first.
+2. The issuers table: mmprof C-line names the mmap churners (mmprofd now
+   reliable). If distributeddata/FFRT is NOT the churner, the SA-init lever
+   is elsewhere (KVS txn reply-deferral family).
+3. ROLL THE RACE (mission 2): the four coin-flips need one clean boot.
+   Recipe unchanged (system-lb5 + fresh2 + dfx=ams46,txnhunt + syscost=1).
+   Any frame change from frozen-logo md5 06b933b4: driver auto-writes
+   run/oh-<tag>-shot-*.ppm — convert + report IMMEDIATELY.
+4. The early-death spiral (3/8 boots tonight, 27-56s ExecReboot panic:
+   storage_manager/hdf_devmgr crashes + watchdog SIGKILL waves) — pre-exist-
+   ing class (16th's lb314 family), but a kernel-side contribution from the
+   no-yield change is not fully excluded; if it climbs above ~50%, A/B one
+   boot with a per-16MB-chunk yield restored (a one-line revert of the
+   MU_YIELD move) before chasing OH ghosts.
