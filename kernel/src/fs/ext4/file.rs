@@ -814,7 +814,24 @@ pub fn ext4_file_write(
     let mut current_offset = offset;
     let mut buf_offset = 0;
 
-    while total_written < to_write as usize {
+    // POSIX write(2) / reference ext4 shape: once at least one byte of the
+    // request has landed, a failure on a LATER block (ENOSPC on a
+    // mid-request hole allocation, EIO on a block fetch) must report the
+    // partial count, not the error — only a request that wrote nothing
+    // fails outright. Appends cannot hit this (their blocks are
+    // pre-allocated above, so allocation failure precedes all data), but
+    // a write into a HOLE of a sparse file allocates mid-loop.
+    macro_rules! partial_or_err {
+        ($label:lifetime, $e:expr) => {
+            if total_written > 0 {
+                break $label;
+            } else {
+                return Err($e);
+            }
+        };
+    }
+
+    'block_loop: while total_written < to_write as usize {
         let block_index = current_offset / block_size;
         let block_offset = (current_offset % block_size) as usize;
 
@@ -850,7 +867,7 @@ pub fn ext4_file_write(
                                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
                                     bio::brelse(bh);
                                 } else {
-                                    return Err(errno::Errno::IOError.as_neg_i32());
+                                    partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
                                 }
                             }
                             phys
@@ -862,13 +879,20 @@ pub fn ext4_file_write(
                             let allocator = crate::fs::ext4::allocator::BlockAllocator::new(fs);
                             let goal_group =
                                 (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
-                            let new_block = allocator.alloc_block(goal_group)?;
+                            let new_block = match allocator.alloc_block(goal_group) {
+                                Ok(b) => b,
+                                Err(e) => partial_or_err!('block_loop, e),
+                            };
                             {
                                 let mut hm: u64 = 0;
-                                crate::fs::ext4::extent::ext4_ext_insert_written(
+                                match crate::fs::ext4::extent::ext4_ext_insert_written(
                                     fs, &mut inode.block, block_index, new_block, 1, &mut hm,
-                                )?;
-                                inode.blocks += hm;
+                                ) {
+                                    Ok(()) => {
+                                        inode.blocks += hm;
+                                    }
+                                    Err(e) => partial_or_err!('block_loop, e),
+                                }
                             }
                             // SAFETY: freshly allocated block; getblk_zero
                             // fabricates the zeroed dirty buffer without a
@@ -881,13 +905,13 @@ pub fn ext4_file_write(
                                 if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
                                     bio::brelse(bh);
                                 } else {
-                                    return Err(errno::Errno::IOError.as_neg_i32());
+                                    partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32());
                                 }
                             }
                             inode.blocks += sectors_per_block;
                             new_block
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => partial_or_err!('block_loop, e),
                     }
                 } else {
                     // Block not allocated, need to allocate a new one for writing
@@ -895,7 +919,7 @@ pub fn ext4_file_write(
                     let goal_group = (inode.ino / fs.inodes_per_group).min(fs.group_count - 1);
                     let new_block = match allocator.alloc_block(goal_group) {
                         Ok(b) => b,
-                        Err(e) => return Err(e),
+                        Err(e) => partial_or_err!('block_loop, e),
                     };
 
                     // Zero the new block (deferred-dirty: the write loop
@@ -904,8 +928,10 @@ pub fn ext4_file_write(
                     // SAFETY: bio::bread returns a valid BufferHead;
                     // b_data is a block-sized writable buffer.
                     unsafe {
-                        let bh = bio::bread(fs.device, new_block)
-                            .ok_or(errno::Errno::IOError.as_neg_i32())?;
+                        let bh = match bio::bread(fs.device, new_block) {
+                            Some(b) => b,
+                            None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
+                        };
 
                         for byte in (*bh).b_data.iter_mut() {
                             *byte = 0;
@@ -919,7 +945,10 @@ pub fn ext4_file_write(
                         inode.block[block_index as usize] = new_block as u32;
                     } else {
                         // Handle indirect blocks
-                        allocate_indirect_block(fs, inode, block_index, new_block, &allocator, goal_group)?;
+                        match allocate_indirect_block(fs, inode, block_index, new_block, &allocator, goal_group) {
+                            Ok(()) => {}
+                            Err(e) => partial_or_err!('block_loop, e),
+                        }
                     }
                     inode.blocks += sectors_per_block;
 
@@ -927,14 +956,16 @@ pub fn ext4_file_write(
                 }
             }
             Ok(b) => b,
-            Err(e) => return Err(e),
+            Err(e) => partial_or_err!('block_loop, e),
         };
 
         // SAFETY: bio::bread returns a valid BufferHead; b_data is a writable
         // block-sized buffer. The slice ranges are bounded by block_size.
         unsafe {
-            let bh = bio::bread(fs.device, block_num)
-                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let bh = match bio::bread(fs.device, block_num) {
+                Some(b) => b,
+                None => partial_or_err!('block_loop, errno::Errno::IOError.as_neg_i32()),
+            };
 
             let data = &mut (*bh).b_data;
             let remaining = to_write as usize - total_written;
@@ -971,9 +1002,12 @@ pub fn ext4_file_write(
         }
     }
 
-    // Update file size
-    if end_offset > inode.get_size() {
-        inode.set_size(end_offset);
+    // Update file size (partial-write safe: a mid-loop allocation failure
+    // broke out with fewer bytes than requested — the size must reflect
+    // only what landed).
+    let effective_end = offset + total_written as u64;
+    if effective_end > inode.get_size() {
+        inode.set_size(effective_end);
     }
 
     // Update inode timestamp

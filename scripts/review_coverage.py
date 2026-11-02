@@ -53,6 +53,8 @@ STATUS = {
     "kernel/src/dfx/lostpark.rs": ("todo", ""),
     "kernel/src/dfx/ksyms.rs": ("done", "written by this review (symbol table)"),
     "kernel/src/dfx/ledger.rs": ("part", "page census"),
+    "kernel/src/dfx/allocwatch.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
+    "kernel/src/dfx/cctx.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
     "kernel/src/dfx/leakorigin.rs": ("done", "cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS"),
     "kernel/src/dfx/memwatch.rs": ("part", "heap census"),
     "kernel/src/dfx/metawatch.rs": ("part", "buddy shadow scan"),
@@ -78,7 +80,7 @@ STATUS = {
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
-    "kernel/src/drivers/drm/mod.rs": ("part", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated"),
+    "kernel/src/drivers/drm/mod.rs": ("fixed", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated; r3b: gem_close re-read — BUG FIXED: shared-object GEM_CLOSE returned -EINVAL (None conflated keep-with-not-found; reference close never fails because another file shares the OBJECT) — outcome split, drop still outside the state lock (2b2a4a52)"),
     "kernel/src/drivers/gpu/*": ("todo", ""),
     "kernel/src/drivers/input/*": ("todo", ""),
     "kernel/src/drivers/intc/*": ("todo", ""),
@@ -87,26 +89,26 @@ STATUS = {
     "kernel/src/drivers/timer/mod.rs": ("part", "jiffies/monotonic"),
     "kernel/src/drivers/timer/riscv64.rs": ("part", "time CSR timebase"),
     "kernel/src/drivers/timer/x86_64.rs": ("part", "TSC/HPET timebase; cr3: set_next_trigger min(grid,hres) arming + re-arm-first placement in handle_timer_tick; idempotent jiffies derive makes PIT/LAPIC double-tick structurally impossible — PASS"),
-    "kernel/src/drivers/virtio/mod.rs": ("part", "s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites"),
+    "kernel/src/drivers/virtio/mod.rs": ("part", "s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites; r3b: sync read/write_block paths (R8-M2/R22-6/late-scan), walker positional+device-truthed arms, ABANDON-vs-DELIVERY, lossless re-raise, vw_lag_watchdog re-read — R contracts honored, PASS"),
     "kernel/src/drivers/virtio/offset.rs": ("todo", ""),
     "kernel/src/drivers/virtio/probe.rs": ("todo", ""),
     "kernel/src/drivers/virtio/queue.rs": ("part", "s2c: wait_for_used_interruptible + wait_for_desc_completion (prepare/recheck/deadline/dequeue-compensation discipline, poll_only for early boot and lock holders), submit_quiet publish via avail_shadow"),
     "kernel/src/drivers/virtio/virtio_pci.rs": ("part", "device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed"),
-    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS"),
+    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS; r3b: bread/get eviction + publication queue re-read in the D-13/ENOSPC context — PASS (dirty-storm wedge filed F-r3b-1/2)"),
     "kernel/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/src/fs/cgroup.rs": ("todo", ""),
     "kernel/src/fs/char_dev.rs": ("todo", ""),
     "kernel/src/fs/vt.rs": ("todo", ""),
     "kernel/src/fs/debugfs.rs": ("done", "written by this review (debugfs)"),
-    "kernel/src/fs/dentry.rs": ("part", "per-directory locking"),
+    "kernel/src/fs/dentry.rs": ("fixed", "r3b: read end to end — reader banks + deferred retirement (692e7623) writer side audited: SeqCst claim/fence pairing re-derived sound, all child/inode mutators retire+bump, drain lock order consistent, DENTRY_DRAIN_DEFERS safety-neutral; BUG FIXED: drain dropped retired vecs under DENTRY_SLOW_READ irqsave and the cascade runs ext4_destroy_inode disk I/O with IRQs+preempt off (virtio poll-only = cli bounded only by device latency) — drops moved outside the lock scope (f62a4df6)"),
     "kernel/src/fs/devfs/mod.rs": ("fixed", "s2b: read end to end — entry model, devtmpfs populate, mknod/remove/mkdir/lookup walkers, inode ops (lookup/iget/getattr/setattr/open/get_file_ops), reg-file read/write/read_at, SharedFilePages coherent MAP_SHARED backing, null/zero/full/random/con devices. DEFECT FIXED (d1275bce): getattr/lseek sized regular files from the stale entry.data while a shared backing is active — now the authoritative entry.size; A/B devfsmap probe 5->110 both cases. S_IFMT-vs-S_IFCHR classification and cross-open size coherence verified sound"),
     "kernel/src/fs/ext4/dir.rs": ("part", "directory ops"),
     "kernel/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
-    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions"),
+    "kernel/src/fs/ext4/file.rs": ("fixed", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); redundant op-level IN_ACCESS self-notifies removed; write body/alloc/lseek/fsync from earlier sessions; r3b: ext4_file_write per-block loop re-read in full — BUG FIXED: mid-loop allocation failure discarded partial progress (Err(ENOSPC) after bytes landed; reference reports the partial count) — partial_or_err arms + partial-safe size tail (6a83a090), host-mirror proptest added in kernel/verify"),
     "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
-    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites"),
-    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS"),
+    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites; r3b: ext4_destroy_inode + PENDING_REAPS/flush_pending_reaps re-read (read_inode in Drop context is the irqsave-drain hazard fixed on the dentry side; comment drift filed F-r3b-4)"),
+    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS; r3b: tail_reserve 12-byte tail threading re-verified (deleted-slot + split arms bounded by usable_end; legacy chains fall through on Err) + D-13 publication ordering — PASS"),
     "kernel/src/fs/fifo.rs": ("todo", ""),
     "kernel/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）；cr3: arch-gated O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE bit positions (aarch64 uapi vs asm-generic) verified against both reference tables; raw literals replaced with the shared constants — PASS"),
     "kernel/src/fs/inode.rs": ("part", "read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）"),
@@ -130,7 +132,7 @@ STATUS = {
     "kernel/src/fs/procfs/loadavg.rs": ("part", "load average"),
     "kernel/src/fs/procfs/locks.rs": ("done", "written by this review"),
     "kernel/src/fs/procfs/meminfo.rs": ("part", "meminfo fields"),
-    "kernel/src/fs/procfs/mod.rs": ("part", "节点树、read/write 分发、/proc/<pid> 路径解析"),
+    "kernel/src/fs/procfs/mod.rs": ("part", "节点树、read/write 分发、/proc/<pid> 路径解析; r3b: ino scheme (100..2524 ranges collision-free: PidFileKind 100..200, fd-dir 200, fd-links 300..1324, ns 410..416, attr 510..516, task 620, fdinfo 1400/1500..2524), node types + root pid-dir fabrication + refcount get/put — PASS (init trees/generators not re-derived)"),
     "kernel/src/fs/procfs/mounts.rs": ("todo", ""),
     "kernel/src/fs/procfs/net.rs": ("todo", ""),
     "kernel/src/fs/procfs/pid.rs": ("part", "status/stat generators"),
@@ -150,7 +152,7 @@ STATUS = {
     "kernel/src/fs/stat.rs": ("todo", ""),
     "kernel/src/fs/sysfs.rs": ("part", "sysfs tree, writable attributes"),
     "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it)"),
-    "kernel/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化"),
+    "kernel/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化; r3b: path_lookup walk + follow_symlink_hinted + dentry_walk_no_symlink read in full (claim discipline on every arm verified), all Dentry mutator call sites grep-audited, vfs_rename_locked/rmdir/unlink publication vs the reader-bank protocol — PASS; walk-side icache-refresh set_inode under claim = drain deferral only"),
     "kernel/src/fs/xattr.rs": ("todo", ""),
     "kernel/src/interrupt/domain.rs": ("todo", ""),
     "kernel/src/interrupt/irqchip.rs": ("todo", ""),
@@ -488,6 +490,34 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("f62a4df6", "kernel/src/fs/dentry.rs",
+     "The reader-bank drain (692e7623) dropped the retired dentry/inode vecs while holding "
+     "DENTRY_SLOW_READ under lock_irqsave. The drop cascade frees whole dentry subtrees and "
+     "runs Inode::drop -> ext4_destroy_inode -> read_inode -> bio::bread — synchronous disk "
+     "I/O with IRQs and preemption off, where the virtio completion wait degrades to the "
+     "poll-only MMIO spin (1e6 iterations plus read_block's 5e7-iteration late scan): a cli "
+     "segment bounded only by device latency, past the 3-7ms IRQ-gate class, tick/IPI loss, "
+     "watchdog bait. Reachable from every unlink/rmdir whose retired inode is the last "
+     "reference (they icache_remove BEFORE clear_inode) and from walk-side icache-refresh "
+     "set_inode retires. Fix: take the vecs under the slow lock, drop AFTER the lock scope — "
+     "the quiescence proof (banks zero at scan; fresh readers cannot reach the Arcs) never "
+     "needed the lock held during the drop."),
+    ("6a83a090", "kernel/src/fs/ext4/file.rs",
+     "ext4_file_write returned Err(ENOSPC) from the per-block loop even after earlier blocks "
+     "of the same request had landed in dirty buffers — a write into an interior hole of a "
+     "sparse file on a full disk discarded its own partial progress. write(2) and the "
+     "reference kernel report the partial count when bytes landed; only a request that wrote "
+     "nothing fails. Every mid-loop failure arm (hole/block allocation, extent materialize, "
+     "buffer fetch) now degrades to partial success once total_written > 0, and the size tail "
+     "tracks only what landed (offset + written). Host-mirror proptest added in kernel/verify "
+     "(fs::ext4::write_partial_test): the old body fails 3/4 tests, the fixed body 4/4."),
+    ("2b2a4a52", "kernel/src/drivers/drm/mod.rs",
+     "gem_close conflated its two None outcomes: 'handle not found' and 'entry kept because "
+     "another holder still references the object' — the shared case returned -EINVAL although "
+     "the caller's close succeeded. The reference's per-file handle tables make a close never "
+     "fail because another file shares the OBJECT, so Mesa's GEM_CLOSE on shared buffers (the "
+     "oh-glm5 EGLImage shape the shared-keep proxy exists for) must see 0. Outcome split into "
+     "Removed/SharedKeep/NotFound; the object drop still runs outside the state lock."),
     ("4ee3e430", "kernel/src/arch/aarch64/mm/asid.rs",
      "The aarch64 ASID allocator bumped NEXT_ASID monotonically and never consulted the in-use "
      "table: after 254 mm creations (any process-churning workload — LTP forks thousands) "
