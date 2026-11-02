@@ -1075,6 +1075,8 @@ fn sendfail_reason_name(code: u64) -> &'static str {
         16 => "offsets-copy-fault",
         17 => "reply-target-gone",
         18 => "translate-fd",
+        20 => "sender-stack-top (reference parity guard)",
+        21 => "sender-todo-head-txn (reference parity guard)",
         _ => "unknown",
     }
 }
@@ -6277,6 +6279,41 @@ fn binder_transaction(
                         t.to_tid(),
                         thread.tid
                     );
+                    // Full stack walk at the mismatch (why=7 hunt, budget
+                    // 20): names every entry's direction so the boot log
+                    // shows whether the top is an unresolved OUTGOING txn
+                    // (the parity gap the SYNCSEND-GUARD now rejects) or
+                    // cross-thread bookkeeping. WORLD held — ConsoleWriter.
+                    static M7_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if M7_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        use core::fmt::Write as _;
+                        let _ = writeln!(
+                            w,
+                            "R7-STACK pid={} tid={} reply-code{:#x} depth={}",
+                            proc.pid,
+                            thread.tid,
+                            tr.code,
+                            thread.st().txn_stack.len()
+                        );
+                        for (i, e) in thread.st().txn_stack.iter().enumerate().rev() {
+                            // SAFETY: reads under WORLD.
+                            let _ = writeln!(
+                                w,
+                                "  R7[{}] txn{} code{:#x} to_tid={:?} from pid{} tid{} oneway={} enq_j={} pick_j={}",
+                                i,
+                                e.id,
+                                e.code,
+                                e.to_tid(),
+                                e.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                e.from_tid.unwrap_or(0),
+                                e.flags & TF_ONE_WAY != 0,
+                                e.enq_j,
+                                *e.pick_j.get()
+                            );
+                        }
+                    }
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
@@ -6486,6 +6523,67 @@ fn binder_transaction(
                 sendfail_why(11);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
+            }
+            // Reference-kernel parity (binder.c binder_transaction,
+            // non-reply sync sends): two protocol guards the reference
+            // line has and we lacked. A sync BC_TRANSACTION is rejected
+            // when (a) a transaction sits at the sender-thread's todo
+            // head ("new transaction not allowed when there is a
+            // transaction on thread todo") or (b) the sender's
+            // transaction-stack top is not an incoming txn addressed to
+            // this thread ("got new transaction with bad transaction
+            // stack"). Accepting those sends instead let userspace drive
+            // reply orderings the reference never permits, ending in the
+            // once-per-boot why=7 reply-stack-top orphan (useriam lb253
+            // @100.9s, accountmgr lb302 @190.8s — each orphaned a sync
+            // client whose TXN-HANG exec then grows without bound).
+            if !reply && !oneway {
+                let st = thread.st();
+                let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
+                let bad_stack_top = match st.txn_stack.last() {
+                    // SAFETY: to_tid read under WORLD.
+                    Some(top) => (unsafe { top.to_tid() }) != Some(thread.tid),
+                    None => false,
+                };
+                if todo_head_txn || bad_stack_top {
+                    sendfail_why(if todo_head_txn { 21 } else { 20 });
+                    *err_cmd = BR_FAILED_REPLY;
+                    static GUARD_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        use core::fmt::Write as _;
+                        let depth = st.txn_stack.len();
+                        // SAFETY: reads of the top txn under WORLD.
+                        let (tid_, tcode, tto, fpid, ftid) = st
+                            .txn_stack
+                            .last()
+                            .map(|t| unsafe {
+                                (
+                                    t.id,
+                                    t.code,
+                                    t.to_tid(),
+                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                    t.from_tid.unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or((0, 0, None, 0, 0));
+                        let _ = writeln!(
+                            w,
+                            "SYNCSEND-GUARD pid={} tid={} why={} stack_depth={} top=txn{} code{:#x} to_tid={:?} from pid{} tid{}",
+                            proc.pid,
+                            thread.tid,
+                            if todo_head_txn { "todo-head-txn" } else { "stack-top-not-mine" },
+                            depth,
+                            tid_,
+                            tcode,
+                            tto,
+                            fpid,
+                            ftid
+                        );
+                    }
+                    return;
+                }
             }
             if !reply {
                 if let Some(node) = &target_node {
@@ -7476,7 +7574,45 @@ fn binder_transaction(
                 if let Some(rthread) = rthread {
                     let rth = rthread.st();
                     match &in_reply_to {
-                        Some(orig) => rth.txn_stack.retain(|t| !Arc::ptr_eq(t, orig)),
+                        Some(orig) => {
+                            // binder_pop_transaction_ilocked parity check:
+                            // the reference pops the origin thread's stack
+                            // TOP and BUG_ONs if it is not exactly this
+                            // txn. We retain-by-identity anywhere (more
+                            // forgiving), but a non-top hit means our
+                            // bookkeeping already diverged — name it
+                            // (budget 20, WORLD held, ConsoleWriter).
+                            let top_is_orig = rth
+                                .txn_stack
+                                .last()
+                                .map(|t| Arc::ptr_eq(t, orig))
+                                .unwrap_or(false);
+                            if !top_is_orig {
+                                static RP_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    < 20
+                                {
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    // SAFETY: reads under WORLD.
+                                    let top = rth.txn_stack.last();
+                                    let _ = writeln!(
+                                        w,
+                                        "RPOP-DIVERGE pid={} tid{} orig=txn{} code{:#x} depth={} top=txn{} code{:#x} to_tid={:?}",
+                                        tproc.pid,
+                                        rtid,
+                                        orig.id,
+                                        orig.code,
+                                        rth.txn_stack.len(),
+                                        top.map(|t| t.id).unwrap_or(0),
+                                        top.map(|t| t.code).unwrap_or(0),
+                                        top.and_then(|t| t.to_tid())
+                                    );
+                                }
+                            }
+                            rth.txn_stack.retain(|t| !Arc::ptr_eq(t, orig));
+                        }
                         None => {}
                     }
                     rth.todo.push_back(Work::Transaction(txn.clone()));
