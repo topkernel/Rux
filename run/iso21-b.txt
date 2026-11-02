@@ -1,0 +1,77 @@
+# idx|test|class|rc|tail
+0|accept02|FAIL|2|/kernel/git/torvalds/linux.git/commit/?id=657831ff  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-8890  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+1|accept4_01|FAIL|2|ing SIGKILL! tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+2|access01|PASS|0|: access(accessdir_wx/accessfile_x, R_OK) as nobody : EACCES (13) access01.c:242: TPASS: access(accessdir_wx/accessfile_x, W_OK) as nobody : EACCES (13)  Summary: passed   199 failed   0 broken   0 skipped  0 warnings 0
+3|access04|CRASH|139|: ENOTDIR (20) access04.c:68: TPASS: access as root : ELOOP (40) access04.c:68: TPASS: access as nobody : ELOOP (40) access04.c:68: TPASS: access as root : EROFS (30) access04.c:68: TPASS: access as nobody : EROFS (30)
+4|close_range01|FAIL|2|l is already tainted  HINT: You _MAY_ be missing kernel fixes:  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fec8a6a69103  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+5|connect01|TIMEOUT|143|connect01    1  TPASS  :  bad file descriptor successful
+6|epoll_create02|FAIL|1|Testing variant: libc epoll_create() epoll_create02.c:32: TPASS: epoll_create(0) : EINVAL (22) epoll_create02.c:32: TPASS: epoll_create(-1) : EINVAL (22)  Summary: passed   3 failed   1 broken   0 skipped  0 warnings 0
+7|execl01|FAIL|2|test.c:1617: TINFO: Timeout per run is 0h 00m 30s execl01_child.c:20: TPASS: execl01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+8|execle01|FAIL|2|st.c:1617: TINFO: Timeout per run is 0h 00m 30s execle01_child.c:34: TPASS: execle01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+9|execlp01|FAIL|2|st.c:1617: TINFO: Timeout per run is 0h 00m 30s execlp01_child.c:20: TPASS: execlp01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+10|execv01|FAIL|2|test.c:1617: TINFO: Timeout per run is 0h 00m 30s execv01_child.c:23: TPASS: execv01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+11|execve01|FAIL|2|st.c:1617: TINFO: Timeout per run is 0h 00m 30s execve01_child.c:34: TPASS: execve01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+12|execve06|FAIL|2|nel/git/torvalds/linux.git/commit/?id=dcd46d897adb  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-4034  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+13|execvp01|FAIL|2|st.c:1617: TINFO: Timeout per run is 0h 00m 30s execvp01_child.c:20: TPASS: execvp01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+14|f1|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/f1: No such file or directory
+15|f2|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/f2: No such file or directory
+16|f3|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/f3: No such file or directory
+17|ftest01|POISON||
+18|ftest04|FAIL|1|it status - failed. ftest04     4  TFAIL  :  ftest04.c:172:  Expected 0 exit status - failed. ftest04     5  TFAIL  :  ftest04.c:172:  Expected 0 exit status - failed. ftest04     6  TFAIL  :  ftest04.c:99: Test failed.
+19|ftest05|FAIL|1|pected 0 exit. ftest05     4  TFAIL  :  ftest05.c:193:  Test{313} failed, expected 0 exit. ftest05     5  TFAIL  :  ftest05.c:193:  Test{316} failed, expected 0 exit. ftest05     6  TFAIL  :  ftest05.c:119: Test failed.
+20|getdents01|FAIL|1|ound 'file' getdents01.c:92: TINFO: Found 'symlink' getdents01.c:126: TPASS: All entries found getdents.h:164: TCONF: libc getdents64() is not implemented  Summary: passed   2 failed   1 broken   0 skipped  1 warnings 0
+21|getdents02|FAIL|1|iled as expected: ENOTDIR (20) getdents02.c:83: TPASS: getdents failed as expected: ENOENT (2) getdents.h:164: TCONF: libc getdents64() is not implemented  Summary: passed   9 failed   3 broken   0 skipped  1 warnings 0
+22|kallsyms|FAIL|2|t process... tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+23|kill11|FAIL|3|nt processes tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   4 failed   1 broken   1 skipped  0 warnings 0
+24|mincore03|FAIL|1|m 30s mincore03.c:66: TPASS: mincore() reports untouched pages are not resident mincore03.c:68: TFAIL: mincore reports resident pages as 0, but expected 3  Summary: passed   1 failed   1 broken   0 skipped  0 warnings 0
+25|open13|FAIL|1|) failed with EBADF open13      3  TFAIL  :  open13.c:144: fchmod(2) succeeded unexpectedly open13      4  TFAIL  :  open13.c:144: fchown(2) succeeded unexpectedly open13      5  TPASS  :  fgetxattr(2) failed with EBADF
+26|process_vm01|FAIL|1|TINFO: Testing data with invalid protection (rvec) process_vm01.c:275: TPASS: TST_RET == -1 (-1) process_vm01.c:93: TPASS: expected failure: EFAULT (14)  Summary: passed   24 failed   1 broken   0 skipped  0 warnings 0
+27|process_vm_readv02|FAIL|3|: reading string from same memory location process_vm_readv02.c:55: TBROK: process_vm_readv: EPERM process_vm_readv02.c:107: TFAIL: child 1: exited with 2  Summary: passed   0 failed   1 broken   1 skipped  0 warnings 0
+28|process_vm_readv03|FAIL|3|AULT (14) process_vm_readv03.c:117: TBROK: process_vm_readv: expected 131072 bytes but got -1 process_vm_readv03.c:185: TFAIL: child_read: exited with 2  Summary: passed   0 failed   32 broken   16 skipped  0 warnings 0
+29|process_vm_writev02|FAIL|1|m_writev, pid_alloc, &local, 1UL, &remote, 1UL, 0UL) returned 100000 process_vm_writev02.c:45: TFAIL: child 0: found 100000 differences from expected data  Summary: passed   1 failed   1 broken   0 skipped  0 warnings 0
+30|recv01|TIMEOUT|143|recv01      1  TPASS  :  bad file descriptor successful
+31|recvfrom01|TIMEOUT|143|recvfrom01    1  TPASS  :  bad file descriptor successful
+32|recvmsg01|FAIL|2|nt processes tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   2 failed   0 broken   1 skipped  0 warnings 0
+33|rt_sigaction01|CRASH|132|rt_sigaction01    0  TINFO  :  signal: 35
+34|sched_getparam03|FAIL|1|: sched_getparam() with invalid pid expected EINVAL: ESRCH (3) sched_getparam03.c:47: TPASS: sched_getparam() with invalid address for param : EINVAL (22)  Summary: passed   2 failed   1 broken   0 skipped  1 warnings 0
+35|sched_rr_get_interval03|FAIL|1|:87: TPASS: sched_rr_get_interval(32768, 0x445908) : ESRCH (3) sched_rr_get_interval03.c:87: TPASS: sched_rr_get_interval(0, 0x7ff000001000) : EFAULT (14)  Summary: passed   4 failed   1 broken   0 skipped  1 warnings 0
+36|sched_setparam04|FAIL|1|sched_setparam04.c:59: TPASS: test with invalid address for p : EINVAL (22) sched_setparam04.c:59: TPASS: test with invalid p.sched_priority : EINVAL (22)  Summary: passed   3 failed   1 broken   0 skipped  1 warnings 0
+37|semctl01|FAIL|1|semaphore sets is correct semctl01.c:235: TPASS: id of the semaphore set is correct semctl01.c:209: TPASS: semaphore appears to be removed : EINVAL (22)  Summary: passed   12 failed   1 broken   0 skipped  0 warnings 0
+38|semctl07|FAIL|1|ded semctl07.c:120: TPASS: semctl(GETNCNT) returned 0 semctl07.c:125: TPASS: semctl(GETZCNT) succeeded semctl07.c:130: TPASS: semctl(GETZCNT) succeeded 0  Summary: passed   15 failed   1 broken   0 skipped  0 warnings 0
+39|semget01|FAIL|1|rg.buf->sem_nsems (0) != PSEMS (10) semget01.c:30: TPASS: un_arg.buf->sem_perm.cuid == geteuid() (0) semget01.c:32: TPASS: basic semaphore values are okay  Summary: passed   2 failed   1 broken   0 skipped  0 warnings 0
+40|send01|TIMEOUT|143|send01      1  TPASS  :  bad file descriptor successful
+41|sendmsg02|PASS|0|sendmsg02    1  TPASS  :  finished after 15 seconds
+42|sendto01|TIMEOUT|143|sendto01    1  TPASS  :  bad file descriptor successful
+43|shmget02|FAIL|1|256) : EACCES (13) shmget02.c:102: TPASS: shmget(1645217848, 2048, 2560) : EINVAL (22) shmget02.c:90: TPASS: shmget(1645217848, 2048, 2560) : EINVAL (22)  Summary: passed   7 failed   1 broken   0 skipped  0 warnings 0
+44|syslog12|FAIL|2|invalid type/command : EINVAL (22) syslog12.c:72: TPASS: syslog() with NULL buffer argument : EINVAL (22) tst_test.c:1677: TBROK: Test killed by SIGSEGV!  Summary: passed   2 failed   0 broken   1 skipped  0 warnings 0
+45|timer_settime03|FAIL|2|el/git/torvalds/linux.git/commit/?id=78c9c4dfbf8c  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-12896  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+46|waitpid01|POISON||
+47|clock_gettime04|PASS|0|- vDSO or syscall with libc spec clock_gettime04.c:188: TINFO:  - syscall with old kernel spec clock_gettime04.c:188: TINFO:  - vDSO with old kernel spec  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+48|clock_nanosleep02|PASS|0|O: min 1000085us, max 1000095us, median 1000085us, trunc mean 1000085.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+49|execve02|PASS|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve02.c:54: TPASS: execve() failed expectedly: EACCES (13)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+50|execve03|PASS|0|ailed as expected: EFAULT (14) execve03.c:124: TPASS: execve failed as expected: EACCES (13) execve03.c:124: TPASS: execve failed as expected: ENOEXEC (8)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+51|execve04|PASS|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve04.c:52: TPASS: execve failed as expected: ETXTBSY (26)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+52|float_bessel|PASS|0|float_bessel    1  TPASS  :  Test passed float_bessel    1  TPASS  :  Test passed
+53|float_exp_log|PASS|0|float_exp_log    1  TPASS  :  Test passed float_exp_log    1  TPASS  :  Test passed
+54|float_iperb|PASS|0|float_iperb    1  TPASS  :  Test passed float_iperb    1  TPASS  :  Test passed
+55|float_power|PASS|0|float_power    1  TPASS  :  Test passed float_power    1  TPASS  :  Test passed
+56|float_trigo|PASS|0|float_trigo    1  TPASS  :  Test passed float_trigo    1  TPASS  :  Test passed
+57|ftest02|PASS|0|ftest02     1  TPASS  :  Test passed in fork-wait part.
+58|ftest06|PASS|0|ftest06     1  TPASS  :  Test passed. ftest06     2  TPASS  :  Test passed.
+59|futex_cmp_requeue01|PASS|0|800 futex_cmp_requeue01.c:140: TINFO: children woken, futex0: 200, futex1: 500, spurious wakeups: 0 futex_cmp_requeue01.c:187: TPASS: futex_cmp_requeue()  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+60|ht_enabled|PASS|0|
+61|inotify11|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s inotify11.c:105: TPASS: Got 9999 IN_DELETE events  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+62|ioperm01|PASS|0|FO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s ioperm01.c:37: TPASS: ioperm() passed for port address 1021, returned 3190  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+63|iopl01|PASS|0|assed for level 1, returned 3201 iopl01.c:40: TPASS: iopl() passed for level 2, returned 3201 iopl01.c:40: TPASS: iopl() passed for level 3, returned 3201  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+64|ioprio_set01|PASS|0|et returned class NONE prio 0 ioprio.h:70: TPASS: ioprio_set new class BEST-EFFORT, new prio 1 ioprio_set01.c:44: TCONF: ioprio decrease out of range (-1)  Summary: passed   1 failed   0 broken   0 skipped  1 warnings 0
+65|ioprio_set03|PASS|0|EINVAL (22) ioprio_set03.c:48: TINFO: tested illegal priority with class NONE ioprio_set03.c:51: TPASS: returned correct error for wrong prio: EINVAL (22)  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+66|memcg_test_3|PASS|0|1617: TINFO: Timeout per run is 0h 00m 30s tst_cgroup.c:706: TINFO: Mounted V2 CGroups on /tmp/cgroup_unified memcg_test_3.c:60: TPASS: Bug not reproduced  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+67|memcontrol01|PASS|0|30s memcontrol01.c:32: TPASS: child should have memory controller returned 1 memcontrol01.c:35: TPASS: child2 should not have memory controller returned 0  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+68|mmap2|PASS|0|128 Available memory: 952MB creating tmp file and writing 'a' to it created file of size 134217728 content of the file is 'a' file mapped at 0x7feffffff000 changing file content to 'A' unmapped file at 0x7feffffff000
+69|nanosleep01|PASS|0|O: min 1000073us, max 1000152us, median 1000073us, trunc mean 1000073.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+70|nptl01|PASS|0|0  TINFO  :  Success thru loop 70000 of 100000 nptl01      0  TINFO  :  Success thru loop 80000 of 100000 nptl01      0  TINFO  :  Success thru loop 90000 of 100000 nptl01      1  TPASS  :  Test completed successfully!
+71|prctl09|PASS|0|O: min 1000089us, max 1000094us, median 1000089us, trunc mean 1000089.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+72|recvmsg02|PASS|0|24 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s recvmsg02.c:76: TINFO: received 25 bytes recvmsg02.c:79: TPASS: recvmsg(..., MSG_PEEK) works fine  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+73|select03|PASS|0|t_var.h:89: TCONF: syscall(-1) __NR__newselect not supported on your arch select_var.h:89: TCONF: syscall(-1) __NR__newselect not supported on your arch  Summary: passed   24 failed   0 broken   0 skipped  16 warnings 0
+74|signal06|PASS|0|nal06    3  TPASS  :  signal06 call succeeded signal06    0  TINFO  :  loop = 30000 signal06    4  TPASS  :  signal06 call succeeded signal06    0  TINFO  :  loop = 30000 signal06    5  TPASS  :  signal06 call succeeded
+75|symlink03|PASS|0|:  symlink() Fails, Symlink path too long, errno=36 symlink03    5  TPASS  :  symlink() Fails, Symlink Pathname is empty, errno=2 symlink03    6  TPASS  :  symlink() Fails, Symlink Path contains regular file, errno=20
