@@ -184,3 +184,101 @@ per the census above, coordinate with OH lane); (3) ltplong long-horizon
 loops (hours) once the 254 family is fixed; (4) mmapstress07 with
 tmpfile args; (5) doubled direct-console interleave on heal prints
 (two CPUs, no console lock) — cosmetic but garbles the heal lines.
+
+### 2026-11-03, round 3 — heal-bar root-caused and rebuilt (observation
+### counting), steal question decided, execaudit landed, 4x soaks PASS
+
+**Sync**: merged origin/main 12acd3f6 (binder tcomplete deferral, ext4
+published-size, x86_64 128KB stacks, LTP r22) — merge 3383cf79. Round-3
+commits: ac0ff7f6 (kernel heal bar), f527ac16 (execaudit probe) + this
+session's docs/driver commit.
+
+**Q1 (the "200.7 s 0x10004 leak") — ROOT-CAUSED: not a missed put.**
+Evidence chain: the first heal's leakhunt ORIGIN showed oage_jif=1 with
+held_jiffies=0x4e6c — an outermost 0->1 acquire ONE jiffy before the
+"200 s hold" heal (a solid base=4 hold cannot rewrite the o-record;
+inner 4->5->4 pairs never touch it) — the base was churning live
+guards. held_jiffies is LEAK_WIN window AGE, not hold time. Three bar
+defects produced every observed face:
+(a) absence-stamp AGE accrued while off-CPU (stamps refresh only on
+    the task's own CPU tick) — the 100 s strand victim resumed with a
+    200+-tick-old bar and its first tick healed the resumed syscall's
+    LIVE guards -> spinlock.rs:0x1b8 underflow at the page-allocator
+    zone lock;
+(b) jiffies is timebase-DERIVED, so >2 s host steal windows inflate
+    stamp age with zero ticks delivered;
+(c) the pb3 release-side re-arm stored the SUPERSEDED ti_pc_zero_jif
+    field (zero readers in the tree) — the bar never re-armed on legal
+    1->0 drains, and lock-hot tasks formed 200-present-sample streaks
+    (held_jiffies=0 storm, oage_jif=1 on every line).
+Plus (d): heals never re-armed anything, so post-heal presence was
+judged against the pre-heal stale bar — the storm amplifier.
+**Fix (ac0ff7f6)**: the bar now counts CONSECUTIVE-PRESENT OBSERVATIONS
+(ti_pc_{pirq,sirq,hirq}_present_run): bumped only by the task's own-CPU
+tick when the field is present; reset on absent samples, legal drains
+(release-side now writes the field the gate reads), every external
+zeroing (all heal paths + underflow clamps), and task creation. No
+tick, no increment — off-CPU time and host steal cannot inflate it.
+Verification (leakhunt boots): memory-fix1 + memory-fix2 = 0 heals / 0
+underflows / 0 strands / 0 PARKED-LEAK (round-2 same-boot: 21/3/1 + a
+storm); forker-v4 (fork 8 + exec 4) = 0 heals / 0 underflows (SP-1
+families stay dead). HEAL lines now print prun=/srun=/hrun=.
+
+**Q2 (steal-aware exemption) — DECIDED, no exemption needed**: the new
+bar's unit is the OBSERVATION (a delivered tick that sampled the field
+present). Host steal delivers no guest ticks -> contributes zero by
+construction. An exemption on the old bar would have masked defect
+(c): the storm was churn-caused (oage_jif=1), not steal-caused.
+
+**NEW parkwalk census (dfx=leakhunt)**: PARKWALK-CENSUS walks/obs/
+parkednz printed every 1000 walks. fix1/fix2: walks=10,000,
+obs=82,629, parkednz=0 — the walk is healthy and NO task parked with a
+nonzero count in either boot. This answers round-2's "why did
+PARKED-HEAL miss the 100 s strand": the victim parked CLEAN; the
+0x10004 face arose at RESUME from the stale bar. The strand itself
+(R85 orphaned-mark/lost-park) remains the OH lane's family — its
+wake-side face no longer corrupts counts on this kernel.
+
+**Q3 (rc=254 silent-child-death)**: execaudit.c probe landed
+(userspace/tests/probes.tar.gz; driver injects it): fork storm +
+immediate exec of a glibc-static target (brkchurn) + strict waitpid
+audit (ECHILD/wrong-pid/signaled/127/nonzero), sibling fork-pressure,
+rsrun's WNOHANG discipline via -w, EA lines to /dev/console. In-guest
+boot: 560 audited execs (280 per discipline), events=0, echild=0 — the
+family did NOT fire this boot (matches its ~1-in-2 intermittency;
+next session: concurrent burst + LTP-shaped targets + multi-boot
+sweep). Probe is the standing reproducer now.
+
+**Q4 (soaks)**: dirstorm 12x150 (4x round-2 intensity) PASS — 2,139,796
+ops, 0 RS-ERR; fsmeta 8x180 PASS — 1,375,896 ops; brkchurn pressure
+rerun (two driver lessons: everything after --spawn is the probe argv;
+the spawn class keeps rs's default 60 s budget unless --timeout
+precedes --spawn) — ~90 s of glibc brk churn under leakhunt:
+sbrk_ops 226k+ / 55+ GB, malloc_ops 29M+ / 290+ GB, enomem=0,
+0 heal-family events. 0 heal-family events in every soak boot.
+
+**NEW mm finding (SP-5 candidate, memory lane's guarded domain)**:
+memory-fix1 boot — malloc class 0 ops for 100 s (round-2 boots: 4.45M);
+zone genuinely exhausted (used=524213/524252), 2 workers self-SIGKILL
+on pagefault OOM, parent sat in direct reclaim with
+in_direct_reclaim=<pid> gate_exit_releases=0 across 4+ OOM-FORENSIC
+dumps WHILE a later dump showed zone_free=33462 pages returned. Heal
+side not involved (round-2 malloc windows had 0 heals too — first heal
+fired only after the class). fix2 boot completed malloc normally:
+INTERMITTENT, same cadence class as the fake-OOM history. Shape:
+reclaim's exit gate does not release (or holder never re-checks) once
+memory returns. Reproducer: the memory class boot itself.
+
+**Gates**: x86_64 build rc=0 (post-fix, twice), riscv64 build rc=0
+(clean config), make test GREEN (ALL TESTS PASSED, rc=0; suite QEMU
+killed after verdict per lock discipline), stressor reruns clean.
+Pushed origin/stress-port.
+
+**Round-4 queue**: (1) SP-5 reclaim-gate livelock — coordinate with
+the mm owner; the stress vehicle reproduces it; add a gate-age census
+to name the holder's wait site; (2) execaudit multi-boot sweep
+(concurrent burst, LTP binaries as targets) to catch the intermittent
+ECHILD; (3) ltplong long-horizon loops (hours) on the fixed kernel;
+(4) mmapstress07 with tmpfile args; (5) SPLIT o-record divergence
+under fork churn (forker-v4: 24 budgeted lines, sched.rs:2580/6041) —
+input for the stale-tp booking hunt (omis), zero wedges alongside.

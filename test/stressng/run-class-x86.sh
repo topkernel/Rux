@@ -21,7 +21,7 @@ BUDGET="${BUDGET:-180}"
 mkdir -p "$OUTDIR"
 
 # ---- inject binaries (always rewrite: rs/rsrun may have been rebuilt) ----
-echo "inject: building + planting rs/rsrun/renameco/brkchurn into $IMAGE"
+echo "inject: building + planting rs/rsrun/renameco/brkchurn/execaudit into $IMAGE"
 CC=toolchain/x86_64-rux-linux-musl/bin/musl-gcc
 $CC -static -O2 -Wall -o "$OUTDIR/rs" test/stressng/rs.c
 $CC -static -O2 -Wall -o "$OUTDIR/rsrun" test/stressng/rsrun.c 2>/dev/null
@@ -29,9 +29,11 @@ $CC -static -O2 -Wall -o "$OUTDIR/renameco" test/stressng/renameco.c 2>/dev/null
 # glibc-static (host gcc — host and guest are both x86_64): exercises
 # the brk paths musl-static binaries cannot (round-1 bigheap finding)
 gcc -static -O2 -Wall -o "$OUTDIR/brkchurn" test/stressng/brkchurn.c 2>/dev/null
+# r3: rc=254 silent-child-death reproducer (fork storm + exec + audit)
+$CC -static -O2 -Wall -o "$OUTDIR/execaudit" test/stressng/execaudit.c 2>/dev/null
 INJ=$(mktemp /tmp/inj-XXXX)
-printf 'cd /test\nmkdir stress-ng\ncd /test/stress-ng\nrm rs\nrm rsrun\nrm renameco\nrm brkchurn\nwrite %s/rs rs\nwrite %s/rsrun rsrun\nwrite %s/renameco renameco\nwrite %s/brkchurn brkchurn\n' \
-    "$OUTDIR" "$OUTDIR" "$OUTDIR" "$OUTDIR" > "$INJ"
+printf 'cd /test\nmkdir stress-ng\ncd /test/stress-ng\nrm rs\nrm rsrun\nrm renameco\nrm brkchurn\nrm execaudit\nwrite %s/rs rs\nwrite %s/rsrun rsrun\nwrite %s/renameco renameco\nwrite %s/brkchurn brkchurn\nwrite %s/execaudit execaudit\n' \
+    "$OUTDIR" "$OUTDIR" "$OUTDIR" "$OUTDIR" "$OUTDIR" > "$INJ"
 debugfs -w -f "$INJ" "$IMAGE" 2>&1 | grep -v "^debugfs" | head -3 || true
 rm -f "$INJ"
 
