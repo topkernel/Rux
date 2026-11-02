@@ -21,13 +21,14 @@ BUDGET="${BUDGET:-180}"
 mkdir -p "$OUTDIR"
 
 # ---- inject binaries (always rewrite: rs/rsrun may have been rebuilt) ----
-echo "inject: building + planting rs/rsrun into $IMAGE"
+echo "inject: building + planting rs/rsrun/renameco into $IMAGE"
 CC=toolchain/x86_64-rux-linux-musl/bin/musl-gcc
 $CC -static -O2 -Wall -o "$OUTDIR/rs" test/stressng/rs.c
 $CC -static -O2 -Wall -o "$OUTDIR/rsrun" test/stressng/rsrun.c 2>/dev/null
+$CC -static -O2 -Wall -o "$OUTDIR/renameco" test/stressng/renameco.c 2>/dev/null
 INJ=$(mktemp /tmp/inj-XXXX)
-printf 'cd /test\nmkdir stress-ng\ncd /test/stress-ng\nrm rs\nrm rsrun\nwrite %s/rs rs\nwrite %s/rsrun rsrun\n' \
-    "$OUTDIR" "$OUTDIR" > "$INJ"
+printf 'cd /test\nmkdir stress-ng\ncd /test/stress-ng\nrm rs\nrm rsrun\nrm renameco\nwrite %s/rs rs\nwrite %s/rsrun rsrun\nwrite %s/renameco renameco\n' \
+    "$OUTDIR" "$OUTDIR" "$OUTDIR" > "$INJ"
 debugfs -w -f "$INJ" "$IMAGE" 2>&1 | grep -v "^debugfs" | head -3 || true
 rm -f "$INJ"
 
