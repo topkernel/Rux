@@ -51,8 +51,12 @@ STATUS = {
     "kernel/src/dfx/filerd.rs": ("todo", "new file (perf-path lane) — awaiting its owner lane's review"),
     "kernel/src/dfx/forkprof.rs": ("todo", ""),
     "kernel/src/dfx/lostpark.rs": ("todo", ""),
+    "kernel/src/dfx/allocwatch.rs": ("todo", "new dfx probe (2026-11-02, allocwatch lane) - awaiting its owner lane's review"),
+    "kernel/src/dfx/cctx.rs": ("todo", "new dfx probe (closegap lane, cctx=1) - awaiting its owner lane's review"),
     "kernel/src/dfx/ksyms.rs": ("done", "written by this review (symbol table)"),
     "kernel/src/dfx/ledger.rs": ("part", "page census"),
+    "kernel/src/dfx/allocwatch.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
+    "kernel/src/dfx/cctx.rs": ("todo", "r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane"),
     "kernel/src/dfx/leakorigin.rs": ("done", "cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS"),
     "kernel/src/dfx/memwatch.rs": ("part", "heap census"),
     "kernel/src/dfx/metawatch.rs": ("part", "buddy shadow scan"),
@@ -78,7 +82,7 @@ STATUS = {
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
-    "kernel/src/drivers/drm/mod.rs": ("part", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated"),
+    "kernel/src/drivers/drm/mod.rs": ("fixed", "cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated; r3b: gem_close re-read — BUG FIXED: shared-object GEM_CLOSE returned -EINVAL (None conflated keep-with-not-found; reference close never fails because another file shares the OBJECT) — outcome split, drop still outside the state lock (2b2a4a52)"),
     "kernel/src/drivers/gpu/*": ("todo", ""),
     "kernel/src/drivers/input/*": ("todo", ""),
     "kernel/src/drivers/intc/*": ("todo", ""),
@@ -87,26 +91,26 @@ STATUS = {
     "kernel/src/drivers/timer/mod.rs": ("part", "jiffies/monotonic"),
     "kernel/src/drivers/timer/riscv64.rs": ("part", "time CSR timebase"),
     "kernel/src/drivers/timer/x86_64.rs": ("part", "TSC/HPET timebase; cr3: set_next_trigger min(grid,hres) arming + re-arm-first placement in handle_timer_tick; idempotent jiffies derive makes PIT/LAPIC double-tick structurally impossible — PASS"),
-    "kernel/src/drivers/virtio/mod.rs": ("part", "s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites"),
+    "kernel/src/drivers/virtio/mod.rs": ("part", "s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites; r3b: sync read/write_block paths (R8-M2/R22-6/late-scan), walker positional+device-truthed arms, ABANDON-vs-DELIVERY, lossless re-raise, vw_lag_watchdog re-read — R contracts honored, PASS"),
     "kernel/src/drivers/virtio/offset.rs": ("todo", ""),
     "kernel/src/drivers/virtio/probe.rs": ("todo", ""),
     "kernel/src/drivers/virtio/queue.rs": ("part", "s2c: wait_for_used_interruptible + wait_for_desc_completion (prepare/recheck/deadline/dequeue-compensation discipline, poll_only for early boot and lock holders), submit_quiet publish via avail_shadow"),
     "kernel/src/drivers/virtio/virtio_pci.rs": ("part", "device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed"),
-    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS"),
+    "kernel/src/fs/bio.rs": ("part", "sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS; r3b: bread/get eviction + publication queue re-read in the D-13/ENOSPC context — PASS (dirty-storm wedge filed F-r3b-1/2)"),
     "kernel/src/fs/buffer.rs": ("part", "FileBuffer chunked read/write"),
     "kernel/src/fs/cgroup.rs": ("todo", ""),
     "kernel/src/fs/char_dev.rs": ("todo", ""),
     "kernel/src/fs/vt.rs": ("todo", ""),
     "kernel/src/fs/debugfs.rs": ("done", "written by this review (debugfs)"),
-    "kernel/src/fs/dentry.rs": ("part", "per-directory locking"),
+    "kernel/src/fs/dentry.rs": ("fixed", "r3b: read end to end — reader banks + deferred retirement (692e7623) writer side audited: SeqCst claim/fence pairing re-derived sound, all child/inode mutators retire+bump, drain lock order consistent, DENTRY_DRAIN_DEFERS safety-neutral; BUG FIXED: drain dropped retired vecs under DENTRY_SLOW_READ irqsave and the cascade runs ext4_destroy_inode disk I/O with IRQs+preempt off (virtio poll-only = cli bounded only by device latency) — drops moved outside the lock scope (f62a4df6)"),
     "kernel/src/fs/devfs/mod.rs": ("fixed", "s2b: read end to end — entry model, devtmpfs populate, mknod/remove/mkdir/lookup walkers, inode ops (lookup/iget/getattr/setattr/open/get_file_ops), reg-file read/write/read_at, SharedFilePages coherent MAP_SHARED backing, null/zero/full/random/con devices. DEFECT FIXED (d1275bce): getattr/lseek sized regular files from the stale entry.data while a shared backing is active — now the authoritative entry.size; A/B devfsmap probe 5->110 both cases. S_IFMT-vs-S_IFCHR classification and cross-open size coherence verified sound"),
     "kernel/src/fs/ext4/dir.rs": ("part", "directory ops"),
     "kernel/src/fs/ext4/extent.rs": ("fixed", "read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb)"),
-    "kernel/src/fs/ext4/file.rs": ("part", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions"),
+    "kernel/src/fs/ext4/file.rs": ("fixed", "read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); redundant op-level IN_ACCESS self-notifies removed; write body/alloc/lseek/fsync from earlier sessions; r3b: ext4_file_write per-block loop re-read in full — BUG FIXED: mid-loop allocation failure discarded partial progress (Err(ENOSPC) after bytes landed; reference reports the partial count) — partial_or_err arms + partial-safe size tail (6a83a090), host-mirror proptest added in kernel/verify"),
     "kernel/src/fs/ext4/inode.rs": ("fixed", "read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2)"),
     "kernel/src/fs/ext4/journal.rs": ("part", "jbd2 transaction start/stop"),
-    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites"),
-    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS"),
+    "kernel/src/fs/ext4/mod.rs": ("part", "superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites; r3b: ext4_destroy_inode + PENDING_REAPS/flush_pending_reaps re-read (read_inode in Drop context is the irqsave-drain hazard fixed on the dentry side; comment drift filed F-r3b-4)"),
+    "kernel/src/fs/ext4/namei.rs": ("part", "cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS; r3b: tail_reserve 12-byte tail threading re-verified (deleted-slot + split arms bounded by usable_end; legacy chains fall through on Err) + D-13 publication ordering — PASS"),
     "kernel/src/fs/fifo.rs": ("todo", ""),
     "kernel/src/fs/file.rs": ("part", "reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）；cr3: arch-gated O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE bit positions (aarch64 uapi vs asm-generic) verified against both reference tables; raw literals replaced with the shared constants — PASS"),
     "kernel/src/fs/inode.rs": ("part", "read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）"),
@@ -130,7 +134,7 @@ STATUS = {
     "kernel/src/fs/procfs/loadavg.rs": ("part", "load average"),
     "kernel/src/fs/procfs/locks.rs": ("done", "written by this review"),
     "kernel/src/fs/procfs/meminfo.rs": ("part", "meminfo fields"),
-    "kernel/src/fs/procfs/mod.rs": ("part", "节点树、read/write 分发、/proc/<pid> 路径解析"),
+    "kernel/src/fs/procfs/mod.rs": ("part", "节点树、read/write 分发、/proc/<pid> 路径解析; r3b: ino scheme (100..2524 ranges collision-free: PidFileKind 100..200, fd-dir 200, fd-links 300..1324, ns 410..416, attr 510..516, task 620, fdinfo 1400/1500..2524), node types + root pid-dir fabrication + refcount get/put — PASS (init trees/generators not re-derived)"),
     "kernel/src/fs/procfs/mounts.rs": ("todo", ""),
     "kernel/src/fs/procfs/net.rs": ("todo", ""),
     "kernel/src/fs/procfs/pid.rs": ("part", "status/stat generators"),
@@ -151,7 +155,7 @@ STATUS = {
     "kernel/src/fs/sysfs.rs": ("part", "sysfs tree, writable attributes"),
     "kernel/src/fs/tmpfs.rs": ("part", "tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it)"),
     "kernel/src/fs/vfs.rs": ("part", "file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化"),
-    "kernel/src/fs/xattr.rs": ("todo", ""),
+    "kernel/src/fs/xattr.rs": ("fixed", "sec-r1 L3: namespace gates read end to end; security.capability now CAP_SETFCAP (commoncap parity), other security.* keep CAP_SYS_ADMIN - deliberate divergence for SELinux-label-carrying images; check_name/size/immutable-flag paths re-read"),
     "kernel/src/interrupt/domain.rs": ("todo", ""),
     "kernel/src/interrupt/irqchip.rs": ("todo", ""),
     "kernel/src/interrupt/irqdesc.rs": ("part", "descriptor registry"),
@@ -190,18 +194,18 @@ STATUS = {
     "kernel/src/module/mod.rs": ("todo", ""),
     "kernel/src/net/*": ("part", "s2b: mod.rs/arp/ethernet/icmp/raw/buffer/ipv4/ipv6 spot-read for the lock audit and the F-fix call paths (ethernet_send loopback framing, ip_rcv gates, udp_rcv delivery); full line-by-line pending"),
     "kernel/src/panic_policy.rs": ("done", "written by this review (panic= parameter)"),
-    "kernel/src/perf/mod.rs": ("todo", ""),
+    "kernel/src/perf/mod.rs": ("fixed", "sec-r1 L3: sys_perf_event_open entry/attr validation/scoping re-read; perfmon_capable gate added (CAP_PERFMON||CAP_SYS_ADMIN else EACCES for !exclude_kernel); tick-stash accounting not re-read"),
     "kernel/src/printk.rs": ("part", "ring buffer, console level"),
     "kernel/src/process/coredump.rs": ("todo", ""),
     "kernel/src/process/exec.rs": ("fixed", "read end to end (abi-review s1): image/stack/interp load, auxv, entry frames; redundant zeroing fixed, linear stack/interp writers audited safe-by-single-block"),
-    "kernel/src/process/exit.rs": ("todo", ""),
+    "kernel/src/process/exit.rs": ("fixed", "r3a full read: do_exit/do_exit_group/de_thread/release_task/sweep/free_dead_member/reparent/do_wait/do_wait_nonblock/do_waitid/robust list/clear_child_tid; waitpid status encodings (WIFEXITED/WIFSIGNALED/WCOREDUMP/WIFSTOPPED), ECHILD vs ERESTARTSYS ordering and the zombie-claim discipline all match the reference contracts; filed (run/review-findings-r3a.md §3): WCONTINUED is a stub in do_waitid (CLD_CONTINUED never reported, wait4 has no WCONTINUED either), P_PGID with id==0 should mean the caller's pgid (reference maps 0 to task_pgrp_nr)"),
     "kernel/src/process/fork.rs": ("part", "task creation paths; TLS inheritance arms (x86_64 fs/gs bases, aarch64 TPIDR_EL0 live read, CLONE_SETTLS) reviewed this session"),
     "kernel/src/process/kthread.rs": ("todo", ""),
     "kernel/src/process/mod.rs": ("todo", ""),
     "kernel/src/process/pid.rs": ("todo", ""),
     "kernel/src/process/pid_hash.rs": ("part", "task iteration"),
     "kernel/src/process/ptrace.rs": ("todo", ""),
-    "kernel/src/process/task.rs": ("part", "task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect); compat-review: cpus_allowed default + default_cpus_allowed/refresh_default_affinity_to_online read (affinity fix 5252505e/a9cbdac2 family)"),
+    "kernel/src/process/task.rs": ("part", "task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect); compat-review: cpus_allowed default + default_cpus_allowed/refresh_default_affinity_to_online read (affinity fix 5252505e/a9cbdac2 family); r3a: rlimit accessor (unknown id -> infinity, irqsave per the tick discipline), comm/comm_str/set_comm (15+NUL, lossy decode) verified through the syscall paths that consume them"),
     "kernel/src/process/wait.rs": ("todo", ""),
     "kernel/src/sched/cgroup.rs": ("done", "cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented"),
     "kernel/src/sched/class.rs": ("done", "sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI"),
@@ -240,11 +244,11 @@ STATUS = {
     "kernel/src/sync/spinlock.rs": ("todo", ""),    "kernel/src/syscall/dispatch.rs": ("todo", ""),
     "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync; compat-review: xattr syscall family read end to end (set/get/list/remove + *at variants) — found and fixed the xattr_read_name errno double-negation (LTP setxattr01/fsetxattr01/fremovexattr02 EFAULT contracts); readlinkat read (ring/NOFOLLOW trailing-slash divergence recorded in run/review-findings-compat.md)"),
     "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验; cr2: drm/prime ioctl dispatch region + ohhunt tap gating (95094dd2)"),
-    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; cr2: drm GEM mmap region + ohhunt tap gating (95094dd2)"),
-    "kernel/src/syscall/misc.rs": ("part", "timerfd family aligned v6.6 (4e1f6110); s2-a: poll/ppoll/pselect/select/epoll_wait head + eventfd2 read (poll fd<0 slots, revents mask, event-driven P3 wait round, maxevents truncation rule, eventfd flag validation); perf filed: per-iteration Vec<PollFd> alloc in sys_poll and ready_events alloc under epoll.entries lock; signalfd4_impl/eventfd write path remain"),
+    "kernel/src/syscall/memory.rs": ("fixed", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; cr2: drm GEM mmap region + ohhunt tap gating (95094dd2); r3a: munmap (zero/align EINVAL, mm-side wrap + user-range bound, empty range succeeds like the reference) and brk (start_brk floor, ignore-below-floor, RLIMIT_DATA, one-page-gap growth rule) read clean; mremap fixed (8d9b4b30): new_size==0 -> EINVAL always, old_size==0 -> EINVAL except the reference MAYMOVE+shareable carve-out — A/B run/pathprobe/errno probe"),
+    "kernel/src/syscall/misc.rs": ("part", "timerfd family aligned v6.6 (4e1f6110); s2-a: poll/ppoll/pselect/select/epoll_wait head + eventfd2 read (poll fd<0 slots, revents mask, event-driven P3 wait round, maxevents truncation rule, eventfd flag validation); perf filed: per-iteration Vec<PollFd> alloc in sys_poll and ready_events alloc under epoll.entries lock; signalfd4_impl/eventfd write path remain; r3a: timerfd_create/settime (flag/clockid EINVAL-before-EBADF order, ABSTIME conversion, old-value EFAULT last, cloexec-after-install) and inotify_init1/add_watch/rm_watch + path reader read clean — filed: settime reads unreadable new_value fields as 0 (disarm) instead of EFAULT, CLOCK_BOOTTIME/REALTIME_ALARM rejected; ioctl dispatch lives in io.rs (EBADF/O_PATH gates, FS_IOC_* owner/CAP shapes verified this round)"),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("fixed", "read end to end (this review): socket/bind/listen/accept/connect/send/recv family + get/setsockopt + mmsg batchers; 4 defects fixed — recvmsg msg_namelen VALUE field was dereferenced as a pointer (write-back gate ate by garbage pointer, msg_namelen never updated), put_sockaddr_* ignored the caller's buffer length (move_addr_to_user clamp), v6 write-backs ran 28B through a 16B-validated range, unix dgram sendto/recvfrom silently truncated at RW_CHUNK 64KB (all-or-nothing datagram contract); A/B probe test/sockaddr_clamp.c (sockaddr_clamp_boot.py): 6 fixable cases FAIL->PASS; findings F5-F11 filed (run/review-findings-func.md) incl. loopback TCP connect wedge vs accept"),
-    "kernel/src/syscall/process.rs": ("part", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending"),
+    "kernel/src/syscall/process.rs": ("fixed", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); r3a: signal-delivery + prctl + rlimit regions read — fixed (26465d5b): PR_GET_PDEATHSIG/PR_GET_NAME now return EFAULT on failed user copies, rt_sigqueueinfo rejects si_code==SI_TKILL with EPERM (twin of rt_tgsigqueueinfo), rt_sigtimedwait requires sigsetsize==8; prlimit64 (EINVAL/EPERM/NOCFILE-cap shapes verified vs do_prlimit), sys_kill broadcast/pid>0 arms, tgkill, rt_tgsigqueueinfo, wait4/waitid errno shapes verified; A/B run/pathprobe/errno probe 9/9; filed: kill pid>0 spreads to every thread vs rt_sigqueueinfo leader-only (reference: one shared-pending delivery), prlimit64 nonexistent pid -> EPERM vs reference ESRCH-first, sigtimedwait 0-timeout rounds to 1 jiffy"),
     "kernel/src/syscall/time.rs": ("part", "nanosleep, realtime clock"),
     "kernel/src/syscall/x86_compat.rs": ("done", "every table entry audited against the host x86_64 + riscv64 asm-generic unistd headers (0 mismatches); targets cross-checked against dispatch arms; legacy block (poll/select/dup2/pause/epoll_create/epoll_wait/arch_prctl) covers the no-generic numbers"),
     "kernel/src/tests/*": ("todo", ""),
@@ -298,7 +302,7 @@ STATUS = {
     "kernel/src/arch/x86_64/boot.S": ("todo", ""),
     "kernel/src/arch/x86_64/boot.rs": ("todo", ""),
     "kernel/src/arch/x86_64/context.rs": ("todo", ""),
-    "kernel/src/arch/x86_64/cpu.rs": ("todo", ""),
+    "kernel/src/arch/x86_64/cpu.rs": ("part", "sec-r1 G1 follow-up: cpuid wrapper, read/write_cr4, enable_fsgsbase, smap_report (new: live CPUID+CR4 state per boot), SMAP_ENABLED; enable_smap arming removed pending triple-fault root cause (sec-r1 notes); rest of file not re-read"),
     "kernel/src/arch/x86_64/ipi.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/asid.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/exception.rs": ("todo", ""),
@@ -364,7 +368,7 @@ STATUS = {
     "kernel/src/fs/jbd2/types.rs": ("todo", ""),
     "kernel/src/fs/mod.rs": ("todo", ""),
     "kernel/src/fs/mount.rs": ("todo", ""),
-    "kernel/src/fs/permission.rs": ("todo", ""),
+    "kernel/src/fs/permission.rs": ("fixed", "sec-r1 L3: generic_permission re-read against the reference shape; CAP_DAC_READ_SEARCH branch added (dirs, no-write masks); fsuid/fsgid comparison and DAC_OVERRIDE exec-bit rule verified"),
     "kernel/src/fs/procfs/timer_list.rs": ("todo", ""),
     "kernel/src/fs/procfs/version.rs": ("todo", ""),
     "kernel/src/fs/readahead.rs": ("todo", ""),
@@ -397,7 +401,7 @@ STATUS = {
     "kernel/src/net/ipv6/mod.rs": ("todo", ""),
     "kernel/src/net/mod.rs": ("todo", ""),
     "kernel/src/net/netlink.rs": ("fixed", "s2b: read socket model, exec request dispatch (rtnl), send/recv engines, uevent broadcast + monitor multicast, sockaddr helpers, ioctl stubs. DEFECTS FIXED: b8a38043 (put_sockaddr_nl* clamp to caller's length), 922e158b (F11 portid-routed unicast: NETLINK_PORTID_TABLE, bind adopts nl_pid with EADDRINUSE, unicast sends deliver/ECONNREFUSED)"),
-    "kernel/src/net/raw.rs": ("todo", ""),
+    "kernel/src/net/raw.rs": ("part", "sec-r1 L3: raw_socket_create/packet_socket_create re-read; CAP_NET_RAW gates wired (packet: before type check per packet_create; inet raw: after protocol filter per inet_create); RawSocket engine not re-read"),
     "kernel/src/net/socket.rs": ("fixed", "cr3: socket_file_stat (S_IFSOCK|0777 + per-description st_ino, ops-ptr dispatch for inet/unix/netlink/raw) — closes the EBADF fstat hole; reference sockfs behavior — PASS. s2b re-read: connect engine (loopback drain + blocking wait), send/recv engines, shutdown path, close/fin paths. DEFECTS FIXED: F7 peek plumbed through socket_recv_ctl/Socket::recv (4edca91e); F10 socket_shutdown_check ENOTCONN discipline (219fce00); F8 UDP zero-length datagram no longer EAGAIN-after-consume (6a1e7eb7)"),
     "kernel/src/net/tcp.rs": ("done", "s2b: read end to end — headers/options, TcpTxBatch (R35 deferred emit), RTT/congestion/timers, full state machine (handle_packet per state, RST validation, SYN spawn/pass dispatch, window-update snd_wl1/wl2 test, OOO trim+drain, partial-ACK trim, fast retransmit-once, persist/keepalive probes, TIME_WAIT reclaim), tcp_rcv/6 checksum gates, tcp_v4_err. No new defects; F7 MSG_PEEK added to TcpSocket::recv (4edca91e), prior rounds' findings 1-10 pinned by comments"),
     "kernel/src/net/tcp_timer.rs": ("todo", ""),
@@ -407,7 +411,7 @@ STATUS = {
     "kernel/src/process/ns.rs": ("done", "compat-review: read end to end (UTS namespace) — found and fixed the empty default hostname (reference default is \"(none)\", LTP gethostname02)"),
     "kernel/src/sbi.rs": ("todo", ""),
     "kernel/src/security/cap_lsm.rs": ("todo", ""),
-    "kernel/src/security/capability.rs": ("todo", ""),
+    "kernel/src/security/capability.rs": ("done", "sec-r1 L3: full 41-cap audit against call sites - 23 consulted / 18 never-checked; constants verified against the UAPI numbering; type ops re-read"),
     "kernel/src/security/lsm.rs": ("todo", ""),
     "kernel/src/security/mod.rs": ("todo", ""),
     "kernel/src/signal.rs": ("fixed", "read end to end (s2-a, prior rounds covered flush_handlers + per-arch cfg arms): do_signal selection loop + sigmask_restore discipline, unkillable-init filter, ptrace intercept, restart_syscall_no_handler on all no-frame paths, per-arch frame build/restore (M-04 user-copy-wins, SPP/SPIE/IF privilege stripping), default actions, send path (pinned lookups, ns pid translation, RLIMIT_SIGPENDING, sig_ignored ordering); pre-existing budgeted prints noted in ledger (KSIG/TKSIG 4000, DEQUEUE 120, SWI 120)"),
@@ -488,6 +492,34 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("f62a4df6", "kernel/src/fs/dentry.rs",
+     "The reader-bank drain (692e7623) dropped the retired dentry/inode vecs while holding "
+     "DENTRY_SLOW_READ under lock_irqsave. The drop cascade frees whole dentry subtrees and "
+     "runs Inode::drop -> ext4_destroy_inode -> read_inode -> bio::bread — synchronous disk "
+     "I/O with IRQs and preemption off, where the virtio completion wait degrades to the "
+     "poll-only MMIO spin (1e6 iterations plus read_block's 5e7-iteration late scan): a cli "
+     "segment bounded only by device latency, past the 3-7ms IRQ-gate class, tick/IPI loss, "
+     "watchdog bait. Reachable from every unlink/rmdir whose retired inode is the last "
+     "reference (they icache_remove BEFORE clear_inode) and from walk-side icache-refresh "
+     "set_inode retires. Fix: take the vecs under the slow lock, drop AFTER the lock scope — "
+     "the quiescence proof (banks zero at scan; fresh readers cannot reach the Arcs) never "
+     "needed the lock held during the drop."),
+    ("6a83a090", "kernel/src/fs/ext4/file.rs",
+     "ext4_file_write returned Err(ENOSPC) from the per-block loop even after earlier blocks "
+     "of the same request had landed in dirty buffers — a write into an interior hole of a "
+     "sparse file on a full disk discarded its own partial progress. write(2) and the "
+     "reference kernel report the partial count when bytes landed; only a request that wrote "
+     "nothing fails. Every mid-loop failure arm (hole/block allocation, extent materialize, "
+     "buffer fetch) now degrades to partial success once total_written > 0, and the size tail "
+     "tracks only what landed (offset + written). Host-mirror proptest added in kernel/verify "
+     "(fs::ext4::write_partial_test): the old body fails 3/4 tests, the fixed body 4/4."),
+    ("2b2a4a52", "kernel/src/drivers/drm/mod.rs",
+     "gem_close conflated its two None outcomes: 'handle not found' and 'entry kept because "
+     "another holder still references the object' — the shared case returned -EINVAL although "
+     "the caller's close succeeded. The reference's per-file handle tables make a close never "
+     "fail because another file shares the OBJECT, so Mesa's GEM_CLOSE on shared buffers (the "
+     "oh-glm5 EGLImage shape the shared-keep proxy exists for) must see 0. Outcome split into "
+     "Removed/SharedKeep/NotFound; the object drop still runs outside the state lock."),
     ("4ee3e430", "kernel/src/arch/aarch64/mm/asid.rs",
      "The aarch64 ASID allocator bumped NEXT_ASID monotonically and never consulted the in-use "
      "table: after 254 mm creations (any process-churning workload — LTP forks thousands) "
@@ -621,6 +653,12 @@ BUGS = [
      "applies to anonymous mappings too, where the offset is ignored. Without it a misaligned offset "
      "silently shifted the mapping's file extent: the VMA stored the raw offset and the fault path "
      "then looked up a page-cache entry at a non-page-aligned offset."),
+    ("4e75d849", "kernel/src/net/raw.rs, kernel/src/net/netlink.rs, kernel/src/syscall/file.rs, kernel/src/fs/xattr.rs, kernel/src/fs/permission.rs, kernel/src/perf/mod.rs",
+     "sec-r1 L3: six never-checked capabilities wired to their reference gates (NET_RAW raw+packet sockets, NET_ADMIN if-ioctls+rtnetlink set ops, SYS_PACCT acct, SETFCAP security.capability, DAC_READ_SEARCH dirs, PERFMON perf) with errno precedence pinned from the reference sources; the other 12 never-checked caps have no syscall surface here."),
+    ("32fd359f", "kernel/src/syscall/network.rs",
+     "sec-r1 L2 TOCTOU: recvmsg (4 family loops) and recvmmsg re-fetched the user iovec array after validating it - a racing thread could redirect the scatter copies to unvalidated addresses. Fixed with a single kernel snapshot consumed by every scatter loop."),
+    ("1de56837", "kernel/src/process/exec.rs, kernel/src/fs/elf.rs, kernel/src/syscall/memory.rs",
+     "sec-r1 L4 W^X: PT_GNU_STACK was never consulted (exec-stack binaries could not run) and the x86_64 initial stack carried no NX bit (executable by absence); READ_IMPLIES_EXEC personality was stored but ignored by mmap. All three fixed to the reference semantics."),
     ("e47b155a", "kernel/src/ipc/posix_mq.rs",
      "mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), "
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "

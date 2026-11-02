@@ -16,8 +16,9 @@
 //! Namespaces (Linux semantics, minimal):
 //! - `user.*`        — read/write for everyone subject to file permission
 //! - `trusted.*`     — requires CAP_SYS_ADMIN
-//! - `security.*`    — requires CAP_SYS_ADMIN (a real LSM would own these;
-//!                     we only store them)
+//! - `security.*`    — requires CAP_SETFCAP for `security.capability`
+//!                     (commoncap), CAP_SYS_ADMIN for the rest (a real
+//!                     LSM would own these; we only store them)
 //! - `system.*`      — read-only namespace → EPERM on set, ENODATA on get
 //!                     unless present (we never store any)
 //! - anything else without a `<ns>.` shape → EINVAL; unknown namespace →
@@ -85,17 +86,40 @@ fn check_name(name: &[u8]) -> Result<(), errno::Errno> {
 /// `user.*` needs write permission on the inode (checked by caller via the
 /// plain DAC path — we approximate with MAY_WRITE), `trusted.*` /
 /// `security.*` need CAP_SYS_ADMIN, `system.*` is read-only.
+/// L3 wiring (sec-r1): `security.capability` specifically requires
+/// CAP_SETFCAP (reference cap_inode_setxattr / cap_inode_removexattr in
+/// commoncap), not CAP_SYS_ADMIN. Other `security.*` names keep the
+/// CAP_SYS_ADMIN gate — a deliberate divergence: this port answers
+/// security.selinux reads with a default context for label-carrying
+/// images, and their restore-time label writes must keep working as root.
 fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
     let ns: &[u8] = &name[..name.iter().position(|&b| b == b'.').unwrap()];
     match ns {
         b"user" => Ok(()),
-        b"trusted" | b"security" => {
+        b"trusted" => {
             let cred = if let Some(task) = crate::sched::current() {
                 task.cred().clone()
             } else {
                 crate::process::task::Cred::new_init()
             };
             if crate::security::has_capability(&cred, crate::security::CAP_SYS_ADMIN) {
+                Ok(())
+            } else {
+                Err(errno::Errno::OperationNotPermitted)
+            }
+        }
+        b"security" => {
+            let cap = if name == b"security.capability" {
+                crate::security::CAP_SETFCAP
+            } else {
+                crate::security::CAP_SYS_ADMIN
+            };
+            let cred = if let Some(task) = crate::sched::current() {
+                task.cred().clone()
+            } else {
+                crate::process::task::Cred::new_init()
+            };
+            if crate::security::has_capability(&cred, cap) {
                 Ok(())
             } else {
                 Err(errno::Errno::OperationNotPermitted)

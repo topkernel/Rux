@@ -568,6 +568,12 @@ fn unwind_raw_file(file: &Arc<File>) {
 
 /// socket(AF_PACKET, SOCK_DGRAM, htons(ethertype)) — cooked packet socket.
 pub fn packet_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
+    // L3 wiring (sec-r1): reference packet_create() consults CAP_NET_RAW
+    // FIRST — before the type validation — so an unprivileged caller gets
+    // EPERM even for a type that would fail the SOCK_DGRAM check.
+    if !crate::security::capable(crate::security::CAP_NET_RAW) {
+        return Err(-1); // EPERM
+    }
     const KNOWN_TYPE_FLAGS: i32 = SOCK_NONBLOCK_FLAG | SOCK_CLOEXEC_FLAG;
     if type_ & !(SOCK_TYPE_MASK | KNOWN_TYPE_FLAGS) != 0 {
         return Err(-22);
@@ -607,6 +613,13 @@ pub fn raw_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
     // EPROTONOSUPPORT for socket(PF_INET, SOCK_RAW, 0)).
     if protocol != IPPROTO_ICMP && protocol != IPPROTO_RAW {
         return Err(-93); // EPROTONOSUPPORT
+    }
+    // L3 wiring (sec-r1): reference inet_create consults CAP_NET_RAW
+    // AFTER the protocol lookup and BEFORE the socket is allocated —
+    // that order makes EPROTONOSUPPORT win over EPERM for protocol 0,
+    // so the cap check belongs here, not at function entry.
+    if !crate::security::capable(crate::security::CAP_NET_RAW) {
+        return Err(-1); // EPERM
     }
     let nonblock = (type_ & SOCK_NONBLOCK_FLAG) != 0;
     let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;

@@ -2552,7 +2552,26 @@ unsafe fn refresh_parent_dir_cache(dir: &Inode, fs: &Ext4FileSystem) {
 unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
     if let Some(sb_ptr) = inode.sb {
         if let Ok(disk_inode) = inode::read_inode(fs, inode.ino as u32) {
-            let updated = inode::Ext4Inode::from_disk(&disk_inode, inode.ino as u32);
+            let mut updated = inode::Ext4Inode::from_disk(&disk_inode, inode.ino as u32);
+            // Delayed-allocation guard (compat-r3): buffered writes publish
+            // the sb-box size AHEAD of the disk inode; this refresh carries
+            // the DISK-FRESH state and used to regress the box back to the
+            // lagging on-disk size (chmod after a buffered write → every
+            // later stat served st_size=0: LTP stat01/fstat02). Hold the
+            // published dirty-tail EOF while dirty frames still live beyond
+            // the disk size — the same watermark the icache revival guard
+            // uses (create_vfs_inode_in); writeback's refresh lands with
+            // the exact final size once the frames are gone.
+            if updated.is_reg() {
+                let fs_id = fs as *const Ext4FileSystem as u64;
+                if let Some(tail_eof) = crate::fs::page_cache::get_page_cache()
+                    .dirty_tail_eof(fs_id, inode.ino as u64)
+                {
+                    if tail_eof > updated.size {
+                        updated.size = tail_eof;
+                    }
+                }
+            }
             let cached = &mut *(sb_ptr as *mut inode::Ext4Inode);
             *cached = updated;
         }
@@ -2655,7 +2674,21 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
             if let Some(ptr) = target.sb {
                 let cached = &mut *(ptr as *mut inode::Ext4Inode);
                 if let Ok(disk) = inode::read_inode(fs, target.ino as u32) {
-                    *cached = inode::Ext4Inode::from_disk(&disk, target.ino as u32);
+                    let mut fresh = inode::Ext4Inode::from_disk(&disk, target.ino as u32);
+                    // Delayed-allocation guard (compat-r3): same discipline
+                    // as refresh_inode_cache — a buffered-written target's
+                    // published size must survive the disk-fresh reload.
+                    if fresh.is_reg() {
+                        let fs_id = fs as *const Ext4FileSystem as u64;
+                        if let Some(tail_eof) = crate::fs::page_cache::get_page_cache()
+                            .dirty_tail_eof(fs_id, target.ino as u64)
+                        {
+                            if tail_eof > fresh.size {
+                                fresh.size = tail_eof;
+                            }
+                        }
+                    }
+                    *cached = fresh;
                 }
             }
             0
