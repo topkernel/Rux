@@ -1656,8 +1656,8 @@ fn wake_thread(t: &BinderThread) {
 /// binder_thread_read) — while the daemon's looper workers are
 /// reg_tgid-gated off the item. Thread-todo delivery bypasses both:
 /// own-thread todo is drained regardless of looper flags (the
-/// `from_thread` pull) and a blocked WRITE_READ wakes through
-/// thread_has_work's `!th.todo.is_empty()` check. Prefers a thread with
+/// `from_thread` pull) and a blocked WRITE_READ wakes through the
+/// process_todo flag set by the delivery push. Prefers a thread with
 /// the shallowest txn stack; returns the woken thread (caller wakes it
 /// AFTER WORLD is released, same contract as wake_ths).
 /// SAFETY: caller must hold WORLD; pushes onto the thread's todo only.
@@ -7865,12 +7865,22 @@ fn binder_transaction(
                 }
                 wakes.push(proc.clone());
             } else {
-                // Sync: TRANSACTION_COMPLETE on the sender's todo (visible
-                // to its next read via thread_has_work's todo check) +
-                // push on the sender's txn stack + queue on the target.
+                // Sync: TRANSACTION_COMPLETE on the sender's todo is
+                // DEFERRED (reference parity, binder.c 6.6
+                // binder_enqueue_deferred_thread_work_ilocked at the
+                // !reply && !TF_ONE_WAY leg): the tcomplete is queued
+                // WITHOUT setting process_todo, so the sender's read
+                // parks until real work (the reply, or an error
+                // resolution) flips process_todo. The reference defers
+                // exactly so the sync client stays inside its BWR ioctl
+                // until the reply — the kernel-side guarantee that a
+                // thread can never stack a second outgoing sync send
+                // over an unresolved one (the lb311 RSS shape: our
+                // immediate tcomplete returned the ioctl, userspace
+                // retried LOAD_SYSTEM_ABILITY 1ms later, and the
+                // reference-parity guard then had to reject it).
                 let th = thread.st();
                 th.todo.push_back(Work::TransactionComplete);
-                th.process_todo = true;
                 // Linux 5.10 from-walk, BEFORE the new txn is stacked:
                 // while this thread is handling a sync txn T whose
                 // originator thread C lives in the target proc, a nested
@@ -8351,11 +8361,14 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    // Own todo non-empty = binder_has_thread_work (Linux): covers work
-    // pushed without an explicit wake, e.g. the deferred sync-send
-    // TRANSACTION_COMPLETE that must reach the sender before it sleeps
-    // awaiting the reply.
-    if th.process_todo || !th.todo.is_empty() {
+    // Reference parity (binder_has_work_ilocked, 6.6): only process_todo
+    // (or looper_need_return / eligible proc work) makes work visible to
+    // a PARKING read — a non-empty todo alone does NOT. This is what
+    // keeps a deferred sync-send TRANSACTION_COMPLETE invisible until
+    // the reply (or an error resolution) sets process_todo. Every
+    // non-deferred push site in this file sets process_todo=true, so
+    // only deferred tcompletes are affected.
+    if th.process_todo {
         return true;
     }
     let avail_for_proc = th.txn_stack.is_empty()
