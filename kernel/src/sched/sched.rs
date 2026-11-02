@@ -1678,6 +1678,18 @@ fn task_page_unmark(ptr: *mut u8) {
 pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// stress-port r3 parkwalk census (dfx=leakhunt only): [0] walks run,
+/// [1] task observations, [2] parked-with-nonzero-count observations.
+/// The hunt2 postmortem needs this: a 100 s strand produced ZERO
+/// PARKED-LEAK lines, and the counters distinguish "walk blind" from
+/// "victim parked clean, the phantom arose at resume".
+pub static PARKWALK_CENSUS: [core::sync::atomic::AtomicU64; 3] =
+    [
+        core::sync::atomic::AtomicU64::new(0),
+        core::sync::atomic::AtomicU64::new(0),
+        core::sync::atomic::AtomicU64::new(0),
+    ];
+
 /// Set while free_task_slot is releasing a Task page, so the heap's
 /// free-side probe (R69) does not flag the legitimate ownership release.
 pub static IN_TASK_FREE: core::sync::atomic::AtomicBool =
@@ -2335,6 +2347,18 @@ unsafe fn __schedule() {
                     );
                     r56_print_pid(b"", home as u32, b"\n");
                 }
+            }
+            // The sched:sched_migrate_task tracepoint for the heal path —
+            // the stamp is about to move an existing task to its home CPU
+            // (the reference records every set_task_cpu move).
+            if crate::trace::EVENT_SCHED_MIGRATE_TASK.armed() {
+                crate::trace::trace_sched_migrate_task(
+                    &*(*tp).comm(),
+                    (*tp).pid() as u32,
+                    (*tp).prio(),
+                    (*tp).ti_cpu(),
+                    home as i32,
+                );
             }
             (*tp).set_ti_cpu(home as i32);
             prev = tp;
@@ -3566,6 +3590,18 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
     // CPU owns the task in the mark_picked_on_cpu → __switch_to window.
     unsafe {
         if !(*task).on_cpu() {
+            // The sched:sched_migrate_task tracepoint — the reference
+            // records it in set_task_cpu, just before the stamp moves.
+            // Marshals only behind armed().
+            if crate::trace::EVENT_SCHED_MIGRATE_TASK.armed() {
+                crate::trace::trace_sched_migrate_task(
+                    &*(*task).comm(),
+                    (*task).pid() as u32,
+                    (*task).prio(),
+                    (*task).ti_cpu(),
+                    target,
+                );
+            }
             (*task).set_ti_cpu(target);
         }
     }
@@ -4949,47 +4985,51 @@ pub fn scheduler_tick() {
             if !cur.is_null() {
                 let pc =
                     unsafe { (*cur).preempt_count() };
-                // Per-field contiguity stamps (phantom-bits round 2/3): a
-                // field's liveness is proven only by its OWN absences —
-                // a field observed PRESENT at 200 consecutive ticks is
-                // phantom (every legal bracket is microseconds, so 2 s of
-                // tick-observed presence is five orders beyond any live
-                // hold), and a field observed ABSENT refreshes its stamp
-                // no matter how hot the OTHER fields churn. Stamped BEFORE
-                // the pc != 0 gate so an entirely-zero count refreshes
-                // every field. Three relaxed stores per tick; only the
-                // task's own CPU writes these.
+                // Per-field consecutive-PRESENT run counters (phantom-bits
+                // r2/3, stress-port r3 2026-11-02): a field's phantomness
+                // is proven only by ITS OWN observations — a field seen
+                // PRESENT at 200 consecutive own-CPU ticks (with no
+                // intervening legal drain, which resets the run from the
+                // release path) is phantom; every legal bracket is
+                // microseconds, so 2 s of observed presence is five orders
+                // beyond any live hold. Counted BEFORE the pc != 0 gate so
+                // an entirely-zero count re-arms every field. Three relaxed
+                // ops per tick; only the task's own CPU writes these (the
+                // release-side resets run in the task's own context, the
+                // heal-side resets in the healing tick / parkwalk walk).
                 //
-                // Arm-on-first-observation (stress-port r1, 2026-11-02):
-                // a stamp of 0 means "this field has never been observed
-                // since TASK CREATION" — forked tasks are born with 0
-                // stamps, not "absent since boot". Under fork/exec churn
-                // (rs --fork 8), fresh children holding live guards at
-                // their first tick were adjudged instantly stale by the
-                // old `j == 0` shortcut in stale_200: 15.5k heals/120 s,
-                // 169 guard drops underflowed after the heal stripped
-                // their bits mid-section (need_resched + preempt of a
-                // live PTE/VMA lock holder = the stranded-lock amplifier).
-                // Stamp-now on the first observation of a never-stamped
-                // field so staleness always measures a real >= 2 s
-                // window; genuine phantoms (field present at 200
-                // consecutive ticks after arming) still heal.
+                // stress-port r3 (replaces absence-stamp AGE): stamp age
+                // had three false-fire producers, all observed on the
+                // memory2/memory-hunt2 boots: (1) age accrued for free
+                // while the task was off-CPU — a task parked mid-section
+                // through the 100 s pick-skip strand resumed instantly
+                // "stale" and its first tick healed a LIVE guard
+                // (underflow at the page-allocator zone lock);
+                // (2) jiffies is timebase-derived, so a >2 s host steal
+                // window inflated age by 200+ ticks with zero ticks
+                // delivered; (3) the pb3 release-side re-arm stored the
+                // superseded ti_pc_zero_jif field, so the bar never
+                // re-armed on legal drains and lock-hot tasks accumulated
+                // stale bars whenever the 100 Hz sampler missed the
+                // microsecond absent-gaps between guard pairs (the
+                // held_jiffies=0 heal storm, oage_jif=1 on every line).
+                // Observation COUNTING is immune to all three by
+                // construction: no tick, no increment. Parked phantoms
+                // stay owned by the parkwalk's 4 s PARKED-HEAL (no tick
+                // needed).
+                //
+                // Arm-on-first-observation (stress-port r1) is inherent:
+                // a fresh task's counters start at 0 and must climb to
+                // 200 real observations before any heal.
                 {
-                    let now = crate::drivers::timer::get_jiffies();
-                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0
-                        || unsafe { (*cur).ti_pc_pirq_zero_jif() } == 0
-                    {
-                        unsafe { (*cur).ti_pc_pirq_zero_jif_stamp(now) };
-                    }
-                    if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0
-                        || unsafe { (*cur).ti_pc_sirq_zero_jif() } == 0
-                    {
-                        unsafe { (*cur).ti_pc_sirq_zero_jif_stamp(now) };
-                    }
-                    if pc & crate::interrupt::preempt::HARDIRQ_MASK == 0
-                        || unsafe { (*cur).ti_pc_hirq_zero_jif() } == 0
-                    {
-                        unsafe { (*cur).ti_pc_hirq_zero_jif_stamp(now) };
+                    let h_extra_now = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
+                        >= 2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
+                    unsafe {
+                        (*cur).ti_pc_present_runs_tick(
+                            pc & crate::interrupt::preempt::PREEMPT_MASK != 0,
+                            pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0,
+                            h_extra_now,
+                        );
                     }
                 }
                 if pc != 0 {
@@ -5054,28 +5094,28 @@ pub fn scheduler_tick() {
                     // delta is the heal policy); the pair-based re-arm
                     // shielded stranded S/H bits on lock-hot carriers
                     // (lb61-lb66: ZERO heals, every CPU monopolized).
-                    // The stamps above answer the question per field:
-                    // stale stamp = present at 200 consecutive ticks.
+                    // The run counters above answer the question per
+                    // field: run >= 200 = present at 200 consecutive
+                    // own-CPU tick observations with no legal drain
+                    // (release-side reset) in between.
                     let s_set = pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0;
                     let p_set = pc & crate::interrupt::preempt::PREEMPT_MASK != 0;
                     let h_extra =
                         (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
                             2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
-                    // stress-port r1: j == 0 ("never observed") is NOT
-                    // stale — with the arm-on-first-observation stamps
-                    // above, a real stamp exists by the time this runs,
-                    // and "never stamped" can only mean a task younger
-                    // than one tick, whose guards are certainly live.
-                    let stale_200 =
-                        |j: u64| j != 0 && now.wrapping_sub(j) >= 200;
+                    // stress-port r3: the bar counts OBSERVATIONS, not
+                    // jiffies — see the counter block above for the three
+                    // defeated age-producer families. run == 0 ("younger
+                    // than one observation") is inherently not stale.
+                    let stale_200 = |run: u64| run >= 200;
                     let p_stale = p_set && {
-                        stale_200(unsafe { (*cur).ti_pc_pirq_zero_jif() })
+                        stale_200(unsafe { (*cur).ti_pc_pirq_present_run() })
                     };
                     let s_stale = s_set && {
-                        stale_200(unsafe { (*cur).ti_pc_sirq_zero_jif() })
+                        stale_200(unsafe { (*cur).ti_pc_sirq_present_run() })
                     };
                     let h_stale = h_extra && {
-                        stale_200(unsafe { (*cur).ti_pc_hirq_zero_jif() })
+                        stale_200(unsafe { (*cur).ti_pc_hirq_present_run() })
                     };
                     w.task.store(task_word, core::sync::atomic::Ordering::Relaxed);
                     w.first.store(t0, core::sync::atomic::Ordering::Relaxed);
@@ -5274,6 +5314,26 @@ pub fn scheduler_tick() {
                                 putchar(b);
                             }
                             ph(now.wrapping_sub(t0));
+                            // stress-port r3: name the bars that fired
+                            // (window age is bookkeeping; the RUNS are
+                            // the proof — a post-heal storm shows
+                            // run=1..3 with held=0, a true phantom shows
+                            // 200+).
+                            const M4B: &[u8] = b" prun=";
+                            for &b in M4B {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).ti_pc_pirq_present_run() });
+                            const M4C: &[u8] = b" srun=";
+                            for &b in M4C {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).ti_pc_sirq_present_run() });
+                            const M4D: &[u8] = b" hrun=";
+                            for &b in M4D {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).ti_pc_hirq_present_run() });
                             putchar(b'\n');
                             // preempt-hunt (2026-11-01): the
                             // outermost-acquire record is guaranteed
@@ -5447,6 +5507,12 @@ pub fn scheduler_tick() {
             static WALK_EPOCH: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let epoch = WALK_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+            // stress-port r3 census: one count per completed walk entry.
+            if crate::dfx::leakorigin::ENABLED
+                .load(core::sync::atomic::Ordering::Relaxed)
+            {
+                PARKWALK_CENSUS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
             struct Visit {
                 task: *mut crate::process::Task,
                 pc: i32,
@@ -5508,6 +5574,23 @@ pub fn scheduler_tick() {
                         if interesting || (nvisited < 32) {
                             visited[nvisited] = Some(Visit { task, pc, running });
                             nvisited += 1;
+                        }
+                    }
+                    // stress-port r3 census (hunt2 postmortem): the walk
+                    // printed ZERO parked-nonzero sightings in a boot that
+                    // stranded pid 307 for 100 s — record what the walk
+                    // actually observes so the next strand's log answers
+                    // "was the victim invisible to the walk, or clean?"
+                    // (visibly clean supports the resume-time
+                    // stale-bar false-fire, not a parked leak).
+                    if crate::dfx::leakorigin::ENABLED
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                    {
+                        crate::sched::sched::PARKWALK_CENSUS[1]
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if pc != 0 && !running {
+                            crate::sched::sched::PARKWALK_CENSUS[2]
+                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -5712,6 +5795,45 @@ pub fn scheduler_tick() {
                         );
                     }
                 }
+            }
+            // stress-port r3 census print: every 1000 walks while
+            // dfx=leakhunt is armed (direct console — IRQ context).
+            if crate::dfx::leakorigin::ENABLED
+                .load(core::sync::atomic::Ordering::Relaxed)
+                && epoch % 1000 == 0
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn pdec(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    let mut buf = [0u8; 20];
+                    let mut n = 0;
+                    if v == 0 {
+                        putchar(b'0');
+                        return;
+                    }
+                    while v > 0 {
+                        buf[n] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        n += 1;
+                    }
+                    while n > 0 {
+                        n -= 1;
+                        putchar(buf[n]);
+                    }
+                }
+                for &b in b"\nPARKWALK-CENSUS walks=" {
+                    putchar(b);
+                }
+                pdec(PARKWALK_CENSUS[0].load(core::sync::atomic::Ordering::Relaxed));
+                for &b in b" obs=" {
+                    putchar(b);
+                }
+                pdec(PARKWALK_CENSUS[1].load(core::sync::atomic::Ordering::Relaxed));
+                for &b in b" parkednz=" {
+                    putchar(b);
+                }
+                pdec(PARKWALK_CENSUS[2].load(core::sync::atomic::Ordering::Relaxed));
+                putchar(b'\n');
             }
         }
     }
