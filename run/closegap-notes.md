@@ -109,3 +109,19 @@ Conclusion: the four latency rows share two cost centers —
 
 - dual-arch build: make build && make build-x86 rc=0
 - make test (riscv64): run/maketest-fix2.log
+
+## Quiet-window family standings (2026-11-03 03:38, fam-quiet1, PCID+FSGSBASE merged, load 4.3-6.3)
+
+| Case | Rux med | Reference-native | Ratio |
+|---|---|---|---|
+| lat_ctx -s64 2 | **1.85 µs/ctx** | 0.91 | 2.03x |
+| lat_ctx -s64 8 | **1.89 µs/ctx** | 1.30 | 1.45x |
+| lat_pipe | **3.94 µs** | 2.74 | 1.44x |
+| lat_sem | **0.836 µs** | 0.444 | 1.88x |
+| lat_unix | 4.77 µs | 3.01 | 1.59x |
+| null/read/write | 0.072/0.150/0.133 | 0.044/0.069/0.064 | 1.6-2.3x |
+
+PCID + FSGSBASE halved the ctx rows (fam-fix 2.07/1.94 med-of-3
+confirmed in quiet window). The remaining gap is the KVM-vs-native
+floor plus scheduler-side wake cost — the ref-kvm fair column
+quantifies the virtualization share.
