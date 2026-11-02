@@ -1357,3 +1357,18 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
    ran at load 6.6-7.1 and all reached SwitchToUser — the fastest, healthiest
    fresh-boot class yet). Recipe: system-lb5 + USERDATA=run/userdata-fresh2.img
    + cg17c-class kernel + dfx=ams46,txnhunt,syncguard,fuxstuck.
+
+### lb324 final verdict + session close (00:0x)
+- lb324 ran to 1500s: markers = appspawn 5.1s / bootanimation.ready 22.7s /
+  finished 32.0s; screen frozen-logo md5 06b933b4 on all 9 shots. Driver and
+  QEMU exited clean (no leftovers).
+- Session pushed through 070c2218. Branch state: ca58fc80 (main merge) +
+  45a3b60b (census) + e60fd08b (fresh bucket) + TASK docs. Gates on the final
+  tree: x3 rc=0 + make test green (cg17c logs).
+- The three-boot class (lb322/323/324) is the fastest, healthiest fresh-boot
+  family of the campaign (all reached SwitchToUser ~105s; lb313's class was
+  ~240s). The single remaining blocker for pixels: BMS's KVS-dependent scan
+  fails empty when the creation trigger (73s, SA registration) meets a
+  not-yet-serving KV store (error 29201 family) — userspace-internal,
+  instrument-backed (zero kernel stall in-window), with the successor levers
+  named in the entry points above.
