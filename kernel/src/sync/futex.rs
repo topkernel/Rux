@@ -296,6 +296,11 @@ struct Waiter {
     bitset: u32,
     /// Whether already woken
     woken: bool,
+    /// Jiffies when this waiter was linked into its bucket chain (the
+    /// park stamp for the dfx=fuxstuck census; 0 on the alloc_waiter
+    /// placeholder, overwritten at real insertion). NOT reset on requeue —
+    /// the park episode continues, so the original stamp stays truthful.
+    park_j: u64,
     /// Hash bucket this waiter is currently linked in. Tracked per-waiter
     /// because FUTEX_REQUEUE can move it to uaddr2's bucket while it sleeps;
     /// a stale bucket at removal time silently leaked the slot (review 6.1).
@@ -435,6 +440,275 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
     out
 }
 
+/// dfx=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
+/// timer heartbeat (same slot as the TXN-HANG audit). The post-creation OH
+/// stall web parks threads in userspace-internal condvars (useriam's FFRT
+/// executor 248-596 s, distributeddata's DB_TaskExecutor, samgr's Executor)
+/// — lostpark already acquitted the kernel wake/park machinery, so the open
+/// question is per-condvar: WHAT is parked where, for how long, and is any
+/// producer of that condvar still runnable. This census stamps every futex
+/// park (Waiter::park_j at chain insertion) and, at most one burst per 5 s,
+/// reports every wait >= 10 s as one FUX-STUCK line:
+///   - uaddr + mm identity of the condvar (exact, not the param-arena class)
+///   - tgid/tid + the stuck thread's entry-frame syscall nr and rip
+///   - the owning tgid's thread-state histogram (runnable vs futex-parked
+///     vs other-int vs unint) — a tgid with zero runnable threads is
+///     deadlocked userspace (no kernel lever); one with runnable threads
+///     but a never-woken condvar names the starving producer chain
+///     (scheduling/priority territory).
+/// Locking: phase A walks the bucket chains under the bucket + nested slot
+/// locks (waiter_of discipline) copying POD only; phase B reads task state
+/// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
+/// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
+/// Zero cost when dfx=fuxstuck is off (one switch load).
+pub fn futex_stuck_census() {
+    use alloc::vec::Vec;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    // One burst per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let last = LAST.load(Relaxed);
+    if last != 0 && (now as u32).wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now as u32, Relaxed, Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    // Whole-boot line budget (a 25 min boot = ~300 bursts x <= 9 lines).
+    static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    const STUCK_MIN_J: u64 = 10 * 100; // report parks >= 10 s
+    struct Stuck {
+        task: *mut Task,
+        uaddr: usize,
+        mm: usize,
+        age_s: u32,
+        woken: bool,
+        // Filled by phase B (0 = task not in the pid hash anymore).
+        tgid: u32,
+        tid: u32,
+        sys: u64,
+        epc: u64,
+    }
+    let mut stuck: Vec<Stuck> = Vec::new();
+    let mut total = 0usize;
+
+    // ---- Phase A: bucket chains (POD + task ptr copy only) ----
+    'buckets: for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        while let Some(i) = idx {
+            // SAFETY: slot index from a chain link held under the bucket
+            // lock; the tuple is copied out under the nested slot lock.
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_nested(&h.proof());
+                match *slot {
+                    Some(ref w) if !w.task.is_null() && w.park_j != 0 => {
+                        let age = now.wrapping_sub(w.park_j);
+                        if age >= STUCK_MIN_J {
+                            (Some((w.task, w.key.uaddr, w.key.mm, age, w.woken)), w.next)
+                        } else {
+                            (None, w.next)
+                        }
+                    }
+                    Some(ref w) => (None, w.next),
+                    None => (None, None),
+                }
+            };
+            if let Some((task, uaddr, mm, age, woken)) = entry {
+                total += 1;
+                if stuck.len() < 32 {
+                    stuck.push(Stuck {
+                        task,
+                        uaddr,
+                        mm,
+                        age_s: (age / 100) as u32,
+                        woken,
+                        tgid: 0,
+                        tid: 0,
+                        sys: 0,
+                        epc: 0,
+                    });
+                } else if total > 64 {
+                    // Sample cap reached with clear headroom — stop the
+                    // walk (the SUM line carries the truncation).
+                    drop(h);
+                    break 'buckets;
+                }
+            }
+            idx = next;
+        }
+        drop(h);
+    }
+    if stuck.is_empty() {
+        return;
+    }
+
+    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
+    crate::sched::for_each_task(|task| {
+        for s in stuck.iter_mut() {
+            // SAFETY: pointer identity comparison only (no deref of the
+            // stored pointer).
+            if core::ptr::eq(s.task, task) {
+                // SAFETY: diagnostic reads under the for_each_task
+                // contract (task pinned in its pid-hash bucket).
+                let tk = unsafe { &*task };
+                s.tgid = tk.tgid() as u32;
+                s.tid = tk.pid();
+                if let Some(top) = tk.kernel_stack_top_checked() {
+                    #[cfg(feature = "x86_64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.orig_rax as u64;
+                        s.epc = r.rip as u64;
+                    }
+                    #[cfg(feature = "riscv64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.a7 as u64;
+                        s.epc = r.epc as u64;
+                    }
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.syscallno as u64;
+                        s.epc = r.pc as u64;
+                    }
+                }
+                break;
+            }
+        }
+    });
+
+    // ---- Phase B2: per-tgid thread histograms for the stuck tgids ----
+    struct Histo {
+        tgid: u32,
+        run: u32,
+        futex: u32,
+        int_other: u32,
+        unint: u32,
+    }
+    let mut histos: Vec<Histo> = Vec::new();
+    crate::sched::for_each_task(|task| {
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        let tgid = tk.tgid() as u32;
+        if !stuck.iter().any(|s| s.tgid == tgid) {
+            return;
+        }
+        let st_bits = tk.state().bits();
+        let run = st_bits == crate::process::task::TaskState::RUNNING
+            || tk.on_cpu()
+            || tk.sched_entity().is_on_rq();
+        let fux = tk.futex_wait_enqueued.load(Relaxed);
+        let slot = match histos.iter_mut().find(|h| h.tgid == tgid) {
+            Some(h) => h,
+            None => {
+                if histos.len() >= 16 {
+                    return;
+                }
+                histos.push(Histo {
+                    tgid,
+                    run: 0,
+                    futex: 0,
+                    int_other: 0,
+                    unint: 0,
+                });
+                histos.last_mut().unwrap()
+            }
+        };
+        if run {
+            slot.run += 1;
+        } else if fux {
+            slot.futex += 1;
+        } else if st_bits & 0x1 != 0 {
+            slot.int_other += 1;
+        } else if st_bits & 0x2 != 0 {
+            slot.unint += 1;
+        }
+    });
+
+    // ---- Phase C: aggregate by (tgid, uaddr), oldest-first, print ----
+    stuck.sort_by(|a, b| b.age_s.cmp(&a.age_s));
+    let mut printed = 0usize;
+    while !stuck.is_empty() && printed < 8 {
+        let tgid = stuck[0].tgid;
+        let uaddr = stuck[0].uaddr;
+        if tgid == 0 {
+            // Task exited between the phases — drop silently.
+            stuck.remove(0);
+            continue;
+        }
+        let mut n = 0usize;
+        let mut any_woken = false;
+        let mut oldest = stuck.remove(0);
+        let mut j = 0usize;
+        while j < stuck.len() {
+            if stuck[j].tgid == tgid && stuck[j].uaddr == uaddr {
+                let s = stuck.remove(j);
+                n += 1;
+                any_woken |= s.woken;
+                if s.age_s > oldest.age_s {
+                    oldest = s;
+                }
+            } else {
+                j += 1;
+            }
+        }
+        n += 1; // the removed head
+        let h = histos.iter().find(|h| h.tgid == tgid);
+        crate::pr_warn!(
+            "FUX-STUCK tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
+            tgid,
+            oldest.tid,
+            uaddr,
+            oldest.mm,
+            n,
+            oldest.age_s,
+            any_woken as u32,
+            oldest.sys,
+            oldest.epc,
+            h.map(|h| h.run).unwrap_or(0),
+            h.map(|h| h.futex).unwrap_or(0),
+            h.map(|h| h.int_other).unwrap_or(0),
+            h.map(|h| h.unint).unwrap_or(0),
+        );
+        printed += 1;
+        if LINES.fetch_add(1, Relaxed) > 1200 {
+            break;
+        }
+    }
+    if total > printed && printed == 8 {
+        crate::pr_warn!(
+            "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
+            total,
+            32
+        );
+    }
+}
+
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
@@ -450,6 +724,7 @@ fn alloc_waiter() -> Option<usize> {
                 task: core::ptr::null_mut(),
                 bitset: 0,
                 woken: false,
+                park_j: 0,
                 bucket: 0,
                 next: None,
             });
@@ -861,6 +1136,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.task = current;
                 w.bitset = bitset;
                 w.woken = false;
+                w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
                 w.next = *head;
             }
