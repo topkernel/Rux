@@ -1529,6 +1529,15 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             args[2],
             ret
         );
+        // cfi4 (22nd, lb348 follow-up): pid 947's mprotect(PROT_NONE)
+        // 0x7ff0007e4000/0x2000 failed ENOMEM 270ms before two threads of
+        // the same process died in musl __stack_chk_fail (canary smash,
+        // hlt->#GP) — the CFI/arena fill cycle desynced from our VMA
+        // tree somewhere in the mprotect/mremap-fixed/munmap sequence.
+        // Name the tree state at failure: GAP in the failing range vs
+        // wrong-flags, plus the neighboring VMAs (bounded, failure-only
+        // so volume is negligible).
+        mprotect_fail_forensics(args[0] as usize, args[1] as usize);
     } else if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
         && (args[2] as u32) & 0x6 == 0
     {
@@ -1541,6 +1550,88 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
         );
     }
     ret
+}
+
+/// cfi4: VMA-tree state dump for a failed mprotect (see sys_mprotect).
+/// Verdict line: is [addr, addr+len) fully covered (wrong-flags class)
+/// or is there a GAP (a lost/mis-split mapping — the fill desync class).
+/// Then up to 6 overlapping/adjacent VMAs within +/-32MB, flags/type/
+/// fd/offset/origin — enough to name which operation ate the mapping.
+fn mprotect_fail_forensics(addr: usize, length: usize) {
+    let Some(current_task) = crate::sched::current() else {
+        return;
+    };
+    let Some(addr_space) = current_task.address_space() else {
+        return;
+    };
+    let end = addr.saturating_add(length);
+    {
+        let vma_mgr = addr_space.vma_read();
+        // Coverage verdict: walk the intersection set.
+        let mut covered_to = addr;
+        let mut gap_at: Option<usize> = None;
+        for v in vma_mgr.iter() {
+            let vs = v.start().as_usize();
+            let ve = v.end().as_usize();
+            if ve <= addr {
+                continue;
+            }
+            if vs >= end {
+                break;
+            }
+            if vs > covered_to {
+                gap_at = Some(covered_to);
+                break;
+            }
+            covered_to = covered_to.max(ve);
+            if covered_to >= end {
+                break;
+            }
+        }
+        if covered_to < end && gap_at.is_none() {
+            gap_at = Some(covered_to);
+        }
+        match gap_at {
+            Some(g) => crate::pr_info!(
+                "MPROTECT-FOR: range GAP at {:#x} (wanted {:#x}..{:#x})",
+                g,
+                addr,
+                end
+            ),
+            None => crate::pr_info!(
+                "MPROTECT-FOR: range COVERED (flags/perm class) {:#x}..{:#x}",
+                addr,
+                end
+            ),
+        }
+        // Neighbor VMAs (bounded).
+        let lo = addr.saturating_sub(0x200_0000);
+        let hi = end.saturating_add(0x200_0000);
+        let mut shown = 0usize;
+        for v in vma_mgr.iter() {
+            let vs = v.start().as_usize();
+            let ve = v.end().as_usize();
+            if ve <= lo || vs >= hi {
+                continue;
+            }
+            if shown >= 6 {
+                crate::pr_info!("MPROTECT-FOR: ... (capped)");
+                break;
+            }
+            crate::pr_info!(
+                "MPROTECT-FOR: vma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
+                vs,
+                ve,
+                v.flags().bits(),
+                v.vma_type(),
+                v.file_fd(),
+                v.offset(),
+                v.origin().creator_name(),
+                if v.origin().is_forked() { "+FORK" } else { "" }
+            );
+            shown += 1;
+        }
+    }
 }
 
 fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
@@ -2731,7 +2822,12 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     // first), so a VMA-shape filter can't catch the move — and MREMAP_FIXED
     // is rare outside CFI/JIT moves anyway: always trace it.
     if (flags & MREMAP_FIXED) != 0 {
-        crate::pr_debug!(
+        // cfi4 (22nd): promoted pr_debug -> pr_info. The comment below
+        // already says "always trace it" but pr_debug never shows at
+        // LOGLEVEL=6 — and lb348's mprotect-ENOMEM desync happened
+        // INSIDE this fill cycle, 270ms before two canary deaths. The
+        // call is boot-time-rare (per-DSO fill), volume is bounded.
+        crate::pr_info!(
             "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
             crate::process::current_pid(),
             old_addr,
