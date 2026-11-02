@@ -998,6 +998,13 @@ impl BuddyAllocator {
 /// Note: This is the only allocator instance, used for kernel heap allocation and #[global_allocator]
 pub static GLOBAL_ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
 
+/// dfx=allocwatch probe: main buddy lock word state at sample time;
+/// see dfx/allocwatch.rs (STUCK detection).
+pub fn audit_lock_held() -> bool {
+    GLOBAL_ALLOCATOR.lock.is_locked()
+}
+
+
 /// Compatibility alias
 pub use GLOBAL_ALLOCATOR as HEAP_ALLOCATOR;
 

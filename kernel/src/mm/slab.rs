@@ -611,6 +611,18 @@ impl SlabAllocator {
 ///
 /// # Returns
 /// Memory pointer on success, null on failure
+/// dfx=allocwatch probe: live lock-word state of every slab cache lock
+/// (bit i = caches[i] held at sample time); see dfx/allocwatch.rs.
+pub fn audit_cache_locks() -> u16 {
+    let mut m = 0u16;
+    for (i, c) in SLAB_ALLOCATOR.caches.iter().enumerate() {
+        if c.is_locked() {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
 pub fn kmalloc(size: usize) -> *mut u8 {
     if !SlabAllocator::is_initialized() {
         return core::ptr::null_mut();

@@ -564,6 +564,11 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     for &addr in entries {
         let page = addr & !(PAGE_SIZE - 1);
@@ -671,6 +676,21 @@ pub fn live_stats_kib() -> (u64, u64) {
 /// free). Object headers carry vtables/magic/locks that identify the
 /// owning type — the census counts say WHICH CLASS holds the heap, this
 /// says WHICH TYPE fills the class. Caller must not hold the class lock.
+/// dfx=allocwatch probe: live lock-word state of every class lock
+/// (bit i = CACHES[i] held at sample time). A sample is not a snapshot;
+/// the caller filters transients (see dfx/allocwatch.rs STUCK detection
+/// — a bit set at every tick for >1 s with no matching holder stamp is
+/// a stuck/corrupt lock word, the wild-write producer's freeze face).
+pub fn audit_class_locks() -> u8 {
+    let mut m = 0u8;
+    for (i, c) in CACHES.iter().enumerate() {
+        if c.lock.is_locked() {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
 pub fn census_peek(ci: usize, per_page: usize) {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
@@ -694,6 +714,11 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let mut nvals = 0usize;
     let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
     let mut pages = 0usize;
     while page != 0 && pages < 32 {
@@ -794,6 +819,11 @@ pub fn census_peek3(ci: usize) {
     let (mut n_uv, mut n_kh, mut n_sm, mut n_ot) = (0u64, 0u64, 0u64, 0u64);
     let mut total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
     let mut pages = 0usize;
     while page != 0 && pages < 32 {
