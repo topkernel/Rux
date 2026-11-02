@@ -1885,18 +1885,3 @@ nested-call wall class. Race tally this session 0/2 so far. lb348
    class-lock volume 2.8x the 25M/boot band figure, worth a glance
    from the memory-domain owner (rest-site charging may differ from
    the allocwatch counter; do not merge the two numbers blindly).
-
-**lb348/lb349 final: the fixes REPRODUCE, the wedge dice do not clear.**
-lb348: hdf_devmgr.ready handled 9.17s, boot.completed 9.18s (stable
-across boots now; was 10.5-14.5s), post-fs-data 2,209ms, early-boot
-755ms, startUser/SwitchToUser at **46.9s** (lb342's creation was
-71.8s) — then the pre-existing wedge: txn exec 772s (668->874, started
-t=20s, BEFORE any memo churn — not negmemo-caused), no bundles.ready.
-lb349: startUser 38.1s (25-34s earlier than the 20th's best), second
-startUser retry 69.8s, max exec 505s — wedged again; frozen-logo md5
-06b933b4 unchanged through t=540. Race tally 0/4 this session; ALL
-four rolls in the pre-existing 300-900s TXN-HANG exec family (lb342
-741s / lb345 941s on the 20th's kernels — same class). The gate is now
-unambiguously the samgr nested-call handler wall (userspace poll-loop
-interleave per the 20th's decode; syscost nr=35 poll tot=592s/min),
-NOT the fs per-op wall this session fixed.
