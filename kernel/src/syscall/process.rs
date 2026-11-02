@@ -2922,9 +2922,12 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 return -(errno::EFAULT as i64);
             }
             // SAFETY: ptr validated with access_ok; put_user is the
-            // exception-table copy path.
+            // exception-table copy path. A failed copy is EFAULT (the
+            // reference prctl propagates put_user's error).
             unsafe {
-                let _ = crate::arch::uaccess::put_user(ptr, (*current).pdeath_signal);
+                if !crate::arch::uaccess::put_user(ptr, (*current).pdeath_signal) {
+                    return -(errno::EFAULT as i64);
+                }
             }
             0
         }
@@ -2970,7 +2973,9 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             // reference to a fixed-size internal buffer of 16 bytes.
             unsafe {
                 let comm = (*current).comm();
-                let _ = copy_to_user(ptr, comm.as_ptr(), 16);
+                if copy_to_user(ptr, comm.as_ptr(), 16) != 0 {
+                    return -(errno::EFAULT as i64);
+                }
             }
             0
         }
@@ -3369,7 +3374,10 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
     let si_code = i32::from_le_bytes(code_buf);
-    if si_code >= 0 {
+    // Reference do_rt_sigqueueinfo: si_code >= 0 or SI_TKILL (-6) is an
+    // attempt to forge a kernel-sourced signal — EPERM (rt_tgsigqueueinfo
+    // already enforces both; this is the process-directed twin).
+    if si_code >= 0 || si_code == -6 {
         return -(errno::EPERM as i64);
     }
 
@@ -3503,7 +3511,10 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
     if uthese.is_null() {
         return -(errno::EFAULT as i64);
     }
-    if sigsetsize < 8 {
+    // sigsetsize must be exactly sizeof(sigset_t) (8) — same EINVAL shape
+    // as rt_sigaction/rt_sigprocmask and the reference kernel; the old
+    // `< 8` accepted 9..∞, diverging on every oversized value.
+    if sigsetsize != 8 {
         return -(errno::EINVAL as i64);
     }
     if !crate::arch::uaccess::access_ok(uthese as usize, 8) {
