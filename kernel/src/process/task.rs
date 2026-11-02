@@ -3156,10 +3156,17 @@ impl Task {
                 // the stamp consumed at the wakee's switch-in.
                 let fp = crate::dfx::forkprof::on();
                 let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
+                // cctx probe (closegap lane): select / enqueue / dispatch
+                // phase sums for the sleeping-target wake path.
+                let cc = crate::dfx::cctx::on();
+                let cc_t_sel = if cc { crate::dfx::cctx::now() } else { 0 };
+                crate::dfx::cctx::bump(&crate::dfx::cctx::WK_N);
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(&*task);
                 let prev_cpu = (*task).ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_SEL_NS, cc_t_sel);
+                let cc_t_enq = crate::dfx::cctx::now();
 
                 // Update task's CPU if it changed.
                 // R13-5: never steer a task that is still executing (on_cpu
@@ -3263,6 +3270,8 @@ impl Task {
                 // (pipe echo, futex handoff) still gets the in-place
                 // handoff from its own schedule().
                 let allowed = (*task).cpus_allowed();
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
+                let cc_t_disp = crate::dfx::cctx::now();
                 match crate::sched::claim_idle_cpu_for(allowed) {
                     Some(idle_cpu) => {
                         crate::sched::resched_cpu(idle_cpu);
@@ -3277,6 +3286,7 @@ impl Task {
                         crate::sched::preempt_check_wake(task);
                     }
                 }
+                crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue

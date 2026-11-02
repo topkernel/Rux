@@ -505,6 +505,11 @@ pub extern "C" fn get_prev_task() -> *mut Task {
 /// After `__switch_to` all locals are invalid; the incoming task is
 /// resolved through `sched::current()` (the per-CPU slot).
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // cctx probe (closegap lane): phase stamps in the OUTGOING frame.
+    // The post-asm stamp is parked in a per-CPU slot (the switch is
+    // CPU-local with IRQs off) because prev's frame freezes
+    // mid-__switch_to — the INCOMING task closes the bracket.
+    let cc_c0 = crate::dfx::cctx::now();
     // R56-heal (early revoked-pick check): if the slot-capture steal
     // already revoked this pick (the picking vCPU was TCG-starved past
     // the whole GRQ-release → wrapper window), the pick state is
@@ -523,6 +528,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // Step 1: save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
+    let cc_c1 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
 
     // Store prev task for ret_from_fork's schedule_tail(prev)
     set_prev_task(prev as *mut Task);
@@ -535,6 +542,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         if read_cr3() >> 12 != next_ppn {
             // PCID is disabled at bring-up: asid is always 0 and the CR3
             // reload itself flushes non-global translations.
+            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
             write_cr3(super::mm::asid::build_satp(0, next_ppn));
         }
     } else {
@@ -542,37 +550,77 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         // dying user mm (dropped by do_exit) can be freed under our feet.
         let kernel_ppn = super::mm::mmu_init::root_page_table_ppn();
         if read_cr3() >> 12 != kernel_ppn {
+            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
             write_cr3(super::mm::asid::build_satp(0, kernel_ppn));
         }
     }
+    let cc_c2 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MM_NS, cc_c1);
 
-    // Step 3: FS base (TLS pointer).  Saved from the live MSR so a task
-    // switched out inside a set_thread_area window resumes correctly.
-    // The GS shadow (IA32_KERNEL_GS_BASE) is programmed alongside so the
-    // swapgs pairing in trap.S holds per task: the kernel runs with GS =
-    // percpu and the SHADOW carries the task's user GS base (0 unless a
-    // task used ARCH_SET_GS), which SWAPGS installs on the user return.
-    let fs = rdmsr(MSR_FS_BASE);
-    prev.thread_mut().fs_base = fs;
-    prev.thread_mut().gs_base = rdmsr(MSR_KERNEL_GS_BASE);
-    wrmsr(MSR_FS_BASE, next.thread().fs_base);
-    wrmsr(MSR_KERNEL_GS_BASE, next.thread().gs_base);
+    // Step 3: FS base (TLS pointer) and the GS shadow
+    // (IA32_KERNEL_GS_BASE). thread.fs_base / thread.gs_base are the
+    // AUTHORITATIVE per-task mirrors — every in-kernel writer keeps both
+    // in sync (arch_prctl ARCH_SET_FS writes cache+MSR, ARCH_SET_GS
+    // writes cache+MSR, flush_thread zeroes cache+MSRs, smp bring-up
+    // zeroes the MSR with ThreadStruct::new() zeroes) — so the switch
+    // needs no rdmsr: the outgoing task's cached values ARE the live
+    // ones, and the incoming pair is written only when it differs from
+    // the outgoing pair (two ping-ponging tasks with distinct TLS
+    // pointers still pay one FS write; same-TLS and the common
+    // zero-shadow GS pairs skip both — 4 MSR ops down to 0-2 per
+    // switch, the rdmsr pair under KVM is the expensive half; cctx
+    // probe: msr bracket 121-393 ns/switch, closegap lane 2026-11-02).
+    // The swapgs pairing in trap.S holds per task as before: the kernel
+    // runs with GS = percpu and the SHADOW carries the task's user GS
+    // base, which SWAPGS installs on the user return.
+    let fs_prev = prev.thread().fs_base;
+    let gs_prev = prev.thread().gs_base;
+    let fs_next = next.thread().fs_base;
+    let gs_next = next.thread().gs_base;
+    if fs_next != fs_prev {
+        wrmsr(MSR_FS_BASE, fs_next);
+    }
+    if gs_next != gs_prev {
+        wrmsr(MSR_KERNEL_GS_BASE, gs_next);
+    }
+    let cc_c3 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MSR_NS, cc_c2);
 
     // Step 4: registers + stacks + per-CPU current + TSS.rsp0.
     //
     // WARNING: after this call all locals are INVALID (callee-saved
     // registers and rsp belong to the incoming task).
+    crate::dfx::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
     __switch_to(prev, next);
+
+    // cctx: the incoming task closes the asm bracket parked by the
+    // outgoing task on this CPU (IRQs stayed off across the switch).
+    {
+        let t3 = crate::dfx::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
+        let t4 = crate::dfx::cctx::now();
+        if t3 != 0 && t4 != 0 {
+            crate::dfx::cctx::add(&crate::dfx::cctx::CW_ASM_NS, t3);
+        }
+    }
 
     // Step 5: restore the incoming task's FPU (review ARCH-H1 parity):
     // resolved via sched::current() — the per-CPU slot __switch_to just
     // published — never through the stale `next` reference.
+    let cc_c4 = crate::dfx::cctx::now();
     if let Some(cur) = crate::sched::current() {
         // SAFETY: cur is the task now running on this CPU.
         unsafe {
             (*cur).thread_mut().restore_fpu();
         }
     }
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
+}
+
+/// This CPU's index for the per-CPU cctx switch stamp (the context.rs
+/// wrapper does not carry cpu_id through __switch_to).
+#[inline]
+fn cpu_of() -> usize {
+    crate::arch::cpu_id() as usize
 }
 
 /// R56-heal: switch-in abort repair (x86_64 twin of riscv_switch_abort).

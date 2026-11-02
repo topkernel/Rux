@@ -1763,7 +1763,21 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // while the count is nonzero) vs lost-wake (WAKE issued, writer
         // still parked) vs coherence drift (two processes observe
         // different vals for the same word).
-        if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr) {
+        // GATED behind dfx=futextrace since the lb243 decode: this tracer
+        // ran ALWAYS-ON from inside do_futex's hot path, and the param
+        // arena is the boot critical path (param_service sync + every
+        // param read). Its 500 budgeted console writes (each allocating +
+        // 0.36-0.93ms UART) all execute in the first seconds of boot; when
+        // the still-unfixed phantom-preempt allocator stall bites
+        // mid-print, the printing thread parks INSIDE do_futex with the
+        // print half-done (lb243: samgr's self-send worker frozen at
+        // do_futex+0x112e over LowerHex/unix_write_slice_owned residue)
+        // and the param sync chain freezes the whole service graph — the
+        // 'samgr-dark' boot family. Hunt with dfx=futextrace, never by
+        // default.
+        if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+        {
             use core::sync::atomic::Ordering::Relaxed as R2;
             let n = FXDV2_N.fetch_add(1, R2);
             if n < 500 {

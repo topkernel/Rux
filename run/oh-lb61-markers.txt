@@ -1,0 +1,4 @@
+    3.957 ServiceStart starting:appspawn
+  100.182 bootevent.bootanimation.ready
+  108.065 bootevent.bootanimation.finished
+  117.164 com.ohos.launcher

@@ -1,0 +1,39 @@
+===CASE lat_sem rep1
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix rep1
+LMBENCH TIMEOUT lat_unix
+===CASE lat_pipe rep1
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 rep1
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 rep1
+"size=64k ovr=1.19
+8 4.83
+===CASE lat_syscall open rep1
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem rep2
+Semaphore latency: 4.3791 microseconds
+===CASE lat_unix rep2
+AF_UNIX sock stream latency: 12.0348 microseconds
+===CASE lat_pipe rep2
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 rep2
+"size=64k ovr=1.11
+2 4.61
+===CASE lat_ctx -s 64 8 rep2
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open rep2
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem rep3
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix rep3
+LMBENCH TIMEOUT lat_unix
+===CASE lat_pipe rep3
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 rep3
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 rep3
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open rep3
+LMBENCH TIMEOUT lat_syscall
+load=7.32 6.47 6.21 7/2212 19896
