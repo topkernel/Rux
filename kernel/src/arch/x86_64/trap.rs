@@ -32,6 +32,7 @@
 
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
+use crate::sync::spinlock::Spinlock;
 
 // Include trap.S assembly code (AT&T syntax — global_asm defaults to
 // Intel on x86 targets).
@@ -644,9 +645,21 @@ type IrqLineHandler = fn();
 static IRQ_LINE_HANDLERS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
+/// The line owners' names (the irq:irq_handler_entry name field; the
+/// x86 PIC path predates the irq-domain action layer, so the name rides
+/// a parallel registry set at request time).
+static IRQ_LINE_NAMES: [Spinlock<&'static str>; 16] = [const { Spinlock::new("") }; 16];
+
 /// Register a handler for a PIC line (0..15) and unmask it.  Returns
 /// false when the line is taken or out of range.
 pub fn request_irq_line(line: u8, handler: fn()) -> bool {
+    request_irq_line_named(line, "", handler)
+}
+
+/// `request_irq_line` with the owner's name (what the
+/// irq:irq_handler_entry tracepoint reports; the empty name renders as
+/// the bare line number prefix the irq event's comm slot carries).
+pub fn request_irq_line_named(line: u8, name: &'static str, handler: fn()) -> bool {
     use core::sync::atomic::Ordering;
     if line >= 16 {
         return false;
@@ -658,15 +671,32 @@ pub fn request_irq_line(line: u8, handler: fn()) -> bool {
     {
         return false;
     }
+    *IRQ_LINE_NAMES[line as usize].lock_irqsave() = name;
     unmask_irq_line(line);
     true
 }
+
+/// The registered name of a line ("" when free or registered unnamed).
+pub fn irq_line_name(line: u8) -> &'static str {
+    if line >= 16 {
+        return "";
+    }
+    *IRQ_LINE_NAMES[line as usize].lock()
+}
+
+/// Fallback names for lines registered without one ("line<N>", what an
+/// unnamed action reports — the reference always carries an action name).
+const LINE_NAME_FALLBACK: [&str; 16] = [
+    "line0", "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8",
+    "line9", "line10", "line11", "line12", "line13", "line14", "line15",
+];
 
 pub fn free_irq_line(line: u8) {
     use core::sync::atomic::Ordering;
     if line < 16 {
         mask_irq_line(line);
         IRQ_LINE_HANDLERS[line as usize].store(0, Ordering::Release);
+        *IRQ_LINE_NAMES[line as usize].lock_irqsave() = "";
     }
 }
 
@@ -1359,7 +1389,24 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             // believing IF=0.
             let is_idle =
                 cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
-            let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
+            // stress-port round 2 (2026-11-02): the tag now carries the
+            // adjudication the suffix only hinted at. An idle frame is
+            // halted with IF=1 (cpu_idle_loop re-enables IRQs before
+            // wfi) — the gap is halt-exit delivery latency, an artifact
+            // by construction. A user frame runs IF=1 by definition —
+            // the gap is vCPU steal. Only a kernel frame keeps the
+            // IRQ-OFF-WINDOW tag, and it is still only a triage hint:
+            // the syscost cli/sti zone accounting is the corroborating
+            // measurement (round-1 stress boots printed 101-461 ms
+            // idle/user gaps while every syscost REST site's longest
+            // CLOSED segment was <= 1 ms).
+            let msg: &[u8] = if regs.user_mode() {
+                b"\nWW: IRQ-DELAY-STEAL cpu="
+            } else if is_idle {
+                b"\nWW: IRQ-DELAY-IDLE cpu="
+            } else {
+                b"\nWW: IRQ-OFF-WINDOW cpu="
+            };
             for &b in msg {
                 putchar(b);
             }
@@ -1565,10 +1612,28 @@ fn handle_external_interrupt(vector: u64) {
     while let Some(line) = pic_claim() {
         let h = IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire);
         if h != 0 {
+            // The irq:irq_handler_entry/exit tracepoints, bracketing the
+            // line handler the way the reference brackets every action
+            // (kernel/irq/handle.c). The x86 line handlers are void, so
+            // the exit's ret is "handled" — the handler ran. Both calls
+            // marshal only behind armed() (one relaxed load when off;
+            // the name lookup too).
+            if crate::trace::EVENT_IRQ_HANDLER_ENTRY.armed() {
+                let name = irq_line_name(line);
+                let name16 = if name.is_empty() {
+                    crate::trace::str_to_comm16(LINE_NAME_FALLBACK[line as usize])
+                } else {
+                    crate::trace::str_to_comm16(name)
+                };
+                crate::trace::trace_irq_handler_entry(line as i32, &name16);
+            }
             // SAFETY: nonzero values were stored from fn pointers by
             // request_irq_line.
             let f: fn() = unsafe { core::mem::transmute(h) };
             f();
+            if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
+                crate::trace::trace_irq_handler_exit(line as i32, 1);
+            }
         } else {
             // Once per line per boot: on the OH q35 boot, spurious PIC
             // lines (2 via vectors 0x2a/0x2b) fire continuously; the

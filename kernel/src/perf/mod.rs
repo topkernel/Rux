@@ -561,6 +561,20 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         return -(crate::errno::constants::EINVAL as i64);
     }
 
+    // L3 wiring (sec-r1): kernel-side measurement is privileged. The
+    // reference gates !exclude_kernel events on perfmon_capable()
+    // (CAP_PERFMON or CAP_SYS_ADMIN) at the default
+    // /proc/sys/kernel/perf_event_paranoid = 2 — EACCES otherwise. This
+    // port's software events sample the kernel tick stash (kernel-mode
+    // PCs included), so the same gate applies. User-space-only events
+    // (exclude_kernel set) stay open to unprivileged callers.
+    if attr.flags1 & FLAG_EXCLUDE_KERNEL == 0
+        && !crate::security::capable(crate::security::CAP_PERFMON)
+        && !crate::security::capable(crate::security::CAP_SYS_ADMIN)
+    {
+        return -(crate::errno::constants::EACCES as i64);
+    }
+
     // 3. Event class.
     if attr.type_ != PERF_TYPE_SOFTWARE {
         return -(crate::errno::constants::EINVAL as i64);

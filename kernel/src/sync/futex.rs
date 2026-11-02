@@ -152,16 +152,69 @@ pub struct FutexKey {
     pub mm: usize,
     /// Flags
     pub flags: u32,
+    /// PHYSICAL word identity — (page frame << 12) | byte offset —
+    /// resolved from the caller's page tables at key construction.
+    /// 0 when unresolved (kernel threads, torn-down exit paths, unit
+    /// tests). Shared-futex equality is physical, not virtual: the
+    /// reference kernel keys shared futexes on (inode, page, offset),
+    /// so a wake from ANY mapping of the same word — including a fresh
+    /// mmap at a DIFFERENT virtual address after fork+exec (LTP's
+    /// tst_checkpoint protocol: parent waits on the MAP_SHARED results
+    /// page, the exec'd child re-opens + re-mmaps and wakes) — reaches
+    /// the waiter. Rux's MAP_SHARED file pages are single cache frames
+    /// aliased in every mapper, so the frame number IS the identity.
+    pub phys: usize,
+}
+
+/// Resolve the physical word identity of `uaddr` in the CURRENT task's
+/// page tables: (frame << 12) | (uaddr & 0xfff). Returns 0 when the walk
+/// finds no present user leaf (callers fall back to uaddr keying — the
+/// pre-fix behavior, never worse).
+fn resolve_futex_phys(uaddr: usize) -> usize {
+    let Some(task) = crate::sched::current() else {
+        return 0;
+    };
+    // SAFETY: read-only AddressSpace accessor on the current task.
+    let root = match unsafe { (*task).address_space() } {
+        Some(mm) => mm.root_ppn(),
+        None => return 0,
+    };
+    // SAFETY: read-only page-table walk of the current address space.
+    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, uaddr as u64) } {
+        Some((ppn, bits)) => {
+            // Present + user leaf only (device-window leaves and kernel
+            // mappings are not futex words).
+            if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                ((ppn as usize) << 12) | (uaddr & 0xfff)
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
 }
 
 impl FutexKey {
     pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags }
+        Self { uaddr, mm, flags, phys: 0 }
+    }
+
+    /// Production constructor: resolves the physical word identity from
+    /// the current page tables (see `phys`).
+    pub fn new_user(uaddr: usize, mm: usize, flags: u32) -> Self {
+        Self { uaddr, mm, flags, phys: resolve_futex_phys(uaddr) }
     }
 
     /// Check if two keys match
     pub fn matches(&self, other: &FutexKey) -> bool {
-        if !(self.flags & FLAGS_SHARED != 0) {
+        if (self.flags & FLAGS_SHARED != 0) && self.phys != 0 && other.phys != 0 {
+            // Shared waiter: physical-word identity (any mapping of the
+            // same word matches — cross-address after exec/fresh mmap).
+            // Also covers the musl cleartid interop (shared waiter vs
+            // private waker on the SAME word) strictly more precisely
+            // than the old uaddr equality.
+            self.phys == other.phys
+        } else if !(self.flags & FLAGS_SHARED != 0) {
             self.uaddr == other.uaddr && self.mm == other.mm
         } else {
             self.uaddr == other.uaddr
@@ -243,6 +296,11 @@ struct Waiter {
     bitset: u32,
     /// Whether already woken
     woken: bool,
+    /// Jiffies when this waiter was linked into its bucket chain (the
+    /// park stamp for the dfx=fuxstuck census; 0 on the alloc_waiter
+    /// placeholder, overwritten at real insertion). NOT reset on requeue —
+    /// the park episode continues, so the original stamp stays truthful.
+    park_j: u64,
     /// Hash bucket this waiter is currently linked in. Tracked per-waiter
     /// because FUTEX_REQUEUE can move it to uaddr2's bucket while it sleeps;
     /// a stale bucket at removal time silently leaked the slot (review 6.1).
@@ -382,6 +440,323 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
     out
 }
 
+/// dfx=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
+/// timer heartbeat (same slot as the TXN-HANG audit). The post-creation OH
+/// stall web parks threads in userspace-internal condvars (useriam's FFRT
+/// executor 248-596 s, distributeddata's DB_TaskExecutor, samgr's Executor)
+/// — lostpark already acquitted the kernel wake/park machinery, so the open
+/// question is per-condvar: WHAT is parked where, for how long, and is any
+/// producer of that condvar still runnable. This census stamps every futex
+/// park (Waiter::park_j at chain insertion) and, at most one burst per 5 s,
+/// reports every wait >= 10 s as one FUX-STUCK line:
+///   - uaddr + mm identity of the condvar (exact, not the param-arena class)
+///   - tgid/tid + the stuck thread's entry-frame syscall nr and rip
+///   - the owning tgid's thread-state histogram (runnable vs futex-parked
+///     vs other-int vs unint) — a tgid with zero runnable threads is
+///     deadlocked userspace (no kernel lever); one with runnable threads
+///     but a never-woken condvar names the starving producer chain
+///     (scheduling/priority territory).
+/// Locking: phase A walks the bucket chains under the bucket + nested slot
+/// locks (waiter_of discipline) copying POD only; phase B reads task state
+/// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
+/// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
+/// Zero cost when dfx=fuxstuck is off (one switch load).
+pub fn futex_stuck_census() {
+    use alloc::vec::Vec;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    // One burst per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let last = LAST.load(Relaxed);
+    if last != 0 && (now as u32).wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now as u32, Relaxed, Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    // Whole-boot line budget (a 25 min boot = ~300 bursts x <= 9 lines).
+    static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    const STUCK_MIN_J: u64 = 10 * 100; // report parks >= 10 s
+    struct Stuck {
+        task: *mut Task,
+        uaddr: usize,
+        mm: usize,
+        age_s: u32,
+        woken: bool,
+        // Filled by phase B (0 = task not in the pid hash anymore).
+        tgid: u32,
+        tid: u32,
+        sys: u64,
+        epc: u64,
+    }
+    let mut stuck: Vec<Stuck> = Vec::new();
+    let mut total = 0usize;
+
+    // ---- Phase A: bucket chains (POD + task ptr copy only) ----
+    'buckets: for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        while let Some(i) = idx {
+            // SAFETY: slot index from a chain link held under the bucket
+            // lock; the tuple is copied out under the nested slot lock.
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_nested(&h.proof());
+                match *slot {
+                    Some(ref w) if !w.task.is_null() && w.park_j != 0 => {
+                        let age = now.wrapping_sub(w.park_j);
+                        if age >= STUCK_MIN_J {
+                            (Some((w.task, w.key.uaddr, w.key.mm, age, w.woken)), w.next)
+                        } else {
+                            (None, w.next)
+                        }
+                    }
+                    Some(ref w) => (None, w.next),
+                    None => (None, None),
+                }
+            };
+            if let Some((task, uaddr, mm, age, woken)) = entry {
+                total += 1;
+                if stuck.len() < 32 {
+                    stuck.push(Stuck {
+                        task,
+                        uaddr,
+                        mm,
+                        age_s: (age / 100) as u32,
+                        woken,
+                        tgid: 0,
+                        tid: 0,
+                        sys: 0,
+                        epc: 0,
+                    });
+                } else if total > 64 {
+                    // Sample cap reached with clear headroom — stop the
+                    // walk (the SUM line carries the truncation).
+                    drop(h);
+                    break 'buckets;
+                }
+            }
+            idx = next;
+        }
+        drop(h);
+    }
+    if stuck.is_empty() {
+        return;
+    }
+
+    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
+    crate::sched::for_each_task(|task| {
+        for s in stuck.iter_mut() {
+            // SAFETY: pointer identity comparison only (no deref of the
+            // stored pointer).
+            if core::ptr::eq(s.task, task) {
+                // SAFETY: diagnostic reads under the for_each_task
+                // contract (task pinned in its pid-hash bucket).
+                let tk = unsafe { &*task };
+                s.tgid = tk.tgid() as u32;
+                s.tid = tk.pid();
+                if let Some(top) = tk.kernel_stack_top_checked() {
+                    #[cfg(feature = "x86_64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.orig_rax as u64;
+                        s.epc = r.rip as u64;
+                    }
+                    #[cfg(feature = "riscv64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.a7 as u64;
+                        s.epc = r.epc as u64;
+                    }
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's pinned
+                        // kernel-stack pages.
+                        let r = unsafe { &*regs };
+                        s.sys = r.syscallno as u64;
+                        s.epc = r.pc as u64;
+                    }
+                }
+                break;
+            }
+        }
+    });
+
+    // ---- Phase B2: per-tgid thread histograms for the stuck tgids ----
+    struct Histo {
+        tgid: u32,
+        run: u32,
+        futex: u32,
+        int_other: u32,
+        unint: u32,
+    }
+    let mut histos: Vec<Histo> = Vec::new();
+    crate::sched::for_each_task(|task| {
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        let tgid = tk.tgid() as u32;
+        if !stuck.iter().any(|s| s.tgid == tgid) {
+            return;
+        }
+        let st_bits = tk.state().bits();
+        let run = st_bits == crate::process::task::TaskState::RUNNING
+            || tk.on_cpu()
+            || tk.sched_entity().is_on_rq();
+        let fux = tk.futex_wait_enqueued.load(Relaxed);
+        let slot = match histos.iter_mut().find(|h| h.tgid == tgid) {
+            Some(h) => h,
+            None => {
+                if histos.len() >= 16 {
+                    return;
+                }
+                histos.push(Histo {
+                    tgid,
+                    run: 0,
+                    futex: 0,
+                    int_other: 0,
+                    unint: 0,
+                });
+                histos.last_mut().unwrap()
+            }
+        };
+        if run {
+            slot.run += 1;
+        } else if fux {
+            slot.futex += 1;
+        } else if st_bits & 0x1 != 0 {
+            slot.int_other += 1;
+        } else if st_bits & 0x2 != 0 {
+            slot.unint += 1;
+        }
+    });
+
+    // ---- Phase C: aggregate by (tgid, uaddr) and print ----
+    // Two visibility buckets (lb323 lesson: a pure oldest-first top-8 was
+    // monopolised by 155 s-class peripheral parks — bluetooth/audio — and
+    // never showed the critical-path park that decided the creation race):
+    //   OLDEST 4 groups by max park age  — the long-standing anchors;
+    //   FRESH   4 groups by min park age  — the currently-developing stall
+    //            (smallest age >= threshold among stuck waiters).
+    stuck.sort_by(|a, b| b.age_s.cmp(&a.age_s));
+    struct Group {
+        tgid: u32,
+        uaddr: usize,
+        n: usize,
+        max_age: u32,
+        min_age: u32,
+        any_woken: bool,
+        rep_tid: u32,
+        rep_mm: usize,
+        rep_sys: u64,
+        rep_epc: u64,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for s in stuck.iter() {
+        if s.tgid == 0 {
+            continue;
+        }
+        let existing = groups
+            .iter_mut()
+            .find(|g| g.tgid == s.tgid && g.uaddr == s.uaddr);
+        match existing {
+            Some(g) => {
+                g.n += 1;
+                g.max_age = g.max_age.max(s.age_s);
+                g.min_age = g.min_age.min(s.age_s);
+                g.any_woken |= s.woken;
+            }
+            None => {
+                if groups.len() < 24 {
+                    groups.push(Group {
+                        tgid: s.tgid,
+                        uaddr: s.uaddr,
+                        n: 1,
+                        max_age: s.age_s,
+                        min_age: s.age_s,
+                        any_woken: s.woken,
+                        rep_tid: s.tid,
+                        rep_mm: s.mm,
+                        rep_sys: s.sys,
+                        rep_epc: s.epc,
+                    });
+                }
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
+    let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
+    for (i, &gi) in order.iter().enumerate() {
+        if i < 4 {
+            chosen.push((gi, false));
+        }
+    }
+    let mut fresh_order = order.clone();
+    fresh_order.sort_by(|&a, &b| groups[a].min_age.cmp(&groups[b].min_age));
+    for &gi in fresh_order.iter() {
+        if chosen.len() >= 8 {
+            break;
+        }
+        if !chosen.iter().any(|(c, _)| *c == gi) {
+            chosen.push((gi, true));
+        }
+    }
+    let mut printed = 0usize;
+    for (gi, is_fresh) in chosen {
+        let g = &groups[gi];
+        let h = histos.iter().find(|h| h.tgid == g.tgid);
+        crate::pr_warn!(
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
+            if is_fresh { "-FRESH" } else { "" },
+            g.tgid,
+            g.rep_tid,
+            g.uaddr,
+            g.rep_mm,
+            g.n,
+            g.min_age,
+            g.max_age,
+            g.any_woken as u32,
+            g.rep_sys,
+            g.rep_epc,
+            h.map(|h| h.run).unwrap_or(0),
+            h.map(|h| h.futex).unwrap_or(0),
+            h.map(|h| h.int_other).unwrap_or(0),
+            h.map(|h| h.unint).unwrap_or(0),
+        );
+        printed += 1;
+        if LINES.fetch_add(1, Relaxed) > 1200 {
+            break;
+        }
+    }
+    if total > printed && printed == 8 {
+        crate::pr_warn!(
+            "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
+            total,
+            32
+        );
+    }
+}
+
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
@@ -397,6 +772,7 @@ fn alloc_waiter() -> Option<usize> {
                 task: core::ptr::null_mut(),
                 bitset: 0,
                 woken: false,
+                park_j: 0,
                 bucket: 0,
                 next: None,
             });
@@ -462,24 +838,28 @@ fn pool_full_backoff() {
 
 /// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
-    // Hash by uaddr ALONE. matches() compares uaddr in BOTH branches
-    // (private: uaddr+mm; shared: uaddr-only), so every waiter a wake
-    // could possibly match shares the waiter's uaddr — a uaddr-keyed
-    // bucket guarantees they are all in the scanned chain, and matches()
-    // does the precise filtering.
+    // Hash by the PHYSICAL word identity when resolved (both private and
+    // shared keys), else by uaddr. matches() compares the physical word
+    // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
+    // and an exec'd child waking from a fresh mmap at vaddr B MUST share
+    // a bucket (the LTP tst_checkpoint protocol; the old uaddr-only
+    // bucketing put them in different chains and the wake never reached
+    // the waiter — waitid08 ETIMEDOUT). Phys-keyed bucketing also keeps
+    // the musl interop below inside one bucket: a shared waiter and a
+    // private waker on the SAME word resolve the same frame.
     //
     // R31-9 fixed only the shared↔shared direction (mm excluded for
     // shared keys); the 4-thread hang hunt caught the remaining
     // shared-waiter ↔ private-waker split: musl's __thread_list_lock
-    // waiters park with priv=0 (shared key, bucket uaddr%H), while the
-    // kernel's CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies
-    // on it to "unlock" the list lock — it passes &__thread_list_lock as
-    // the clone ctid) hashed the private key (uaddr+mm)%H → a DIFFERENT
-    // bucket → the wake scanned an empty chain (woken=0 with three
-    // parked waiters) → every later exiter/joiner parked on the
-    // never-released lock word forever. Linux solves the same interop
-    // with FLAG_IMMUTABLE (the cleartid wake matches both key variants);
-    // uaddr-only bucketing gives this kernel the same reach.
+    // waiters park with priv=0 (shared key), while the kernel's
+    // CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies on it to
+    // "unlock" the list lock — it passes &__thread_list_lock as the
+    // clone ctid) hashed the private key (uaddr+mm) → a DIFFERENT bucket
+    // → the wake scanned an empty chain (woken=0 with three parked
+    // waiters) → every later exiter/joiner parked on the never-released
+    // lock word forever. Linux solves the same interop with
+    // FLAG_IMMUTABLE (the cleartid wake matches both key variants);
+    // same-word bucketing gives this kernel the same reach.
     //
     // F12: the raw `uaddr % HASH_SIZE` clustered EVERY thread-stack
     // futex into ONE bucket. musl hands out 1 MB pthread stacks with a
@@ -490,7 +870,8 @@ fn futex_hash(key: &FutexKey) -> usize {
     // bucket, every wake/alloc walking 256 entries under that lock).
     // Fibonacci-multiply the byte offset so any fixed stride spreads
     // across the buckets.
-    let x = (key.uaddr >> 2) as u64;
+    let id = if key.phys != 0 { key.phys } else { key.uaddr };
+    let x = (id >> 2) as u64;
     let mixed = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     // Take the high bits (multiplicative hashing) modulo HASH_SIZE.
     let bits = HASH_SIZE.trailing_zeros();
@@ -518,7 +899,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         return -EINVAL as i64;
     }
 
-    let key = FutexKey::new(uaddr, mm, flags);
+    let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
@@ -733,7 +1114,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     // valid for the duration of this syscall.
     let mm = task_futex_mm_id(current);
 
-    let key = FutexKey::new(uaddr, mm, flags);
+    let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
 
     // Linux futex_wait semantics: success (0) is returned ONLY when
@@ -803,6 +1184,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.task = current;
                 w.bitset = bitset;
                 w.woken = false;
+                w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
                 w.next = *head;
             }
@@ -1187,7 +1569,7 @@ pub fn futex_requeue(
 ) -> i64 {
     let mm = current_futex_mm_id();
 
-    let key1 = FutexKey::new(uaddr, mm, flags);
+    let key1 = FutexKey::new_user(uaddr, mm, flags);
 
     // For CMP_REQUEUE, verify *uaddr == cmpval
     if is_cmp {
@@ -1209,7 +1591,7 @@ pub fn futex_requeue(
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     }
 
-    let key2 = FutexKey::new(uaddr2, mm, flags);
+    let key2 = FutexKey::new_user(uaddr2, mm, flags);
     let bucket1 = futex_hash(&key1);
     let bucket2 = futex_hash(&key2);
 
@@ -1475,7 +1857,7 @@ pub fn futex_wake_op(
     };
 
     let mm = current_futex_mm_id();
-    let key2 = FutexKey::new(uaddr2, mm, flags);
+    let key2 = FutexKey::new_user(uaddr2, mm, flags);
     let bucket2 = futex_hash(&key2);
 
     // Perform the user-word operation while holding uaddr2's bucket lock:

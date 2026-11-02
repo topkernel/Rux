@@ -95,4 +95,10 @@ pub fn security_init() {
 
     lsm::register_lsm(&cap_lsm::CapLsm);
     crate::print_status("security", "capability LSM initialized", true);
+
+    // G1 follow-up (sec-r1): state the SMAP armed state on every boot,
+    // from the real CR4 read captured at arming time — a silently-off
+    // SMAP must never pass unnoticed again (design doc §1 item 1).
+    #[cfg(feature = "x86_64")]
+    crate::arch::x86_64::cpu::smap_report();
 }

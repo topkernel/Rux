@@ -1710,18 +1710,34 @@ fn gem_close(handle: u32) -> i64 {
     // Mesa's llvmpipe assert-aborted render_service on every first
     // composition (oh-svc lane, boot oh-glm5). The entry goes away when
     // the caller's close is the last reference.
-    let taken = {
+    enum CloseOutcome {
+        Removed(Arc<GemObject>),
+        SharedKeep,
+        NotFound,
+    }
+    let outcome = {
         let mut st = DRM_STATE.lock_irqsave();
         match st.gems.get(&handle) {
-            Some(gem) if Arc::strong_count(gem) > 1 => None, // still referenced elsewhere
-            _ => st.gems.remove(&handle),
+            Some(gem) if Arc::strong_count(gem) > 1 => CloseOutcome::SharedKeep,
+            Some(_) => CloseOutcome::Removed(st.gems.remove(&handle).unwrap()),
+            None => CloseOutcome::NotFound,
         }
     };
-    match taken {
+    match outcome {
         // Drop OUTSIDE the state lock: GemObject::drop runs virtio
         // RESOURCE_UNREF, which polls the device for milliseconds.
-        Some(_) => 0,
-        None => -22,
+        CloseOutcome::Removed(gem) => {
+            drop(gem);
+            0
+        }
+        // The caller's handle close SUCCEEDED — the object merely stays
+        // for its other holders. The reference's per-file handle tables
+        // make a close never fail because another file shares the
+        // OBJECT; reporting -EINVAL here made Mesa's GEM_CLOSE on
+        // shared buffers look failed (errno-shape divergence; the
+        // shared-keep behavior itself is the oh-glm5 fix above).
+        CloseOutcome::SharedKeep => 0,
+        CloseOutcome::NotFound => -22,
     }
 }
 

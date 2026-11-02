@@ -323,6 +323,73 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
             // kernel-image addresses are numerically ABOVE the heap.)
             let is_static =
                 !(0xffff_8880_4000_0000..0xffff_8880_4800_0000).contains(&(next as usize));
+            // Resume-boundary guard (LTP chunk@700 panic hunt, KSO census
+            // 2026-11-02): a HEAP task with NO kernel stack (fields cleared
+            // at exit-free) or a dead/exiting state, resumed through a
+            // stale link, executes on freed-and-reused memory — the
+            // deterministic rip=0 "Kernel stack overflow" panic family
+            // (4/4 boots of chunk 700; fault rsp inside an unowned 80KB
+            // kstack slot holding recycled "./loop" path buffers). The
+            // FOREIGN-SP check below skips when top==0, so this shape was
+            // silent before. Runs AFTER try_affirm_pick flipped the claim
+            // to LIVE: aborting leaves the corpse LIVE-claimed by this
+            // CPU, which neutralizes further picks of it (a re-pick after
+            // a claim-sweep reset just aborts again — cheap, no tear).
+            if !is_static
+                && (top == 0
+                    || (*next).state().is_dead()
+                    || ((*next).ti_flags()
+                        & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                            != 0))
+            {
+                use crate::console::putchar_no_lock as putchar;
+                const M: &[u8] = b"\nSWITCHIN-DEAD-TASK task=0x";
+                for &b in M {
+                    putchar(b);
+                }
+                let mut v = next as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M2: &[u8] = b" pid=";
+                for &b in M2 {
+                    putchar(b);
+                }
+                // SAFETY: header read of the task we refuse to resume.
+                let mut v = unsafe { (*next).pid() } as u64;
+                for _ in 0..8 {
+                    let n = (v >> 28) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M3: &[u8] = b" top=0x";
+                for &b in M3 {
+                    putchar(b);
+                }
+                let mut v = top as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M4: &[u8] = b" sp=0x";
+                for &b in M4 {
+                    putchar(b);
+                }
+                let mut v = sp as u64;
+                for _ in 0..16 {
+                    let n = (v >> 60) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    v <<= 4;
+                }
+                const M5: &[u8] = b" dead-resume aborted\n";
+                for &b in M5 {
+                    putchar(b);
+                }
+                return 1;
+            }
             if !is_static && top != 0 && !(sp > bottom && sp <= top) {
                 use crate::console::putchar_no_lock as putchar;
                 const M: &[u8] = b"\nSWITCHIN-FOREIGN-SP task=0x";
@@ -434,6 +501,38 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
     // flips).
     const HEAP_LO: u64 = 0xffff_8880_4000_0000;
     const HEAP_HI: u64 = HEAP_LO + crate::config::KERNEL_HEAP_SIZE as u64;
+    // DFX (LTP chunk@700 hunt): a top==0 (no-kstack) switch-in silently
+    // keeps the PREVIOUS task's rsp0 — if that task has exited and its
+    // stack was freed, every later user entry on this CPU lands on
+    // recycled memory (the stale-rsp0 engine). Name it.
+    if !task.is_null() && top == 0 {
+        use crate::console::putchar_no_lock as putchar;
+        const MSG: &[u8] = b"\nR64-NOTOP-SKIP task=0x";
+        // SAFETY: raw console write; no locks, no allocation.
+        unsafe {
+            for &b in MSG {
+                putchar(b);
+            }
+            let mut v = task as u64;
+            for _ in 0..16 {
+                let n = (v >> 60) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                v <<= 4;
+            }
+            const M2: &[u8] = b" pid=";
+            for &b in M2 {
+                putchar(b);
+            }
+            let mut v = (*task).pid() as u64;
+            for _ in 0..8 {
+                let n = (v >> 28) as u8;
+                putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                v <<= 4;
+            }
+            putchar(b'\n');
+        }
+        return; // keep the previous rsp0
+    }
     if top != 0 && (top < HEAP_LO || top >= HEAP_HI || top & 0xF != 0) {
         use crate::console::putchar_no_lock as putchar;
         const MSG: &[u8] = b"\nR64-BAD-RSP0 task=0x";

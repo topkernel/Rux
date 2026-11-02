@@ -372,33 +372,47 @@ pub unsafe fn wrgsbase(base: u64) {
     unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
 }
 
-pub fn enable_smap() {
-    // CPUID leaf 7 subleaf 0, **EBX** bit 20 = SMAP capability.
-    //
-    // The register was wrong until 2026-11-01: the check read EDX[20]
-    // (the architectural SMAP capability bit lives in EBX), so the
-    // protection never armed on silicon — the emulators we test on
-    // happen to report the bit in EDX as well, which is why CI stayed
-    // green while real hardware ran with SMAP off.
+/// Boot-log assertion of the SMAP armed state, from LIVE reads (sec-r1,
+/// G1 follow-up).
+///
+/// Every boot must state the CPUID capability and the actual CR4 bit
+/// side by side, so a silently-off SMAP (the original G1 defect class)
+/// can never pass unnoticed again.
+///
+/// ARMING IS DELIBERATELY NOT ATTEMPTED (2026-11-02 finding, sec-r1):
+/// calling enable_smap() at any pre-IDT boot stage (arch_init and
+/// fpu_init were both tested) triple-faults the machine on the FIRST
+/// kernel data access after the CR4 store — on KVM and on TCG. The
+/// kernel dereferences at least one U/S-mapped page in early boot (prime
+/// suspect: a kernel stack or per-CPU structure mapped with the user
+/// bit). Because the old CPUID bug read EDX[20] (never set anywhere),
+/// the arm path had never executed before this round; exercising it is
+/// what exposed the latent fault. Root-causing it is its own lane
+/// (see run/sec-r1-notes.md); until then this report honestly states
+/// that user-mode access prevention is ABSENT.
+pub fn smap_report() {
     let (_, ebx, _, _) = cpuid(7, 0);
-    if ebx & (1 << 20) == 0 {
-        crate::println!("arch: SMAP not available (CPUID.7.0:EBX[20]=0), leaving CR4 untouched");
-        return;
+    let present = ebx & (1 << 20) != 0;
+    let cr4 = read_cr4();
+    let armed = cr4 & (1u64 << 21) != 0;
+    match (present, armed) {
+        (true, true) => crate::println!(
+            "arch: CR4.SMAP armed (CPUID.7.0:EBX[20]=1, live CR4={:#x}, bit 21 = 1)",
+            cr4
+        ),
+        (true, false) => crate::println!(
+            "arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4={:#x}); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)",
+            cr4
+        ),
+        (false, true) => crate::println!(
+            "arch: CR4.SMAP set by firmware though CPUID.7.0:EBX[20]=0 (live CR4={:#x})",
+            cr4
+        ),
+        (false, false) => crate::println!(
+            "arch: CR4.SMAP not armed (CPUID.7.0:EBX[20]=0, live CR4={:#x}); user-mode access prevention is ABSENT on this boot",
+            cr4
+        ),
     }
-    // SAFETY: CR4 update with the SMAP bit only; CPUID gated. BIOS may
-    // already have it set — the or is idempotent.
-    unsafe {
-        core::arch::asm!(
-            "movq %cr4, %rax",
-            "orq {bit}, %rax",
-            "movq %rax, %cr4",
-            bit = const (1u64 << 21),
-            out("rax") _,
-            options(nomem, nostack, att_syntax)
-        );
-    }
-    SMAP_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
-    crate::println!("arch: CR4.SMAP enabled");
 }
 
 /// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).

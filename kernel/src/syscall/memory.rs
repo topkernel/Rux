@@ -377,10 +377,26 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
 
     let mut addr = args[0] as usize;
     let length = args[1] as usize;
-    let prot_flags = args[2] as u32;
+    let mut prot_flags = args[2] as u32;
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+
+    // W^X (sec-r1): READ_IMPLIES_EXEC personality (0x0400000, settable
+    // via personality(2) — legacy loaders use it). The reference do_mmap
+    // adds PROT_EXEC to any PROT_READ mapping made by such a process,
+    // EXCEPT on noexec-mounted files (that carve-out needs the file's
+    // mount flags, which this port's mmap does not yet consult for ANY
+    // exec mapping — noted in the posture ledger).
+    const READ_IMPLIES_EXEC: u32 = 0x0400_000; // include/uapi personality.h
+    if prot_flags & prot::PROT_READ != 0 {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: `t` is the current task pointer; a u32 field read.
+            if unsafe { (*t).personality } & READ_IMPLIES_EXEC != 0 {
+                prot_flags |= prot::PROT_EXEC;
+            }
+        }
+    }
 
     // The file offset must be a multiple of the page size. The reference
     // kernel's mmap syscall wrapper rejects a misaligned offset with
@@ -2610,6 +2626,18 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         None => return mmap_error::EINVAL,
     };
 
+    // mremap(2) EINVAL shape: new_size == 0 is always invalid. old_size ==
+    // 0 is invalid except the reference's shareable+MAYMOVE carve-out
+    // (post-4.14: EINVAL for everything else); sharedness is only known
+    // after the VMA lookup, so old_size==0 without MAYMOVE is rejected
+    // here and the VMA-sharing check rides the lookup below.
+    if new_size == 0 {
+        return mmap_error::EINVAL;
+    }
+    if old_size == 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        return mmap_error::EINVAL;
+    }
+
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
@@ -2662,6 +2690,13 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         Some(info) => info,
         None => return mmap_error::EFAULT,  // Address not mapped
     };
+
+    // Second half of the old_size == 0 contract (mremap(2)): with
+    // MREMAP_MAYMOVE it stays EINVAL unless the mapping at old_addr is
+    // shareable (VmaFlags::SHARED — the reference's post-4.14 carve-out).
+    if old_size == 0 && !vma_flags.is_shared() {
+        return mmap_error::EINVAL;
+    }
 
     // Pinned vm_file of the ORIGINAL mapping (None for anonymous): moved
     // or grown file mappings re-pin it at the new piece's start so

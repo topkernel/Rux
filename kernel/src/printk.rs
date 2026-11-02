@@ -233,6 +233,18 @@ fn printk_ring_always(level: u8, args: fmt::Arguments) {
     let _ = fmt::Write::write_fmt(&mut writer, args);
     let text_len = writer.pos.min(RECORD_TEXT_SIZE);
 
+    // The printk:console tracepoint — the reference fires it in
+    // printk_sprint, right after the text is formatted into the record
+    // (KERN prefix stripped by the formatter; the trailing newline cut
+    // per the fast_assign). Marshals only behind armed().
+    if crate::trace::EVENT_CONSOLE.armed() {
+        let mut tlen = text_len;
+        if tlen > 0 && buf[tlen - 1] == b'\n' {
+            tlen -= 1;
+        }
+        crate::trace::trace_console(&buf[..tlen]);
+    }
+
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
         let timestamp = crate::arch::cpu::read_time();

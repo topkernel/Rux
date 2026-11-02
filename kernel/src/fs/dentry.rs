@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
 
@@ -100,265 +100,6 @@ impl VfsMountInternal {
 unsafe impl Send for VfsMountInternal {}
 unsafe impl Sync for VfsMountInternal {}
 
-// ============================================================================
-// Reader banks + deferred retirement (gap-fs lane)
-// ============================================================================
-//
-// The path walk's per-component costs were dominated by lock pairs:
-// `children` (BTreeMap under a spinlock) and `inode` (Option<Arc> under a
-// spinlock) — measured ~39 ns + ~20 ns per walked component under the fsw
-// pathcost probe, with the line bouncing between the two vCPUs of the
-// lmbench rig. The protocol below (the FdTable leg-52 lever-B pattern,
-// generalized) lets the walk read both lock-free:
-//
-// READER: acquire a WalkClaim (a SeqCst increment of THIS CPU's reader
-// bank — or, for a cpu id outside the bank range, the DENTRY_SLOW_READ
-// irqsave lock), then load a memo slot's child pointer / the inode
-// pointer mirror and, when an owned reference is needed, increment the
-// target's strong count BEFORE releasing the claim.
-//
-// WRITER: every mutation of the child map or the inode slot bumps the
-// dentry's `children_ver` (memo slots stamped with an older version are
-// then ignored) and parks any Arc it removes in the RETIRED lists
-// instead of dropping it in place.
-//
-// DRAIN: `dentry_drain_if_quiescent` reclaims the retired Arcs only
-// after a SeqCst fence and a scan that observes EVERY bank at zero (plus
-// DENTRY_SLOW_READ held across the take). A reader can therefore only
-// load a pointer whose reference is provably alive: either the map /
-// inode slot still publishes it, or the removing writer's drain is
-// waiting for THIS reader's bank to return to zero before its drop. The
-// reader's SeqCst claim-before-load and the drain's SeqCst-fence-then-
-// scan close the store-load ordering hole (same argument as FdTable's
-// get_file / drain_retired pair).
-//
-// Unlike FdTable (whose sections are irq-off and bounded), a WalkClaim
-// is PREEMPTIBLE and held for the dcache-hot span of one path walk: a
-// walk never holds it across an operation that can sleep (fs lookup on
-// a dcache miss, symlink read/follow, mount descriptor cloning) — those
-// arms materialize owned Arcs and drop the claim first. A task
-// preempted mid-claim only delays reclamation: the drain has a spin
-// budget and defers to the next mutation (DENTRY_DRAIN_DEFERS counts
-// the gives-up; correctness is never affected).
-
-/// Number of per-CPU reader banks. Kernel.toml's SMP ceiling is 4; 16
-/// leaves generous headroom. A cpu id at or above this bound degrades to
-/// the DENTRY_SLOW_READ lock (held for the claim's span — unreachable
-/// with any current config, but kept correct rather than assumed away;
-/// the FdTable r8final discipline).
-const DENTRY_READER_BANKS: usize = 16;
-
-/// One per-CPU reader-nesting counter, padded to its own cacheline so
-/// the CPUs' counter RMWs never share a line (FdTable discipline).
-#[repr(align(64))]
-struct DentryReaderBank(AtomicUsize);
-
-static DENTRY_BANKS: [DentryReaderBank; DENTRY_READER_BANKS] = [const {
-    DentryReaderBank(AtomicUsize::new(0))
-}; DENTRY_READER_BANKS];
-
-/// Slow-path exclusion for readers whose cpu id falls outside the bank
-/// range; drains hold it across the drop of retired Arcs.
-static DENTRY_SLOW_READ: Spinlock<()> = Spinlock::new(());
-
-/// Dentries removed from a parent's child map (remove_child /
-/// add_child displacement / clear / rehome) whose last strong reference
-/// may still be racing a banked reader — parked until a drain observes
-/// every reader bank at zero.
-static DENTRY_RET_DENTRY: Spinlock<Vec<Arc<Dentry>>> = Spinlock::new(Vec::new());
-
-/// Inodes swapped out of a dentry's inode slot (set_inode / clear_inode)
-/// — same parking discipline.
-static DENTRY_RET_INODE: Spinlock<Vec<Arc<Inode>>> = Spinlock::new(Vec::new());
-
-/// Drain give-up counter (dfx observability, FdTable discipline): a
-/// drain that could not observe all banks at zero within its spin budget
-/// defers the retired drop to the next writer.
-pub static DENTRY_DRAIN_DEFERS: AtomicUsize = AtomicUsize::new(0);
-
-/// Walk-scoped reader claim. `acquire()` bumps this CPU's bank (SeqCst —
-/// the claim is globally visible before any subsequent pointer load
-/// executes); Drop decrements it (Release). The value is Copy-able
-/// evidence of holding the claim: methods taking `&WalkClaim` may load
-/// raw pointers that are only guaranteed alive while some claim is held
-/// on the calling CPU.
-pub struct WalkClaim {
-    /// Bank index claimed, or usize::MAX for the slow-path lock (whose
-    /// guard we keep alive in `slow`).
-    cpu: usize,
-    slow: Option<crate::sync::spinlock::SpinlockIrqGuard<'static, ()>>,
-}
-
-impl WalkClaim {
-    /// Claim this CPU's reader bank (or the slow-path lock for an
-    /// out-of-range cpu id).
-    pub fn acquire() -> Self {
-        let cpu = crate::arch::cpu_id() as usize;
-        if cpu < DENTRY_READER_BANKS {
-            DENTRY_BANKS[cpu].0.fetch_add(1, Ordering::SeqCst);
-            WalkClaim { cpu, slow: None }
-        } else {
-            // SAFETY of holding this lock for the claim's span: drains
-            // take it across the retired drop, so a raw pointer loaded
-            // under it cannot be freed mid-read. Unreachable with the
-            // current SMP configs (banks sized above the ceiling).
-            let g = DENTRY_SLOW_READ.lock_irqsave();
-            WalkClaim { cpu: usize::MAX, slow: Some(g) }
-        }
-    }
-}
-
-impl Drop for WalkClaim {
-    fn drop(&mut self) {
-        if self.cpu != usize::MAX {
-            DENTRY_BANKS[self.cpu].0.fetch_sub(1, Ordering::Release);
-        } else {
-            self.slow.take(); // releases the slow-path lock
-        }
-    }
-}
-
-/// Park a detached dentry until a reader-quiescent drain (see the
-/// protocol comment above). Called by the child-map mutators with the
-/// removed Arc in hand.
-fn retire_dentry_arc(a: Arc<Dentry>) {
-    DENTRY_RET_DENTRY.lock_irqsave().push(a);
-}
-
-/// Park a swapped-out inode (set_inode / clear_inode).
-fn retire_inode_arc(a: Arc<Inode>) {
-    DENTRY_RET_INODE.lock_irqsave().push(a);
-}
-
-/// Drop retired dentries/inodes once no reader can be mid-read.
-///
-/// Quiescence: every bank reads 0 (each scan load Acquire — reading 0
-/// synchronizes with that reader's Release decrement, so its
-/// strong-count increment has completed) AND the slow-path lock is held
-/// across the take. Readers that START after a successful scan cannot
-/// load these Arcs: the map/slot publications preceded the park, the
-/// parks precede this drain's SeqCst fence, and a fresh reader's pointer
-/// load follows its own SeqCst bank claim.
-///
-/// `parked`: the caller just pushed entries (skip the emptiness
-/// pre-check). Called by the mutators after every retire and (cheaply)
-/// when their retired lists have grown past the drain threshold.
-pub fn dentry_drain_if_quiescent(parked: bool) {
-    if !parked {
-        // Cheap emptiness check first: most lookups/mutations park
-        // nothing and most drains find a previous drain already took
-        // the vecs.
-        let d = DENTRY_RET_DENTRY.lock_irqsave();
-        if d.is_empty() {
-            let i = DENTRY_RET_INODE.lock_irqsave();
-            if i.is_empty() {
-                return;
-            }
-        }
-    }
-    let mut scans: usize = 0;
-    loop {
-        // The fence orders the earlier retire/park stores before the
-        // bank reads below (the reader side of the handshake is its
-        // SeqCst bank claim before its pointer load).
-        core::sync::atomic::fence(Ordering::SeqCst);
-        let mut all_zero = true;
-        for b in DENTRY_BANKS.iter() {
-            if b.0.load(Ordering::Acquire) != 0 {
-                all_zero = false;
-                break;
-            }
-        }
-        if all_zero {
-            break;
-        }
-        scans += 1;
-        if scans >= 64 {
-            // Defer, never fail: the next writer retries. Walk claims
-            // are preemptible, so a deferral is expected whenever a
-            // hot-walk CPU is mid-path — bounded by mutation bursts.
-            DENTRY_DRAIN_DEFERS.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        core::hint::spin_loop();
-    }
-    {
-        let _slow = DENTRY_SLOW_READ.lock_irqsave();
-        let taken_d = core::mem::take(&mut *DENTRY_RET_DENTRY.lock_irqsave());
-        let taken_i = core::mem::take(&mut *DENTRY_RET_INODE.lock_irqsave());
-        // Drops run inside the slow-lock scope: any cascade (a dentry's
-        // child map / inode slot releasing further Arcs) cannot race a
-        // banked reader, which by the scan above cannot exist now.
-        drop(taken_d);
-        drop(taken_i);
-    }
-}
-
-/// Increment a dentry's strong count for a pointer loaded under a
-/// reader claim (the claim blocks the drain that would otherwise free
-/// it) and return an owned Arc.
-///
-/// # Safety
-/// `p` must have been loaded from a dentry child memo slot / inode
-/// pointer mirror while a WalkClaim is held by the caller, and `p` must
-/// be non-null.
-pub unsafe fn dentry_arc_from_raw(p: *const Dentry) -> Arc<Dentry> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
-}
-
-/// Same as [`dentry_arc_from_raw`] for inodes (the inode pointer mirror).
-///
-/// # Safety
-/// See [`dentry_arc_from_raw`]; `p` non-null, loaded under a claim.
-pub unsafe fn inode_arc_from_raw(p: *const Inode) -> Arc<Inode> {
-    Arc::increment_strong_count(p);
-    Arc::from_raw(p)
-}
-
-/// FNV-1a over the component bytes — the memo slot key.
-#[inline]
-fn child_name_hash(name: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for &b in name {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// Inline name capacity of a memo slot (24 bytes covers the hot
-/// component shapes; longer names take the locked path).
-const CHILD_MEMO_NAME_MAX: usize = 24;
-/// Memo slots per dentry (index = hash & mask).
-const CHILD_MEMO_SLOTS: usize = 4;
-const CHILD_MEMO_MASK: usize = CHILD_MEMO_SLOTS - 1;
-
-/// Plain (non-atomic) slot payload — read/written through the enclosing
-/// slot's seqlock (the sync::seqlock UnsafeCell discipline).
-struct ChildMemoData {
-    /// `children_ver` at fill time — the slot is valid only while it
-    /// equals the dentry's current version (any map mutation bumped it).
-    ver: u64,
-    /// FNV-1a of the name (fast reject before the byte compare).
-    hash: u64,
-    /// Name bytes, `name_len` valid.
-    name: [u8; CHILD_MEMO_NAME_MAX],
-    name_len: u8,
-    /// The child (raw — the child map / a pending retire keeps it alive;
-    /// see the reader-bank protocol).
-    child: *const Dentry,
-}
-
-/// One lock-free child-memo slot, exactly one cacheline. Racing readers
-/// are guarded by the per-slot seqlock (odd = a refill is writing).
-#[repr(align(64))]
-struct ChildMemoSlot {
-    /// Per-slot seqlock (writer: odd → fields → even).
-    seq: AtomicU64,
-    data: core::cell::UnsafeCell<ChildMemoData>,
-}
-
 /// Directory entry
 ///
 #[repr(C)]
@@ -404,19 +145,6 @@ pub struct Dentry {
     /// whether to take the SLOW path — a stale "current" verdict is
     /// caught on the next walk after the generation bumps.
     inode_gen: AtomicU64,
-    /// (gap-fs lane) Child-map mutation version — bumped (under the
-    /// children lock) by every add/remove/clear/rehome. A memo slot
-    /// stamped with an older version is stale and ignored, so readers
-    /// never need to serialize with the mutators.
-    children_ver: AtomicU64,
-    /// (gap-fs lane) Lock-free child memo — see ChildMemoSlot.
-    memo: [ChildMemoSlot; CHILD_MEMO_SLOTS],
-    /// (gap-fs lane) Mirror of the `inode` slot's Arc pointer (null =
-    /// None), published with Release by set_inode/clear_inode. Readers
-    /// load it under a WalkClaim and may increment the strong count
-    /// directly (the claim blocks the drain; see the reader-bank
-    /// protocol comment).
-    inode_ptr: AtomicPtr<Inode>,
 }
 
 unsafe impl Send for Dentry {}
@@ -438,20 +166,6 @@ impl Dentry {
             negative: AtomicBool::new(false),
             is_mountpoint: AtomicBool::new(false),
             inode_gen: AtomicU64::new(0),
-            children_ver: AtomicU64::new(0),
-            memo: [const {
-                ChildMemoSlot {
-                    seq: AtomicU64::new(0),
-                    data: core::cell::UnsafeCell::new(ChildMemoData {
-                        ver: 0,
-                        hash: 0,
-                        name: [0; CHILD_MEMO_NAME_MAX],
-                        name_len: 0,
-                        child: core::ptr::null(),
-                    }),
-                }
-            }; CHILD_MEMO_SLOTS],
-            inode_ptr: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -462,65 +176,11 @@ impl Dentry {
 
     /// Set inode
     pub fn set_inode(&self, inode: Arc<Inode>) {
-        let old = {
-            let mut slot = self.inode.lock();
-            // Publish the mirror first: a concurrent banked reader sees
-            // either the old pointer (kept alive by the slot until the
-            // replace below, then by its retire until the drain) or the
-            // new one (held by the slot) — both valid under the claim.
-            self.inode_ptr
-                .store(Arc::as_ptr(&inode) as *mut Inode, Ordering::Release);
-            slot.replace(inode)
-        };
+        *self.inode.lock() = Some(inode);
         // (perf-path lane) stamp the icache generation this Arc was made
         // current at — see inode_gen.
         self.inode_gen
             .store(crate::fs::inode::icache_regen(), Ordering::Relaxed);
-        if let Some(old) = old {
-            retire_inode_arc(old);
-            dentry_drain_if_quiescent(true);
-        }
-    }
-
-    /// (gap-fs lane) Drop the dentry's inode (unlink/rmdir/rename kill
-    /// the cached entry). Publishes the null mirror and parks the old
-    /// Arc for a reader-quiescent drain — replaces the direct
-    /// `*inode.lock() = None` writes, which a banked reader of the old
-    /// pointer could not be protected from.
-    pub fn clear_inode(&self) {
-        let old = {
-            let mut slot = self.inode.lock();
-            self.inode_ptr.store(core::ptr::null_mut(), Ordering::Release);
-            slot.take()
-        };
-        if let Some(old) = old {
-            retire_inode_arc(old);
-            dentry_drain_if_quiescent(true);
-        }
-    }
-
-    /// The current inode as a raw pointer, for callers holding a
-    /// WalkClaim (see the reader-bank protocol comment): the object
-    /// stays alive while the claim is held (the inode slot or a pending
-    /// retire owns it). Null when the dentry has no inode.
-    pub fn inode_ptr_walk(&self, _claim: &WalkClaim) -> *const Inode {
-        self.inode_ptr.load(Ordering::Acquire)
-    }
-
-    /// Lock-free inode read for standalone callers: claim, load the
-    /// mirror, take a strong reference, release.
-    pub fn get_inode_fast(&self) -> Option<Arc<Inode>> {
-        let claim = WalkClaim::acquire();
-        let p = self.inode_ptr.load(Ordering::Acquire);
-        let out = if p.is_null() {
-            None
-        } else {
-            // SAFETY: p is non-null and kept alive by the inode slot or
-            // its pending retire; our claim blocks the drain.
-            Some(unsafe { inode_arc_from_raw(p) })
-        };
-        drop(claim);
-        out
     }
 
     /// The icache generation `inode` was last refreshed at (see inode_gen).
@@ -661,120 +321,6 @@ impl Dentry {
         self.children.lock().get(name).cloned()
     }
 
-    /// (gap-fs lane) Lock-free child lookup for the path walk. Returns
-    /// the child as a RAW pointer valid only while `claim` is held (the
-    /// child map — or the removed child's pending retire — owns it; the
-    /// claim blocks the drain). Callers that need the reference beyond
-    /// the claim must `dentry_arc_from_raw` it first.
-    ///
-    /// Memo hit path: version check + per-slot seqlock pair + one name
-    /// compare — no lock, no refcount traffic. Miss path: the locked
-    /// BTreeMap lookup, refilling the memo slot (serialized by the
-    /// children lock) so the next walk of the same component rides the
-    /// memo.
-    pub fn lookup_child_walk(
-        &self,
-        claim: &WalkClaim,
-        name: &str,
-    ) -> Option<*const Dentry> {
-        if name.len() > CHILD_MEMO_NAME_MAX {
-            // Long names can't ride the inline memo. Locked lookup (the
-            // children lock serializes with every retire); the returned
-            // Arc's map reference keeps the child alive under the claim
-            // after our clone drops.
-            let c = self.lookup_child(name)?;
-            return Some(Arc::as_ptr(&c));
-        }
-        let h = child_name_hash(name.as_bytes());
-        let slot = &self.memo[(h as usize) & CHILD_MEMO_MASK];
-        let ver = self.children_ver.load(Ordering::Relaxed);
-        let mut spins: u32 = 0;
-        loop {
-            let s1 = slot.seq.load(Ordering::Acquire);
-            if s1 & 1 == 0 {
-                // SAFETY: seqlock-protected read (validated by the seq
-                // re-load below; the sync::seqlock UnsafeCell discipline).
-                let d = unsafe { &*slot.data.get() };
-                let hit = d.ver == ver
-                    && d.hash == h
-                    && d.name_len as usize == name.len()
-                    && d.name[..name.len()] == *name.as_bytes();
-                let p = d.child;
-                if slot.seq.load(Ordering::Acquire) == s1 {
-                    if hit {
-                        debug_assert!(!p.is_null());
-                        return Some(p);
-                    }
-                    break; // clean miss → locked fallback + refill
-                }
-            }
-            spins += 1;
-            if spins >= 128 {
-                break; // persistent seq mismatch → locked fallback
-            }
-            core::hint::spin_loop();
-        }
-        let child = {
-            let guard = self.children.lock();
-            let c = guard.get(name).cloned();
-            if let Some(ref c) = c {
-                self.refill_memo_locked(name, c);
-            }
-            c
-        };
-        child.map(|c| Arc::as_ptr(&c))
-    }
-
-    /// Lock-free child read for standalone callers: claim, memo/locked
-    /// lookup, take a strong reference, release.
-    pub fn lookup_child_fast(&self, name: &str) -> Option<Arc<Dentry>> {
-        let claim = WalkClaim::acquire();
-        let out = match self.lookup_child_walk(&claim, name) {
-            Some(p) => {
-                // SAFETY: loaded under the claim; see the protocol.
-                Some(unsafe { dentry_arc_from_raw(p) })
-            }
-            None => None,
-        };
-        drop(claim);
-        out
-    }
-
-    /// Refill a memo slot — called with the CHILDREN LOCK HELD (all
-    /// refills and all `children_ver` bumps are serialized by it), so
-    /// the plain-field writes race only readers, which the per-slot
-    /// seqlock guards.
-    fn refill_memo_locked(&self, name: &str, child: &Arc<Dentry>) {
-        if name.len() > CHILD_MEMO_NAME_MAX {
-            return;
-        }
-        let ver = self.children_ver.load(Ordering::Relaxed);
-        let h = child_name_hash(name.as_bytes());
-        let slot = &self.memo[(h as usize) & CHILD_MEMO_MASK];
-        // A fill that already matches the current version wins (another
-        // CPU refilled between our miss and taking the lock).
-        {
-            // SAFETY: children lock held — all refills serialize here.
-            let cur = unsafe { &*slot.data.get() };
-            if cur.ver == ver && cur.hash == h {
-                return;
-            }
-        }
-        let s = slot.seq.load(Ordering::Relaxed);
-        slot.seq.store(s | 1, Ordering::Release); // odd — enter write
-        // SAFETY: children lock held (serializes writers); racing
-        // readers are guarded by the seqlock.
-        {
-            let d = unsafe { &mut *slot.data.get() };
-            d.ver = ver;
-            d.hash = h;
-            d.name_len = name.len() as u8;
-            d.name[..name.len()].copy_from_slice(name.as_bytes());
-            d.child = Arc::as_ptr(child);
-        }
-        slot.seq.store((s | 1) + 1, Ordering::Release); // even — leave
-    }
-
     /// Add a child dentry. If a child with the same name exists, it is replaced.
     pub fn add_child(&self, name: String, child: Arc<Dentry>) {
         // lb-lane hunt (OH /storage invisibility): pid 1's early tmpfs
@@ -803,42 +349,19 @@ impl Dentry {
                 }
             }
         }
-        let old = self.children.lock().insert(name, child);
-        // (gap-fs lane) Invalidate memo slots stamped with the old
-        // version, then park a displaced child for a reader-quiescent
-        // drain (a banked reader may still hold its raw pointer).
-        self.children_ver.fetch_add(1, Ordering::Release);
-        if let Some(old) = old {
-            retire_dentry_arc(old);
-            dentry_drain_if_quiescent(true);
-        }
+        self.children.lock().insert(name, child);
     }
 
     /// Remove a child dentry by name.
     pub fn remove_child(&self, name: &str) {
-        let old = self.children.lock().remove(name);
-        self.children_ver.fetch_add(1, Ordering::Release);
-        if let Some(old) = old {
-            retire_dentry_arc(old);
-            dentry_drain_if_quiescent(true);
-        }
+        self.children.lock().remove(name);
     }
 
     /// Drop every cached child (mount(2) MS_MOVE onto "/": the old root's
     /// cached ramdisk names must not shadow the moved-in filesystem's
     /// root — lookups fall back to the new root inode's directory ops).
     pub fn clear_children(&self) {
-        let old: Vec<Arc<Dentry>> = {
-            let mut guard = self.children.lock();
-            core::mem::take(&mut *guard).into_values().collect()
-        };
-        self.children_ver.fetch_add(1, Ordering::Release);
-        for c in old {
-            retire_dentry_arc(c);
-        }
-        if !DENTRY_RET_DENTRY.lock_irqsave().is_empty() {
-            dentry_drain_if_quiescent(true);
-        }
+        self.children.lock().clear();
     }
 
     /// Move every cached child of `self` into `into` (re-parenting them).
@@ -850,23 +373,11 @@ impl Dentry {
         let moving: Vec<(String, Arc<Dentry>)> = self.children.lock().iter().map(|(k, v)| {
             (k.clone(), v.clone())
         }).collect();
-        {
-            let mut guard = self.children.lock();
-            guard.clear();
-        }
-        self.children_ver.fetch_add(1, Ordering::Release);
         for (name, child) in moving {
             child.set_parent(into.clone());
-            into.add_child(name, child.clone());
-            // (gap-fs lane) Our clone drops here — if it was the last
-            // live reference (no new-parent map entry, e.g. a racing
-            // displacement), the free must wait out banked readers, so
-            // park it like every other detached child.
-            retire_dentry_arc(child);
+            into.add_child(name, child);
         }
-        if !DENTRY_RET_DENTRY.lock_irqsave().is_empty() {
-            dentry_drain_if_quiescent(true);
-        }
+        self.children.lock().clear();
     }
 
     /// Detach the mount descriptor (mount(2) MS_MOVE source side and

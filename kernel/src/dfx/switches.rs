@@ -105,6 +105,9 @@ macro_rules! dfx_switch_table {
             FilerdProbe => "filerd",
             LostParkTrace => "lostpark",
             AllocWatch => "allocwatch",
+            SyncGuard => "syncguard",
+            SyncWatch => "syncwatch",
+            FuxStuck => "fuxstuck",
         }
     };
 }
@@ -517,9 +520,36 @@ pub enum DfxSwitch {
     /// 2026-11-02). OFF by default; Relaxed atomic stores per slow-path
     /// acquire when on, nothing but one load when off.
     AllocWatch,
+    /// Reference-parity sync-send guards as a DIAGNOSTIC (ipc/binder.rs
+    /// SYNCSEND-GUARD prints): log-only mode would still reject, so the
+    /// switch gates the REJECTION itself. The reference kernel enforces
+    /// these two checks always; enabling this switch on an OH boot names
+    /// which userspace sends violate the reference shape under our
+    /// bookkeeping (lb304: samgr's own early code-20/code-3 sends —
+    /// meaning our sender-thread state diverges from the reference's
+    /// BEFORE the guard, and that divergence is the real hunt target).
+    SyncGuard,
+    /// Log-only companion of SyncGuard: runs the same two reference
+    /// checks on every sync send but NEVER rejects (SYNCSEND-WATCH
+    /// prints). For the divergence hunt: a boot with syncwatch shows
+    /// which sender shapes trip the reference checks on a boot that
+    /// still PROCEEDS, and the print carries the discriminator fields
+    /// (stack-top from_tid — my own outgoing = userspace stacking the
+    /// reference rejects; todo-head to_tid — None means proc-addressed
+    /// work on a busy thread's todo, a delivery shape the reference
+    /// avoids via waiting_threads).
+    SyncWatch,
+    /// Futex-stuck census (sync/futex.rs futex_stuck_census, timer 1 Hz
+    /// heartbeat): park-time stamp per futex wait (Waiter::park_j) + a
+    /// one-burst-per-5s report of waits >= 10 s naming uaddr/mm/tgid/tid,
+    /// the stuck thread's entry-frame syscall, and the owning tgid's
+    /// thread-state histogram — the per-condvar producer-starvation
+    /// adjudication for the OH post-creation stall web (useriam FFRT /
+    /// DB_TaskExecutor families). Zero cost when off.
+    FuxStuck,
 }
 
-const SWITCH_COUNT: usize = 57;
+const SWITCH_COUNT: usize = 60;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -621,6 +651,9 @@ impl DfxSwitch {
             // to a table without those two). Lookup is by name; indices
             // only key the SWITCHES array.
             DfxSwitch::AllocWatch => 56,
+            DfxSwitch::SyncGuard => 57,
+            DfxSwitch::SyncWatch => 58,
+            DfxSwitch::FuxStuck => 59,
         }
     }
 

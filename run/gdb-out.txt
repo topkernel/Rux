@@ -1,0 +1,5 @@
+0xffffffff802ad5c5 in rux::arch::x86_64::cpu::wfi ()
+Hardware assisted breakpoint 1 at 0xffffffff804cb3d0
+[Inferior 1 (process 1) exited normally]
+Python Exception <class 'gdb.error'>: No stack.
+Error occurred in Python: No stack.

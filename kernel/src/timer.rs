@@ -676,6 +676,10 @@ pub fn timer_softirq_handler(_nr: usize) {
             // + rate-capped inside) — leaf attribution for nested-call
             // cascades (fs/futex stalls behind reader exhaustion).
             crate::dfx::slowtask::tick();
+            // 17th successor: futex-stuck census (dfx=fuxstuck, self-gated
+            // + rate-capped inside) — per-condvar producer-starvation
+            // adjudication for the OH post-creation stall web.
+            crate::sync::futex::futex_stuck_census();
         }
     }
 

@@ -125,7 +125,15 @@ rm -f "$LOG"
     sleep 0.5
     echo 'echo ===EVENTS: arm and generate ==='
     sleep 0.3
-    echo 'echo sched:sched_waking sched:sched_wakeup sched:sched_wakeup_new sched:sched_process_fork sched:sched_process_exit exceptions:page_fault_user exceptions:page_fault_kernel > /sys/kernel/debug/tracing/set_event'
+    # One event per write — set_event applies a single token per
+    # write() (the reference's trace_get_user contract).
+    echo 'echo sched:sched_waking > /sys/kernel/debug/tracing/set_event'
+    echo 'echo sched:sched_wakeup > /sys/kernel/debug/tracing/set_event'
+    echo 'echo sched:sched_wakeup_new > /sys/kernel/debug/tracing/set_event'
+    echo 'echo sched:sched_process_fork > /sys/kernel/debug/tracing/set_event'
+    echo 'echo sched:sched_process_exit > /sys/kernel/debug/tracing/set_event'
+    echo 'echo exceptions:page_fault_user > /sys/kernel/debug/tracing/set_event'
+    echo 'echo exceptions:page_fault_kernel > /sys/kernel/debug/tracing/set_event'
     sleep 0.3
     echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
     sleep 0.3

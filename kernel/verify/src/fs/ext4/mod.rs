@@ -10,3 +10,4 @@ pub mod namei_test;
 pub mod superblock_test;
 pub mod dir_test;
 pub mod inode_test;
+pub mod write_partial_test;
