@@ -1111,3 +1111,37 @@ meter demanded), lb270 (fx8fix, meter live: 1500 cycles), lb275+
    WritePlan burn; the residual is the distributeddata/samgr retry
    ladder — fifth-successor territory), NOT the biglock (holds are
    3-4j; the fair-spinner fix landed as hygiene).
+
+### FOURTEENTH-SUCCESSOR ADDENDUM 3 — the retry ladder's never-true condition, named
+lb253's window (116-146s), kernel-side dependency chain from the 1Hz audit:
+1. tid877 (distributeddata OS_IPC_1, pid 873) executes asset_service's
+   txn12462 parked in sys=35 NANOSLEEP — the FFRT/DB_TaskExecutor
+   wait_for (userspace-internal; the check between sleeps is not
+   kernel-visible).
+2. The FFRT pool worker tid874 (OS_IPC_0) is parked as a sync-IPC
+   CLIENT in sys=16 against USERIAM tid 654, txn10152 code 12, exec
+   5530ms -> 10530ms+ (the 30s-class exec family — crypto + syscalls
+   under the per-op wall; useriam is the historical watchdog-kill
+   victim on earlier boots).
+=> NEVER-TRUE CONDITION: tid877's wait_for returns only when a pool
+   worker frees; the pool's worker is blocked on useriam's code-12 for
+   10-30s+ each; every dependent (asset_service, powermgr, drm_service,
+   usb_host — 235+ hung txns each) queues behind distributeddata.
+   Combined with the accountmgr 32-poison (addendum 2): accountmgr's
+   own KV handlers ride the same pool starvation, time out, return 32,
+   and permanently death-mark foundation's osaccount proxies.
+=> KERNEL LEVER: useriam's exec cost = the per-syscall wall (the perf
+   lane's p1_null 4.5us class x millions of calls) — cross-lane. No
+   correctness bug in this hop; the kernel-side fixes this session
+   (pcp, UTF8, walk bounds, fair-spinner) stand as hygiene + panic
+   kills. Biglock stalls: 7 (lb275) -> 0 (lb290) with the fair-spinner
+   fix in — recorded, variance-caveated (lb290 had no chmod-era
+   contention at all).
+lb290 bundles.ready: NEVER fired (87 SAs, storm on) — the store-load
+residual is stall-independent, routing through the pool/useriam chain.
+
+### SESSION CLOSE (14th successor, 2026-11-02 ~14:10)
+Branch pushed @ 4420bb92+this. Rollers: poproll continues (fx12fix,
+snapshot-armed; PIDs owned by lb-boot.py lb29X drivers — kill only
+those). Merge queue: coordinator takes biofix-fieldpoll. Successor
+entry points in the addenda above + the main close section.
