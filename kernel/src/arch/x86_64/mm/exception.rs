@@ -431,7 +431,9 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             // replays rings/uaccess here; x86 bring-up has no such
             // plumbing yet).
             if access_type & FaultFlags::EXEC != 0 {
-                let cr3 = crate::arch::cpu::read_cr3();
+                // satp_to_ppn masks the PCID/NOFLUSH bits a live CR3
+                // carries with PCID on.
+                let cr3_ppn = crate::arch::mm::asid::satp_to_ppn(crate::arch::cpu::read_cr3());
                 let exe = crate::sched::current()
                     .map(|t| t.get_exe_path())
                     .unwrap_or(&[]);
@@ -442,8 +444,8 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     crate::sched::get_current_pid(),
                     exe_str,
                     addr_space.pgd() as u64,
-                    cr3 >> 12,
-                    if (cr3 >> 12) == addr_space.pgd() as u64 { "" } else { " MISMATCH" },
+                    cr3_ppn,
+                    if cr3_ppn == addr_space.pgd() as u64 { "" } else { " MISMATCH" },
                     regs.rip
                 );
             }
