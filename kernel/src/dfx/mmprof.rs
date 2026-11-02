@@ -163,33 +163,64 @@ pub fn bucket_len(total: usize, t0: u64) {
     BUCKETS[b].max.fetch_max(d, Ordering::Relaxed);
 }
 
-/// Attribute one mmap to its issuer's comm (8-slot linear table).
+/// Attribute one mmap to its issuer's comm (8-slot linear table,
+/// min-count eviction — the first-come table saturated with boot-time
+/// one-shot processes and never named the churner; the churner's count
+/// dwarfs theirs within a minute, so evicting the smallest slot
+/// converges on it).
 #[inline]
 pub fn bump_comm() {
     let Some(t) = crate::sched::current() else {
         return;
     };
     let comm: [u8; 16] = unsafe { *(*t).comm() };
+    // fast path: present slot
     for slot in COMMS.iter() {
         let mut cur = [0u8; 16];
         for (i, b) in cur.iter_mut().enumerate() {
             *b = slot.comm[i].load(Ordering::Relaxed);
         }
-        if cur == comm {
-            slot.n.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        if slot.n.load(Ordering::Relaxed) == 0 {
-            // empty slot: claim it
-            for (i, b) in comm.iter().enumerate() {
-                slot.comm[i].store(*b, Ordering::Relaxed);
-            }
+        if cur == comm && slot.n.load(Ordering::Relaxed) != 0 {
             slot.n.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
-    // table full: fold into the last slot's count so the total still adds up
-    COMMS[COMM_SLOTS - 1].n.fetch_add(1, Ordering::Relaxed);
+    // slow path: claim an empty slot, else evict the smallest count
+    let mut victim = 0usize;
+    let mut victim_n = u64::MAX;
+    for (i, slot) in COMMS.iter().enumerate() {
+        let n = slot.n.load(Ordering::Relaxed);
+        if n == 0 {
+            victim = i;
+            victim_n = 0;
+            break;
+        }
+        if n < victim_n {
+            victim = i;
+            victim_n = n;
+        }
+    }
+    let slot = &COMMS[victim];
+    if victim_n == 0 {
+        for (i, b) in comm.iter().enumerate() {
+            slot.comm[i].store(*b, Ordering::Relaxed);
+        }
+        slot.n.store(1, Ordering::Relaxed);
+        return;
+    }
+    // evict: compare_exchange the count so a concurrent claimant cannot
+    // resurrect the evicted comm under us
+    if slot
+        .n
+        .compare_exchange(victim_n, 1, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
+        for (i, b) in comm.iter().enumerate() {
+            slot.comm[i].store(*b, Ordering::Relaxed);
+        }
+    } else {
+        slot.n.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 const MMPROF_DUMP_SECS: u64 = 60;

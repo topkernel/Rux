@@ -862,21 +862,20 @@ impl MmStruct {
             // never be held across schedule(), and the boundary is the
             // same-mm racer handoff point (mm-audit invariant).
             drop(vma_mgr);
-            // NO per-chunk cond_resched: the reference kernel does not
-            // schedule inside munmap, and mmprof measured the per-chunk
-            // yield at 132us AVERAGE (max 1.64s) x 213k chunks/60s under
-            // the OH FFRT churn — 75% of the whole munmap body and the
-            // 722ms-class mmap tail (every chunk was a full re-queue
-            // under need_resched). The walk is now leaf-table direct
-            // (us-class per chunk), so each held window is bounded by
-            // construction and the reference holds the lock across the
-            // WHOLE operation. One yield at the operation boundary.
+            // NO cond_resched anywhere in this loop (lb339 lesson: with
+            // ~1.05 chunks per munmap call, moving the yield from
+            // per-chunk to end-of-call changed nothing — the call still
+            // scheduled every time at 132us because need_resched is
+            // ~always set under the OH churn, 1-2k munmap calls/s). The
+            // REFERENCE kernel never schedules inside munmap: preemption
+            // is handled at syscall exit (need_resched checked on the
+            // return path), and our syscalls return through the same
+            // check. The chunk boundaries drop vma_write, so same-mm
+            // racers keep their handoff points; the longest held window
+            // is one ~10us chunk after the leaf-table walk fix.
         }
 
-        let mp_ty = if mp { crate::dfx::mmprof::now() } else { 0 };
-        crate::sched::cond_resched();
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_YIELD, mp_ty);
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
         }
         Ok(())
