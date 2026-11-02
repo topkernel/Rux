@@ -57,6 +57,7 @@ pub use sched::{
     wake_up_process,
     yield_cpu,
     for_each_task,
+    for_each_task_try,
     defer_exit_notify,
     // Preemptive scheduling support
     need_resched,

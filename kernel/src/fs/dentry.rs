@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::fs::inode::Inode;
 use crate::fs::mount::MntFlags;
 
@@ -145,6 +145,16 @@ pub struct Dentry {
     /// whether to take the SLOW path — a stale "current" verdict is
     /// caught on the next walk after the generation bumps.
     inode_gen: AtomicU64,
+    /// (21st successor, negative-lookup memo) The parent directory
+    /// INODE's content generation at insert time (meaningful only while
+    /// `negative` is set). The stamp lives on the shared inode —
+    /// bind-mount aliases are separate dentries over one inode, so a
+    /// mutation through ANY alias invalidates memos cached under every
+    /// alias. 0 = unstamped.
+    pub neg_gen: AtomicU64,
+    /// Negative memo children currently cached under this parent
+    /// (bounded — see NEG_MEMO_CAP / memo_negative).
+    neg_count: AtomicUsize,
 }
 
 unsafe impl Send for Dentry {}
@@ -166,7 +176,71 @@ impl Dentry {
             negative: AtomicBool::new(false),
             is_mountpoint: AtomicBool::new(false),
             inode_gen: AtomicU64::new(0),
+            neg_gen: AtomicU64::new(0),
+            neg_count: AtomicUsize::new(0),
         }
+    }
+
+    /// (negative-lookup memo) The generation this negative child was
+    /// stamped with at insert time.
+    #[inline]
+    pub fn neg_gen_load(&self) -> u64 {
+        self.neg_gen.load(Ordering::Acquire)
+    }
+
+    /// Cap on negative memo children per parent. The OH boot's probe
+    /// storm targets a small fixed name set per directory (dozens at
+    /// most); 32 pins the working set while bounding the heap cost that
+    /// made uncached negatives a leak (one Dentry + String per ENOENT,
+    /// inode02's ALLOCTHROW family).
+    pub const NEG_MEMO_CAP: usize = 32;
+
+    /// (negative-lookup memo) Insert a NEGATIVE child for `name` — an
+    /// ext4 ENOENT this walk just paid the full directory scan for.
+    /// Bounded: at the cap, one existing negative child is evicted
+    /// (FIFO-by-name is not needed; any eviction keeps the bound, and a
+    /// later probe of the evicted name re-inserts it). A positive child
+    /// (or a fresher racer's insert) is never replaced. Call only for
+    /// filesystems whose content changes exclusively through VFS
+    /// mutations (ext4) — dynamic filesystems (procfs/devfs/sysfs)
+    /// change without them and must never memo.
+    pub fn memo_negative(self: &Arc<Self>, name: &str, parent_gen: u64) {
+        let mut guard = self.children.lock();
+        if let Some(existing) = guard.get(name) {
+            if existing.is_negative() {
+                // Refresh the stamp so a mutation that happened between
+                // our miss and this insert does not doom the memo.
+                existing.neg_gen.store(parent_gen, Ordering::Release);
+            }
+            // Positive child: the file exists — nothing to memo.
+            return;
+        }
+        if self.neg_count.load(Ordering::Acquire) >= Self::NEG_MEMO_CAP {
+            // Evict one negative child (first found) to keep the bound.
+            let victim = guard
+                .iter()
+                .find(|(_, v)| v.is_negative())
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(v) => {
+                    guard.remove(&v);
+                    self.neg_count.fetch_sub(1, Ordering::AcqRel);
+                }
+                None => {
+                    // Counter drift (evictions raced): cap refused this
+                    // insert; the next probe re-runs the fs lookup.
+                    self.neg_count
+                        .store(0, Ordering::Release);
+                    return;
+                }
+            }
+        }
+        let d = Arc::new(Dentry::new(alloc::string::String::from(name)));
+        d.set_parent(self.clone());
+        d.negative.store(true, Ordering::Release);
+        d.neg_gen.store(parent_gen, Ordering::Release);
+        guard.insert(alloc::string::String::from(name), d);
+        self.neg_count.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Set parent directory entry
@@ -354,7 +428,19 @@ impl Dentry {
 
     /// Remove a child dentry by name.
     pub fn remove_child(&self, name: &str) {
-        self.children.lock().remove(name);
+        let mut guard = self.children.lock();
+        if let Some(removed) = guard.remove(name) {
+            // Keep the negative-memo bound honest: a detached negative
+            // child (stale-memo discard, mutation maintenance) frees its
+            // slot.
+            if removed.is_negative() {
+                let was = self.neg_count.fetch_sub(1, Ordering::AcqRel);
+                if was == 0 {
+                    // Counter underflow race — clamp.
+                    self.neg_count.store(0, Ordering::Release);
+                }
+            }
+        }
     }
 
     /// Drop every cached child (mount(2) MS_MOVE onto "/": the old root's
@@ -362,6 +448,7 @@ impl Dentry {
     /// root — lookups fall back to the new root inode's directory ops).
     pub fn clear_children(&self) {
         self.children.lock().clear();
+        self.neg_count.store(0, Ordering::Release);
     }
 
     /// Move every cached child of `self` into `into` (re-parenting them).

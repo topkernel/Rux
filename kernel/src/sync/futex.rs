@@ -448,7 +448,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
 /// question is per-condvar: WHAT is parked where, for how long, and is any
 /// producer of that condvar still runnable. This census stamps every futex
 /// park (Waiter::park_j at chain insertion) and, at most one burst per 5 s,
-/// reports every wait >= 10 s as one FUX-STUCK line:
+/// reports every wait >= 3 s as one FUX-STUCK line:
 ///   - uaddr + mm identity of the condvar (exact, not the param-arena class)
 ///   - tgid/tid + the stuck thread's entry-frame syscall nr and rip
 ///   - the owning tgid's thread-state histogram (runnable vs futex-parked
@@ -484,7 +484,13 @@ pub fn futex_stuck_census() {
     // Whole-boot line budget (a 25 min boot = ~300 bursts x <= 9 lines).
     static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-    const STUCK_MIN_J: u64 = 10 * 100; // report parks >= 10 s
+    // lb343: 3 s bar (was 10 s). The OH boot cascade's decisive parks are
+    // 4-5 s class — init's param-service thread sat 5.06 s between
+    // hdf_devmgr's ready-set (5.433s) and init's handle (10.496s, lb342),
+    // and the DB_TaskExecutor/DB metronomes poll on 4 s timers — all
+    // invisible at the old bar. Diagnostics only; the 8-line burst cap
+    // plus the SUM truncation line keep the volume bounded.
+    const STUCK_MIN_J: u64 = 3 * 100;
     struct Stuck {
         task: *mut Task,
         uaddr: usize,
@@ -552,7 +558,12 @@ pub fn futex_stuck_census() {
     }
 
     // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
-    crate::sched::for_each_task(|task| {
+    // lb325 wedge: this census runs at the timer-softirq heartbeat (IF=0);
+    // the BLOCKING task walk self-deadlocks against a pid-hash bucket held
+    // by an interrupted task-context writer. Try-walk (skipped buckets just
+    // leave that stuck entry's tgid/tid fields at their phase-A defaults —
+    // the uaddr/park-span data from phase A is already in hand).
+    crate::sched::for_each_task_try(|task| {
         for s in stuck.iter_mut() {
             // SAFETY: pointer identity comparison only (no deref of the
             // stored pointer).
@@ -611,7 +622,9 @@ pub fn futex_stuck_census() {
         unint: u32,
     }
     let mut histos: Vec<Histo> = Vec::new();
-    crate::sched::for_each_task(|task| {
+    // Same lb325 discipline as phase B1: try-walk from the heartbeat —
+    // a skipped bucket only under-counts that tgid's histogram this burst.
+    crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = unsafe { &*task };
         let tgid = tk.tgid() as u32;

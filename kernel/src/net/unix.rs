@@ -40,7 +40,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
@@ -196,6 +196,22 @@ pub struct UnixSocket {
     /// "Broken pipe on a live bus" shape). The next non-empty enqueue
     /// drains this onto the front of the new segment (first-touch delivery).
     pending_anc: Spinlock<Vec<(Vec<Arc<File>>, Option<UnixCred>)>>,
+    /// Entry count mirror of `pending_anc` (perf-r3): the enqueue fast
+    /// path takes the drain lock only when something is actually parked —
+    /// a per-send lock pair on every stream send was pure cost for the
+    /// (overwhelmingly common) empty case. Relaxed: the lock still
+    /// provides the ordering for actual drain correctness; the counter
+    /// only decides whether to bother.
+    pending_anc_n: AtomicUsize,
+    /// Cached mirror of options.passcred (perf-r3): Linux's
+    /// unix_maybe_add_creds() consults the SENDER's and RECEIVER's
+    /// SOCK_PASSCRED flags at send time — both sides uncredentialed means
+    /// the skb carries no cred snapshot at all. Stamping every segment
+    /// unconditionally (old shape) paid a task-cred snapshot per send on
+    /// sockets that can never report it (recvmsg emits the cmsg only
+    /// under the RECEIVER's SO_PASSCRED). The atomic mirrors the option
+    /// the setsockopt path writes under the options lock.
+    passcred_flag: AtomicBool,
     /// Peer performed close()/shutdown — drain then EOF
     eof: Spinlock<bool>,
     /// This socket's close() ran (poll: peer sees POLLHUP — the Linux
@@ -244,6 +260,8 @@ impl UnixSocket {
                 charge: 0,
             }),
             pending_anc: Spinlock::new(Vec::new()),
+            pending_anc_n: AtomicUsize::new(0),
+            passcred_flag: AtomicBool::new(false),
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
@@ -1798,7 +1816,12 @@ pub fn unix_send(
         // stream readers take as peer EOF (see pending_anc on UnixSocket).
         if data.is_empty() && matches!(sock.kind, UnixKind::Stream) {
             if !files.is_empty() || cred.is_some() {
-                target.pending_anc.lock().push((files, cred));
+                let n = {
+                    let mut anc = target.pending_anc.lock();
+                    anc.push((files, cred));
+                    anc.len()
+                };
+                target.pending_anc_n.store(n, Ordering::Release);
             }
             return Ok(0);
         }
@@ -1818,10 +1841,12 @@ pub fn unix_send(
                 let src = sock.src_arc.lock().clone();
                 // Drain parked ancillary data onto the front of the new
                 // segment: first-touch delivery with the first bytes that
-                // were queued AFTER the (files, cred) arrived.
+                // were queued AFTER the (files, cred) arrived. The count
+                // mirror gates the lock pair (perf-r3): the empty case —
+                // every ordinary stream send — skips it entirely.
                 let mut files = files;
                 let mut cred = cred;
-                {
+                if target.pending_anc_n.load(Ordering::Acquire) != 0 {
                     let mut anc = target.pending_anc.lock();
                     for (pf, pc) in anc.drain(..) {
                         files.extend(pf);
@@ -1829,20 +1854,25 @@ pub fn unix_send(
                             cred = pc;
                         }
                     }
+                    target.pending_anc_n.store(0, Ordering::Release);
                 }
-                // SO_PASSCRED parity: Linux stamps the sender's
-                // {pid,uid,gid} into every skb at send time (scm.c
-                // __scm_send snapshots the current task unconditionally);
-                // the RECEIVER's recvmsg emits the SCM_CREDENTIALS cmsg
-                // only when the receiving socket has SO_PASSCRED set.
-                // hilogd's stats-query socket rides on this contract: its
-                // RequestStatsQuery derefs the cmsg buffer pointer
-                // unconditionally after a successful recvmsg (compiled
-                // path at libhilog.so+0x17efc reads [rax+0x18] with rax
-                // = msg_control when controllen < 16), so a receive
-                // without the cmsg is a NULL-deref SIGSEGV that kills
-                // the hilogd.server thread — no hilog visibility.
-                if cred.is_none() {
+                // SO_PASSCRED parity (perf-r3): Linux's
+                // unix_maybe_add_creds() snapshots the sender's
+                // {pid,uid,gid} into the skb at send time only when the
+                // SENDER's or the RECEIVER's socket has SOCK_PASSCRED
+                // set — an uncredentialed pair carries no snapshot at
+                // all. The RECEIVER's recvmsg emits the SCM_CREDENTIALS
+                // cmsg only when the receiving socket has SO_PASSCRED
+                // set, so gating here changes nothing observable for
+                // credentialed receivers (hilogd — which derefs the cmsg
+                // pointer unconditionally after recvmsg — sets
+                // SO_PASSCRED, so its segments are still stamped) while
+                // the common no-passcred pair skips the per-send task
+                // snapshot.
+                if cred.is_none()
+                    && (sock.passcred_flag.load(Ordering::Relaxed)
+                        || target.passcred_flag.load(Ordering::Relaxed))
+                {
                     cred = Some(current_unix_cred());
                 }
                 let charge = seg_charge(data.len());
@@ -3048,13 +3078,16 @@ pub fn unix_setsockopt(
         // SO_PASSCRED (init's second mandatory service-socket option,
         // init_service_socket.c:81): store the flag — the recvmsg side
         // attaches creds cmsgs when it is set (shared SocketOptions
-        // field, same as the netlink path).
+        // field, same as the netlink path). The atomic mirror lets the
+        // send path apply unix_maybe_add_creds semantics without the
+        // options lock pair (perf-r3).
         SO_PASSCRED => {
             let v = match read_i32() {
                 Some(v) => v,
                 None => return -22,
             };
             sock.options.lock().passcred = v != 0;
+            sock.passcred_flag.store(v != 0, Ordering::Release);
             0
         }
         SO_RCVTIMEO | SO_SNDTIMEO => {

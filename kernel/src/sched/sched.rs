@@ -6438,6 +6438,36 @@ where
     crate::process::pid_hash::pid_hash_for_each_task(|t| f(t));
 }
 
+/// Non-blocking variant of [`for_each_task`] for NON-PREEMPTIBLE contexts
+/// (the timer-softirq heartbeat slot and any IRQ-side diagnostic).
+///
+/// lb325 wedge forensics (18th successor): both `dfx::slowtask::audit` and
+/// `futex_stuck_census` phase B walk tasks from the 1 Hz heartbeat, which
+/// runs with IF=0. A task-context pid-hash writer (insert/remove/for_each
+/// callback) that a timer interrupt suspends mid-critical-section holds its
+/// bucket lock across the suspension; the heartbeat walker on that CPU then
+/// reaches the SAME bucket, blocks on `lock_bucket`, and the interrupted
+/// holder can never resume — self-deadlock by interrupt (the second CPU's
+/// heartbeat walker joins the spin; serial goes silent; QEMU burns 2 vCPUs
+/// forever). Evidence: both vCPUs at the identical RIP inside
+/// `AtomicBool::compare_exchange` with RDI = pid_hash BUCKET_LOCK+22,
+/// RFL IF=0 on both, BUCKET_LOCK[22] the only held byte in the array, and
+/// the active frames `slowtask::audit → for_each_task →
+/// pid_hash_for_each_task → lock_bucket` / `futex_stuck_census →
+/// for_each_task → …`.
+///
+/// The blocking walk stays correct for preemptible callers (task context,
+/// kernel threads): there the holder always resumes. IRQ-side callers MUST
+/// use this try variant — buckets held at snapshot time are skipped and the
+/// skipped count is returned for the caller to report. Repeated snapshots
+/// converge: a bucket skipped one round is usually free the next.
+pub fn for_each_task_try<F>(mut f: F) -> usize
+where
+    F: FnMut(*mut Task),
+{
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| f(t))
+}
+
 pub fn current() -> Option<&'static mut Task> {
     let tp = crate::arch::cpu::get_thread_id() as *mut Task;
     if tp.is_null() || (tp as usize) < 0x80000000 {
