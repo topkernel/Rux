@@ -650,46 +650,94 @@ pub fn futex_stuck_census() {
         }
     });
 
-    // ---- Phase C: aggregate by (tgid, uaddr), oldest-first, print ----
+    // ---- Phase C: aggregate by (tgid, uaddr) and print ----
+    // Two visibility buckets (lb323 lesson: a pure oldest-first top-8 was
+    // monopolised by 155 s-class peripheral parks — bluetooth/audio — and
+    // never showed the critical-path park that decided the creation race):
+    //   OLDEST 4 groups by max park age  — the long-standing anchors;
+    //   FRESH   4 groups by min park age  — the currently-developing stall
+    //            (smallest age >= threshold among stuck waiters).
     stuck.sort_by(|a, b| b.age_s.cmp(&a.age_s));
-    let mut printed = 0usize;
-    while !stuck.is_empty() && printed < 8 {
-        let tgid = stuck[0].tgid;
-        let uaddr = stuck[0].uaddr;
-        if tgid == 0 {
-            // Task exited between the phases — drop silently.
-            stuck.remove(0);
+    struct Group {
+        tgid: u32,
+        uaddr: usize,
+        n: usize,
+        max_age: u32,
+        min_age: u32,
+        any_woken: bool,
+        rep_tid: u32,
+        rep_mm: usize,
+        rep_sys: u64,
+        rep_epc: u64,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for s in stuck.iter() {
+        if s.tgid == 0 {
             continue;
         }
-        let mut n = 0usize;
-        let mut any_woken = false;
-        let mut oldest = stuck.remove(0);
-        let mut j = 0usize;
-        while j < stuck.len() {
-            if stuck[j].tgid == tgid && stuck[j].uaddr == uaddr {
-                let s = stuck.remove(j);
-                n += 1;
-                any_woken |= s.woken;
-                if s.age_s > oldest.age_s {
-                    oldest = s;
+        let existing = groups
+            .iter_mut()
+            .find(|g| g.tgid == s.tgid && g.uaddr == s.uaddr);
+        match existing {
+            Some(g) => {
+                g.n += 1;
+                g.max_age = g.max_age.max(s.age_s);
+                g.min_age = g.min_age.min(s.age_s);
+                g.any_woken |= s.woken;
+            }
+            None => {
+                if groups.len() < 24 {
+                    groups.push(Group {
+                        tgid: s.tgid,
+                        uaddr: s.uaddr,
+                        n: 1,
+                        max_age: s.age_s,
+                        min_age: s.age_s,
+                        any_woken: s.woken,
+                        rep_tid: s.tid,
+                        rep_mm: s.mm,
+                        rep_sys: s.sys,
+                        rep_epc: s.epc,
+                    });
                 }
-            } else {
-                j += 1;
             }
         }
-        n += 1; // the removed head
-        let h = histos.iter().find(|h| h.tgid == tgid);
+    }
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
+    let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
+    for (i, &gi) in order.iter().enumerate() {
+        if i < 4 {
+            chosen.push((gi, false));
+        }
+    }
+    let mut fresh_order = order.clone();
+    fresh_order.sort_by(|&a, &b| groups[a].min_age.cmp(&groups[b].min_age));
+    for &gi in fresh_order.iter() {
+        if chosen.len() >= 8 {
+            break;
+        }
+        if !chosen.iter().any(|(c, _)| *c == gi) {
+            chosen.push((gi, true));
+        }
+    }
+    let mut printed = 0usize;
+    for (gi, is_fresh) in chosen {
+        let g = &groups[gi];
+        let h = histos.iter().find(|h| h.tgid == g.tgid);
         crate::pr_warn!(
-            "FUX-STUCK tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
-            tgid,
-            oldest.tid,
-            uaddr,
-            oldest.mm,
-            n,
-            oldest.age_s,
-            any_woken as u32,
-            oldest.sys,
-            oldest.epc,
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
+            if is_fresh { "-FRESH" } else { "" },
+            g.tgid,
+            g.rep_tid,
+            g.uaddr,
+            g.rep_mm,
+            g.n,
+            g.min_age,
+            g.max_age,
+            g.any_woken as u32,
+            g.rep_sys,
+            g.rep_epc,
             h.map(|h| h.run).unwrap_or(0),
             h.map(|h| h.futex).unwrap_or(0),
             h.map(|h| h.int_other).unwrap_or(0),
