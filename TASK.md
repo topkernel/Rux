@@ -1087,3 +1087,27 @@ meter demanded), lb270 (fx8fix, meter live: 1500 cycles), lb275+
    producer hunt (r83hunt / preempt bits) remains THE wall; the
    biglock fairness fix removes one amplifier. EXT4-BIGLOCK-HOLDER-STK
    + maxheld instruments are in for the next stall read.
+
+### FOURTEENTH-SUCCESSOR ADDENDUM 2 — monopolist snapshot + the storm's true author
+1. Snapshot instrument (fx11/fx12fix): dump_all_tasks at BOTH stall
+   variants (free-strand + locked-churn) + the waiter's explicit
+   on_rq/preempt/ti_cpu line. lb285 (fx11) ran the CHURN shape
+   (maxheld=3j) with NO free-strand — snapshot moved to both branches.
+2. lb290 (fx12fix, 445s): the POISON STORM HIT WITH ZERO BIGLOCK STALLS
+   — 2372 POISON32 lines, no STALL prints at all. The stall->storm
+   causality is NOT universal.
+3. THE STORM'S AUTHOR IS NAMED: pid 961 = accountmgr (started 94.5s)
+   authored 2389/2407 POISON32-DELIVER, victims = foundation (pid 370,
+   tids 988/1203 x~600 each). This is the eighth-successor decode
+   exactly: accountmgr's osaccount stub returns error-32 (ERR_DEAD_
+   OBJECT as TF_STATUS_CODE), which PERMANENTLY death-marks foundation's
+   IOsAccount proxies → every osaccount query fails silently → no
+   user-100 creation → no launcher. The 32's own origin = accountmgr's
+   internal KV read failing under the store-load wall (the campaign's
+   standing userspace-internal timeout family).
+4. NET for the launcher: the chain is store-load wall -> accountmgr
+   handler errors -> 32-poison of foundation -> creation dead. The
+   kernel-side lever remains the STORE-LOAD COST (bio fix removed the
+   WritePlan burn; the residual is the distributeddata/samgr retry
+   ladder — fifth-successor territory), NOT the biglock (holds are
+   3-4j; the fair-spinner fix landed as hygiene).
