@@ -85,10 +85,11 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 
 /// Broadcast a TLB-flush IPI to every OTHER started CPU.
 ///
-/// The remote handler performs a full non-global flush (CR3 reload with
-/// PCID off), so there is no per-page state to race with and nothing to
-/// coalesce.  Fire-and-forget: the caller must have flushed its own TLB
-/// entry(ies) locally (the mm callers pair this with invlpg/flush_tlb).
+/// The remote handler performs a full non-global flush (INVPCID
+/// all-contexts with PCID on, CR3 reload otherwise), so there is no
+/// per-page state to race with and nothing to coalesce.  Fire-and-forget:
+/// the caller must have flushed its own TLB entry(ies) locally (the mm
+/// callers pair this with invlpg/flush_tlb).
 pub fn flush_tlb_others(_start: u64, _end: u64) {
     let me = crate::arch::cpu_id() as usize;
     for cpu in 0..MAX_CPUS {
@@ -114,10 +115,26 @@ pub fn handle_ipi_vector(vector: u64) {
         VECTOR_CALL_FUNCTION => csd_flush_queue(),
         VECTOR_TLB_FLUSH => {
             // Full non-global flush of the CURRENT address space: no
-            // kernel PTEs carry the GLOBAL bit, so the CR3 reload
-            // covers everything the local invlpg/flush_tlb covered.
-            // SAFETY: reloading the current CR3 with PCID off.
-            unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
+            // kernel PTEs carry the GLOBAL bit, so this covers
+            // everything the local invlpg/flush_tlb covered. With PCID
+            // active the CR3 reload would only reach the CURRENT PCID's
+            // entries, so the flush is INVPCID all-contexts (every PCID
+            // on this CPU) — the shootdown callers invalidate mappings
+            // that may be cached under any mm's PCID.
+            if crate::arch::mm::asid::pcid_enabled() {
+                // SAFETY: type 3 ignores the descriptor content and is
+                // valid regardless of the current CR3.
+                unsafe {
+                    crate::arch::x86_64::cpu::invpcid(
+                        crate::arch::x86_64::cpu::INVPCID_ALL_NON_GLOBAL,
+                        0,
+                        0,
+                    )
+                };
+            } else {
+                // SAFETY: reloading the current CR3 with PCID off.
+                unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
+            }
         }
         VECTOR_STOP => loop {
             crate::arch::cpu::disable_irq();

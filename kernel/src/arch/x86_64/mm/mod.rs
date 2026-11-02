@@ -29,8 +29,9 @@ pub use fixmap::*;
 pub mod asid;
 pub use asid::{
     ASID_BITS, MAX_ASID, ASID_KERNEL, ASID_RESERVED, ASID_FIRST,
-    alloc_asid, free_asid, asid_usage_count,
-    flush_tlb_all, flush_tlb_asid, flush_tlb_page, flush_tlb_range, flush_tlb_kernel,
+    alloc_asid, free_asid, asid_usage_count, pcid_enabled, enable_pcid,
+    flush_tlb_all, flush_tlb_asid, flush_tlb_page, flush_tlb_page_asid, flush_tlb_range,
+    flush_tlb_kernel, switch_root,
     build_satp, satp_to_asid, satp_to_ppn, read_satp, write_satp,
     AsidContext, print_asid_status,
 };
