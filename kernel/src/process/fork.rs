@@ -148,7 +148,16 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                 }
                 #[cfg(feature = "x86_64")]
                 {
-                    (*parent_task).thread_mut().fpu_save_for_switch();
+                    // LAZY FPU: only save when the parent's live
+                    // registers can be dirty (CR0.TS clear = parent used
+                    // FP since its switch-in). With TS set the saved
+                    // image in thread.fpu is already the parent's
+                    // current state (never dirtied) — and xsave under TS
+                    // would trap anyway. The child still receives the
+                    // clean initial image (mark_fpu_clean), unchanged.
+                    if !crate::arch::cpu::ts_set() {
+                        (*parent_task).thread_mut().fpu_save_for_switch();
+                    }
                     let pfpu = (*parent_task).thread().fpu;
                     let ct = task.thread_mut();
                     ct.fpu.bytes.copy_from_slice(&pfpu.bytes);

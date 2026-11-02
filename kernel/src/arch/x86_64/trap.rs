@@ -1786,10 +1786,28 @@ fn handle_alignment_check(regs: &mut PtRegs) {
     }
 }
 
-/// #NM — FPU unavailable.  Should not happen (fpu_init clears CR0.EM/TS),
-/// but re-initialize defensively and resume instead of dying.
+/// #NM — FPU unavailable: the LAZY-FPU restore point.
+///
+/// context_switch sets CR0.TS on every switch-in and skips the incoming
+/// task's xrstor; the task's first FP instruction lands here (the kernel
+/// binary has no compiler-emitted FP instructions — the only xmm sites
+/// are restore_fpu's own asm — so a user instruction is the only way to
+/// observe TS). Clear TS and run the ordinary restore: the saved image
+/// when the task ever used FP, the deterministic ABI-initial state
+/// otherwise (fork/exec mark fpu images clean/valid).
 fn handle_device_not_available() {
-    crate::pr_warn!("trap: #NM (FPU unavailable) — re-running fpu_init");
+    if let Some(cur) = crate::sched::current() {
+        // SAFETY: cur is the task now running on this CPU; clts claims
+        // the live FPU for it, restore_fpu loads its image.
+        unsafe {
+            super::cpu::clts();
+            (*cur).thread_mut().restore_fpu();
+        }
+        return;
+    }
+    // No current task (early boot / idle context) took an FP trap:
+    // re-enable the FPU defensively instead of looping on #NM.
+    crate::pr_warn!("trap: #NM with no current task — re-running fpu_init");
     // SAFETY: fpu_init only flips CR0/CR4 feature bits and zeroes the
     // live FPU state; the caller was not using it (#NM proves that).
     unsafe { super::thread::fpu_init() };

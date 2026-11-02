@@ -97,6 +97,31 @@ pub unsafe fn write_cr0(value: u64) {
     unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
 }
 
+/// CR0.TS (task switched) — set on every context switch-in; the first
+/// FP instruction of the incoming task takes #NM, which restores that
+/// task's image (lazy FPU). See context_switch / handle_device_not_available.
+pub const CR0_TS: u64 = 1 << 3;
+
+/// Is CR0.TS set (live FPU registers are NOT the current task's)?
+#[inline]
+pub fn ts_set() -> bool {
+    read_cr0() & CR0_TS != 0
+}
+
+/// Clear CR0.TS (claim the live FPU for the current task).
+#[inline]
+pub unsafe fn clts() {
+    // SAFETY: single-bit clear, mode bits preserved.
+    unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
+#[inline]
+pub unsafe fn stts() {
+    // SAFETY: single-bit set, mode bits preserved.
+    unsafe { write_cr0(read_cr0() | CR0_TS) };
+}
+
 /// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
 ///
 /// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE

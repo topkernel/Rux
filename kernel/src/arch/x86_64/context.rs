@@ -528,8 +528,19 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
     }
 
-    // Step 1: save prev FPU state
-    prev.thread_mut().fpu_save_for_switch();
+    // Step 1: save prev FPU state — LAZY: only if prev actually used FP
+    // since its switch-in (CR0.TS still clear). A task that never
+    // touched FP leaves thread.fpu authoritative (it was never dirtied),
+    // so the xsaveopt is pure overhead for FP-idle ping-pongs (cctx:
+    // fpusave 51 + fpurest 76 ns per switch under load; the restore
+    // moves to the #NM handler). The kernel binary contains no
+    // compiler-emitted FP instructions (verified: the only xmm sites are
+    // restore_fpu's own init fallback), so TS can only be observed by
+    // user code.
+    let fpu_dirty = !super::cpu::ts_set();
+    if fpu_dirty {
+        prev.thread_mut().fpu_save_for_switch();
+    }
     let cc_c1 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
 
@@ -657,16 +668,16 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
     }
 
-    // Step 5: restore the incoming task's FPU (review ARCH-H1 parity):
-    // resolved via sched::current() — the per-CPU slot __switch_to just
-    // published — never through the stale `next` reference.
+    // Step 5: LAZY FPU restore — set CR0.TS instead of xrstor. The
+    // incoming task's live registers are whatever the last FP user left
+    // on this CPU; the first FP instruction traps #NM, whose handler
+    // (trap::handle_device_not_available) clears TS and runs the same
+    // restore_fpu (fpu_valid image or the ABI-init fallback). FP-idle
+    // ping-pong workloads (the scheduler-family benches) never pay the
+    // xrstor at all.
     let cc_c4 = crate::dfx::cctx::now();
-    if let Some(cur) = crate::sched::current() {
-        // SAFETY: cur is the task now running on this CPU.
-        unsafe {
-            (*cur).thread_mut().restore_fpu();
-        }
-    }
+    // SAFETY: single CR0 bit set (see stts); no register clobber.
+    unsafe { super::cpu::stts() };
     crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
 }
 

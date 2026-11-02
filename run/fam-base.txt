@@ -51,3 +51,25 @@ Simple read: 0.1500 microseconds
 ===CASE r3 lat_syscall,write
 LMBENCH TIMEOUT lat_syscall
 === fam-med3 base done 13:30:17
+===CASE r4 lat_ctx,-s,64,2
+"size=64k ovr=1.09
+2 4.97
+===CASE r4 lat_ctx,-s,64,8
+===CASE r4 lat_pipe,
+===CASE r4 lat_unix,
+AF_UNIX sock stream latency: 4.5071 microseconds
+===CASE r4 lat_sem,
+Semaphore latency: 0.9513 microseconds
+===CASE r4 lat_syscall,read
+Simple read: 0.1539 microseconds
+===CASE r5 lat_ctx,-s,64,2
+===CASE r5 lat_ctx,-s,64,8
+"size=64k ovr=1.08
+8 1.94
+===CASE r5 lat_pipe,
+===CASE r5 lat_unix,
+===CASE r5 lat_sem,
+Semaphore latency: 0.8611 microseconds
+===CASE r5 lat_syscall,read
+Simple read: 0.1490 microseconds
+=== fam-fill base done 14:30:31 load=5.05
