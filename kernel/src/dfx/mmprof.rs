@@ -45,15 +45,16 @@ pub const MP_PTE: usize = 14; // mprotect_pte_range (per-page rewrite)
 pub const MP_TLB: usize = 15; // post-rewrite flush (riscv sfence arm)
 pub const P_COUNT: usize = 16;
 
-// ---- scalar slots (bump-counted, reported raw) ----
-pub const S_FIXED: usize = P_COUNT + 0; // MAP_FIXED mmaps
-pub const S_HINT: usize = P_COUNT + 1; // hinted mmaps (addr != 0)
-pub const S_ANON0: usize = P_COUNT + 2; // kernel-placed mmaps (addr == 0)
-pub const S_UNPAGES: usize = P_COUNT + 3; // pages visited by unmap walks
-pub const S_UNEMPTY: usize = P_COUNT + 4; // visited pages with no PTE
-pub const S_MPPAGES: usize = P_COUNT + 5; // pages visited by mprotect walks
-pub const S_VMAADD: usize = P_COUNT + 6; // VmaManager::add calls
-pub const S_MUNLOOPS: usize = P_COUNT + 7; // munmap chunk iterations
+// ---- scalar slots (bump-counted, reported raw; separate namespace
+// from the phase slots — bump() indexes SCALARS[0..P_SCALARS]) ----
+pub const S_FIXED: usize = 0; // MAP_FIXED mmaps
+pub const S_HINT: usize = 1; // hinted mmaps (addr != 0)
+pub const S_ANON0: usize = 2; // kernel-placed mmaps (addr == 0)
+pub const S_UNPAGES: usize = 3; // pages visited by unmap walks
+pub const S_UNEMPTY: usize = 4; // visited pages with no PTE
+pub const S_MPPAGES: usize = 5; // pages visited by mprotect walks
+pub const S_VMAADD: usize = 6; // VmaManager::add calls
+pub const S_MUNLOOPS: usize = 7; // munmap chunk iterations
 pub const P_SCALARS: usize = 8;
 
 // ---- length buckets for successful mmaps (count + cycles) ----
@@ -119,8 +120,12 @@ pub fn now() -> u64 {
 }
 
 /// Account `elapsed = now() - t0` cycles against phase `p`.
+/// Out-of-range slots are dropped, never a panic (diagnostic discipline).
 #[inline]
 pub fn add(p: usize, t0: u64) {
+    if p >= P_COUNT {
+        return;
+    }
     let d = now().saturating_sub(t0);
     let s = &STATS[p];
     s.count.fetch_add(1, Ordering::Relaxed);
@@ -131,6 +136,9 @@ pub fn add(p: usize, t0: u64) {
 /// Scalar counter (pages walked, fixed mmaps, ...).
 #[inline]
 pub fn bump(p: usize, n: u64) {
+    if p >= P_SCALARS {
+        return;
+    }
     SCALARS[p].fetch_add(n, Ordering::Relaxed);
 }
 
