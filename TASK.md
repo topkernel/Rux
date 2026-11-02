@@ -859,338 +859,79 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
    riscv64 + aarch64), make test GREEN (lb69-maketest.log: verdict
    green, 1267/1267). Branch pushed through e8b9a969.
 
-## ELEVENTH-SUCCESSOR SESSION (2026-11-01 20:00+, branch oh-ladder @ 05e3c4c5)
-Mission: the fix run for the 441s installs poll stall. THE VIRTIO POLL
-STALL IS FIXED AND VERIFIED HEALTHY; the wall rotated on.
+## THIRTEENTH-SUCCESSOR SESSION (2026-11-02 03:30-08:30, branches oh-ladder @ 79cb96cb + biofix-fieldpoll @ 6e5afaae)
+Mission per charter: population race -> pixels. Coordinator redirected mid-session
+(07:00): STOP image patches, hunt the kernel stall. Outcome: THE 550-1100s
+STORE-LOAD STALL IS DECODED AND FIXED; a second, OLDER blocker (the allocator
+freeze) is now named to its exact victim signature and blocks verification.
 
-### The fix (05e3c4c5)
-wait_for_used_interruptible's poll_only branch (read_block_once /
-write_block_once / flush_block_once — everything synchronous under a
-preempt guard or early boot) had NEITHER the sleep path's 10s deadline
-NOR its kick-and-walk recovery leg: 5M laps of blind resp-byte spin,
-then the caller's retry stack re-polled the same dead ring (lb66: 441s).
-Now: every 10ms of wall time (read_time: TSC-derived, IRQ-independent —
-a jiffies deadline would stand still under an irqsave guard) the poller
-RE-KICKS the device (lost/quiet kick: an un-kicked chain's completion
-never arrives no matter how long we spin) and RUNS THE COMPLETION WALKER
-IN ITS OWN CONTEXT (irq_exit defers Block softirq to ksoftirqd under a
-preempt guard, and ksoftirqd cannot run under that guard on this CPU —
-the walker is the process-context last-line consumer, same discipline as
-the drain/rescue paths); at 10s it returns the prev_used sentinel so the
-caller runs its bounded late-drain, flags the tombstone, fails loudly.
-Early-boot polling unchanged (pure spin, 5M budget — no scheduler yet).
-VW-POLLSTALL print now carries walker/shadow/unkicked (vw_pollstall_print
-+ pci_blk_lag_snapshot) — one line splits delivery-loss / kick-loss /
-window-reuse; deadline exit prints POLLSTALL-DL.
+### The bio write-plan closure burn (root cause of the crawl's 550-1100s loads)
+1. lb229 evidence (252 identical 5s TXN-HANG samples): distributeddata's
+   OS_IPC_0_912 frozen at fs::bio::WritePlan::push_entry for the WHOLE 1092s
+   window; bundles.ready landed 1091.6s. The kernel stack never changed.
+2. Engine: plan_add_constraints (fs/bio.rs) rescans EVERY pending publication
+   against the whole plan per round; the plan grows a few blocks/round ->
+   thousands of quadratic rounds = 18+ min kernel CPU in ONE fsync/mkdir
+   durability point. Every service pays it behind accumulated churn; the KV
+   load (many fsyncs) crawls 550-1100s vs ~40s healthy. This is the O(batch^2)
+   class the fs lane fixed for jbd2 — the SAME family in the bio WritePlan.
+3. Fix iteration 1 (index+worklist closure) ALLOCATED from journal/eviction
+   spinlock contexts -> allocator wedges (lb234/235: samgr workers frozen in
+   RawVecInner::finish_grow; REVERTED). Fix iteration 2 (79cb96cb, FINAL):
+   allocation-free round cap (3 rounds) + conservative linear fallback
+   (schedule every record's pres+entries for the device — strict superset,
+   same pre->entry phase discipline, one linear pass). Gates: make test ALL
+   PASSED; x3 builds rc=0 (x86_64 two-pass release, riscv64, aarch64).
+4. Also landed while chasing the dark family: FXDV2 param-arena futex tracer
+   ran ALWAYS-ON (500 console prints from do_futex's hot path in the first
+   seconds of every boot) — gated behind dfx=futextrace (6e5afaae).
 
-### Verification (lb74 — concurrent lane's boot, same kernel bytes:
-### bzImage-ladder-r3w == my pollfix2, md5-identical)
-- ZERO POLLSTALL prints through a 600s+ install-phase boot: the poll
-  path never hit 2M laps once.
-- VW-SNAP @603s: ALL six disks used == last == shadow, unkicked=0,
-  intx=42317/walks=42302 — rings fully drained, interrupts flowing.
-  The 441s engine is not present with the fix in.
-- lb75: install-phase SLOW-TXNs absent from the virtio layer entirely.
+### THE REMAINING BLOCKER (older than this session, now precisely named)
+Every boot since ~07:45 wedges before SA inserts (samgr-dark; 10+ consecutive,
+all kernel classes/all images; ~50% flowed earlier tonight; load-correlated).
+Victim signature EXACT: parking threads sit in unix_write_slice_owned ->
+RawVecInner::finish_grow (a HILOG write's allocation), epoll_create1, or
+finish_grow directly — i.e. every allocating syscall parks on the small_alloc
+class lock held by a thread frozen mid-section. That is the mm guarded-domain
+PHANTOM-PREEMPT-INSIDE-ALLOCATOR family (leakhunt's named acquire sites:
+small_alloc.rs:283, slab.rs:628, buddy_allocator.rs:857). NOT kernel-class
+specific, NOT my bio fix (allocation-free now), NOT FXDV2 (gated, still dark).
+This freeze ALSO explains the population boots' bimodality all along.
 
-### The wall rotated (evidence lb74/lb75, both on the fixed kernel)
-1. lb74: pid 311 el5_filekey_man monopolizes cpu with preempt=0x100
-   (softirq-field phantom or storm), nr_running=203 starved, installs
-   tid 990 blocked 512s in sys_faccessat on a Mutex whose holder never
-   runs. Heals fired 29x early (all was=0x10001), NONE after 113.8s —
-   the pure-0x100 face never healed. r3-heal gap: a permanent sirq-field
-   count should stale its stamp in 2s and heal; why it did not for 500s
-   is THE open sched question (sched lane's hunt).
-2. lb75: Shape B DECODED AT THE QUERY LEVEL — the IsOsAccountExists
-   query (SAREG txn12749, ohos.accountfwk.IOsAccount) LEFT foundation at
-   241.515 (the libipc poison-mark patch WORKS — no client-side marking),
-   and accountmgr tid 929 ANSWERED it with a TF_STATUS_CODE 32 reply at
-   241.521 -> "userId not exist" 7ms later. distributeddata was answering
-   accountmgr's own queries at the same moment (txn12763 @241.548) — the
-   32 is authored by accountmgr's osaccount stub under load (userspace),
-   NOT by kernel delivery and NOT by the poison mark anymore.
-3. Remaining ladder walls (all pre-existing, none virtio): monopolist
-   starvation / samgr code-7 slow loads (brk storm) / accountmgr inner
-   futex stalls / accountmgr osaccount-32 answers. Boot-to-boot lottery
-   decides; lb27/lb57/lb59/lb65-class boots have passed all of them.
+### Verification state (blocked)
+run/verify-roll.sh (bzImage-ladder-fx2fix = fieldpoll+biofix+futexgate,
+system-lb5 unmodified, warm snapshot) re-rolls for a boot that reaches the
+store-load window: measure bundles.ready vs the 550-1100s baseline; expect
+the fast (~40s) class. Kernels in run/: bzImage-ladder-fx2fix (verification),
+bzImage-ladder-biofix{,2} (superseded iterations).
 
-### Boots this session
-lb73 (pollfix kernel): driver died at 150s (serial truncated
-mid-poison-storm, QEMU SIGPIPE'd; cause unclear — a concurrent lane
-works this worktree, its cleanup or the patrol may have killed the
-driver). lb75 (pollfix2): Shape B at 241.5s (decode above), killed.
-lb76 (pollfix2): rolling at write time. lb74 is the CONCURRENT LANE's
-boot (r3w) — do not kill it.
-Gates: make test GREEN (lb73-maketest.log, "All tests passed!", rc=0;
-post-halt VW-WEDGE prints are noise); x3 builds rc=0 (x86_64 release
-two-pass + riscv64 + aarch64; POLLSTALL-DL string verified in both
-debug ELFs).
-
-### Session close part 1 (21:3x) — tonight's Shape-B is DETERMINISTIC; engine decoded
-- 11 consecutive Shape-B fails (lb75/76/77/78/80/81/82/83 + lbpop3 +
-  roller boots): startUser(100) -> "userId not exist" with the SAME
-  signature every time: the IsOsAccountExists query LEAVES foundation
-  (proxy unmarked — libipc patch works), accountmgr answers it with a
-  TF_STATUS_CODE 32 reply in 1-4ms (the stub's own inner failure), and
-  user 100 was NEVER CREATED on these boots — no CreateNewUser /
-  GenerateUserKeys lines at all, vs lb65 (PASS) which ran
-  GenerateUserKeys(user:100) + CreateNewUser at 40.2s.
-- WHY lb65 created and tonight doesn't: the SERVICE GRAPH crawls. lb65
-  had 41 services started by 41s; lb80 had 14 by 98s. lb78's dynamic
-  proc loads ran 59.8/102.6/222.9s each (lb65: 40/133/249ms) with
-  72 brk-class SLOW-TXN stalls (server threads parked in sys=45 = brk
-  for 2.8-222s). brk is the VICTIM: sys_brk is VMA-surgery-only; the
-  wait is addr_space.vma_write() held across AddressSpace::munmap's
-  WHOLE PTE-zap walk (mm_ops.rs: "the guard now also spans the PTE zap
-  below" — deliberate, the mmap-into-hole audit) while the holder is
-  CPU-starved by the monopolist family. The 100s-class stalls predate
-  my fix (lb71 pre-fix: txn19304 exec 1019s) — NOT introduced by 05e3c4c5.
-- The monopolist face (lb74 dump): pid 311 el5_filekey_man, preempt=0x100,
-  vruntime 5.6e9 (280x peers), nr_running=203 starved, installs tid 990
-  blocked 512s in sys_faccessat on a Mutex whose holder never runs.
-  r3 heal analysis: a PERMANENT 0x100 leak would stale its stamp in 2s
-  and heal (clear_base clears SOFTIRQ bits too — verified in task.rs);
-  it did not heal => the field FLICKERS (high-duty softirq re-entry or
-  re-leak every <2s), the shape the stamp logic treats as live. The
-  binder ioctl loop returns to user mode constantly (lastsys=16), so
-  the trap-exit gate SHOULD preempt on need_resched — why it doesn't is
-  the sched lane's open question (same hunt as before).
-- NOSNAP population retry (lbpop3 on reflink copy userdata-warm2.img)
-  ALSO failed Shape-B — the population path is blocked by the same
-  crawl; no kernel knob for it tonight.
-- NEXT for pixels, in order: (a) bound the munmap VMA-write hold
-  (chunked zap + lock drop — the preempt-hunt's named prerequisite;
-  mm guarded domain, needs LTP+perf gates; collapses the 100s-class
-  convoy that crawls the service graph), (b) the flicker-monopolist
-  adjudication in the heal, (c) keep rolling boots (run/roll-boots.sh)
-  — the lottery does land (lb65-class) when the host is quiet.
-- Roller: run/roll-boots.sh (fail-shape detection + relaunch; success
-  shapes stop it and leave the VM up). Bugs fixed: setsid per boot +
-  process-group teardown.
-
-### Session close part 2 (~22:00) — lb92: SECOND-EVER SwitchToUser; the population strategy
-- lb92 (roller boot, kernel bzImage-ladder-fieldpoll = af5577c5 +
-  e8b9a969 + 05e3c4c5): CheckUserParam PASSED for the first time in 12
-  boots tonight (the osaccount read coin landed), SwitchToUser
-  oldUserId:0 newUserId:100 EXECUTED at 97.867 (lb59 in campaign
-  history was the first). Then the known lb40/lb59 shape: no
-  CreateNewUser had run on this boot either, so user 100 has NO
-  per-user bundle records -> ImplicitQueryInfoByPriority can't find the
-  launcher -> the isBoot retry ladder spins (365+ lines) -> no spawn.
-- THE WIN CONDITION, named: a boot that runs the CREATION flow
-  (GenerateUserKeys + CreateNewUser + bundle size:NN install stream —
-  the lb65 shape at 40s) AND PERSISTS IT. lb65 ran it under snapshot
-  (records discarded). run/roll-pop.sh now boots NOSNAP on a FRESH
-  REFLINK COPY per boot; the boot that lands the lb65 shape writes
-  user 100 + the per-user records into its own copy (the GOLDEN
-  population) — later snapshot boots on that copy get AbilityInfo for
-  user 100 deterministically. First pop-roller boots (lb110/111):
-  fail-shapeB as usual; lb112 slow-phase. Roller runs unattended,
-  logs to run/roll-logs/poproller.log.
-- The osaccount coin (tonight 1-pass/13): lb92's "exists" answer means
-  the warm image's DB plausibly HAS user 100 (from the original lbwarm
-  population at 14:38) and the 11 "not exist" boots were failed/empty
-  KVS READS (the fifth successor's lb42 coin-flip conclusion). A golden
-  population copy removes the read's dependence on timing: the records
-  are physically present and freshly written.
-- NOTE for the perf lane (merge review of 05e3c4c5): the poll-path
-  change's healthy-path delta is one Option check + one TSC read per
-  4096 spin laps; the sleep path (the common waiter) is untouched; the
-  recovery only engages at >=10ms polls and the deadline at 10s. Tier-2
-  pbench rows (p6_write_fsync/mkdrmdir) re-bank on the next pa battery
-  of the merged tree — this session's OH boots showed zero POLLSTALL
-  firings and fully-drained rings (VW-SNAP used==last==shadow on all
-  six disks, intx flowing).
-
-### SESSION CLOSE (22:40) — eleventh successor final
-- Pop roller final: lb110-lb119 (10 NOSNAP boots on reflink copies).
-  lb119 = SUCCESS-switch (SwitchToUser @135.3s, THIRD-ever; no
-  CreateNewUser -> not golden) then wedged post-SwitchToUser:
-  foundation's user-start blocked on accesstoken_ser (txn10607 exec
-  269s, server RUNNING stuck mid-syscall sys=75) + powermgr txn11799
-  exec 252s (server parked in ioctl, never picked up). The starvation
-  family again. Screen frozen-logo md5 06b933b4 to the end. VM killed
-  at 832s; its copy run/rollpop-lb119.img KEPT (freshly persisted
-  SwitchToUser-era /data; snapshot-boot it if you want the same
-  osaccount-true read lane — lb92/lb119 both passed CheckUserParam on
-  this lineage while 15 sibling boots failed).
-- Tonight's tally: 18 boots on the fix kernels. Zero POLLSTALL, zero
-  virtio-layer stalls, rings drained at every snapshot (VW-SNAP). The
-  441s poll-stall engine is dead; the walls that replaced it (in hit
-  order): Shape-B osaccount read/answer (15), monopolist starvation
-  crawl (2: lb74, lb112), post-SwitchToUser accesstoken stall (lb119).
-  Ladder deepest point reached twice: SwitchToUser (lb92, lb119).
-- The pixel path for the twelfth successor, in order:
-  1. The golden population is still THE unclaimed prize: a NOSNAP boot
-     that runs CreateNewUser+install-stream (the lb65@40s shape) —
-     roll-pop.sh automates the hunt; when 'bundle size' lands, that
-     copy makes every later boot's ImplicitQuery find the launcher.
-     Tonight's obstacle: the creation flow needs the osaccount read to
-     say NO-USER early (the coin's other face) + a fast-enough service
-     graph. Boot count is the lever (lb65 landed 1-in-3 on its era).
-  2. Kernel-side odds-raisers, both named with evidence above: bound
-     the munmap VMA-write hold (kills the 100s-class brk convoy that
-     crawls the service graph), and the flicker-monopolist heal.
-  3. The post-SwitchToUser accesstoken stall (lb119) is a NEW wall
-     name: foundation->accesstoken_ser code10 exec 269s server RUNNING
-     mid-syscall — same starvation class; capture its stack next time
-     (TXN-HANG-STK symbolization: sys=75 = sendto/setsockopt family).
-- Branch oh-ladder pushed through 450c4d95 (+ this close). Kernels in
-  run/: bzImage-ladder-polldl (release, 05e3c4c5),
-  bzImage-ladder-pollfix2 (release, HEAD-class r3+fix, md5-identical
-  to the concurrent lane's r3w), bzImage-ladder-fieldpoll (release,
-  af5577c5+e8b9a969+05e3c4c5 — the lb92/lb119 SwitchToUser boots).
-
-### FINAL VERDICT of the tenth successor (2026-11-01 ~21:00, branch @ 76e4b6ed)
-THE COORDINATOR'S "fdatasync 441s BUG" AND THE MONOPOLIST BUG ARE THE
-SAME BUG. Evidence chain, closed:
-1. lb66's installs tid984 stack: sys_mkdir -> ext4_journal_stop ->
-   blkdev_write -> submit_request -> wait_for_used_interruptible —
-   and lb66's OWN task dump at 126s: init at preempt=0x10000 +
-   el5_filekey_man at 0x100 owning both CPUs, installs state=RUNNING
-   on_rq=1 NEVER SCHEDULED. The 441s "fdatasync that never returns"
-   is that task FROZEN MID-SYSCALL by the phantom-preempt monopoly —
-   the last syscall it entered is what the audit printed. Not a virtio
-   delivery loss.
-2. Direct proof the block layer is healthy (76e4b6ed, lb74 VW-SNAP at
-   603s): walks=42302 intx=42317 (1:1 x86 INTx deliveries to walker
-   passes, every disk's used==last==shadow, unkicked=0, pending=0/0).
-   The earlier "irqs=0 all boot" was the riscv-only VW_IRQS wiring
-   lying on x86 — now counted (VW_BLK_INTX) and it matches walks 1:1.
-3. The round-3 heal removes the monopoly: lb70-lb74, ZERO
-   monopolist/strand census events after the early phase, CPUs clean
-   (heals 29-119/boot naming the 0x10001/0x10000 faces). With the
-   freeze gone, every boot advanced into the USERSPACE walls:
-   accountmgr tid parked in FUTEX_WAIT with a QUEUED txn (lb67
-   txn16360/16423), samgr code-7 30s family, ui_service/powermgr
-   700-860s chains (lb72/73/74). This is the samgr/installs 30s-class
-   futex chain on the campaign map — userspace-internal, the next
-   hunt's territory. NO boot this session reached the install stream;
-   the fdatasync shape should be RE-EVALUATED there with the r3w
-   kernel — with the monopoly dead it is expected to compress to
-   milliseconds (the poll path's own bounded 5M-lap budget + 5
-   caller retries were never the wall).
-4. Artifacts for the successor (all pushed, branch oh-ladder @76e4b6ed):
-   run/bzImage-ladder-r3w (x86_64 release, VW-SNAP+VW-POLLSTALL+
-   VW_BLK_INTX), lb70-lb74 serials, and the one-line recipe: roll
-   boots until one passes the accountmgr coin-flip, then read
-   VW-POLLSTALL (fires only if a poll truly stalls 2M laps) and
-   startUser -> SwitchToUser -> appspawn -> pixels.
-
-## TWELFTH-SUCCESSOR SESSION (2026-11-01 23:00 → 11-02 01:00, branch oh-ladder @ c002dbe3)
-Mission: the munmap VMA-convoy fix, then the golden population. Landed both
-mm fixes PLUS the user's single-sticking-point directive decode: THE CRAWL
-IS A CLASS — init's boot jobs are chains of SYNCHRONOUS execs + child-exit
-reaping; any child blocking T seconds freezes the WHOLE service graph
-(no starts, no params, no reaping) for T. Three concrete blockers named
-with A/B evidence, two FIXED, one left with a named next probe.
-
-### Kernel commits (all make-test green 1267/1267, x3 builds rc=0)
-1. bbcc5cae mm(munmap): CHUNKED the VMA surgery + PTE zap (all three arch
-   twins). Per iteration: ≤1MiB of ONE VMA — surgery+zap under ONE guard
-   (mm-audit invariant preserved: at every guard drop, VMA-gone ⇒ PTEs-
-   cleared), then drop + cond_resched + RE-DERIVE the first overlapping
-   VMA (tree can change between holds). Verification lb122 (vs lb119):
-   brk-park (sys=45) max exec 735s → 25s; service graph 81-by-105s; the
-   4th-ever SwitchToUser @207.8s. Wall 1 (15/18 boots) is DEAD.
-2. 4c71a4f5 mm(mmap): MAP_FIXED teardown routed through the chunked
-   munmap (was the SECOND whole-range vma_write+zap hold; a PROT_NONE
-   reserve carve over empty space walked every page under the lock with
-   ZERO overlapping VMAs). Install under fresh guard + bounded
-   racer-retry (8, then ENOMEM).
-3. f0c57182 task/exit/signal: Task::comm_str() (lossy NUL-terminated
-   decode) replacing all ten from_utf8_unchecked(comm) sites — lb120
-   PANICKED at 672s in do_exit's KOT-KILL vnames Debug print ("start
-   byte 12 is not a char boundary"; a >15-byte UTF-8 thread name
-   truncates mid-char in the 16-byte comm).
-4. 9c8bcba0 binder: deliver context-manager SELF-SENDS (mainline parity).
-   The S1-era BR_FAILED_REPLY refusal was an unverified port assumption;
-   it fired at 4.09s every boot (samgr's self-registration oneway, code
-   0x5f504e47, AMS46-SENDFAIL why=5) and lb119/lb122 carried 69-112
-   *.accessToken handle:0 ERR_NULL_OBJECT failures from 6s on. NOTE: the
-   accessToken proxy badness PERSISTS on lb123+ with the fix — its own
-   chain, see successor notes.
-5. c002dbe3 rcu/exit: synchronize_rcu_bounded(1500ms, site) at the THREE
-   exit-path grace waits (MmStruct::drop raw-borrower wait, thread
-   kernel-stack free, release_task task-memory free). THE lb125 DECODE
-   (see below). WARN RCU-GP-BOUND names site+stuck-CPU on each trip.
-
-### THE lb125 DIFFERENTIAL DECODE (the sticking point, evidence chain)
-Healthy lb65 vs crawling lb125 service-start cadence: lb65 86-by-40s;
-lb125 FROZEN at 44 from 20s to 100s, then the whole backlog flushed in
-~3s to the same total. Inside the freeze window:
-- 12.0s chipset_init (pid 466, init's sub-init plugin) last print
-  (configfs usb_gadget mkdirfails — /config absent); it blocked ~30s on
-  a command and its OWN poll watchdog fired
-- 42.03s EXITGRP pid=466 code 32512 (=127)
-- 105.39s init's signal handler finally reaped it — 63 SECONDS LATER
-- In between init received ZERO param msgs, started ZERO services, left
-  six ohos.ctl.start device_manager requests unread (samgr's
-  "Start dynamic proc ... 15000ms" chain x7 — the visible 15s family)
-MECHANISM: do_exit drops the last mm Arc inline; MmStruct::drop calls
-synchronize_rcu() BEFORE the ZOMBIE transition + deferred SIGCHLD. A CPU
-whose task runs unpreemptible (phantom preempt counts / monopolist
-windows) reports NO quiescent state → grace period stalls the window's
-full length → SIGCHLD late → init (signal-driven, single loop) frozen.
-Bimodality = the coincidence coin. lb127 post-fix: no grace tail; the
-residual 40s freeze was named as sdc (below).
-
-### The sdc coin (lb127, image-side fixed)
-lb127: last ServiceStart 4.02s; "Sync exec: /system/bin/sdc" at 4.315s;
-"result 12 1" at 58.043s — init blocked 54s on ONE sync exec (the debug-
-bridge client retrying a transport that is not up; exit 12). Healthy
-boots: sdc exits 0 in ~1.2s (lb65 17.3→18.4, lb122 4.4→5.5). FIX:
-run/system-lb5.img = lb4 + sdc replaced by a #!/system/bin/sh exit-0
-stub (mode 0755) — verified on lb128 (result 0, fast).
-
-### Population hunt state (the prize, unclaimed)
-- run/system-lb4.img = lb3 + installs.cfg ondemand true→false (lb3 had
-  LOST the lb2 resident-installs fix — the 30-75s dynamic installd loads
-  were back on every lb3 boot!). system-lb5.img = lb4 + sdc stub.
-- lb124 died at 84s: accesstoken_ser's OS_DfxWatchdog mutual-kill (its
-  23s init window; lb122-class boots pass at 16.6-17s — a ~6s margin
-  coin) → init StopAllServices → DELIBERATE sysrq-'c' crash (our sysrq
-  handler is correct; that is OH init's reboot path).
-- lb123 (fresh2 copy, lb3): scan started 513s, stalled ~700s (foundation
-  pool parked, userspace futex family); copy kept (goldpop-lb123.img).
-- lb126 (fresh2 copy #2): degenerate from 11s (userspace panic + hdf
-  devmgr 65280 early death + same-process code-30 txn 240s) — bad boot.
-- lb128 (RUNNING at close): fresh2 copy + system-lb5 + gpbound kernel;
-  post-fs-data (first-boot, ~50s) → post-fs 12.3s → late-fs 0.03s →
-  services flowing; watcher armed (run/pop-hunt.sh lb128). Population
-  copies inventory: goldpop-{lb123,lb125,lb126,lb128}.img (pristine
-  partial states) + rollpop-lb122.img (2nd CheckUserParam lineage).
-
-### Successor entry points (in order)
-1. lb128's outcome (run/lb128-hunt.log): with sdc stubbed + grace waits
-   bounded + resident installs, the fresh2 first-boot scan + creation
-   race is the cleanest shot yet at 'bundle size'. pop-hunt.sh kills the
-   VM before an out-of-order CreateNewUser poisons the copy.
-2. chipset_init's ~30s configfs block (lb125 12→42s): the third concrete
-   blocker, UNFIXED. The child's parked syscall is nameable with a
-   mid-block sampler (last_calls ring exists in do_exit's print; add a
-   watchdog-side tap or boot dfx=taskdump on a fresh2 copy).
-3. First-boot post-fs-data ~50s (lb128 10→61s): the fs sync-write family
-   (fs domain) — genuine work, but the e2fsck/restorecon exec chain
-   under it deserves a per-command breakdown before the population race
-   can be won reliably.
-4. *.accessToken proxy handle:0 ERR_NULL_OBJECT (85-112/boot from 6s,
-  persists past the binder self-send fix): the proxy is CONSTRUCTED
-  broken (handle 0, null invoker — SendRequestInner error 7 before any
-  kernel send). Trace foundation's AccessTokenKit init at 6s vs SA 3503
-  registration at 23-27s — a GetSystemAbility-null answer cached into a
-  permanent broken proxy is the shape; OH-side retry or kernel-side
-  nothing. This gates the post-SwitchToUser user-start leg.
-5. The flicker-monopolist heal + phantom-producer hunts (sched lane,
-   unchanged) — the monopolist windows are now the only thing that
-   trips RCU-GP-BOUND (watch that print: it names site+CPU per trip).
+### Population-path decodes (committed for the successor, image work stopped)
+1. Creation trigger (OH source): accountmgr's OnAddSystemAbility runs
+   CreateOsAccount(100) once storage(5003)+AMS(180)+BMS(401) SAs registered;
+   subscription via samgr's CheckListenerNotify (late subscribers notified).
+2. User-100 resurrection: GetOsAccountInfoById falls back to the
+   distributeddata KV when the file is absent — stripping only
+   /data/service/el1/public/account is INSUFFICIENT; the store lives at
+   /data/service/el1/public/database/os_account_mgr_service/ (discovery boot
+   lb216 listed the paths). IsOsAccountExists = presence of
+   account/<id>/account_info.json (valid JSON).
+3. Race margins (creation start vs bundles.ready): lb59 -28s, lbpop2 -239s,
+   lb219 -38s, lb226 -0.4s (read at exec start ~155s loses), lb229 lost by
+   12ms (retry budget 900s burned, ready at 1091.616, giveup 1091.604). With
+   the bio fix compressing the load, the natural race should win on a
+   healthy boot. Image-side: system-lb6/8 (strip stubs), lb9 (condition,
+   bypassed by dynamic SA loads), lb10 (ondemand flips), lb11-13 (patched
+   libbms retry) — ALL SUPERSEDED, do not boot; system-lb5 remains the
+   campaign baseline; lb7 = discovery (prints paths to console).
+4. FIRST MOVE when the allocator freeze is fixed: verify the bio fix
+   (verify-roll), then the strip-population (system-lb8 recipe: strip account
+   dir + os_account_mgr_service dir at 4.3s via sdc stub, NOSNAP fresh warm
+   copy) -> creation reads the populated store -> bundle size:34 -> install
+   stream persists -> GOLDEN copy -> snapshot ladder -> pixels.
 
 ### Boots this session
-lb120 (munchunk: 81-svcs-fast, brk residual 144s→MAP_FIXED suspect,
-PANIC 672s comm print → fix 3), lb122 (mmfix3: 4th SwitchToUser 207.8s,
-brk max 25s, empty-records ladder spin = lineage property; copy kept),
-lb123 (pop attempt 1: scan stall), lb124 (mmfix4+lb4: accesstoken
-watchdog reboot), lb125 (THE differential decode boot; mmfix4+lb4),
-lb126 (degenerate), lb127 (warm+gpbound: 152-by-70s, sdc named+fixed),
-lb128 (RUNNING: lb5+gpbound population hunt).
-Gates: make test GREEN 3x (lb120/lb121/lb123/lb126-maketest.log — the
-last on the final gpbound tree, 1267/1267); x3 builds rc=0 per commit.
+lb200 (roller aborted), lb210 (strip v1: KV resurrection), lb216 (discovery),
+lb217-231 (golden rolls: samgr-dark mix + race losses; lb219/222/223/225/226
+created user-100-empty = copies deleted; lb227/229 = the retry-budget
+boundaries), lb232-245 (verification attempts: the allocator-freeze dark
+streak). Gates: make test ALL PASSED (biofix-maketest-full.log), x3 rc=0.
