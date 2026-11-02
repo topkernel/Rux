@@ -145,18 +145,12 @@ pub struct Dentry {
     /// whether to take the SLOW path — a stale "current" verdict is
     /// caught on the next walk after the generation bumps.
     inode_gen: AtomicU64,
-    /// (21st successor, negative-lookup memo) THIS dentry's content
-    /// generation, bumped on every successful directory mutation
-    /// dispatched through it as the parent (create/mkdir/unlink/rmdir/
-    /// rename/link/symlink/mknod). A negative memo child whose stamped
-    /// generation differs from the parent's is stale and re-resolved
-    /// from the filesystem. The reference kernel invalidates negative
-    /// dentries on every mutation; the global VFS_DIR_EPOCH (getdents
-    /// cache key) is too coarse — a mutation in one directory would
-    /// invalidate every other directory's memos.
-    pub mut_gen: AtomicU64,
-    /// The parent's mut_gen at the time this negative memo was inserted
-    /// (meaningful only while `negative` is set). 0 = unstamped.
+    /// (21st successor, negative-lookup memo) The parent directory
+    /// INODE's content generation at insert time (meaningful only while
+    /// `negative` is set). The stamp lives on the shared inode —
+    /// bind-mount aliases are separate dentries over one inode, so a
+    /// mutation through ANY alias invalidates memos cached under every
+    /// alias. 0 = unstamped.
     pub neg_gen: AtomicU64,
     /// Negative memo children currently cached under this parent
     /// (bounded — see NEG_MEMO_CAP / memo_negative).
@@ -182,23 +176,9 @@ impl Dentry {
             negative: AtomicBool::new(false),
             is_mountpoint: AtomicBool::new(false),
             inode_gen: AtomicU64::new(0),
-            mut_gen: AtomicU64::new(0),
             neg_gen: AtomicU64::new(0),
             neg_count: AtomicUsize::new(0),
         }
-    }
-
-    /// (negative-lookup memo) The parent's content generation.
-    #[inline]
-    pub fn mut_gen_load(&self) -> u64 {
-        self.mut_gen.load(Ordering::Acquire)
-    }
-
-    /// (negative-lookup memo) Invalidate this parent's negative memos —
-    /// call on every successful mutation dispatched through this parent.
-    #[inline]
-    pub fn bump_mut_gen(&self) {
-        self.mut_gen.fetch_add(1, Ordering::AcqRel);
     }
 
     /// (negative-lookup memo) The generation this negative child was
@@ -224,15 +204,13 @@ impl Dentry {
     /// filesystems whose content changes exclusively through VFS
     /// mutations (ext4) — dynamic filesystems (procfs/devfs/sysfs)
     /// change without them and must never memo.
-    pub fn memo_negative(self: &Arc<Self>, name: &str) {
+    pub fn memo_negative(self: &Arc<Self>, name: &str, parent_gen: u64) {
         let mut guard = self.children.lock();
         if let Some(existing) = guard.get(name) {
             if existing.is_negative() {
                 // Refresh the stamp so a mutation that happened between
                 // our miss and this insert does not doom the memo.
-                existing
-                    .neg_gen
-                    .store(self.mut_gen.load(Ordering::Acquire), Ordering::Release);
+                existing.neg_gen.store(parent_gen, Ordering::Release);
             }
             // Positive child: the file exists — nothing to memo.
             return;
@@ -260,8 +238,7 @@ impl Dentry {
         let d = Arc::new(Dentry::new(alloc::string::String::from(name)));
         d.set_parent(self.clone());
         d.negative.store(true, Ordering::Release);
-        d.neg_gen
-            .store(self.mut_gen.load(Ordering::Acquire), Ordering::Release);
+        d.neg_gen.store(parent_gen, Ordering::Release);
         guard.insert(alloc::string::String::from(name), d);
         self.neg_count.fetch_add(1, Ordering::AcqRel);
     }

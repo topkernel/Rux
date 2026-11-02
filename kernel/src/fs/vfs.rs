@@ -1774,6 +1774,33 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // the walk even started. Only chrooted tasks and non-normal paths
     // take the allocating arms now.
     let rooted = process_rooted();
+    // (21st successor) CHROOT FAST BASE: when the jail root is recorded
+    // as a dentry (set_root_with_dentry at chroot time) and the caller's
+    // path is absolute, start the walk AT the jail root and feed the raw
+    // components straight into the loop — its "."/".."/trailing-slash
+    // arms already carry the semantics, and the ".." clamp anchors at
+    // this same dentry. Replaces the per-lookup make_absolute_rooted +
+    // get_process_root + normalize_with_root allocation train AND the
+    // dentry_walk_no_symlink RE-WALK of the jail prefix (lb346: walk
+    // prologue averaged 66.6us over 781k walks = 52s wall, comparable to
+    // the whole walk loop; every OH service is chrooted).
+    let mut fast_base: Option<Arc<Dentry>> = None;
+    let rooted = if rooted && pathname.starts_with('/') {
+        match crate::sched::current()
+            .and_then(|t| t.fs_arc())
+            .and_then(|fs| fs.root_dentry())
+        {
+            Some(rd) => {
+                fast_base = Some(rd);
+                // Components come raw from pathname; the walk below starts
+                // at fast_base instead of the global root.
+                false
+            }
+            None => true,
+        }
+    } else {
+        rooted
+    };
     let abs_owned: Option<String>;
     let abs_path: &str = if pathname.starts_with('/') {
         if rooted {
@@ -1869,9 +1896,17 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // Start from root, follow mount. P1 chroot: also resolve the task's
     // root dentry (when chrooted) for the ".." clamp below and for absolute
     // symlink bases in follow_symlink.
-    let mut current = follow_mount(vfs_root.clone());
+    // (21st successor) CHROOT FAST BASE: with a recorded jail-root dentry
+    // the walk starts THERE (no jail-prefix re-walk, no root string);
+    // the same dentry anchors the ".." clamp.
+    let mut current = match fast_base {
+        Some(ref rd) => follow_mount(rd.clone()),
+        None => follow_mount(vfs_root.clone()),
+    };
     let mut symlink_depth: usize = 0;
-    let task_root_dentry: Option<Arc<Dentry>> = if rooted {
+    let task_root_dentry: Option<Arc<Dentry>> = if let Some(ref rd) = fast_base {
+        Some(rd.clone())
+    } else if rooted {
         dentry_walk_no_symlink(root_str)
     } else {
         None
@@ -2005,14 +2040,30 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // the reference kernel drops negative dentries on every parent
         // mutation; ours refreshes lazily on the next walk.
         let looked_up = match current.lookup_child(component) {
-            Some(ref c)
-                if c.is_negative()
-                    && crate::dfx::fsw::negmemo_on()
-                    && c.neg_gen_load() != current.mut_gen_load() =>
+            Some(c)
+                if c.is_negative() && crate::dfx::fsw::negmemo_on() =>
             {
-                crate::dfx::fsw::note_negstale();
-                current.remove_child(component);
-                None
+                // The stamp lives on the parent's INODE (shared across
+                // bind-mount aliases) — carried here in cur_inode_opt.
+                let parent_gen = match cur_inode_opt.as_ref() {
+                    Some(i) => i.dir_mut_gen_load(),
+                    None => match current.get_inode() {
+                        Some(i) => i.dir_mut_gen_load(),
+                        None => 0,
+                    },
+                };
+                if c.neg_gen_load() != parent_gen {
+                    // STALE memo: the parent mutated since the memo was
+                    // inserted (through this dentry OR any bind alias).
+                    // Detach and re-resolve from the filesystem — the
+                    // reference kernel drops negative dentries on every
+                    // parent mutation; ours refreshes lazily here.
+                    crate::dfx::fsw::note_negstale();
+                    current.remove_child(component);
+                    None
+                } else {
+                    Some(c)
+                }
             }
             other => other,
         };
@@ -2156,7 +2207,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                         if crate::dfx::fsw::negmemo_on()
                                             && ops.lookup == Some(crate::fs::ext4::ext4_lookup)
                                         {
-                                            current.memo_negative(component);
+                                            let pgen = dir_inode.dir_mut_gen_load();
+                                            current.memo_negative(component, pgen);
                                         }
                                     }
                                     if sbx_tracing {
@@ -2807,17 +2859,6 @@ fn vfs_dir_epoch_bump() {
     VFS_DIR_EPOCH.fetch_add(1, core::sync::atomic::Ordering::Release);
 }
 
-/// (negative-lookup memo, 21st successor) Invalidate the parent
-/// directory's negative memos after a successful mutation dispatched
-/// through it as parent. One fetch_add per successful mutation — the
-/// walk's memo-hit path compares generations lazily, so no per-child
-/// work happens here.
-#[inline]
-fn parent_dentry_mutation_bump(parent_vpath: &VfsPath) {
-    if let Some(ref d) = parent_vpath.dentry {
-        d.bump_mut_gen();
-    }
-}
 
 /// Create directory - unified implementation using inode_operations
 ///
@@ -2912,7 +2953,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
                 }
             };
             vfs_dir_epoch_bump();
-            parent_dentry_mutation_bump(&parent_vpath);
+            parent_inode.dir_mut_gen_bump();
 
             // inode_init_owner (Linux): a new entry gets the caller's fsuid,
             // and when the PARENT directory has S_ISGID set the child
@@ -3031,7 +3072,7 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
                     crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
                 mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev).map_err(|e| e.as_neg_i32())?;
                 vfs_dir_epoch_bump();
-                parent_dentry_mutation_bump(&parent_vpath);
+                parent_inode.dir_mut_gen_bump();
 
                 // Invalidate any stale (negative) dentry, the same
                 // discipline as vfs_mkdir. The mknod callback returns no
@@ -3086,7 +3127,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
         if let Some(symlink_fn) = ops.symlink {
             let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes()).map_err(|e| e.as_neg_i32())?;
             vfs_dir_epoch_bump();
-            parent_dentry_mutation_bump(&parent_vpath);
+            parent_inode.dir_mut_gen_bump();
 
             // Invalidate negative dentry and cache the new one
             if let Some(ref parent_dentry) = parent_vpath.dentry {
@@ -3169,7 +3210,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
             let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
                 vfs_dir_epoch_bump();
-                parent_dentry_mutation_bump(&parent_vpath);
+                parent_inode.dir_mut_gen_bump();
                 // Invalidate icache entry for the removed directory
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
@@ -3283,7 +3324,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
             let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
                 vfs_dir_epoch_bump();
-                parent_dentry_mutation_bump(&parent_vpath);
+                parent_inode.dir_mut_gen_bump();
                 // inotify: capture the target inode before the caches drop
                 // it — IN_DELETE on the parent (named); IN_DELETE_SELF on
                 // the inode itself only when the last link went away.
@@ -3411,7 +3452,7 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
             let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
             if result == 0 {
                 vfs_dir_epoch_bump();
-                parent_dentry_mutation_bump(&parent_vpath);
+                parent_inode.dir_mut_gen_bump();
                 // Invalidate stale/negative dentry at new path
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     parent_dentry.remove_child(&name);
@@ -3564,8 +3605,8 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
         // still-missing verdict stays TRUE but is re-proven by the gen
         // bump) and arrived in new_parent (any memo there was wrong the
         // moment the name appeared).
-        parent_dentry_mutation_bump(&old_parent_vpath);
-        parent_dentry_mutation_bump(&new_parent_vpath);
+        old_parent.dir_mut_gen_bump();
+        new_parent.dir_mut_gen_bump();
         // Keep the dentry cache in step with the on-disk rename by MOVING
         // the renamed entry's cached dentry (reference d_move): the dentry
         // — with its whole cached subtree — is re-attached under the new
@@ -4395,10 +4436,6 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     }
                 }
                 let parent_vpath = path_lookup(&parent_path, 0)?;
-                // (negative-lookup memo) Take the parent dentry BEFORE the
-                // partial move below — the mutation bump needs it after
-                // create_fn succeeded.
-                let parent_pd = parent_vpath.dentry.clone();
                 let parent_inode = parent_vpath.inode
                     .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
                 // A non-directory in the middle of the create path is
@@ -4443,9 +4480,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     // CVE-2018-13405 family).
                     inherit_setgid_dir_gid(&parent_inode, &new_inode);
                     vfs_dir_epoch_bump();
-                    if let Some(ref d) = parent_pd {
-                        d.bump_mut_gen();
-                    }
+                    parent_inode.dir_mut_gen_bump();
                     new_inode
                 };
                 // Cache new dentry (replace stale/negative dentry)
