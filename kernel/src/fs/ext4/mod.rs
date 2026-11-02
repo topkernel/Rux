@@ -2506,6 +2506,56 @@ fn locked_owner_alive_wait(owner: &u32) -> bool {
     alive
 }
 
+/// lb275 coordinator steer: dump the CURRENT holder's kernel-stack PCs
+/// (text-window scan, HUNG-STK pattern) — the holder is a real task
+/// parked mid-section; its saved sp names the exact wait site inside
+/// the 5 s-class hold. Diagnostic only, called from the stall printer.
+fn biglock_holder_stack(owner: u32) {
+    use crate::process::pid_hash;
+    let t = pid_hash::pid_hash_lookup_pinned(owner);
+    if t.is_null() {
+        return;
+    }
+    let thsp = unsafe { (*t).thread().sp };
+    crate::process::task::Task::task_put(t);
+    if (thsp >> 48) != 0xffff || (thsp & 7) != 0 || thsp <= 0x1000 {
+        return;
+    }
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+    let base = thsp as *const u64;
+    let mut shown = 0;
+    crate::pr_err!("EXT4-BIGLOCK-HOLDER-STK pid={} sp={:#x}", owner, thsp);
+    for k in 0..90 {
+        // SAFETY: diagnostic read within the holder's own kernel stack
+        // pages (the Task exists and pins them).
+        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        if v >= lo && v < hi && (v & 1) == 0 {
+            crate::pr_err!("EXT4-BIGLOCK-HOLDER-STK2 {:#x}", v);
+            shown += 1;
+            if shown >= 10 {
+                break;
+            }
+        }
+    }
+}
+
 struct Ext4BigState {
     locked: bool,
     owner: u32,
@@ -2516,6 +2566,9 @@ struct Ext4BigState {
     /// parks every later ext4 user in D-state forever: the full3/inst-full1
     /// wedge shape).
     acquired_at: u64,
+    /// lb275 hold-profile: longest hold observed (jiffies) + holder.
+    max_held: u64,
+    max_held_by: u32,
     /// R84 (b139 fairness): tasks parked on `wait` PLUS tasks holding an
     /// unspent release() wake token. A task enters the count when it
     /// first registers on the queue and leaves it in the same critical
@@ -2550,6 +2603,13 @@ impl Ext4BigLock {
     /// 3 s queued means the handoff is not reaching this waiter.
     const STALL_WAITER_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 3;
 
+    /// lb275: how long a preempt-bit TASK-context spinner waits FAIRLY
+    /// (gated behind parked waiters) before falling back to the old
+    /// barging acquire. 2 s: far under the waiter anti-starve (5 s), so
+    /// a real spinlock holder is never stuck long, while a whole chmod
+    /// storm of bargers cannot out-run the queue between escapes.
+    const BARGE_ESCAPE_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 2;
+
     const fn new() -> Self {
         Self {
             state: crate::sync::spinlock::Spinlock::new(Ext4BigState {
@@ -2557,6 +2617,8 @@ impl Ext4BigLock {
                 owner: 0,
                 depth: 0,
                 acquired_at: 0,
+                max_held: 0,
+                max_held_by: 0,
                 waiters: 0,
                 handoff_epoch: 0,
             }),
@@ -2681,9 +2743,43 @@ impl Ext4BigLock {
         crate::dfx::fsw::note_biglock_contend();
         let cur = match crate::sched::current() {
             Some(t) if can_sleep => t,
-            _ => {
+            None => {
+                // TRUE no-task context (early boot / hard IRQ): cannot
+                // wait at all — the old barging acquire is the only
+                // option.
                 loop {
                     if let Some(g) = self.try_acquire_or_recurse(pid) {
+                        return g;
+                    }
+                    for _ in 0..64 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+            Some(_t) => {
+                // TASK context with preempt_count != 0 — either a real
+                // spinlock holder or a PHANTOM-bit carrier. lb275: the
+                // ungated barging acquire below let a phantom-bit
+                // chmod walker barge past every parked waiter on every
+                // op — 5 s+ parks (ANTI_STARVE) for sa_main/render
+                // behind the chmod storm, services missing their
+                // binder windows, and the 1524-delivery poison storm
+                // that kills user-100 creation. Such a caller cannot
+                // queue (it cannot sleep), but it CAN wait FAIRLY:
+                // spin on the gated acquire (fresh callers only take a
+                // free lock when NO waiters are parked) so the queue
+                // drains, with a bounded starve-escape back to the
+                // barging acquire (a real spinlock holder must never
+                // spin forever behind an endless waiter stream).
+                let escape_at = crate::drivers::timer::get_jiffies()
+                    + Self::BARGE_ESCAPE_JIFFIES;
+                loop {
+                    let g = if crate::drivers::timer::get_jiffies() < escape_at {
+                        self.try_acquire_or_recurse_fair(pid)
+                    } else {
+                        self.try_acquire_or_recurse(pid)
+                    };
+                    if let Some(g) = g {
                         return g;
                     }
                     for _ in 0..64 {
@@ -2900,15 +2996,26 @@ impl Ext4BigLock {
                                 waited
                             );
                         } else {
+                            let (max_held, max_held_by) = {
+                                let st = self.state.lock();
+                                (st.max_held, st.max_held_by)
+                            };
                             crate::pr_err!(
-                                "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j",
+                                "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j maxheld={}j by={}",
                                 cur_pid,
                                 owner,
                                 depth,
                                 held,
                                 nwaiters,
-                                waited
+                                waited,
+                                max_held,
+                                max_held_by
                             );
+                            // lb275: name WHERE the holder sits (the
+                            // held=0j snapshot artifact hides the real
+                            // hold profile; the holder's parked stack
+                            // is the ground truth).
+                            biglock_holder_stack(owner);
                         }
                     }
                 }
@@ -2953,6 +3060,16 @@ impl Ext4BigLock {
             if st.depth > 0 {
                 st.depth -= 1;
                 if st.depth == 0 {
+                    // lb275: hold-profile tracker — the stall print's
+                    // held=0j is a POST-HANDOFF snapshot artifact; the
+                    // real question (WHICH section holds for 5 s) needs
+                    // the max observed hold + its holder.
+                    let now = crate::drivers::timer::get_jiffies();
+                    let held = now.saturating_sub(st.acquired_at);
+                    if held > st.max_held {
+                        st.max_held = held;
+                        st.max_held_by = st.owner;
+                    }
                     st.locked = false;
                     st.owner = 0;
                 }
