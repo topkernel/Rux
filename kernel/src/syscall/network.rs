@@ -3360,6 +3360,15 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     if !crate::arch::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
         return -(errno::EFAULT as i64);
     }
+    // TOCTOU fix (sec-r1, L2): the iovec array is fetched ONCE and the
+    // scatter loops below consume this kernel snapshot. The old shape
+    // re-read each entry after the receive, so a racing thread of the
+    // same process could swap iov_base/iov_len between validation and
+    // use — the scatter wrote to addresses that were never validated
+    // (the classic double-fetch). Validation and use now see the same
+    // bytes.
+    let mut iovs: alloc::vec::Vec<(usize, usize)> =
+        alloc::vec::Vec::with_capacity(msg_iovlen);
     for i in 0..msg_iovlen {
         // SAFETY: iovec fields read from user memory at validated offset.
         let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
@@ -3373,6 +3382,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         if total_buf_len > crate::syscall::io::RW_CHUNK.saturating_mul(4) {
             return -(errno::EMSGSIZE as i64);
         }
+        iovs.push((iov_base, iov_len));
     }
 
     if total_buf_len == 0 {
@@ -3393,19 +3403,16 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             Ok(r) => r,
             Err(e) => return e as i64,
         };
-        // Scatter data back to iovecs.
+        // Scatter data back to iovecs (the sec-r1 kernel snapshot — the
+        // addresses below are the validated ones, not a re-fetch).
         let mut offset = 0usize;
-        for i in 0..msg_iovlen {
+        for &(iov_base, iov_len) in &iovs {
             if offset >= r.len {
                 break;
             }
-            // SAFETY: iovec fields at validated user offset (the array was
-            // access_ok-checked above).
-            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
-            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
             let copy_len = core::cmp::min(iov_len, r.len - offset);
             if copy_len > 0 {
-                // SAFETY: iov_base validated with access_ok above.
+                // SAFETY: iov_base validated with access_ok at snapshot time.
                 let uncopied = unsafe {
                     crate::arch::uaccess::copy_to_user(
                         iov_base as *mut u8,
@@ -3489,16 +3496,15 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             Err(e) => return e as i64,
         };
         let mut offset = 0usize;
-        for i in 0..msg_iovlen {
+        for &(iov_base, iov_len) in &iovs {
             if offset >= n {
                 break;
             }
-            // SAFETY: iovec fields at validated user offset.
-            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
-            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+            // sec-r1 TOCTOU fix: scatter from the kernel snapshot (the
+            // validated iov_base/iov_len), not a re-fetch of user memory.
             let copy_len = core::cmp::min(iov_len, n - offset);
             if copy_len > 0 {
-                // SAFETY: iov_base validated with access_ok above.
+                // SAFETY: iov_base validated with access_ok at snapshot time.
                 let uncopied = unsafe {
                     crate::arch::uaccess::copy_to_user(
                         iov_base as *mut u8,
@@ -3570,16 +3576,15 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 Err(e) => return e as i64,
             };
         let mut offset = 0usize;
-        for i in 0..msg_iovlen {
+        for &(iov_base, iov_len) in &iovs {
             if offset >= n {
                 break;
             }
-            // SAFETY: iovec fields at validated user offset.
-            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
-            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
+            // sec-r1 TOCTOU fix: scatter from the kernel snapshot (the
+            // validated iov_base/iov_len), not a re-fetch of user memory.
             let copy_len = core::cmp::min(iov_len, n - offset);
             if copy_len > 0 {
-                // SAFETY: iov_base validated with access_ok above.
+                // SAFETY: iov_base validated with access_ok at snapshot time.
                 let uncopied = unsafe {
                     crate::arch::uaccess::copy_to_user(
                         iov_base as *mut u8,
@@ -3672,13 +3677,11 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     if datagram_truncated && bytes_read > 0 {
         out_flags |= MSG_TRUNC as u32;
     }
-    // Scatter data back to iovecs
+    // Scatter data back to iovecs (sec-r1 TOCTOU fix: kernel snapshot —
+    // the validated iov_base/iov_len, not a re-fetch of user memory).
     let mut offset = 0usize;
-    for i in 0..msg_iovlen {
+    for &(iov_base, iov_len) in &iovs {
         if offset >= bytes_read { break; }
-        // SAFETY: iovec fields at validated user offset; copy_len bounds the write.
-        let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
-        let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16 + 8)) };
         let copy_len = core::cmp::min(iov_len, bytes_read - offset);
         if copy_len > 0 {
             // R20-3: exception-table copy — a raw
@@ -4169,6 +4172,12 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
             }
             return total_recv as i64;
         }
+        // TOCTOU fix (sec-r1, L2): fetch each message's iovec array ONCE
+        // and scatter from the snapshot — the old code re-read the entries
+        // after the receive, so a racing thread could rewrite them between
+        // validation and use (double-fetch).
+        let mut iovs: alloc::vec::Vec<(usize, usize)> =
+            alloc::vec::Vec::with_capacity(msg_iovlen);
         for j in 0..msg_iovlen {
             // SAFETY: iovec fields at validated offset; iov_base validated below.
             let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16)) };
@@ -4187,6 +4196,7 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                 }
                 return total_recv as i64;
             }
+            iovs.push((iov_base, iov_len));
         }
 
         // review F8: a zero-length buffer still RECEIVES (and consumes) a
@@ -4212,13 +4222,11 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
                     break;
                 }
             };
-        // Scatter data back to iovecs
+        // Scatter data back to iovecs (sec-r1 TOCTOU fix: the kernel
+        // snapshot built above, not a re-fetch of user memory).
         let mut offset = 0usize;
-        for j in 0..msg_iovlen {
+        for &(iov_base, iov_len) in &iovs {
             if offset >= bytes_read { break; }
-            // SAFETY: iovec fields at validated offset; copy_len bounds the write.
-            let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16)) };
-            let iov_len = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(j * 16 + 8)) };
             let copy_len = core::cmp::min(iov_len, bytes_read - offset);
             if copy_len > 0 {
                 // R20-3: exception-table copy — see sys_recvmsg.

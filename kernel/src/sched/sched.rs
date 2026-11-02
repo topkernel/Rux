@@ -4959,15 +4959,36 @@ pub fn scheduler_tick() {
                 // the pc != 0 gate so an entirely-zero count refreshes
                 // every field. Three relaxed stores per tick; only the
                 // task's own CPU writes these.
+                //
+                // Arm-on-first-observation (stress-port r1, 2026-11-02):
+                // a stamp of 0 means "this field has never been observed
+                // since TASK CREATION" — forked tasks are born with 0
+                // stamps, not "absent since boot". Under fork/exec churn
+                // (rs --fork 8), fresh children holding live guards at
+                // their first tick were adjudged instantly stale by the
+                // old `j == 0` shortcut in stale_200: 15.5k heals/120 s,
+                // 169 guard drops underflowed after the heal stripped
+                // their bits mid-section (need_resched + preempt of a
+                // live PTE/VMA lock holder = the stranded-lock amplifier).
+                // Stamp-now on the first observation of a never-stamped
+                // field so staleness always measures a real >= 2 s
+                // window; genuine phantoms (field present at 200
+                // consecutive ticks after arming) still heal.
                 {
                     let now = crate::drivers::timer::get_jiffies();
-                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0 {
+                    if pc & crate::interrupt::preempt::PREEMPT_MASK == 0
+                        || unsafe { (*cur).ti_pc_pirq_zero_jif() } == 0
+                    {
                         unsafe { (*cur).ti_pc_pirq_zero_jif_stamp(now) };
                     }
-                    if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0 {
+                    if pc & crate::interrupt::preempt::SOFTIRQ_MASK == 0
+                        || unsafe { (*cur).ti_pc_sirq_zero_jif() } == 0
+                    {
                         unsafe { (*cur).ti_pc_sirq_zero_jif_stamp(now) };
                     }
-                    if pc & crate::interrupt::preempt::HARDIRQ_MASK == 0 {
+                    if pc & crate::interrupt::preempt::HARDIRQ_MASK == 0
+                        || unsafe { (*cur).ti_pc_hirq_zero_jif() } == 0
+                    {
                         unsafe { (*cur).ti_pc_hirq_zero_jif_stamp(now) };
                     }
                 }
@@ -5040,7 +5061,13 @@ pub fn scheduler_tick() {
                     let h_extra =
                         (pc & crate::interrupt::preempt::HARDIRQ_MASK) >=
                             2 * crate::interrupt::preempt::HARDIRQ_OFFSET;
-                    let stale_200 = |j: u64| j == 0 || now.wrapping_sub(j) >= 200;
+                    // stress-port r1: j == 0 ("never observed") is NOT
+                    // stale — with the arm-on-first-observation stamps
+                    // above, a real stamp exists by the time this runs,
+                    // and "never stamped" can only mean a task younger
+                    // than one tick, whose guards are certainly live.
+                    let stale_200 =
+                        |j: u64| j != 0 && now.wrapping_sub(j) >= 200;
                     let p_stale = p_set && {
                         stale_200(unsafe { (*cur).ti_pc_pirq_zero_jif() })
                     };
