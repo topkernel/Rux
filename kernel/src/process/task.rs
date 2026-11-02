@@ -1813,6 +1813,31 @@ impl Task {
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
+        // stress-port r1 (SP-1 follow-up, same R68a class): the four
+        // per-field preempt-count liveness stamps were also missing —
+        // a recycled Task page carried the PREVIOUS task's stamps, so a
+        // fork child holding a live guard at its first tick presented a
+        // minutes-old stamp and stale_200 adjudged it instantly stale:
+        // 4,114 false heals on fresh children in 100 s of fork churn
+        // (rs --fork 8), each heal stripping live guard bits mid-section
+        // (underflowed drops at spinlock.rs/rwlock.rs). Zeroed here, the
+        // arm-on-first-observation tick logic in sched.rs owns the rest.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
         // Task pages come from the non-zeroing buddy allocator, so every
         // fork inherited the previous occupant's bytes. The fatal one is
@@ -2437,6 +2462,31 @@ impl Task {
         // "e ticks" surviving inside live ksoftirqd/0).
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // stress-port r1 (SP-1 follow-up, same R68a class): the four
+        // per-field preempt-count liveness stamps were also missing —
+        // a recycled Task page carried the PREVIOUS task's stamps, so a
+        // fork child holding a live guard at its first tick presented a
+        // minutes-old stamp and stale_200 adjudged it instantly stale:
+        // 4,114 false heals on fresh children in 100 s of fork churn
+        // (rs --fork 8), each heal stripping live guard bits mid-section
+        // (underflowed drops at spinlock.rs/rwlock.rs). Zeroed here, the
+        // arm-on-first-observation tick logic in sched.rs owns the rest.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
