@@ -303,6 +303,15 @@ impl WaitQueueHead {
         self.wake_up(WakeUpHint::Normal, 1)
     }
 
+    /// Lock-free proof of waiters (the `waiters` fast-path counter):
+    /// true when at least one entry is queued. Callers that only need
+    /// "is anyone parked here?" (e.g. the idle loop's UART drain gate,
+    /// which skips a port-read VM exit when no reader sleeps) use this
+    /// instead of taking the irqsave list lock.
+    pub fn has_sleepers(&self) -> bool {
+        self.waiters.load(Ordering::Acquire) != 0
+    }
+
     /// Diagnostic: entries currently queued, and how many carry the
     /// woken flag (VW forensic instrumentation — a woken-flagged entry
     /// whose task sleeps is the sticky-skip lost-wake signature).

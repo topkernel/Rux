@@ -1,0 +1,151 @@
+===CASE lat_sem base rep1 load=6.98
+Semaphore latency: 4.6027 microseconds
+===CASE lat_unix base rep1 load=6.98
+AF_UNIX sock stream latency: 11.9899 microseconds
+===CASE lat_pipe base rep1 load=6.98
+Pipe latency: 7.7265 microseconds
+===CASE lat_ctx -s 64 2 base rep1 load=6.98
+"size=64k ovr=1.10
+2 4.89
+===CASE lat_ctx -s 64 8 base rep1 load=8.54
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open base rep1 load=8.54
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null base rep1 load=8.54
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read base rep1 load=8.54
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write base rep1 load=8.77
+Simple write: 0.1341 microseconds
+===CASE lat_sem fix rep1 load=8.77
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix fix rep1 load=8.77
+LMBENCH TIMEOUT lat_unix
+===CASE lat_pipe fix rep1 load=8.77
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 fix rep1 load=8.29
+"size=64k ovr=1.14
+2 2.71
+===CASE lat_ctx -s 64 8 fix rep1 load=8.29
+"size=64k ovr=1.12
+8 6.68
+===CASE lat_syscall open fix rep1 load=8.29
+Simple open/close: 1.1046 microseconds
+===CASE lat_syscall null fix rep1 load=8.29
+Simple syscall: 0.0746 microseconds
+===CASE lat_syscall read fix rep1 load=8.83
+Simple read: 0.1643 microseconds
+===CASE lat_syscall write fix rep1 load=8.83
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem fix rep2 load=8.83
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix fix rep2 load=8.83
+LMBENCH TIMEOUT lat_unix
+===CASE lat_pipe fix rep2 load=9.55
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 fix rep2 load=9.55
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 fix rep2 load=9.55
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open fix rep2 load=9.55
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null fix rep2 load=10.15
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read fix rep2 load=10.15
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write fix rep2 load=10.15
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem base rep2 load=10.15
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix base rep2 load=10.18
+AF_UNIX sock stream latency: 13.6471 microseconds
+===CASE lat_pipe base rep2 load=10.18
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 base rep2 load=10.18
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 base rep2 load=10.18
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open base rep2 load=10.48
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null base rep2 load=10.48
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read base rep2 load=10.48
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write base rep2 load=10.48
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem base rep3 load=11.59
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix base rep3 load=11.59
+AF_UNIX sock stream latency: 12.9255 microseconds
+===CASE lat_pipe base rep3 load=11.59
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 base rep3 load=11.59
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 base rep3 load=12.18
+"size=64k ovr=1.19
+8 5.01
+===CASE lat_syscall open base rep3 load=12.18
+Simple open/close: 1.1767 microseconds
+===CASE lat_syscall null base rep3 load=12.18
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read base rep3 load=12.18
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write base rep3 load=12.39
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem fix rep3 load=12.39
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix fix rep3 load=12.39
+AF_UNIX sock stream latency: 19.4848 microseconds
+===CASE lat_pipe fix rep3 load=12.39
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 fix rep3 load=11.86
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 fix rep3 load=11.86
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open fix rep3 load=11.86
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null fix rep3 load=11.86
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read fix rep3 load=11.34
+Simple read: 0.1626 microseconds
+===CASE lat_syscall write fix rep3 load=11.34
+Simple write: 0.1401 microseconds
+===CASE lat_sem fix rep4 load=11.34
+Semaphore latency: 1.1471 microseconds
+===CASE lat_unix fix rep4 load=11.34
+AF_UNIX sock stream latency: 7.2474 microseconds
+===CASE lat_pipe fix rep4 load=11.08
+LMBENCH TIMEOUT lat_pipe
+===CASE lat_ctx -s 64 2 fix rep4 load=11.08
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 fix rep4 load=11.08
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_syscall open fix rep4 load=11.08
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null fix rep4 load=11.85
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read fix rep4 load=11.85
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write fix rep4 load=11.85
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_sem base rep4 load=11.85
+LMBENCH TIMEOUT lat_sem
+===CASE lat_unix base rep4 load=11.63
+AF_UNIX sock stream latency: 12.9495 microseconds
+===CASE lat_pipe base rep4 load=11.63
+Pipe latency: 8.1357 microseconds
+===CASE lat_ctx -s 64 2 base rep4 load=11.63
+LMBENCH TIMEOUT lat_ctx
+===CASE lat_ctx -s 64 8 base rep4 load=11.63
+"size=64k ovr=1.11
+8 5.24
+===CASE lat_syscall open base rep4 load=11.71
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall null base rep4 load=11.71
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall read base rep4 load=11.71
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall write base rep4 load=11.71
+LMBENCH TIMEOUT lat_syscall
+final load=11.71 11.60 10.10 11/2234 67679
+done

@@ -392,6 +392,30 @@ pub const F_RDLCK_KIND: u8 = 1;
 pub const F_WRLCK_KIND: u8 = 2;
 
 static RECORD_LOCK_TABLE: Spinlock<Vec<RecordLock>> = Spinlock::new(Vec::new());
+
+/// Live-entry mirror of RECORD_LOCK_TABLE, stored inside every critical
+/// section that mutates the table (closegap lane, 2026-11-02). The two
+/// per-CLOSE release paths (posix_release_on_close via
+/// displaced_close_decision, ofd_release_file via File::drop) read this
+/// first and skip the table lock + retain scan when it is 0 — the
+/// overwhelmingly common case (no process on the box holds record
+/// locks), and one irqsave lock pair + O(table) scan off every close
+/// (the close side of lat_syscall,open; perf-path lane measured the
+/// whole close at 300-400 ns). Exactness: 0 proves the table was empty
+/// at the storing critical section; a concurrent FIRST-ever insert
+/// racing the read can leave one lock unreleased by that close — a
+/// window that needs a task inserting the box's first record lock in
+/// the exact interval another thread of the same process closes a
+/// same-inode file; the stale entry is still reaped by
+/// reap_stale_locked (belt-and-braces) and by that owner's next
+/// release path.
+static RECORD_LOCK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_table_len(table: &Vec<RecordLock>) {
+    RECORD_LOCK_COUNT.store(table.len(), core::sync::atomic::Ordering::Release);
+}
 /// All blocked F_SETLKW waiters (wake-all-and-recheck on every change).
 static RECORD_LOCK_WAIT: WaitQueueHead = WaitQueueHead::new();
 /// Pending blocking requests: (owner, key, start, end). Written before a
@@ -474,6 +498,9 @@ fn owner_is_dead(owner: LockOwner) -> bool {
 fn reap_stale_locked(table: &mut Vec<RecordLock>) -> bool {
     let before = table.len();
     table.retain(|l| !owner_is_dead(l.owner));
+    if table.len() != before {
+        note_table_len(table);
+    }
     table.len() != before
 }
 
@@ -599,6 +626,7 @@ fn apply_owner_lock(
     // start offset (see find_conflict). Stable sort keeps same-start
     // ties in their existing relative order.
     table.sort_by(|a, b| (a.key, a.start, a.end).cmp(&(b.key, b.start, b.end)));
+    note_table_len(table);
     removed
 }
 
@@ -713,6 +741,10 @@ enum Outcome {
 /// "close any fd of the file drops the process's locks on it" rule.
 /// Called from FdTable::close_fd / dup2_fd / Drop.
 pub fn posix_release_on_close(inode: &Inode) {
+    // closegap: empty-table fast path — see RECORD_LOCK_COUNT.
+    if RECORD_LOCK_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let pid = current_tgid();
     if pid == 0 {
         return;
@@ -722,6 +754,7 @@ pub fn posix_release_on_close(inode: &Inode) {
     let before = table.len();
     table.retain(|l| !(l.key == key && l.owner == LockOwner::Pid(pid)));
     if table.len() != before {
+        note_table_len(&table);
         drop(table);
         RECORD_LOCK_WAIT.wake_up_all();
     }
@@ -731,10 +764,15 @@ pub fn posix_release_on_close(inode: &Inode) {
 /// (F_OFD_SETLK locks live and die with the description, like flock).
 /// Called from `File::drop`.
 pub fn ofd_release_file(file_id: u64) {
+    // closegap: empty-table fast path — see RECORD_LOCK_COUNT.
+    if RECORD_LOCK_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut table = RECORD_LOCK_TABLE.lock();
     let before = table.len();
     table.retain(|l| l.owner != LockOwner::Ofd(file_id));
     if table.len() != before {
+        note_table_len(&table);
         drop(table);
         RECORD_LOCK_WAIT.wake_up_all();
     }

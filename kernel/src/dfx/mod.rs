@@ -114,6 +114,10 @@ pub mod forkprof;
 /// scheduling events around an SMP lost-park wedge, dumped by the
 /// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
 pub mod lostpark;
+/// Context-switch / wake / IPC-syscall cost anatomy (cctx=1, closegap
+/// lane): NS-sum brackets for the __schedule, context_switch, wake and
+/// semop/pipe/unix bodies, dumped at shutdown; see dfx/cctx.rs.
+pub mod cctx;
 
 /// Initialize the DFX subsystem.
 ///
