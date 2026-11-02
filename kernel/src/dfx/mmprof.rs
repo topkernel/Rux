@@ -108,6 +108,9 @@ pub fn on() -> bool {
                 _ => 1,
             };
             ARMED.store(v, Ordering::Relaxed);
+            if v == 2 {
+                crate::pr_warn!("MMPROF armed (cmdline mmprof=1)");
+            }
             v == 2
         }
     }
@@ -191,6 +194,7 @@ pub fn bump_comm() {
 
 const MMPROF_DUMP_SECS: u64 = 60;
 static LAST_DUMP: AtomicU64 = AtomicU64::new(0);
+static DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Timer-heartbeat hook (next to syscost::tick) — periodic dump.
 pub fn tick(now_jiffies: u64) {
@@ -203,24 +207,38 @@ pub fn tick(now_jiffies: u64) {
         return;
     }
     LAST_DUMP.store(now_jiffies, Ordering::Relaxed);
-    report();
+    let k = DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 3;
+    report_line(k);
 }
 
-fn fmt_stat(name: &str, c: u64, cyc: u64, max: u64, per_us: u64) {
+/// Print ONE compact stat as `name=avg/max(n)` inside a caller's line.
+fn fmt_cell(out: &mut alloc::string::String, name: &str, c: u64, cyc: u64, max: u64, per_us: u64) {
     if c == 0 {
         if cyc != 0 {
-            crate::println!("MMPROF {} scalar={}", name, cyc);
+            out.push_str(&alloc::format!(" {}=s{}", name, cyc));
         }
         return;
     }
     let avg = cyc / c.max(1) / per_us;
     let mx = max / per_us;
-    crate::println!("MMPROF {} n={} avg={}us max={}us", name, c, avg, mx);
+    out.push_str(&alloc::format!(" {}={}/{}(n{})", name, avg, mx, c));
 }
 
-/// Print the phase table. Called from the heartbeat tick and the
-/// shutdown cascade (forkprof pattern).
-pub fn report() {
+fn stat(i: usize) -> (u64, u64, u64) {
+    let s = &STATS[i];
+    (
+        s.count.load(Ordering::Relaxed),
+        s.cyc.load(Ordering::Relaxed),
+        s.max.load(Ordering::Relaxed),
+    )
+}
+
+/// Emit ONE line per 60s dump, rotating through three variants.
+/// Console discipline: the printk emit-lock carries a 100us budget in
+/// softirq context and the OH boot floods at ~700us per UART line, so a
+/// multi-line burst loses all but 1-2 lines (lb332 evidence). One
+/// short line per dump survives; the full table completes every 3 min.
+pub fn report_line(k: u64) {
     if !on() {
         return;
     }
@@ -230,45 +248,76 @@ pub fn report() {
     let hz = 0; // cycle-domain report only on the other ports
     let per_us = if hz > 1_000_000 { hz / 1_000_000 } else { 1 };
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
-    let names = [
-        "m_total", "m_body", "m_lockwait", "m_findfree", "m_add", "m_fixedmun",
-        "mu_body", "mu_surg", "mu_walk", "mu_tlb", "mu_yield",
-        "mp_total", "mp_lock", "mp_cover", "mp_pte", "mp_tlb",
-    ];
-    crate::println!("MMPROF BEGIN t={}s hz={}", secs, hz);
-    for (i, name) in names.iter().enumerate() {
-        let s = &STATS[i];
-        fmt_stat(name, s.count.load(Ordering::Relaxed), s.cyc.load(Ordering::Relaxed), s.max.load(Ordering::Relaxed), per_us);
-    }
-    let snames = [
-        "s_fixed", "s_hint", "s_anon0", "s_unpages", "s_unempty", "s_mppages",
-        "s_vmaadd", "s_munloops",
-    ];
-    for (i, name) in snames.iter().enumerate() {
-        let n = SCALARS[i].load(Ordering::Relaxed);
-        if n != 0 {
-            crate::println!("MMPROF {} ={}", name, n);
+    match k {
+        0 => {
+            // A: mmap + mprotect stages
+            let mut l = alloc::format!("MMPROF-A t={}s mmap:", secs);
+            let (c, cy, mx) = stat(M_TOTAL);
+            fmt_cell(&mut l, "tot", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(M_LOCKWAIT);
+            fmt_cell(&mut l, "lock", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(M_FINDFREE);
+            fmt_cell(&mut l, "find", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(M_ADD);
+            fmt_cell(&mut l, "add", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(M_FIXEDMUN);
+            fmt_cell(&mut l, "fixmun", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MP_TOTAL);
+            fmt_cell(&mut l, "| mprot-tot", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MP_LOCK);
+            fmt_cell(&mut l, "mplock", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MP_COVER);
+            fmt_cell(&mut l, "mpcov", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MP_PTE);
+            fmt_cell(&mut l, "mppte", c, cy, mx, per_us);
+            crate::pr_warn!("{}", l);
+        }
+        1 => {
+            // B: munmap stages + placement scalars
+            let mut l = alloc::format!("MMPROF-B t={}s munmap:", secs);
+            let (c, cy, mx) = stat(MU_BODY);
+            fmt_cell(&mut l, "body", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MU_SURG);
+            fmt_cell(&mut l, "surg", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MU_WALK);
+            fmt_cell(&mut l, "walk", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MU_TLB);
+            fmt_cell(&mut l, "tlb", c, cy, mx, per_us);
+            let (c, cy, mx) = stat(MU_YIELD);
+            fmt_cell(&mut l, "yld", c, cy, mx, per_us);
+            crate::pr_warn!(
+                "{} | fixed={} hint={} anon0={} unpg={} unempty={} munloops={}",
+                l,
+                SCALARS[S_FIXED].load(Ordering::Relaxed),
+                SCALARS[S_HINT].load(Ordering::Relaxed),
+                SCALARS[S_ANON0].load(Ordering::Relaxed),
+                SCALARS[S_UNPAGES].load(Ordering::Relaxed),
+                SCALARS[S_UNEMPTY].load(Ordering::Relaxed),
+                SCALARS[S_MUNLOOPS].load(Ordering::Relaxed)
+            );
+        }
+        _ => {
+            // C: length buckets + issuers
+            let mut l = alloc::format!("MMPROF-C t={}s", secs);
+            for b in 0..B_N {
+                let s = &BUCKETS[b];
+                fmt_cell(&mut l, B_NAMES[b], s.count.load(Ordering::Relaxed), s.cyc.load(Ordering::Relaxed), s.max.load(Ordering::Relaxed), per_us);
+            }
+            l.push_str(" | iss:");
+            for slot in COMMS.iter() {
+                let n = slot.n.load(Ordering::Relaxed);
+                if n == 0 {
+                    continue;
+                }
+                let mut comm = [0u8; 16];
+                for (i, b) in comm.iter_mut().enumerate() {
+                    *b = slot.comm[i].load(Ordering::Relaxed);
+                }
+                let end = comm.iter().position(|&c| c == 0).unwrap_or(16);
+                let name = core::str::from_utf8(&comm[..end]).unwrap_or("?");
+                l.push_str(&alloc::format!(" {}={}", name, n));
+            }
+            crate::pr_warn!("{}", l);
         }
     }
-    for (b, name) in B_NAMES.iter().enumerate() {
-        let s = &BUCKETS[b];
-        fmt_stat(name, s.count.load(Ordering::Relaxed), s.cyc.load(Ordering::Relaxed), s.max.load(Ordering::Relaxed), per_us);
-    }
-    // issuer attribution
-    let mut line = alloc::string::String::from("MMPROF issuers:");
-    for slot in COMMS.iter() {
-        let n = slot.n.load(Ordering::Relaxed);
-        if n == 0 {
-            continue;
-        }
-        let mut comm = [0u8; 16];
-        for (i, b) in comm.iter_mut().enumerate() {
-            *b = slot.comm[i].load(Ordering::Relaxed);
-        }
-        let end = comm.iter().position(|&c| c == 0).unwrap_or(16);
-        let name = core::str::from_utf8(&comm[..end]).unwrap_or("?");
-        line.push_str(&alloc::format!(" {}={}", name, n));
-    }
-    crate::println!("{}", line);
-    crate::println!("MMPROF END");
 }
