@@ -15,7 +15,7 @@
 cd /home/william/rux-agents/oh-launcher || exit 1
 MAX=${1:-6}
 START=${2:-275}
-KERNEL=${KERNEL:-run/bzImage-ladder-fx10fix}
+KERNEL=${KERNEL:-run/bzImage-ladder-fx11fix}
 for i in $(seq 0 $((MAX-1))); do
   TAG="lb$((START+i))"
   SER="run/oh-${TAG}-serial.log"

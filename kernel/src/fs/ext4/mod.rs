@@ -2995,6 +2995,39 @@ impl Ext4BigLock {
                                 nwaiters,
                                 waited
                             );
+                            // Coordinator steer (2026-11-02): NAME THE
+                            // MONOPOLIST at the strand moment. The full
+                            // task dump prints per-cpu slot currents,
+                            // every task's state/preempt, and the GRQ
+                            // counts — the discrimination between
+                            // wake-path strand (waiter not in pickable
+                            // set), picker starvation (in-queue, never
+                            // picked), and a kernel-loop monopolist
+                            // (current task with preempt bits / IRQ-off)
+                            // reads directly off this one snapshot.
+                            // Runs in task context with no locks held
+                            // (the stall tripwire fires between park
+                            // iterations); budgeted by the 10 s
+                            // LAST_WAIT_REPORT gate above.
+                            crate::dfx::taskdump::dump_all_tasks(
+                                "biglock-stall-free",
+                            );
+                            // The waiter's own queue state, stated
+                            // explicitly (the dump lists every task; this
+                            // line removes the ambiguity for OUR pid).
+                            {
+                                let on_rq =
+                                    unsafe { (*cur).sched_entity().is_on_rq() };
+                                crate::pr_err!(
+                                    "EXT4-BIGLOCK-WAITER pid={} state={} preempt={:#x} on_rq={} ti_cpu={} first_park={}j",
+                                    cur_pid,
+                                    unsafe { (*cur).state().bits() },
+                                    unsafe { (*cur).preempt_count() },
+                                    on_rq as u8,
+                                    unsafe { (*cur).ti_cpu() },
+                                    first_park
+                                );
+                            }
                         } else {
                             let (max_held, max_held_by) = {
                                 let st = self.state.lock();
