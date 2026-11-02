@@ -282,16 +282,32 @@ pub fn dentry_drain_if_quiescent(parked: bool) {
         }
         core::hint::spin_loop();
     }
-    {
+    let (taken_d, taken_i) = {
         let _slow = DENTRY_SLOW_READ.lock_irqsave();
-        let taken_d = core::mem::take(&mut *DENTRY_RET_DENTRY.lock_irqsave());
-        let taken_i = core::mem::take(&mut *DENTRY_RET_INODE.lock_irqsave());
-        // Drops run inside the slow-lock scope: any cascade (a dentry's
-        // child map / inode slot releasing further Arcs) cannot race a
-        // banked reader, which by the scan above cannot exist now.
-        drop(taken_d);
-        drop(taken_i);
-    }
+        (
+            core::mem::take(&mut *DENTRY_RET_DENTRY.lock_irqsave()),
+            core::mem::take(&mut *DENTRY_RET_INODE.lock_irqsave()),
+        )
+        // The slow lock only serializes the TAKE with slow-path readers:
+        // ownership of the vecs transfers to us here, and the drops below
+        // run OUTSIDE the irqsave scope. The quiescence proof does not
+        // need the lock held during the drop (the scan observed every
+        // bank at zero; readers that start after the scan cannot reach
+        // these Arcs because every publication that exposed them was
+        // undone before its park, which preceded the scan fence). What
+        // the lock CANNOT afford to cover is the drop CASCADE: freeing a
+        // dentry releases its child map and inode slot, and the last
+        // Inode Arc runs fs destroy hooks — ext4_destroy_inode reads the
+        // inode table from DISK (bio::bread), which under IRQs-off +
+        // preempt-off degrades the virtio completion wait to the
+        // poll-only MMIO spin (up to 1e6 iterations, plus read_block's
+        // 5e7-iteration late scan) — seconds of cli on a slow host, tick
+        // loss, watchdog bait. Drop with IRQs on so the wait sleeps (or
+        // at worst polls with ticks live), exactly like the pre-drain
+        // caller-context drops this protocol replaced.
+    };
+    drop(taken_d);
+    drop(taken_i);
 }
 
 /// Increment a dentry's strong count for a pointer loaded under a
