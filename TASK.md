@@ -947,3 +947,114 @@ waiters cannot self-report (printing allocates — they are parked IN the
 allocator). Boot-side, the frozen holder's identity is recoverable from a
 cross-CPU task dump (the txn-hang dump_all_tasks machinery) — none armed on
 the dark boots (the 20s-latch had not fired before the wedge).
+
+## FOURTEENTH-SUCCESSOR SESSION (2026-11-02 10:45-13:00, branch biofix-fieldpoll @ 0508ff20+)
+Mission: verify the bio fix end-to-end + hunt the allocator freeze. Outcome:
+THREE RIG BUGS and TWO KERNEL PANIC CLASSES fixed; the "freeze" did NOT
+reproduce on the quiet host — tonight's reproductions were INSTRUMENT
+RACES plus the roller killing healthy boots. The allocator itself
+measures at MICROSECOND class. The pixel wall is back to the
+store-load/ladder userspace family.
+
+### Rig bugs found (these poisoned the 13th's dark-streak evidence)
+1. verify-roll.sh READY grep matched the NEGATIVE "not set" warning line
+   (lb246's false READY at 169s = foundation exit; fixed: positive
+   marker only).
+2. verify-roll.sh never set USERDATA -> every verify boot (lb233-lb246,
+   the WHOLE dark streak) mounted the checksum-poisoned userdata-fresh
+   symlink: /data mount FAILED (-5, superblock checksum invalid). The
+   13th's "freeze" boots were entangled with the no-/data trap (the
+   fourth successor's lb16-lb26 lesson). Fixed: USERDATA pin. Baselines
+   lb229 etc. were gold-roller reflink copies (vdf mounted rc=0), so the
+   550-1100s class numbers stand; the DARK-BOOT diagnosis does not.
+3. poproll.sh killed the VM the moment an ALLOC-* print appeared —
+   combined with (see below) a racy stamp table, healthy boots were
+   murdered at 29-360s and read as "the freeze kills the machine".
+
+### Kernel fixes (committed, pushed; make test green x3; x3 builds rc=0)
+1. mm/pcp.rs: free_order0's entry store bound-checked (lb250 PANIC
+   "index 32" at 22s: the 35336eb1 refill guard can leave count ==
+   PCP_HIGH exactly; a full row + this store = out of bounds. Full row
+   now spills oldest batch + sends the incoming frame straight to
+   buddy).
+2. Print-path PANIC class (lb266 @209s): from_utf8_unchecked on task
+   comm (userspace-writable via prctl) panicked inside the KOT-KILL
+   group print's Debug fmt ("end byte index 13 not a char boundary")
+   during do_exit_group — one print killed the kernel. Fixed: checked
+   UTF-8 at all 10 comm sites (exit.rs/signal.rs) + netdev get_name
+   (SIOCSIFNAME names). lb250's StrSearcher-shaped trace = same family.
+3. mm/small_alloc.rs: both class page-list walks capped at 8192 pages
+   (cycle defense; walk_cycles counter). DEFENSIVE — no cycle was ever
+   observed (see meter below).
+
+### The allocwatch DFX (dfx=allocwatch) — and the mirage it created then killed
+- Final design: DEDICATED per-key slots (site base + class; 24 slots),
+  cross-CPU tick scan reports holds >300ms with holder identity/state/
+  preempt/ti_cpu/buddy-word + kernel-stack PCs; ALLOC-STUCK lock-word
+  detector (200ms); per-class slow-path section meter (max TSC cycles,
+  >10ms count, 10s heartbeat).
+- Iterations 1-3 used a SHARED 16-slot scan table — two different class
+  locks' enters raced the slot choice and MIXED pid/epoch/jif between
+  stamps; the mixed stamp survived its exit and read "held 300ms-1s".
+  The prints named real pids (os_ds_service) that were NOT stuck.
+- The meter is the arbiter: healthy-boot sections measure 76-1500
+  CYCLES (<= 0.6us), over10ms=0 all boot. NO slow section ever existed.
+- lb253 (the one boot never killed on a print) ran its FULL 1500s
+  healthy with /data mounted (userdata-warm2). The 13th's
+  finish_grow-park freeze is HOST-LOAD-CORRELATED and did NOT bite in
+  single-agent quiet-host conditions (tonight's host: 3 lmbench loops
+  from other lanes' worktrees, load 7/32, VM at 199% = both vcpus
+  healthy).
+- ABBA hypothesis (coordinator ask): STRUCTURALLY ABSENT — small_alloc
+  class sections are pure mm (alloc_locked -> buddy only; no
+  fs/journal/reclaim calls; buddy sections O(1) helpers, bounded
+  loops). The REVERSE nesting EXISTS (bio LRU lock -> Box free ->
+  class-lock flush) = latency amplifier only, not a cycle.
+
+### The bio fix's end-to-end measurement (honest numbers)
+- lb253 (fx3fix kernel = fieldpoll+biofix+pcp1, system-lb5,
+  userdata-warm2, /data rc=0): bundles.ready NEVER SET in 1500s; ladder
+  spun (186 waiting-query). The WritePlan burn is GONE (tid877's stack
+  = nanosleep/poll retry ladder, userspace-internal), but the window
+  did NOT compress on warm2's shape. The 550-1100s "class" measured by
+  the 13th was on STRIPPED warm copies — warm2 (unstripped, stale
+  user-100) is a DIFFERENT, slower shape. No clean A/B landed yet.
+- POPULATION STATE (lb260/lb275, warm.img): startUser at 101s with NO
+  CreateNewUser — warm.img ALSO carries a stale user-100 (the ninth's
+  NOSNAP lbpop wrote it). Both warm images have the
+  user-100-per-user-records question open; the ladder misses
+  (ImplicitQueryInfoByPriority) on every boot. PIXELS need userdata
+  with NO user-100 + populated store: the strip recipe (image-side,
+  FORBIDDEN now) or FRESH provisioning (userdata-fresh2.img — creation
+  retry budget vs first-scan; the bio fix should flip it; UNTESTED
+  this session).
+
+### Boot inventory this session
+lb250 (pcp panic 22s), lb251/252 (dark, poisoned userdata-fresh),
+lb253 (fx3fix, warm2, full 1500s, healthy, no ready), lb260 (fx4fix,
+warm, ALLOC print @360s = stamp race + roller kill), lb261 (same @29s),
+lb262/264 (not-found stamp face), lb263 (fx5fix, stack=creation-sp,
+freeze print @301s), lb266 (fx6fix, UTF8 PANIC @209s), lb267 (killed
+for fx7), lb268 (fx7fix, 300ms-stamp w/ clean preempt+buddyword ->
+meter demanded), lb270 (fx8fix, meter live: 1500 cycles), lb275+
+(fx9fix, clean instrument, no-kill roller — ROLLING at close).
+
+### FIFTEENTH-SUCCESSOR ENTRY POINTS (in order)
+1. lb275+ verdicts (pop14.log): with the no-kill roller these boots
+   LIVE — read bundles.ready timing, the ladder outcome, and any
+   ALLOC-* prints (now trustworthy). If the ladder spins on warm.img's
+   stale user-100 (expected), switch the roller's USERDATA to
+   run/userdata-fresh2.img (fresh provisioning — the kernel-only pixel
+   path) and watch the creation-vs-ready race.
+2. The store-load window: instrument-decode WHERE the 1500s+ goes on
+   warm2 (lb253's tid877 nanosleep ladder — the distributeddata retry
+   chain; SLOW-TXN census on a live boot names the servers in its
+   wait chain). This is the bio-fix A/B that never landed.
+3. The 13th's freeze: reproduce by LOADING the host (the correlation
+   is the clue) with allocwatch armed — the fixed-slot instrument + the
+   meter will now name a real holder (if any) vs host starvation. If
+   NO stamp ever fires under load, the freeze is vcpu starvation or a
+   stuck word (ALLOC-STUCK) — the mm fix follows from which.
+4. Gates reminder: everything is on origin/biofix-fieldpoll; the mm
+   guarded-domain rows (pcp, small_alloc) need syscost/pbench numbers
+   before main-merge; the UTF8 fix is print-path-only (no gate).
