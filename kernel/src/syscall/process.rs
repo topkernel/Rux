@@ -6020,6 +6020,8 @@ fn shutdown_cascade(cmd: u32) {
     // probe rig ends with reboot(2), so the phase table lands in the
     // serial log without a dedicated reader.
     crate::dfx::forkprof::report();
+    // mmprof (cmdline mmprof=1): vm-op stage table, same discipline.
+    crate::dfx::mmprof::report_line(0);
     if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }

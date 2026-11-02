@@ -754,6 +754,19 @@ pub fn rust_main_tail() -> ! {
                 print_status("fs", "debugfs mounted /sys/kernel/debug", ok);
             }
 
+            // tracefs at /sys/kernel/tracing (the reference's canonical
+            // tracefs location). One instance, two paths: the same
+            // superblock is also mounted at /sys/kernel/debug/tracing,
+            // the way the reference automounts tracefs under debugfs —
+            // consumers of either path see the same files.
+            {
+                let ok = fs::tracefs::init_tracefs()
+                    .and_then(|_| fs::tracefs::mount_at("/sys/kernel/tracing"))
+                    .and_then(|_| fs::tracefs::mount_at("/sys/kernel/debug/tracing"))
+                    .is_ok();
+                print_status("fs", "tracefs mounted /sys/kernel/tracing", ok);
+            }
+
             // cgroup v2 unified hierarchy (U1b). init ALWAYS registers
             // the filesystem type (`mount -t cgroup2` from userspace —
             // what real systemd does for itself). The BOOT pre-mount is

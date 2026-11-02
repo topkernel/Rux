@@ -192,6 +192,38 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         }
         return n;
     }
+    // Small-count stack staging (perf-r3): a 1-byte read (lat_syscall
+    // read; every poller's probe read) paid a slab alloc + free pair
+    // per call in the chunk loop below — the largest removable cost
+    // above the null syscall floor (the fd lookup, the dispatch checks
+    // and the device fill together are ~20-30 ns; the staging pair
+    // ~30-50 ns). Same semantics as the one-chunk case of the loop:
+    // a short/zero result returns immediately; a user-page fault
+    // returns EFAULT with no bytes reported (nothing was consumed).
+    // The 256-byte zero-init is 4 cache lines of stores — an order of
+    // magnitude cheaper than the allocator pair it replaces, and the
+    // &mut [u8] contract to the ops layer requires initialized memory.
+    const SMALL_STAGE: usize = 256;
+    if count <= SMALL_STAGE {
+        let mut sbuf = [0u8; SMALL_STAGE];
+        let result = file.read_slice(&mut sbuf[..count]);
+        if result < 0 {
+            return result as i32 as i64;
+        }
+        if result == 0 {
+            crate::dfx::syscost::note_read_eof(&file);
+            return 0;
+        }
+        let n = result as usize;
+        // buf was access_ok-validated against count at the sys_read
+        // entry; exception-table copy.
+        let uncopied = crate::arch::uaccess_safe::copy_out(buf, &sbuf[..n]);
+        if uncopied > 0 {
+            return -errno::EFAULT as i64;
+        }
+        crate::dfx::syscost::note_read_data(&file, n, fd);
+        return n as i64;
+    }
     // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
     // a huge count can never OOM the kernel heap. A short chunk
     // (EOF / pipe drained) ends the loop and returns what we
@@ -634,6 +666,26 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // nothing sent; blocking/EPIPE per the engine).
     if count <= RW_CHUNK && crate::net::unix::is_unix_file(&file) {
         return crate::net::unix::unix_write_user(&file, buf as *const u8, count) as i64;
+    }
+    // Small-count stack staging (perf-r3): same lever as read_file_core —
+    // a short write (1 byte to /dev/null, hilog-class records) paid a
+    // slab alloc + free pair per call in the chunk loop below. One
+    // copy-in, one dispatch, identical error semantics to the loop's
+    // first iteration (EFAULT before any side effect; a non-positive
+    // write result propagates as-is).
+    const SMALL_STAGE: usize = 256;
+    if count <= SMALL_STAGE {
+        let mut sbuf = [0u8; SMALL_STAGE];
+        let uncopied =
+            crate::arch::uaccess_safe::copy_in(&mut sbuf[..count], buf);
+        if uncopied > 0 {
+            return -errno::EFAULT as i64;
+        }
+        let result = file.write_slice(&sbuf[..count]);
+        if result <= 0 {
+            return result as i32 as i64;
+        }
+        return result as i64;
     }
     // Chunked write (SYSA-C1): bounded staging buffer so a huge
     // count cannot OOM the kernel heap; a partial chunk write

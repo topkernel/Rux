@@ -44,10 +44,12 @@
 //!
 //! An event is recorded only when its own `enable` switch is on AND
 //! the global `tracing_on` is on — the same two-level gate the
-//! reference host uses. Both checks are relaxed loads, so a call site's disabled
-//! path is one branch after the two loads (see `TraceEvent::armed`);
-//! call sites must marshal their arguments only after `armed()`
-//! returns true.
+//! reference host uses. The site pays ONE relaxed load for the event
+//! switch (`TraceEvent::armed`); the `tracing_on` check sits inside
+//! `record`, after the argument marshalling — the same split as the
+//! reference (static key at the tracepoint, ring-buffer reserve under
+//! `tracing_on`). Call sites must marshal their arguments only after
+//! `armed()` returns true.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -95,13 +97,19 @@ unsafe impl Send for TraceEvent {}
 unsafe impl Sync for TraceEvent {}
 
 impl TraceEvent {
-    /// Is this event armed (its own switch AND the global switch)?
+    /// Is this event armed (its own switch)?
     ///
-    /// Two relaxed loads; call sites guard their argument marshalling
-    /// behind this so the disabled path marshals nothing.
+    /// ONE relaxed load — the whole disabled-path cost at a call site
+    /// (the lane charter's overhead gate; the same class as the bespoke
+    /// `dfx=` switch table). The global `tracing_on` master is checked
+    /// inside `record`, after the arguments are marshalled — exactly
+    /// where the reference checks it (the tracepoint's static key gates
+    /// the site; `tracing_on` gates the ring buffer reserve, which
+    /// happens after the fast-assign marshalling). Call sites must
+    /// marshal their arguments only after `armed()` returns true.
     #[inline]
     pub fn armed(&self) -> bool {
-        TRACING_ON.load(Ordering::Relaxed) && self.enabled.load(Ordering::Relaxed)
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// The full event name, as the reference host's available_events shows it.
@@ -207,6 +215,30 @@ impl PackArg for &str {
             slots[*at] = u64::from_le_bytes(chunk);
             *at += 1;
         }
+    }
+}
+
+/// A dynamic byte blob (the reference's `__dynamic_array`): packs into
+/// every remaining slot as little-endian words, up to `TRACE_ARGS * 8`
+/// bytes (80). A longer blob is TRUNCATED — the fixed-size record
+/// cannot carry more (a noted capacity divergence from the reference's
+/// variable-length records; the format file still describes the
+/// dynamic array).
+impl PackArg for &[u8] {
+    const SLOTS: usize = TRACE_ARGS;
+    #[inline]
+    fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize) {
+        for i in *at..TRACE_ARGS {
+            let off = (i - *at) * 8;
+            if off >= self.len() {
+                break;
+            }
+            let end = (off + 8).min(self.len());
+            let mut chunk = [0u8; 8];
+            chunk[..end - off].copy_from_slice(&self[off..end]);
+            slots[i] = u64::from_le_bytes(chunk);
+        }
+        *at = TRACE_ARGS;
     }
 }
 
@@ -714,6 +746,88 @@ tracepoints! {
             args[9] as i16,
         )
     };
+
+    /// irq:irq_handler_entry — immediately before an IRQ action handler
+    /// runs. The reference host's events/irq/irq_handler_entry
+    /// (kernel/irq/handle.c records it around action->handler). The
+    /// name is the action's name (`__data_loc char[]` in the reference;
+    /// Rux stores the 16-byte name inline, the same approach the sched
+    /// comms take).
+    EVENT_IRQ_HANDLER_ENTRY / irq_handler_entry_fmt / trace_irq_handler_entry : "irq", "irq_handler_entry", 23,
+    print: "\"irq=%d name=%s\", REC->irq, __get_str(name)",
+    fields: "\tfield:int irq;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:__data_loc char[] name;\toffset:12;\tsize:4;\tsigned:0;\n",
+    call (irq: i32, name: &[u8; COMM_LEN]),
+    render |args: &[u64; TRACE_ARGS]| {
+        let name = comm_from_words(args[1], args[2]);
+        let end = name.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!("irq={} name={}", args[0] as i32, String::from_utf8_lossy(&name[..end]))
+    };
+
+    /// irq:irq_handler_exit — immediately after the action handler
+    /// returns, with its result. The reference host's
+    /// events/irq/irq_handler_exit; `ret` is the handler's return value
+    /// (nonzero means handled — __printk's `%s` picks "handled" vs
+    /// "unhandled").
+    EVENT_IRQ_HANDLER_EXIT / irq_handler_exit_fmt / trace_irq_handler_exit : "irq", "irq_handler_exit", 24,
+    print: "\"irq=%d ret=%s\", REC->irq, REC->ret ? \"handled\" : \"unhandled\"",
+    fields: "\tfield:int irq;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int ret;\toffset:12;\tsize:4;\tsigned:1;\n",
+    call (irq: i32, ret: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "irq={} ret={}",
+            args[0] as i32,
+            if args[1] != 0 { "handled" } else { "unhandled" }
+        )
+    };
+
+    /// sched:sched_migrate_task — a task's CPU stamp moves to another
+    /// CPU. The reference host's events/sched/sched_migrate_task
+    /// (kernel/sched/core.c records it in set_task_cpu, before the
+    /// stamp changes). Rux's placement points: the wake-time steer and
+    /// the home-resync correction — the sites where an EXISTING task's
+    /// stamp is moved (first stamps take the reference's untraced
+    /// __set_task_cpu path).
+    EVENT_SCHED_MIGRATE_TASK / sched_migrate_task_fmt / trace_sched_migrate_task : "sched", "sched_migrate_task", 25,
+    print: "\"comm=%s pid=%d prio=%d orig_cpu=%d dest_cpu=%d\", REC->comm, REC->pid, REC->prio, REC->orig_cpu, REC->dest_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int orig_cpu;\toffset:32;\tsize:4;\tsigned:1;\n\
+             \tfield:int dest_cpu;\toffset:36;\tsize:4;\tsigned:1;\n",
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32, orig_cpu: i32, dest_cpu: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[0], args[1]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "comm={} pid={} prio={} orig_cpu={} dest_cpu={}",
+            String::from_utf8_lossy(&comm[..end]),
+            args[2] as u32,
+            args[3] as i32,
+            args[4] as i32,
+            args[5] as i32,
+        )
+    };
+
+    /// printk:console — a printk record was formatted into the store.
+    /// The reference host's events/printk/console (kernel/printk/printk.c
+    /// fires it in printk_sprint, with the KERN prefix and the trailing
+    /// newline stripped). The dynamic message is carried in the
+    /// argument slots — up to 80 bytes; longer messages are truncated
+    /// (the fixed-size record's capacity limit).
+    EVENT_CONSOLE / console_fmt / trace_console : "printk", "console", 26,
+    print: "\"%s\", __get_str(msg)",
+    fields: "\tfield:__data_loc char[] msg;\toffset:8;\tsize:4;\tsigned:0;\n",
+    call (msg: &[u8]),
+    render |args: &[u64; TRACE_ARGS]| {
+        let mut bytes = [0u8; TRACE_ARGS * 8];
+        for (i, word) in args.iter().enumerate() {
+            bytes[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
@@ -756,6 +870,73 @@ pub fn tracing_on() -> bool {
 /// Turn tracing on or off (the tracefs `tracing_on` file).
 pub fn set_tracing_on(on: bool) {
     TRACING_ON.store(on, Ordering::Relaxed);
+}
+
+// ============================================================================
+// The trace options (tracefs `options/` — one boolean file per option)
+// ============================================================================
+
+/// One trace option: a boolean with the reference's default.
+///
+/// Round 1 implements the options the renderer and the ring actually
+/// consume; the reference's remaining options (tracer-specific or
+/// output-format switches with no counterpart here) are omitted rather
+/// than faked — see the migration ledger in the lane TASK.md.
+pub struct TraceOption {
+    /// The option name (the file name under `options/`).
+    pub name: &'static str,
+    /// The option's value.
+    pub set: AtomicBool,
+}
+
+/// context-info — print the trace header (pid/cpu/time columns block).
+/// Reference default: on (TRACE_ITER_CONTEXT_INFO in TRACE_DEFAULT_FLAGS).
+pub static OPT_CONTEXT_INFO: TraceOption = TraceOption {
+    name: "context-info",
+    set: AtomicBool::new(true),
+};
+
+/// overwrite — overwrite the oldest records when a ring is full. When
+/// off, NEW records are dropped instead (counted in per-CPU `stats` as
+/// "dropped events", the reference's accounting). Reference default:
+/// on (TRACE_ITER_OVERWRITE).
+pub static OPT_OVERWRITE: TraceOption = TraceOption {
+    name: "overwrite",
+    set: AtomicBool::new(true),
+};
+
+/// sym-addr — print the raw address after every resolved symbol
+/// (` <0xADDR>`, the reference's seq_print_ip_suffix). Reference
+/// default: off.
+pub static OPT_SYM_ADDR: TraceOption = TraceOption {
+    name: "sym-addr",
+    set: AtomicBool::new(false),
+};
+
+/// sym-offset — print symbols as `name+0xoff/0xsize` instead of the
+/// bare name (the reference's trace_seq_print_sym offset argument).
+/// Reference default: off.
+pub static OPT_SYM_OFFSET: TraceOption = TraceOption {
+    name: "sym-offset",
+    set: AtomicBool::new(false),
+};
+
+/// Every option, in the reference's declaration order.
+pub static OPTIONS: &[&TraceOption] = &[
+    &OPT_CONTEXT_INFO,
+    &OPT_OVERWRITE,
+    &OPT_SYM_ADDR,
+    &OPT_SYM_OFFSET,
+];
+
+/// Look an option up by name.
+pub fn find_option(name: &str) -> Option<&'static TraceOption> {
+    OPTIONS.iter().find(|o| o.name == name).copied()
+}
+
+/// Is an option set?
+pub fn option_enabled(option: &TraceOption) -> bool {
+    option.set.load(Ordering::Relaxed)
 }
 
 // ============================================================================
@@ -807,6 +988,9 @@ pub struct TraceRing {
     /// How many records a trace_pipe reader has consumed (the stats
     /// file's "read events" column).
     pub read_events: AtomicU64,
+    /// Records dropped because the ring was full and the `overwrite`
+    /// option was off (the stats file's "dropped events" column).
+    pub dropped_events: AtomicU64,
 }
 
 // SAFETY: the ring's mutable state is behind atomics.
@@ -829,11 +1013,21 @@ impl TraceRing {
             head: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
             read_events: AtomicU64::new(0),
+            dropped_events: AtomicU64::new(0),
         }
     }
 
-    /// Append a record, overwriting the oldest one when full.
+    /// Append a record. With the `overwrite` option on (the reference
+    /// default) the oldest record is overwritten when full; with it
+    /// off, a full ring DROPS the new record and counts it in
+    /// `dropped_events` — the reference's two ring policies.
     fn push(&self, record: TraceRecord) {
+        if !OPT_OVERWRITE.set.load(Ordering::Relaxed)
+            && self.count.load(Ordering::Relaxed) >= RING_CAPACITY
+        {
+            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let idx = self.head.fetch_add(1, Ordering::Relaxed) % RING_CAPACITY;
         // SAFETY: the head counter hands out distinct slots to
         // concurrent writers, so this slot is owned by this push; the
@@ -909,11 +1103,13 @@ fn render_flags() -> [u8; 5] {
 
 /// Record an event on the current CPU.
 ///
-/// `record` re-checks the two switches (a call site that already
-/// called `armed()` pays nothing extra the second time — both are
-/// relaxed loads of words now hot in cache).
+/// `record` re-checks the event switch and the `tracing_on` master (a
+/// call site that already called `armed()` pays one extra relaxed load
+/// of a now-cache-hot word; an event that is armed while tracing is
+/// off marshals its arguments and is dropped here — the reference's
+/// ring_buffer_lock_reserve behaves the same).
 pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
-    if !event.armed() {
+    if !event.armed() || !TRACING_ON.load(Ordering::Relaxed) {
         return false;
     }
     let cpu = crate::arch::cpu_id() as usize;
@@ -1068,12 +1264,13 @@ pub fn cpu_stats(cpu: usize) -> String {
     let now = crate::drivers::timer::monotonic_ns_since_boot();
     let secs = |ns: u64| format!("{}.{:06}", ns / 1_000_000_000, (ns % 1_000_000_000) / 1000);
     format!(
-        "entries: {}\noverrun: {}\ncommit overrun: 0\nbytes: {}\noldest event ts: {}\nnow ts: {}\ndropped events: 0\nread events: {}\n",
+        "entries: {}\noverrun: {}\ncommit overrun: 0\nbytes: {}\noldest event ts: {}\nnow ts: {}\ndropped events: {}\nread events: {}\n",
         count,
         overrun,
         count * record_bytes,
         secs(oldest),
         secs(now),
+        ring.dropped_events.load(Ordering::Relaxed),
         ring.read_events.load(Ordering::Relaxed),
     )
 }
@@ -1156,10 +1353,14 @@ fn render_record(record: &TraceRecord) -> String {
 }
 
 /// Render the buffered records the way the reference host's `trace` file does
-/// (header + every record). The `trace_pipe` reader uses
-/// `render_pipe`, which has no header.
+/// (header + every record; the `context-info` option off drops the
+/// header, the reference's TRACE_ITER_CONTEXT_INFO). The `trace_pipe`
+/// reader uses `render_pipe`, which has no header.
 pub fn render_trace() -> String {
-    let mut out = trace_header();
+    let mut out = String::new();
+    if option_enabled(&OPT_CONTEXT_INFO) {
+        out.push_str(&trace_header());
+    }
     for record in snapshot().iter() {
         out.push_str(&render_record(record));
     }
@@ -1176,30 +1377,33 @@ pub fn render_pipe() -> String {
 }
 
 /// per_cpu/cpuN/trace: the same header shape with that CPU's counts,
-/// then that CPU's records only.
+/// then that CPU's records only (the `context-info` option drops the
+/// header here too).
 pub fn render_trace_cpu(cpu: usize) -> String {
     let mut out = String::new();
     if cpu < RINGS.len() {
-        let ring = &RINGS[cpu];
-        let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
-        let written = ring.head.load(Ordering::Acquire);
-        out.push_str("# tracer: nop\n");
-        out.push_str("#\n");
-        out.push_str(&format!(
-            "# entries-in-buffer/entries-written: {}/{}   #P:{}\n",
-            count,
-            written,
-            crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS)
-        ));
-        out.push_str("#\n");
-        out.push_str("#                                _-----=> irqs-off/BH-disabled\n");
-        out.push_str("#                               / _----=> need-resched\n");
-        out.push_str("#                              | / _---=> hardirq/softirq\n");
-        out.push_str("#                              || / _--=> preempt-depth\n");
-        out.push_str("#                              ||| / _-=> migrate-disable\n");
-        out.push_str("#                              |||| /     delay\n");
-        out.push_str("#           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION\n");
-        out.push_str("#              | |         |   |||||     |         |\n");
+        if option_enabled(&OPT_CONTEXT_INFO) {
+            let ring = &RINGS[cpu];
+            let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
+            let written = ring.head.load(Ordering::Acquire);
+            out.push_str("# tracer: nop\n");
+            out.push_str("#\n");
+            out.push_str(&format!(
+                "# entries-in-buffer/entries-written: {}/{}   #P:{}\n",
+                count,
+                written,
+                crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS)
+            ));
+            out.push_str("#\n");
+            out.push_str("#                                _-----=> irqs-off/BH-disabled\n");
+            out.push_str("#                               / _----=> need-resched\n");
+            out.push_str("#                              | / _---=> hardirq/softirq\n");
+            out.push_str("#                              || / _--=> preempt-depth\n");
+            out.push_str("#                              ||| / _-=> migrate-disable\n");
+            out.push_str("#                              |||| /     delay\n");
+            out.push_str("#           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION\n");
+            out.push_str("#              | |         |   |||||     |         |\n");
+        }
         for record in snapshot_cpu(cpu).iter() {
             out.push_str(&render_record(record));
         }
@@ -1344,21 +1548,34 @@ fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
 }
 
 /// page_fault_user / page_fault_kernel: address, ip, error_code. The
-/// `%ps` rendering is symbolic — the symbol table resolves the address
-/// to name+off/size and falls back to the raw hex exactly as the
-/// reference's %ps does when no symbol covers the address.
+/// `%ps` rendering follows the reference's trace_seq_print_sym +
+/// seq_print_ip_suffix exactly: `sym-offset` picks `name+0xoff/0xsize`
+/// vs the bare name, `sym-addr` appends ` <0xADDR>`, and an unknown
+/// address falls back to `0x%08lx`-style raw hex.
 fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
     let ps = |addr: u64| -> String {
-        match crate::dfx::ksyms::lookup(addr) {
+        let sym_offset = option_enabled(&OPT_SYM_OFFSET);
+        let sym_addr = option_enabled(&OPT_SYM_ADDR);
+        let mut out = match crate::dfx::ksyms::lookup(addr) {
             Some((name, sym, size)) => {
-                if size > 0 {
-                    format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
+                if sym_offset {
+                    if size > 0 {
+                        format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
+                    } else {
+                        format!("{}+0x{:x}", name, addr - sym)
+                    }
                 } else {
-                    format!("{}+0x{:x}", name, addr - sym)
+                    format!("{}", name)
                 }
             }
-            None => format!("{:#x}", addr),
+            // No symbol covers the address: the reference prints the
+            // raw value (0x%08lx / IP_FMT).
+            None => format!("0x{:016x}", addr),
+        };
+        if sym_addr {
+            out.push_str(&format!(" <0x{:016x}>", addr));
         }
+        out
     };
     format!(
         "address={} ip={} error_code=0x{:x}",
@@ -1366,4 +1583,14 @@ fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
         ps(args[1]),
         args[2]
     )
+}
+
+/// Copy a `&'static str` (an IRQ action name) into the 16-byte comm
+/// layout the irq events carry (truncating at 15 bytes + NUL, like
+/// strscpy into TASK_COMM_LEN).
+pub fn str_to_comm16(name: &str) -> [u8; COMM_LEN] {
+    let mut out = [0u8; COMM_LEN];
+    let n = name.len().min(COMM_LEN - 1);
+    out[..n].copy_from_slice(&name.as_bytes()[..n]);
+    out
 }

@@ -375,12 +375,24 @@ pub fn free_irq(irq: u32, dev_id: usize) -> Result<(), &'static str> {
 ///
 /// Acquires the action spinlock to prevent concurrent modification by
 /// `free_irq`. Uses lock_irqsave because this runs in IRQ context.
+/// The irq:irq_handler_entry/exit tracepoints bracket each action
+/// exactly where the reference brackets them (kernel/irq/handle.c's
+/// handle_irq_event_percpu); both marshal only behind armed().
 fn handle_irq_event(desc: &IrqDesc, irq: u32) -> IrqReturn {
     let action_guard = desc.action.lock_irqsave();
     let mut retval = IrqReturn::None;
     let mut action = action_guard.as_ref();
     while let Some(act) = action {
+        if crate::trace::EVENT_IRQ_HANDLER_ENTRY.armed() {
+            crate::trace::trace_irq_handler_entry(
+                irq as i32,
+                &crate::trace::str_to_comm16(act.name),
+            );
+        }
         let ret = (act.handler)(irq, act.dev_id);
+        if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
+            crate::trace::trace_irq_handler_exit(irq as i32, ret as i32);
+        }
         if ret == IrqReturn::Handled {
             retval = IrqReturn::Handled;
         }

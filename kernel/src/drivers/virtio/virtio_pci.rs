@@ -2119,7 +2119,11 @@ mod intx {
     /// handler).
     fn hook_line(int_line: u8) -> bool {
         if !LINES_HOOKED[int_line as usize].swap(true, Ordering::AcqRel) {
-            if !crate::arch::x86_64::trap::request_irq_line(int_line, intx_dispatch) {
+            if !crate::arch::x86_64::trap::request_irq_line_named(
+                int_line,
+                "virtio-pci",
+                intx_dispatch,
+            ) {
                 LINES_HOOKED[int_line as usize].store(false, Ordering::Release);
                 crate::pr_err!("virtio-pci: PIC line {} unavailable", int_line);
                 return false;
