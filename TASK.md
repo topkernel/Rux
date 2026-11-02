@@ -1612,3 +1612,15 @@ spiral class).
 - unpg=7.4M present pages per boot through munmap at ~1.2µs/page of
   descriptor work (rmap/put/free) — the next mm-lever if the store window
   still matters after the userspace-internal residual.
+- Final P8 quiet row on the no-yield binary (p8d, perf-gate re-bank):
+  fixed-cold 16.8µs (ref 1.24), fixed-hot 58.8µs (ref 3.42), mmap0
+  6.3-6.4µs (ref 0.22), mprotect 3.9/5.9µs (ref 0.51/0.53). The mmap0 and
+  mprotect quiet residuals (BTreeMap+split surgery, 3 lock acquires, the
+  per-call full TLB flush) are the successor's single-hold surgery target.
+- mprotect load residual (lb341 A-line): tot=47µs = lock 0 + cov 1 + pte 4
+  + ~42µs in the split surgery (Vec alloc + 3x Vma::new + 2-3 BTreeMap ops
+  per overlapping VMA) + the per-call full flush — the same single-hold
+  surgery shape applies.
+- lb341 ran the full 800s healthy (race lost on the 83->115s trigger-vs-
+  ready gap as every fresh boot this session; the ladder spin + POISON32
+  trickle class, no crash).
