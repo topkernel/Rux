@@ -4216,6 +4216,35 @@ pub fn wake_up_enqueue_opt(
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
         //
+        // The sched:sched_waking tracepoint — the reference records it in
+        // try_to_wake_up right after the state match passes, before the
+        // enqueue attempt. This is the matching point in the funnel:
+        // every target that still reaches the enqueue below (a genuinely
+        // sleeping/STOPPED task, or a healed phantom the R46 family just
+        // re-armed) is "about to be woken"; the refused stale shapes
+        // returned above, exactly like the reference's state-mismatch
+        // goto-out before the tracepoint. GRQ is held here; record()
+        // takes no locks (the sched_switch site relies on the same
+        // contract under IRQs-off).
+        if crate::trace::EVENT_SCHED_WAKING.armed() {
+            let words = crate::trace::comm_to_words(&*(*task).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_WAKING,
+                [
+                    words[0],
+                    words[1],
+                    (*task).pid() as u64,
+                    (*task).prio() as u64,
+                    (*task).ti_cpu() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+        //
         // WAKE-HEAL (launcher perf wall, 2026-10-31): the OH boots show
         // the same few service tasks (mmi_service, os_ds_service, OS_IPC
         // workers) parking with preempt_count==1 and waking back up with
@@ -4468,7 +4497,10 @@ pub fn wake_up_enqueue_opt(
                 }
             }
         }
-        if enqueue_task_locked(&mut *grq_guard, task) {
+        // The result feeds the sched:sched_wakeup tracepoint below, so
+        // route the two true-arms through one binding first (the else
+        // arm keeps its inline refusal print).
+        let woken = if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
@@ -4497,6 +4529,32 @@ pub fn wake_up_enqueue_opt(
             }
             false
         }
+        // The sched:sched_wakeup tracepoint — the reference's
+        // ttwu_do_wakeup record: the task left the wait queue and is
+        // enqueued (or was still linked in the R42 race window), state
+        // now RUNNING. Both true-arms land here; a refused wake never
+        // reaches it, which is the wake→pick census discrimination as
+        // event data (a waking with no matching wakeup = refused wake).
+        // GRQ is held; record() takes no locks.
+        if woken && crate::trace::EVENT_SCHED_WAKEUP.armed() {
+            let words = crate::trace::comm_to_words(&*(*task).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_WAKEUP,
+                [
+                    words[0],
+                    words[1],
+                    (*task).pid() as u64,
+                    (*task).prio() as u64,
+                    (*task).ti_cpu() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+        woken
     }
 }
 
