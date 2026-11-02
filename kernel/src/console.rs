@@ -661,7 +661,7 @@ pub fn init_irq() {
         }
     }
 
-    if crate::arch::trap::request_irq_line(4, uart4_irq_line) {
+    if crate::arch::trap::request_irq_line_named(4, "serial", uart4_irq_line) {
         // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
         unsafe { write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) };
         UART_IRQ_ARMED.store(true, Ordering::Release);

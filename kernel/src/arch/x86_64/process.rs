@@ -72,6 +72,12 @@ pub fn flush_thread() {
             // fresh image" clears here.
             super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
             super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+
+            // LAZY FPU: the live registers still hold the OLD image's
+            // state. Mark them stale (CR0.TS) so the first FP use of the
+            // new image traps into the clean restore above.
+            // SAFETY: single CR0 bit set.
+            super::cpu::stts();
         }
         // Scribble hunter: absorb this legitimate in-run write.
         crate::dfx::scribble::note_thread_write(current);

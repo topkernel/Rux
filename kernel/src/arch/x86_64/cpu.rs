@@ -97,6 +97,31 @@ pub unsafe fn write_cr0(value: u64) {
     unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
 }
 
+/// CR0.TS (task switched) — set on every context switch-in; the first
+/// FP instruction of the incoming task takes #NM, which restores that
+/// task's image (lazy FPU). See context_switch / handle_device_not_available.
+pub const CR0_TS: u64 = 1 << 3;
+
+/// Is CR0.TS set (live FPU registers are NOT the current task's)?
+#[inline]
+pub fn ts_set() -> bool {
+    read_cr0() & CR0_TS != 0
+}
+
+/// Clear CR0.TS (claim the live FPU for the current task).
+#[inline]
+pub unsafe fn clts() {
+    // SAFETY: single-bit clear, mode bits preserved.
+    unsafe { core::arch::asm!("clts", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Set CR0.TS (drop the live FPU; next FP instruction traps #NM).
+#[inline]
+pub unsafe fn stts() {
+    // SAFETY: single-bit set, mode bits preserved.
+    unsafe { write_cr0(read_cr0() | CR0_TS) };
+}
+
 /// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
 ///
 /// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE
@@ -162,11 +187,62 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 
 /// Invalidate a TLB entry
 ///
+/// With CR4.PCIDE=1 this invalidates only the entry cached under the
+/// CURRENT PCID (callers flushing a non-current address space use
+/// `invpcid` with an explicit PCID — see mm/asid.rs).
+///
 /// # Safety
 /// Caller must ensure the address is canonical.
 #[inline]
 pub unsafe fn invlpg(addr: u64) {
     unsafe { core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+}
+
+/// Read CR4.
+#[inline]
+pub fn read_cr4() -> u64 {
+    let value: u64;
+    // SAFETY: reading CR4 is always safe.
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) };
+    value
+}
+
+/// Write CR4.
+///
+/// # Safety
+/// Caller must ensure the written value is architecturally valid
+/// (reserved bits 0; PCIDE only with paging on and CR3[11:0]=0).
+#[inline]
+pub unsafe fn write_cr4(value: u64) {
+    unsafe { core::arch::asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// INVPCID descriptor types.
+pub const INVPCID_ADDR: u64 = 0; // one linear address under one PCID
+pub const INVPCID_SINGLE_CTX: u64 = 1; // all entries under one PCID
+pub const INVPCID_ALL_INCL_GLOBAL: u64 = 2; // every PCID, global included
+pub const INVPCID_ALL_NON_GLOBAL: u64 = 3; // every PCID, global excluded
+
+/// Invalidate by PCID descriptor (`invpcid`). The 16-byte descriptor is
+/// [ PCID:u64 | linear-address:u64 ]; its content is ignored for types
+/// 2/3 but must be readable memory.
+///
+/// # Safety
+/// Caller must ensure INVPCID is present (CPUID.7.0:EBX[10]) and the type
+/// is <= 3; for types 0/1 with a nonzero PCID, CR4.PCIDE must be 1.
+#[inline]
+pub unsafe fn invpcid(kind: u64, pcid: u64, addr: u64) {
+    let desc: [u64; 2] = [pcid & 0xfff, addr];
+    // SAFETY: see fn doc; the descriptor is stack memory whose ADDRESS is
+    // an input (the instruction reads it, it does not write through it).
+    unsafe {
+        core::arch::asm!(
+            "invpcid {kind}, [{desc}]",
+            kind = in(reg) kind,
+            desc = in(reg) &desc as *const [u64; 2] as usize,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,33 +315,104 @@ pub fn smap_enabled() -> bool {
     SMAP_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-pub fn enable_smap() {
-    // CPUID leaf 7 subleaf 0, **EBX** bit 20 = SMAP capability.
-    //
-    // The register was wrong until 2026-11-01: the check read EDX[20]
-    // (the architectural SMAP capability bit lives in EBX), so the
-    // protection never armed on silicon — the emulators we test on
-    // happen to report the bit in EDX as well, which is why CI stayed
-    // green while real hardware ran with SMAP off.
+/// Whether FSGSBASE (rdfsgsbase/wrfsbase/wrgsbase) is available and
+/// armed — set by enable_fsgsbase() once per boot (the feature is
+/// CPU-global), read on every context switch. With it armed the FS
+/// switch avoids the intercepted `wrmsr(MSR_FS_BASE)` (the GS shadow
+/// pair needs only native swapgs+wrgsbase), saving most of the MSR
+/// bracket's cost per switch (cctx: msr bracket 89 ns avg under load,
+/// gap-sched lane 2026-11-02).
+pub static FSGSBASE_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// True once `enable_fsgsbase` found CPUID.7.0:EBX[16].
+#[inline(always)]
+pub fn fsgsbase_enabled() -> bool {
+    FSGSBASE_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Arm FSGSBASE for the context-switch path (WRFSBASE/WRGSBASE take
+/// effect CPU-globally once CR4.FSGSBASE is set; the switch path gates
+/// on fsgsbase_enabled() so the instruction never executes without it).
+pub fn enable_fsgsbase() {
+    // CPUID leaf 7 subleaf 0, EBX bit 16 = FSGSBASE.
     let (_, ebx, _, _) = cpuid(7, 0);
-    if ebx & (1 << 20) == 0 {
-        crate::println!("arch: SMAP not available (CPUID.7.0:EBX[20]=0), leaving CR4 untouched");
+    if ebx & (1 << 16) == 0 {
+        crate::println!("arch: FSGSBASE not available, switches keep wrmsr FS/GS");
         return;
     }
-    // SAFETY: CR4 update with the SMAP bit only; CPUID gated. BIOS may
-    // already have it set — the or is idempotent.
+    // SAFETY: CR4 update with the FSGSBASE bit only; CPUID gated and
+    // idempotent.
     unsafe {
-        core::arch::asm!(
-            "movq %cr4, %rax",
-            "orq {bit}, %rax",
-            "movq %rax, %cr4",
-            bit = const (1u64 << 21),
-            out("rax") _,
-            options(nomem, nostack, att_syntax)
-        );
+        let cr4 = read_cr4();
+        write_cr4(cr4 | (1 << 16));
     }
-    SMAP_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
-    crate::println!("arch: CR4.SMAP enabled");
+    FSGSBASE_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+    crate::println!("arch: CR4.FSGSBASE enabled");
+}
+
+/// WRFSBASE — set FS.base without an MSR write.
+///
+/// # Safety
+/// CR4.FSGSBASE must be set (see fsgsbase_enabled); value must be
+/// canonical.
+#[inline]
+pub unsafe fn wrfsbase(base: u64) {
+    unsafe { core::arch::asm!("wrfsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+}
+
+/// WRGSBASE — set the CURRENT GS.base (NOT the IA32_KERNEL_GS_BASE
+/// swapgs shadow; the switch path pairs it with swapgs to reach the
+/// shadow).
+///
+/// # Safety
+/// CR4.FSGSBASE must be set; value must be canonical.
+#[inline]
+pub unsafe fn wrgsbase(base: u64) {
+    unsafe { core::arch::asm!("wrgsbase {}", in(reg) base, options(nostack, preserves_flags)) };
+}
+
+/// Boot-log assertion of the SMAP armed state, from LIVE reads (sec-r1,
+/// G1 follow-up).
+///
+/// Every boot must state the CPUID capability and the actual CR4 bit
+/// side by side, so a silently-off SMAP (the original G1 defect class)
+/// can never pass unnoticed again.
+///
+/// ARMING IS DELIBERATELY NOT ATTEMPTED (2026-11-02 finding, sec-r1):
+/// calling enable_smap() at any pre-IDT boot stage (arch_init and
+/// fpu_init were both tested) triple-faults the machine on the FIRST
+/// kernel data access after the CR4 store — on KVM and on TCG. The
+/// kernel dereferences at least one U/S-mapped page in early boot (prime
+/// suspect: a kernel stack or per-CPU structure mapped with the user
+/// bit). Because the old CPUID bug read EDX[20] (never set anywhere),
+/// the arm path had never executed before this round; exercising it is
+/// what exposed the latent fault. Root-causing it is its own lane
+/// (see run/sec-r1-notes.md); until then this report honestly states
+/// that user-mode access prevention is ABSENT.
+pub fn smap_report() {
+    let (_, ebx, _, _) = cpuid(7, 0);
+    let present = ebx & (1 << 20) != 0;
+    let cr4 = read_cr4();
+    let armed = cr4 & (1u64 << 21) != 0;
+    match (present, armed) {
+        (true, true) => crate::println!(
+            "arch: CR4.SMAP armed (CPUID.7.0:EBX[20]=1, live CR4={:#x}, bit 21 = 1)",
+            cr4
+        ),
+        (true, false) => crate::println!(
+            "arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4={:#x}); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)",
+            cr4
+        ),
+        (false, true) => crate::println!(
+            "arch: CR4.SMAP set by firmware though CPUID.7.0:EBX[20]=0 (live CR4={:#x})",
+            cr4
+        ),
+        (false, false) => crate::println!(
+            "arch: CR4.SMAP not armed (CPUID.7.0:EBX[20]=0, live CR4={:#x}); user-mode access prevention is ABSENT on this boot",
+            cr4
+        ),
+    }
 }
 
 /// Query CPUID. Returns (eax, ebx, ecx, edx) for (leaf, subleaf).

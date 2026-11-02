@@ -671,6 +671,12 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             }
         }
         RTM_NEWLINK => {
+            // L3 wiring (sec-r1): rtnl_newlink checks
+            // netlink_net_capable(CAP_NET_ADMIN) before any payload work.
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             // ifinfomsg: family, pad, type(u16), index(i32), flags(u32), change(u32)
             if payload.len() < 16 {
                 sock.push_response(build_error_msg(seq, -22, orig_hdr));
@@ -694,6 +700,12 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             }
         }
         RTM_DELLINK => {
+            // L3 wiring (sec-r1): rtnl_dellink gate (EPERM precedes the
+            // EOPNOTSUPP this port answers for link deletion).
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             sock.push_response(build_error_msg(seq, -95, orig_hdr)); // EOPNOTSUPP
         }
         RTM_GETADDR => {
@@ -737,6 +749,11 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             }
         }
         RTM_NEWADDR => {
+            // L3 wiring (sec-r1): rtnl_newaddr CAP_NET_ADMIN gate.
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             // ifaddrmsg: family, prefixlen, flags, scope, ifindex(u32)
             if payload.len() < 8 {
                 sock.push_response(build_error_msg(seq, -22, orig_hdr));
@@ -767,6 +784,11 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             }
         }
         RTM_DELADDR => {
+            // L3 wiring (sec-r1): rtnl_deladdr CAP_NET_ADMIN gate.
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             if payload.len() < 8 {
                 sock.push_response(build_error_msg(seq, -22, orig_hdr));
                 return;
@@ -794,6 +816,11 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             sock.push_response(build_done_msg(seq));
         }
         RTM_NEWROUTE => {
+            // L3 wiring (sec-r1): rtnl_newroute CAP_NET_ADMIN gate.
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             // rtmsg: family, dst_len, src_len, tos, table, proto, scope, type, flags(u32)
             if payload.len() < 12 {
                 sock.push_response(build_error_msg(seq, -22, orig_hdr));
@@ -839,6 +866,11 @@ fn netlink_exec(sock: &Arc<NetlinkSocket>, msg: &[u8]) {
             }
         }
         RTM_DELROUTE => {
+            // L3 wiring (sec-r1): rtnl_delroute CAP_NET_ADMIN gate.
+            if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+                sock.push_response(build_error_msg(seq, -1, orig_hdr)); // EPERM
+                return;
+            }
             if payload.len() < 12 {
                 sock.push_response(build_error_msg(seq, -22, orig_hdr));
                 return;
@@ -1427,6 +1459,28 @@ pub fn is_if_ioctl(request: u32) -> bool {
     )
 }
 
+/// Is this one of the interface-MUTATING ioctls? The reference kernel
+/// gates every one of these behind CAP_NET_ADMIN (dev_ioctl /
+/// devinet_ioctl / ip_rt_ioctl): EPERM for unprivileged callers, checked
+/// after the request struct is copied in but before the device lookup
+/// (EPERM wins over ENODEV).
+pub fn is_if_write_ioctl(request: u32) -> bool {
+    matches!(
+        request,
+        SIOCSIFFLAGS
+            | SIOCSIFADDR
+            | SIOCSIFDSTADDR
+            | SIOCSIFBRDADDR
+            | SIOCSIFNETMASK
+            | SIOCSIFMETRIC
+            | SIOCDIFADDR
+            | SIOCSIFTXQLEN
+            | SIOCSIFMAP
+            | SIOCADDRT
+            | SIOCDELRT
+    )
+}
+
 /// Interface-management ioctl dispatcher. `arg` is the user pointer to an
 /// ifreq (or an ifconf for SIOCGIFCONF). Returns 0 or a negative errno.
 pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
@@ -1461,6 +1515,13 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
         // SAFETY: access_ok(RTENTRY_SIZE) validated; exception-table copy.
         if unsafe { copy_from_user(rt.as_mut_ptr(), arg as *const u8, RTENTRY_SIZE) } != 0 {
             return -(constants::EFAULT as i64);
+        }
+        // L3 wiring (sec-r1): ip_rt_ioctl checks CAP_NET_ADMIN after the
+        // rtentry copy and before any route-table mutation. Boot-time
+        // configuration (ifconfig/route as root) is unaffected: root
+        // holds the full effective set.
+        if !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+            return -(constants::EPERM as i64);
         }
         // sockaddr IPv4 payload: family(2B) at +0, address at +4 (BE).
         let sa_ip = |off: usize| -> Option<u32> {
@@ -1581,6 +1642,13 @@ pub fn net_if_ioctl(request: u32, arg: usize) -> i64 {
     // SAFETY: access_ok(IFREQ_SIZE) validated; exception-table copy.
     if unsafe { copy_from_user(ifreq.as_mut_ptr(), arg as *const u8, IFREQ_SIZE) } != 0 {
         return -(constants::EFAULT as i64);
+    }
+    // L3 wiring (sec-r1): the write-side requests (SIOCSIF*) require
+    // CAP_NET_ADMIN (dev_ioctl / devinet_ioctl); the gate sits after the
+    // ifreq copy (EFAULT first) and before the device lookup (EPERM wins
+    // over ENODEV, matching the reference order).
+    if is_if_write_ioctl(request) && !crate::security::capable(crate::security::CAP_NET_ADMIN) {
+        return -(constants::EPERM as i64);
     }
     let name_len = ifreq[..16].iter().position(|&c| c == 0).unwrap_or(16);
     let name = match core::str::from_utf8(&ifreq[..name_len]) {

@@ -1,0 +1,11 @@
+# idx|test|class|rc|tail
+0|rt_sigaction01|CRASH|132|rt_sigaction01    0  TINFO  :  signal: 35
+1|accept02|PASS|0|is using guarded buffers accept02.c:131: TINFO: Starting listener on port: 32768 accept02.c:75: TPASS: Multicast group was not copied: EADDRNOTAVAIL (99)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+2|accept4_01|PASS|0|call SYS_ACCEPT4 syscall accept4_01.c:78: TINFO: server listening on: 32780 accept4_01.c:43: TCONF: syscall(-1) __NR_socketcall not supported on your arch  Summary: passed   8 failed   0 broken   0 skipped  1 warnings 0
+3|connect01|PASS|0|nect01    4  TPASS  :  invalid socket successful connect01    5  TPASS  :  already connected successful connect01    6  TPASS  :  connection refused successful connect01    7  TPASS  :  invalid address family successful
+4|recv01|PASS|0|TPASS  :  invalid socket successful recv01      3  TPASS  :  invalid recv buffer successful recv01      4  TPASS  :  invalid MSG_OOB flag set successful recv01      5  TPASS  :  invalid MSG_ERRQUEUE flag set successful
+5|recvfrom01|PASS|0|socket addr length successful recvfrom01    5  TPASS  :  invalid recv buffer successful recvfrom01    6  TPASS  :  invalid MSG_OOB flag set successful recvfrom01    7  TPASS  :  invalid MSG_ERRQUEUE flag set successful
+6|recvmsg01|PASS|0|55: TPASS: invalid MSG_OOB flag set passed recvmsg01.c:255: TPASS: invalid MSG_ERRQUEUE flag set passed recvmsg01.c:255: TPASS: large cmesg length passed  Summary: passed   10 failed   0 broken   0 skipped  0 warnings 0
+7|send01|PASS|0|3  TPASS  :  invalid send buffer successful send01      4  TPASS  :  UDP message too big successful send01      5  TPASS  :  local endpoint shutdown successful send01      6  TPASS  :  invalid flags set successful
+8|sendto01|PASS|0|to01    7  TPASS  :  invalid to buffer successful sendto01    8  TPASS  :  UDP message too big successful sendto01    9  TPASS  :  local endpoint shutdown successful sendto01   10  TPASS  :  invalid flags set successful
+9|sendmsg02|PASS|0|sendmsg02    1  TPASS  :  finished after 15 seconds

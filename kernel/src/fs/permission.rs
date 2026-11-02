@@ -42,6 +42,21 @@ pub fn generic_permission(
         return true;
     }
 
+    // CAP_DAC_READ_SEARCH (L3 wiring, sec-r1): on DIRECTORIES it overrides
+    // read/search when the mask carries no write bit — the reference
+    // generic_permission grants CAP_DAC_READ_SEARCH only for
+    // `!(mask & MAY_WRITE)` and only for S_ISDIR; plain files never pass
+    // through this cap here (a file read needs CAP_DAC_OVERRIDE; the
+    // cap's other file use, linkat AT_EMPTY_PATH, is not implemented).
+    if mask & MAY_WRITE == 0 {
+        let mode = inode_mode as u32;
+        if mode & 0o170000 == 0o040000 // S_IFDIR
+            && crate::security::has_capability(cred, crate::security::CAP_DAC_READ_SEARCH)
+        {
+            return true;
+        }
+    }
+
     let mode = inode_mode as u32;
 
     // Linux's generic_permission compares against the FILESYSTEM ids

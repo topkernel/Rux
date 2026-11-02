@@ -181,6 +181,13 @@ instances; `pkill` stays forbidden), and (4) relaunch the queue at full
 concurrency without waiting for instructions. The user only ever says
 "继续".
 
+**Test-case archive (user rule 2026-11-02): guest test-case sources are
+archived under `userspace/tests/` as a tarball + extraction script ONLY
+(`userspace/tests/probes.tar.gz` + `extract.sh`) — never commit loose
+guest source files under `test/`. Host-side boot drivers (.py/.sh)
+stay in `test/`. New test cases get appended to the tarball; the
+extraction script restores them to `test/` when needed.**
+
 **Image store (user rule 2026-10-30): ALL disk images live in /home/william/rux-images/ (outside every repo/worktree, invisible to git) — oh/ (the 7 OH images), aarch64/ (a64-rootfs.img + the toybox cross-build), ubuntu/. Worktrees reference them by SYMLINK only; boots use -snapshot + file.locking=off. Never place real image bytes inside a worktree (a disk cleanup once deleted a whole campaign's assets that way). Rebuildable scratch (probe disks) stays in the lane worktree's run/.
 
 **Resource discipline (mandatory — the host runs many QEMUs at once):**
@@ -204,6 +211,15 @@ accept02, getrusage04, kill02, genfmod, rename/statfs families).
 
 ## Debugging Aids
 
+- **Observability policy (user directive 2026-11-02)**: NEW kernel
+  observability goes through TRACEPOINTS in the unified trace-event
+  framework (`kernel/src/trace/`, exposed via tracefs at
+  /sys/kernel/tracing — reference semantics). The bespoke `dfx=` switch
+  table (`kernel/src/dfx/switches.rs`) is FROZEN legacy: it keeps
+  working for the lanes still hunting with it, but it must not grow —
+  add a tracepoint in the reference's shape instead. The migration
+  ledger mapping each bespoke instrument to its replacement lives in
+  the dfx-trace lane's TASK.md.
 - Serial console output is the primary log (`console=ttyS0`).
 - `dfx=taskdump,watchdog` boot flags enable periodic task dumps and the
   spinlock/deadlock watchdog; `dfx=memwatch` adds heap/page accounting.

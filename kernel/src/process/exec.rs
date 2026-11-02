@@ -177,12 +177,26 @@ pub(crate) fn do_execve_elf(
     // Find virtual address range
     let mut min_vaddr: u64 = u64::MAX;
     let mut max_vaddr: u64 = 0;
+    // Executable-stack request from PT_GNU_STACK (see the loop below).
+    let mut exec_stack_exec: bool = false;
 
     for i in 0..phdr_count {
         // SAFETY: program_data is a valid ELF file slice and i < phdr_count is bounded
         // by the ELF header's e_phnum, so the program header index is in range.
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
+
+        // W^X (sec-r1, L4): PT_GNU_STACK decides the stack's executability
+        // exactly like the reference load_elf_binary: PF_X → EXSTACK_ENABLE_X
+        // (stack mapped RWX, VMA EXEC), anything else → NX. Neither Rux
+        // arch sets READ_IMPLIES_EXEC from a MISSING header (x86_64:
+        // mmap_is_ia32() is false here; riscv64 uses the
+        // elf_read_implies_exec == 0 fallback), so absence keeps the
+        // secure default. Only the MAIN exe's PT_GNU_STACK counts — the
+        // reference reads it from elf_phdata, not the interpreter's phdrs.
+        if phdr.p_type == crate::fs::elf::PT_GNU_STACK {
+            exec_stack_exec = phdr.p_flags & crate::fs::elf::PF_X != 0;
+        }
 
         if phdr.is_load() {
             let virt_addr = phdr.p_vaddr;
@@ -293,9 +307,22 @@ pub(crate) fn do_execve_elf(
     if ec2_on { ec2_as = crate::arch::cpu::read_time(); }
 
     // Start with RW (no X) — permissions will be tightened per-segment below.
+    // W^X (sec-r1): the stack's executability follows PT_GNU_STACK
+    // (EXSTACK_ENABLE_X / the secure NX default). Per-arch encoding:
+    // riscv64 exec = X bit set; x86_64/aarch64 exec = NX/UXN clear, so a
+    // non-exec stack must explicitly carry NX there — leaving it unset
+    // kept the initial x86_64 stack RW-executable by absence of NX.
     let flags = PageTableEntry::V | PageTableEntry::U |
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::A | PageTableEntry::D;
+    let stack_flags = if exec_stack_exec {
+        flags | PageTableEntry::X
+    } else {
+        #[cfg(feature = "riscv64")]
+        { flags }
+        #[cfg(not(feature = "riscv64"))]
+        { flags | PageTableEntry::NX }
+    };
 
     // SAFETY: user_ppn is a freshly allocated page table root, image_start..image_start+total_size
     // is a valid range, and flags contains valid PTE bits for user pages.
@@ -317,7 +344,7 @@ pub(crate) fn do_execve_elf(
     let stack_top = user_end - PAGE_SIZE as u64;
     let stack_bottom = stack_top - initial_stack_size;
     let _stack_phys_base = unsafe {
-        alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
+        alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, stack_flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // NOTE (abi-review session 1): no explicit zeroing here. BOTH arch
@@ -1221,10 +1248,16 @@ pub(crate) fn do_execve_elf(
         // UP to cover the whole mapped stack.
         let stack_top_page =
             (stack_top + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+        // W^X (sec-r1): EXEC on the stack VMA only when PT_GNU_STACK
+        // requested it (EXSTACK_ENABLE_X) — mprotect on this VMA consults
+        // these flags, and /proc/<pid>/maps must report the same shape.
+        let stack_vma_flags =
+            VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN
+                | if exec_stack_exec { VmaFlags::EXEC } else { 0 };
         let mut stack_vma = Vma::new(
             crate::mm::page::VirtAddr::new(stack_bottom as usize),
             crate::mm::page::VirtAddr::new(stack_top_page as usize),
-            VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN),
+            VmaFlags::from_bits(stack_vma_flags),
         );
         stack_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
         let mut vma_mgr = new_addr_space.vma_write();
@@ -1435,8 +1468,17 @@ pub(crate) fn do_execve_elf(
     // We are replacing the task's address space and trap frame for the new program.
     if ec2_on { ec2_vma = crate::arch::cpu::read_time(); }
     unsafe {
-        // Capture the new mm's ASID before the Arc takes ownership.
-        let new_asid = new_addr_space.asid();
+        // Capture the new mm's ASID before the Arc takes ownership. A
+        // fresh exec mm has none yet — draw one NOW: with x86_64 PCID
+        // active, switch_address_space tags the CR3 with it, and a user
+        // root entering under asid 0 (the kernel root's tag) would cache
+        // its translations under the wrong PCID. alloc_asid returns 0
+        // with PCID off, so the legacy path is unchanged.
+        let new_asid = if new_addr_space.asid() != 0 {
+            new_addr_space.asid()
+        } else {
+            new_addr_space.alloc_asid().unwrap_or(0)
+        };
 
         // Switch to the NEW address space BEFORE dropping the old mm.
         // The old order (set_address_space → switch_mm) had an SMP window:

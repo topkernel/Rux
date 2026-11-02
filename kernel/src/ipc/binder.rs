@@ -1075,6 +1075,8 @@ fn sendfail_reason_name(code: u64) -> &'static str {
         16 => "offsets-copy-fault",
         17 => "reply-target-gone",
         18 => "translate-fd",
+        20 => "sender-stack-top (reference parity guard)",
+        21 => "sender-todo-head-txn (reference parity guard)",
         _ => "unknown",
     }
 }
@@ -1654,8 +1656,8 @@ fn wake_thread(t: &BinderThread) {
 /// binder_thread_read) — while the daemon's looper workers are
 /// reg_tgid-gated off the item. Thread-todo delivery bypasses both:
 /// own-thread todo is drained regardless of looper flags (the
-/// `from_thread` pull) and a blocked WRITE_READ wakes through
-/// thread_has_work's `!th.todo.is_empty()` check. Prefers a thread with
+/// `from_thread` pull) and a blocked WRITE_READ wakes through the
+/// process_todo flag set by the delivery push. Prefers a thread with
 /// the shallowest txn stack; returns the woken thread (caller wakes it
 /// AFTER WORLD is released, same contract as wake_ths).
 /// SAFETY: caller must hold WORLD; pushes onto the thread's todo only.
@@ -4153,6 +4155,11 @@ pub fn pool_census_audit() {
 /// SAFETY: caller holds WORLD.
 unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::string::String {
     let mut found = alloc::string::String::new();
+    // Flood cap (lb310 lesson): a 60-1900-deep legal-interleave stack
+    // turned each census line into a 100-230KB console write that
+    // drowned the boot. Print the first 8 entries verbatim, then a
+    // count summary of the rest.
+    let mut shown = 0usize;
     for p in &world.procs {
         let pim = p.im();
         for (i, wk) in pim.todo.iter().enumerate() {
@@ -4173,22 +4180,33 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
                 if let Work::Transaction(t) = wk {
                     if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                         use core::fmt::Write;
-                        let _ = write!(
-                            found,
-                            " [p{}t{}todo{} txn{} code{}]",
-                            p.pid, ct.tid, i, t.id, t.code
-                        );
+                        shown += 1;
+                        if shown <= 8 {
+                            let _ = write!(
+                                found,
+                                " [p{}t{}todo{} txn{} code{}]",
+                                p.pid, ct.tid, i, t.id, t.code
+                            );
+                        }
                     }
                 }
             }
             for (i, st) in cth.txn_stack.iter().enumerate() {
                 if st.from_tid == Some(tid) && st.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                     use core::fmt::Write;
-                    let _ = write!(
-                        found,
-                        " [p{}t{}stack{} txn{} code{}]",
-                        p.pid, ct.tid, i, st.id, st.code
-                    );
+                    shown += 1;
+                    if shown <= 8 {
+                        // SAFETY: to_tid read under WORLD (same contract
+                        // as the rest of this walk).
+                        let tt = unsafe { st.to_tid() };
+                        let _ = write!(
+                            found,
+                            " [p{}t{}stack{} txn{} code{}>{}.{}]",
+                            p.pid, ct.tid, i, st.id, st.code,
+                            st.to_proc.pid,
+                            tt.unwrap_or(0)
+                        );
+                    }
                 }
             }
         }
@@ -4196,10 +4214,17 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
             for t in node.st().async_todo.iter() {
                 if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                     use core::fmt::Write;
-                    let _ = write!(found, " [p{}node{} async txn{}]", p.pid, node.id, t.id);
+                    shown += 1;
+                    if shown <= 8 {
+                        let _ = write!(found, " [p{}node{} async txn{}]", p.pid, node.id, t.id);
+                    }
                 }
             }
         }
+    }
+    if shown > 8 {
+        use core::fmt::Write;
+        let _ = write!(found, " +{}more", shown - 8);
     }
     found
 }
@@ -6277,6 +6302,41 @@ fn binder_transaction(
                         t.to_tid(),
                         thread.tid
                     );
+                    // Full stack walk at the mismatch (why=7 hunt, budget
+                    // 20): names every entry's direction so the boot log
+                    // shows whether the top is an unresolved OUTGOING txn
+                    // (the parity gap the SYNCSEND-GUARD now rejects) or
+                    // cross-thread bookkeeping. WORLD held — ConsoleWriter.
+                    static M7_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if M7_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        use core::fmt::Write as _;
+                        let _ = writeln!(
+                            w,
+                            "R7-STACK pid={} tid={} reply-code{:#x} depth={}",
+                            proc.pid,
+                            thread.tid,
+                            tr.code,
+                            thread.st().txn_stack.len()
+                        );
+                        for (i, e) in thread.st().txn_stack.iter().enumerate().rev() {
+                            // SAFETY: reads under WORLD.
+                            let _ = writeln!(
+                                w,
+                                "  R7[{}] txn{} code{:#x} to_tid={:?} from pid{} tid{} oneway={} enq_j={} pick_j={}",
+                                i,
+                                e.id,
+                                e.code,
+                                e.to_tid(),
+                                e.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                e.from_tid.unwrap_or(0),
+                                e.flags & TF_ONE_WAY != 0,
+                                e.enq_j,
+                                *e.pick_j.get()
+                            );
+                        }
+                    }
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
@@ -6486,6 +6546,117 @@ fn binder_transaction(
                 sendfail_why(11);
                 *err_cmd = BR_FAILED_REPLY;
                 return;
+            }
+            // Reference-kernel parity (binder.c binder_transaction,
+            // non-reply sync sends): two protocol guards the reference
+            // line has and we lacked. A sync BC_TRANSACTION is rejected
+            // when (a) a transaction sits at the sender-thread's todo
+            // head ("new transaction not allowed when there is a
+            // transaction on thread todo") or (b) the sender's
+            // transaction-stack top is not an incoming txn addressed to
+            // this thread ("got new transaction with bad transaction
+            // stack"). Accepting those sends instead let userspace drive
+            // reply orderings the reference never permits, ending in the
+            // once-per-boot why=7 reply-stack-top orphan (useriam lb253
+            // @100.9s, accountmgr lb302 @190.8s — each orphaned a sync
+            // client whose TXN-HANG exec then grows without bound).
+            // GATED (dfx=syncguard): lb304 showed always-on rejection
+            // wedges the early SA storm (samgr's own first code-20/3
+            // sends violate the shape under OUR bookkeeping — OH boots
+            // on the reference, so our sender-thread state already
+            // diverges upstream; the guard is a diagnostic that names
+            // those sends until that divergence is fixed).
+            if !reply && !oneway {
+                let sg_reject = crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::SyncGuard,
+                );
+                let sw_watch = crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::SyncWatch,
+                );
+                if sg_reject || sw_watch {
+                    let st = thread.st();
+                    let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
+                    let bad_stack_top = match st.txn_stack.last() {
+                        // SAFETY: to_tid read under WORLD.
+                        Some(top) => (unsafe { top.to_tid() }) != Some(thread.tid),
+                        None => false,
+                    };
+                    if todo_head_txn || bad_stack_top {
+                        static GUARD_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let depth = st.txn_stack.len();
+                            // SAFETY: reads of the top txn under WORLD.
+                            let (tid_, tcode, tto, fpid, ftid) = st
+                                .txn_stack
+                                .last()
+                                .map(|t| unsafe {
+                                    (
+                                        t.id,
+                                        t.code,
+                                        t.to_tid(),
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0),
+                                    )
+                                })
+                                .unwrap_or((0, 0, None, 0, 0));
+                            // SAFETY: read of the todo-head txn under
+                            // WORLD. to_tid=None means proc-addressed
+                            // work landed on a BUSY thread's todo — a
+                            // delivery shape the reference avoids (it
+                            // picks waiting_threads or the proc todo).
+                            let (hid, hcode, hto, hfpid, hftid) = match st.todo.front() {
+                                // SAFETY: same WORLD-held read as above.
+                                Some(Work::Transaction(t)) => unsafe {
+                                    (
+                                        t.id,
+                                        t.code,
+                                        t.to_tid(),
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0),
+                                    )
+                                },
+                                _ => (0, 0, None, 0, 0),
+                            };
+                            let _ = writeln!(
+                            w,
+                            "SYNCSEND-{} pid={} tid={} why={} stack_depth={} top=txn{} code{:#x} to_tid={:?} from pid{} tid{} todo_head=txn{} code{:#x} to_tid={:?} from pid{} tid{}",
+                            if sg_reject { "GUARD" } else { "WATCH" },
+                            proc.pid,
+                            thread.tid,
+                            if todo_head_txn { "todo-head-txn" } else { "stack-top-not-mine" },
+                            depth,
+                            tid_,
+                            tcode,
+                            tto,
+                            fpid,
+                            ftid,
+                            hid,
+                            hcode,
+                            hto,
+                            hfpid,
+                            hftid
+                        );
+                            // Sender's transition ring: what this thread
+                            // did between stacking the top txn and this
+                            // send (tcomplete read? error delivery?
+                            // incoming handled?) — the divergence
+                            // decoder for the guard hits.
+                            let _ = writeln!(
+                                w,
+                                "{}",
+                                hist_line_of(thread.tid, &hist_snapshot(&thread))
+                            );
+                        }
+                        if sg_reject {
+                            sendfail_why(if todo_head_txn { 21 } else { 20 });
+                            *err_cmd = BR_FAILED_REPLY;
+                            return;
+                        }
+                    }
+                }
             }
             if !reply {
                 if let Some(node) = &target_node {
@@ -7476,7 +7647,45 @@ fn binder_transaction(
                 if let Some(rthread) = rthread {
                     let rth = rthread.st();
                     match &in_reply_to {
-                        Some(orig) => rth.txn_stack.retain(|t| !Arc::ptr_eq(t, orig)),
+                        Some(orig) => {
+                            // binder_pop_transaction_ilocked parity check:
+                            // the reference pops the origin thread's stack
+                            // TOP and BUG_ONs if it is not exactly this
+                            // txn. We retain-by-identity anywhere (more
+                            // forgiving), but a non-top hit means our
+                            // bookkeeping already diverged — name it
+                            // (budget 20, WORLD held, ConsoleWriter).
+                            let top_is_orig = rth
+                                .txn_stack
+                                .last()
+                                .map(|t| Arc::ptr_eq(t, orig))
+                                .unwrap_or(false);
+                            if !top_is_orig {
+                                static RP_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    < 20
+                                {
+                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    use core::fmt::Write as _;
+                                    // SAFETY: reads under WORLD.
+                                    let top = rth.txn_stack.last();
+                                    let _ = writeln!(
+                                        w,
+                                        "RPOP-DIVERGE pid={} tid{} orig=txn{} code{:#x} depth={} top=txn{} code{:#x} to_tid={:?}",
+                                        tproc.pid,
+                                        rtid,
+                                        orig.id,
+                                        orig.code,
+                                        rth.txn_stack.len(),
+                                        top.map(|t| t.id).unwrap_or(0),
+                                        top.map(|t| t.code).unwrap_or(0),
+                                        top.and_then(|t| t.to_tid())
+                                    );
+                                }
+                            }
+                            rth.txn_stack.retain(|t| !Arc::ptr_eq(t, orig));
+                        }
                         None => {}
                     }
                     rth.todo.push_back(Work::Transaction(txn.clone()));
@@ -7656,12 +7865,22 @@ fn binder_transaction(
                 }
                 wakes.push(proc.clone());
             } else {
-                // Sync: TRANSACTION_COMPLETE on the sender's todo (visible
-                // to its next read via thread_has_work's todo check) +
-                // push on the sender's txn stack + queue on the target.
+                // Sync: TRANSACTION_COMPLETE on the sender's todo is
+                // DEFERRED (reference parity, binder.c 6.6
+                // binder_enqueue_deferred_thread_work_ilocked at the
+                // !reply && !TF_ONE_WAY leg): the tcomplete is queued
+                // WITHOUT setting process_todo, so the sender's read
+                // parks until real work (the reply, or an error
+                // resolution) flips process_todo. The reference defers
+                // exactly so the sync client stays inside its BWR ioctl
+                // until the reply — the kernel-side guarantee that a
+                // thread can never stack a second outgoing sync send
+                // over an unresolved one (the lb311 RSS shape: our
+                // immediate tcomplete returned the ioctl, userspace
+                // retried LOAD_SYSTEM_ABILITY 1ms later, and the
+                // reference-parity guard then had to reject it).
                 let th = thread.st();
                 th.todo.push_back(Work::TransactionComplete);
-                th.process_todo = true;
                 // Linux 5.10 from-walk, BEFORE the new txn is stacked:
                 // while this thread is handling a sync txn T whose
                 // originator thread C lives in the target proc, a nested
@@ -8142,11 +8361,14 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    // Own todo non-empty = binder_has_thread_work (Linux): covers work
-    // pushed without an explicit wake, e.g. the deferred sync-send
-    // TRANSACTION_COMPLETE that must reach the sender before it sleeps
-    // awaiting the reply.
-    if th.process_todo || !th.todo.is_empty() {
+    // Reference parity (binder_has_work_ilocked, 6.6): only process_todo
+    // (or looper_need_return / eligible proc work) makes work visible to
+    // a PARKING read — a non-empty todo alone does NOT. This is what
+    // keeps a deferred sync-send TRANSACTION_COMPLETE invisible until
+    // the reply (or an error resolution) sets process_todo. Every
+    // non-deferred push site in this file sets process_todo=true, so
+    // only deferred tcompletes are affected.
+    if th.process_todo {
         return true;
     }
     let avail_for_proc = th.txn_stack.is_empty()

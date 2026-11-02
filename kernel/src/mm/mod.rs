@@ -157,9 +157,10 @@ pub unsafe fn alloc_and_map_user_memory(
 ///
 /// Bridges the per-arch context-switch primitives: riscv64 drives
 /// `context::switch_mm(ppn, asid)` (satp + ASID-scoped sfence); x86_64
-/// writes CR3 through the interface-parity `mm::write_satp` (no PCID
-/// yet, so the ASID argument is unused); aarch64 decomposes the composed
-/// satp into TTBR0_EL1 (root PPA + ASID in [63:48]) with a full flush.
+/// builds the tagged CR3 (PCID + NOFLUSH when PCID is armed — asid 0
+/// callers are kernel-root switches; user roots must carry a resolved
+/// PCID, see exec.rs); aarch64 decomposes the composed satp into
+/// TTBR0_EL1 (root PPA + ASID in [63:48]) with a full flush.
 ///
 /// # Safety
 /// `root_ppn` must be a live page-table root; caller must ensure the
@@ -170,9 +171,9 @@ pub unsafe fn switch_address_space(root_ppn: u64, asid: u16) {
     crate::arch::context::switch_mm(root_ppn, asid);
     #[cfg(feature = "x86_64")]
     {
-        let _ = asid;
-        // SAFETY: caller guarantees a valid root (see fn doc).
-        crate::arch::mm::write_satp(root_ppn << 12);
+        // SAFETY: caller guarantees a valid root (see fn doc); the
+        // PCID-tagging/fallback discipline lives in asid::switch_root.
+        crate::arch::mm::asid::switch_root(root_ppn, asid);
     }
     #[cfg(feature = "aarch64")]
     {

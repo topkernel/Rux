@@ -298,6 +298,13 @@ pub unsafe fn fpu_init() {
         }
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
 
+        // FSGSBASE (CPUID-gated inside): per-CPU CR4 bit the context
+        // switch gates on — fpu_init runs once per CPU (BSP + every AP),
+        // exactly the arming discipline. Runs AFTER the CR4 write above
+        // (its own RMW read the pre-write value; a pre-write call here
+        // would be clobbered by the store).
+        crate::arch::x86_64::cpu::enable_fsgsbase();
+
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
         cr0 &= !(1 << 2); // clear EM (no emulation)

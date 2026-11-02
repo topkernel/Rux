@@ -40,7 +40,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
@@ -196,6 +196,22 @@ pub struct UnixSocket {
     /// "Broken pipe on a live bus" shape). The next non-empty enqueue
     /// drains this onto the front of the new segment (first-touch delivery).
     pending_anc: Spinlock<Vec<(Vec<Arc<File>>, Option<UnixCred>)>>,
+    /// Entry count mirror of `pending_anc` (perf-r3): the enqueue fast
+    /// path takes the drain lock only when something is actually parked —
+    /// a per-send lock pair on every stream send was pure cost for the
+    /// (overwhelmingly common) empty case. Relaxed: the lock still
+    /// provides the ordering for actual drain correctness; the counter
+    /// only decides whether to bother.
+    pending_anc_n: AtomicUsize,
+    /// Cached mirror of options.passcred (perf-r3): Linux's
+    /// unix_maybe_add_creds() consults the SENDER's and RECEIVER's
+    /// SOCK_PASSCRED flags at send time — both sides uncredentialed means
+    /// the skb carries no cred snapshot at all. Stamping every segment
+    /// unconditionally (old shape) paid a task-cred snapshot per send on
+    /// sockets that can never report it (recvmsg emits the cmsg only
+    /// under the RECEIVER's SO_PASSCRED). The atomic mirrors the option
+    /// the setsockopt path writes under the options lock.
+    passcred_flag: AtomicBool,
     /// Peer performed close()/shutdown — drain then EOF
     eof: Spinlock<bool>,
     /// This socket's close() ran (poll: peer sees POLLHUP — the Linux
@@ -244,6 +260,8 @@ impl UnixSocket {
                 charge: 0,
             }),
             pending_anc: Spinlock::new(Vec::new()),
+            pending_anc_n: AtomicUsize::new(0),
+            passcred_flag: AtomicBool::new(false),
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
@@ -1798,7 +1816,12 @@ pub fn unix_send(
         // stream readers take as peer EOF (see pending_anc on UnixSocket).
         if data.is_empty() && matches!(sock.kind, UnixKind::Stream) {
             if !files.is_empty() || cred.is_some() {
-                target.pending_anc.lock().push((files, cred));
+                let n = {
+                    let mut anc = target.pending_anc.lock();
+                    anc.push((files, cred));
+                    anc.len()
+                };
+                target.pending_anc_n.store(n, Ordering::Release);
             }
             return Ok(0);
         }
@@ -1818,10 +1841,12 @@ pub fn unix_send(
                 let src = sock.src_arc.lock().clone();
                 // Drain parked ancillary data onto the front of the new
                 // segment: first-touch delivery with the first bytes that
-                // were queued AFTER the (files, cred) arrived.
+                // were queued AFTER the (files, cred) arrived. The count
+                // mirror gates the lock pair (perf-r3): the empty case —
+                // every ordinary stream send — skips it entirely.
                 let mut files = files;
                 let mut cred = cred;
-                {
+                if target.pending_anc_n.load(Ordering::Acquire) != 0 {
                     let mut anc = target.pending_anc.lock();
                     for (pf, pc) in anc.drain(..) {
                         files.extend(pf);
@@ -1829,20 +1854,25 @@ pub fn unix_send(
                             cred = pc;
                         }
                     }
+                    target.pending_anc_n.store(0, Ordering::Release);
                 }
-                // SO_PASSCRED parity: Linux stamps the sender's
-                // {pid,uid,gid} into every skb at send time (scm.c
-                // __scm_send snapshots the current task unconditionally);
-                // the RECEIVER's recvmsg emits the SCM_CREDENTIALS cmsg
-                // only when the receiving socket has SO_PASSCRED set.
-                // hilogd's stats-query socket rides on this contract: its
-                // RequestStatsQuery derefs the cmsg buffer pointer
-                // unconditionally after a successful recvmsg (compiled
-                // path at libhilog.so+0x17efc reads [rax+0x18] with rax
-                // = msg_control when controllen < 16), so a receive
-                // without the cmsg is a NULL-deref SIGSEGV that kills
-                // the hilogd.server thread — no hilog visibility.
-                if cred.is_none() {
+                // SO_PASSCRED parity (perf-r3): Linux's
+                // unix_maybe_add_creds() snapshots the sender's
+                // {pid,uid,gid} into the skb at send time only when the
+                // SENDER's or the RECEIVER's socket has SOCK_PASSCRED
+                // set — an uncredentialed pair carries no snapshot at
+                // all. The RECEIVER's recvmsg emits the SCM_CREDENTIALS
+                // cmsg only when the receiving socket has SO_PASSCRED
+                // set, so gating here changes nothing observable for
+                // credentialed receivers (hilogd — which derefs the cmsg
+                // pointer unconditionally after recvmsg — sets
+                // SO_PASSCRED, so its segments are still stamped) while
+                // the common no-passcred pair skips the per-send task
+                // snapshot.
+                if cred.is_none()
+                    && (sock.passcred_flag.load(Ordering::Relaxed)
+                        || target.passcred_flag.load(Ordering::Relaxed))
+                {
                     cred = Some(current_unix_cred());
                 }
                 let charge = seg_charge(data.len());
@@ -2442,6 +2472,19 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.rcvtimeo_deadline();
 
+    // STREAM with a count above the bounce: direct drain (gap-net /
+    // bw_unix). The 1 KiB bounce loop below priced a 64 KiB read(2) at 64
+    // engine rounds — each with its own recv_queue lock pair, a
+    // seg->bounce copy, a bounce->user copy, a wait-queue wake and a peer
+    // epoll re-arm — and double-copied every byte. This path pops whole
+    // segments (one short lock pair each) and copies each segment
+    // STRAIGHT to user: one copy per byte total, one wake per syscall,
+    // no staging allocation. Semantics identical to the bounce loop
+    // (same contract list below); read(2) discards ancillary data.
+    if matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
+        return unix_recv_stream_user(&socket, dst, count, nonblock, deadline);
+    }
+
     // Dgram/Seqpacket with a count above the bounce: one-shot staged
     // receive so a large record still returns whole (single record per
     // call; the bounce loop would split it across records — wrong).
@@ -2537,6 +2580,165 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
         }
     }
     total as isize
+}
+
+/// STREAM read(2) direct drain into the user buffer (gap-net / bw_unix).
+///
+/// Contract — identical to the bounce loop it replaces for large counts:
+/// - Everything queued up to `count`, one segment-granularity exception
+///   copy each; blocking only until the first byte (continuations never
+///   block — POSIX short-read).
+/// - EOF (peer closed / SHUT_RD, queue empty) returns 0; O_NONBLOCK on
+///   an empty queue returns EAGAIN; SO_RCVTIMEO expiry surfaces as
+///   EAGAIN; a pending signal returns the partial count when bytes
+///   already landed (unix_wait_round reports EINTR only while total
+///   is zero, matching the bounce path's first-call propagation).
+/// - Ancillary data is taken first-touch and discarded (read(2) cannot
+///   report cmsgs — same as the bounce path; scmtap notes the drop).
+/// - A fault mid-copy returns the bytes that landed (POSIX partial
+///   read); the unconsumed remainder of the torn segment stays queued.
+fn unix_recv_stream_user(
+    sock: &Arc<UnixSocket>,
+    dst: *mut u8,
+    count: usize,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> isize {
+    use crate::arch::uaccess::copy_to_user;
+    let mut user_ptr = dst;
+    let mut remaining = count;
+    let mut total: usize = 0;
+    let mut files: Vec<Arc<File>> = Vec::new();
+    let mut cred: Option<UnixCred> = None;
+    let mut anc_seen = false;
+    loop {
+        // === Drain phase: pop segments (short lock) and copy each out
+        // with the queue lock RELEASED — a user-page fault must never be
+        // resolved under the recv_queue spinlock. ===
+        let mut drained_any = false;
+        let mut buffer_full = false;
+        let mut fault_tail: Option<(usize, usize)> = None; // (good, bad)
+        while !buffer_full {
+            let popped = {
+                let mut q = sock.recv_queue.lock();
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            };
+            let Some(mut seg) = popped else { break };
+            drained_any = true;
+            // First-touch ancillary pickup (mirror of the engine drain).
+            if !anc_seen && (!seg.files.is_empty() || seg.cred.is_some()) {
+                anc_seen = true;
+                files.extend(seg.files.drain(..));
+                cred = seg.cred.take();
+            } else {
+                seg.files.clear();
+                seg.cred = None;
+            }
+            let take = seg.data.len().min(remaining);
+            // SAFETY: user_ptr stays inside the access_ok-validated
+            // [dst, dst+count) window; exactly `take` bytes are read out
+            // of the popped (owned) segment.
+            let uncopied =
+                unsafe { copy_to_user(user_ptr, seg.data.as_ptr(), take) };
+            if uncopied > 0 {
+                let good = take - uncopied;
+                total += good;
+                remaining -= good;
+                fault_tail = Some((good, uncopied));
+                // Keep the unconsumed remainder queued for the retry the
+                // caller will issue (Linux leaves the skb readable the
+                // same way after a short copy fault).
+                push_back_remainder(sock, seg.data, good, seg.src.clone());
+                break;
+            }
+            total += take;
+            remaining -= take;
+            // SAFETY: bounded offset arithmetic within the count window.
+            user_ptr = unsafe { user_ptr.add(take) };
+            if take < seg.data.len() {
+                // Buffer filled mid-segment: remainder stays queued (fds
+                // already taken — delivered, first-touch semantics).
+                push_back_remainder(sock, seg.data, take, seg.src.clone());
+                buffer_full = true;
+                break;
+            }
+            if remaining == 0 {
+                buffer_full = true;
+            }
+        }
+        if drained_any {
+            // Room freed for senders blocked on our queue + the peer's
+            // EPOLLOUT edge — ONCE per syscall, not per segment.
+            sock.wait_queue.wake_up_all();
+            if let Some(peer) = sock.peer_arc() {
+                let fid = peer.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::syscall::misc::epoll_notify_file(fid);
+                }
+            }
+            if !files.is_empty() {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                }
+                let _ = cred;
+            }
+            if fault_tail.is_some() && total == 0 {
+                // Whole first copy faulted with nothing landed.
+                return -14; // EFAULT
+            }
+            return total as isize;
+        }
+        // Nothing queued. Empty-queue semantics (mirror of unix_recv's
+        // tail): EOF, ENOTCONN, EAGAIN, or one blocking wait round.
+        if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+            return 0; // EOF after drain
+        }
+        let state = *sock.state.lock();
+        if state == UnixState::Unconnected || state == UnixState::Listening {
+            return -107; // ENOTCONN
+        }
+        if nonblock {
+            return -11; // EAGAIN
+        }
+        let s = sock.clone();
+        match unix_wait_round(&s, &|| sock_recv_ready(&s), deadline) {
+            Ok(()) => continue,
+            Err(e) => return e as isize,
+        }
+    }
+}
+
+/// Push the unconsumed tail of a partially-drained segment back onto the
+/// FRONT of the receive queue (direct-drain path): `consumed` bytes are
+/// dropped from the front of `data`, the rest keeps its flow-control
+/// charge and (for a full-drain caller's interest) the original src
+/// stamp. Ancillary data is never re-queued — first-touch delivery
+/// already consumed it.
+fn push_back_remainder(
+    sock: &Arc<UnixSocket>,
+    data: Vec<u8>,
+    consumed: usize,
+    src: Option<Arc<str>>,
+) {
+    let mut rest = data;
+    rest.drain(..consumed);
+    if rest.is_empty() {
+        return;
+    }
+    let charge = seg_charge(rest.len());
+    let mut q = sock.recv_queue.lock();
+    q.charge += charge;
+    q.segs.push_front(UnixSeg {
+        data: rest,
+        files: Vec::new(),
+        cred: None,
+        src,
+        charge,
+    });
 }
 
 fn unix_file_close(file: &File) -> i32 {
@@ -2876,13 +3078,16 @@ pub fn unix_setsockopt(
         // SO_PASSCRED (init's second mandatory service-socket option,
         // init_service_socket.c:81): store the flag — the recvmsg side
         // attaches creds cmsgs when it is set (shared SocketOptions
-        // field, same as the netlink path).
+        // field, same as the netlink path). The atomic mirror lets the
+        // send path apply unix_maybe_add_creds semantics without the
+        // options lock pair (perf-r3).
         SO_PASSCRED => {
             let v = match read_i32() {
                 Some(v) => v,
                 None => return -22,
             };
             sock.options.lock().passcred = v != 0;
+            sock.passcred_flag.store(v != 0, Ordering::Release);
             0
         }
         SO_RCVTIMEO | SO_SNDTIMEO => {

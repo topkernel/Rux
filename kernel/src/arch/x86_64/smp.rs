@@ -348,7 +348,9 @@ fn setup_trampoline(kernel_cr3: u64) {
 
     tramp_write_u32(TRAMP_PML4, TRAMP_PML4_PHYS as u32);
     tramp_write_u64(TRAMP_ENTRY, ap_entry64 as usize as u64);
-    tramp_write_u64(TRAMP_KCR3, kernel_cr3);
+    // Diagnostics slot: store the plain physical root (mask the live
+    // CR3's PCID/NOFLUSH bits — with PCID the BSP's CR3 carries them).
+    tramp_write_u64(TRAMP_KCR3, kernel_cr3 & 0x000F_FFFF_FFFF_F000);
 
     // ---- Trampoline page tables ----
     // PML4[0] -> PDPT -> PD (identity low 1GB, 2MB leaves); the upper
@@ -571,6 +573,11 @@ pub extern "C" fn ap_entry64() -> ! {
     unsafe {
         crate::arch::cpu::write_cr3(crate::arch::mm::mmu_init::root_static_phys());
     }
+
+    // Arm PCID on this AP right after the clean kernel-root load (the
+    // enable precondition is CR3[11:0]=0). Idempotent with the BSP's
+    // enable; stays off without CPUID PCID+INVPCID.
+    crate::arch::mm::asid::enable_pcid();
 
     // Per-CPU descriptor tables, syscall MSRs and FPU enable.
     crate::arch::trap::init_secondary(cpu);

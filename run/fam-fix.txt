@@ -1,0 +1,58 @@
+=== fam-med3 fix 2026-11-02_14:30:47 kernel=53a6afa1
+--- round 1 load=4.96
+===CASE r1 lat_ctx,-s,64,2
+"size=64k ovr=1.09
+2 2.07
+===CASE r1 lat_ctx,-s,64,8
+"size=64k ovr=1.07
+8 1.94
+===CASE r1 lat_pipe,
+Pipe latency: 3.7977 microseconds
+===CASE r1 lat_unix,
+AF_UNIX sock stream latency: 4.9281 microseconds
+===CASE r1 lat_sem,
+Semaphore latency: 0.8963 microseconds
+===CASE r1 lat_syscall,null
+Simple syscall: 0.0718 microseconds
+===CASE r1 lat_syscall,read
+Simple read: 0.1483 microseconds
+===CASE r1 lat_syscall,write
+Simple write: 0.1314 microseconds
+--- round 2 load=4.57
+===CASE r2 lat_ctx,-s,64,2
+"size=64k ovr=1.07
+2 1.98
+===CASE r2 lat_ctx,-s,64,8
+"size=64k ovr=1.07
+8 1.94
+===CASE r2 lat_pipe,
+Pipe latency: 3.9294 microseconds
+===CASE r2 lat_unix,
+AF_UNIX sock stream latency: 4.6077 microseconds
+===CASE r2 lat_sem,
+Semaphore latency: 0.7465 microseconds
+===CASE r2 lat_syscall,null
+Simple syscall: 0.0720 microseconds
+===CASE r2 lat_syscall,read
+LMBENCH TIMEOUT lat_syscall
+===CASE r2 lat_syscall,write
+LMBENCH TIMEOUT lat_syscall
+--- round 3 load=6.29
+===CASE r3 lat_ctx,-s,64,2
+LMBENCH TIMEOUT lat_ctx
+===CASE r3 lat_ctx,-s,64,8
+"size=64k ovr=1.11
+8 1.90
+===CASE r3 lat_pipe,
+Pipe latency: 4.1213 microseconds
+===CASE r3 lat_unix,
+LMBENCH TIMEOUT lat_unix
+===CASE r3 lat_sem,
+Semaphore latency: 0.9000 microseconds
+===CASE r3 lat_syscall,null
+LMBENCH TIMEOUT lat_syscall
+===CASE r3 lat_syscall,read
+Simple read: 0.1507 microseconds
+===CASE r3 lat_syscall,write
+Simple write: 0.1358 microseconds
+=== fam-med3 fix done 14:48:47

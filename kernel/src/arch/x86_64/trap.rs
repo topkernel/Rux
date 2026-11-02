@@ -23,15 +23,16 @@
 //! | 6   | 64-bit user code| 0x33     |
 //! | 7/8 | TSS (16-byte)   | 0x38     |
 //!
-//! STAR = (0x20<<48) | (0x08<<32): SYSCALL enters on CS=0x08/SS=0x10;
+//! STAR = (0x23<<48) | (0x08<<32): SYSCALL enters on CS=0x08/SS=0x10;
 //! SYSRET64 returns to CS = STAR[63:48]+16 = 0x33, SS = +8 = 0x2b.
 //! FMASK = TF|IF|DF — syscalls enter with IF clear; `handle_syscall`
-//! re-enables interrupts like the riscv64 twin.  Return is via iretq
-//! (never sysretq): avoids the SYSRET canonical-RSP crash class and
-//! keeps one uniform exit path.
+//! re-enables interrupts like the riscv64 twin.  Returns use SYSRET on
+//! the untouched fast path (trap.S trap_exit_syscall; rcx/r11 mirror
+//! checks) and IRETQ everywhere else — the Linux discipline.
 
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
+use crate::sync::spinlock::Spinlock;
 
 // Include trap.S assembly code (AT&T syntax — global_asm defaults to
 // Intel on x86 targets).
@@ -172,9 +173,13 @@ const _: () = assert!(TSS_OFF_RSP0 == 4 && TSS_OFF_SP2 == 0x14 && TSS_OFF_IST1 =
 /// entry — syscalls arrive through LSTAR).
 pub const SYSCALL_VECTOR: u64 = 0x80;
 
-/// STAR value: kernel CS 0x08 on SYSCALL; user base 0x20 so SYSRET64
-/// computes CS = 0x20+16 = 0x33 (user code64), SS = 0x20+8 = 0x2b.
-const MSR_STAR_VALUE: u64 = (0x20u64 << 48) | (0x08u64 << 32);
+/// STAR value: kernel CS 0x08 on SYSCALL; user base 0x23 (the user-code
+/// GDT index 6 << 3 | RPL3) so SYSRET64 computes CS = 0x23+16 = 0x33
+/// (user code64) and SS = 0x23+8 = 0x2b — both with RPL 3. The base
+/// used to be 0x20, which SYSRET would have loaded as CS=0x30/SS=0x28
+/// (RPL 0); nothing exercised it while returns were iretq-only
+/// (gap-net added the SYSRET tail in trap.S).
+const MSR_STAR_VALUE: u64 = (0x23u64 << 48) | (0x08u64 << 32);
 /// FMASK: TF(8) | IF(9) | DF(10) cleared on syscall entry.
 const MSR_FMASK_VALUE: u64 = (1 << 8) | (1 << 9) | (1 << 10);
 
@@ -640,9 +645,21 @@ type IrqLineHandler = fn();
 static IRQ_LINE_HANDLERS: [core::sync::atomic::AtomicU64; 16] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
+/// The line owners' names (the irq:irq_handler_entry name field; the
+/// x86 PIC path predates the irq-domain action layer, so the name rides
+/// a parallel registry set at request time).
+static IRQ_LINE_NAMES: [Spinlock<&'static str>; 16] = [const { Spinlock::new("") }; 16];
+
 /// Register a handler for a PIC line (0..15) and unmask it.  Returns
 /// false when the line is taken or out of range.
 pub fn request_irq_line(line: u8, handler: fn()) -> bool {
+    request_irq_line_named(line, "", handler)
+}
+
+/// `request_irq_line` with the owner's name (what the
+/// irq:irq_handler_entry tracepoint reports; the empty name renders as
+/// the bare line number prefix the irq event's comm slot carries).
+pub fn request_irq_line_named(line: u8, name: &'static str, handler: fn()) -> bool {
     use core::sync::atomic::Ordering;
     if line >= 16 {
         return false;
@@ -654,15 +671,32 @@ pub fn request_irq_line(line: u8, handler: fn()) -> bool {
     {
         return false;
     }
+    *IRQ_LINE_NAMES[line as usize].lock_irqsave() = name;
     unmask_irq_line(line);
     true
 }
+
+/// The registered name of a line ("" when free or registered unnamed).
+pub fn irq_line_name(line: u8) -> &'static str {
+    if line >= 16 {
+        return "";
+    }
+    *IRQ_LINE_NAMES[line as usize].lock()
+}
+
+/// Fallback names for lines registered without one ("line<N>", what an
+/// unnamed action reports — the reference always carries an action name).
+const LINE_NAME_FALLBACK: [&str; 16] = [
+    "line0", "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8",
+    "line9", "line10", "line11", "line12", "line13", "line14", "line15",
+];
 
 pub fn free_irq_line(line: u8) {
     use core::sync::atomic::Ordering;
     if line < 16 {
         mask_irq_line(line);
         IRQ_LINE_HANDLERS[line as usize].store(0, Ordering::Release);
+        *IRQ_LINE_NAMES[line as usize].lock_irqsave() = "";
     }
 }
 
@@ -951,16 +985,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             unsafe { core::arch::asm!("cli; hlt") };
         }
     }
-    // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin entry (trap,
-    // IRQ, or syscall) must land inside the CURRENT task's kernel stack —
-    // TSS.rsp0 / PER_CPU.tss_rsp0 name exactly that stack.  A frame
-    // anywhere else is the cross-stack engine caught in the act: this CPU
-    // would push frames through the victim's live data (torn return
-    // addresses — the byte-flip/#GP/#UD family).  Report the full
-    // ownership picture on raw serial and park THIS CPU (the others keep
-    // their state for their own reports).
-    if cpu_id < crate::config::MAX_CPUS {
-        let user_entry = unsafe { ((*regs).cs & 3) != 0 || vector == SYSCALL_VECTOR };
+    // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin TRAP or IRQ
+    // entry must land inside the CURRENT task's kernel stack — TSS.rsp0 /
+    // PER_CPU.tss_rsp0 name exactly that stack.  A frame anywhere else is
+    // the cross-stack engine caught in the act: this CPU would push frames
+    // through the victim's live data (torn return addresses — the
+    // byte-flip/#GP/#UD family).  Report the full ownership picture on raw
+    // serial and park THIS CPU (the others keep their state for their own
+    // reports).
+    //
+    // (gap-net) SYSCALL entries skip the walk: the entry stub validated
+    // the GS base against the PerCpu magic BEFORE reading rsp0, and the
+    // context switch validated the stack top it published into rsp0 (see
+    // x86_64/context.rs) — a syscall frame is at tss_rsp0-168 by
+    // construction, so this guard's content for syscalls (3 dependent
+    // loads on the hottest path in the kernel) is already established by
+    // those two checks.
+    if cpu_id < crate::config::MAX_CPUS && vector != SYSCALL_VECTOR {
+        let user_entry = unsafe { ((*regs).cs & 3) != 0 };
         if user_entry {
             let tp = super::smp::PER_CPU[cpu_id]
                 .current_task
@@ -1347,7 +1389,24 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             // believing IF=0.
             let is_idle =
                 cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
-            let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
+            // stress-port round 2 (2026-11-02): the tag now carries the
+            // adjudication the suffix only hinted at. An idle frame is
+            // halted with IF=1 (cpu_idle_loop re-enables IRQs before
+            // wfi) — the gap is halt-exit delivery latency, an artifact
+            // by construction. A user frame runs IF=1 by definition —
+            // the gap is vCPU steal. Only a kernel frame keeps the
+            // IRQ-OFF-WINDOW tag, and it is still only a triage hint:
+            // the syscost cli/sti zone accounting is the corroborating
+            // measurement (round-1 stress boots printed 101-461 ms
+            // idle/user gaps while every syscost REST site's longest
+            // CLOSED segment was <= 1 ms).
+            let msg: &[u8] = if regs.user_mode() {
+                b"\nWW: IRQ-DELAY-STEAL cpu="
+            } else if is_idle {
+                b"\nWW: IRQ-DELAY-IDLE cpu="
+            } else {
+                b"\nWW: IRQ-OFF-WINDOW cpu="
+            };
             for &b in msg {
                 putchar(b);
             }
@@ -1553,10 +1612,28 @@ fn handle_external_interrupt(vector: u64) {
     while let Some(line) = pic_claim() {
         let h = IRQ_LINE_HANDLERS[line as usize].load(core::sync::atomic::Ordering::Acquire);
         if h != 0 {
+            // The irq:irq_handler_entry/exit tracepoints, bracketing the
+            // line handler the way the reference brackets every action
+            // (kernel/irq/handle.c). The x86 line handlers are void, so
+            // the exit's ret is "handled" — the handler ran. Both calls
+            // marshal only behind armed() (one relaxed load when off;
+            // the name lookup too).
+            if crate::trace::EVENT_IRQ_HANDLER_ENTRY.armed() {
+                let name = irq_line_name(line);
+                let name16 = if name.is_empty() {
+                    crate::trace::str_to_comm16(LINE_NAME_FALLBACK[line as usize])
+                } else {
+                    crate::trace::str_to_comm16(name)
+                };
+                crate::trace::trace_irq_handler_entry(line as i32, &name16);
+            }
             // SAFETY: nonzero values were stored from fn pointers by
             // request_irq_line.
             let f: fn() = unsafe { core::mem::transmute(h) };
             f();
+            if crate::trace::EVENT_IRQ_HANDLER_EXIT.armed() {
+                crate::trace::trace_irq_handler_exit(line as i32, 1);
+            }
         } else {
             // Once per line per boot: on the OH q35 boot, spurious PIC
             // lines (2 via vectors 0x2a/0x2b) fire continuously; the
@@ -1786,10 +1863,28 @@ fn handle_alignment_check(regs: &mut PtRegs) {
     }
 }
 
-/// #NM — FPU unavailable.  Should not happen (fpu_init clears CR0.EM/TS),
-/// but re-initialize defensively and resume instead of dying.
+/// #NM — FPU unavailable: the LAZY-FPU restore point.
+///
+/// context_switch sets CR0.TS on every switch-in and skips the incoming
+/// task's xrstor; the task's first FP instruction lands here (the kernel
+/// binary has no compiler-emitted FP instructions — the only xmm sites
+/// are restore_fpu's own asm — so a user instruction is the only way to
+/// observe TS). Clear TS and run the ordinary restore: the saved image
+/// when the task ever used FP, the deterministic ABI-initial state
+/// otherwise (fork/exec mark fpu images clean/valid).
 fn handle_device_not_available() {
-    crate::pr_warn!("trap: #NM (FPU unavailable) — re-running fpu_init");
+    if let Some(cur) = crate::sched::current() {
+        // SAFETY: cur is the task now running on this CPU; clts claims
+        // the live FPU for it, restore_fpu loads its image.
+        unsafe {
+            super::cpu::clts();
+            (*cur).thread_mut().restore_fpu();
+        }
+        return;
+    }
+    // No current task (early boot / idle context) took an FP trap:
+    // re-enable the FPU defensively instead of looping on #NM.
+    crate::pr_warn!("trap: #NM with no current task — re-running fpu_init");
     // SAFETY: fpu_init only flips CR0/CR4 feature bits and zeroes the
     // live FPU state; the caller was not using it (#NM proves that).
     unsafe { super::thread::fpu_init() };
