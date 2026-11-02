@@ -152,16 +152,69 @@ pub struct FutexKey {
     pub mm: usize,
     /// Flags
     pub flags: u32,
+    /// PHYSICAL word identity — (page frame << 12) | byte offset —
+    /// resolved from the caller's page tables at key construction.
+    /// 0 when unresolved (kernel threads, torn-down exit paths, unit
+    /// tests). Shared-futex equality is physical, not virtual: the
+    /// reference kernel keys shared futexes on (inode, page, offset),
+    /// so a wake from ANY mapping of the same word — including a fresh
+    /// mmap at a DIFFERENT virtual address after fork+exec (LTP's
+    /// tst_checkpoint protocol: parent waits on the MAP_SHARED results
+    /// page, the exec'd child re-opens + re-mmaps and wakes) — reaches
+    /// the waiter. Rux's MAP_SHARED file pages are single cache frames
+    /// aliased in every mapper, so the frame number IS the identity.
+    pub phys: usize,
+}
+
+/// Resolve the physical word identity of `uaddr` in the CURRENT task's
+/// page tables: (frame << 12) | (uaddr & 0xfff). Returns 0 when the walk
+/// finds no present user leaf (callers fall back to uaddr keying — the
+/// pre-fix behavior, never worse).
+fn resolve_futex_phys(uaddr: usize) -> usize {
+    let Some(task) = crate::sched::current() else {
+        return 0;
+    };
+    // SAFETY: read-only AddressSpace accessor on the current task.
+    let root = match unsafe { (*task).address_space() } {
+        Some(mm) => mm.root_ppn(),
+        None => return 0,
+    };
+    // SAFETY: read-only page-table walk of the current address space.
+    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, uaddr as u64) } {
+        Some((ppn, bits)) => {
+            // Present + user leaf only (device-window leaves and kernel
+            // mappings are not futex words).
+            if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                ((ppn as usize) << 12) | (uaddr & 0xfff)
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
 }
 
 impl FutexKey {
     pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags }
+        Self { uaddr, mm, flags, phys: 0 }
+    }
+
+    /// Production constructor: resolves the physical word identity from
+    /// the current page tables (see `phys`).
+    pub fn new_user(uaddr: usize, mm: usize, flags: u32) -> Self {
+        Self { uaddr, mm, flags, phys: resolve_futex_phys(uaddr) }
     }
 
     /// Check if two keys match
     pub fn matches(&self, other: &FutexKey) -> bool {
-        if !(self.flags & FLAGS_SHARED != 0) {
+        if (self.flags & FLAGS_SHARED != 0) && self.phys != 0 && other.phys != 0 {
+            // Shared waiter: physical-word identity (any mapping of the
+            // same word matches — cross-address after exec/fresh mmap).
+            // Also covers the musl cleartid interop (shared waiter vs
+            // private waker on the SAME word) strictly more precisely
+            // than the old uaddr equality.
+            self.phys == other.phys
+        } else if !(self.flags & FLAGS_SHARED != 0) {
             self.uaddr == other.uaddr && self.mm == other.mm
         } else {
             self.uaddr == other.uaddr
@@ -462,24 +515,28 @@ fn pool_full_backoff() {
 
 /// Calculate futex hash value
 fn futex_hash(key: &FutexKey) -> usize {
-    // Hash by uaddr ALONE. matches() compares uaddr in BOTH branches
-    // (private: uaddr+mm; shared: uaddr-only), so every waiter a wake
-    // could possibly match shares the waiter's uaddr — a uaddr-keyed
-    // bucket guarantees they are all in the scanned chain, and matches()
-    // does the precise filtering.
+    // Hash by the PHYSICAL word identity when resolved (both private and
+    // shared keys), else by uaddr. matches() compares the physical word
+    // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
+    // and an exec'd child waking from a fresh mmap at vaddr B MUST share
+    // a bucket (the LTP tst_checkpoint protocol; the old uaddr-only
+    // bucketing put them in different chains and the wake never reached
+    // the waiter — waitid08 ETIMEDOUT). Phys-keyed bucketing also keeps
+    // the musl interop below inside one bucket: a shared waiter and a
+    // private waker on the SAME word resolve the same frame.
     //
     // R31-9 fixed only the shared↔shared direction (mm excluded for
     // shared keys); the 4-thread hang hunt caught the remaining
     // shared-waiter ↔ private-waker split: musl's __thread_list_lock
-    // waiters park with priv=0 (shared key, bucket uaddr%H), while the
-    // kernel's CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies
-    // on it to "unlock" the list lock — it passes &__thread_list_lock as
-    // the clone ctid) hashed the private key (uaddr+mm)%H → a DIFFERENT
-    // bucket → the wake scanned an empty chain (woken=0 with three
-    // parked waiters) → every later exiter/joiner parked on the
-    // never-released lock word forever. Linux solves the same interop
-    // with FLAG_IMMUTABLE (the cleartid wake matches both key variants);
-    // uaddr-only bucketing gives this kernel the same reach.
+    // waiters park with priv=0 (shared key), while the kernel's
+    // CLONE_CHILD_CLEARTID exit wake (musl pthread_exit relies on it to
+    // "unlock" the list lock — it passes &__thread_list_lock as the
+    // clone ctid) hashed the private key (uaddr+mm) → a DIFFERENT bucket
+    // → the wake scanned an empty chain (woken=0 with three parked
+    // waiters) → every later exiter/joiner parked on the never-released
+    // lock word forever. Linux solves the same interop with
+    // FLAG_IMMUTABLE (the cleartid wake matches both key variants);
+    // same-word bucketing gives this kernel the same reach.
     //
     // F12: the raw `uaddr % HASH_SIZE` clustered EVERY thread-stack
     // futex into ONE bucket. musl hands out 1 MB pthread stacks with a
@@ -490,7 +547,8 @@ fn futex_hash(key: &FutexKey) -> usize {
     // bucket, every wake/alloc walking 256 entries under that lock).
     // Fibonacci-multiply the byte offset so any fixed stride spreads
     // across the buckets.
-    let x = (key.uaddr >> 2) as u64;
+    let id = if key.phys != 0 { key.phys } else { key.uaddr };
+    let x = (id >> 2) as u64;
     let mixed = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     // Take the high bits (multiplicative hashing) modulo HASH_SIZE.
     let bits = HASH_SIZE.trailing_zeros();
@@ -518,7 +576,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         return -EINVAL as i64;
     }
 
-    let key = FutexKey::new(uaddr, mm, flags);
+    let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
@@ -733,7 +791,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     // valid for the duration of this syscall.
     let mm = task_futex_mm_id(current);
 
-    let key = FutexKey::new(uaddr, mm, flags);
+    let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
 
     // Linux futex_wait semantics: success (0) is returned ONLY when
@@ -1187,7 +1245,7 @@ pub fn futex_requeue(
 ) -> i64 {
     let mm = current_futex_mm_id();
 
-    let key1 = FutexKey::new(uaddr, mm, flags);
+    let key1 = FutexKey::new_user(uaddr, mm, flags);
 
     // For CMP_REQUEUE, verify *uaddr == cmpval
     if is_cmp {
@@ -1209,7 +1267,7 @@ pub fn futex_requeue(
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     }
 
-    let key2 = FutexKey::new(uaddr2, mm, flags);
+    let key2 = FutexKey::new_user(uaddr2, mm, flags);
     let bucket1 = futex_hash(&key1);
     let bucket2 = futex_hash(&key2);
 
@@ -1475,7 +1533,7 @@ pub fn futex_wake_op(
     };
 
     let mm = current_futex_mm_id();
-    let key2 = FutexKey::new(uaddr2, mm, flags);
+    let key2 = FutexKey::new_user(uaddr2, mm, flags);
     let bucket2 = futex_hash(&key2);
 
     // Perform the user-word operation while holding uaddr2's bucket lock:
