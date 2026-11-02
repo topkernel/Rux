@@ -155,9 +155,13 @@ static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 #[cfg(target_arch = "x86_64")]
 const KSTACK_BLOCK: usize = 262144; // order-6, 64 pages
 #[cfg(target_arch = "x86_64")]
-const KSTACK_SLOTS: usize = 3;
+const KSTACK_SLOTS: usize = 2;
 // The slot carve must fit the block (compile-time guard against a
 // future kernel_stack_size_x86_64 edit, e.g. 96KB would need 288KB).
+// compat-r3: 128KB stacks again (the 80KB/3-slot packing's margin was
+// an OH-load figure; the LTP class overflowed it — nftw01's wild-jump
+// boot panic + the nice=-120 corruption signature, see Kernel.toml).
+// Two 128KB slots per 256KB block: exact fit, zero carve waste.
 #[cfg(target_arch = "x86_64")]
 const _: () = assert!(KSTACK_SLOTS * KERNEL_STACK_SIZE <= KSTACK_BLOCK);
 

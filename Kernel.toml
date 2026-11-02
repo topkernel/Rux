@@ -80,8 +80,17 @@ swap_size_mb = 256
 # boxes its 8KB master_rx buffer (see fs/pty.rs) so pair construction
 # no longer shuffles 8KB through every frame.
 kernel_stack_size = 131072
-# x86_64 arch override (see above): 80KB packed-slab slots.
-kernel_stack_size_x86_64 = 81920
+# x86_64 arch override (see above): back to the 128KB base (compat-r3).
+# The 80KB slot was gated on OH-load depth only (62,512B max); the LTP
+# class nests deeper — nftw01's path (walk + lookup + fill + the
+# perf-path lane's extra frames, first-bad 5542a7b6) crossed the line
+# and spilled frames into the adjacent slab slot / recycled heap pages,
+# zeroing them: the task then returned through zeroed frames into a
+# wild jump to NULL (chunk@700 boot panic, rip=0/rsp below the stack,
+# deterministic 3/3) and the same class corrupted a nice value to -120
+# in isolation (getpriority01 — the fee7774f signature). The packed
+# slab serves TWO 128KB slots per 256KB order-6 block (exact fit).
+kernel_stack_size_x86_64 = 131072
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count
