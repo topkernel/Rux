@@ -1709,3 +1709,63 @@ banked; lb343 (syscost + 3s census bar) rolling at write time.
   routes device_manager/wifi/distributeddata through samgr LOADs — both
   kernels run the same on-demand cfg semantics; the reference's cascade
   simply finishes inside the first 2s after boot.completed.
+
+### lb343/lb344 (3s-bar census + periodic taskdump + syscost) — the cascade under the microscope
+- lb343: param-watcher stall present but variable (first param RECV 8.36s vs
+  sends from 5.4s; lb344: sent 5.8 handled 14.1 = **8.3s**; lb342 5.06s). The
+  stall is a per-boot variance band of the same shape: init's param service
+  does not drain its queue while the service-start storm runs; boot.completed
+  (gated on hdf_devmgr.ready) fires only after it drains — 10.5-14.5s on ours
+  vs ~3.6s on the reference. ~7-11s of the structural gap sits HERE.
+- THE SAMGR-INTERNAL INTERLEAVE (both boots): SLOW-TXN rows "queue 0 ms,
+  exec Ns" — samgr's own threads call EACH OTHER (Executor->OS_IPC_2,
+  OS_IPC_0->OS_IPC_1, OS_IPC_8->OS_IPC_9, OS_IPC_13->OS_IPC_7...) and every
+  handler takes seconds with ZERO queue wait: code 2 x1.5-6.6s, code 3
+  x2.2-6.0s, code 12 x9.0-9.6s, code 30 x2.3-26.3s, one code-20 x113s
+  (audio_service->samgr), time_service->samgr x95s+. The handler threads show
+  state=0x0 (RUNNING) sys=16 while "executing" for seconds — the handler is
+  in USERSPACE code (past the BWR ioctl), either burning CPU at the per-op
+  wall or spinning on a userspace lock whose holder is descheduled. The 12-deep
+  OWE stacks on tid 339 (txn71/110/116/119/129/132 code20>328.458) are the
+  nested-sync chain riding these per-hop seconds. samgr is the boot's
+  serialization point; per-hop seconds compose into every SA registration,
+  LOAD reply (the 4.0s outlier), and the 4s metronomes.
+- vruntime CAVEAT for the successor: the periodic taskdump's vruntime field is
+  STALE (mmprofd's dumps landed at 61/121/181s while its dumped vruntime stayed
+  byte-identical) — do NOT use frozen vruntime as a not-picked proof. The
+  strand adjudication needs sum_exec_runtime/last-pick in the dump line (the
+  stress lane's W3-FROZEN-EXEC-SLOT shape).
+- syscost t=240s (only clean window; 60/120/180 rows lost to the doubled-
+  console interleave — R34 corruption eats our own telemetry, mmprofd-style
+  task-context emitter is the fix): **nr=2 open() n=193,537 avg=85us
+  tot=16,470ms per 60s** (the top syscall — the sysevent-scan class), nr=83
+  mkdir n=844 avg=3,646us tot=3,077ms, nr=257 openat n=12,791 avg=181us,
+  nr=77 futex n=92 avg=19ms. open() at 85us vs reference 1-5us class = the
+  next per-op lever family (mkdir 3.6ms vs ~50us class).
+- SPIRALS (mission-4 note): lb343 accesstoken_service exit 270.8s -> KOT-KILL
+  waves (storage_manager group kills 294s) -> init sysrq-c 326.2s; lb344
+  ExecReboot at 25.0s then crash-looped (3 ExecReboot/PANIC). lb342 healthy.
+  2/3 this session vs the 19th's ~50% rate — same pre-existing class, not
+  chase-attributed.
+- PIXELS: none (md5 unchanged where shots landed). Race not reached on
+  lb343/344 (both spiraled before/inside the cascade); lb342 lost by 31.4s
+  as usual.
+
+### Successor entry points (20th, in order)
+1. THE SAMGR HANDLER BLACK BOX: instrument ONE samgr-internal slow handler
+   end-to-end (code 12/30, queue-0/exec-seconds): is it userspace CPU at the
+   open()/mkdir() wall, a userspace spin, or a chain? A per-tgid syscall-tap
+   (scmtap exists) behind dfx, or fsw counters, inside the 15-40s window.
+   The open()/mkdir() per-op rows above are the named kernel lever family.
+2. init's param-service drain stall (5-8.3s variance): catch init's param
+   thread posture DURING the stall with the 3s-bar census (its parks are
+   <3s/cycle or non-futex — a 1s bar or a taskdump at t=8-12s would name it);
+   kernel-side check the param socket queue wakeup path (unix socket
+   readability for the param channel).
+3. Roll the race (recipe unchanged + periodic): the four coin-flips still
+   need one clean boot; 2/3 boots spiral early — the spiral is the dice.
+4. mmprofd-style task-context emitter for syscost (the 60/120s rows are
+   lost to console interleave today).
+5. WAKE-RUN-LEAK "kicked-2x" threads + the W2 refusals: low-rate, but the
+   census's own kick contaminates its snapshot — decouple (report first,
+   kick next round).
