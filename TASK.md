@@ -858,3 +858,80 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
 6. Gates this session: x3 builds rc=0 (x86_64 release two-pass +
    riscv64 + aarch64), make test GREEN (lb69-maketest.log: verdict
    green, 1267/1267). Branch pushed through e8b9a969.
+
+## THIRTEENTH-SUCCESSOR SESSION (2026-11-02 03:30-08:30, branches oh-ladder @ 79cb96cb + biofix-fieldpoll @ 6e5afaae)
+Mission per charter: population race -> pixels. Coordinator redirected mid-session
+(07:00): STOP image patches, hunt the kernel stall. Outcome: THE 550-1100s
+STORE-LOAD STALL IS DECODED AND FIXED; a second, OLDER blocker (the allocator
+freeze) is now named to its exact victim signature and blocks verification.
+
+### The bio write-plan closure burn (root cause of the crawl's 550-1100s loads)
+1. lb229 evidence (252 identical 5s TXN-HANG samples): distributeddata's
+   OS_IPC_0_912 frozen at fs::bio::WritePlan::push_entry for the WHOLE 1092s
+   window; bundles.ready landed 1091.6s. The kernel stack never changed.
+2. Engine: plan_add_constraints (fs/bio.rs) rescans EVERY pending publication
+   against the whole plan per round; the plan grows a few blocks/round ->
+   thousands of quadratic rounds = 18+ min kernel CPU in ONE fsync/mkdir
+   durability point. Every service pays it behind accumulated churn; the KV
+   load (many fsyncs) crawls 550-1100s vs ~40s healthy. This is the O(batch^2)
+   class the fs lane fixed for jbd2 — the SAME family in the bio WritePlan.
+3. Fix iteration 1 (index+worklist closure) ALLOCATED from journal/eviction
+   spinlock contexts -> allocator wedges (lb234/235: samgr workers frozen in
+   RawVecInner::finish_grow; REVERTED). Fix iteration 2 (79cb96cb, FINAL):
+   allocation-free round cap (3 rounds) + conservative linear fallback
+   (schedule every record's pres+entries for the device — strict superset,
+   same pre->entry phase discipline, one linear pass). Gates: make test ALL
+   PASSED; x3 builds rc=0 (x86_64 two-pass release, riscv64, aarch64).
+4. Also landed while chasing the dark family: FXDV2 param-arena futex tracer
+   ran ALWAYS-ON (500 console prints from do_futex's hot path in the first
+   seconds of every boot) — gated behind dfx=futextrace (6e5afaae).
+
+### THE REMAINING BLOCKER (older than this session, now precisely named)
+Every boot since ~07:45 wedges before SA inserts (samgr-dark; 10+ consecutive,
+all kernel classes/all images; ~50% flowed earlier tonight; load-correlated).
+Victim signature EXACT: parking threads sit in unix_write_slice_owned ->
+RawVecInner::finish_grow (a HILOG write's allocation), epoll_create1, or
+finish_grow directly — i.e. every allocating syscall parks on the small_alloc
+class lock held by a thread frozen mid-section. That is the mm guarded-domain
+PHANTOM-PREEMPT-INSIDE-ALLOCATOR family (leakhunt's named acquire sites:
+small_alloc.rs:283, slab.rs:628, buddy_allocator.rs:857). NOT kernel-class
+specific, NOT my bio fix (allocation-free now), NOT FXDV2 (gated, still dark).
+This freeze ALSO explains the population boots' bimodality all along.
+
+### Verification state (blocked)
+run/verify-roll.sh (bzImage-ladder-fx2fix = fieldpoll+biofix+futexgate,
+system-lb5 unmodified, warm snapshot) re-rolls for a boot that reaches the
+store-load window: measure bundles.ready vs the 550-1100s baseline; expect
+the fast (~40s) class. Kernels in run/: bzImage-ladder-fx2fix (verification),
+bzImage-ladder-biofix{,2} (superseded iterations).
+
+### Population-path decodes (committed for the successor, image work stopped)
+1. Creation trigger (OH source): accountmgr's OnAddSystemAbility runs
+   CreateOsAccount(100) once storage(5003)+AMS(180)+BMS(401) SAs registered;
+   subscription via samgr's CheckListenerNotify (late subscribers notified).
+2. User-100 resurrection: GetOsAccountInfoById falls back to the
+   distributeddata KV when the file is absent — stripping only
+   /data/service/el1/public/account is INSUFFICIENT; the store lives at
+   /data/service/el1/public/database/os_account_mgr_service/ (discovery boot
+   lb216 listed the paths). IsOsAccountExists = presence of
+   account/<id>/account_info.json (valid JSON).
+3. Race margins (creation start vs bundles.ready): lb59 -28s, lbpop2 -239s,
+   lb219 -38s, lb226 -0.4s (read at exec start ~155s loses), lb229 lost by
+   12ms (retry budget 900s burned, ready at 1091.616, giveup 1091.604). With
+   the bio fix compressing the load, the natural race should win on a
+   healthy boot. Image-side: system-lb6/8 (strip stubs), lb9 (condition,
+   bypassed by dynamic SA loads), lb10 (ondemand flips), lb11-13 (patched
+   libbms retry) — ALL SUPERSEDED, do not boot; system-lb5 remains the
+   campaign baseline; lb7 = discovery (prints paths to console).
+4. FIRST MOVE when the allocator freeze is fixed: verify the bio fix
+   (verify-roll), then the strip-population (system-lb8 recipe: strip account
+   dir + os_account_mgr_service dir at 4.3s via sdc stub, NOSNAP fresh warm
+   copy) -> creation reads the populated store -> bundle size:34 -> install
+   stream persists -> GOLDEN copy -> snapshot ladder -> pixels.
+
+### Boots this session
+lb200 (roller aborted), lb210 (strip v1: KV resurrection), lb216 (discovery),
+lb217-231 (golden rolls: samgr-dark mix + race losses; lb219/222/223/225/226
+created user-100-empty = copies deleted; lb227/229 = the retry-budget
+boundaries), lb232-245 (verification attempts: the allocator-freeze dark
+streak). Gates: make test ALL PASSED (biofix-maketest-full.log), x3 rc=0.
