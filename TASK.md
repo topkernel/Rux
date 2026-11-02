@@ -1252,3 +1252,93 @@ the stress lane's TASK.md on main.
   (the two fastest boots — lb313/317 — ran when load was ~7; every roll
   at load 12+ crawled or spiraled). The successor should check `uptime`
   before rolling and prefer quiet windows.
+
+## SEVENTEENTH-SUCCESSOR SESSION (2026-11-02 23:00-00:0x, branch biofix-fieldpoll @ ca58fc80+)
+Mission: sync main (128KB stacks + ext4 size hold), roll the race in quiet windows,
+build the 16th's futex-stuck census, re-check the long-handler parks. Outcome:
+THE CENSUS IS IN (dfx=fuxstuck, two commits), the cg17 kernel DOUBLED boot speed,
+the account side of the race now WINS every roll (startUser+SwitchToUser on all
+three boots — first fresh-boot boots ever where creation completed and the account
+existed), useriam's 248-596s FFRT parks are GONE, but the BMS per-user install
+query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still frozen.
+
+### Merge + gates
+- ca58fc80 = origin/main merged (c05f13ad 128KB x86_64 stacks, e9029b74 ext4
+  published-size hold, SP-1/2/3, sec-r1/compat-r3/review-r3a). TASK.md conflict
+  resolved ours-by-intent (lane history; main's copy is the stress lane's).
+- Gates: x3 builds rc=0 + make test green (cg17/cg17b/cg17c log sets in run/).
+  TRAP: a finished make test leaves its QEMU alive under `timeout 600` holding
+  test/rootfs.img's write lock — the NEXT make test fails with "Failed to get
+  write lock" until the leftover self-reaps (or you kill your own leftover).
+
+### The futex-stuck census (mission leg 2) — landed, verified on live boots
+- 45a3b60b: Waiter::park_j stamped at chain insertion; futex_stuck_census() on
+  the 1Hz heartbeat slot next to txn_hang_audit; dfx=fuxstuck-gated; one burst
+  per 5s; >=10s threshold; bounded (32 sampled, 8 printed, 1200-line budget).
+  Line: uaddr/mm/tgid/tid + park span + anywoken + entry-frame sysno/epc + the
+  owning tgid's thread histogram [run/futex/int/unint].
+- e60fd08b: fresh-onset bucket — lb323 taught that a pure oldest-8 top was
+  monopolised by 155s-class peripheral parks (bluetooth/audio) and NEVER showed
+  the critical-path park that decided the race. Now: top-4 oldest anchors +
+  top-4 newest-onset groups (FUX-STUCK-FRESH).
+
+### Roll results (system-lb5 + userdata-fresh2 + SMP2 + LOGLEVEL6, host load ~6.6-7.1)
+- lb322 (cg17, dfx=ams46,txnhunt,syncguard): bundles.ready 104.5s (lb313:
+  238.8s — 2.3x faster), CreateNewUser start 73.1 / end 104.6, startUser
+  104.9, SwitchToUser 105.0. ACCOUNT SIDE WON. But the BMS "create user:100
+  bundle size:34" print NEVER came -> empty-set ladder spin -> frozen logo.
+  POISON32 176 (12 into foundation).
+- lb323 (cg17b + census): same shape (72.6 / 104.0 / 104.1). useriam tgid 683:
+  ZERO >10s futex parks ALL BOOT — the 248-596s FFRT executor parks are GONE on
+  the cg17 kernel (mission leg 3 answered; 128KB stacks + merges correlate).
+  Steady state: stuck_total=65 constant, ALL peripheral — bluetooth(385) 6
+  threads, audio_server(373) 11 futex+10 int, resource_schedule(451),
+  vibrator(567), deviceauth(614), sharing(742), codec_host(558),
+  storage_daemon(326) — every tgid run=0. The critical path (foundation /
+  distributeddata / accountmgr) is NEVER futex-stuck >10s.
+- lb324 (cg17c + slowtask): accountmgr(904) SEGFAULTED at 71.9s (kernel
+  USEGV-L forensics printed; NOT the usb_host crash-loop site) -> restarted as
+  1105 -> POISON32 1233 (844 into distributeddata(579), 47 into
+  foundation(865)). Same race shape (73.4 / 103.9 / 104.1). SLOWTASK in the
+  73-104s window: NO fs-family slow entries at all (only idle sys=16
+  binder-read parks) — there is NO kernel-side stall in the loss window.
+
+### The race, re-decoded on cg17
+1. The trigger: accountmgr's OnAddSystemAbility CreateOsAccount fires once
+   storage+AMS+BMS SAs register — cg17's speed moved that from ~183s (cg16f)
+   to ~73s. BMS's bundle-data completion (bundles.ready) still lands ~104s.
+2. The loss: CreateNewUser start ~73s, its internal data wait resolves at
+   ready+0.1-0.6s on every boot (end tracks READY, not start+30 — it waits for
+   the data), yet the per-user install-list query STILL returns empty (the
+   size print is never reached). Structural ~30s early trigger + a query that
+   fails even when resolved late.
+3. NOT the poison: lb317 WON with 2034 total POISON32 (zero into foundation);
+   lb323 LOST with 16 total (zero into foundation). No correlation.
+4. NOT a cg17 regression in the hang shapes: lb323's camera->distributeddata
+   code-25 337s hang has its 766s-class analogues on lb317 (cg16f).
+5. Kernel-actionable inventory from the census: render_service (tgid 864 on
+   lb324) is the ONLY stuck tgid with runnable producers (run=2 futex=12,
+   waiter tid 948 parked 263s on uaddr 0x7ff08d38d804) — if that waiter is on
+   the pixel path, it is the scheduling-lever candidate. samgr itself parks
+   (run=1). Everything else is run=0 deadlocked userspace (no kernel lever).
+
+### Successor entry points (in order)
+1. THE 73s-vs-104s GAP: in-window kernel cost is nil (slowtask empty, no
+   futex-stuck critical path) — the gap is userspace work (FFRT scan churn).
+   Perf lane territory (pbench/syscost on a standard boot), OR find whether OH
+   re-triggers CreateNewUser on accountmgr restart AFTER ~105s: lb324's
+   restart (71.9s) re-triggered creation but too early; a restart landing
+   after 105s should hit a populated store and WIN — cheap to watch on the
+   next crash-boot (grep CreateNewUser + accountmgr SIGDEATH ordering).
+2. THE ACCOUNTMGR SEGFAULT (lb324 71.9s): pull the full USEGV-L register/vma
+   dump from run/oh-lb324-serial.log (~line 8283); if a syscall fed it garbage
+   (e9029b74/capability paths are new since cg16f), kernel-actionable. One
+   crash in three boots; compare against cg16f boots' crash counts.
+3. RENDER_SERVICE WAITER (tid 948, uaddr 0x7ff08d38d804): decode whether it is
+   the compositor's surface/vsync wait (unblocks with pixels) or a producer
+   the pixel path needs (starved signaler — scheduling lever). The census
+   prints its park on every fuxstuck boot now.
+4. Roll discipline unchanged: quiet windows only (the three boots above all
+   ran at load 6.6-7.1 and all reached SwitchToUser — the fastest, healthiest
+   fresh-boot class yet). Recipe: system-lb5 + USERDATA=run/userdata-fresh2.img
+   + cg17c-class kernel + dfx=ams46,txnhunt,syncguard,fuxstuck.
