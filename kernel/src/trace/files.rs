@@ -450,59 +450,55 @@ pub fn register() {
     }
 }
 
-/// The set_event write handler: comma- or space-separated tokens,
-/// "group:name" (or ":name" for any group, or "all"/"none"), an
-/// optional '!' prefix disarms instead of arming — the standard grammar.
+/// The set_event write handler — the reference grammar exactly.
+///
+/// The reference applies ONE whitespace-delimited token per write
+/// (trace_get_user consumes a single token and the rest of the buffer
+/// with it; a whitespace-only write is a no-op). A leading '!' disarms
+/// instead of arming. The token forms, per ftrace_set_clr_event:
+///
+/// - `system:event` — that one event;
+/// - `*:event` / `:event` — every event of that name, any system;
+/// - `system:*` / `system:` — every event of that system;
+/// - `name` (no colon) — every event whose SYSTEM or NAME is `name`.
+///
+/// A token that matches no event is EINVAL (the reference's
+/// __ftrace_set_clr_event_nolock leaves the error set). There are no
+/// "all"/"none" words in the reference's set_event — the events/enable
+/// file is the all-events switch.
 fn set_event_write(buf: &[u8]) -> i32 {
     let text = match core::str::from_utf8(buf) {
-        Ok(t) => t.trim(),
+        Ok(t) => t,
         Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
     };
-    for token in text.split(|c| c == ',' || c == ' ') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let (disarm, name) = match token.strip_prefix('!') {
-            Some(rest) => (true, rest),
-            None => (false, token),
-        };
-        let enable = |e: &trace::TraceEvent| {
-            e.enabled
-                .store(!disarm, core::sync::atomic::Ordering::Relaxed);
-        };
-        match name {
-            "all" => {
-                for e in trace::EVENTS.iter() {
-                    enable(e);
-                }
+    let token = match text.split_whitespace().next() {
+        Some(t) => t,
+        // Only whitespace (the shell's split trailing-newline write):
+        // consumed, nothing applied.
+        None => return 0,
+    };
+    let (disarm, spec) = match token.strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let matches: Vec<&trace::TraceEvent> = trace::EVENTS
+        .iter()
+        .filter(|e| match spec.split_once(':') {
+            Some((sub, event)) => {
+                let sub_ok = sub.is_empty() || sub == "*" || e.group == sub;
+                let event_ok = event.is_empty() || event == "*" || e.name == event;
+                sub_ok && event_ok
             }
-            "none" => {
-                for e in trace::EVENTS.iter() {
-                    e.enabled
-                        .store(false, core::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            _ => {
-                let (group, event) = match name.split_once(':') {
-                    Some((g, n)) => (g, n),
-                    None => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
-                };
-                // ":name" (empty group) arms every group's event of
-                // that name (any group).
-                let matches: Vec<&trace::TraceEvent> = trace::EVENTS
-                    .iter()
-                    .filter(|e| (group.is_empty() || e.group == group) && e.name == event)
-                    .copied()
-                    .collect();
-                if matches.is_empty() {
-                    return crate::errno::Errno::InvalidArgument.as_neg_i32();
-                }
-                for e in matches {
-                    enable(e);
-                }
-            }
-        }
+            None => e.group == spec || e.name == spec,
+        })
+        .copied()
+        .collect();
+    if matches.is_empty() {
+        return crate::errno::Errno::InvalidArgument.as_neg_i32();
+    }
+    for e in matches {
+        e.enabled
+            .store(!disarm, core::sync::atomic::Ordering::Relaxed);
     }
     0
 }
