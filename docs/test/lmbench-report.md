@@ -96,6 +96,24 @@ single-case with a longer window (90–150 s) when the standard window
 proved shorter than the benchmark's auto-calibration; identical
 kernel, image and arguments.*
 
+
+
+## Standing addendum (2026-11-03, kernel 33413d92 lineage — idle poll window 120us)
+
+The battery2 cctx anatomy (3.8M switches in a 4s unix roundtrip window)
+attributed the remaining roundtrip cost to the wake+IPI chain (enqueue
+244ns + dispatch 22ns + IPI mean 995ns). The 30us idle poll window
+missed handoffs landing just past it; widening to 120us removed the
+bimodal tail on lat_unix (base boots showed 16.7/6.05us bimodal; the
+120us window boots read 6.2-6.3us under load 7).
+
+| Case | Rux (120us window) | Reference (native) |
+|---|---|---|
+| lat_unix | 6.24-6.30 us | 3.01 us |
+| null/read/write | 0.059-0.077 / 0.133-0.153 / 0.109-0.136 µs | 0.044 / 0.069 / 0.064 µs |
+
+Semop ping-pong under load stayed 2M-round clean through the soak.
+
 ## Reading the table
 
 - **Ratio** = Rux value / reference value for latency cases; for the
