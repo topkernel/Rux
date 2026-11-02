@@ -1372,3 +1372,115 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
   not-yet-serving KV store (error 29201 family) — userspace-internal,
   instrument-backed (zero kernel stall in-window), with the successor levers
   named in the entry points above.
+
+## EIGHTEENTH-SUCCESSOR SESSION (2026-11-03 00:17-.., branch biofix-fieldpoll @ 714d767b+)
+Mission: sync main (d89cdce4), THE RETRY QUESTION (reference-kernel timeline on
+the same image), render_service waiter decode, quiet-window rolls. Outcome:
+retry question ANSWERED (reference never needs to retry; the store-serving gap
+is the lever), render_service DECODED (victim not lever), a cg18 wedge
+root-caused live via QEMU monitor (heartbeat pid-hash self-deadlock) and FIXED,
+and lb325 became the FIRST FRESH BOOT EVER to print "create user:100 bundle
+size:34" + run the per-user SetBundleQuota stream (the BMS race WON via the
+watchdog-restart path) — then wedged at 107s (the fix's target).
+
+### Merge + first roll
+- 714d767b = origin/main d89cdce4 merged (LTP r22 census 1042/1869, tmpfs
+  MAP_SHARED coherence, shared-futex physical keys, 128KB x86 stacks lineage).
+  TASK.md auto-resolved to main's copy (stress charter + our tail — a
+  superset, kept as-is; no ours-restore needed this time).
+- cg18 build x3 rc=0 (x86_64 first, others before push). lb325 rolled with
+  slowtask ADDED to the census recipe (dfx=ams46,txnhunt,syncguard,fuxstuck,
+  slowtask + syscost=1) on userdata-fresh2 at load ~7.5.
+
+### THE RETRY QUESTION — answered (mission leg 1)
+- Reference kernel, SAME image set incl. userdata-fresh2 (refu9, this
+  session): accountmgr 4.3s, distributeddata start 4.9s, BMS scan start
+  5.9s, creation (GenerateUserKeys user:100) 8.3s, per-user SetBundleQuota
+  el2/100 launcher 8.5s, launcher.ready 11.7s. ZERO PrintErrorDetailedInfo
+  lines. Every prior reference boot (refu1 6.4s / refu2 8.2s / refu7 6.5s /
+  refu8 11.6s) likewise: creation succeeds FIRST attempt.
+- Conclusion: the reference NEVER enters the failure regime — its store
+  serves ~1.4s after distributeddata exec, long before the SA-registration
+  trigger. There is no reference retry machinery exercised to diverge from.
+- Our kernel's restart-retrigger machinery is PROVEN working: lb324's
+  accountmgr crash-restart re-triggered creation; lb325's watchdog SIGKILL
+  wave (allocator_host/composer_host/foundation/resource_schedule/inputmethod
+  all signal:9 at 30-31s) restarted foundation at 32.3s, whose re-run scan
+  landed AFTER the store (SA:1301 init finished 46.3s / 31.8s duration) and
+  SUCCEEDED: "create user:100 bundle size:34" at 65.5s — the first
+  non-empty per-user query on a fresh boot of the campaign — SetBundleQuota
+  el2/100 stream 66.5s+, CreateNewUser end 102.5s, startUser 103.1s,
+  SwitchToUser 103.1s.
+- VERDICT: branch B of the mission — the lever is the STORE'S TIME-TO-SERVE
+  (ours ~40-104s class vs reference ~1.4s), a per-op cost problem for the
+  perf queue, NOT a retry-semantics divergence. Handoff table below.
+
+### The perf handoff table (lb325 syscost=1 + lb322/323/624 vs refu8/refu9)
+- distributeddata SA:1301 init: 28,341 ms (lb322) / 28,761 ms (lb323) /
+  31,759 ms (lb325) vs reference max SA init 1,829 ms (memmgrservice; the
+  reference prints only 3 init-finished lines total, all <2s).
+- ~20 foundation SAs each report 20-22s init, ALL completing at ~40s —
+  gated on the store serving (the pile releases the moment SA:1301 lands).
+- KVS-family binder txns to distributeddata (lb323 TXN-HANG): 13 distinct
+  >5s; max exec 61,570 / 56,570 / 51,570 / 31,570 / 16,570 / 11,570 ms —
+  server thread IDLE, reply deferred userspace-side (FFRT pool churn).
+- lb325 syscost t=60s: ticks u/k/i c0=1205/12076/247 c1=1266/11307/734 —
+  ~90% KERNEL-mode, ~2% idle; IF=0 tot 16.5s/60s cpu0 + 14.1s/60s cpu1
+  (max closed seg 7-16ms); rest-sites: percpu.rs:126 n=33.0M avg 216ns,
+  slab.rs:640 n=21.1M avg 313ns, sched.rs:2568 n=288k avg 6.5us (!),
+  binder.rs:1586 n=259k avg 4.3us; UART if1 n=11581 avg 719us max 10ms
+  (70% multi-poll — console writes alone cost 8.3s of cpu1's first 60s at
+  loglevel 6); hilogd.server 384,443 console writes in 60s.
+- BMS scan: ours 40->64s (restarted foundation; first attempt 40->104s
+  fails); reference 5.9->8.5s (2.6s, succeeds).
+- SLOWTASK threshold is >=8s-same-entry: per-op costs in the 4ms-8s band
+  are invisible to it — that blind band is exactly where the store lives.
+
+### render_service waiter (mission leg 2) — decoded, NOT a lever
+- tid 948 (lb324 tgid 864) parks on 0x7ff08d38d804 in TWO long episodes
+  (onset ~33s->~80s and ~166s->500s+). Through every census the tgid
+  histogram OSCILLATES run=0/1/2 with futex=12<->13, int=5<->6 — the
+  "runnable producers" are picked, run, and re-park continuously (classic
+  worker-pool churn). A stranded-on-runqueue bug (stress-lane
+  WAKE-STRANDED class, 1-2.6s faces) would PIN run>=1 across consecutive
+  censuses; it never pins. VERDICT: throughput/dependency-bound VICTIM —
+  the compositor waits for surfaces from the launcher that never spawns.
+  No scheduling lever; it heals the day the launcher spawns.
+
+### THE lb325 WEDGE — root-caused live, fixed (the session's kernel change)
+- At 107.072s (last serial: TXN-HANG txn20418 file-op=sync on
+  /mnt/sandbox/system/data/service/el1/public/account/100/account_avatar.tmp,
+  server state=0x0) the serial went silent; QEMU burned 198% CPU for 8+
+  minutes; screen still frozen-logo md5 06b933b4 (oh-lb325-wedge-shot.ppm).
+- QEMU-monitor conviction: BOTH vCPUs at the IDENTICAL RIP inside
+  core::sync::atomic::atomic_compare_exchange<u8> with RDI =
+  0xffffffff814de05e on BOTH (pid_hash::BUCKET_LOCK+22), RFL=0x97 (IF=0!)
+  on both; a full scan of the 256-byte BUCKET_LOCK array found byte 22 the
+  ONLY one held. Stack walks: CPU0 = futex_stuck_census -> for_each_task
+  -> pid_hash_for_each_task -> lock_bucket(22); CPU1 = dfx::slowtask::audit
+  -> for_each_task -> pid_hash_for_each_task -> lock_bucket(22).
+- Mechanism (the sc207/sc215 class, re-convicted): both audits run on the
+  1Hz timer-softirq heartbeat with IF=0. A task-context pid-hash writer
+  (fork insert / exit remove / kill for_each — the install stream at its
+  pid-churn peak) was interrupted mid-critical-section holding bucket 22;
+  the heartbeat walker on that CPU reached bucket 22 and block-spun; the
+  interrupted holder can never resume (its CPU spins non-preemptible), the
+  other CPU's heartbeat walker joins — whole box dead, heartbeat included
+  (why no census ever printed). stallwatch_tick was already converted to
+  the _try walk in sc215 for exactly this; slowtask::audit (lb324 recipe
+  added slowtask) and futex_stuck_census (17th) were NOT — arming BOTH
+  doubled heartbeat-side blocking walks and the 107s install churn hit the
+  window.
+- FIX (cg18b): new sched::for_each_task_try wrapper (documents the
+  conviction); slowtask::audit, futex_stuck_census phases B1/B2, and
+  treehunt::tick (heartbeat member, same hazard when dfx=treehunt is
+  armed) switched to it; slowtask reports partial-snapshot rounds (8-line
+  cap). Blocking walks remain for preemptible callers (task context,
+  khungtaskd) where the holder always resumes. Kernel-semantic change:
+  NONE — diagnostics only, default-off switches.
+- Per-nr table (lb325 t=60s window): nr=9 mmap n=179,154 avg 72us max 722ms
+  tot 12,968ms (3k mmap/s — the FFRT arena churn at 50-70x the reference's
+  ~1-5us class); nr=10 mprotect n=31,596 avg 53us tot 1,681ms; nr=7 poll
+  avg 1.56s (waits); nr=77 futex avg 15ms (condvar waits). The vm-op family
+  (mmap+mprotect: 210k ops, ~15s wall per CPU-minute) is the concrete
+  per-op lever candidate behind distributeddata's 27-32s SA init.
