@@ -935,3 +935,15 @@ lb217-231 (golden rolls: samgr-dark mix + race losses; lb219/222/223/225/226
 created user-100-empty = copies deleted; lb227/229 = the retry-budget
 boundaries), lb232-245 (verification attempts: the allocator-freeze dark
 streak). Gates: make test ALL PASSED (biofix-maketest-full.log), x3 rc=0.
+
+### Why the heal machinery never fires during the allocator freeze (for the sched lane)
+The frozen class-lock holder sits inside lock_irqsave (IF=0 + preempt off):
+its OWN CPU's tick cannot fire, so every tick-side observer (PREEMPT-HEAL
+per-field stamps, claim-sweep census) is blind to it — ZERO heal lines on
+every dark boot while the machine is wedged. Only an observer on the OTHER
+CPU (GRQ timeline walk / cross-CPU dump) can see and name the holder. A
+holder-naming DFX needs to be cross-CPU by construction; also note the
+waiters cannot self-report (printing allocates — they are parked IN the
+allocator). Boot-side, the frozen holder's identity is recoverable from a
+cross-CPU task dump (the txn-hang dump_all_tasks machinery) — none armed on
+the dark boots (the 20s-latch had not fired before the wedge).
