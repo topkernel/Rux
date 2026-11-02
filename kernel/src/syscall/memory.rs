@@ -2610,6 +2610,18 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         None => return mmap_error::EINVAL,
     };
 
+    // mremap(2) EINVAL shape: new_size == 0 is always invalid. old_size ==
+    // 0 is invalid except the reference's shareable+MAYMOVE carve-out
+    // (post-4.14: EINVAL for everything else); sharedness is only known
+    // after the VMA lookup, so old_size==0 without MAYMOVE is rejected
+    // here and the VMA-sharing check rides the lookup below.
+    if new_size == 0 {
+        return mmap_error::EINVAL;
+    }
+    if old_size == 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        return mmap_error::EINVAL;
+    }
+
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
@@ -2662,6 +2674,13 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         Some(info) => info,
         None => return mmap_error::EFAULT,  // Address not mapped
     };
+
+    // Second half of the old_size == 0 contract (mremap(2)): with
+    // MREMAP_MAYMOVE it stays EINVAL unless the mapping at old_addr is
+    // shareable (VmaFlags::SHARED — the reference's post-4.14 carve-out).
+    if old_size == 0 && !vma_flags.is_shared() {
+        return mmap_error::EINVAL;
+    }
 
     // Pinned vm_file of the ORIGINAL mapping (None for anonymous): moved
     // or grown file mappings re-pin it at the new piece's start so
