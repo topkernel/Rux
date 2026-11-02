@@ -126,26 +126,23 @@ static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
 // ===== Leg-17 packed kstack slab — x86_64 ONLY =====
 //
-// The buddy only serves power-of-two blocks, so a bare 80KB (or 96KB)
-// stack request still consumes a whole 128KB order-5 block — sc225's
-// o5-block math showed the interim 96KB attempt saved NOTHING. On
-// x86_64 (where KERNEL_STACK_SIZE is 81920 via kernel_stack_size_x86_64
-// in Kernel.toml + build.rs) this carver takes 256KB order-6 blocks and
-// slices three KERNEL_STACK_SIZE slots (3 x 80KB = 240KB; the 16KB tail
-// per block is the only waste, 6.7% vs the 60% padding of an unpadded
-// request). Per-stack footprint 85.3KB (was 128KB): ~-115MB at the
-// launcher-floor population of ~2690 stacks, which is the point of the
-// whole exercise (the floor is what kills the launcher spawn inside
-// appspawn's window).
+// The buddy only serves power-of-two blocks, so a non-power-of-two
+// stack request consumes a whole larger block. KERNEL_STACK_SIZE on
+// x86_64 is 128KB (see Kernel.toml kernel_stack_size_x86_64): the
+// interim 80KB carve (3 x 80KB = 240KB per 256KB order-6 block, ~15KB
+// margin) held for OH boots but NOT under LTP — the depth-capped (40)
+// recursive symlink resolution in fs/vfs.rs costs ~2240B of stack per
+// nested hop ≈ 90KB for a maximal chain, past the 80KB bottom before
+// the depth counter can return ELOOP (nftw01 chunk@700 boot panic,
+// 4/4 deterministic, 2026-11-02; rsp 19KB below the bottom, frames
+// torn through a recycled adjacent slot, ret to rip=0). 128KB restores
+// the riscv64-parity floor this file's history already documents for
+// deep-nesting kernels.
 //
-// ARCH GATE (fee7774f lesson, leg-17 re-land): the 80KB slot's ~15KB
-// margin over the 62.5KB measured max is an x86_64-OH figure only. The
-// riscv64 kernel nests deeper in kernel mode — under its LTP test
-// kernel the slot overflowed and corrupted adjacent heap data
-// (getpriority PRIO_PGRP read nice=-120 → 140). riscv64 keeps 128KB
-// (config.rs gets the Kernel.toml base there), where this slab is
-// compiled out entirely: a power-of-two request is already perfectly
-// packed in one order-5 buddy block, so packing buys nothing.
+// At 128KB the carver serves TWO slots per 256KB order-6 block with
+// zero tail waste, and the buddy fallback is one perfectly-packed
+// order-5 block (the slab is then pure bookkeeping; kept so exhausted
+// order-6 blocks still fall back cleanly).
 //
 // Slot state lives in a side table under KSTACK_BLOCKS — the stack
 // pages themselves stay pure (R18-2 canary still sits at each SLOT
@@ -317,8 +314,8 @@ pub fn kstack_anat() -> (u64, u64) {
 
 /// Plain buddy allocation of one kernel stack (the pre-slab path).
 /// On x86_64 this is only the packed-slab exhaustion fallback (the
-/// 80KB request rounds up to a 128KB order-5 block inside GlobalAlloc);
-/// elsewhere it is THE allocation path.
+/// 128KB request is one perfectly-packed order-5 block); elsewhere it
+/// is THE allocation path.
 fn plain_kstack_alloc() -> *mut u8 {
     // SAFETY: Layout is valid; null check follows.
     unsafe {
@@ -348,8 +345,8 @@ fn stack_cache_alloc() -> *mut u8 {
         let mut cache = STACK_CACHE.lock();
         let _ = &mut cache;
     }
-    // Leg-17: on x86_64 stacks come from the packed slab first (three
-    // 80KB slots per 256KB order-6 block — see the slab block comment);
+    // Leg-17: on x86_64 stacks come from the packed slab first (two
+    // 128KB slots per 256KB order-6 block — see the slab block comment);
     // a whole order-5 buddy block is only the exhaustion fallback.
     // Every other arch keeps the plain power-of-two allocation, where
     // 128KB is already one perfectly-packed order-5 block.
@@ -378,6 +375,46 @@ fn stack_cache_alloc() -> *mut u8 {
         unsafe { core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY) };
     }
     bottom
+}
+
+/// DFX (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
+/// stacks, so a kernel fault with rsp inside a freed-but-recycled stack
+/// names the freer. Diagnostic only; cold path.
+pub struct FreedStackRec {
+    pub bottom: usize,
+    pub top: usize,
+    pub pid: u32,
+    pub free_jiffies: u64,
+}
+static FREED_STACKS: Spinlock<([FreedStackRec; 32], usize)> =
+    Spinlock::new(([const { FreedStackRec { bottom: 0, top: 0, pid: 0, free_jiffies: 0 } }; 32], 0));
+
+/// Record a stack free (call before the memory is reusable).
+pub fn note_kstack_freed(bottom: usize, top: usize, pid: u32) {
+    let mut g = FREED_STACKS.lock();
+    let idx = g.1;
+    g.0[idx].bottom = bottom;
+    g.0[idx].top = top;
+    g.0[idx].pid = pid;
+    g.0[idx].free_jiffies = crate::drivers::timer::get_jiffies();
+    g.1 = (idx + 1) % 32;
+}
+
+/// Read-side lookup for fault diagnostics: the most recent record whose
+/// range contains `sp`, if any.
+pub fn freed_stack_containing(sp: usize) -> Option<(usize, u32, u64)> {
+    let g = FREED_STACKS.lock();
+    let now = crate::drivers::timer::get_jiffies();
+    let mut best: Option<(u64, usize, u32, u64)> = None;
+    for r in g.0.iter() {
+        if r.bottom != 0 && sp >= r.bottom && sp < r.top {
+            match best {
+                Some((j, ..)) if j >= r.free_jiffies => {}
+                _ => best = Some((r.free_jiffies, r.top, r.pid, now.wrapping_sub(r.free_jiffies))),
+            }
+        }
+    }
+    best.map(|(_, top, pid, age)| (top, pid, age))
 }
 
 /// Free a kernel stack (with caching)
@@ -4862,6 +4899,79 @@ impl Task {
                     off += 8;
                 }
             }
+
+            // DFX (LTP chunk@700 panic hunt, 2026-11-02): if any CPU's
+            // live TSS.rsp0 still points at THIS stack's top, every later
+            // user-origin trap entry on that CPU pushes its frame into
+            // freed-and-recycled memory — the stale-rsp0 engine behind the
+            // deterministic rip=0 "Kernel stack overflow" panics (frames
+            // observed ~7KB deep inside an unowned kstack slot). The
+            // switch path re-installs rsp0 on every switch, so a hit here
+            // names the exact ordering hole. Raw UART, no allocation.
+            #[cfg(feature = "x86_64")]
+            for c in 0..crate::config::MAX_CPUS {
+                let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
+                    .tss_rsp0
+                    .load(core::sync::atomic::Ordering::Acquire);
+                if rsp0 == stack_top as u64 {
+                    use crate::console::putchar;
+                    const MSG: &[u8] = b"\nSTACKFREE-LIVE-RSP0 cpu=";
+                    for &b in MSG {
+                        putchar(b);
+                    }
+                    let mut v = c as u64;
+                    if v == 0 {
+                        putchar(b'0');
+                    }
+                    let mut d = [0u8; 20];
+                    let mut k = 0;
+                    while v > 0 {
+                        d[k] = b'0' + (v % 10) as u8;
+                        k += 1;
+                        v /= 10;
+                    }
+                    while k > 0 {
+                        k -= 1;
+                        putchar(d[k]);
+                    }
+                    const M2: &[u8] = b" top=0x";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    let mut vv = stack_top as u64;
+                    for sh2 in (0..16).rev() {
+                        let nb = ((vv >> (sh2 * 4)) & 0xF) as u8;
+                        putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                    }
+                    const M3: &[u8] = b" freeing_pid=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    let mut pv = self.pid() as u64;
+                    if pv == 0 {
+                        putchar(b'0');
+                    }
+                    let mut pd = [0u8; 10];
+                    let mut pk = 0;
+                    while pv > 0 {
+                        pd[pk] = b'0' + (pv % 10) as u8;
+                        pk += 1;
+                        pv /= 10;
+                    }
+                    while pk > 0 {
+                        pk -= 1;
+                        putchar(pd[pk]);
+                    }
+                    putchar(b'\n');
+                }
+            }
+
+            // DFX: record for the freed-stack execution detector.
+            note_kstack_freed(
+                stack_bottom as usize,
+                stack_top as usize,
+                self.pid(),
+            );
 
             // Return to cache instead of deallocating
             stack_cache_free(stack_bottom);

@@ -351,6 +351,11 @@ impl TmpfsNode {
     /// exposes zeros, not stale data. Dropping a `TmpfsPage` returns it
     /// to the mount's page budget automatically.
     pub fn truncate(&self, new_size: usize) {
+        // MAP_SHARED alias coherence (execl01 family): a truncate
+        // invalidates the page-cache alias entries — mapped PTEs keep
+        // their pinned frames (documented deviation, ext4-class), and a
+        // later fault re-populates from the (zero-extended) node pages.
+        crate::fs::page_cache::get_page_cache().invalidate_inode(self.fs_id, self.ino);
         let mut pages = self.pages.lock();
         if new_size == 0 {
             // A 0-size file keeps NO pages. The old `idx <= new_size /
@@ -1114,6 +1119,12 @@ unsafe fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
 
 // SAFETY: VFS callback contract — called when the inode's refcount hits 0.
 unsafe fn tmpfs_destroy_inode(inode: &mut Inode) {
+    // Drop any MAP_SHARED page-cache aliases of this file (the frames
+    // stay alive while user PTEs pin them; the ENTRIES must not survive
+    // the inode — a recycled (fs_id, ino) pair would otherwise observe
+    // the dead file's frames).
+    crate::fs::page_cache::get_page_cache()
+        .invalidate_inode(inode.fs_id, inode.ino as u64);
     if let Some(ptr) = inode.private_data.take() {
         // Reclaim the leaked Arc reference (idempotent via Option::take).
         let _ = Arc::from_raw(ptr as *const TmpfsNode);
@@ -1263,6 +1274,17 @@ pub static TMPFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .close(tmpfs_file_close)
     .read_at(tmpfs_file_read_at)
     .build();
+
+/// Is `file` a regular file on a tmpfs mount (ops-table identity, same
+/// discipline as ext4's is_ext4_file)? Gates the MAP_SHARED page-cache
+/// alias arm in the fault paths: LTP's harness prefers /dev/shm for its
+/// shared results/checkpoint page (setup_ipc), so coherent cross-process
+/// mmap of tmpfs files is load-bearing for the whole checkpoint-based
+/// test family (execl01..execveat02, waitid08, ...).
+pub fn is_tmpfs_file(file: &crate::fs::File) -> bool {
+    file.get_ops()
+        .is_some_and(|ops| core::ptr::eq(ops as *const _, &TMPFS_FILE_OPS as *const _))
+}
 
 /// tmpfs positional read (R71): explicit offset, shared file position
 /// untouched — the generic set_pos/read/restore fallback races against
