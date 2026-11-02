@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::PAGE_SIZE;
 use super::zone::{Zone, ZoneType, GfpFlags, MAX_ORDER, pfn_to_phys, phys_to_pfn, WMARK_LOW};
@@ -65,7 +65,164 @@ pub fn reclaim_gate_exit_release(pid: u32) {
             pid,
             n
         );
+        GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
     }
+}
+
+// ==================== SP-5 gate census ====================
+//
+// stress-port round 3 (memory-fix1): the gate can be held for minutes
+// while the zone refills around the holder (workers died and freed
+// 122k pages; in_direct_reclaim stayed = holder pid across 4+ OOM
+// dumps; vmscan freed 268->278 pages in ~40 s). The old evidence could
+// not name WHERE the holder's time went. These stamps answer that:
+// the holder's context notes its reclaim phase (one atomic store per
+// phase transition), and the 1 Hz timer heartbeat prints a census line
+// when the gate has been held >= GATE_STRAND_J — i.e. only on strands.
+// Standard boots never hold the gate 2 s and print nothing; the
+// always-on cost is one atomic load per heartbeat.
+//
+// Waiter side: tasks spinning in the bounded 64-attempt gate-wait loop
+// are counted live; the ones that burned all 64 attempts WITHOUT the
+// gate (their allocation then fails even though the zone may refill a
+// moment later) are counted cumulatively, and a nested allocation made
+// BY the holder itself (current == gate value — reclaim I/O paths
+// re-entering alloc_pages while holding the gate) is counted as a
+// self-fight: the holder CAS-looping against itself.
+pub const GATE_PHASE_FREE: usize = 0;
+pub const GATE_PHASE_ENTERED: usize = 1;
+pub const GATE_PHASE_ROUND: usize = 2;
+pub const GATE_PHASE_SHRINK: usize = 3;
+pub const GATE_PHASE_ANON: usize = 4;
+pub const GATE_PHASE_SWAPW: usize = 5;
+pub const GATE_PHASE_DEEP: usize = 6;
+pub const GATE_PHASE_RETRY: usize = 7;
+
+/// Jiffies stamp of the successful gate CAS (reset per hold).
+static GATE_TAKEN_J: AtomicU64 = AtomicU64::new(0);
+/// Current holder phase (one of GATE_PHASE_*).
+static GATE_PHASE: AtomicUsize = AtomicUsize::new(GATE_PHASE_FREE);
+/// Jiffies stamp of the last phase transition.
+static GATE_PHASE_J: AtomicU64 = AtomicU64::new(0);
+/// try_to_free_pages rounds completed by the current holder.
+static GATE_ROUNDS: AtomicU64 = AtomicU64::new(0);
+/// Pages freed by the current holder's reclaim (rounds + deep drain).
+static GATE_FREED: AtomicU64 = AtomicU64::new(0);
+/// Deep-drain passes executed by the current holder.
+static GATE_DEEP: AtomicU64 = AtomicU64::new(0);
+/// Tasks currently inside the 64-attempt gate-wait loop.
+static GATE_WAITERS: AtomicUsize = AtomicUsize::new(0);
+/// Cumulative: waiters that exhausted all 64 attempts without the gate.
+static GATE_EXHAUSTED: AtomicU64 = AtomicU64::new(0);
+/// Cumulative: gate-wait loop iterations where the spinning task was
+/// ITSELF the holder (nested alloc self-fight).
+static GATE_SELF: AtomicU64 = AtomicU64::new(0);
+/// Last exhaustion witness (pid + jiffies).
+static GATE_LAST_EXH_PID: AtomicU64 = AtomicU64::new(0);
+static GATE_LAST_EXH_J: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn gate_holder_is_me() -> bool {
+    let holder = IN_DIRECT_RECLAIM.load(Ordering::Relaxed);
+    if holder == 0 {
+        return false;
+    }
+    let pid = crate::process::current_pid();
+    let me = if pid == 0 { usize::MAX } else { pid as usize };
+    holder == me
+}
+
+/// Phase stamp — called from reclaim code paths; only the gate holder's
+/// context writes (kswapd shares the vmscan entry points but never
+/// holds the gate, and its stamps would otherwise overwrite the
+/// holder's).
+#[inline]
+pub fn gate_note_phase(p: usize) {
+    if gate_holder_is_me() {
+        GATE_PHASE.store(p, Ordering::Relaxed);
+        GATE_PHASE_J.store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+    }
+}
+
+/// Round/progress stamp: a completed reclaim round that freed >0 pages.
+/// Kept separate from gate_note_phase so the phase after a round
+/// (RETRY, stamped by the caller) is not overwritten.
+#[inline]
+pub fn gate_note_round_done(freed: u64) {
+    if gate_holder_is_me() {
+        GATE_ROUNDS.fetch_add(1, Ordering::Relaxed);
+        GATE_FREED.fetch_add(freed, Ordering::Relaxed);
+    }
+}
+
+/// Deep-drain pass stamp: called once per drain_file_cache_before_oom
+/// pass; also accumulates what the drain freed.
+#[inline]
+pub fn gate_note_deep_pass(freed: u64) {
+    if gate_holder_is_me() {
+        GATE_DEEP.fetch_add(1, Ordering::Relaxed);
+        if freed > 0 {
+            GATE_FREED.fetch_add(freed, Ordering::Relaxed);
+        }
+    }
+}
+
+/// SP-5 census: called from the 1 Hz timer heartbeat. Prints one line
+/// when the gate has been held >= GATE_STRAND_J (2 s), naming the
+/// holder, its phase + phase age, progress counters, the holder task's
+/// scheduler state/CPU (cross-CPU safe read via the pid hash), and the
+/// waiter-side counters. Rate-limited by construction (1 Hz call).
+pub fn reclaim_gate_census() {
+    let holder = IN_DIRECT_RECLAIM.load(Ordering::Relaxed);
+    if holder == 0 || holder == usize::MAX {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    let taken = GATE_TAKEN_J.load(Ordering::Relaxed);
+    // Taken==0 can mean "never" only when the gate is also free; a
+    // holder implies a successful CAS wrote a nonzero stamp (jiffies
+    // starts at 0 only pre-timer, where no reclaim runs).
+    let age = now.saturating_sub(taken);
+    const GATE_STRAND_J: u64 = 200;
+    if age < GATE_STRAND_J {
+        return;
+    }
+    let phase = GATE_PHASE.load(Ordering::Relaxed);
+    let phase_age = now.saturating_sub(GATE_PHASE_J.load(Ordering::Relaxed));
+    // Best-effort holder task read (cross-CPU; the task may be exiting
+    // concurrently — same discipline as the parkwalk census).
+    let (tstate, tcpu) = unsafe {
+        let t = crate::sched::find_task_by_pid(holder as u32);
+        if t.is_null() {
+            (0xFFFFFFFFu32, 0xFFFFu32)
+        } else {
+            ((*t).state().bits(), (*t).ti_cpu() as u32)
+        }
+    };
+    let zone_free = unsafe {
+        first_online_node_mut()
+            .and_then(|n| n.zone(super::zone::ZoneType::ZoneNormal))
+            .map(|z| z.nr_free())
+            .unwrap_or(0)
+    };
+    crate::pr_info!(
+        "GATE-CENSUS holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} task_state={:#x} tcpu={} zone_free={} waiters={} exhausted={} selffight={} last_exh_pid={} last_exh_age={}j",
+        holder,
+        age,
+        phase,
+        phase_age,
+        GATE_ROUNDS.load(Ordering::Relaxed),
+        GATE_FREED.load(Ordering::Relaxed),
+        GATE_DEEP.load(Ordering::Relaxed),
+        tstate,
+        tcpu,
+        zone_free,
+        GATE_WAITERS.load(Ordering::Relaxed),
+        GATE_EXHAUSTED.load(Ordering::Relaxed),
+        GATE_SELF.load(Ordering::Relaxed),
+        GATE_LAST_EXH_PID.load(Ordering::Relaxed),
+        now.saturating_sub(GATE_LAST_EXH_J.load(Ordering::Relaxed)),
+    );
 }
 
 /// Allocate 2^order contiguous physical pages
@@ -169,6 +326,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         let pid = crate::process::current_pid();
                         if pid == 0 { usize::MAX } else { pid as usize }
                     };
+                    GATE_WAITERS.fetch_add(1, Ordering::Relaxed);
                     while gate_attempts < 64 {
                         if IN_DIRECT_RECLAIM
                             .compare_exchange(0, holder, Ordering::AcqRel, Ordering::Acquire)
@@ -177,19 +335,54 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             held_gate = true;
                             break;
                         }
+                        // SP-5: an allocation made BY the current holder
+                        // (reclaim's own I/O paths re-entering alloc_pages)
+                        // fights its own gate here — count it; the census
+                        // quantifies the self-fight face.
+                        if IN_DIRECT_RECLAIM.load(Ordering::Relaxed) == holder
+                            && holder != usize::MAX
+                        {
+                            GATE_SELF.fetch_add(1, Ordering::Relaxed);
+                        }
                         if let Some(pfn) = zone.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                            GATE_WAITERS.fetch_sub(1, Ordering::Relaxed);
                             return pfn_to_phys(pfn);
                         }
                         crate::sched::yield_cpu();
                         gate_attempts += 1;
                     }
+                    GATE_WAITERS.fetch_sub(1, Ordering::Relaxed);
+                    if !held_gate && gate_attempts >= 64 {
+                        // SP-5: this allocation is about to FAIL because it
+                        // never got the gate — the zone may refill moments
+                        // later (the round-3 #3/#4 forensics: alloc failed
+                        // while the holder's victims were being torn down).
+                        GATE_EXHAUSTED.fetch_add(1, Ordering::Relaxed);
+                        if holder != usize::MAX {
+                            GATE_LAST_EXH_PID.store(holder as u64, Ordering::Relaxed);
+                            GATE_LAST_EXH_J
+                                .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
+                        }
+                    }
                     if held_gate {
+                        // SP-5 census: reset the per-hold progress stamps,
+                        // then follow the holder's phases.
+                        GATE_TAKEN_J.store(
+                            crate::drivers::timer::get_jiffies(),
+                            Ordering::Relaxed,
+                        );
+                        GATE_ROUNDS.store(0, Ordering::Relaxed);
+                        GATE_FREED.store(0, Ordering::Relaxed);
+                        GATE_DEEP.store(0, Ordering::Relaxed);
+                        gate_note_phase(GATE_PHASE_ENTERED);
                         for _ in 0..8 {
                             let freed = super::vmscan::try_to_free_pages(order as i32);
+                            gate_note_phase(GATE_PHASE_RETRY);
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                                 IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                                GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
                                 return pfn_to_phys(pfn);
                             }
                             if freed == 0 {
@@ -219,16 +412,20 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             .saturating_add(1usize << order)
                             .saturating_sub(zone.nr_free());
                         let deep_target = shortfall.clamp(32, 8192);
+                        gate_note_phase(GATE_PHASE_DEEP);
                         let deep_freed =
                             super::vmscan::drain_file_cache_before_oom(deep_target);
+                        gate_note_phase(GATE_PHASE_RETRY);
                         if deep_freed > 0 {
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
                                 IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                                GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
                                 return pfn_to_phys(pfn);
                             }
                         }
                         IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                        GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
                     }
                 }
 
@@ -322,6 +519,16 @@ pub fn oom_forensic_dump(site: &str) {
         "OOM-FORENSIC: in_direct_reclaim={} (holder pid; 0=free) gate_exit_releases={}",
         IN_DIRECT_RECLAIM.load(Ordering::Relaxed),
         RECLAIM_GATE_EXIT_RELEASES.load(Ordering::Relaxed)
+    );
+    crate::println!(
+        "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={}",
+        GATE_PHASE.load(Ordering::Relaxed),
+        GATE_ROUNDS.load(Ordering::Relaxed),
+        GATE_FREED.load(Ordering::Relaxed),
+        GATE_DEEP.load(Ordering::Relaxed),
+        GATE_WAITERS.load(Ordering::Relaxed),
+        GATE_EXHAUSTED.load(Ordering::Relaxed),
+        GATE_SELF.load(Ordering::Relaxed)
     );
 
     // Zone state: counters vs walkable chains

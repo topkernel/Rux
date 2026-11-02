@@ -680,6 +680,11 @@ pub fn timer_softirq_handler(_nr: usize) {
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
             crate::sync::futex::futex_stuck_census();
+            // stress-port SP-5: direct-reclaim gate census — names the
+            // holder's phase/wait-site when the gate has been held >=2 s
+            // (self-gated: one atomic load when the gate is free; zero
+            // serial on standard boots).
+            crate::mm::page_alloc::reclaim_gate_census();
         }
     }
 
