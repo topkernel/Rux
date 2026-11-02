@@ -120,6 +120,43 @@ static GATE_SELF: AtomicU64 = AtomicU64::new(0);
 /// Last exhaustion witness (pid + jiffies).
 static GATE_LAST_EXH_PID: AtomicU64 = AtomicU64::new(0);
 static GATE_LAST_EXH_J: AtomicU64 = AtomicU64::new(0);
+/// Cumulative successful gate acquisitions (SP-5 round 4: distinguishes
+/// one long hold from release+reacquire churn — the round-4 sweep boot 1
+/// showed the SP-5 face at the OOM dumps with ZERO 1 Hz census lines,
+/// which is either heartbeat starvation or short-hold churn).
+static GATE_ACQS: AtomicU64 = AtomicU64::new(0);
+/// Cumulative holds whose age at release crossed the strand bar (2 s).
+static GATE_LONGHOLDS: AtomicU64 = AtomicU64::new(0);
+
+/// Release the gate from the holder's allocation path. Every
+/// alloc_pages_inner release site funnels through here so the SP-5
+/// audit is uniform: a hold that aged past the strand bar prints one
+/// GATE-LONGHOLD line AT RELEASE (process context — immune to timer
+/// softirq starvation, unlike the 1 Hz census).
+#[inline]
+fn gate_release(holder: usize) {
+    let now = crate::drivers::timer::get_jiffies();
+    let age = now.saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed));
+    if age >= 200 {
+        GATE_LONGHOLDS.fetch_add(1, Ordering::Relaxed);
+        crate::pr_info!(
+            "GATE-LONGHOLD holder={} age={}j phase={} phase_age={}j rounds={} freed={} deep={} acqs={} waiters={} exhausted={} selffight={}",
+            holder,
+            age,
+            GATE_PHASE.load(Ordering::Relaxed),
+            now.saturating_sub(GATE_PHASE_J.load(Ordering::Relaxed)),
+            GATE_ROUNDS.load(Ordering::Relaxed),
+            GATE_FREED.load(Ordering::Relaxed),
+            GATE_DEEP.load(Ordering::Relaxed),
+            GATE_ACQS.load(Ordering::Relaxed),
+            GATE_WAITERS.load(Ordering::Relaxed),
+            GATE_EXHAUSTED.load(Ordering::Relaxed),
+            GATE_SELF.load(Ordering::Relaxed)
+        );
+    }
+    IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+    GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
+}
 
 #[inline]
 fn gate_holder_is_me() -> bool {
@@ -368,6 +405,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     if held_gate {
                         // SP-5 census: reset the per-hold progress stamps,
                         // then follow the holder's phases.
+                        GATE_ACQS.fetch_add(1, Ordering::Relaxed);
                         GATE_TAKEN_J.store(
                             crate::drivers::timer::get_jiffies(),
                             Ordering::Relaxed,
@@ -381,8 +419,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             gate_note_phase(GATE_PHASE_RETRY);
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                                IN_DIRECT_RECLAIM.store(0, Ordering::Release);
-                                GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
+                                gate_release(holder);
                                 return pfn_to_phys(pfn);
                             }
                             if freed == 0 {
@@ -419,13 +456,11 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         if deep_freed > 0 {
                             if let Some(pfn) = zone.alloc_pages(order) {
                                 ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                                IN_DIRECT_RECLAIM.store(0, Ordering::Release);
-                                GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
+                                gate_release(holder);
                                 return pfn_to_phys(pfn);
                             }
                         }
-                        IN_DIRECT_RECLAIM.store(0, Ordering::Release);
-                        GATE_PHASE.store(GATE_PHASE_FREE, Ordering::Relaxed);
+                        gate_release(holder);
                     }
                 }
 
@@ -521,14 +556,18 @@ pub fn oom_forensic_dump(site: &str) {
         RECLAIM_GATE_EXIT_RELEASES.load(Ordering::Relaxed)
     );
     crate::println!(
-        "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={}",
+        "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={} taken_age={}j acqs={} longholds={}",
         GATE_PHASE.load(Ordering::Relaxed),
         GATE_ROUNDS.load(Ordering::Relaxed),
         GATE_FREED.load(Ordering::Relaxed),
         GATE_DEEP.load(Ordering::Relaxed),
         GATE_WAITERS.load(Ordering::Relaxed),
         GATE_EXHAUSTED.load(Ordering::Relaxed),
-        GATE_SELF.load(Ordering::Relaxed)
+        GATE_SELF.load(Ordering::Relaxed),
+        crate::drivers::timer::get_jiffies()
+            .saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed)),
+        GATE_ACQS.load(Ordering::Relaxed),
+        GATE_LONGHOLDS.load(Ordering::Relaxed)
     );
 
     // Zone state: counters vs walkable chains
