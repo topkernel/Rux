@@ -1145,3 +1145,101 @@ Branch pushed @ 4420bb92+this. Rollers: poproll continues (fx12fix,
 snapshot-armed; PIDs owned by lb-boot.py lb29X drivers — kill only
 those). Merge queue: coordinator takes biofix-fieldpoll. Successor
 entry points in the addenda above + the main close section.
+
+## SIXTEENTH-SUCCESSOR SESSION (2026-11-02 19:30-21:0x, branch biofix-fieldpoll @ c8d1b9f7)
+Mission: verify the 15th's binder sync-send parity find end-to-end. Outcome:
+THE UPSTREAM DIVERGENCE IS FOUND AND FIXED — the why=7 orphan's root cause is
+our NON-DEFERRED sync-send TRANSACTION_COMPLETE; the reference-parity fix
+(deferral, 963b3e95) landed, gates green, and lb313 took the fresh-provisioning
+boot FURTHER THAN EVER (bundles.ready 238.8s + CreateNewUser raced to a 1s
+loss). The race is now a coin-flip, not a wall.
+
+### The root cause (source-verified against the reference tree)
+1. REFERENCE SEMANTICS (linux-6.6 binder.c, the reference bzImage is 6.6.101):
+   a sync (!oneway, !reply) send queues the sender's tcomplete DEFERRED
+   (binder_enqueue_deferred_thread_work_ilocked — NO process_todo), and
+   binder_has_work_ilocked consults process_todo (plus looper_need_return /
+   eligible proc work) — NOT todo-emptiness. Net: the sync client stays PARKED
+   INSIDE its BWR ioctl until the reply (or error resolution) flips
+   process_todo. The ioctl cannot return in between: the kernel itself makes
+   send-over-send from one thread impossible. Reply delivery then returns
+   [BR_TRANSACTION_COMPLETE, BR_REPLY] together. OH's WaitForCompletion loop
+   is built for exactly this.
+2. OUR divergence: we pushed the tcomplete with process_todo=true — the read
+   returned immediately, userspace regained control between send and reply,
+   and OH (written against reference semantics) drove the shapes the
+   reference structurally forbids: RSS tid458 resent LOAD_SYSTEM_ABILITY 1ms
+   over undelivered txn15580 (lb311, caught by the guard why=20); samgr
+   workers' 60-1900-deep legal-interleave txn stacks (lb308/310 OWE); the
+   out-of-order reply pops (reference BUG_ONs at binder_pop_transaction_
+   ilocked when top != replied txn — we retain-anywhere, so old replies
+   surface mid-nest: lb313 tid981 REPLY_PUSHED(14793) while 14791 sat above).
+3. FIX (963b3e95): sync-send tcomplete queued WITHOUT process_todo +
+   thread_has_work drops its `!th.todo.is_empty()` clause (audited: every
+   other thread-todo push site sets process_todo=true). All error-resolution
+   paths (dead_reply_to_sender etc.) already set process_todo → the parked
+   client wakes exactly like the reference.
+
+### Verification boots (system-lb5, SMP=2, LOGLEVEL=6, dfx=ams46,txnhunt,syncguard)
+- lb311 (guards ON, warm userdata, cg16c): why=20 fired ONCE (176.3s, RSS),
+  boot UNWEDGED (the 15th's lb304 wedge fear did not reproduce), startUser
+  + SwitchToUser reached at 176.5s, ladder spun on warm's stale user-100
+  (known data shape). POISON32 collapsed 2372 (lb290) -> 16.
+- lb313 (cg16e = deferral, FRESH userdata-fresh2): healthiest fresh boot ever
+  — bootanimation 166s, CreateNewUser(100) START 199.3s, bundles.ready SET
+  238.8s, CreateNewUser end 239.77s (lost the race by ~1s: the KVS read gave
+  up 67ms after ready — the lb229 12ms-margin family, now compressed from
+  700s to ~1s), startUser 240.4s, SwitchToUser 240.5s, then the empty-set
+  ladder spin (no per-user records — SetBundleQuota=0). The store-load wall
+  (550-1100s class, bio-fix A/B never landed) is GONE on this kernel.
+- lb314 (same recipe): the samgr-buffer-exhaustion death spiral (8x why=12,
+  428 KOT-KILLs, OS_IPC_0 workers of codec/composer/hdf/accesstoken killed)
+  -> init stopAllServices -> DELIBERATE guest sysrq-c panic at 36.9s. A
+  pre-existing variance class (lb313 same kernel clean), not deferral-caused.
+- lb315 (same recipe): crawling variant (txn2 samgr-internal futex stall at
+  7s — the storage_manager->samgr early call), running at close.
+
+### The parity guard verdict (mission question a/b)
+- (a) why=20/21 rejections DO replace the why=7 orphan at exactly the rotating
+  victim moment — BUT each hit names an OUR-BOOKKEEPING divergence (the
+  immediate tcomplete), not reference-illegal userspace: with the deferral
+  fix the illegal shapes become structurally unreachable.
+- (b) OH userspace on rejection: the RSS hit did NOT wedge (1 rejection, boot
+  continued); the lb304-class wedge was the EARLY samgr code-20/3 sends under
+  the pre-fix bookkeeping. Post-fix boots (lb313) show ZERO guard prints —
+  the reference discipline holds without rejections, exactly like the
+  reference kernel.
+- Guards stay dfx=syncguard-gated (default off) until the coordinator decides;
+  syncwatch (log-only companion) landed for divergence hunting (55b5f6d6).
+
+### Git reconciliation (c8d1b9f7)
+- origin/main merged twice (819a1be2 gap-*; 394c16ce test-archive rule).
+- origin/biofix-fieldpoll (the 14th's addendum lineage) merged with ext4/mod.rs
+  taken ENTIRELY from main's SleepMutex EXT4_BIG_LOCK — this drops the
+  rejected 7954908e fair-spinner content by construction (user directive
+  2026-11-02) and its old-lock diagnostics.
+- Gates on the final tree: x3 builds rc=0 (x86_64/riscv64/aarch64 — NOTE:
+  the aarch64 build rewrites arch/aarch64/dtb_blob.S's .incbin path to this
+  worktree; restore it before committing if it shows dirty), make test ALL
+  TESTS PASSED (cg16-maketest2/3.log).
+
+### Successor entry points (in order)
+1. ROLL THE RACE: system-lb5 + USERDATA=run/userdata-fresh2.img + cg16e-class
+   kernel + dfx=ams46,txnhunt,syncguard. The race is now ~1s-class; a boot
+   where the KVS read lands AFTER bundles.ready wins: watch "create user:100
+   bundle size:34" (NOT the empty-set end) -> SetBundleQuota -> per-user
+   install stream -> ImplicitQuery EXITS -> appspawn com.ohos.launcher ->
+   PIXELS. Screenshot to run/oh-rux-launcher-*.png, report IMMEDIATELY.
+2. If the race keeps losing by ~1s: the CreateNewUser KVS read's 30-40s
+   internal timeout (userspace-internal futex wait, the DB_TaskExecutor
+   family) is the margin to shave — kernel-side it is the distributeddata
+   exec-class residual (bio fix landed; the samgr Executor futex interleave
+   at boot, txn2-shaped, is the current visible stall).
+3. The OS_IPC_0 worker watchdog-death family (lb314's spiral trigger,
+   lb315's audio_host): pre-existing, load-correlated; if a spiral boot
+   sysrq-c's again, just reroll.
+4. The out-of-order reply-pop decode (lb313 tid981): with the deferral the
+   mid-nest reply delivery (reference BUG_ON site) can still occur if a
+   parked client receives NEW incoming work before its reply — reference
+   delivers BR_TRANSACTION reentrantly there too; if a why=7/-6 family
+   resurfaces, RPOP-DIVERGE + the guard hist dumps (006921c1) name it.
