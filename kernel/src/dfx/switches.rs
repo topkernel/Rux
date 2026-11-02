@@ -107,6 +107,7 @@ macro_rules! dfx_switch_table {
             AllocWatch => "allocwatch",
             SyncGuard => "syncguard",
             SyncWatch => "syncwatch",
+            FuxStuck => "fuxstuck",
         }
     };
 }
@@ -538,9 +539,17 @@ pub enum DfxSwitch {
     /// work on a busy thread's todo, a delivery shape the reference
     /// avoids via waiting_threads).
     SyncWatch,
+    /// Futex-stuck census (sync/futex.rs futex_stuck_census, timer 1 Hz
+    /// heartbeat): park-time stamp per futex wait (Waiter::park_j) + a
+    /// one-burst-per-5s report of waits >= 10 s naming uaddr/mm/tgid/tid,
+    /// the stuck thread's entry-frame syscall, and the owning tgid's
+    /// thread-state histogram — the per-condvar producer-starvation
+    /// adjudication for the OH post-creation stall web (useriam FFRT /
+    /// DB_TaskExecutor families). Zero cost when off.
+    FuxStuck,
 }
 
-const SWITCH_COUNT: usize = 59;
+const SWITCH_COUNT: usize = 60;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -644,6 +653,7 @@ impl DfxSwitch {
             DfxSwitch::AllocWatch => 56,
             DfxSwitch::SyncGuard => 57,
             DfxSwitch::SyncWatch => 58,
+            DfxSwitch::FuxStuck => 59,
         }
     }
 
