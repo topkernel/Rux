@@ -717,21 +717,32 @@ pub fn dump() {
         // per-component A..D = WALK_x_NS/WALK_COMP_N, miss arm =
         // WALK_MISSCOST_NS/WALK_MISS, walk tail = WALK_TAIL_NS/WALK,
         // open pre = OPEN_PRE_NS/OPEN_N, tails likewise.
-        // 21st-successor addendum: misseo (walk misses that were ENOENT
-        // existence probes), neghit/negstale (bounded negative-memo
-        // verdicts), openwmax (worst open wall, us), openexec (exec-NS
-        // sum, avg = /OPEN_N) + openexecmax (worst exec, us) — the
-        // wall-vs-exec split that attributes the syscost 85us row to
-        // kernel CPU vs waiting.
-        "PC t={}s stat={} pre={} tail={} open={} pre={} tail={} walk pre={} loop={} tail={} comp={} a={} b={} c={} d={} miss={} misseo={} neghit={} negstale={} openwmax={}us openexec={} openexecmax={}us",
+        // (PC1/PC2 split, 21st successor: the printk line cap truncated
+        // the single line before the miss/negative/open-exec fields —
+        // lb346 lost everything past 'c='.)
+        "PC1 t={}s stat={} pre={} tail={} open={} pre={} tail={} walk pre={} loop={} tail={} comp={} a={} b={} c={} d={}",
         secs,
         v(&STAT_N), v(&STAT_PRE_NS), v(&STAT_TAIL_NS),
         v(&OPEN_N), v(&OPEN_PRE_NS), v(&OPEN_TAIL_NS),
         v(&WALK_PRE_NS), v(&WALK_LOOP_NS), v(&WALK_TAIL_NS),
         v(&WALK_COMP_N), v(&WALK_A_NS), v(&WALK_B_NS),
-        v(&WALK_C_NS), v(&WALK_D_NS), v(&WALK_MISSCOST_NS),
-        v(&WALK_MISS_ENOENT), v(&NEGHIT), v(&NEGSTALE),
+        v(&WALK_C_NS), v(&WALK_D_NS),
+    );
+    crate::pr_warn!(
+        // 21st successor PC2: the miss class (the walk loop's 85%
+        // occupant — 130us per miss, 52% of them ENOENT existence
+        // probes), the bounded negative-memo verdicts, and the open
+        // wall-vs-exec split (OPEN_EXEC_NS average = /OPEN_N; exec ~=
+        // wall means real kernel CPU, exec << wall means waiting).
+        "PC2 t={}s miss={} misseo={} neghit={} negstale={} openwmax={}us openexec={} openexecavg={}ns openexecmax={}us",
+        secs,
+        v(&WALK_MISSCOST_NS), v(&WALK_MISS_ENOENT), v(&NEGHIT), v(&NEGSTALE),
         v(&OPEN_WALL_MAX_NS) / 1000, v(&OPEN_EXEC_NS),
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&OPEN_EXEC_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
         v(&OPEN_EXEC_MAX_NS) / 1000,
     );
 }
