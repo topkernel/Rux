@@ -197,7 +197,8 @@ pub fn kill_other_threads(current: *mut Task) {
     // caller and victims directly.
     if !victims.is_empty() {
         let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
+            core::str::from_utf8((*current).comm())
+                .unwrap_or("?")
                 .trim_end_matches('\0')
         };
         let mut vnames: alloc::vec::Vec<alloc::string::String> =
@@ -207,7 +208,8 @@ pub fn kill_other_threads(current: *mut Task) {
             if !t.is_null() {
                 unsafe {
                     vnames.push(alloc::string::String::from(
-                        core::str::from_utf8_unchecked((*t).comm())
+                        core::str::from_utf8((*t).comm())
+                            .unwrap_or("?")
                             .trim_end_matches('\0'),
                     ));
                 }
@@ -1113,7 +1115,8 @@ pub fn do_exit(exit_code: i32) -> ! {
             // until this is root-caused.
             let ccomm = unsafe {
                 alloc::string::String::from(
-                    core::str::from_utf8_unchecked((*current).comm())
+                    core::str::from_utf8((*current).comm())
+                        .unwrap_or("?")
                         .trim_end_matches('\0'),
                 )
             };
@@ -1144,7 +1147,8 @@ pub fn do_exit(exit_code: i32) -> ! {
                     victims.push((
                         t.pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked(t.comm())
+                            core::str::from_utf8(t.comm())
+                                .unwrap_or("?")
                                 .trim_end_matches('\0'),
                         ),
                     ));
@@ -1235,7 +1239,8 @@ pub fn do_exit_group(exit_code: i32) -> ! {
     // decode from this one print.
     {
         let ccomm = unsafe {
-            core::str::from_utf8_unchecked((*current).comm())
+            core::str::from_utf8((*current).comm())
+                .unwrap_or("?")
                 .trim_end_matches('\0')
         };
         let pend = unsafe { (*current).pending.signal.load(core::sync::atomic::Ordering::Relaxed) };

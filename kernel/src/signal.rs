@@ -1348,7 +1348,8 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                     "DEQUEUE sig={} pid={} comm='{}' info={}",
                     sig,
                     (*current).pid(),
-                    core::str::from_utf8_unchecked((*current).comm())
+                    core::str::from_utf8((*current).comm())
+                        .unwrap_or("?")
                         .trim_end_matches('\0'),
                     match &qi {
                         Some(i) => {
@@ -1360,7 +1361,8 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                             } else {
                                 unsafe {
                                     alloc::string::String::from(
-                                        core::str::from_utf8_unchecked((*st).comm())
+                                        core::str::from_utf8((*st).comm())
+                                            .unwrap_or("?")
                                             .trim_end_matches('\0'),
                                     )
                                 }
@@ -2874,7 +2876,8 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
+                            core::str::from_utf8((*t).comm())
+                                .unwrap_or("?")
                                 .trim_end_matches('\0'),
                         ),
                     )
@@ -3005,7 +3008,8 @@ fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
+                            core::str::from_utf8((*t).comm())
+                                .unwrap_or("?")
                                 .trim_end_matches('\0'),
                         ),
                     )
@@ -3469,7 +3473,8 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
                     (
                         (*t).pid(),
                         alloc::string::String::from(
-                            core::str::from_utf8_unchecked((*t).comm())
+                            core::str::from_utf8((*t).comm())
+                                .unwrap_or("?")
                                 .trim_end_matches('\0'),
                         ),
                     )

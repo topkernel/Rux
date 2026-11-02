@@ -137,10 +137,11 @@ impl NetDevice {
 
     /// Get device name
     pub fn get_name(&self) -> &str {
-        unsafe {
-            let len = self.name.iter().position(|&c| c == 0).unwrap_or(IFNAMSIZ);
-            core::str::from_utf8_unchecked(&self.name[..len])
-        }
+        // Checked UTF-8: interface names are userspace-writable (ioctl
+        // SIOCSIFNAME) arbitrary bytes — the KOT-KILL comm panic class
+        // (lb266) applies to every unchecked name print.
+        let len = self.name.iter().position(|&c| c == 0).unwrap_or(IFNAMSIZ);
+        core::str::from_utf8(&self.name[..len]).unwrap_or("?")
     }
 
     /// Transmit packet
