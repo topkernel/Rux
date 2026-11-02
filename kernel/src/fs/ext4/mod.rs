@@ -1964,9 +1964,12 @@ fn create_dir_entry(data: &mut [u8], ino: u32, name: &str, file_type: u8, rec_le
 use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
 use crate::fs::Stat;
 
-/// Ext4 inode lookup operation
+/// Ext4 inode lookup operation (pub: the path walk's negative-memo gate
+/// compares this fn pointer — only filesystems whose content changes
+/// exclusively through VFS mutations may memo ENOENT results; dynamic
+/// filesystems are excluded).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+pub unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError)?;
     let fs = &*(fs_ptr as *const Ext4FileSystem);
 

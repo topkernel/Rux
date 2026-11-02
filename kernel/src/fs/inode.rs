@@ -316,6 +316,16 @@ pub struct Inode {
     pub uid: AtomicU32,
     /// Owner group ID
     pub gid: AtomicU32,
+    /// (negative-lookup memo, 21st successor) Directory content
+    /// generation: bumped on every successful mutation dispatched with
+    /// this inode as the parent directory (create/mkdir/unlink/rmdir/
+    /// rename/link/symlink/mknod). Stamp lives on the INODE, not the
+    /// dentry, because bind-mount aliases of one directory are separate
+    /// dentries sharing this inode — a memo cached under the sandbox
+    /// view must invalidate when the file appears through the host view
+    /// (and vice versa). The path walk's memo-hit check compares a
+    /// memo child's stamp against this counter.
+    pub dir_mut_gen: AtomicU64,
     /// Inode state
     pub state: Spinlock<InodeState>,
 
@@ -383,6 +393,22 @@ impl Drop for Inode {
 }
 
 impl Inode {
+    /// (negative-lookup memo) Invalidate this directory's negative memos
+    /// — call on every successful mutation dispatched through this
+    /// inode as the parent. One fetch_add; the walk's memo-hit path
+    /// compares generations lazily. Shared across bind-mount aliases
+    /// (they are separate dentries over this one inode).
+    #[inline]
+    pub fn dir_mut_gen_bump(&self) {
+        self.dir_mut_gen.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// (negative-lookup memo) The directory's current content generation.
+    #[inline]
+    pub fn dir_mut_gen_load(&self) -> u64 {
+        self.dir_mut_gen.load(core::sync::atomic::Ordering::Acquire)
+    }
+
     /// Update the CACHED mode word after a successful setattr(ATTR_MODE).
     ///
     /// The icache shares Inode through Arc while the VFS reads `mode`
@@ -414,6 +440,7 @@ impl Inode {
             rdev_atomic: AtomicU64::new(0),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            dir_mut_gen: AtomicU64::new(0),
             state: Spinlock::new(InodeState::INew),
             ops: None,
             sb: None,
@@ -437,6 +464,7 @@ impl Inode {
             rdev_atomic: AtomicU64::new(0),
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
+            dir_mut_gen: AtomicU64::new(0),
             state: Spinlock::new(InodeState::INew),
             ops: None,
             sb: Some(sb),

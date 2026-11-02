@@ -62,7 +62,12 @@ pub fn tick() {
         return;
     }
 
-    crate::sched::for_each_task(|task| {
+    // Heartbeat (softirq, IF=0) context: the blocking walk self-deadlocks
+    // against a pid-hash bucket held by an interrupted task-context writer
+    // (sc215/stallwatch discipline; lb325 re-convicted the class with
+    // slowtask::audit + futex_stuck_census at BUCKET_LOCK[22]). Try-walk:
+    // a skipped bucket only misses tasks for this 60 s window.
+    crate::sched::for_each_task_try(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock; reads of
         // the task's own fields and diagnostic reads of plausible peer
         // pointers only; no writes except the diagnostic counters.

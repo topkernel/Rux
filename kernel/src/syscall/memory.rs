@@ -290,7 +290,15 @@ fn vmap_budget_line(line: impl FnOnce()) {
 }
 
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
+    let mp = crate::dfx::mmprof::on();
+    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
     let ret = sys_mmap_inner(args);
+    if mp {
+        crate::dfx::mmprof::add(crate::dfx::mmprof::M_TOTAL, mp_t0);
+        if ret > 0 {
+            crate::dfx::mmprof::bucket_len(args[1] as usize, mp_t0);
+        }
+    }
     {
         use core::sync::atomic::Ordering::Relaxed;
         let idx = MMAP_CURSOR.fetch_add(1, Relaxed) % MMAP_RING.len();
@@ -374,6 +382,21 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::pagemap::Perm;
     use crate::arch::mm::{prot, mmap_error};
     use crate::mm::map;
+
+    // mmprof (cmdline mmprof=1, oh-launcher perf handoff): placement
+    // scalars + issuer attribution (the whole-syscall bracket lives in
+    // the sys_mmap wrapper so early EINVAL returns still count).
+    let mp = crate::dfx::mmprof::on();
+    if mp {
+        crate::dfx::mmprof::bump_comm();
+        if args[3] as u32 & map::MAP_FIXED != 0 || args[3] as u32 & 0x100000 != 0 {
+            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_FIXED, 1);
+        } else if args[0] == 0 {
+            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_ANON0, 1);
+        } else {
+            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_HINT, 1);
+        }
+    }
 
     let mut addr = args[0] as usize;
     let length = args[1] as usize;
@@ -1483,7 +1506,12 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
+    let mp = crate::dfx::mmprof::on();
+    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
     let ret = sys_mprotect_inner(args);
+    if mp {
+        crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TOTAL, mp_t0);
+    }
     // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
     // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
     // mremap(MREMAP_FIXED)s a filled scratch over them; a failed fill
@@ -1669,7 +1697,15 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // AFTER PTEs and earlier VMAs had already been mutated. All
             // decisions now precede all mutations, and no same-mm thread
             // can interleave between them.
+            // mmprof: the write-guard acquire wait + the coverage/EACCES
+            // walk (mmprof=1; the guard spans the whole syscall body).
+            let mp2 = crate::dfx::mmprof::on();
+            let mp_t_lock = if mp2 { crate::dfx::mmprof::now() } else { 0 };
             let mut vma_mgr = addr_space.vma_write();
+            if mp2 {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_LOCK, mp_t_lock);
+            }
+            let mp_t_cover = if mp2 { crate::dfx::mmprof::now() } else { 0 };
 
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
@@ -1732,24 +1768,57 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // (only a pinned, provably read-only file is) — the old
                 // in-surgery copy of this check treated a missing pin as
                 // read-only and bailed mid-mutation.
+                //
+                // Range-bounded scan (reference mprotect_fixup walks the
+                // range only): the old whole-tree iter() made every
+                // writable mprotect O(all VMAs of the mm) under the write
+                // lock — the mp_cover cost class on the FFRT-churn boots
+                // (mmprof). Same semantics: the seed catches any VMA
+                // containing addr (an overlapping VMA with start < addr
+                // must contain addr), the loop covers starts >= addr
+                // until past the span.
                 if prot & 0x2 != 0 {
-                    for vma in vma_mgr.iter() {
-                        let vs = vma.start().as_usize();
-                        let ve = vma.end().as_usize();
-                        if vs >= addr + length || ve <= addr {
-                            continue; // no overlap with the target range
-                        }
-                        if !vma.flags().is_shared() {
-                            continue; // MAP_PRIVATE upgrades are legal
-                        }
-                        if let Some(file) = addr_space.get_vma_file(vs) {
-                            if file.flags().is_readonly() {
-                                return -13_i64; // EACCES
+                    let range_end = addr + length;
+                    let mut cursor = addr;
+                    if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                        cursor = v.end().as_usize();
+                        if v.flags().is_shared() {
+                            if let Some(file) = addr_space.get_vma_file(v.start().as_usize()) {
+                                if file.flags().is_readonly() {
+                                    return -13_i64; // EACCES
+                                }
                             }
+                        }
+                    }
+                    for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                        let (vs, ve) = (v.start().as_usize(), v.end().as_usize());
+                        if vs >= range_end {
+                            break; // past the span
+                        }
+                        if ve <= cursor {
+                            continue; // covered by the seed / a prior piece
+                        }
+                        if v.flags().is_shared() {
+                            if let Some(file) = addr_space.get_vma_file(vs) {
+                                if file.flags().is_readonly() {
+                                    return -13_i64; // EACCES
+                                }
+                            }
+                        }
+                        cursor = ve.max(cursor);
+                        if cursor >= range_end {
+                            break;
                         }
                     }
                 }
             }
+
+            // mmprof: coverage+EACCES walk done.
+            if mp2 {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_COVER, mp_t_cover);
+                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
+            }
+            let mp_t_pte = if mp2 { crate::dfx::mmprof::now() } else { 0 };
 
             // Get page table root
             let root_ppn = addr_space.root_ppn();
@@ -1920,8 +1989,15 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // Flush TLB after updating PTE permissions (still under the
             // PTE lock so no stale entry survives the section).
             // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
+            if mp2 {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_PTE, mp_t_pte);
+            }
+            let mp_t_tlb = if mp2 { crate::dfx::mmprof::now() } else { 0 };
             unsafe {
                 crate::arch::mm::asid::flush_tlb_all();
+            }
+            if mp2 {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TLB, mp_t_tlb);
             }
             drop(_pte_guard);
 

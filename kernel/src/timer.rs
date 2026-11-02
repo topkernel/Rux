@@ -1014,6 +1014,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
     crate::dfx::syscost::tick(current);
 
+    // vm-op stage profiler (cmdline `mmprof=1`, oh-launcher perf
+    // handoff): mmap/munmap/mprotect stage table, same 60s cadence.
+    crate::dfx::mmprof::tick(current);
+
     // perf events (PERF_TYPE_SOFTWARE sampling): charge the tick stash
     // captured by the hard IRQ into the armed events and emit sample
     // records. Bails on one relaxed load when nothing is armed.

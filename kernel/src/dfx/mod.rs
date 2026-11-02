@@ -115,6 +115,10 @@ pub mod scmtap;
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// dfx/forkprof.rs.
 pub mod forkprof;
+/// mmap/mprotect stage profiler (cmdline mmprof=1, oh-launcher perf
+/// handoff): TSC deltas per vm-op stage + issuer attribution, dumped
+/// from the timer heartbeat; see dfx/mmprof.rs.
+pub mod mmprof;
 /// Lost-park event ring (dfx=lostpark, fix-lostpark lane): last-64
 /// scheduling events around an SMP lost-park wedge, dumped by the
 /// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
@@ -130,6 +134,9 @@ pub mod cctx;
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
     switches::init_from_cmdline();
+    // mmprof (cmdline mmprof=1): spawn the task-context dump thread here
+    // (cmdline is parsed; the thread prints with the task emit budget).
+    mmprof::ensure_dump_thread();
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
     // Wild-write tripwire arms between the timekeeper's init and
