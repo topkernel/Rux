@@ -3,6 +3,53 @@ Baseline r19 = 1,018/1,869. Work autonomously; never ask. Worktree = THIS (main@
 
 ---
 
+# LTP r22 SESSION 2 (2026-11-02 evening, second successor; branch ltp-r21 @ main 819a1be2 + 2 commits)
+
+## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
+The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
+"PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —
+ROOT CAUSE = KERNEL STACK EXHAUSTION by the recursive symlink resolver.
+Decode chain (all evidence in run/repro-nftw01.log + gdb dumps):
+1. The call-trace frame below trap_handler was the fault STUB's return
+   address (mis-symbolized as census_peek3::is_userva / AlignedStorage —
+   DWARF pollution over the stub region); the real RIP never printed.
+   Added rip + kstack bounds to the panic line: rip=0x0 (instruction
+   FETCH at NULL), rsp 19KB BELOW task 307's stack bottom.
+2. KSO census (new, in exception.rs): task 307 cpu1 slot CORRECT, rsp0
+   CORRECT, no dead-task resume, no foreign-sp switch-in, no
+   freed-stack/rsp0 staleness — the freed-slot theory died; the plain
+   classification was right: the task overflowed its own stack INTO the
+   adjacent (free) kstack slot [0x7c5a8000,0x7c5bc000) of the 256KB
+   block, tearing through stale "./loop" path-buffer data; a return
+   through a zeroed slot jumped to rip=0.
+3. Overflow-zone frame dump (new): follow_symlink/follow_symlink_hinted
+   frames at a measured 2240-BYTE STRIDE per nested hop. The resolver is
+   depth-capped at 40 (MAX_SYMLINKS, review 5.1) but 40 hops x 2240B =
+   ~90KB of chain frames alone — past the 80KB x86_64 kernel stack
+   before the counter can return ELOOP. nftw01's tree has the symlinks.
+4. FIX: Kernel.toml kernel_stack_size_x86_64 81920 -> 131072 (128KB,
+   riscv64 parity; this file's own history documents the same lesson for
+   riscv64), kstack slab 3 slots/block -> 2 (zero tail waste; buddy
+   fallback = one perfect order-5 block). OH-floor memory cost +48KB/
+   stack (~+125MB at 2690 stacks) — flagged to coordinator for the
+   merge gate (mm guarded domain).
+5. Also landed (b5480343): KSO census + overflow-zone ra dump + dead-task
+   resume guard at switch-in + rsp0 skip/free-vs-live-rsp0 witnesses +
+   freed-stack ring. All silent on clean boots; they convert this panic
+   class into named prints.
+6. GATES: x3 builds rc=0 (x86_64/riscv64/aarch64); make test GREEN
+   (run/maketest-128k.log "All tests passed!"); repro-nftw.sh x2 clean
+   (nftw01 completes, rc=1 = its r21-class real FAIL, SCAN_DONE).
+7. Long-term note for the fs lane: the reference kernel resolves symlink
+   chains ITERATIVELY (link_path_walk) — 40 hops cost ~0 stack there.
+   Making follow_symlink iterative would decouple stack size from path
+   shape entirely (big surgery in fs/vfs.rs; NOT done this session).
+
+## Mystery QEMU (recorded, not touched)
+pid 1192385 (20:42), cwd=/home/william/rux-agents/compat-r3, boots
+compat-r3's own kernel with init=/test/ltpscan + -gdb tcp::1235 — the
+compat lane's QEMU, NOT this lane's.
+
 # LTP r22 SESSION (2026-11-02, successor agent; branch ltp-r21 synced main@2fd5215f)
 
 Mission: retest the 2 open r21 items, kernel-fix what is real, full r22 scan on
