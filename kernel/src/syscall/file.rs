@@ -4200,12 +4200,30 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                 // No inode at all (anonymous pipe/socket file): EINVAL.
                 None => -(errno::EINVAL as i64),
                 Some(inode) => {
+                    // ext4 files: flush data blocks + journal commit via the
+                    // W2-exposed ext4_sync_file. Other filesystems (rootfs,
+                    // pipes, ...) have no fsync op — flush the shared buffer
+                    // cache as a best effort.
+                    let is_ext4 = inode.ops.is_some_and(|o| core::ptr::eq(
+                        o as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+                    ));
                     // Linux do_fsync → vfs_fsync: only file types with an
-                    // fsync method (regular files) can be synced. FIFOs,
-                    // sockets, and device nodes report EINVAL instead of
-                    // flushing an unrelated global cache and claiming
-                    // success.
-                    if !inode.mode.is_regular_file() {
+                    // fsync method can be synced. FIFOs, sockets, and
+                    // device nodes report EINVAL instead of flushing an
+                    // unrelated global cache and claiming success.
+                    // DIRECTORIES on ext4 DO have an fsync method: the
+                    // reference kernel's ext4_dir_operations carries
+                    // .fsync (ext4_sync_file), so fsync(dirfd) succeeds
+                    // and persists the directory's blocks — the
+                    // durable-rename pattern (fsync(file); rename;
+                    // fsync(dirfd)) depends on it, and our own namei
+                    // write sites defer entry-block durability to
+                    // "fsync(dirfd)" (namei.rs). SP-3 (stress-port
+                    // round 2): the blanket !is_regular_file() check
+                    // returned EINVAL for every ext4 directory fd.
+                    if !inode.mode.is_regular_file()
+                        && !(inode.mode.is_directory() && is_ext4)
+                    {
                         return -(errno::EINVAL as i64);
                     }
                     // dfx=txnhunt (leg-29A): name the file when this
@@ -4218,13 +4236,6 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                         crate::dfx::pathstash::OP_SYNC,
                         || file.path(),
                     );
-                    // ext4 files: flush data blocks + journal commit via the
-                    // W2-exposed ext4_sync_file. Other filesystems (rootfs,
-                    // pipes, ...) have no fsync op — flush the shared buffer
-                    // cache as a best effort.
-                    let is_ext4 = inode.ops.is_some_and(|o| core::ptr::eq(
-                        o as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _,
-                    ));
                     if is_ext4 {
                         let fs_ptr = match inode.private_data {
                             Some(p) => p as *const crate::fs::ext4::Ext4FileSystem,

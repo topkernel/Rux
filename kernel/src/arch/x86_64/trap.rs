@@ -1359,7 +1359,24 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             // believing IF=0.
             let is_idle =
                 cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
-            let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
+            // stress-port round 2 (2026-11-02): the tag now carries the
+            // adjudication the suffix only hinted at. An idle frame is
+            // halted with IF=1 (cpu_idle_loop re-enables IRQs before
+            // wfi) — the gap is halt-exit delivery latency, an artifact
+            // by construction. A user frame runs IF=1 by definition —
+            // the gap is vCPU steal. Only a kernel frame keeps the
+            // IRQ-OFF-WINDOW tag, and it is still only a triage hint:
+            // the syscost cli/sti zone accounting is the corroborating
+            // measurement (round-1 stress boots printed 101-461 ms
+            // idle/user gaps while every syscost REST site's longest
+            // CLOSED segment was <= 1 ms).
+            let msg: &[u8] = if regs.user_mode() {
+                b"\nWW: IRQ-DELAY-STEAL cpu="
+            } else if is_idle {
+                b"\nWW: IRQ-DELAY-IDLE cpu="
+            } else {
+                b"\nWW: IRQ-OFF-WINDOW cpu="
+            };
             for &b in msg {
                 putchar(b);
             }
