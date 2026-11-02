@@ -6537,7 +6537,18 @@ fn binder_transaction(
             // once-per-boot why=7 reply-stack-top orphan (useriam lb253
             // @100.9s, accountmgr lb302 @190.8s — each orphaned a sync
             // client whose TXN-HANG exec then grows without bound).
-            if !reply && !oneway {
+            // GATED (dfx=syncguard): lb304 showed always-on rejection
+            // wedges the early SA storm (samgr's own first code-20/3
+            // sends violate the shape under OUR bookkeeping — OH boots
+            // on the reference, so our sender-thread state already
+            // diverges upstream; the guard is a diagnostic that names
+            // those sends until that divergence is fixed).
+            if !reply
+                && !oneway
+                && crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::SyncGuard,
+                )
+            {
                 let st = thread.st();
                 let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
                 let bad_stack_top = match st.txn_stack.last() {

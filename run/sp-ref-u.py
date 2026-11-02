@@ -26,10 +26,11 @@ def drive(path, i):
 
 DISKS = (drive(f"{REF}/updater.img", 0)
          + drive(os.environ.get("SYSIMG", "run/oh-img/system.img"), 1)
-         + drive("run/oh-img/vendor.img", 2) + drive(f"{REF}/sys_prod.img", 3)
-         + drive("run/oh-img/chip_prod.img", 4)
+         + drive(os.environ.get("VENDOR", "run/oh-img/vendor.img"), 2)
+         + drive(f"{REF}/sys_prod.img", 3)
+         + drive(os.environ.get("CHIP", "run/oh-img/chip_prod.img"), 4)
          + drive(os.environ.get("USERDATA", "run/userdata-fresh.img"), 5))
-APPEND = ("ip=dhcp loglevel=6 console=ttyS0,115200 init=init root=/dev/ram0 rw "
+APPEND = ("ip=dhcp loglevel=" + os.environ.get("LOGLEVEL", "7") + " console=ttyS0,115200 init=init root=/dev/ram0 rw "
           "ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio "
           "ohos.boot.sn=01234567890 "
           "ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required "
