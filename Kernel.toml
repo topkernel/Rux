@@ -80,16 +80,17 @@ swap_size_mb = 256
 # boxes its 8KB master_rx buffer (see fs/pty.rs) so pair construction
 # no longer shuffles 8KB through every frame.
 kernel_stack_size = 131072
-# x86_64 arch override (see above): back to the 128KB base (compat-r3).
-# The 80KB slot was gated on OH-load depth only (62,512B max); the LTP
-# class nests deeper — nftw01's path (walk + lookup + fill + the
-# perf-path lane's extra frames, first-bad 5542a7b6) crossed the line
-# and spilled frames into the adjacent slab slot / recycled heap pages,
-# zeroing them: the task then returned through zeroed frames into a
-# wild jump to NULL (chunk@700 boot panic, rip=0/rsp below the stack,
-# deterministic 3/3) and the same class corrupted a nice value to -120
-# in isolation (getpriority01 — the fee7774f signature). The packed
-# slab serves TWO 128KB slots per 256KB order-6 block (exact fit).
+# x86_64 arch override (see above): 128KB — SAME floor as the base.
+# The interim 80KB packed-slab carve (3 slots per 256KB block) held for
+# OH boots but NOT for deep kernel recursion under LTP: the (reviewed,
+# depth-capped-at-40) recursive symlink resolution in fs/vfs.rs costs
+# ~2240 bytes of stack PER nested hop (measured on the nftw01 boot
+# panic, chunk@700, 2026-11-02: 4/4 deterministic "Kernel stack
+# overflow" with rsp 19KB past the 80KB bottom, ret-through-zeroed-slot
+# to rip=0). 40 hops ≈ 90KB of chain alone — over the 80KB stack before
+# the depth counter can return ELOOP. At 128KB the packed slab serves
+# two slots per 256KB order-6 block with ZERO tail waste (and the buddy
+# fallback is one perfectly-packed order-5 block, like riscv64).
 kernel_stack_size_x86_64 = 131072
 # Buddy allocator max order
 buddy_max_order = 20

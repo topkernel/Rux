@@ -850,15 +850,33 @@ pub fn handle_mm_fault(
                 let file = vm_file
                     .clone()
                     .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
-                if let Some(file) = file
-                    .filter(|f| crate::fs::ext4::file::is_ext4_file(f.as_ref()))
-                {
-                    if let Some(cache_phys) = filemap_pin_cache_page(
-                        file.as_ref(),
-                        file_offset,
-                        effective_size,
-                        true,
-                    ) {
+                if let Some(file) = file.filter(|f| {
+                    crate::fs::ext4::file::is_ext4_file(f.as_ref())
+                        || crate::fs::tmpfs::is_tmpfs_file(f.as_ref())
+                }) {
+                    // tmpfs (LTP setup_ipc prefers /dev/shm for its shared
+                    // results/checkpoint page): alias through the page
+                    // cache via the fs-agnostic populate (bounce read of
+                    // the node's page into a cache frame, zero for holes)
+                    // — one frame per (fs_id, ino, page) shared by every
+                    // mapper across fork AND across fresh mmaps after
+                    // exec. Frames have no disk writeback; read(2) stays
+                    // on the node pages (documented deviation class, same
+                    // as ext4's write(2) invalidation).
+                    let cache_phys = if crate::fs::tmpfs::is_tmpfs_file(file.as_ref()) {
+                        crate::fs::page_cache::shared_file_fault_page(
+                            file.as_ref(),
+                            file_offset as u64,
+                        )
+                    } else {
+                        filemap_pin_cache_page(
+                            file.as_ref(),
+                            file_offset,
+                            effective_size,
+                            true,
+                        )
+                    };
+                    if let Some(cache_phys) = cache_phys {
                         // file_offset < effective_size held (SIGBUS gate).
                         let mut sp_flags = PageTableEntry::P
                             | PageTableEntry::A
@@ -908,7 +926,7 @@ pub fn handle_mm_fault(
                             // belong to the page cache.
                             filemap_bookkeep_mapped_cache_page(cache_phys);
                         }
-                        if want_w {
+                        if want_w && crate::fs::ext4::file::is_ext4_file(file.as_ref()) {
                             // Conservative v1 dirty mark, AFTER the mapping
                             // is installed (a failed/raced attempt leaves no
                             // phantom dirty): a writable mapping MAY write;
@@ -916,6 +934,9 @@ pub fn handle_mm_fault(
                             // Cleared only when no mapping holds a pin
                             // anymore (flush_done). pte -> inodes order,
                             // same as the release sites.
+                            // ext4 only: the flush walker is the ext4
+                            // writeback; tmpfs aliases have no disk and
+                            // their frames are authoritative while mapped.
                             if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
                                 crate::fs::page_cache::get_page_cache().mark_dirty(
                                     inode.fs_id,
