@@ -745,6 +745,12 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         {
             let p = crate::mm::small_alloc::alloc(size, align);
             if !p.is_null() {
+                trace_kmalloc_at(
+                    mw_s0,
+                    p as u64,
+                    size,
+                    crate::mm::small_alloc::effective_size(size, align),
+                );
                 return p;
             }
         }
@@ -762,6 +768,12 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             crate::pr_err!("bigalloc: FAILED size={:#x}", size);
         }
         drop(_guard);
+        // kmem:kmalloc — the buddy-served tail of the same event: one
+        // record per allocation through the GlobalAlloc chokepoint, with
+        // bytes_alloc the true serving size (the buddy block).
+        if !ptr.is_null() {
+            trace_kmalloc_at(mw_s0, ptr as u64, size, PAGE_SIZE << order);
+        }
         if !ptr.is_null() && crate::dfx::memwatch::armed() {
             let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
                 [0; crate::dfx::memwatch::SITE_FRAMES];
@@ -826,6 +838,12 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         if self.initialized.load(Ordering::Acquire) == 0 {
             return;
         }
+        // kmem:kfree — one event per free, at entry, before the
+        // deferred-free interception decides where the block goes (the
+        // reference fires kfree at kfree() entry, whatever the backend
+        // does with it afterwards). armed() first: the disabled path on
+        // this, the kernel's hottest function pair, is one branch.
+        trace_kfree_at(ptr as u64);
 
         // Teardown-race guard (mm/deferred_free.rs): frees of the
         // registered size class (the MmStruct ArcInner block) are held
@@ -841,6 +859,50 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         self.dealloc_untracked(ptr, layout);
     }
+}
+
+/// kmem:kmalloc record from the GlobalAlloc boundary. `s0` is the
+/// caller's own frame pointer captured at entry (callee-saved — the
+/// same discipline memwatch uses); the call_site is the first frame
+/// above the __rust_alloc plumbing. Disarmed = two relaxed loads and a
+/// branch, the tracepoint contract.
+#[inline]
+fn trace_kmalloc_at(s0: u64, ptr: u64, bytes_req: usize, bytes_alloc: usize) {
+    if !crate::trace::EVENT_KMALLOC.armed() {
+        return;
+    }
+    let mut frames = [0u64; 8];
+    // SAFETY: s0 is GlobalAlloc::alloc's own fp (captured at entry,
+    // callee-saved); the walk reads only kernel frames.
+    unsafe {
+        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+    }
+    crate::trace::trace_kmalloc(
+        crate::trace::alloc_call_site(&frames),
+        ptr,
+        bytes_req as u64,
+        bytes_alloc as u64,
+        0xcc0, // GFP_KERNEL — Rux's allocator takes no gfp mask
+        -1,    // NUMA_NO_NODE
+        false, // __GFP_ACCOUNT not set
+    );
+}
+
+/// kmem:kfree record from the GlobalAlloc boundary, same origin
+/// discipline as the alloc twin.
+#[inline]
+fn trace_kfree_at(ptr: u64) {
+    if !crate::trace::EVENT_KFREE.armed() {
+        return;
+    }
+    let s0 = crate::dfx::backtrace::current_frame_pointer();
+    let mut frames = [0u64; 8];
+    // SAFETY: s0 is current_frame_pointer() read in THIS frame, the
+    // dealloc twin of the alloc capture.
+    unsafe {
+        crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+    }
+    crate::trace::trace_kfree(crate::trace::alloc_call_site(&frames), ptr);
 }
 
 /// Free through the live global allocator, bypassing the deferred-free

@@ -669,6 +669,124 @@ pub fn enabled(switch: DfxSwitch) -> bool {
     SWITCHES[switch.index()].load(Ordering::Relaxed)
 }
 
+/// The ported-wave trace alias table (the migration ledger's port map).
+///
+/// Round 2 of the dfx-trace migration: enabling one of these `dfx=`
+/// switches ALSO arms its reference trace events and turns `tracing_on`
+/// on, so hunting scripts written against the bespoke switch keep
+/// working unchanged while the boot gains the reference event timeline
+/// (read through /sys/kernel/tracing) that the bespoke serial prints
+/// cannot carry. The bespoke prints themselves stay untouched until the
+/// hunts close (the ledger's do-not-delete rule).
+///
+/// Mapping notes:
+/// - the sched family (schedtrace/schb/periodic/taskdump/parkdump/
+///   sleepsnap/wwcensus) and the timeline switches (execcost/ohhunt/
+///   treehunt) map onto the sched:* events, per the ledger;
+/// - the syscall-family switches (syscalltrace/sysforensic/sysring) map
+///   onto raw_syscalls:sys_enter/sys_exit;
+/// - the futex-family switches (futextrace/fuxstuck/thpark) map onto
+///   raw_syscalls + the sched wake pair: the reference kernel has NO
+///   futex trace events (kernel/futex/* carries no tracepoints and
+///   include/trace/events/ has no futex.h — verified against the
+///   reference master), so the reference's own futex visibility IS the
+///   syscall boundary (uaddr/op in the sys_enter args) plus the wake
+///   outcome (sched_waking/sched_wakeup). No invented futex events;
+///   reference wins every dispute.
+pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace::TraceEvent]> {
+    use crate::trace;
+    // The sched family: every sched:* event of the table.
+    static SCHED: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+    ];
+    static RAW_SYSCALLS: &[&trace::TraceEvent] =
+        &[&trace::EVENT_SYS_ENTER, &trace::EVENT_SYS_EXIT];
+    static SCHED_AND_SYSCALLS: &[&trace::TraceEvent] = &[
+        &trace::EVENT_SCHED_SWITCH,
+        &trace::EVENT_SCHED_WAKING,
+        &trace::EVENT_SCHED_WAKEUP,
+        &trace::EVENT_SCHED_WAKEUP_NEW,
+        &trace::EVENT_SCHED_PROCESS_FORK,
+        &trace::EVENT_SCHED_PROCESS_EXIT,
+        &trace::EVENT_SCHED_PROCESS_FREE,
+        &trace::EVENT_SCHED_PROCESS_WAIT,
+        &trace::EVENT_SCHED_MIGRATE_TASK,
+        &trace::EVENT_SYS_ENTER,
+        &trace::EVENT_SYS_EXIT,
+    ];
+    static SIGNAL: &[&trace::TraceEvent] = &[&trace::EVENT_SIGNAL_GENERATE];
+    static BINDER: &[&trace::TraceEvent] = &[
+        &trace::EVENT_BINDER_TRANSACTION,
+        &trace::EVENT_BINDER_TRANSACTION_RECEIVED,
+        &trace::EVENT_BINDER_TRANSACTION_ALLOC_BUF,
+        &trace::EVENT_BINDER_TRANSACTION_BUFFER_RELEASE,
+        &trace::EVENT_BINDER_WAIT_FOR_WORK,
+    ];
+    static KMEM: &[&trace::TraceEvent] = &[
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+    static MM_PARTIAL: &[&trace::TraceEvent] = &[
+        &trace::EVENT_MARK_VICTIM,
+        &trace::EVENT_KMALLOC,
+        &trace::EVENT_KFREE,
+        &trace::EVENT_MM_PAGE_ALLOC,
+        &trace::EVENT_MM_PAGE_FREE,
+    ];
+    static WRITE_TRACE: &[&trace::TraceEvent] = &[
+        &trace::EVENT_PAGE_FAULT_KERNEL,
+        &trace::EVENT_BLOCK_RQ_ISSUE,
+        &trace::EVENT_BLOCK_RQ_COMPLETE,
+    ];
+    match switch {
+        // The ledger's ready-to-port wave. (WwCensus is deliberately
+        // ABSENT: the ledger keeps the wild-write tripwires frozen —
+        // they are active detectors, not passive observability.)
+        DfxSwitch::SchedTrace
+        | DfxSwitch::Schb
+        | DfxSwitch::PeriodicDump
+        | DfxSwitch::TaskDumpKey
+        | DfxSwitch::ParkDump
+        | DfxSwitch::SleepSnap => Some(SCHED),
+        DfxSwitch::SyscallTrace | DfxSwitch::SysForensic | DfxSwitch::SysRing => {
+            Some(RAW_SYSCALLS)
+        }
+        DfxSwitch::ExecCost | DfxSwitch::OhHunt | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
+        DfxSwitch::SigTrace => Some(SIGNAL),
+        DfxSwitch::BinderTrace | DfxSwitch::TxnHang => Some(BINDER),
+        // The futex family: reference-shaped visibility only (see the
+        // doc comment above).
+        DfxSwitch::FutexTrace | DfxSwitch::FuxStuck | DfxSwitch::ThPark => {
+            Some(SCHED_AND_SYSCALLS)
+        }
+        // The round-2 kmem wave: allocator watches map onto the kmem
+        // events (the ledger's allocwatch/leakhunt/mmforensics/vmap/
+        // poolcensus/monowatch row) and memwatch's partial row
+        // (oom:mark_victim + the mm family).
+        DfxSwitch::AllocWatch
+        | DfxSwitch::LeakHunt
+        | DfxSwitch::MmForensics
+        | DfxSwitch::VmaProbe
+        | DfxSwitch::PoolCensus
+        | DfxSwitch::MonoWatch => Some(KMEM),
+        DfxSwitch::MemWatch => Some(MM_PARTIAL),
+        // The ledger's writetrace row (partial): the kernel-fault and
+        // block-request views of the write path.
+        DfxSwitch::WriteTrace => Some(WRITE_TRACE),
+        _ => None,
+    }
+}
+
 /// Force a switch on/off programmatically (used by tests and the sysrq hook).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
