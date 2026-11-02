@@ -211,15 +211,19 @@ pub fn note_acquire(
     }
 }
 
-/// Live report of a divergent outermost acquire (preempt-hunt). DISABLED
-/// (record-only): ph5/ph5b — the only boots carrying this print — both
-/// wedged (UNIX_TABLE both-CPU deadlock at 18s/90s) while ph3, without
-/// it, completed 1200s cleanly; by elimination the print from inside
-/// the acquire path (it fires between the count read and the booking,
-/// from any context a lock acquire can run in) is wedge-correlated. The
-/// oslot record + ORIGIN lines at adjudication time carry the same
-/// data. The body is kept behind this switch for one gated re-trial.
-static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
+/// Live report of a divergent outermost acquire (preempt-hunt). Record-
+/// only by default since 14d04456: ph5/ph5b — the only boots carrying
+/// this print — both wedged (UNIX_TABLE both-CPU deadlock at 18s/90s)
+/// while ph3, without it, completed 1200s cleanly. CONFOUND NOTE (Face C
+/// re-trial, 2026-11-02): the ph-session branch was built AFTER 192bfdce
+/// (perf-sched merge 11-01 01:27) — every ph boot, wedged or clean, ran
+/// with the x86_64 IRQ-exit kpreempt hook armed by default; the wedge-
+/// fix lane's bisect (28b1afca) proved hook-ON causes exactly the
+/// both-CPU DEADLOCK family. The print was never isolated from that
+/// cause. Re-armed via the `dfx=acqdiv` runtime switch for the A/B: the
+/// print rides only on boots that ask for it, on a tree where kpreempt
+/// defaults OFF.
+pub static DIVERGENT_PRINT: AtomicBool = AtomicBool::new(false);
 
 #[allow(unsafe_code)]
 fn report_acquire_divergent(

@@ -83,6 +83,7 @@ macro_rules! dfx_switch_table {
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
             LeakHunt => "leakhunt",
+            AcqDiv => "acqdiv",
             WwCensus => "wwcensus",
             TxnHang => "txnhunt",
             TreeHunt => "treehunt",
@@ -334,6 +335,16 @@ pub enum DfxSwitch {
     /// armed: one side-table store per outermost guard acquire plus one
     /// count load per user-mode trap return. OFF by default.
     LeakHunt,
+    /// dfx=acqdiv (preempt-hunt Face C re-trial): arms the LIVE
+    /// ACQUIRE-DIVERGENT print inside leakorigin's outermost-acquire tap
+    /// (default record-only since 14d04456). The print fires between the
+    /// preempt_count read and the booking, from any context a lock
+    /// acquire can run in — including inside lock sections — so it is
+    /// hunt-only: never enable it on production or LTP boots. Its
+    /// ph5/ph5b wedge correlation is confounded (those boots also ran
+    /// the kpreempt hook armed by default, 192bfdce); this switch exists
+    /// to isolate it on a kpreempt-OFF tree.
+    AcqDiv,
     /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
     /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
     /// reporter. These are hunt instruments: they made the serial
@@ -498,7 +509,7 @@ pub enum DfxSwitch {
     LostParkTrace,
 }
 
-const SWITCH_COUNT: usize = 55;
+const SWITCH_COUNT: usize = 56;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -594,6 +605,7 @@ impl DfxSwitch {
             DfxSwitch::SysRing => 52,
             DfxSwitch::FilerdProbe => 53,
             DfxSwitch::LostParkTrace => 54,
+            DfxSwitch::AcqDiv => 55,
         }
     }
 
@@ -620,6 +632,9 @@ pub fn set(switch: DfxSwitch, on: bool) {
     }
     if let DfxSwitch::LeakHunt = switch {
         super::leakorigin::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::AcqDiv = switch {
+        super::leakorigin::DIVERGENT_PRINT.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::Scribble = switch {
         #[cfg(feature = "x86_64")]
