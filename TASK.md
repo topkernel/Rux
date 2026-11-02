@@ -1058,3 +1058,32 @@ meter demanded), lb270 (fx8fix, meter live: 1500 cycles), lb275+
 4. Gates reminder: everything is on origin/biofix-fieldpoll; the mm
    guarded-domain rows (pcp, small_alloc) need syscost/pbench numbers
    before main-merge; the UTF8 fix is print-path-only (no gate).
+
+### FOURTEENTH-SUCCESSOR ADDENDUM — the coordinator's ext4-biglock steer, decoded
+1. (a) THE HOLD HYPOTHESIS IS DEAD: maxheld instrument (release-side
+   max hold + holder) reads **4 jiffies (40 ms)** as the boot maximum —
+   NOBODY holds the biglock for 5 s. The waited=500j episodes are QUEUE
+   STARVATION: the anti-starve timer (5 s) is the only visible episode
+   length. STALL-FREE lines (owner=none, waiters=5) show a FREE lock
+   with parked waiters — the handoff wake fires but the woken waiter
+   cannot be SCHEDULED: phantom-preempt monopolists own the CPUs (the
+   campaign's open producer, Face B). The queue protocol itself is
+   sound.
+2. FAIR-SPINNER FIX LANDED (real mitigation): task-context preempt-bit
+   callers on lock_fair previously degraded to the UNGATED barging
+   acquire — a phantom-bit chmod walker (chmod_ros pid 524 storm)
+   barged past every parked waiter per op. Now they spin on the GATED
+   acquire (2 s BARGE_ESCAPE fallback). Stall count unchanged
+   (lb275: 7 vs lb280: 6) because the root is scheduling, not barging.
+3. (b) SENDFAIL taps: the storm onset (80.3-81.6 s) shows samgr REPLY
+   failures — why=6-reply-empty-stack, why=17-reply-target-gone — then
+   why=3-owner-proc-dead (pid 333->handle 23): REAL process deaths
+   after the stall era (OH watchdogs firing), so the poison is a MIX:
+   real deaths + late-reply/empty-stack on stalled callers.
+4. (c) SA:401 (BMS) DID insert (and SA:4010); bundles.ready=0 is the
+   BMS scan never completing (the store-load wall), not registration.
+5. NET: the poison storm's kernel-side window is the STALL ERA
+   (5-78 s) = scheduling starvation under phantom monopolists. The
+   producer hunt (r83hunt / preempt bits) remains THE wall; the
+   biglock fairness fix removes one amplifier. EXT4-BIGLOCK-HOLDER-STK
+   + maxheld instruments are in for the next stall read.
