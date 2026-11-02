@@ -4634,6 +4634,14 @@ pub fn scheduler_tick() {
     // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
     crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
+    // Allocator class-lock holder watch (dfx=allocwatch): scan ALL mm
+    // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
+    // The holder sits at IF=0 (lock_irqsave), so its OWN CPU's tick is
+    // dead — this check only ever fires from the OTHER CPU. The waiters
+    // cannot self-report (they are parked IN the allocator, printing
+    // allocates). See dfx/allocwatch.rs.
+    crate::dfx::allocwatch::tick_check();
+
     // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
     // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
     // victim a pick walk EXAMINES, and walks stop at the first allowed

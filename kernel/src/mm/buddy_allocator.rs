@@ -750,6 +750,13 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         }
 
         let _guard = self.lock.lock_irqsave();
+        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // The GlobalAlloc main path — RawVec finish_grow lands here for
+        // sizes above the small_alloc classes.
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_BUDDY,
+            0,
+        );
         let ptr = self.alloc_blocks(order);
         if ptr.is_null() && size > 4 * 1024 * 1024 {
             crate::pr_err!("bigalloc: FAILED size={:#x}", size);
@@ -855,6 +862,13 @@ impl BuddyAllocator {
             return core::ptr::null_mut();
         }
         let _guard = self.lock.lock_irqsave();
+        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        // Runs NESTED under the small_alloc class lock (class -> buddy
+        // order) — a stamp pair names the whole frozen chain.
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_BUDDY,
+            0,
+        );
         let ptr = self.alloc_blocks(0);
         drop(_guard);
         ptr
@@ -873,6 +887,11 @@ impl BuddyAllocator {
             return;
         }
         let _guard = self.lock.lock_irqsave();
+        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_BUDDY,
+            0,
+        );
         self.free_blocks(ptr, 0);
         drop(_guard);
     }
@@ -960,6 +979,11 @@ impl BuddyAllocator {
         }
 
         let _guard = self.lock.lock_irqsave();
+        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_BUDDY,
+            0,
+        );
         self.free_blocks(ptr, order);
         drop(_guard);
         crate::dfx::memwatch::note_free(

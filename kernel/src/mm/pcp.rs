@@ -243,11 +243,28 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
     // the 16 zone.free_pages calls) stays OUTSIDE the window exactly as
     // before — only the 16 usize copies moved inside, and a nested
     // same-CPU entry remains serial (INV-PCP-3).
+    //
+    // lb250 (2026-11-02, verify roller): the 35336eb1 refill guard can
+    // leave count == PCP_HIGH EXACTLY (its stores stop at the bound, so
+    // a 31-count row refilled to full parks ON 32 with no drain pending
+    // — the intended spill never runs because that store is not a
+    // free_order0 entry). This entry store must therefore be bound
+    // checked too: a full row spills the OLDEST PCP_BATCH out of the
+    // list and sends the INCOMING frame straight to the buddy (its +1
+    // accounting and OnPcp transition already happened above, so it
+    // joins the drain accounting as +1/-1, not a row member).
     let mut pfns = [0usize; PCP_BATCH];
     let mut do_drain = false;
+    let mut spill_direct = false;
     with_row(|row| {
-        row.list[row.count] = pfn;
-        row.count += 1;
+        if row.count < PCP_HIGH {
+            row.list[row.count] = pfn;
+            row.count += 1;
+        } else {
+            // Row left full by a capped refill: the incoming frame
+            // bypasses the list (spill_direct below).
+            spill_direct = true;
+        }
         if row.count >= PCP_HIGH {
             let first = row.count - PCP_BATCH;
             for i in 0..PCP_BATCH {
@@ -275,6 +292,20 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             }
             zone.free_pages(*p, 0);
         }
+    }
+    if spill_direct {
+        // The incoming frame never entered the row: undo its pcp-side
+        // +1 and hand it to the zone directly (same transition shape as
+        // the drain loop's frames).
+        PCP_DRAINS.fetch_add(1, Ordering::Relaxed);
+        zone.free_pages_sub(1);
+        let pg = pfn_to_page_mut(pfn);
+        if !pg.is_null() {
+            unsafe {
+                (*pg).clear_flag(PageFlag::OnPcp);
+            }
+        }
+        zone.free_pages(pfn, 0);
     }
     true
 }

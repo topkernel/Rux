@@ -27,6 +27,11 @@
 //! ```
 
 pub mod taint;
+/// Allocator class-lock holder watch (cmdline `dfx=allocwatch`): cross-CPU
+/// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section
+/// (IF=0 kills its own tick; only the other CPU's tick can see it);
+/// see dfx/allocwatch.rs.
+pub mod allocwatch;
 pub mod backtrace;
 pub mod bug;
 pub mod hexdump;
