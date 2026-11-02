@@ -858,17 +858,25 @@ impl MmStruct {
             }
             self.unmap_pages(PageVirtAddr::new(seg_start), chunk_end - seg_start)?;
 
-            // Drop the guard BEFORE yielding: the write lock must never
-            // be held across schedule().
+            // Drop the guard at every chunk boundary: the write lock must
+            // never be held across schedule(), and the boundary is the
+            // same-mm racer handoff point (mm-audit invariant).
             drop(vma_mgr);
-            let mp_ty = if mp { crate::dfx::mmprof::now() } else { 0 };
-            crate::sched::cond_resched();
-            if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MU_YIELD, mp_ty);
-            }
+            // NO per-chunk cond_resched: the reference kernel does not
+            // schedule inside munmap, and mmprof measured the per-chunk
+            // yield at 132us AVERAGE (max 1.64s) x 213k chunks/60s under
+            // the OH FFRT churn — 75% of the whole munmap body and the
+            // 722ms-class mmap tail (every chunk was a full re-queue
+            // under need_resched). The walk is now leaf-table direct
+            // (us-class per chunk), so each held window is bounded by
+            // construction and the reference holds the lock across the
+            // WHOLE operation. One yield at the operation boundary.
         }
 
+        let mp_ty = if mp { crate::dfx::mmprof::now() } else { 0 };
+        crate::sched::cond_resched();
         if mp {
+            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_YIELD, mp_ty);
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
         }
         Ok(())
@@ -890,6 +898,17 @@ impl MmStruct {
     }
 
     /// Unmap physical pages in specified range
+    ///
+    /// Reference-parity fast path (mmprof attribution, lb332/333): the old
+    /// body ran a full PageTableWalker::walk PER PAGE — four dependent
+    /// memory references per 4KB — measuring 23us per 1MB chunk under the
+    /// OH FFRT arena churn (fixed_cold 24us / fixed_hot 64us vs the
+    /// reference kernel's 1.2/3.4us, pbench P8). The reference walks the
+    /// leaf table directly: resolve the upper chain ONCE per 2MB block,
+    /// then iterate the 512 leaf PTEs. Per-page semantics are bit-exact
+    /// with the old body (same swap/kernel-window/foreign-frame/rmap/
+    /// refcount/clear discipline); exotic shapes (an upper-level leaf in
+    /// the user range) fall back to the per-page walk.
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
@@ -899,67 +918,163 @@ impl MmStruct {
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
 
-        while addr < end {
-            if mp {
-                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNPAGES, 1);
+        // Root guard (same shape as PageTableWalker::walk): a freed-mm
+        // root fed a garbage PPN used to die in phys_to_virt overflow.
+        {
+            let root_pa = self.pgd << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published()
+                && root_pa != 0
+                && !crate::mm::phys_valid(root_pa as usize)
+            {
+                return Ok(());
             }
-            // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the range
-            // being unmapped from this address space.
-            let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
+        }
 
-            // Swap entry (P=0 leaf): no resident page — free the swap
-            // slot and clear the PTE. Without this, munmap of a swapped
-            // page leaks the slot for the lifetime of the swap area.
-            if ppn.is_none() {
-                if mp {
-                    crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNEMPTY, 1);
+        // SAFETY: self.pgd passed the root guard above; every intermediate
+        // frame is re-checked with the same stale guard the walker used
+        // before being handed to get_page_table_virt.
+        let root_table = unsafe { get_page_table_virt(self.pgd << PAGE_SHIFT) };
+
+        while addr < end {
+            let a = VirtAddr::new(addr as u64);
+            let pmd_base = addr & !(PMD_SIZE as usize - 1);
+            let pmd_end = pmd_base + PMD_SIZE as usize;
+            let block_end = end.min(pmd_end);
+
+            let pte4 = unsafe { (*root_table).get(a.pgd_index() as usize) };
+            if !pte4.is_valid() {
+                addr = pmd_end;
+                continue;
+            }
+            if pte4.is_leaf() {
+                // 1GB leaf at PML4/PUD level: unreachable for user VAs in
+                // practice; keep the old per-page behavior exactly.
+                self.unmap_pages_slow(addr, block_end);
+                addr = block_end;
+                continue;
+            }
+            {
+                let pa = pte4.phys_addr();
+                if crate::mm::page_desc::descs_published()
+                    && pa != 0
+                    && !crate::mm::phys_valid(pa as usize)
+                {
+                    // Stale intermediate (freed/recycled table): the old
+                    // walk bailed None and the read_pte_raw tail did
+                    // nothing for a non-swap raw — skip the block.
+                    addr = pmd_end;
+                    continue;
                 }
-                if let Some(raw) = super::page_fault::read_pte_raw(
-                    self.pgd,
-                    VirtAddr::new(addr as u64),
-                ) {
+            }
+            // SAFETY: pa re-validated immediately above (same guard the
+            // walker used before get_page_table_virt).
+            let table3 = unsafe { get_page_table_virt(pte4.phys_addr()) };
+            let pte3 = unsafe { (*table3).get(a.pud_index() as usize) };
+            if !pte3.is_valid() {
+                addr = pmd_end;
+                continue;
+            }
+            if pte3.is_leaf() {
+                if pte3.bits() & PageTableEntry::U == 0 {
+                    // Kernel identity/device window leaf: the old body
+                    // skipped these via the U-bit check, one page at a
+                    // time; skipping the block is the same outcome.
+                    addr = pmd_end;
+                    continue;
+                }
+                self.unmap_pages_slow(addr, block_end);
+                addr = block_end;
+                continue;
+            }
+            {
+                let pa = pte3.phys_addr();
+                if crate::mm::page_desc::descs_published()
+                    && pa != 0
+                    && !crate::mm::phys_valid(pa as usize)
+                {
+                    addr = pmd_end;
+                    continue;
+                }
+            }
+            // SAFETY: pa re-validated immediately above.
+            let table2 = unsafe { get_page_table_virt(pte3.phys_addr()) };
+            let pte2 = unsafe { (*table2).get(a.pmd_index() as usize) };
+            if !pte2.is_valid() {
+                addr = pmd_end;
+                continue;
+            }
+            if pte2.is_leaf() {
+                if pte2.bits() & PageTableEntry::U == 0 {
+                    addr = pmd_end;
+                    continue;
+                }
+                // A USER 2MB leaf covers the whole block; keep the old
+                // per-page behavior exactly (fallback).
+                self.unmap_pages_slow(addr, block_end);
+                addr = block_end;
+                continue;
+            }
+            {
+                let pa = pte2.phys_addr();
+                if crate::mm::page_desc::descs_published()
+                    && pa != 0
+                    && !crate::mm::phys_valid(pa as usize)
+                {
+                    addr = pmd_end;
+                    continue;
+                }
+            }
+            // SAFETY: pa re-validated immediately above.
+            let table1 = unsafe { get_page_table_virt(pte2.phys_addr()) };
+
+            // Leaf-table iteration: identical per-page semantics to the
+            // old walk()-based body.
+            let mut va = addr;
+            while va < block_end {
+                let idx = (((va as u64) >> PAGE_SHIFT) & 0x1ff) as usize;
+                let raw = unsafe { (*table1).get(idx).bits() };
+                if raw == 0 {
+                    va += PAGE_SIZE_USIZE;
+                    continue;
+                }
+                if mp {
+                    crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNPAGES, 1);
+                }
+                if raw & PageTableEntry::P == 0 {
+                    // Swap entry (P=0 leaf): free the swap slot and clear
+                    // the PTE (the old read_pte_raw tail). A non-swap P=0
+                    // leaf (PROT_NONE marker / migration entry) is left
+                    // alone, exactly like the old body.
                     if crate::mm::swap::is_swap_entry(raw) {
                         crate::mm::swap::swap_free_slot(
                             crate::mm::swap::swap_entry_type(raw),
                             crate::mm::swap::swap_entry_offset(raw),
                         );
-                        // SAFETY: addr is a page-aligned user address whose
-                        // PTE we just verified above.
-                        unsafe { self.clear_pte(addr as u64); }
+                        unsafe { Self::unmap_clear_leaf(table1, idx, va) };
                     }
-                }
-                addr += PAGE_SIZE_USIZE;
-                continue;
-            }
-
-            if let Some((ppn_val, pte_bits)) = ppn {
-                // E8-MM: a valid leaf WITHOUT the U bit is a KERNEL
-                // translation the user VA range overlaps (identity device
-                // windows cloned into every root, or one RESTORED by
-                // clear_pte after the user mapping over it was unmapped).
-                // It is not this mm's page: no rmap entry, no refcount, no
-                // PTE to clear — freeing or punching it corrupts kernel
-                // MMIO access (also closes the pre-existing hole where
-                // munmap over an untouched cloned MMIO page zeroed the
-                // kernel's PTE).
-                if pte_bits & PageTableEntry::U == 0 {
-                    addr += PAGE_SIZE_USIZE;
+                    va += PAGE_SIZE_USIZE;
                     continue;
                 }
+                // E8-MM: a valid leaf WITHOUT the U bit is a KERNEL
+                // translation the user VA range overlaps (identity device
+                // windows cloned into every root). Not this mm's page.
+                if raw & PageTableEntry::U == 0 {
+                    va += PAGE_SIZE_USIZE;
+                    continue;
+                }
+                let ppn_val = (raw & PageTableEntry::PHYS_MASK_PUBLIC) >> PAGE_SHIFT;
                 // Foreign frame (kernel-heap GEM/fb backing): not this
-                // mm's to put/free — clear the PTE only. Same discipline
-                // as the framebuffer case in unmap_one_user_leaf_locked.
+                // mm's to put/free — clear the PTE only.
                 if crate::mm::page_alloc::is_foreign_user_frame(
                     (ppn_val as usize) << PAGE_SHIFT,
                 ) {
-                    // SAFETY: addr is a page-aligned user address whose
-                    // leaf we just verified above.
-                    unsafe { self.clear_pte(addr as u64); }
-                    addr += PAGE_SIZE_USIZE;
+                    unsafe { Self::unmap_clear_leaf(table1, idx, va) };
+                    va += PAGE_SIZE_USIZE;
                     continue;
                 }
-                // Remove reverse mapping before clearing PTE, then drop this
-                // mapping's reference; the last reference frees the page.
+                // Remove reverse mapping before clearing PTE, then drop
+                // this mapping's reference; the last reference frees the
+                // page.
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
                 if !page.is_null() {
@@ -968,7 +1083,7 @@ impl MmStruct {
                     unsafe {
                         (*page).rmap_alt_remove(
                             self as *const _ as usize,
-                            addr / PAGE_SIZE_USIZE,
+                            va / PAGE_SIZE_USIZE,
                         );
                     }
                     if unsafe { (*page).is_mapped() } {
@@ -989,26 +1104,18 @@ impl MmStruct {
                     // release_cache_mapping_pin). Order matters: the pin's
                     // release may free an invalidated frame — every
                     // reference must be gone by then.
-                    if pte_bits & cow_flags::PCACHE != 0 {
+                    if raw & cow_flags::PCACHE != 0 {
                         release_cache_mapping_pin(ppn_val as usize);
                     }
                 }
-                // SAFETY: addr is a valid, page-aligned virtual address in this address space,
-                // and its reverse mapping has just been removed above.
-                unsafe {
-                    self.clear_pte(addr as u64);
-                }
+                unsafe { Self::unmap_clear_leaf(table1, idx, va) };
                 // RSS accounting: one resident page leaves this address space.
                 self.sub_rss(1);
+                va += PAGE_SIZE_USIZE;
             }
-
-            addr += PAGE_SIZE_USIZE;
+            addr = block_end;
         }
 
-        // Remote shootdown: other CPUs may still hold cached translations
-        // of the pages just unmapped — a stale hit reads/writes freed
-        // frames. One broadcast per batch unmap (local-only during x86
-        // single-CPU bring-up; the call keeps shape parity).
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
         }
@@ -1025,6 +1132,98 @@ impl MmStruct {
         }
 
         Ok(())
+    }
+
+    /// Clear ONE leaf PTE with clear_pte's exact rule: restore the kernel
+    /// device-window translation when the VA sits inside a kernel identity
+    /// device window (E8-MM), else write 0. Caller holds the PTE section.
+    #[inline]
+    unsafe fn unmap_clear_leaf(
+        table1: *mut super::pagetable::PageTable,
+        idx: usize,
+        va: usize,
+    ) {
+        let new_bits = super::mmu_init::kernel_device_window_pte(va as u64).unwrap_or(0);
+        // SAFETY: caller holds this mm's PTE section; table1 was resolved
+        // and stale-guarded by the block walk above.
+        unsafe { (*table1).set(idx, PageTableEntry::from_bits(new_bits)) };
+    }
+
+    /// The old per-page walk body, kept for the exotic shapes the fast
+    /// path declines (an upper-level leaf in the user range). Semantics
+    /// are the pre-fast-path behavior, unchanged.
+    fn unmap_pages_slow(&self, start: usize, end: usize) {
+        let mut addr = start;
+        while addr < end {
+            // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the range
+            // being unmapped from this address space.
+            let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
+
+            if ppn.is_none() {
+                if let Some(raw) = super::page_fault::read_pte_raw(
+                    self.pgd,
+                    VirtAddr::new(addr as u64),
+                ) {
+                    if crate::mm::swap::is_swap_entry(raw) {
+                        crate::mm::swap::swap_free_slot(
+                            crate::mm::swap::swap_entry_type(raw),
+                            crate::mm::swap::swap_entry_offset(raw),
+                        );
+                        // SAFETY: addr is a page-aligned user address whose
+                        // PTE we just verified above.
+                        unsafe { self.clear_pte(addr as u64); }
+                    }
+                }
+                addr += PAGE_SIZE_USIZE;
+                continue;
+            }
+
+            if let Some((ppn_val, pte_bits)) = ppn {
+                if pte_bits & PageTableEntry::U == 0 {
+                    addr += PAGE_SIZE_USIZE;
+                    continue;
+                }
+                if crate::mm::page_alloc::is_foreign_user_frame(
+                    (ppn_val as usize) << PAGE_SHIFT,
+                ) {
+                    // SAFETY: addr is a page-aligned virtual address in this address space.
+                    unsafe { self.clear_pte(addr as u64); }
+                    addr += PAGE_SIZE_USIZE;
+                    continue;
+                }
+                use crate::mm::page_desc::pfn_to_page_mut;
+                let page = pfn_to_page_mut(ppn_val as usize);
+                if !page.is_null() {
+                    unsafe {
+                        (*page).rmap_alt_remove(
+                            self as *const _ as usize,
+                            addr / PAGE_SIZE_USIZE,
+                        );
+                    }
+                    if unsafe { (*page).is_mapped() } {
+                        crate::mm::rmap::page_remove_rmap(unsafe { &*page });
+                    }
+                    let new_ref =
+                        unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                    if new_ref == 0 {
+                        crate::mm::page_alloc::free_pages(
+                            (ppn_val as usize) << PAGE_SHIFT, 0,
+                        );
+                    }
+                    if pte_bits & cow_flags::PCACHE != 0 {
+                        release_cache_mapping_pin(ppn_val as usize);
+                    }
+                }
+                // SAFETY: addr is a valid, page-aligned virtual address in this address space,
+                // and its reverse mapping has just been removed above.
+                unsafe {
+                    self.clear_pte(addr as u64);
+                }
+                self.sub_rss(1);
+            }
+
+            addr += PAGE_SIZE_USIZE;
+        }
     }
 
     /// Teardown of ONE present user leaf at `va`, for callers that already
@@ -1100,7 +1299,7 @@ impl MmStruct {
         let vpn2 = a.pmd_index() as usize;
         let vpn1 = a.pte_index() as usize;
 
-        let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
+        let root_table = unsafe { get_page_table_virt(self.pgd << PAGE_SHIFT) };
 
         let pte4 = (*root_table).get(vpn4);
         if !pte4.is_valid() {
@@ -1166,7 +1365,7 @@ impl MmStruct {
             let vpn2 = a.pmd_index() as usize;
             let vpn1 = a.pte_index() as usize;
 
-            let root_table = get_page_table_virt(self.pgd << PAGE_SHIFT);
+            let root_table = unsafe { get_page_table_virt(self.pgd << PAGE_SHIFT) };
             let pte4 = (*root_table).get(vpn4);
             if !pte4.is_valid() {
                 va += PAGE_SIZE_USIZE as u64;
