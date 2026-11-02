@@ -2465,15 +2465,39 @@ unsafe fn setup_frame_x86_64(
         ss_size: (*task).sigstack.ss_size,
     };
 
-    // Handler return path: glibc ALWAYS sets SA_RESTORER on x86_64 — use
-    // the userspace restorer when provided, else the in-frame trampoline.
-    frame.pretcode = if (action.sa_flags.bits() & SigFlags::SA_RESTORER) != 0
-        && action.sa_restorer != 0
-    {
-        action.sa_restorer as u64
+    // Handler return path — reference x86_64 semantics (arch/x86
+    // __setup_rt_frame): SA_RESTORER is MANDATORY on this ABI. The kernel
+    // uses the provided sa_restorer VERBATIM (even 0 — the handler then
+    // returns to NULL and dies, si_addr=0) and, when SA_RESTORER is clear
+    // at all, fails the frame setup ("could use a vstub here" -> -EFAULT)
+    // which force-sigsegv's the task. There is NO kernel-side trampoline
+    // on this ABI, unlike riscv64/aarch64 whose reference kernels return
+    // through a vDSO stub (Rux stand-in: the fixed trampoline page).
+    //
+    // The old in-frame stack trampoline here was a non-reference crutch:
+    // it kept musl-built LTP's restorer-less installs alive (musl never
+    // fills oldact's sa_restorer, so LTP's sig_initial() harvests 0 and
+    // installs SA_RESTORER|0 — rt_sigprocmask01/rt_sigsuspend01) while
+    // the user stack was executable; the stack-NX W^X change (sec-r1)
+    // then made the jump into the frame fault exactly like the same
+    // binaries die on the reference host kernel (verified 3/3 on the
+    // host: rt_sigprocmask01 rc=139, rt_sigsuspend01 TBROK SIGSEGV —
+    // the r21 PASSes were riding the crutch, a musl artifact classed
+    // with rt_sigaction01, not a kernel bug).
+    if (action.sa_flags.bits() & SigFlags::SA_RESTORER) != 0 {
+        frame.pretcode = action.sa_restorer as u64;
     } else {
-        frame_addr + core::mem::offset_of!(SignalFrame, retcode) as u64
-    };
+        // Reference: -EFAULT from frame setup -> force_sigsegv(sig).
+        crate::pr_err!(
+            "sigframe: no SA_RESTORER (sig={} pid={}) -> force SIGSEGV",
+            sig,
+            (*task).pid()
+        );
+        (*task).sigframe = None;
+        (*task).sigframe_addr = 0;
+        handle_default_signal(11);
+        return false;
+    }
 
     // Save signal frame to task structure
     (*task).sigframe_addr = frame_addr;
