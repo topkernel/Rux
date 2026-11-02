@@ -25,6 +25,7 @@ pub mod stat;
 pub mod procfs;
 pub mod sysfs;
 pub mod debugfs;
+pub mod tracefs;
 pub mod dev_t;
 pub mod devfs;
 pub mod fs_struct;

@@ -2348,6 +2348,18 @@ unsafe fn __schedule() {
                     r56_print_pid(b"", home as u32, b"\n");
                 }
             }
+            // The sched:sched_migrate_task tracepoint for the heal path —
+            // the stamp is about to move an existing task to its home CPU
+            // (the reference records every set_task_cpu move).
+            if crate::trace::EVENT_SCHED_MIGRATE_TASK.armed() {
+                crate::trace::trace_sched_migrate_task(
+                    &*(*tp).comm(),
+                    (*tp).pid() as u32,
+                    (*tp).prio(),
+                    (*tp).ti_cpu(),
+                    home as i32,
+                );
+            }
             (*tp).set_ti_cpu(home as i32);
             prev = tp;
         } else if (tp as usize) >= 0x80000000
@@ -3578,6 +3590,18 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
     // CPU owns the task in the mark_picked_on_cpu → __switch_to window.
     unsafe {
         if !(*task).on_cpu() {
+            // The sched:sched_migrate_task tracepoint — the reference
+            // records it in set_task_cpu, just before the stamp moves.
+            // Marshals only behind armed().
+            if crate::trace::EVENT_SCHED_MIGRATE_TASK.armed() {
+                crate::trace::trace_sched_migrate_task(
+                    &*(*task).comm(),
+                    (*task).pid() as u32,
+                    (*task).prio(),
+                    (*task).ti_cpu(),
+                    target,
+                );
+            }
             (*task).set_ti_cpu(target);
         }
     }
