@@ -377,10 +377,26 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
 
     let mut addr = args[0] as usize;
     let length = args[1] as usize;
-    let prot_flags = args[2] as u32;
+    let mut prot_flags = args[2] as u32;
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+
+    // W^X (sec-r1): READ_IMPLIES_EXEC personality (0x0400000, settable
+    // via personality(2) — legacy loaders use it). The reference do_mmap
+    // adds PROT_EXEC to any PROT_READ mapping made by such a process,
+    // EXCEPT on noexec-mounted files (that carve-out needs the file's
+    // mount flags, which this port's mmap does not yet consult for ANY
+    // exec mapping — noted in the posture ledger).
+    const READ_IMPLIES_EXEC: u32 = 0x0400_000; // include/uapi personality.h
+    if prot_flags & prot::PROT_READ != 0 {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: `t` is the current task pointer; a u32 field read.
+            if unsafe { (*t).personality } & READ_IMPLIES_EXEC != 0 {
+                prot_flags |= prot::PROT_EXEC;
+            }
+        }
+    }
 
     // The file offset must be a multiple of the page size. The reference
     // kernel's mmap syscall wrapper rejects a misaligned offset with

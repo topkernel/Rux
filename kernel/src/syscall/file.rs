@@ -5038,14 +5038,11 @@ pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
 pub fn sys_acct(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[0] as *const u8;
 
-    // CAP_SYS_PACCT-equivalent gate FIRST — even acct(NULL) from an
-    // unprivileged caller is EPERM (LTP acct01 runs the NULL/tmpfile
-    // cases as nobody).
-    if let Some(task) = crate::sched::current() {
-        if task.cred().euid != 0 {
-            return -(errno::EPERM as i64);
-        }
-    } else {
+    // CAP_SYS_PACCT gate FIRST — even acct(NULL) from an unprivileged
+    // caller is EPERM (LTP acct01 runs the NULL/tmpfile cases as nobody).
+    // L3 wiring (sec-r1): the gate is the capability, not euid!=0 — a
+    // capability-holding non-root caller passes, matching acct(2).
+    if !crate::security::capable(crate::security::CAP_SYS_PACCT) {
         return -(errno::EPERM as i64);
     }
 

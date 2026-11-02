@@ -336,6 +336,13 @@ pub const PF_X: u32 = 0x1;  // Executable
 pub const PF_W: u32 = 0x2;  // Writable
 pub const PF_R: u32 = 0x4;  // Readable
 
+/// PT_GNU_STACK (UAPI): stack permission request. PF_X in p_flags asks
+/// for an executable stack (EXSTACK_ENABLE_X); any other value keeps the
+/// secure NX default. A MISSING header also means NX on this port —
+/// neither arch maps onto the reference's READ_IMPLIES_EXEC fallback
+/// (that path exists for 32-bit x86 binaries only).
+pub const PT_GNU_STACK: u32 = 0x6474_e551;
+
 impl Elf64Ehdr {
     /// Parse ELF header from byte buffer
     pub unsafe fn from_bytes(data: &[u8]) -> Option<Elf64Ehdr> {
