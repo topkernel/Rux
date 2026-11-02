@@ -106,6 +106,7 @@ macro_rules! dfx_switch_table {
             LostParkTrace => "lostpark",
             AllocWatch => "allocwatch",
             SyncGuard => "syncguard",
+            SyncWatch => "syncwatch",
         }
     };
 }
@@ -527,9 +528,19 @@ pub enum DfxSwitch {
     /// meaning our sender-thread state diverges from the reference's
     /// BEFORE the guard, and that divergence is the real hunt target).
     SyncGuard,
+    /// Log-only companion of SyncGuard: runs the same two reference
+    /// checks on every sync send but NEVER rejects (SYNCSEND-WATCH
+    /// prints). For the divergence hunt: a boot with syncwatch shows
+    /// which sender shapes trip the reference checks on a boot that
+    /// still PROCEEDS, and the print carries the discriminator fields
+    /// (stack-top from_tid — my own outgoing = userspace stacking the
+    /// reference rejects; todo-head to_tid — None means proc-addressed
+    /// work on a busy thread's todo, a delivery shape the reference
+    /// avoids via waiting_threads).
+    SyncWatch,
 }
 
-const SWITCH_COUNT: usize = 58;
+const SWITCH_COUNT: usize = 59;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -632,6 +643,7 @@ impl DfxSwitch {
             // only key the SWITCHES array.
             DfxSwitch::AllocWatch => 56,
             DfxSwitch::SyncGuard => 57,
+            DfxSwitch::SyncWatch => 58,
         }
     }
 
