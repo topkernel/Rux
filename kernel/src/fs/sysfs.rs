@@ -1384,6 +1384,10 @@ fn build_tree() -> Arc<KObject> {
     // /sys/kernel/debug is the debugfs mount point (Linux: sysfs owns
     // the directory, debugfs is mounted over it).
     mk_dir(&kernel, "debug", KType::Kernel);
+    // /sys/kernel/tracing is the tracefs mount point — the reference's
+    // canonical tracefs location (sysfs owns the directory, tracefs is
+    // mounted over it).
+    mk_dir(&kernel, "tracing", KType::Kernel);
     attr_ro(&kernel, "uevent_seqnum", move || {
         format!("{}\n", UEVENT_SEQNUM.load(Ordering::Relaxed)).into_bytes()
     });
