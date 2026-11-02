@@ -1330,10 +1330,14 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
    restart (71.9s) re-triggered creation but too early; a restart landing
    after 105s should hit a populated store and WIN — cheap to watch on the
    next crash-boot (grep CreateNewUser + accountmgr SIGDEATH ordering).
-2. THE ACCOUNTMGR SEGFAULT (lb324 71.9s): pull the full USEGV-L register/vma
-   dump from run/oh-lb324-serial.log (~line 8283); if a syscall fed it garbage
-   (e9029b74/capability paths are new since cg16f), kernel-actionable. One
-   crash in three boots; compare against cg16f boots' crash counts.
+2. THE ACCOUNTMGR SEGFAULT (lb324 71.9s, DECODED): fault rip=0x7ff085175144,
+   cr2=0x7ff20051c6c2 — the faulting address sits INSIDE the 2GB PROT_NONE
+   guard map (PROTNONE-MAP 0x7ff0020cb000 len 0x80000000 printed 30ms before,
+   serial lines 8271-8283 of run/oh-lb324-serial.log). That is userspace
+   dereferencing a failed-map/guard result — the reference kernel faults the
+   same way; NOT kernel-actionable on its face (unless the map that produced
+   the garbage pointer failed on OUR kernel but succeeds on the reference —
+   would need an mmap-failure audit around 71.7s). One crash in three boots.
 3. RENDER_SERVICE WAITER (tid 948, uaddr 0x7ff08d38d804): decode whether it is
    the compositor's surface/vsync wait (unblocks with pixels) or a producer
    the pixel path needs (starved signaler — scheduling lever). The census
