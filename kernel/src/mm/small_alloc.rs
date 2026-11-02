@@ -141,6 +141,10 @@ struct SmallCache {
     /// lb260/lb261 OH allocator-freeze) — nonzero means the wild-write
     /// producer struck this class's list.
     walk_cycles: AtomicUsize,
+    /// dfx=allocwatch section meter: max slow-path section duration
+    /// (TSC cycles) and count of sections >10 ms (25M cycles @2.5GHz).
+    slow_max_cyc: AtomicU64,
+    slow_over_10ms: AtomicU64,
 }
 
 impl SmallCache {
@@ -154,6 +158,8 @@ impl SmallCache {
             obj_frees: AtomicUsize::new(0),
             lock_holds: AtomicUsize::new(0),
             walk_cycles: AtomicUsize::new(0),
+            slow_max_cyc: AtomicU64::new(0),
+            slow_over_10ms: AtomicU64::new(0),
         }
     }
 }
@@ -287,11 +293,14 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
     // dfx=allocwatch: cross-CPU holder stamp (frozen-holder naming; the
-    // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs).
+    // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs) + the
+    // section-duration meter (lb268: one bounded section held 300 ms of
+    // real KVM execution — name the cost class).
     let _aw = crate::dfx::allocwatch::guard(
         crate::dfx::allocwatch::SITE_SMALL_ALLOC,
         ci as u8,
     );
+    let _t0 = crate::arch::cpu::read_time();
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut refill = |mag: &mut Magazine| -> bool {
         while mag.len < MAG_DEPTH {
@@ -312,6 +321,17 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         // cpu id out of bank range (divergence family): serve one
         // object directly under the lock, no row touched.
         first = alloc_locked(ci, heap_start);
+    }
+    // dfx=allocwatch section meter (see _t0 above).
+    if crate::dfx::allocwatch::armed() {
+        let d = crate::arch::cpu::read_time().wrapping_sub(_t0);
+        let prev = cache.slow_max_cyc.load(Ordering::Relaxed);
+        if d > prev {
+            cache.slow_max_cyc.store(d, Ordering::Relaxed);
+        }
+        if d > 25_000_000 {
+            cache.slow_over_10ms.fetch_add(1, Ordering::Relaxed);
+        }
     }
     drop(_g);
     first
@@ -711,6 +731,20 @@ pub fn live_stats_kib() -> (u64, u64) {
 /// free). Object headers carry vtables/magic/locks that identify the
 /// owning type — the census counts say WHICH CLASS holds the heap, this
 /// says WHICH TYPE fills the class. Caller must not hold the class lock.
+/// dfx=allocwatch probe: per-class slow-path section durations (max ms
+/// and count of sections >10 ms) — separates a genuinely long section
+/// from a stale stamp. Reset on read.
+pub fn audit_section_peek() -> [(u64, u64); 8] {
+    let mut out = [(0u64, 0u64); 8];
+    for (i, c) in CACHES.iter().enumerate() {
+        out[i] = (
+            c.slow_max_cyc.load(Ordering::Relaxed),
+            c.slow_over_10ms.load(Ordering::Relaxed),
+        );
+    }
+    out
+}
+
 /// dfx=allocwatch probe: live lock-word state of every class lock
 /// (bit i = CACHES[i] held at sample time). A sample is not a snapshot;
 /// the caller filters transients (see dfx/allocwatch.rs STUCK detection
