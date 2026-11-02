@@ -1768,20 +1768,46 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // (only a pinned, provably read-only file is) — the old
                 // in-surgery copy of this check treated a missing pin as
                 // read-only and bailed mid-mutation.
+                //
+                // Range-bounded scan (reference mprotect_fixup walks the
+                // range only): the old whole-tree iter() made every
+                // writable mprotect O(all VMAs of the mm) under the write
+                // lock — the mp_cover cost class on the FFRT-churn boots
+                // (mmprof). Same semantics: the seed catches any VMA
+                // containing addr (an overlapping VMA with start < addr
+                // must contain addr), the loop covers starts >= addr
+                // until past the span.
                 if prot & 0x2 != 0 {
-                    for vma in vma_mgr.iter() {
-                        let vs = vma.start().as_usize();
-                        let ve = vma.end().as_usize();
-                        if vs >= addr + length || ve <= addr {
-                            continue; // no overlap with the target range
-                        }
-                        if !vma.flags().is_shared() {
-                            continue; // MAP_PRIVATE upgrades are legal
-                        }
-                        if let Some(file) = addr_space.get_vma_file(vs) {
-                            if file.flags().is_readonly() {
-                                return -13_i64; // EACCES
+                    let range_end = addr + length;
+                    let mut cursor = addr;
+                    if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
+                        cursor = v.end().as_usize();
+                        if v.flags().is_shared() {
+                            if let Some(file) = addr_space.get_vma_file(v.start().as_usize()) {
+                                if file.flags().is_readonly() {
+                                    return -13_i64; // EACCES
+                                }
                             }
+                        }
+                    }
+                    for v in vma_mgr.iter_after(crate::mm::page::VirtAddr::new(addr.saturating_sub(1))) {
+                        let (vs, ve) = (v.start().as_usize(), v.end().as_usize());
+                        if vs >= range_end {
+                            break; // past the span
+                        }
+                        if ve <= cursor {
+                            continue; // covered by the seed / a prior piece
+                        }
+                        if v.flags().is_shared() {
+                            if let Some(file) = addr_space.get_vma_file(vs) {
+                                if file.flags().is_readonly() {
+                                    return -13_i64; // EACCES
+                                }
+                            }
+                        }
+                        cursor = ve.max(cursor);
+                        if cursor >= range_end {
+                            break;
                         }
                     }
                 }
