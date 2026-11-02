@@ -1,4 +1,4 @@
-# Industry OS Design Survey — designs the reference kernel lacks, and what Rux adopts
+# Operating-System Kernel Design Survey — designs the reference kernel lacks, and what Rux adopts
 
 Round 1 of the arch-research lane (charter in `TASK.md`, 2026-11-03). Scope:
 survey industry operating-system architectures for designs the mainstream

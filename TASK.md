@@ -28,7 +28,7 @@ stacks are the existing entries).
   per-CPU, procfile macros...) — evaluate each lever against industry
   precedent and evidence.
 
-## Deliverable (docs/architecture/industry-design-survey.md)
+## Deliverable (docs/architecture/os-kernel-survey.md)
 Per design: what it is + where it ships (papers/projects/numbers);
 what the reference kernel lacks; Rux adoption verdict — ADOPT /
 PROTOTYPE / REJECT (with the three-gate risk note); cost estimate;
@@ -68,7 +68,7 @@ divergence in docs/architecture/design-divergences.md per template.
   (4.3/4.11/5.13), NOVA/PMFS + Optane EOL 2022, Capsicum (USEC '10,
   FreeBSD 9), Plan 9 namespaces (Pike), RUMP anykernel (Kantee),
   Kani/loom. Sources recorded inline in the doc.
-- Wrote `docs/architecture/industry-design-survey.md` (~730 lines):
+- Wrote `docs/architecture/os-kernel-survey.md` (~730 lines):
   18 designs, verdicts (ADOPT: intralingual continuation, verification
   method; PROTOTYPE: Zircon internal rights, internal writeback
   completion-ring, RUMP-style in-host fs tests; REJECT with reasons:
