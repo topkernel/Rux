@@ -207,8 +207,60 @@ pub fn tick(now_jiffies: u64) {
         return;
     }
     LAST_DUMP.store(now_jiffies, Ordering::Relaxed);
-    let k = DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 3;
-    report_line(k);
+    // Line emission is deferred to the dump kthread: a softirq emitter
+    // carries a 100us emit-lock budget while the OH hilog flood holds the
+    // console ~17ms per 256B line (emulated baud) — the lb336 t=60s dump
+    // never reached the serial. Task context waits up to 2s and wins.
+    ensure_dump_thread();
+}
+
+// ---- dump kthread ----
+static DUMP_THREAD_ON: AtomicBool = AtomicBool::new(false);
+
+/// Spawn the task-context dump thread (once; called from the timer
+/// softirq tick and from dfx::init — either way the thread starts once).
+pub fn ensure_dump_thread() {
+    if DUMP_THREAD_ON.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    crate::process::kthread::kthread_run(
+        mmprof_dump_fn,
+        core::ptr::null_mut(),
+        "mmprofd",
+    );
+}
+
+extern "C" fn mmprof_dump_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    use crate::process::task::{Task, TaskState};
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+        // Sleep MMPROF_DUMP_SECS of jiffies (nanosleep discipline:
+        // one-shot wakeup timer + INTERRUPTIBLE schedule).
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut Task,
+            None => return 0, // no task context
+        };
+        // SAFETY: current is the running task's pointer (we are it).
+        let pid = unsafe { (*current).pid() };
+        let wake_at = crate::drivers::timer::get_jiffies()
+            + MMPROF_DUMP_SECS * crate::config::KERNEL_HZ as u64;
+        let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
+        // SAFETY: setting our own task's state.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        // Re-arm IRQs so the timer tick reaches this CPU (R54).
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
+        let k = DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 3;
+        report_line(k);
+    }
+    0
 }
 
 /// Print ONE compact stat as `name=avg/max(n)` inside a caller's line.

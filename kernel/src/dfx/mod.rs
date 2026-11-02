@@ -134,6 +134,9 @@ pub mod cctx;
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
     switches::init_from_cmdline();
+    // mmprof (cmdline mmprof=1): spawn the task-context dump thread here
+    // (cmdline is parsed; the thread prints with the task emit budget).
+    mmprof::ensure_dump_thread();
     // oops=panic seeds panic_on_oops (the sysctl can flip it later).
     oops::init_from_cmdline();
     // Wild-write tripwire arms between the timekeeper's init and
