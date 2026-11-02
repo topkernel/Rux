@@ -1197,3 +1197,47 @@ origin/main's TASK.md became the stress lane's 101-line document (the
 coordinator repurposed it). This worktree keeps the oh-launcher lane
 history; the merge resolution is ours-by-intent. SP-1/SP-2 intel is in
 the stress lane's TASK.md on main.
+
+### SIXTEENTH-SUCCESSOR CLOSE (2026-11-02 22:05-22:10)
+1. THE STEER ADJUDICATED (lostpark on a stall boot): lb319 (futextrace+
+   lostpark armed) hit the samgr-internal futex deadlock class (samgr main
+   tid 325 + Executor tid 345 parked in PRIVATE futexes from ~6s, 630s+).
+   lostpark printed ZERO lines all boot — no idle-loop lies, no refused
+   wakes through a 10-minute full-system stall. The parked uaddrs
+   (0x7ff082aa94394 / 0x7fffffffcab4 — process heap + main-thread stack)
+   are NOT the param-arena family (FXDV2 covers 0x7ff0_0000_0000..100000
+   only; its 500 budget burns by 5.5s AND its hot-path prints are a
+   documented samgr-dark hazard — lb243). VERDICT: the post-creation
+   stall web is USERSPACE-INTERNAL with instrument backing; kernel wake/
+   park machinery is clean through it. futextrace dropped from rolls.
+2. USERIAM (mission leg 3, now adjudicated): the code-12 handler park is
+   on EVERY boot's critical path (lb317 596s, lb318 424s, lb320 248s+),
+   parked USERSPACE-SIDE (OWE: thtodo=0, no outstanding txn, thread idle
+   in BWR read) — useriam's FFRT executor never completes the task
+   (task-dump posture: OS_FFRT_2_0 in futex_wait, OS_FFRT_Delay epoll-
+   polling). NOT the kernel orphan (that died with the tcomplete fix).
+   NEXT INSTRUMENT (successor): a futex-stuck census — stamp park time
+   per futex wait, 1Hz report of waits >N s with uaddr/tgid/tid — names
+   the exact condvar and its non-running producers; park it next to the
+   TXN-HANG census in the same tick.
+3. Boot classes this session (cg16e/cg16f, all system-lb5+fresh2,
+   dfx=ams46,txnhunt,syncguard): lb311 guards-on warm (1 why=20, boot
+   unharmed, POISON32 2372->16), lb312 pre-fix kernel crawl (no ready in
+   1355s), lb313 RACE LOST BY ~1s (ready 238.8 vs giveup 239.7),
+   lb314/316 samgr-buffer-exhaust watchdog spiral -> init sysrq-c
+   (variance), lb315/319 samgr-internal futex deadlock class (6s onset),
+   lb317 RACE WON (bundle size:34 @183.4s, install stream ran, ladder
+   0-spin — then stalled PRE-startUser on the foundation tid-725 futex
+   anchor + 1522 poison at distributeddata), lb318 startUser fired ->
+   accountmgr "userId not exist" fast-fail (the KVS coin-flip),
+   lb320 late creation (689s, host-loaded) -> empty-set loss, ladder
+   spin. lostpark silent on every armed boot; zero PANIC on cg16f.
+4. PUSHED through c6659188 (main aa43f52e merged; SP-1/SP-2 in every
+   roll since cg16f). Gates: x3 rc=0 + make test ALL PASSED on the
+   final tree (cg16-*-build4/maketest4 logs).
+5. PIXELS: not yet. The chain now needs ONE boot with: no early spiral +
+   race won + accountmgr coin-flip won + post-creation chain unstarved.
+   lb317 had 3 of 4. The two standing roots (samgr Executor futex
+   interleave; useriam FFRT completion) are userspace-internal under the
+   whole-system per-op wall — the perf lane's syscost/pbench territory
+   per the merge-gate philosophy, or the futex-stuck census above.
