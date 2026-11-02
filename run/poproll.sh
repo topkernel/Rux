@@ -15,7 +15,7 @@ for i in $(seq 0 $((MAX-1))); do
   SER="run/oh-${TAG}-serial.log"
   echo "[pop] boot $TAG $(date +%H:%M:%S)" >> run/roll-logs/pop14.log
   setsid env SMP=2 LOGLEVEL=6 USERDATA=run/userdata-warm.img \
-    python3 run/lb-boot.py "$TAG" 1800 run/system-lb5.img run/bzImage-ladder-fx5fix \
+    python3 run/lb-boot.py "$TAG" 1800 run/system-lb5.img run/bzImage-ladder-fx6fix \
     " dfx=ams46,txnhunt,allocwatch" > "run/${TAG}-driver.out" 2>&1 &
   DRV=$!
   sleep 10

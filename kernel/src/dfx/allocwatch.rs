@@ -135,12 +135,16 @@ fn enter_keyed(site: u8, class: u8) -> u64 {
     };
     let ep = EPOCH.fetch_add(1, Ordering::Relaxed);
     let h = &HOLDERS[slot];
-    h.key.store(key, Ordering::Relaxed);
-    h.epoch.store(ep, Ordering::Relaxed);
-    h.pid.store(pid, Ordering::Relaxed);
-    h.tgid.store(tgid, Ordering::Relaxed);
+    // Publish order: everything BEFORE pid; pid last (x86 TSO retires
+    // stores in order even under Relaxed). A reader seeing pid != 0
+    // then sees a coherent fresh stamp — the lb264 shape (fresh pid,
+    // stale jif from the slot's previous tenant) is impossible.
     h.jif
         .store(crate::drivers::timer::get_jiffies() as u64, Ordering::Relaxed);
+    h.key.store(key, Ordering::Relaxed);
+    h.epoch.store(ep, Ordering::Relaxed);
+    h.tgid.store(tgid, Ordering::Relaxed);
+    h.pid.store(pid, Ordering::Relaxed);
     ep
 }
 
@@ -234,7 +238,7 @@ fn tick_stuck_scan(now: u64) {
             let first = s.load(Ordering::Relaxed);
             if first == 0 {
                 s.store(now, Ordering::Relaxed);
-            } else if now - first >= 100 {
+            } else if now - first >= 20 {
                 stuck_report(now, "small_alloc", i as u8, first);
                 // keep the run (no re-arm) — the word is still stuck;
                 // the global throttle paces the re-reports.
@@ -250,7 +254,7 @@ fn tick_stuck_scan(now: u64) {
             let first = s.load(Ordering::Relaxed);
             if first == 0 {
                 s.store(now, Ordering::Relaxed);
-            } else if now - first >= 100 {
+            } else if now - first >= 20 {
                 stuck_report(now, "slab", i as u8, first);
             }
         } else {
@@ -261,7 +265,7 @@ fn tick_stuck_scan(now: u64) {
         let first = BUDDY_STUCK.load(Ordering::Relaxed);
         if first == 0 {
             BUDDY_STUCK.store(now, Ordering::Relaxed);
-        } else if now - first >= 100 {
+        } else if now - first >= 20 {
             stuck_report(now, "buddy", 0, first);
         }
     } else {
@@ -285,7 +289,7 @@ pub fn tick_check() {
             continue;
         }
         let jif = h.jif.load(Ordering::Relaxed);
-        if now <= jif || now - jif < 100 {
+        if now <= jif || now - jif < 30 {
             continue; // held < 1 s (100 Hz)
         }
         // Re-report throttle: per-SLOT 5 s (the first version throttled
@@ -294,7 +298,7 @@ pub fn tick_check() {
         // small_alloc and the machine died before the buddy slot's
         // window opened).
         let last = h.jif_report.load(Ordering::Relaxed);
-        if last != 0 && now < last + 500 {
+        if last != 0 && now < last + 200 {
             continue;
         }
         h.jif_report.store(now, Ordering::Relaxed);
@@ -354,8 +358,23 @@ pub fn tick_check() {
         } else {
             "not-found(task exited? stamp stale)"
         };
+        // Nested-buddy-spin hint (lb263): the small_alloc section's only
+        // unbounded tail is the NESTED buddy-lock acquire — a waiter
+        // there has NO stamp (stamps happen after acquire), so a stuck
+        // buddy word makes the small_alloc holder spin forever with no
+        // buddy slot ever appearing. Name the buddy word's live state on
+        // every small_alloc/slab hold report.
+        let buddy_hint = if site < SITE_MAX {
+            if crate::mm::buddy_allocator::audit_lock_held() {
+                " buddyword=locked"
+            } else {
+                " buddyword=clean"
+            }
+        } else {
+            ""
+        };
         crate::pr_warn!(
-            "ALLOC-HOLD #{} slot={} site={} class={} pid={} tgid={} comm={} held={}ms state={} preempt={:#x} ti_cpu={} verdict={}",
+            "ALLOC-HOLD #{} slot={} site={} class={} pid={} tgid={} comm={} held={}ms state={} preempt={:#x} ti_cpu={} verdict={}{}",
             n,
             i,
             site_name,
@@ -367,7 +386,8 @@ pub fn tick_check() {
             if found { state_bits } else { 0xff },
             preempt,
             ti_cpu,
-            cls
+            cls,
+            buddy_hint
         );
         // Holder kernel-stack PCs (lb260: the onset print named the
         // holder but not WHERE it is stuck; both cpus died within ~5 s
