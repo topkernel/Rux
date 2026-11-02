@@ -3721,15 +3721,40 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let argv_ptr = args[2] as *const *const u8;
     let envp_ptr = args[3] as *const *const u8;
-    let _flags = args[4] as i32;
+    let flags = args[4] as i32;
+
+    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+    const AT_EMPTY_PATH: i32 = 0x1000;
 
     if pathname_ptr.is_null() {
         return -(errno::EFAULT as i64);
     }
 
-    let path = match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {
-        Ok(p) => p,
-        Err(e) => return e as i64,
+    // Reference do_execveat: unknown flags are rejected BEFORE anything
+    // else (execveat02's flags=-1 case expects EINVAL even though the
+    // path itself would resolve).
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Path selection, reference do_execveat_common:
+    // - AT_EMPTY_PATH: execute the file referenced by dirfd itself (a
+    //   missing/invalid fd is EBADF, checked before any path walking —
+    //   execveat02's bad-fd case).
+    // - otherwise: normal dirfd/AT_FDCWD-relative resolution ("" is
+    //   ENOENT inside resolve_user_path, like getname()).
+    let path = if flags & AT_EMPTY_PATH != 0 {
+        let file = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(dirfd as usize));
+        match file {
+            Some(f) => f.path(),
+            None => return -(errno::EBADF as i64),
+        }
+    } else {
+        match crate::syscall::file::resolve_user_path(dirfd, pathname_ptr) {
+            Ok(p) => p,
+            Err(e) => return e as i64,
+        }
     };
 
     let argv = match copy_argv_from_user(argv_ptr) {
@@ -3740,6 +3765,23 @@ pub fn sys_execveat(args: SyscallArgs) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
+
+    // AT_SYMLINK_NOFOLLOW: the reference's may_open() fails an open-for-
+    // exec of a symlink with ELOOP (S_IFLNK case), so execveat on a
+    // symlink with NOFOLLOW never execs the target (execveat02 expects
+    // ELOOP). Only the non-empty-path form can name a symlink here —
+    // AT_EMPTY_PATH execs whatever file object dirfd holds.
+    if flags & AT_SYMLINK_NOFOLLOW != 0 && flags & AT_EMPTY_PATH == 0 {
+        if let Ok(vp) =
+            crate::fs::vfs::path_lookup(&path, crate::fs::vfs::LOOKUP_NOFOLLOW)
+        {
+            if let Some(inode) = vp.inode.as_ref() {
+                if inode.mode.is_symlink() {
+                    return -(errno::ELOOP as i64);
+                }
+            }
+        }
+    }
 
     do_execve(&path, &argv, &envp, 0) as i64
 }
