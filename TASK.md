@@ -99,3 +99,88 @@ long-loop (fork12, mmapstress, mmap-corruption); brk-churn probe via
 glibc-static (musl pins brk); make test + full LTP spot-scan on the
 fixed kernel to guard the setattr/preempt changes.
 
+
+### 2026-11-02, round 2 — SP-3 fixed, IRQ-OFF-WINDOW adjudicated artifact, residual family censused, brk covered
+
+**Sync**: merged origin/main aa43f52e (round-1 SP-1/SP-2 content landed
+there); branch descends from main. Round-2 commits: 126e99b9 (kernel),
+ec9a0079 (probes).
+
+**Queue item 1 (SP-2 deep soak) + SP-3**: new rs classes dirstorm
+(shared-tree legal races, strict fd-pinned verify) and dirsync (16 KB
+write + fdatasync/fsync + fchmod + rename + dir-fsync storm). fsdeep
+boot: dirstorm 6x150s PASS (2.02M ops, 0 corrupt); fsmeta 8x180s PASS
+(1.45M ops — SP-2 area holds at 2x round-1 intensity); dirsync caught
+**SP-3: fsync(dirfd) on ext4 returned EINVAL** (sys_fsync's blanket
+!is_regular_file check; the reference kernel's ext4_dir_operations
+carries .fsync, and our own namei defers entry-block durability to
+fsync(dirfd)). Fixed (is_directory + ext4 ops -> ext4_sync_file);
+rerun clean: dirsync 615,856 ops rc=0, dirstorm 2.55M ops rc=0 with
+strict dir-fsync checks. make test green after fix.
+
+**Queue item 2 (IRQ-OFF-WINDOW idle-wake)**: adjudicated MEASUREMENT
+ARTIFACT, not an interrupts-domain violation. Evidence: periodic LAPIC
+tick + idle halts with IF=1 (gap = halt-exit delivery latency);
+user-frame gap lines prove steal-magnitude delays with IF=1; syscost's
+cli/sti zone accounting measured organic REST maxima <=2 ms in the same
+boots (the only >7 ms segments were ONE host-stall window quantized on
+both CPUs: 2619 ms REST @ file.rs:581 cpu1 + 2620 ms UART cpu0, fired
+once, never again). Probe re-tagged: IRQ-DELAY-IDLE / IRQ-DELAY-STEAL
+for artifact frames (kernel change 126e99b9), verified live. No
+interrupts fix needed; guarded-domain band holds organically.
+
+**Queue item 3 (WAKE-STRANDED re-census, SP-1-fixed kernel)**: the
+residual family STANDS and is deterministic. memory2 boot: malloc rc=1
+(worker 308 wedge, needed SIGKILL — campaign's first wedge), 1x
+WAKE-STRANDED 100,469 ms/22,262 visits, 21 heals, 3 underflows. Chain:
+rs malloc parent (pid 307) carried preempt_count 0x10004 for 200.7 s ->
+wakeups refused -> heal -> induced underflow at a page-allocator lock
+drop (.sdata near mm::pglist::NODE_DATA). leakhunt rerun reproduced
+everything (wedge + 100.3 s strand + 200.8 s leak) and captured
+false-fire ORIGIN sites mm/zone.rs:567 + mm/mm_struct.rs:958 with
+oage_jif=1 (live acquires healed instantly) — steal-window false-fire
+producer: the ti_pc_* stamps refresh only on the task's own CPU tick,
+so a task parked mid-guard through a >2 s host steal window resumes
+"stale-stamped + bits present" and is healed live. Numbers are for the
+OH lane (same family); steal-aware exemption for the 200-tick bar is
+the argued fix direction.
+
+**Queue item 4 (LTP robustness long-loops)**: rsrun gained an
+`exec <budget> <path> [args]` line form (fixed a stale-tail argv bug
+found in-flight: NULL terminator placed before two token shifts — LTP
+new-API binaries rejected the duplicated path arg; host-verified).
+ltplong sweep (49 entries: mmapstress01-10 x3, mmap-corruption01 x3,
+msgstress01 x3, msg_comm, sem_nstest, fork_procs, fork_exec_loop,
+growfiles): mmapstress01 x3 + mmap-corruption01 x3 rc=0. Adjudicated
+NOT bugs (host reference identical): mmapstress02/03/05/08 brk-ENOMEM
+(1990s static binaries; their brk roundup fails on the modern
+reference kernel too). Usage-shape (my cmds lacked args):
+mmapstress06/09/10 — rerun with canonical args in ltplong3. REAL
+suspect family: fork_procs/fork_exec_loop/growfiles/msg_comm/sem_nstest
++ 1 of 3 msgstress01 -> rc=254 with EMPTY output = rsrun's waitpid
+ECHILD path: exec'd glibc-static children die silently before
+userspace output, sometimes (msgstress01 mixed 2xTBROK+1x254), under
+fork-heavy tests. fork_procs passes on the host reference (rc=0).
+ltplong3 rerun (8 entries incl. 2 of the same binaries): 0 recurrences
+— the family is INTERMITTENT (~1 boot in 2 today); mmapstress09/10
+PASS with canonical args, fork_procs -n 100 x2 + sem_nstest + growfiles
+all rc=0. Functional datum for the LTP lane: msg_comm TFAIL "messages
+leak between namespaces".
+
+**Queue item 5 (brk via glibc)**: brkchurn.c (glibc-static, host gcc
+— host/guest both x86_64): PASS. 864,320 raw sbrk waves (212 GB) +
+114.9M glibc malloc blocks (1.15 TB), enomem=0, verify 0 mismatch.
+The sys_brk paths musl physically cannot reach: covered clean.
+
+**Gates**: x86_64 build rc=0 (final 22:23), riscv64 build rc=0 (clean
+config), make test GREEN (1096-suite verdict green), SP-3 stressor
+rerun clean. Pushed origin/stress-port.
+
+**Round-3 queue**: (1) the rc=254 silent-child-death family (minimal
+repro: fork+exec loop of a glibc-static hello + waitpid audit; suspect
+interaction with the strand/leak family — same boots); (2) heal
+bar steal-awareness (200-tick bar vs >2 s host steal windows — design
+per the census above, coordinate with OH lane); (3) ltplong long-horizon
+loops (hours) once the 254 family is fixed; (4) mmapstress07 with
+tmpfile args; (5) doubled direct-console interleave on heal prints
+(two CPUs, no console lock) — cosmetic but garbles the heal lines.
