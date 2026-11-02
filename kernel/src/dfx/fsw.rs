@@ -176,6 +176,118 @@ pub static WALK_D_NS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_MISSCOST_NS: AtomicU64 = AtomicU64::new(0);
 /// Final dentry inode re-fetch + trailing-slash checks (walk tail).
 pub static WALK_TAIL_NS: AtomicU64 = AtomicU64::new(0);
+/// Walk misses whose fs lookup returned ENOENT (existence probes —
+/// each one paid the full ext4 directory scan; the negative-memo's
+/// target class).
+pub static WALK_MISS_ENOENT: AtomicU64 = AtomicU64::new(0);
+/// Negative-memo hits (ENOENT served from the bounded per-parent memo).
+pub static NEGHIT: AtomicU64 = AtomicU64::new(0);
+/// Stale negative memos discarded (parent mutated since insert).
+pub static NEGSTALE: AtomicU64 = AtomicU64::new(0);
+
+// === open() wall-vs-exec anatomy (21st successor) =========================
+// syscost's open row is WALL time per syscall — under the OH boot's load
+// it conflates kernel CPU with deschedule + spin-wait. These brackets
+// split the two: OPEN_WALL_MAX names the worst wall per open,
+// OPEN_EXEC_NS/OPEN_EXEC_MAX measure the sched-exec share (actual CPU
+// consumed inside the syscall, from the CFS entity's exec accounting).
+// exec ~= wall  -> real kernel cost (fix the fs path);
+// exec << wall  -> waiting (scheduling / lock-holder descheduled).
+pub static OPEN_WALL_MAX_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_EXEC_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_EXEC_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Max-update helper: keep the running maximum of `val` in `dst`.
+#[inline]
+fn max_update(dst: &AtomicU64, val: u64) {
+    let mut cur = dst.load(Ordering::Relaxed);
+    while val > cur {
+        match dst.compare_exchange_weak(cur, val, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(c) => cur = c,
+        }
+    }
+}
+
+/// Entry stamp for the open wall/exec brackets. Returns (wall_t0,
+/// exec_armed): the exec side charges the task's CFS accounting up to
+/// the entry instant (the returned pre-open window is discarded); the
+/// exit call then returns exactly the on-CPU time consumed inside the
+/// syscall. (0, false) when the probe is off or no task context exists.
+#[inline]
+pub fn open_exec_stamp() -> (u64, bool) {
+    if !on() {
+        return (0, false);
+    }
+    let w0 = crate::drivers::timer::monotonic_ns_since_boot();
+    match crate::sched::current() {
+        None => (w0, false),
+        Some(t) => {
+            t.sched_entity()
+                .update_exec_runtime(crate::sched::fair::sched_clock());
+            (w0, true)
+        }
+    }
+}
+
+/// Close the open wall/exec brackets opened by open_exec_stamp().
+#[inline]
+pub fn open_close(w0: u64, exec_armed: bool) {
+    if w0 == 0 {
+        return;
+    }
+    let wall = crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(w0);
+    max_update(&OPEN_WALL_MAX_NS, wall);
+    if exec_armed {
+        if let Some(t) = crate::sched::current() {
+            let d = t
+                .sched_entity()
+                .update_exec_runtime(crate::sched::fair::sched_clock());
+            OPEN_EXEC_NS.fetch_add(d, Ordering::Relaxed);
+            max_update(&OPEN_EXEC_MAX_NS, d);
+        }
+    }
+}
+
+pub fn note_walk_miss_enoent() {
+    WALK_MISS_ENOENT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_neghit() {
+    NEGHIT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_negstale() {
+    NEGSTALE.fetch_add(1, Ordering::Relaxed);
+}
+
+// (21st successor) cmdline `negmemo=1`: bounded negative-lookup memo in
+// the path walk (ext4 ENOENT results cached as negative dentry children,
+// invalidated by per-parent mut_gen, capped per parent). Gated separately
+// from the counters so a boot can measure the miss class with the fix
+// off, then A/B with it on.
+static NEG_MEMO_ARMED8: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+pub fn negmemo_on() -> bool {
+    match NEG_MEMO_ARMED8.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let v = match crate::cmdline::get_cmdline() {
+                None => return false,
+                Some(_) => crate::cmdline::get_param("negmemo").as_deref() == Some("1"),
+            };
+            NEG_MEMO_ARMED8.store(if v { 2 } else { 1 }, Ordering::Relaxed);
+            crate::pr_warn!(
+                "negmemo: {} (cmdline negmemo param = {:?})",
+                if v { "armed" } else { "off" },
+                crate::cmdline::get_param("negmemo")
+            );
+            v
+        }
+    }
+}
 
 /// Bracket timestamp (0 when the probe is off — skips the clock read).
 #[inline]
@@ -605,12 +717,21 @@ pub fn dump() {
         // per-component A..D = WALK_x_NS/WALK_COMP_N, miss arm =
         // WALK_MISSCOST_NS/WALK_MISS, walk tail = WALK_TAIL_NS/WALK,
         // open pre = OPEN_PRE_NS/OPEN_N, tails likewise.
-        "PC t={}s stat={} pre={} tail={} open={} pre={} tail={} walk pre={} loop={} tail={} comp={} a={} b={} c={} d={} miss={}",
+        // 21st-successor addendum: misseo (walk misses that were ENOENT
+        // existence probes), neghit/negstale (bounded negative-memo
+        // verdicts), openwmax (worst open wall, us), openexec (exec-NS
+        // sum, avg = /OPEN_N) + openexecmax (worst exec, us) — the
+        // wall-vs-exec split that attributes the syscost 85us row to
+        // kernel CPU vs waiting.
+        "PC t={}s stat={} pre={} tail={} open={} pre={} tail={} walk pre={} loop={} tail={} comp={} a={} b={} c={} d={} miss={} misseo={} neghit={} negstale={} openwmax={}us openexec={} openexecmax={}us",
         secs,
         v(&STAT_N), v(&STAT_PRE_NS), v(&STAT_TAIL_NS),
         v(&OPEN_N), v(&OPEN_PRE_NS), v(&OPEN_TAIL_NS),
         v(&WALK_PRE_NS), v(&WALK_LOOP_NS), v(&WALK_TAIL_NS),
         v(&WALK_COMP_N), v(&WALK_A_NS), v(&WALK_B_NS),
         v(&WALK_C_NS), v(&WALK_D_NS), v(&WALK_MISSCOST_NS),
+        v(&WALK_MISS_ENOENT), v(&NEGHIT), v(&NEGSTALE),
+        v(&OPEN_WALL_MAX_NS) / 1000, v(&OPEN_EXEC_NS),
+        v(&OPEN_EXEC_MAX_NS) / 1000,
     );
 }
