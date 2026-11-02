@@ -105,6 +105,7 @@ macro_rules! dfx_switch_table {
             FilerdProbe => "filerd",
             LostParkTrace => "lostpark",
             AllocWatch => "allocwatch",
+            SyncGuard => "syncguard",
         }
     };
 }
@@ -517,9 +518,18 @@ pub enum DfxSwitch {
     /// 2026-11-02). OFF by default; Relaxed atomic stores per slow-path
     /// acquire when on, nothing but one load when off.
     AllocWatch,
+    /// Reference-parity sync-send guards as a DIAGNOSTIC (ipc/binder.rs
+    /// SYNCSEND-GUARD prints): log-only mode would still reject, so the
+    /// switch gates the REJECTION itself. The reference kernel enforces
+    /// these two checks always; enabling this switch on an OH boot names
+    /// which userspace sends violate the reference shape under our
+    /// bookkeeping (lb304: samgr's own early code-20/code-3 sends —
+    /// meaning our sender-thread state diverges from the reference's
+    /// BEFORE the guard, and that divergence is the real hunt target).
+    SyncGuard,
 }
 
-const SWITCH_COUNT: usize = 57;
+const SWITCH_COUNT: usize = 58;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -621,6 +631,7 @@ impl DfxSwitch {
             // to a table without those two). Lookup is by name; indices
             // only key the SWITCHES array.
             DfxSwitch::AllocWatch => 56,
+            DfxSwitch::SyncGuard => 57,
         }
     }
 
