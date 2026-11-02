@@ -281,6 +281,12 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (frozen-holder naming; the
+    // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut refill = |mag: &mut Magazine| -> bool {
         while mag.len < MAG_DEPTH {

@@ -2,16 +2,22 @@
 # verify-roll.sh — measure the store-load window (bundles.ready) on the
 # biofix kernel, unmodified image (system-lb5, snapshot boots on warm data).
 # Re-rolls past samgr-dark boots (SA inserts == 0 by 300s cannot reach BMS).
+# 2026-11-02 fix (14th successor): the READY grep matched the NEGATIVE
+# "bootevent...not set" warning lines (the lb17/lb246 false-positive trap),
+# and USERDATA was unset so boots mounted the checksum-poisoned
+# userdata-fresh.img — every verify attempt ran WITHOUT /data. Now:
+# USERDATA pins userdata-warm2.img (the population-era warm golden state)
+# and READY requires the positive marker only.
 cd /home/william/rux-agents/oh-launcher || exit 1
 MAX=${1:-6}
-START=${2:-233}
+START=${2:-250}
 for i in $(seq 0 $((MAX-1))); do
   TAG="lb$((START+i))"
   SER="run/oh-${TAG}-serial.log"
   echo "[verify] boot $TAG $(date +%H:%M:%S)" >> run/roll-logs/verify.log
-  setsid env SMP=2 LOGLEVEL=6 \
-    python3 run/lb-boot.py "$TAG" 1500 run/system-lb5.img run/bzImage-ladder-fp-biofix \
-    " dfx=ams46,txnhunt" > "run/${TAG}-driver.out" 2>&1 &
+  setsid env SMP=2 LOGLEVEL=6 USERDATA=run/userdata-warm2.img \
+    python3 run/lb-boot.py "$TAG" 1500 run/system-lb5.img run/bzImage-ladder-fx3fix \
+    " dfx=ams46,txnhunt,allocwatch" > "run/${TAG}-driver.out" 2>&1 &
   DRV=$!
   sleep 10
   T0=$(date +%s); VERDICT=timeout
@@ -19,14 +25,18 @@ for i in $(seq 0 $((MAX-1))); do
     sleep 5
     EL=$(( $(date +%s) - T0 ))
     kill -0 "$DRV" 2>/dev/null || { VERDICT=died; break; }
-    if grep -aq 'bootevent.bms.main.bundles.ready' "$SER" 2>/dev/null; then VERDICT=READY; break; fi
+    # positive marker only: the "not set" warning line must NOT count
+    LAST=$(grep -a 'bootevent.bms.main.bundles.ready' "$SER" 2>/dev/null | tail -1)
+    if [ -n "$LAST" ] && ! echo "$LAST" | grep -aq 'not set'; then
+      VERDICT=READY; break
+    fi
     SA=$(grep -a -c 'insert SA:' "$SER" 2>/dev/null)
     if [ "$SA" -eq 0 ] && [ $EL -gt 300 ]; then VERDICT=dark; break; fi
     M=$(stat -c %Y "$SER" 2>/dev/null || echo "$(date +%s)")
     if [ $(( $(date +%s) - M )) -gt 420 ]; then VERDICT=quiet; break; fi
     if [ $EL -gt 1450 ]; then VERDICT=timeout; break; fi
   done
-  T=$(grep -a -m1 -o '\[ *[0-9]*\.[0-9]*\][^(]*bootevent\.bms\.main\.bundles\.ready' "$SER" 2>/dev/null | grep -o '^.*\]' | head -1)
+  T=$(grep -a 'bootevent.bms.main.bundles.ready' "$SER" 2>/dev/null | grep -av 'not set' | head -1 | grep -a -o '\[ *[0-9]*\.[0-9]*\]' | head -1)
   echo "[verify] $TAG verdict=$VERDICT ready='$T' at ${EL}s" >> run/roll-logs/verify.log
   if [ "$VERDICT" = READY ]; then
     echo "$TAG" > run/roll-logs/VERIFY-HIT
