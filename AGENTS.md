@@ -211,6 +211,15 @@ accept02, getrusage04, kill02, genfmod, rename/statfs families).
 
 ## Debugging Aids
 
+- **Observability policy (user directive 2026-11-02)**: NEW kernel
+  observability goes through TRACEPOINTS in the unified trace-event
+  framework (`kernel/src/trace/`, exposed via tracefs at
+  /sys/kernel/tracing — reference semantics). The bespoke `dfx=` switch
+  table (`kernel/src/dfx/switches.rs`) is FROZEN legacy: it keeps
+  working for the lanes still hunting with it, but it must not grow —
+  add a tracepoint in the reference's shape instead. The migration
+  ledger mapping each bespoke instrument to its replacement lives in
+  the dfx-trace lane's TASK.md.
 - Serial console output is the primary log (`console=ttyS0`).
 - `dfx=taskdump,watchdog` boot flags enable periodic task dumps and the
   spinlock/deadlock watchdog; `dfx=memwatch` adds heap/page accounting.
