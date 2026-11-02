@@ -135,7 +135,13 @@ unsafe fn audit(now: u64) {
     }
     let mut notes: alloc::vec::Vec<Note> = alloc::vec::Vec::new();
 
-    crate::sched::for_each_task(|task| {
+    // lb325 wedge: this audit runs at the timer-softirq heartbeat (IF=0,
+    // non-preemptible). The BLOCKING task walk deadlocks when the snapshot
+    // reaches a bucket whose lock an interrupted task-context writer still
+    // holds (self-deadlock by interrupt). Try-walk: buckets held at
+    // snapshot time are skipped; a tuple missed one round simply
+    // re-baselines next round (the >=8 s persistence filter is unaffected).
+    let skipped = crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = unsafe { &*task };
         let st_bits = tk.state().bits();
@@ -315,6 +321,17 @@ unsafe fn audit(now: u64) {
             slot.printed_j = now;
         }
     });
+    if skipped > 0 {
+        // Partial snapshot (a bucket was mid-write): never fatal, but the
+        // round's persistence filter saw fewer tasks — say so once.
+        static SKIP_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if SKIP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::pr_warn!(
+                "SLOWTASK: round snapshot partial — {} pid-hash bucket(s) held, skipped",
+                skipped
+            );
+        }
+    }
 
     if notes.is_empty() {
         return;

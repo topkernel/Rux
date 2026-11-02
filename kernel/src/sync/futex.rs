@@ -552,7 +552,12 @@ pub fn futex_stuck_census() {
     }
 
     // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
-    crate::sched::for_each_task(|task| {
+    // lb325 wedge: this census runs at the timer-softirq heartbeat (IF=0);
+    // the BLOCKING task walk self-deadlocks against a pid-hash bucket held
+    // by an interrupted task-context writer. Try-walk (skipped buckets just
+    // leave that stuck entry's tgid/tid fields at their phase-A defaults —
+    // the uaddr/park-span data from phase A is already in hand).
+    crate::sched::for_each_task_try(|task| {
         for s in stuck.iter_mut() {
             // SAFETY: pointer identity comparison only (no deref of the
             // stored pointer).
@@ -611,7 +616,9 @@ pub fn futex_stuck_census() {
         unint: u32,
     }
     let mut histos: Vec<Histo> = Vec::new();
-    crate::sched::for_each_task(|task| {
+    // Same lb325 discipline as phase B1: try-walk from the heartbeat —
+    // a skipped bucket only under-counts that tgid's histogram this burst.
+    crate::sched::for_each_task_try(|task| {
         // SAFETY: diagnostic reads under the for_each_task contract.
         let tk = unsafe { &*task };
         let tgid = tk.tgid() as u32;
