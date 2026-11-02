@@ -1435,8 +1435,17 @@ pub(crate) fn do_execve_elf(
     // We are replacing the task's address space and trap frame for the new program.
     if ec2_on { ec2_vma = crate::arch::cpu::read_time(); }
     unsafe {
-        // Capture the new mm's ASID before the Arc takes ownership.
-        let new_asid = new_addr_space.asid();
+        // Capture the new mm's ASID before the Arc takes ownership. A
+        // fresh exec mm has none yet — draw one NOW: with x86_64 PCID
+        // active, switch_address_space tags the CR3 with it, and a user
+        // root entering under asid 0 (the kernel root's tag) would cache
+        // its translations under the wrong PCID. alloc_asid returns 0
+        // with PCID off, so the legacy path is unchanged.
+        let new_asid = if new_addr_space.asid() != 0 {
+            new_addr_space.asid()
+        } else {
+            new_addr_space.alloc_asid().unwrap_or(0)
+        };
 
         // Switch to the NEW address space BEFORE dropping the old mm.
         // The old order (set_address_space → switch_mm) had an SMP window:

@@ -611,6 +611,18 @@ impl SlabAllocator {
 ///
 /// # Returns
 /// Memory pointer on success, null on failure
+/// dfx=allocwatch probe: live lock-word state of every slab cache lock
+/// (bit i = caches[i] held at sample time); see dfx/allocwatch.rs.
+pub fn audit_cache_locks() -> u16 {
+    let mut m = 0u16;
+    for (i, c) in SLAB_ALLOCATOR.caches.iter().enumerate() {
+        if c.is_locked() {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
 pub fn kmalloc(size: usize) -> *mut u8 {
     if !SlabAllocator::is_initialized() {
         return core::ptr::null_mut();
@@ -626,6 +638,11 @@ pub fn kmalloc(size: usize) -> *mut u8 {
     // and an interrupt firing while we hold the slab lock would self-deadlock
     // if the handler also allocates memory.
     let mut cache = SLAB_ALLOCATOR.caches[cache_idx].lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SLAB,
+        cache_idx as u8,
+    );
     let ptr = cache.alloc(SlabAllocator::pages());
     if !ptr.is_null() {
         // Store cache_idx in slab header for O(1) kfree lookup
@@ -672,6 +689,11 @@ pub fn kfree(ptr: *mut u8) {
     // Fallback: linear search for non-slab pointers or corrupted header
     for i in 0..NUM_CACHES {
         let mut cache = SLAB_ALLOCATOR.caches[i].lock_irqsave();
+        // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+        let _aw = crate::dfx::allocwatch::guard(
+            crate::dfx::allocwatch::SITE_SLAB,
+            i as u8,
+        );
         if cache.free(ptr, SlabAllocator::pages()) {
             return;
         }

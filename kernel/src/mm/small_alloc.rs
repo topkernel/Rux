@@ -137,6 +137,14 @@ struct SmallCache {
     /// the census so a boot's lock-traffic win is directly readable
     /// against obj_allocs+obj_frees on the same line.
     lock_holds: AtomicUsize,
+    /// Page-list walks that hit the corruption cap (cycle defense,
+    /// lb260/lb261 OH allocator-freeze) — nonzero means the wild-write
+    /// producer struck this class's list.
+    walk_cycles: AtomicUsize,
+    /// dfx=allocwatch section meter: max slow-path section duration
+    /// (TSC cycles) and count of sections >10 ms (25M cycles @2.5GHz).
+    slow_max_cyc: AtomicU64,
+    slow_over_10ms: AtomicU64,
 }
 
 impl SmallCache {
@@ -149,6 +157,9 @@ impl SmallCache {
             obj_allocs: AtomicUsize::new(0),
             obj_frees: AtomicUsize::new(0),
             lock_holds: AtomicUsize::new(0),
+            walk_cycles: AtomicUsize::new(0),
+            slow_max_cyc: AtomicU64::new(0),
+            slow_over_10ms: AtomicU64::new(0),
         }
     }
 }
@@ -281,6 +292,15 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (frozen-holder naming; the
+    // holder's own tick is dead at IF=0 — see dfx/allocwatch.rs) + the
+    // section-duration meter (lb268: one bounded section held 300 ms of
+    // real KVM execution — name the cost class).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
+    let _t0 = crate::arch::cpu::read_time();
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let mut refill = |mag: &mut Magazine| -> bool {
         while mag.len < MAG_DEPTH {
@@ -302,6 +322,17 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         // object directly under the lock, no row touched.
         first = alloc_locked(ci, heap_start);
     }
+    // dfx=allocwatch section meter (see _t0 above).
+    if crate::dfx::allocwatch::armed() {
+        let d = crate::arch::cpu::read_time().wrapping_sub(_t0);
+        let prev = cache.slow_max_cyc.load(Ordering::Relaxed);
+        if d > prev {
+            cache.slow_max_cyc.store(d, Ordering::Relaxed);
+        }
+        if d > 25_000_000 {
+            cache.slow_over_10ms.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     drop(_g);
     first
 }
@@ -314,9 +345,30 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     let objs_per_page: u16 = ((PAGE_SIZE - fo) / s) as u16;
 
     // 1. Serve from an active page; lazy-skip dead heads.
+    //
+    // WALK BOUND (the OH allocator-freeze, lb260/lb261): the unlink-skip
+    // below re-links around dead pages, but a page-list CYCLE (wild-write
+    // corruption: A->B->A with both dead) revisits forever — head=B,
+    // then head=B.next=A, then head=A.next=B ... every iteration under
+    // the class lock at IF=0, so the holder's own tick dies and the
+    // whole machine freezes (os_ds_service t548 held small_alloc class
+    // locks for the rest of the boot on both boots; ALLOC-HOLD named
+    // it). A legit class list is bounded by the heap's page count — cap
+    // the walk at 8192 pages (no legitimate single-class list approaches
+    // that); on cap, taint loudly and fall through to a FRESH page
+    // (path 2): the corrupt cycle is leaked like every other corrupt
+    // page here — "loud beats corrupt", and a leaked cycle beats a
+    // frozen machine.
+    let mut walked: u32 = 0;
     let mut prev: u32 = 0; // page index of the previous live link point (0 = head)
     let mut cur = cache.head.load(Ordering::Relaxed) as u32;
     while cur != 0 {
+        walked += 1;
+        if walked > 8192 {
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
         let page_addr = heap_start + cur as usize * PAGE_SIZE;
         let hdr = hdr_of(page_addr);
         if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE || hdr.free_count == 0 {
@@ -558,6 +610,11 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     for &addr in entries {
         let page = addr & !(PAGE_SIZE - 1);
@@ -596,7 +653,16 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             let pi = ((page - heap_start) / PAGE_SIZE) as u32;
             let mut prev: u32 = 0;
             let mut cur = cache.head.load(Ordering::Relaxed) as u32;
+            // Cycle cap (see alloc_locked's WALK BOUND — a corrupted
+            // list must never loop under the class lock at IF=0).
+            let mut steps: u32 = 0;
             while cur != 0 {
+                steps += 1;
+                if steps > 8192 {
+                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                    cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
                 let a = heap_start + cur as usize * PAGE_SIZE;
                 if cur == pi {
                     let next = hdr_of(a).next_page;
@@ -665,6 +731,35 @@ pub fn live_stats_kib() -> (u64, u64) {
 /// free). Object headers carry vtables/magic/locks that identify the
 /// owning type — the census counts say WHICH CLASS holds the heap, this
 /// says WHICH TYPE fills the class. Caller must not hold the class lock.
+/// dfx=allocwatch probe: per-class slow-path section durations (max ms
+/// and count of sections >10 ms) — separates a genuinely long section
+/// from a stale stamp. Reset on read.
+pub fn audit_section_peek() -> [(u64, u64); 8] {
+    let mut out = [(0u64, 0u64); 8];
+    for (i, c) in CACHES.iter().enumerate() {
+        out[i] = (
+            c.slow_max_cyc.load(Ordering::Relaxed),
+            c.slow_over_10ms.load(Ordering::Relaxed),
+        );
+    }
+    out
+}
+
+/// dfx=allocwatch probe: live lock-word state of every class lock
+/// (bit i = CACHES[i] held at sample time). A sample is not a snapshot;
+/// the caller filters transients (see dfx/allocwatch.rs STUCK detection
+/// — a bit set at every tick for >1 s with no matching holder stamp is
+/// a stuck/corrupt lock word, the wild-write producer's freeze face).
+pub fn audit_class_locks() -> u8 {
+    let mut m = 0u8;
+    for (i, c) in CACHES.iter().enumerate() {
+        if c.lock.is_locked() {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
 pub fn census_peek(ci: usize, per_page: usize) {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
     if ci >= CLASSES.len() {
@@ -688,6 +783,11 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let mut nvals = 0usize;
     let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
     let mut pages = 0usize;
     while page != 0 && pages < 32 {
@@ -788,6 +888,11 @@ pub fn census_peek3(ci: usize) {
     let (mut n_uv, mut n_kh, mut n_sm, mut n_ot) = (0u64, 0u64, 0u64, 0u64);
     let mut total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
+    // dfx=allocwatch: cross-CPU holder stamp (see dfx/allocwatch.rs).
+    let _aw = crate::dfx::allocwatch::guard(
+        crate::dfx::allocwatch::SITE_SMALL_ALLOC,
+        ci as u8,
+    );
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
     let mut pages = 0usize;
     while page != 0 && pages < 32 {

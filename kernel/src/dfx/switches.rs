@@ -104,6 +104,7 @@ macro_rules! dfx_switch_table {
             SysRing => "sysring",
             FilerdProbe => "filerd",
             LostParkTrace => "lostpark",
+            AllocWatch => "allocwatch",
         }
     };
 }
@@ -507,9 +508,18 @@ pub enum DfxSwitch {
     /// wakes refused while nothing is runnable. Rate-limited direct-
     /// console lines; OFF by default.
     LostParkTrace,
+    /// Allocator class-lock holder watch (dfx/allocwatch.rs): mm sites
+    /// stamp (pid, site, class, jiffies) at small_alloc/slab/buddy
+    /// class-lock acquire; scheduler_tick scans ALL stamps cross-CPU and
+    /// reports any held >1 s with the holder's task state — a frozen
+    /// holder sits at IF=0 so its OWN tick is dead and every same-CPU
+    /// observer is blind to it (the OH allocator-freeze family,
+    /// 2026-11-02). OFF by default; Relaxed atomic stores per slow-path
+    /// acquire when on, nothing but one load when off.
+    AllocWatch,
 }
 
-const SWITCH_COUNT: usize = 56;
+const SWITCH_COUNT: usize = 57;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -606,6 +616,11 @@ impl DfxSwitch {
             DfxSwitch::FilerdProbe => 53,
             DfxSwitch::LostParkTrace => 54,
             DfxSwitch::AcqDiv => 55,
+            // AllocWatch arrives after FilerdProbe/LostParkTrace on
+            // main, so it takes 56 (its lane-local index of 53 belonged
+            // to a table without those two). Lookup is by name; indices
+            // only key the SWITCHES array.
+            DfxSwitch::AllocWatch => 56,
         }
     }
 

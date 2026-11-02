@@ -1071,3 +1071,201 @@ waiters cannot self-report (printing allocates — they are parked IN the
 allocator). Boot-side, the frozen holder's identity is recoverable from a
 cross-CPU task dump (the txn-hang dump_all_tasks machinery) — none armed on
 the dark boots (the 20s-latch had not fired before the wedge).
+
+## FOURTEENTH-SUCCESSOR SESSION (2026-11-02 10:45-13:00, branch biofix-fieldpoll @ 0508ff20+)
+Mission: verify the bio fix end-to-end + hunt the allocator freeze. Outcome:
+THREE RIG BUGS and TWO KERNEL PANIC CLASSES fixed; the "freeze" did NOT
+reproduce on the quiet host — tonight's reproductions were INSTRUMENT
+RACES plus the roller killing healthy boots. The allocator itself
+measures at MICROSECOND class. The pixel wall is back to the
+store-load/ladder userspace family.
+
+### Rig bugs found (these poisoned the 13th's dark-streak evidence)
+1. verify-roll.sh READY grep matched the NEGATIVE "not set" warning line
+   (lb246's false READY at 169s = foundation exit; fixed: positive
+   marker only).
+2. verify-roll.sh never set USERDATA -> every verify boot (lb233-lb246,
+   the WHOLE dark streak) mounted the checksum-poisoned userdata-fresh
+   symlink: /data mount FAILED (-5, superblock checksum invalid). The
+   13th's "freeze" boots were entangled with the no-/data trap (the
+   fourth successor's lb16-lb26 lesson). Fixed: USERDATA pin. Baselines
+   lb229 etc. were gold-roller reflink copies (vdf mounted rc=0), so the
+   550-1100s class numbers stand; the DARK-BOOT diagnosis does not.
+3. poproll.sh killed the VM the moment an ALLOC-* print appeared —
+   combined with (see below) a racy stamp table, healthy boots were
+   murdered at 29-360s and read as "the freeze kills the machine".
+
+### Kernel fixes (committed, pushed; make test green x3; x3 builds rc=0)
+1. mm/pcp.rs: free_order0's entry store bound-checked (lb250 PANIC
+   "index 32" at 22s: the 35336eb1 refill guard can leave count ==
+   PCP_HIGH exactly; a full row + this store = out of bounds. Full row
+   now spills oldest batch + sends the incoming frame straight to
+   buddy).
+2. Print-path PANIC class (lb266 @209s): from_utf8_unchecked on task
+   comm (userspace-writable via prctl) panicked inside the KOT-KILL
+   group print's Debug fmt ("end byte index 13 not a char boundary")
+   during do_exit_group — one print killed the kernel. Fixed: checked
+   UTF-8 at all 10 comm sites (exit.rs/signal.rs) + netdev get_name
+   (SIOCSIFNAME names). lb250's StrSearcher-shaped trace = same family.
+3. mm/small_alloc.rs: both class page-list walks capped at 8192 pages
+   (cycle defense; walk_cycles counter). DEFENSIVE — no cycle was ever
+   observed (see meter below).
+
+### The allocwatch DFX (dfx=allocwatch) — and the mirage it created then killed
+- Final design: DEDICATED per-key slots (site base + class; 24 slots),
+  cross-CPU tick scan reports holds >300ms with holder identity/state/
+  preempt/ti_cpu/buddy-word + kernel-stack PCs; ALLOC-STUCK lock-word
+  detector (200ms); per-class slow-path section meter (max TSC cycles,
+  >10ms count, 10s heartbeat).
+- Iterations 1-3 used a SHARED 16-slot scan table — two different class
+  locks' enters raced the slot choice and MIXED pid/epoch/jif between
+  stamps; the mixed stamp survived its exit and read "held 300ms-1s".
+  The prints named real pids (os_ds_service) that were NOT stuck.
+- The meter is the arbiter: healthy-boot sections measure 76-1500
+  CYCLES (<= 0.6us), over10ms=0 all boot. NO slow section ever existed.
+- lb253 (the one boot never killed on a print) ran its FULL 1500s
+  healthy with /data mounted (userdata-warm2). The 13th's
+  finish_grow-park freeze is HOST-LOAD-CORRELATED and did NOT bite in
+  single-agent quiet-host conditions (tonight's host: 3 lmbench loops
+  from other lanes' worktrees, load 7/32, VM at 199% = both vcpus
+  healthy).
+- ABBA hypothesis (coordinator ask): STRUCTURALLY ABSENT — small_alloc
+  class sections are pure mm (alloc_locked -> buddy only; no
+  fs/journal/reclaim calls; buddy sections O(1) helpers, bounded
+  loops). The REVERSE nesting EXISTS (bio LRU lock -> Box free ->
+  class-lock flush) = latency amplifier only, not a cycle.
+
+### The bio fix's end-to-end measurement (honest numbers)
+- lb253 (fx3fix kernel = fieldpoll+biofix+pcp1, system-lb5,
+  userdata-warm2, /data rc=0): bundles.ready NEVER SET in 1500s; ladder
+  spun (186 waiting-query). The WritePlan burn is GONE (tid877's stack
+  = nanosleep/poll retry ladder, userspace-internal), but the window
+  did NOT compress on warm2's shape. The 550-1100s "class" measured by
+  the 13th was on STRIPPED warm copies — warm2 (unstripped, stale
+  user-100) is a DIFFERENT, slower shape. No clean A/B landed yet.
+- POPULATION STATE (lb260/lb275, warm.img): startUser at 101s with NO
+  CreateNewUser — warm.img ALSO carries a stale user-100 (the ninth's
+  NOSNAP lbpop wrote it). Both warm images have the
+  user-100-per-user-records question open; the ladder misses
+  (ImplicitQueryInfoByPriority) on every boot. PIXELS need userdata
+  with NO user-100 + populated store: the strip recipe (image-side,
+  FORBIDDEN now) or FRESH provisioning (userdata-fresh2.img — creation
+  retry budget vs first-scan; the bio fix should flip it; UNTESTED
+  this session).
+
+### Boot inventory this session
+lb250 (pcp panic 22s), lb251/252 (dark, poisoned userdata-fresh),
+lb253 (fx3fix, warm2, full 1500s, healthy, no ready), lb260 (fx4fix,
+warm, ALLOC print @360s = stamp race + roller kill), lb261 (same @29s),
+lb262/264 (not-found stamp face), lb263 (fx5fix, stack=creation-sp,
+freeze print @301s), lb266 (fx6fix, UTF8 PANIC @209s), lb267 (killed
+for fx7), lb268 (fx7fix, 300ms-stamp w/ clean preempt+buddyword ->
+meter demanded), lb270 (fx8fix, meter live: 1500 cycles), lb275+
+(fx9fix, clean instrument, no-kill roller — ROLLING at close).
+
+### FIFTEENTH-SUCCESSOR ENTRY POINTS (in order)
+1. lb275+ verdicts (pop14.log): with the no-kill roller these boots
+   LIVE — read bundles.ready timing, the ladder outcome, and any
+   ALLOC-* prints (now trustworthy). If the ladder spins on warm.img's
+   stale user-100 (expected), switch the roller's USERDATA to
+   run/userdata-fresh2.img (fresh provisioning — the kernel-only pixel
+   path) and watch the creation-vs-ready race.
+2. The store-load window: instrument-decode WHERE the 1500s+ goes on
+   warm2 (lb253's tid877 nanosleep ladder — the distributeddata retry
+   chain; SLOW-TXN census on a live boot names the servers in its
+   wait chain). This is the bio-fix A/B that never landed.
+3. The 13th's freeze: reproduce by LOADING the host (the correlation
+   is the clue) with allocwatch armed — the fixed-slot instrument + the
+   meter will now name a real holder (if any) vs host starvation. If
+   NO stamp ever fires under load, the freeze is vcpu starvation or a
+   stuck word (ALLOC-STUCK) — the mm fix follows from which.
+4. Gates reminder: everything is on origin/biofix-fieldpoll; the mm
+   guarded-domain rows (pcp, small_alloc) need syscost/pbench numbers
+   before main-merge; the UTF8 fix is print-path-only (no gate).
+
+### FOURTEENTH-SUCCESSOR ADDENDUM — the coordinator's ext4-biglock steer, decoded
+1. (a) THE HOLD HYPOTHESIS IS DEAD: maxheld instrument (release-side
+   max hold + holder) reads **4 jiffies (40 ms)** as the boot maximum —
+   NOBODY holds the biglock for 5 s. The waited=500j episodes are QUEUE
+   STARVATION: the anti-starve timer (5 s) is the only visible episode
+   length. STALL-FREE lines (owner=none, waiters=5) show a FREE lock
+   with parked waiters — the handoff wake fires but the woken waiter
+   cannot be SCHEDULED: phantom-preempt monopolists own the CPUs (the
+   campaign's open producer, Face B). The queue protocol itself is
+   sound.
+2. FAIR-SPINNER FIX LANDED (real mitigation): task-context preempt-bit
+   callers on lock_fair previously degraded to the UNGATED barging
+   acquire — a phantom-bit chmod walker (chmod_ros pid 524 storm)
+   barged past every parked waiter per op. Now they spin on the GATED
+   acquire (2 s BARGE_ESCAPE fallback). Stall count unchanged
+   (lb275: 7 vs lb280: 6) because the root is scheduling, not barging.
+3. (b) SENDFAIL taps: the storm onset (80.3-81.6 s) shows samgr REPLY
+   failures — why=6-reply-empty-stack, why=17-reply-target-gone — then
+   why=3-owner-proc-dead (pid 333->handle 23): REAL process deaths
+   after the stall era (OH watchdogs firing), so the poison is a MIX:
+   real deaths + late-reply/empty-stack on stalled callers.
+4. (c) SA:401 (BMS) DID insert (and SA:4010); bundles.ready=0 is the
+   BMS scan never completing (the store-load wall), not registration.
+5. NET: the poison storm's kernel-side window is the STALL ERA
+   (5-78 s) = scheduling starvation under phantom monopolists. The
+   producer hunt (r83hunt / preempt bits) remains THE wall; the
+   biglock fairness fix removes one amplifier. EXT4-BIGLOCK-HOLDER-STK
+   + maxheld instruments are in for the next stall read.
+
+### FOURTEENTH-SUCCESSOR ADDENDUM 2 — monopolist snapshot + the storm's true author
+1. Snapshot instrument (fx11/fx12fix): dump_all_tasks at BOTH stall
+   variants (free-strand + locked-churn) + the waiter's explicit
+   on_rq/preempt/ti_cpu line. lb285 (fx11) ran the CHURN shape
+   (maxheld=3j) with NO free-strand — snapshot moved to both branches.
+2. lb290 (fx12fix, 445s): the POISON STORM HIT WITH ZERO BIGLOCK STALLS
+   — 2372 POISON32 lines, no STALL prints at all. The stall->storm
+   causality is NOT universal.
+3. THE STORM'S AUTHOR IS NAMED: pid 961 = accountmgr (started 94.5s)
+   authored 2389/2407 POISON32-DELIVER, victims = foundation (pid 370,
+   tids 988/1203 x~600 each). This is the eighth-successor decode
+   exactly: accountmgr's osaccount stub returns error-32 (ERR_DEAD_
+   OBJECT as TF_STATUS_CODE), which PERMANENTLY death-marks foundation's
+   IOsAccount proxies → every osaccount query fails silently → no
+   user-100 creation → no launcher. The 32's own origin = accountmgr's
+   internal KV read failing under the store-load wall (the campaign's
+   standing userspace-internal timeout family).
+4. NET for the launcher: the chain is store-load wall -> accountmgr
+   handler errors -> 32-poison of foundation -> creation dead. The
+   kernel-side lever remains the STORE-LOAD COST (bio fix removed the
+   WritePlan burn; the residual is the distributeddata/samgr retry
+   ladder — fifth-successor territory), NOT the biglock (holds are
+   3-4j; the fair-spinner fix landed as hygiene).
+
+### FOURTEENTH-SUCCESSOR ADDENDUM 3 — the retry ladder's never-true condition, named
+lb253's window (116-146s), kernel-side dependency chain from the 1Hz audit:
+1. tid877 (distributeddata OS_IPC_1, pid 873) executes asset_service's
+   txn12462 parked in sys=35 NANOSLEEP — the FFRT/DB_TaskExecutor
+   wait_for (userspace-internal; the check between sleeps is not
+   kernel-visible).
+2. The FFRT pool worker tid874 (OS_IPC_0) is parked as a sync-IPC
+   CLIENT in sys=16 against USERIAM tid 654, txn10152 code 12, exec
+   5530ms -> 10530ms+ (the 30s-class exec family — crypto + syscalls
+   under the per-op wall; useriam is the historical watchdog-kill
+   victim on earlier boots).
+=> NEVER-TRUE CONDITION: tid877's wait_for returns only when a pool
+   worker frees; the pool's worker is blocked on useriam's code-12 for
+   10-30s+ each; every dependent (asset_service, powermgr, drm_service,
+   usb_host — 235+ hung txns each) queues behind distributeddata.
+   Combined with the accountmgr 32-poison (addendum 2): accountmgr's
+   own KV handlers ride the same pool starvation, time out, return 32,
+   and permanently death-mark foundation's osaccount proxies.
+=> KERNEL LEVER: useriam's exec cost = the per-syscall wall (the perf
+   lane's p1_null 4.5us class x millions of calls) — cross-lane. No
+   correctness bug in this hop; the kernel-side fixes this session
+   (pcp, UTF8, walk bounds, fair-spinner) stand as hygiene + panic
+   kills. Biglock stalls: 7 (lb275) -> 0 (lb290) with the fair-spinner
+   fix in — recorded, variance-caveated (lb290 had no chmod-era
+   contention at all).
+lb290 bundles.ready: NEVER fired (87 SAs, storm on) — the store-load
+residual is stall-independent, routing through the pool/useriam chain.
+
+### SESSION CLOSE (14th successor, 2026-11-02 ~14:10)
+Branch pushed @ 4420bb92+this. Rollers: poproll continues (fx12fix,
+snapshot-armed; PIDs owned by lb-boot.py lb29X drivers — kill only
+those). Merge queue: coordinator takes biofix-fieldpoll. Successor
+entry points in the addenda above + the main close section.

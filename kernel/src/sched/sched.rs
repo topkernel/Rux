@@ -899,6 +899,20 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
+/// Per-CPU polling-idle flags (closegap lane): set while the idle loop
+/// is inside its pre-halt poll window. `resched_cpu` reads this and
+/// skips the resched IPI when set — the polling CPU observes
+/// NEED_RESCHED/nr_running on its own within tens of ns. The idle loop
+/// clears the flag BEFORE its final recheck, so a dispatch racing the
+/// clear either takes the no-IPI path with the recheck catching the
+/// work, or takes the IPI path against a halting CPU (see cpu_idle_loop).
+static POLLING_IDLE: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+    core::sync::atomic::AtomicBool::new(false),
+];
+
 // Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
 // written by the idle loop itself at each phase transition, read by the
 // 1 Hz heartbeat. The A2 strand shape (victims linked, SKIPHIST empty,
@@ -1255,16 +1269,35 @@ pub fn resched_curr() {
 
 /// Send reschedule IPI to target CPU
 pub fn resched_cpu(cpu: usize) {
+    // cctx probe: the IPI send itself (APIC write cost, waker-side).
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::IPI_N);
     // SAFETY: cpu is bounds-checked against MAX_CPUS; NEED_RESCHED[cpu] is AtomicBool.
     unsafe {
         if cpu < MAX_CPUS {
             NEED_RESCHED[cpu].store(true, core::sync::atomic::Ordering::Release);
             let this_cpu = crate::arch::cpu_id() as usize;
+            // closegap: skip the IPI when the target is in its polling-idle
+            // window — it observes NEED_RESCHED/nr_running itself within
+            // tens of ns (the IPI + halt-exit costs ~2-5 us of KVM exit
+            // latency per handoff; cctx probe measured 935-1139 ns for the
+            // waker-side send alone). Lost-wake safety (Dekker pairing
+            // with the idle loop's flag-clear + final recheck): the
+            // SeqCst fence between our NEED_RESCHED store and the flag
+            // load, mirrored by the idle loop's fence between its
+            // flag-clear store and its recheck loads, guarantees at least
+            // one side observes the other — either we see the flag clear
+            // and send the IPI, or the idler's recheck sees
+            // NEED_RESCHED and skips the halt.
             if this_cpu != cpu {
-                crate::arch::ipi::send_reschedule_ipi(cpu);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                if !POLLING_IDLE[cpu].load(core::sync::atomic::Ordering::Acquire) {
+                    crate::arch::ipi::send_reschedule_ipi(cpu);
+                }
             }
         }
     }
+    crate::dfx::cctx::add(&crate::dfx::cctx::IPI_NS, cc_t);
 }
 
 /// Claim an idle CPU (within `affinity`) for a wake dispatch (perf-ipc):
@@ -2169,6 +2202,12 @@ fn swapper_comm(cpu: usize) -> [u8; 16] {
 }
 
 unsafe fn __schedule() {
+    // cctx probe (closegap lane): phase NS sums for the whole schedule
+    // body. t0 at entry; the phases add below bracket guards, GRQ wait,
+    // accounting, prev dequeue/requeue, pick, publish. Off = zero cost
+    // (now() short-circuits to 0, add() to a no-op).
+    let cc_t0 = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::SCH_N);
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
@@ -2524,7 +2563,11 @@ unsafe fn __schedule() {
     }
 
     // Lock the global RQ
+    let cc_t1 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PRE_NS, cc_t0);
     let mut grq_guard = grq().lock_irqsave();
+    let cc_t2 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
 
     // Update runtime accounting for current task based on its scheduling class.
     // CFS: update vruntime; DL: consume runtime budget.
@@ -2566,6 +2609,8 @@ unsafe fn __schedule() {
     }
 
     // Deactivate prev: dequeue from the correct class-specific runqueue.
+    let cc_acct = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_ACCT_NS, cc_t2);
     let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
     if !prev_running && prev_pid != 0 {
         match prev_policy {
@@ -2594,10 +2639,14 @@ unsafe fn __schedule() {
         // guard; a stale-true flag dropped prev permanently.
         requeue_prev_locked(&mut *grq_guard, prev);
     }
+    let cc_t3 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_DEQREQ_NS, cc_acct);
 
     // Pick next task (R8-1b: prev is passed so the switching CPU may
     // re-pick itself through the next == prev fast path).
     let next = pick_next_task(&mut *grq_guard, cpu_id, prev);
+    let cc_t4 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PICK_NS, cc_t3);
 
     // Capture next_pid while we still hold references (before unlock)
     let next_pid = if !next.is_null() { (*next).pid() } else { 0 };
@@ -2656,6 +2705,7 @@ unsafe fn __schedule() {
 
     // Release lock but keep IRQs disabled for context_switch
     let flags = grq_guard.unlock_irqretain();
+    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PUB_NS, cc_t4);
 
     if next == prev {
         // Same-task repick: no context switch happens, so the post-switch
@@ -2691,6 +2741,7 @@ unsafe fn __schedule() {
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
+        crate::dfx::cctx::bump(&crate::dfx::cctx::CTX_N);
         // The sched:sched_switch tracepoint (recorded in
         // __schedule just before the switch). One `armed()` check when
         // off; the prev/next fields are marshalled only when on. IRQs
@@ -4797,6 +4848,14 @@ pub fn scheduler_tick() {
     // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
     crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
+    // Allocator class-lock holder watch (dfx=allocwatch): scan ALL mm
+    // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
+    // The holder sits at IF=0 (lock_irqsave), so its OWN CPU's tick is
+    // dead — this check only ever fires from the OTHER CPU. The waiters
+    // cannot self-report (they are parked IN the allocator, printing
+    // allocates). See dfx/allocwatch.rs.
+    crate::dfx::allocwatch::tick_check();
+
     // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
     // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
     // victim a pick walk EXAMINES, and walks stop at the first allowed
@@ -5949,6 +6008,11 @@ pub fn scheduler_tick() {
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
+    // cctx probe: CW_N counted here; the phase stamps live inside
+    // arch::context::context_switch (the phases — FPU save, CR3, MSRs,
+    // asm switch, FPU restore — are arch-local).
+    crate::dfx::cctx::bump(&crate::dfx::cctx::CW_N);
 
     // forkprof (cmdline forkprof=1): consume a pending wake stamp —
     // wake->switch-in is the latency the fork/exit handoff pays.
@@ -7317,10 +7381,62 @@ pub fn cpu_idle_loop() -> ! {
                 continue;
             }
 
+            // Poll window before halting (closegap lane, 2026-11-02): a
+            // wake dispatch to this idle CPU sets NEED_RESCHED and — while
+            // POLLING_IDLE is published — SKIPS the resched IPI (see
+            // resched_cpu). The poll loop turns the IPI + halt-exit +
+            // idle-loop pass (~2-5 us of KVM exit latency per handoff,
+            // cctx probe: IPI send alone 935-1139 ns waker-side) into a
+            // tens-of-ns spin observe for every idle period shorter than
+            // the window — the lmbench ping-pong class (lat_pipe/lat_ctx/
+            // lat_sem/lat_unix) idles for microseconds between handoffs.
+            // Lost-wake protocol: POLLING_IDLE is cleared BEFORE the final
+            // nr_running/need_resched recheck below, and resched_cpu only
+            // skips the IPI while the flag is set — a dispatch racing the
+            // clear either sees the flag still set (no IPI, but the final
+            // recheck observes the enqueue/flag) or sees it clear (sends
+            // the IPI, which interrupts the halt). Same shape as the
+            // reference's polling-idle / need_resched-before-halt.
+            POLLING_IDLE[cpu_id].store(true, core::sync::atomic::Ordering::Release);
+            let poll_t0 = crate::drivers::timer::monotonic_ns_since_boot();
+            const IDLE_POLL_WINDOW_NS: u64 = 30_000; // 30 us
+            while crate::drivers::timer::monotonic_ns_since_boot()
+                .saturating_sub(poll_t0)
+                < IDLE_POLL_WINDOW_NS
+            {
+                if need_resched()
+                    || GlobalRunQueue::grq_nr_running() > 0
+                {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            POLLING_IDLE[cpu_id].store(false, core::sync::atomic::Ordering::Release);
+            // Dekker pairing fence (see resched_cpu): orders this
+            // flag-clear before the recheck loads below against the
+            // waker's NEED_RESCHED-store / flag-load sequence — at least
+            // one side of the race observes the other, so a skipped IPI
+            // is always covered by this recheck and a sent IPI always
+            // interrupts the halt.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+            // Final recheck (closes the poll-clear window; also the R20-2
+            // discipline against an enqueue that landed during the poll).
+            if need_resched() || GlobalRunQueue::grq_nr_running() > 0 {
+                grq().clear_idle(cpu_id);
+                continue;
+            }
+
             // Poll UART for pending data before entering WFI.
             // WW_IDLE_PHASE 3: recheck passed, pre-WFI (uart poll window).
             WW_IDLE_PHASE[cpu_id].store(3, core::sync::atomic::Ordering::Release);
-            if crate::console::uart_has_data() {
+            // closegap: the port read is a VM exit under KVM — only pay it
+            // when a console reader is actually parked (interactive boots
+            // keep it; benchmark boots with no reader skip one exit per
+            // idle pass, one of the idle-side handoff costs).
+            if crate::console::read_waitq().has_sleepers()
+                && crate::console::uart_has_data()
+            {
                 crate::console::read_waitq().wake_up_one();
             }
 

@@ -90,6 +90,11 @@ pub unsafe fn clear_fixmap(idx: FixedAddress) {
         }
         let table1 = super::mmu_init::get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         (*table1).set(vpn1, PageTableEntry::from_bits(0));
+        // Kernel-VA teardown: peers may cache the slot under their
+        // current PCID (PCID keeps kernel entries per-tag), so the
+        // shootdown is explicit — with PCID off it used to ride the
+        // peer's next CR3 reload. Cold path.
+        crate::arch::ipi::flush_tlb_others(virt, virt + super::memory_layout::PAGE_SIZE as u64);
         crate::arch::cpu::invlpg(virt);
     }
 }

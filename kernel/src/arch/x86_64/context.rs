@@ -61,12 +61,14 @@ const _: () = {
 /// twin's switch_mm; called from exec/exit paths outside context_switch).
 ///
 /// # Safety
-/// `next_ppn` must be a live page-table root PPN.  `asid` is ignored —
-/// PCID is disabled at bring-up (see mm/asid.rs) and the CR3 reload
-/// flushes non-global translations by itself.
-pub unsafe fn switch_mm(next_ppn: u64, _asid: u16) {
-    // SAFETY: caller guarantees a valid PML4 physical address.
-    unsafe { write_cr3(super::mm::asid::build_satp(0, next_ppn)) };
+/// `next_ppn` must be a live page-table root PPN.  With PCID active
+/// `asid` tags the CR3 write (NOFLUSH keeps cached translations); asid 0
+/// for a USER root is the allocator-pressure fallback and must arrive
+/// here as such — callers pass the mm's resolved PCID (see exec.rs).
+pub unsafe fn switch_mm(next_ppn: u64, asid: u16) {
+    // SAFETY: caller guarantees a valid PML4 physical address; the
+    // tagging/fallback discipline lives in asid::switch_root.
+    unsafe { super::mm::asid::switch_root(next_ppn, asid) };
 }
 
 // ============================================================================
@@ -505,6 +507,11 @@ pub extern "C" fn get_prev_task() -> *mut Task {
 /// After `__switch_to` all locals are invalid; the incoming task is
 /// resolved through `sched::current()` (the per-CPU slot).
 pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
+    // cctx probe (closegap lane): phase stamps in the OUTGOING frame.
+    // The post-asm stamp is parked in a per-CPU slot (the switch is
+    // CPU-local with IRQs off) because prev's frame freezes
+    // mid-__switch_to — the INCOMING task closes the bracket.
+    let cc_c0 = crate::dfx::cctx::now();
     // R56-heal (early revoked-pick check): if the slot-capture steal
     // already revoked this pick (the picking vCPU was TCG-starved past
     // the whole GRQ-release → wrapper window), the pick state is
@@ -521,58 +528,164 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         }
     }
 
-    // Step 1: save prev FPU state
-    prev.thread_mut().fpu_save_for_switch();
+    // Step 1: save prev FPU state — LAZY: only if prev actually used FP
+    // since its switch-in (CR0.TS still clear). A task that never
+    // touched FP leaves thread.fpu authoritative (it was never dirtied),
+    // so the xsaveopt is pure overhead for FP-idle ping-pongs (cctx:
+    // fpusave 51 + fpurest 76 ns per switch under load; the restore
+    // moves to the #NM handler). The kernel binary contains no
+    // compiler-emitted FP instructions (verified: the only xmm sites are
+    // restore_fpu's own init fallback), so TS can only be observed by
+    // user code.
+    let fpu_dirty = !super::cpu::ts_set();
+    if fpu_dirty {
+        prev.thread_mut().fpu_save_for_switch();
+    }
+    let cc_c1 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
 
     // Store prev task for ret_from_fork's schedule_tail(prev)
     set_prev_task(prev as *mut Task);
 
     // Step 2: switch_mm — user PML4s share the kernel half, so a CR3
     // write from anywhere keeps the kernel mapped (unlike the riscv64
-    // twin, no linear-map region dance is needed).
+    // twin, no linear-map region dance is needed). With PCID active the
+    // write is TAGGED (per-mm PCID + NOFLUSH): switching back to a
+    // previously-run mm keeps its cached translations instead of
+    // flushing the whole TLB on every switch (cctx probe: 543 ns per
+    // CR3 reload before PCID — the largest single switch cost after the
+    // FS/GS mirror). A user mm with no PCID (allocator exhausted) falls
+    // back to the untagged write, which flushes on entry — legacy
+    // behavior, correct because PCID 0's entries die before reuse.
     if let Some(next_mm) = next.address_space() {
         let next_ppn = next_mm.root_ppn();
-        if read_cr3() >> 12 != next_ppn {
-            // PCID is disabled at bring-up: asid is always 0 and the CR3
-            // reload itself flushes non-global translations.
-            write_cr3(super::mm::asid::build_satp(0, next_ppn));
+        if super::mm::asid::satp_to_ppn(read_cr3()) != next_ppn {
+            // Resolve the mm's PCID lazily (mm creation does not draw
+            // one; the first switch that runs the mm does — aarch64
+            // twin's discipline).
+            let asid = {
+                let a = next_mm.asid();
+                if a != 0 {
+                    a
+                } else {
+                    next_mm.alloc_asid().unwrap_or(0)
+                }
+            };
+            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+            if asid != 0 || !super::mm::asid::pcid_enabled() {
+                write_cr3(super::mm::asid::build_satp(asid, next_ppn));
+            } else {
+                // User root without a PCID under PCID mode: untagged
+                // load (flush) — see comment above.
+                write_cr3(next_ppn << 12);
+            }
         }
     } else {
         // Next is a kernel thread — switch to the kernel root so a
         // dying user mm (dropped by do_exit) can be freed under our feet.
+        // PCID 0 (kernel root's own tag) with NOFLUSH: kernel entries
+        // are only invalidated by the explicit kernel flush sites.
         let kernel_ppn = super::mm::mmu_init::root_page_table_ppn();
-        if read_cr3() >> 12 != kernel_ppn {
+        if super::mm::asid::satp_to_ppn(read_cr3()) != kernel_ppn {
+            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
             write_cr3(super::mm::asid::build_satp(0, kernel_ppn));
         }
     }
+    let cc_c2 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MM_NS, cc_c1);
 
-    // Step 3: FS base (TLS pointer).  Saved from the live MSR so a task
-    // switched out inside a set_thread_area window resumes correctly.
-    // The GS shadow (IA32_KERNEL_GS_BASE) is programmed alongside so the
-    // swapgs pairing in trap.S holds per task: the kernel runs with GS =
-    // percpu and the SHADOW carries the task's user GS base (0 unless a
-    // task used ARCH_SET_GS), which SWAPGS installs on the user return.
-    let fs = rdmsr(MSR_FS_BASE);
-    prev.thread_mut().fs_base = fs;
-    prev.thread_mut().gs_base = rdmsr(MSR_KERNEL_GS_BASE);
-    wrmsr(MSR_FS_BASE, next.thread().fs_base);
-    wrmsr(MSR_KERNEL_GS_BASE, next.thread().gs_base);
+    // Step 3: FS base (TLS pointer) and the GS shadow
+    // (IA32_KERNEL_GS_BASE). thread.fs_base / thread.gs_base are the
+    // AUTHORITATIVE per-task mirrors — every in-kernel writer keeps both
+    // in sync (arch_prctl ARCH_SET_FS writes cache+MSR, ARCH_SET_GS
+    // writes cache+MSR, flush_thread zeroes cache+MSRs, smp bring-up
+    // zeroes the MSR with ThreadStruct::new() zeroes) — so the switch
+    // needs no rdmsr: the outgoing task's cached values ARE the live
+    // ones, and the incoming pair is written only when it differs from
+    // the outgoing pair (two ping-ponging tasks with distinct TLS
+    // pointers still pay one FS write; same-TLS and the common
+    // zero-shadow GS pairs skip both).
+    //
+    // The write path itself: with FSGSBASE armed the FS store is
+    // WRFSBASE (a plain instruction, not intercepted) and the GS shadow
+    // pair becomes swapgs + WRGSBASE + swapgs (writes the shadow without
+    // an MSR exit); otherwise the wrmsr pair (intercepted under KVM).
+    // The swapgs pairing in trap.S holds per task as before: the kernel
+    // runs with GS = percpu and the SHADOW carries the task's user GS
+    // base, which SWAPGS installs on the user return.
+    let fs_prev = prev.thread().fs_base;
+    let gs_prev = prev.thread().gs_base;
+    let fs_next = next.thread().fs_base;
+    let gs_next = next.thread().gs_base;
+    if super::cpu::fsgsbase_enabled() {
+        // SAFETY: CR4.FSGSBASE armed (gates this branch); bases are
+        // canonical per-task values.
+        unsafe {
+            if fs_next != fs_prev {
+                super::cpu::wrfsbase(fs_next);
+            }
+            if gs_next != gs_prev {
+                // Write the SHADOW (KERNEL_GS_BASE), not the live
+                // percpu GS.base: swapgs exchanges them, WRGSBASE
+                // writes the (now live) shadow slot, swapgs restores
+                // the kernel's percpu view. Three native instructions.
+                core::arch::asm!(
+                    "swapgs",
+                    "wrgsbase {}",
+                    "swapgs",
+                    in(reg) gs_next,
+                    options(nostack, preserves_flags)
+                );
+            }
+        }
+    } else {
+        if fs_next != fs_prev {
+            // SAFETY: cached per-task mirror value.
+            unsafe { wrmsr(MSR_FS_BASE, fs_next) };
+        }
+        if gs_next != gs_prev {
+            // SAFETY: cached per-task mirror value.
+            unsafe { wrmsr(MSR_KERNEL_GS_BASE, gs_next) };
+        }
+    }
+    let cc_c3 = crate::dfx::cctx::now();
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MSR_NS, cc_c2);
 
     // Step 4: registers + stacks + per-CPU current + TSS.rsp0.
     //
     // WARNING: after this call all locals are INVALID (callee-saved
     // registers and rsp belong to the incoming task).
+    crate::dfx::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
     __switch_to(prev, next);
 
-    // Step 5: restore the incoming task's FPU (review ARCH-H1 parity):
-    // resolved via sched::current() — the per-CPU slot __switch_to just
-    // published — never through the stale `next` reference.
-    if let Some(cur) = crate::sched::current() {
-        // SAFETY: cur is the task now running on this CPU.
-        unsafe {
-            (*cur).thread_mut().restore_fpu();
+    // cctx: the incoming task closes the asm bracket parked by the
+    // outgoing task on this CPU (IRQs stayed off across the switch).
+    {
+        let t3 = crate::dfx::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
+        let t4 = crate::dfx::cctx::now();
+        if t3 != 0 && t4 != 0 {
+            crate::dfx::cctx::add(&crate::dfx::cctx::CW_ASM_NS, t3);
         }
     }
+
+    // Step 5: LAZY FPU restore — set CR0.TS instead of xrstor. The
+    // incoming task's live registers are whatever the last FP user left
+    // on this CPU; the first FP instruction traps #NM, whose handler
+    // (trap::handle_device_not_available) clears TS and runs the same
+    // restore_fpu (fpu_valid image or the ABI-init fallback). FP-idle
+    // ping-pong workloads (the scheduler-family benches) never pay the
+    // xrstor at all.
+    let cc_c4 = crate::dfx::cctx::now();
+    // SAFETY: single CR0 bit set (see stts); no register clobber.
+    unsafe { super::cpu::stts() };
+    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
+}
+
+/// This CPU's index for the per-CPU cctx switch stamp (the context.rs
+/// wrapper does not carry cpu_id through __switch_to).
+#[inline]
+fn cpu_of() -> usize {
+    crate::arch::cpu_id() as usize
 }
 
 /// R56-heal: switch-in abort repair (x86_64 twin of riscv_switch_abort).
@@ -592,13 +705,24 @@ pub unsafe extern "C" fn x86_switch_abort(
     msrs_switched: u64,
 ) {
     // Address space: compare-based — no write at the early-check site.
+    // The repair must reinstall prev's root under prev's OWN PCID (a
+    // user mm that was switched in with PCID X and is repaired under
+    // PCID 0 would cache its entries under the kernel root's tag — the
+    // allocator-pressure hazard without the pressure). prev->thread's
+    // mm still pins the asid; fallback mms (asid 0) reload untagged,
+    // exactly how they were loaded.
     let prev_root = if let Some(mm) = (*prev).address_space() {
         mm.root_ppn()
     } else {
         super::mm::mmu_init::root_page_table_ppn()
     };
-    if read_cr3() >> 12 != prev_root {
-        write_cr3(super::mm::asid::build_satp(0, prev_root));
+    if super::mm::asid::satp_to_ppn(read_cr3()) != prev_root {
+        let prev_asid = (*prev).address_space().map(|mm| mm.asid()).unwrap_or(0);
+        if prev_asid != 0 || !super::mm::asid::pcid_enabled() {
+            write_cr3(super::mm::asid::build_satp(prev_asid, prev_root));
+        } else {
+            write_cr3(prev_root << 12);
+        }
     }
 
     // Per-task MSRs: only when the wrapper already swapped them (the

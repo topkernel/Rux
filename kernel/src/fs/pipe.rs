@@ -750,7 +750,12 @@ pub fn pipe_file_read(file: &File, buf: &mut [u8]) -> isize {
 /// for pipes that was ~half the per-op cost under TCG. Same semantics as
 /// pipe_file_read — the caller must have access_ok-validated `dst`.
 pub fn pipe_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
-    pipe_read_common(file, dst, count, true)
+    // cctx probe (closegap lane): whole-op read sum for lat_pipe.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::PR_N);
+    let r = pipe_read_common(file, dst, count, true);
+    crate::dfx::cctx::add(&crate::dfx::cctx::PR_NS, cc_t);
+    r
 }
 
 /// Shared pipe read core: `user` selects exception-table user copies
@@ -884,7 +889,12 @@ pub fn pipe_file_write(file: &File, buf: &[u8]) -> isize {
 /// write(2) fast path for pipes: transfer directly user↔ring (see
 /// pipe_read_user). The caller must have access_ok-validated `src`.
 pub fn pipe_write_user(file: &File, src: *const u8, count: usize) -> isize {
-    pipe_write_common(file, src, count, true)
+    // cctx probe (closegap lane): whole-op write sum for lat_pipe.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::PW_N);
+    let r = pipe_write_common(file, src, count, true);
+    crate::dfx::cctx::add(&crate::dfx::cctx::PW_NS, cc_t);
+    r
 }
 
 /// Shared pipe write core (kernel slice vs direct user transfer).

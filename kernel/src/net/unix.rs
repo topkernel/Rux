@@ -2306,23 +2306,30 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
 /// staged path's contract).
 pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     use crate::arch::uaccess::copy_from_user;
+    // cctx probe (closegap lane): whole-op send sum for lat_unix.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UW_N);
+    let cc_out = |r: isize| -> isize {
+        crate::dfx::cctx::add(&crate::dfx::cctx::UW_NS, cc_t);
+        r
+    };
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open. `count`
     // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
     // allocation per call, same heap discipline as the generic staging.
     let socket = match unsafe { unix_of_file(file) } {
         Some(s) => s,
-        None => return -9, // EBADF
+        None => return cc_out(-9), // EBADF
     };
     if *socket.shut_wr.lock() {
-        return -32; // EPIPE
+        return cc_out(-32); // EPIPE
     }
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
 
     let mut kbuf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     if kbuf.try_reserve_exact(count).is_err() {
-        return -12; // ENOMEM
+        return cc_out(-12); // ENOMEM
     }
     // SAFETY: capacity is exactly count; copy_from_user fills it before
     // set_len exposes the bytes. A partial copy is EFAULT with nothing
@@ -2331,13 +2338,13 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     unsafe {
         let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
         if uncopied > 0 {
-            return -14; // EFAULT
+            return cc_out(-14); // EFAULT
         }
         kbuf.set_len(count);
     }
     match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
-        Ok(n) => n as isize,
-        Err(e) => e as isize,
+        Ok(n) => cc_out(n as isize),
+        Err(e) => cc_out(e as isize),
     }
 }
 
@@ -2416,6 +2423,16 @@ const READ_BOUNCE: usize = 1024;
 /// advisory only: it preserves the EFAULT-before-side-effect errno
 /// ordering the read(2) entry points produce.
 pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
+    // body has many return points — wrap instead of threading stamps).
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UR_N);
+    let r = unix_read_user_inner(file, dst, count);
+    crate::dfx::cctx::add(&crate::dfx::cctx::UR_NS, cc_t);
+    r
+}
+
+fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open.
     let socket = match unsafe { unix_of_file(file) } {
@@ -2424,6 +2441,19 @@ pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     };
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.rcvtimeo_deadline();
+
+    // STREAM with a count above the bounce: direct drain (gap-net /
+    // bw_unix). The 1 KiB bounce loop below priced a 64 KiB read(2) at 64
+    // engine rounds — each with its own recv_queue lock pair, a
+    // seg->bounce copy, a bounce->user copy, a wait-queue wake and a peer
+    // epoll re-arm — and double-copied every byte. This path pops whole
+    // segments (one short lock pair each) and copies each segment
+    // STRAIGHT to user: one copy per byte total, one wake per syscall,
+    // no staging allocation. Semantics identical to the bounce loop
+    // (same contract list below); read(2) discards ancillary data.
+    if matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
+        return unix_recv_stream_user(&socket, dst, count, nonblock, deadline);
+    }
 
     // Dgram/Seqpacket with a count above the bounce: one-shot staged
     // receive so a large record still returns whole (single record per
@@ -2520,6 +2550,165 @@ pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
         }
     }
     total as isize
+}
+
+/// STREAM read(2) direct drain into the user buffer (gap-net / bw_unix).
+///
+/// Contract — identical to the bounce loop it replaces for large counts:
+/// - Everything queued up to `count`, one segment-granularity exception
+///   copy each; blocking only until the first byte (continuations never
+///   block — POSIX short-read).
+/// - EOF (peer closed / SHUT_RD, queue empty) returns 0; O_NONBLOCK on
+///   an empty queue returns EAGAIN; SO_RCVTIMEO expiry surfaces as
+///   EAGAIN; a pending signal returns the partial count when bytes
+///   already landed (unix_wait_round reports EINTR only while total
+///   is zero, matching the bounce path's first-call propagation).
+/// - Ancillary data is taken first-touch and discarded (read(2) cannot
+///   report cmsgs — same as the bounce path; scmtap notes the drop).
+/// - A fault mid-copy returns the bytes that landed (POSIX partial
+///   read); the unconsumed remainder of the torn segment stays queued.
+fn unix_recv_stream_user(
+    sock: &Arc<UnixSocket>,
+    dst: *mut u8,
+    count: usize,
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> isize {
+    use crate::arch::uaccess::copy_to_user;
+    let mut user_ptr = dst;
+    let mut remaining = count;
+    let mut total: usize = 0;
+    let mut files: Vec<Arc<File>> = Vec::new();
+    let mut cred: Option<UnixCred> = None;
+    let mut anc_seen = false;
+    loop {
+        // === Drain phase: pop segments (short lock) and copy each out
+        // with the queue lock RELEASED — a user-page fault must never be
+        // resolved under the recv_queue spinlock. ===
+        let mut drained_any = false;
+        let mut buffer_full = false;
+        let mut fault_tail: Option<(usize, usize)> = None; // (good, bad)
+        while !buffer_full {
+            let popped = {
+                let mut q = sock.recv_queue.lock();
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            };
+            let Some(mut seg) = popped else { break };
+            drained_any = true;
+            // First-touch ancillary pickup (mirror of the engine drain).
+            if !anc_seen && (!seg.files.is_empty() || seg.cred.is_some()) {
+                anc_seen = true;
+                files.extend(seg.files.drain(..));
+                cred = seg.cred.take();
+            } else {
+                seg.files.clear();
+                seg.cred = None;
+            }
+            let take = seg.data.len().min(remaining);
+            // SAFETY: user_ptr stays inside the access_ok-validated
+            // [dst, dst+count) window; exactly `take` bytes are read out
+            // of the popped (owned) segment.
+            let uncopied =
+                unsafe { copy_to_user(user_ptr, seg.data.as_ptr(), take) };
+            if uncopied > 0 {
+                let good = take - uncopied;
+                total += good;
+                remaining -= good;
+                fault_tail = Some((good, uncopied));
+                // Keep the unconsumed remainder queued for the retry the
+                // caller will issue (Linux leaves the skb readable the
+                // same way after a short copy fault).
+                push_back_remainder(sock, seg.data, good, seg.src.clone());
+                break;
+            }
+            total += take;
+            remaining -= take;
+            // SAFETY: bounded offset arithmetic within the count window.
+            user_ptr = unsafe { user_ptr.add(take) };
+            if take < seg.data.len() {
+                // Buffer filled mid-segment: remainder stays queued (fds
+                // already taken — delivered, first-touch semantics).
+                push_back_remainder(sock, seg.data, take, seg.src.clone());
+                buffer_full = true;
+                break;
+            }
+            if remaining == 0 {
+                buffer_full = true;
+            }
+        }
+        if drained_any {
+            // Room freed for senders blocked on our queue + the peer's
+            // EPOLLOUT edge — ONCE per syscall, not per segment.
+            sock.wait_queue.wake_up_all();
+            if let Some(peer) = sock.peer_arc() {
+                let fid = peer.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::syscall::misc::epoll_notify_file(fid);
+                }
+            }
+            if !files.is_empty() {
+                if crate::dfx::scmtap::enabled() {
+                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                }
+                let _ = cred;
+            }
+            if fault_tail.is_some() && total == 0 {
+                // Whole first copy faulted with nothing landed.
+                return -14; // EFAULT
+            }
+            return total as isize;
+        }
+        // Nothing queued. Empty-queue semantics (mirror of unix_recv's
+        // tail): EOF, ENOTCONN, EAGAIN, or one blocking wait round.
+        if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+            return 0; // EOF after drain
+        }
+        let state = *sock.state.lock();
+        if state == UnixState::Unconnected || state == UnixState::Listening {
+            return -107; // ENOTCONN
+        }
+        if nonblock {
+            return -11; // EAGAIN
+        }
+        let s = sock.clone();
+        match unix_wait_round(&s, &|| sock_recv_ready(&s), deadline) {
+            Ok(()) => continue,
+            Err(e) => return e as isize,
+        }
+    }
+}
+
+/// Push the unconsumed tail of a partially-drained segment back onto the
+/// FRONT of the receive queue (direct-drain path): `consumed` bytes are
+/// dropped from the front of `data`, the rest keeps its flow-control
+/// charge and (for a full-drain caller's interest) the original src
+/// stamp. Ancillary data is never re-queued — first-touch delivery
+/// already consumed it.
+fn push_back_remainder(
+    sock: &Arc<UnixSocket>,
+    data: Vec<u8>,
+    consumed: usize,
+    src: Option<Arc<str>>,
+) {
+    let mut rest = data;
+    rest.drain(..consumed);
+    if rest.is_empty() {
+        return;
+    }
+    let charge = seg_charge(rest.len());
+    let mut q = sock.recv_queue.lock();
+    q.charge += charge;
+    q.segs.push_front(UnixSeg {
+        data: rest,
+        files: Vec::new(),
+        cred: None,
+        src,
+        charge,
+    });
 }
 
 fn unix_file_close(file: &File) -> i32 {

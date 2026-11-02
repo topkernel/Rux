@@ -27,6 +27,11 @@
 //! ```
 
 pub mod taint;
+/// Allocator class-lock holder watch (cmdline `dfx=allocwatch`): cross-CPU
+/// naming of a small_alloc/slab/buddy class-lock holder frozen mid-section
+/// (IF=0 kills its own tick; only the other CPU's tick can see it);
+/// see dfx/allocwatch.rs.
+pub mod allocwatch;
 pub mod backtrace;
 pub mod bug;
 pub mod hexdump;
@@ -114,6 +119,10 @@ pub mod forkprof;
 /// scheduling events around an SMP lost-park wedge, dumped by the
 /// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.
 pub mod lostpark;
+/// Context-switch / wake / IPC-syscall cost anatomy (cctx=1, closegap
+/// lane): NS-sum brackets for the __schedule, context_switch, wake and
+/// semop/pipe/unix bodies, dumped at shutdown; see dfx/cctx.rs.
+pub mod cctx;
 
 /// Initialize the DFX subsystem.
 ///

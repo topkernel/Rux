@@ -72,6 +72,12 @@ pub fn flush_thread() {
             // fresh image" clears here.
             super::cpu::wrmsr(0xC000_0100, 0); // MSR_FS_BASE
             super::cpu::wrmsr(0xC000_0102, 0); // MSR_KERNEL_GS_BASE (user shadow)
+
+            // LAZY FPU: the live registers still hold the OLD image's
+            // state. Mark them stale (CR0.TS) so the first FP use of the
+            // new image traps into the clean restore above.
+            // SAFETY: single CR0 bit set.
+            super::cpu::stts();
         }
         // Scribble hunter: absorb this legitimate in-run write.
         crate::dfx::scribble::note_thread_write(current);
@@ -88,6 +94,7 @@ const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
 const ARCH_GET_GS: u64 = 0x1004;
 const MSR_FS_BASE: u32 = 0xC000_0100;
+const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 /// arch_prctl(code, addr) — TLS base management. glibc/musl startup calls
 /// ARCH_SET_FS before anything else; without it every TLS access faults
@@ -135,6 +142,13 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
             // SAFETY: see ARCH_SET_FS.
             unsafe {
                 (*current).thread_mut().gs_base = addr;
+                // closegap/cache-parity: program the SWAPGS shadow too, so
+                // the live MSR matches thread.gs_base immediately (the
+                // context switch no longer re-reads the MSR to refresh the
+                // cache — a stale shadow here would otherwise be saved
+                // nowhere and visible to userspace until the next switch).
+                // The ACTIVE GS base (percpu) is untouched, as before.
+                super::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
             }
             // Scribble hunter: absorb this legitimate in-run write.
             crate::dfx::scribble::note_thread_write(current);

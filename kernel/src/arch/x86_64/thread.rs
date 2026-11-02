@@ -131,16 +131,32 @@ impl ThreadStruct {
                 );
             }
         } else {
-            // SAFETY: xsave64 writes at most the enabled components
-            // into the 4096-byte area.
-            unsafe {
-                core::arch::asm!(
-                    "xsave64 ({ptr})",
-                    ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
-                    in("eax") 0xFFFF_FFFFu32,
-                    in("edx") 0xFFFF_FFFFu32,
-                    options(att_syntax, nostack, preserves_flags),
-                );
+            // closegap: xsaveopt64 when the CPU offers it — identical
+            // state semantics to xsave64 with the skip-untouched-write
+            // optimization (see XSAVEOPT_READY). Fall back to plain
+            // xsave64 on parts without leaf-0xD.1 support.
+            // SAFETY: writes at most the enabled components into the
+            // 4096-byte area.
+            if xsaveopt_ready() {
+                unsafe {
+                    core::arch::asm!(
+                        "xsaveopt64 ({ptr})",
+                        ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
+                        in("eax") 0xFFFF_FFFFu32,
+                        in("edx") 0xFFFF_FFFFu32,
+                        options(att_syntax, nostack, preserves_flags),
+                    );
+                }
+            } else {
+                unsafe {
+                    core::arch::asm!(
+                        "xsave64 ({ptr})",
+                        ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
+                        in("eax") 0xFFFF_FFFFu32,
+                        in("edx") 0xFFFF_FFFFu32,
+                        options(att_syntax, nostack, preserves_flags),
+                    );
+                }
             }
         }
         self.fpu_valid = true;
@@ -282,6 +298,13 @@ pub unsafe fn fpu_init() {
         }
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
 
+        // FSGSBASE (CPUID-gated inside): per-CPU CR4 bit the context
+        // switch gates on — fpu_init runs once per CPU (BSP + every AP),
+        // exactly the arming discipline. Runs AFTER the CR4 write above
+        // (its own RMW read the pre-write value; a pre-write call here
+        // would be clobbered by the store).
+        crate::arch::x86_64::cpu::enable_fsgsbase();
+
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
         cr0 &= !(1 << 2); // clear EM (no emulation)
@@ -294,6 +317,15 @@ pub unsafe fn fpu_init() {
         // is #GP, so the CPUID mask (leaf 0xD EAX) gates each one.
         if xsave_capable {
             let (d_eax, _, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 0);
+            // closegap: XSAVEOPT detection (CPUID.0xD.1:EAX bit 0) — the
+            // optimized save skips writing components unmodified since the
+            // last xrstor, so FPU-less ping-pong switch-outs save nothing
+            // (the plain xsave64 the switch path used writes the full
+            // enabled set every time — 78-238 ns per switch, cctx probe).
+            let (d1_eax, _, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 1);
+            if d1_eax & 1 != 0 {
+                XSAVEOPT_READY.store(true, core::sync::atomic::Ordering::Release);
+            }
             let mut mask: u64 = 0x3; // x87 | SSE — always
             if d_eax & (1 << 2) != 0 {
                 mask |= 1 << 2; // YMM (AVX)
@@ -381,10 +413,24 @@ static AVX_ENABLED: core::sync::atomic::AtomicBool =
 static XSAVE_READY: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// XSAVEOPT available (CPUID.0xD.1:EAX[0]): fpu_save_for_switch uses
+/// xsaveopt64, which skips writing components the task has not touched
+/// since its xrstor switch-in. Per-CPU modified/init tracking makes this
+/// correct across migrations: the first switch-out on a new CPU always
+/// writes the full set (tracking cold), and the saved image lives in the
+/// task's OWN buffer — a skipped write leaves the buffer holding exactly
+/// what that same task's last restore loaded (closegap lane).
+static XSAVEOPT_READY: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn avx_enabled() -> bool {
     AVX_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 fn xsave_ready() -> bool {
     XSAVE_READY.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn xsaveopt_ready() -> bool {
+    XSAVEOPT_READY.load(core::sync::atomic::Ordering::Relaxed)
 }
