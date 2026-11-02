@@ -47,16 +47,32 @@ pub use crate::mm::AddressSpace;
 impl MmStruct {
     /// Enable this address space (switch CR3 to this root)
     ///
-    /// Loading CR3 itself flushes the non-global TLB (PCID off).
+    /// The load is PCID-tagged when armed (NOFLUSH keeps cached
+    /// translations); without PCID it flushes non-global entries.
     pub unsafe fn enable(&self) {
-        crate::arch::cpu::write_cr3(self.pgd << PAGE_SHIFT);
+        // A user mm must enter under its OWN PCID; asid 0 here means
+        // kernel-root or PCID-off — both correct via build_satp.
+        let asid = if self.space_type() == PageTableType::User {
+            let a = self.asid();
+            if a != 0 {
+                a
+            } else {
+                self.alloc_asid().unwrap_or(0)
+            }
+        } else {
+            0
+        };
+        crate::arch::mm::asid::switch_root(self.pgd, asid);
     }
 
     /// Disable address space (switch back to the kernel root)
     ///
     /// x86 has no bare mode: "disabled" means the static kernel PML4.
     pub unsafe fn disable() {
-        crate::arch::cpu::write_cr3(get_kernel_page_table_ppn() << PAGE_SHIFT);
+        crate::arch::mm::asid::switch_root(
+            get_kernel_page_table_ppn(),
+            crate::arch::mm::asid::ASID_KERNEL,
+        );
     }
 
     /// Flush entire TLB (reload CR3)
@@ -1114,7 +1130,12 @@ impl MmStruct {
             va += PAGE_SIZE_USIZE as u64;
         }
         // SAFETY: full TLB flush so the tightened permissions take effect
-        // immediately (CR3 reload).
+        // immediately. Remote shootdown too: a peer CPU running a task
+        // of THIS mm may hold the old permissive entries — with PCID
+        // those survive context switches, and even PCID-less they only
+        // died at the peer's next CR3 reload (latent same-mm stale
+        // window, closed with the broadcast).
+        crate::arch::ipi::flush_tlb_others(0, 0);
         crate::arch::mm::asid::flush_tlb_all();
     }
 

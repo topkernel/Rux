@@ -1871,6 +1871,13 @@ pub fn init() {
             kernel_virt,
             kernel_virt + KERNEL_MAP.size as u64
         );
+
+        // Arm PCID now: CR3 holds the clean (low bits 0) static root.
+        // Context switches from here on carry a per-mm PCID + NOFLUSH;
+        // every TLB invalidation goes through the INVPCID paths in
+        // mm/asid.rs. No-op (stays flush-on-CR3) without CPUID
+        // PCID+INVPCID.
+        super::asid::enable_pcid();
     }
 }
 
