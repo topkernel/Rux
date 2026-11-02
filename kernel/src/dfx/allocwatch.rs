@@ -178,6 +178,94 @@ impl Drop for AwGuard {
     }
 }
 
+/// Live stamp present for (site, class)?
+fn stamp_live(site: u8, class: u8) -> bool {
+    let key = site as u32 | ((class as u32) << 8);
+    for h in HOLDERS.iter() {
+        if h.pid.load(Ordering::Relaxed) != 0 && h.key.load(Ordering::Relaxed) == key {
+            return true;
+        }
+    }
+    false
+}
+
+// STUCK detection: a class lock's WORD observed locked at every tick for
+// >1 s with NO live holder stamp is not a held lock — it is a stuck/
+// corrupt word (the wild-write producer's freeze face: waiters spin
+// forever on a lock nobody holds, and the preemptible TTAS wait makes
+// them cycle through finish_grow forever — the exact OH victim
+// signature with NO frozen holder to name).
+static SA_STUCK: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static SLAB_STUCK: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+static BUDDY_STUCK: AtomicU64 = AtomicU64::new(0);
+
+fn stuck_report(
+    now: u64,
+    site: &str,
+    class: u8,
+    first: u64,
+) {
+    let last = LAST_REPORT_JIF.load(Ordering::Relaxed);
+    if now < last + 500 {
+        return;
+    }
+    LAST_REPORT_JIF.store(now, Ordering::Relaxed);
+    let n = REPORTS.fetch_add(1, Ordering::Relaxed);
+    if n > 200 {
+        return;
+    }
+    crate::pr_warn!(
+        "ALLOC-STUCK #{} site={} class={} stuck={}ms (lock word held with NO live holder stamp — corrupt/stuck word, wild-write producer face)",
+        n,
+        site,
+        class,
+        (now - first) * 10
+    );
+}
+
+fn tick_stuck_scan(now: u64) {
+    let sa = crate::mm::small_alloc::audit_class_locks();
+    for i in 0..8u32 {
+        let s = &SA_STUCK[i as usize];
+        if sa & (1 << i) != 0 && !stamp_live(SITE_SMALL_ALLOC, i as u8) {
+            let first = s.load(Ordering::Relaxed);
+            if first == 0 {
+                s.store(now, Ordering::Relaxed);
+            } else if now - first >= 100 {
+                stuck_report(now, "small_alloc", i as u8, first);
+                // keep the run (no re-arm) — the word is still stuck;
+                // the global throttle paces the re-reports.
+            }
+        } else {
+            s.store(0, Ordering::Relaxed);
+        }
+    }
+    let sl = crate::mm::slab::audit_cache_locks();
+    for i in 0..10u32 {
+        let s = &SLAB_STUCK[i as usize];
+        if sl & (1 << i) != 0 && !stamp_live(SITE_SLAB, i as u8) {
+            let first = s.load(Ordering::Relaxed);
+            if first == 0 {
+                s.store(now, Ordering::Relaxed);
+            } else if now - first >= 100 {
+                stuck_report(now, "slab", i as u8, first);
+            }
+        } else {
+            s.store(0, Ordering::Relaxed);
+        }
+    }
+    if crate::mm::buddy_allocator::audit_lock_held() && !stamp_live(SITE_BUDDY, 0) {
+        let first = BUDDY_STUCK.load(Ordering::Relaxed);
+        if first == 0 {
+            BUDDY_STUCK.store(now, Ordering::Relaxed);
+        } else if now - first >= 100 {
+            stuck_report(now, "buddy", 0, first);
+        }
+    } else {
+        BUDDY_STUCK.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Cross-CPU check from scheduler_tick: report stamps older than 1 s.
 /// The holder's own CPU cannot run this (IF=0 froze its tick); the other
 /// CPU's tick scans ALL slots regardless of which CPU stamped them.
@@ -186,6 +274,7 @@ pub fn tick_check() {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u64;
+    tick_stuck_scan(now);
     for i in 0..SLOTS {
         let h = &HOLDERS[i];
         let pid = h.pid.load(Ordering::Relaxed);
