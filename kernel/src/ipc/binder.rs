@@ -6639,6 +6639,16 @@ fn binder_transaction(
                             hfpid,
                             hftid
                         );
+                            // Sender's transition ring: what this thread
+                            // did between stacking the top txn and this
+                            // send (tcomplete read? error delivery?
+                            // incoming handled?) — the divergence
+                            // decoder for the guard hits.
+                            let _ = writeln!(
+                                w,
+                                "{}",
+                                hist_line_of(thread.tid, &hist_snapshot(&thread))
+                            );
                         }
                         if sg_reject {
                             sendfail_why(if todo_head_txn { 21 } else { 20 });
