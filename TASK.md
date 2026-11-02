@@ -1777,3 +1777,126 @@ banked; lb343 (syscost + 3s census bar) rolling at write time.
   wifi 12.1-14.5s, softbus 41.6, 1301 releases at softbus). Frozen-logo md5s
   unchanged. Race tally this session 0/4 (lb342 lost by 31.4s, lb343/344/345
   spiral-class).
+
+### 21st session (2026-11-03) — THE PARAM STALL DECODED + THE OPEN() WALL CUT 3x (104->33us)
+
+Synced origin/main ee332f51 (tree identical to the 20th's tip; no code delta).
+
+**Lever-2 decode: the param drain stall is NOT a lost wakeup — it is init's
+single main-loop thread BUSY for ~5s in the boot-job file-command storm.**
+lb342 serial, timestamps host-side: last `le_epoll.c:122 timeout:-1` (wait
+entry) at 5.036s; hdf_devmgr SETS ready at 5.433 (PCTL-SEND #3); init's
+epoll loop does NOT return until 10.144-10.160 (next timeout:-1 line), and
+the signalfd SIGCHLD reaps + PCTL-RECV #0..#5 drain in ONE burst right
+after. In between, pid=1 prints are a continuous per-file command stream:
+`boot job post-fs-data start` 5.605 -> finish diff **2,306ms** (reference
+refu9: **275ms**, 8.4x), `early-boot finish diff 981ms` (ref 85ms, 11.5x),
+`pre-init 2,033ms` (ref 733ms), then the `boot` job runs to ~10.1s. The
+param messages land at 5.36-5.49s — just as the loop leaves for the job
+chain — and queue behind it. Reference runs the same jobs in 0.36s
+total, so its param set is handled same-millisecond. WAKE PATH IS CLEAN
+(this round's named kernel question answered: the drain waits because
+the reader is BUSY, not because a wake is lost — the 5.06/8.3s variance
+= job-storm variance). Lever-2 collapses into Lever-1: cut the per-op fs
+wall and the storm compresses.
+
+**Lever-1 attribution (lb346, fsw=1 anatomy — infra from the perf-path
+lane + new brackets, commit fd950765):** at t=330s: open n=218,469 wall
+avg **99.6us** (matches syscost 104us — no contradiction, digits
+re-read); walk loop wall 51.7s of which **miss=44.2s (85%)** over 339k
+misses (130us each), **misseo=177,610** (52% of misses = ENOENT
+existence probes, each paying the FULL ext4 dir scan: get_data_blocks
+Vec + per-block extent walk + every dirent parsed — ENOENT was never
+cached, the old no-negative-cache objection was the unbounded-heap
+leak); walk PROLOGUE **66.6us/walk over 781k walks = 52s wall** — every
+OH service is chrooted and paid make_absolute_rooted +
+get_process_root(String) + normalize_with_root + dentry_walk_no_symlink
+RE-WALK of the jail prefix PER LOOKUP; openexecavg (lb346 lacked PC2 —
+truncation) — fixed by the PC1/PC2 split.
+
+**Two kernel fixes (b21e126b, both pushed):**
+1. **Bounded negative-lookup memo** (cmdline negmemo=1): ext4 ENOENT
+   misses insert a NEGATIVE dentry child stamped with the parent
+   INODE's dir_mut_gen; the 8 VFS mutation sites (create/mkdir/unlink/
+   rmdir/rename/link/symlink/mknod) bump parent_inode.dir_mut_gen.
+   Stamp on the INODE (not the dentry) because bind-mount aliases are
+   separate dentries over one shared inode — a sandbox-view memo must
+   invalidate when the file appears host-side. Ext4-only (ops.lookup
+   fn-pointer gate; dynamic fs change without VFS mutations — procfs
+   pid reuse). Cap 32 negatives/parent, first-found eviction. A stale
+   memo (gen mismatch) is detached and re-resolved (NEGSTALE).
+   Reference parity: the reference kernel caches negative dentries in
+   its dcache with the same mutation-invalidation semantics.
+2. **Chroot fast base**: with the jail root recorded as a dentry
+   (set_root_with_dentry) and an absolute path, path_lookup STARTS at
+   the jail-root dentry and feeds raw components to the loop ('.'/'..'
+   /trailing-slash arms carry the semantics; '..' clamps at the same
+   dentry). Kills the root-string allocation train AND the jail-prefix
+   re-walk. Reference parity: nd->root IS a resolved dentry there; and
+   the old code permission-checked the whole jail prefix per lookup,
+   which the reference does not.
+
+**A/B (lb346 off vs lb347 on, same recipe, fsw=1+syscost=1):**
+- syscost open() t=240s: n=200,012 avg=**104us** tot=20.8s/min ->
+  n=249,477 avg=**33us** tot=8.3s/min (3.2x; volume UP 25% = the boot
+  gets more done per minute).
+- walk prologue: 66.6us -> **2.0us/walk** (1.89s total vs 52s).
+- negmemo: neghit=50,522 probes served from the memo, negstale=**90**
+  (invalidation scheme stable), misseo 177,610 -> 163,891.
+- boot.completed: 11.8s -> **9.2s** (hdf_devmgr.ready handled 11.5 ->
+  9.09s); post-fs-data 2,843 -> 2,081ms (-27%); early-boot 1,291 ->
+  938ms (-27%); pre-init 1,321ms. Remaining vs reference: post-fs-data
+  7.6x — the residue is REAL-file cold-dcache misses (the found-miss
+  half of the 130us miss class), mkdir/jbd2, and the sync-exec storm.
+- **openexecavg = 29.6us exec vs 33us wall (PC2)** — after the fixes
+  the open row is ~90% real kernel CPU (was ~70% waiting). The wall is
+  no longer scheduling-inflated; the remaining sink is the miss path
+  (ext4 dir scan) — next fs lever.
+- open max 179ms/165ms class remains (blocking open tail —
+  VFS_MUTATION_LOCK/jbd2-commit family, unattributed this round).
+
+**Rolls: lb346 (off) + lb347 (on) BOTH wedged in the pre-existing
+300-900s TXN-HANG exec family** (lb346: 334s exec 778->336, killed;
+lb347: 333s exec 822->337 + POISON32 wave, killed). NOT a regression:
+lb342 maxed 741s, lb345 941s on the 20th's kernels — the samgr
+nested-call wall class. Race tally this session 0/2 so far. lb348
+(same kernel, negmemo=1) rolling at write time.
+
+**Successor entry points (21st, in order):**
+1. **The miss path is now THE fs sink**: 40.8s walk-loop wall over 329k
+   remaining misses (found-misses ~19.5s + unmemoed ENOENT ~21.3s).
+   The ext4 lookup pays get_data_blocks (Vec alloc + FULL extent walk
+   per block index) + every dirent parsed + bread per block, per miss.
+   Cache the dir-block list per directory inode, or parse the on-disk
+   htree index. fs is a guarded domain: pbench fs rows + boot-job A/B
+   after any change.
+2. The 165-179ms blocking open tail: bracket VFS_MUTATION_LOCK wait vs
+   jbd2 commit vs bio wait on the O_CREAT path (the mkdir 3.6ms row's
+   big sibling).
+3. Roll the race on the nm2 kernel (recipe: SMP=2 LOGLEVEL=6
+   USERDATA=run/userdata-warm2.img lb-boot.py <tag> 1500
+   run/system-lb5.img run/bzImage-ladder-nm2 " syscost=1 fsw=1
+   negmemo=1 dfx=fuxstuck,txnhunt,ams46,slowtask"). The wedge dice are
+   the odds (pre-existing family); boot.completed now fires ~9.2s —
+   1.3s earlier than the 20th's best gate.
+4. PC2's openexecavg is the health check for any fs change: exec should
+   track wall within ~20%; a widening gap = a new wait crept in.
+5. The 70M slab.rs:640 rest-site n at t=180 (19.1s) — allocator
+   class-lock volume 2.8x the 25M/boot band figure, worth a glance
+   from the memory-domain owner (rest-site charging may differ from
+   the allocwatch counter; do not merge the two numbers blindly).
+
+**lb348/lb349 final: the fixes REPRODUCE, the wedge dice do not clear.**
+lb348: hdf_devmgr.ready handled 9.17s, boot.completed 9.18s (stable
+across boots now; was 10.5-14.5s), post-fs-data 2,209ms, early-boot
+755ms, startUser/SwitchToUser at **46.9s** (lb342's creation was
+71.8s) — then the pre-existing wedge: txn exec 772s (668->874, started
+t=20s, BEFORE any memo churn — not negmemo-caused), no bundles.ready.
+lb349: startUser 38.1s (25-34s earlier than the 20th's best), second
+startUser retry 69.8s, max exec 505s — wedged again; frozen-logo md5
+06b933b4 unchanged through t=540. Race tally 0/4 this session; ALL
+four rolls in the pre-existing 300-900s TXN-HANG exec family (lb342
+741s / lb345 941s on the 20th's kernels — same class). The gate is now
+unambiguously the samgr nested-call handler wall (userspace poll-loop
+interleave per the 20th's decode; syscost nr=35 poll tot=592s/min),
+NOT the fs per-op wall this session fixed.
