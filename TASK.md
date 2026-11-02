@@ -1570,21 +1570,45 @@ losers remain (BMS trigger ~40-82s vs store ready ~104-113s; the early-death
 spiral class).
 
 ### Successor entry points (in order)
-1. The remaining vm-op gap (fixmun 40µs vs ref ~3µs): the fixed path runs 3
+1. The remaining vm-op gap (fixmun 34µs vs ref ~3µs): the fixed path runs 3
    vma_write acquires + 2 BTreeMap removes + 1 add + pin/unpin + 2 Vma::new
    + IPI+CR3 pair per re-map. A single-hold unified MAP_FIXED surgery (the
    reference mmap_region shape) would chase it — but the chunked-munmap
    discipline is load-bearing (mm-audit invariant comments); design first.
-2. The issuers table: mmprof C-line names the mmap churners (mmprofd now
-   reliable). If distributeddata/FFRT is NOT the churner, the SA-init lever
-   is elsewhere (KVS txn reply-deferral family).
+   The present-page teardown path inside unmap walks runs ~1.2µs/page
+   (rmap_alt_remove + page_remove_rmap + put_page_site + free) — 7.4M
+   present pages per boot through munmap — a second-order lever.
+2. THE CHURNERS ARE NAMED (lb341 issuers, eviction working): sysevent_source
+   93,308 mmaps by t=180s (32% — the hiSysEvent boot scan), sa_main 22,137,
+   appspawn 11,555, hdf_devhost 7,695, processdump 3,316. NOT
+   distributeddata's DB_TaskExecutor threads directly. The 18th's "FFRT
+   arena" attribution was the family; the top comm is the sys-event scan.
 3. ROLL THE RACE (mission 2): the four coin-flips need one clean boot.
    Recipe unchanged (system-lb5 + fresh2 + dfx=ams46,txnhunt + syscost=1).
    Any frame change from frozen-logo md5 06b933b4: driver auto-writes
    run/oh-<tag>-shot-*.ppm — convert + report IMMEDIATELY.
 4. The early-death spiral (3/8 boots tonight, 27-56s ExecReboot panic:
    storage_manager/hdf_devmgr crashes + watchdog SIGKILL waves) — pre-exist-
-   ing class (16th's lb314 family), but a kernel-side contribution from the
-   no-yield change is not fully excluded; if it climbs above ~50%, A/B one
-   boot with a per-16MB-chunk yield restored (a one-line revert of the
-   MU_YIELD move) before chasing OH ghosts.
+   ing class (16th's lb314 family, ~50% rate then as now); lb340/341 (the
+   no-yield kernel) both ran healthy 800s, so the yield removal is not the
+   trigger.
+
+### lb339-341 addendum — the yield lesson and the final numbers
+- lb339's B-line exposed the flaw in the first fix: with ~1.05 chunks per
+  munmap call, moving the cond_resched from per-chunk to end-of-call fired
+  it just as often (need_resched is ~always set under the OH churn — 1-2k
+  munmap calls/s, each schedule 132µs behind ~165 runnable tasks). The
+  REFERENCE kernel never schedules inside munmap; preemption is handled at
+  syscall exit. ee42c599 removes the yield entirely.
+- lb340/341 (no-yield kernel) t=60s: mmap tot=27µs (n=160k, MAX 2.1ms —
+  the 749ms tail is GONE), fixmun=34µs (was 210), munmap body=52µs (was
+  177-185), yld absent, mpcov=1µs, mplock=0; >16M mmap median 5.6ms ->
+  415-427µs; mprotect 47µs (variance band 32-47 across boots — the cover
+  fix is in (mpcov 1µs) but the whole-body write-lock hold under flood
+  dominates the residual; an A/B candidate for the same surgery shape).
+- syscost cross-check lb340 t=180s: nr=9 n=269,567 avg=32µs max=3ms
+  (lb325: 179k avg 72µs max 722ms). The vm-op family wall: ~15s/CPU-min ->
+  ~5s/CPU-min (-67%).
+- unpg=7.4M present pages per boot through munmap at ~1.2µs/page of
+  descriptor work (rmap/put/free) — the next mm-lever if the store window
+  still matters after the userspace-internal residual.
