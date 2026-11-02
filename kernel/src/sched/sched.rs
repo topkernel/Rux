@@ -7578,7 +7578,15 @@ pub fn cpu_idle_loop() -> ! {
             // reference's polling-idle / need_resched-before-halt.
             POLLING_IDLE[cpu_id].store(true, core::sync::atomic::Ordering::Release);
             let poll_t0 = crate::drivers::timer::monotonic_ns_since_boot();
-            const IDLE_POLL_WINDOW_NS: u64 = 30_000; // 30 us
+            // battery2 (perf-r3, 2026-11-03): the 30 us window already
+            // absorbs most ping-pong handoffs, but the unix r/w roundtrip
+            // anatomy showed IPIs still firing (815/1915 wakes) at a mean
+            // 995 ns — handoffs landing just past the window. Widening to
+            // 120 us keeps the idler spinning through the remaining
+            // near-idle handoffs (each saves the ~1 us IPI+halt-exit
+            // exit latency); the window still closes well before a 250 Hz
+            // tick. Pure-spin, no allocations.
+            const IDLE_POLL_WINDOW_NS: u64 = 120_000; // 120 us
             while crate::drivers::timer::monotonic_ns_since_boot()
                 .saturating_sub(poll_t0)
                 < IDLE_POLL_WINDOW_NS
