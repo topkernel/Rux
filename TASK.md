@@ -1,155 +1,103 @@
-Lane: LTP r20 full scan (riscv64)
-Baseline r19 = 1,018/1,869. Work autonomously; never ask. Worktree = THIS (main@82059759; test/rootfs.img may need symlink -> /home/william/workspace/Rux/test/rootfs.img).
+# stress-port lane: port industry stress tests, find stability bugs
 
-## Mission
-1. Reconstruct deleted infra from git (main + `git branch -r | grep archived`): the LTP runner, the 1,869-case list, the per-round results layout (convention /home/william/rux-agents/ltp-r<N>/results/). test/patrol-runbook.md + test/suite.sh carry conventions. LTP source: userspace/linux-ltp/ltp-20240524.tar.xz (extract-build convention like toybox; musl SDK via `make sdk`; soft-fp overlay discipline userspace/build-softfp.sh — BUG-S005 zcb pin).
-2. Build kernel (riscv64) + LTP with the pinned march.
-3. Full 1,869 scan (detached/setsid; long runs survive tool timeouts). Known flake families (rerun 2x in isolation before counting new failures): accept02 getrusage04 kill02 genfmod rename/statfs.
-4. Results to /home/william/rux-agents/ltp-r20/results/. Deliver r20 vs r19 delta table.
-5. New real failures: triage against recent main merges (aarch64 merge b238ebd1 shared diffs: virtio device-ID table, wake floor per-arch, ELF machine checks, boot-table honesty) — compare failing syscall surface vs merge diff.
-6. Small kernel fixes welcome (small commits, English, NEVER "Linux"); rerun affected family.
+## Charter (user directive 2026-11-02)
+"Supplement stress test cases — stability is still a problem. If the
+industry has stress tests for the reference kernel, port them directly
+and run them." PRIMARY vehicle: x86_64 + KVM (platform priority).
+Goal: panics, wedges, leaks, and scheduler starvation exposed by
+sustained load — then kernel-side fixes.
 
-## Discipline
-One QEMU at a time (check ps — other lanes live); -smp 2 -m 1G; kill only yours; pkill FORBIDDEN. make test stays green; x3 builds rc=0 if kernel touched. Push origin/ltp-r20.
-Final message: r20 number + delta table + flake/real verdicts (2x rerun evidence) + fixes + results path.
+## What to port, in order
+1. stress-ng (the industry standard, ~300 stressors). Build a static
+   x86_64 subset against the toolchain already used for probes (see
+   test/ build patterns; musl static preferred). Inject via the LTP
+   vehicle in /home/william/rux-images/testimages/ (boot rig there
+   already runs x86_64+KVM). Start with the classes our bug ledger
+   says are weak:
+   - memory: malloc/mmap churn (allocator class-lock family),
+     mmapfixed, bigheap (zone exhaustion vs the fake-OOM history)
+   - fork/exec churn (p4 regression history; exit-path RCU grace)
+   - filesystem metadata churn (mkdir/rmdir/unlink storms — the OH
+     chmod-storm shape; bio write-plan under load)
+   - IPC: pipe/socket storms, SysV sem/msg/shm
+   - sched: many-thread yield/wakeup storms (phantom preempt family,
+     WAKE-STRANDED census)
+   - timer/clock: settime/interval storms (tick discipline)
+2. LTP robustness subset already in the tree (fork12, mmapstress,
+   mmap-corruption, sem/msg stress) — run long-loop, not just once.
+3. (later) syscall-fuzzer class (trinity-like) once 1-2 are clean.
 
----
+## Method
+- One stressor class per boot; serial console is the log.
+- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
+  run/findings.md + minimal reproducer.
+- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
+  clean before push (origin/stress-port).
+- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
+  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
+  double as Tier-1-under-load evidence for the perf gate.
+- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
+  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
+  by exact cmdline).
 
-# Perf review: mm
+## Session log (append per session)
 
-Focus: MEMORY — p3a anon fault med 0.08µs but p99 581µs (bimodal: what is the slow path paying?); P4 fork+exit 9ms / fork+exec 13ms (reference ~1ms class); TLB shootdown cost; mmap/munmap paths; copy_page_table_cow walk; vma tree operations; the allocator family (small_alloc/buddy/slab — the OH campaign named phantom preempt-count acquire sites there; the REST share, magazine discipline); demand-fill vs fault-around (aarch64 noted anon fault-around deferred; x86 batch fill exists — compare).
+### 2026-11-02, round 1 — rs suite ported, 2 kernel bug families fixed, 2 stressors re-run clean
 
-Perf-review lane rules (binding)
-- Mission: find where Rux is SLOW vs the reference kernel and close the gap. Target: 10x-class improvements on the lagging metrics. The user mandate: every interface metric where we lag the reference must be examined.
-- GROUND TRUTH: the reference kernel bzImage is at /home/william/workspace/oh-robot/out/x86_64_virt/packages/phone/images/bzImage. test/pbench_boot.py --bzimage <path> boots ANY bzImage with the pbench P1-P7 battery — run the SAME battery on the reference kernel and on your rebuilt Rux kernel to get true A/B columns. This is the primary tool: measure reference, measure ours, fix, re-measure.
-- Known instrumented gaps (from syscost/OH campaign, x86_64 debug): futex wake→run tick-quantized 10-108ms (reference: µs); openat avg 252µs; p1 null syscall ~4.5µs; p2 ctxsw 15.4µs (debug); p6_append ~640µs; write_fsync ~12ms; mkdrmdir ~20ms; unlink ~1ms; pipe roundtrip ~19µs; UART print 0.36-0.93ms/line; OH boot to launcher.ready 254-541s vs reference 14.4s (~26x whole-system).
-- Every fix ships with NUMBERS: pbench median before/after (same boot config), or syscost per-op average before/after. No numbers = not merged.
-- Correctness gate: `make test` green (riscv 1198) + x3 builds rc=0. If you touch aarch64 paths, `make test PLATFORM=aarch64` green too.
-- Small commits, English messages, NEVER the word "Linux" in commits/docs — write "the reference kernel".
-- Record findings/fixes/numbers in run/perf-findings.md; push origin/perf-<scope>.
-- One QEMU at a time (check ps; many lanes run); kill only your own; pkill FORBIDDEN.
-- Worktree: THIS one. Never write to /home/william/workspace/Rux.
+**Ported** (stress-ng stressor logic as standalone static musl probes,
+per charter method; sources archived in userspace/tests/probes.tar.gz
+per the 394c16ce policy, host driver test/stressng/run-class-x86.sh):
+14 classes — malloc/mmap/bigheap (memory churn), fork/exec, fsmeta
+(metadata storm with read-back verify), pipe/sock/sem/msg/shm (IPC),
+futex/sched (wakeup storms), timer (create/settime/delete + CLOCK_
+MONOTONIC discipline + nanosleep latency), plus --spawn passthrough
+for minimal reproducers. Vehicle: the x86_64+KVM LTP rootfs (copy of
+the permanent-store image in run/, rs/rsrun/renameco injected via
+debugfs); PID-1 rsrun runs cmds.txt lines with per-class budgets.
 
----
+**Round-1 campaign** (baseline 819a1be2, one family per boot,
+dfx=allocwatch,taskdump,watchdog + syscost=1, logs in
+run/stress-runs/): ipc / sched / timer / memory PASS (0 panics, 0
+wedges, 0 probe errors); fsmeta FAIL (SP-2); forker survived but lit
+up the SP-1 storm. Verdicts + census numbers: run/stress-runs/
+findings.md.
 
-### Landed (all pushed)
-1. merge main e8cc17ec (rotation-proof heal, 2s bound, cumulative bar).
-2. **WAKE-HEAL** (sched.rs, wake_up_enqueue_opt tail): a task about to be
-   woken, GRQ held, owned by no CPU slot (verified), not mid-switch-out
-   (with 50-jiffy stale-marker confirmation — a stale SWITCHING_OUT entry
-   was the silent forever-skip for the carrier tasks), not PF_EXITING,
-   carries NO legal guard by construction (sc265's conviction) → its
-   phantom preempt_count is zeroed AT WAKE so the monopoly never forms.
-   Skip-reason census: `why=e/s/c` budgeted 60; heal report budgeted 300.
-   lb18 measured: fires 268/boot, strands 13 (vs 21-36 before), lb20
-   early: 0 strands/34s. ALL observed skips are why=c (task in its own
-   slot — legit pre-sleep window OR lying busy slot; the lying-slot
-   adjudication needs the frozen-exec-clock check, NOT done).
-3. **tick-heal now sets need_resched** after clearing base bits (the zero
-   alone left the incumbent running to user-return — sc267).
-4. **kpreempt=1 cmdline arm of the IRQ-exit kernel-preempt hook**
-   (trap.rs, default OFF, syscost-style cmdline verdict cache).
+**SP-1 (fixed, verified)**: PREEMPT-HEAL false-fires stripped live
+guard bits of fresh fork/exec tasks (15,577 heals + 169 underflows per
+120 s of fork churn). Two producers: (1) stale_200's j==0 arm treated
+never-stamped fields as instantly stale — fixed with arm-on-first-
+observation (sched.rs); (2) new_task_at did not zero the four
+ti_pc_*_zero_jif stamps on recycled Task pages — same class as R68a
+(task.rs). Verification boot (fork 8 + exec 4, full 100 s budgets):
+**0 heals, 0 underflows, 0 panics** (was 15,577/169/0).
 
-### VERDICTS (evidence in run/oh-lb19b-serial.log)
-- **kpreempt is NEGATIVE in the current tree**: DEADLOCK spinlock-stuck
-  prints on BOTH cpus from 54s, strands EXPLODED to 40. Mechanism: the
-  2s tick-heal false-heals REAL guards held >2s (holders are themselves
-  collapse victims) → preemptible() lies → the hook preempts a lock
-  holder mid-critical-section → the DEADLOCK lock 0xffff88807d2876d0 is
-  the same slab-region instance the underflow drops name every boot.
-  Full kernel preemption needs the false-heal problem solved first.
-- **The leak is a steady-state ENGINE, not one-off**: lb17 tail shows the
-  same pids (0x13e/0x219/0x24c/0x425 = OS_IPC worker threads, e.g. pid
-  318 = first OS_IPC worker after key_enable) re-healed every ~200ms
-  with was=0x10001, underflow at spinlock.rs:461/rwlock.rs:457 drops
-  (lock instances 0xffff88807d28a2d0/0xffff88807df62290 heap/slab
-  region — per-inode/per-socket Spinlock family per sc73), re-leak
-  immediately. Producer remains the double-run/wild-write family.
-- The lock at 0xffff88807d2876d0: slab-region heap object embedding a
-  Spinlock (inode.state / socket state family), deterministic address
-  across boots, contended by both CPUs for seconds at a time.
-- SLOW-TXN exec times up to 41.7s (device_manager code 14 during the
-  install stream) — exec-time class, not queue-time: the SERVER thread
-  itself runs 41s (crypto+syscalls under the collapse), same family as
-  the deviceauth 129s / asset_service 135s census stalls.
+**SP-2 (fixed, verified)**: ext4 setattr corrupted freshly-written
+files — the success tail ran page-cache invalidate_inode for EVERY
+attr flavor (chmod dropped dirty unflushed pages) and metadata-only
+setattrs wrote back the disk-read inode's stale i_size (0 for pending
+writeback). renameco minimal reproducer isolated chmod (3/300 fails,
+reads returned EOF; rename alone clean). Fix: invalidate gated to
+ATTR_SIZE, metadata setattrs carry the live VFS size (ext4/mod.rs).
+Verification boot: renameco 0/300 on every sequence; fsmeta 4-worker
+class full 120 s rc=0 (was: all 4 workers corrupt on cycle 1).
 
-### lb20 ENDGAME (read before next boot) — the wedge is now NAMED
-lb20 (full 2400s, WAKE-HEAL + need_resched insurance): the healthiest boot
-yet, AND the account-chain wedge is now a concrete starvation cascade:
-1. accountmgr SA LOADED for the first time ever ("SAFWK: StartSystemAbilityTask
-   accountmgr SA:200 init finished, 252 ms" @221.9s, pid 976; SACB callbacks
-   DELIVERED to tid 976 x16 @268-311s — the samgr->client direction works).
-2. softbus_server (pid 724) registered @228.8s then went SILENT — its worker
-   never answers. Its pick claim was reset once (STALE-CLAIM-RESET by_cpu=0
-   pid=724 @841.7s) with no recovery. This is the R85 "linked but starved /
-   pick-skip wedge" family (orphaned on_cpu mark / stale claim), NOT a leak.
-3. Consequence cascade, live in the log: device_manager (pid 568) code-3
-   handler waits ~5.24s (softbus LNN timeout) PER CALL, x102 SLOW-TXNs from
-   distributeddata's DB_TaskExecutor in a 5.75s retry loop; 104 stale-binder-
-   buffer reclaims of pid 568 (its own waiters' reply buffers age out);
-   distributed account queries (SAREG code=4 ohos.account.f...) spam accountmgr
-   x dozens/second from 355s on; bootevent.account.ready never SET (the
-   param_watcher wait at 211s hangs); useriam watchdog-killed at 641s (own
-   OS_DfxWatchdog) and restarts (687->1064->1135); screen stays md5 06b933b4.
-4. NO PARKED-LEAK on any softbus thread; last WAKE-STRANDED at 315s (pid 318
-   behind incumbents pid 684 pc=0x102 and pid 1 pc=1) — the strand/heal
-   machinery QUIETED after 315s. The final state is a stable starvation
-   equilibrium, not a collapse in progress.
-### Session close (third successor, 2026-10-31 ~17:50) — LADDER POSITION
-Ladder 1 (foundation survives) NOT yet held; the wall moved from "generic
-collapse" to ONE concrete cluster. Facts at close:
-- lb21 (dfx=wwcensus, same kernel): strand volume COLLAPSED to 6/boot
-  (strand_max 10.4s; lb15/16 class was 17-36) — the heal stack (rotation-
-  proof 2s tick heal + WAKE-HEAL + need_resched insurance) works. All my
-  QEMUs are dead; screen md5 06b933b4 (frozen logo) on lb20/lb21.
-- accountmgr SA loads (both boots); samgr->client callbacks work; the
-  remaining wall is the softbus/device_manager/accountmgr distributed-
-  cluster handshake: every call in that cluster runs multi-second (5.25s
-  device_manager timeouts on lb20; softbus->accountmgr code-14 SLOW-TXNs
-  on lb21), so activation never lands inside the watchdog windows.
-- Stale-claim resets keep regenerating (lb20: pids 497x2/457; lb21: 532x2/
-  584/1092) — the phantom-mark producer is alive but bounded.
-- Branch oh-launcher pushed through 7c850d6d + TASK commits; x3 builds
-  rc=0 (x86_64/riscv64/aarch64); make test ALL PASSED twice (lb18/lb21
-  maketest logs) on the final tree.
+**Driver bug found+fixed in-flight**: rsrun killed classes at an
+absolute 60 s (RES rc=137 truncation in the first campaign's memory/
+forker boots); now parses --timeout per class.
 
-### FOURTH-SUCCESSOR ENTRY POINTS (in order)
-1. The softbus starvation (lb20 evidence above): first boot with
-   `dfx=wwcensus` (lb21's recipe), watch pid 7xx softbus_server threads'
-   W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT lines + the PICK-SKIP reason
-   codes in fair.rs's pick decision legs. If a softbus worker is linked-
-   but-skipped with why=on_cpu, the R85 stale_oncpu heal's relink leg is
-   the fix site (it fired STALE-CLAIM-RESET on 724 at 841s on lb20 without
-   recovering the task).
-2. The re-leak engine (unchanged): OS_IPC worker carriers re-acquire
-   phantom +1 every ~200ms (lb17 tail); drops underflow at spinlock.rs:461/
-   rwlock.rs:457 with heap lock instances in the slab region
-   (0xffff88807d28a2d0/0xffff88807df62290/0xffff88807d2876d0 — the last
-   one DEADLOCKED both cpus under kpreempt). Root remains the double-run/
-   wild-write family (sc265/266/73 convictions; r83hunt is the tool).
-3. kpreempt=1 is armed-but-NEGATIVE until guards-held->2s disappear
-   (the false-heal preempts real lock holders; lb19b DEADLOCK proof).
-   Prerequisite: cond_resched at lock-free boundaries of the long kernel
-   loops (fork copy / exit unmap / rmap batches) OR the producer fix.
-4. timerfd_create storm caller still unnamed (4k/s; the 10-line TFDC
-   budget only caught boot-start callers: bluetooth/audio).
-=> OH-side note: even with accountmgr up, the DISTRIBUTED account path
-   (ohos.account.foreign/distributed) drags device_manager/softbus into the
-   critical path at boot. The hmdfs-disable image edit killed hmdfs, but
-   distributeddata's device_manager dependency remains. If the kernel
-   starvation is fixed, this chain should complete on its own.
+**Tier-1-under-load evidence** (syscost, memory boot): IF=0 cpu0
+17.6 s/60 s (rest 17.2 s, hard 408 ms, uart 3 ms), top rest-site
+sched.rs:2568 (37.4M ops avg 834 ns); no ALLOCTHROW / DEADLOCK /
+KERNPANIC classes in any boot. Follow-up hunts queued: IRQ-OFF-WINDOW
+idle-wake prints 65-142 ms under load (pre-existing, guarded domain
+interrupts); WAKE-STRANDED 118 s face under memory churn (SP-1
+family; re-check on fixed kernel in round 2).
 
-### Boot inventory this session
-lb16 (merged heal): anim.ready 221s, distributeddata watchdog-killed
-  (OS_DfxIpcCheck KOT-KILL 15 members) at 260s, wedge same class.
-lb17 (+WAKE-HEAL v1 silent): anim.ready 254s; console stalled ~300s;
-  steady re-leak engine first captured. NOTE: lb17's "launcher.ready
-  marker" was a FALSE match on "launcher.ready not set" — lb-boot.py now
-  rejects "not set" lines.
-lb18 (+skip census +stale-marker confirm): anim.ready 226s, heals 268,
-  strands 13, accountmgr started 303s, killed at 650s mid-account-phase.
-lb19/lb19b (kpreempt=1): the DEADLOCK verdict above (killed early).
-lb20 (running at write time): full 2400s, current branch.
+**Round 2 queue**: dirstorm-style shared-tree churn + fsync pressure;
+pipe/socketpair under CPU contention (2 vCPU); LTP robustness subset
+long-loop (fork12, mmapstress, mmap-corruption); brk-churn probe via
+glibc-static (musl pins brk); make test + full LTP spot-scan on the
+fixed kernel to guard the setattr/preempt changes.
 
 ### Successor entry points (in order)
 1. lb20's endgame: did the account phase complete / foundation survive /
@@ -1243,3 +1191,9 @@ loss). The race is now a coin-flip, not a wall.
    parked client receives NEW incoming work before its reply — reference
    delivers BR_TRANSACTION reentrantly there too; if a why=7/-6 family
    resurfaces, RPOP-DIVERGE + the guard hist dumps (006921c1) name it.
+
+### TASK.md note (16th successor, aa43f52e merge)
+origin/main's TASK.md became the stress lane's 101-line document (the
+coordinator repurposed it). This worktree keeps the oh-launcher lane
+history; the merge resolution is ours-by-intent. SP-1/SP-2 intel is in
+the stress lane's TASK.md on main.

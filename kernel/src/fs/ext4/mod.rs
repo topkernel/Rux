@@ -2122,6 +2122,21 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         Err(e) => return e,
     };
 
+    // SP-2 (stress-port r1, 2026-11-02): metadata-only setattr (chmod/
+    // chown/utime/atime) must NOT write back the stale disk size. The
+    // disk-read Ext4Inode lags pending writeback (write() updates the
+    // VFS size immediately; the disk inode is synced by writeback), so
+    // a chmod on a freshly-written file persisted i_size=0 — combined
+    // with the (formerly unconditional) page-cache invalidate below it
+    // dropped the unflushed data and read-after-chmod returned EOF
+    // (renameco: chmod sequence 3/300 fails with n=0; rename alone
+    // clean). The live VFS size is authoritative for every non-SIZE
+    // flavor (see FIX8 below for the same authority argument).
+    if attr != setattr_attr::ATTR_SIZE {
+        let live = inode.size.load(core::sync::atomic::Ordering::Acquire);
+        ext4_inode.set_size(live);
+    }
+
     match attr {
         setattr_attr::ATTR_MODE => {
             // arg1 = new mode. A full mode word (type bits present) RETYPES
@@ -2362,8 +2377,20 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
                     core::sync::atomic::Ordering::Release,
                 );
             }
-            // Invalidate page cache after size change (truncate/extend)
-            crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, inode.ino);
+            // Invalidate page cache ONLY on a size change (truncate/
+            // extend). SP-2 (stress-port r1): this used to run for EVERY
+            // setattr flavor — a chmod/chown/utime/atime dropped the
+            // inode's DIRTY unflushed pages (silent data loss: renameco
+            // read back EOF after chmod on a freshly-written file; the
+            // reference kernel keeps the page cache across metadata-only
+            // attribute changes) and needlessly killed the buffer-cache
+            // hit rate on the atime path.
+            if attr == setattr_attr::ATTR_SIZE {
+                crate::fs::page_cache::get_page_cache().invalidate_inode(
+                    fs as *const Ext4FileSystem as u64,
+                    inode.ino,
+                );
+            }
             0
         }
         Err(e) => e,
