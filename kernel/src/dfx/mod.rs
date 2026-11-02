@@ -115,6 +115,10 @@ pub mod scmtap;
 /// perf lane): TSC deltas per fork/exit phase, dumped at shutdown; see
 /// dfx/forkprof.rs.
 pub mod forkprof;
+/// mmap/mprotect stage profiler (cmdline mmprof=1, oh-launcher perf
+/// handoff): TSC deltas per vm-op stage + issuer attribution, dumped
+/// from the timer heartbeat; see dfx/mmprof.rs.
+pub mod mmprof;
 /// Lost-park event ring (dfx=lostpark, fix-lostpark lane): last-64
 /// scheduling events around an SMP lost-park wedge, dumped by the
 /// wakewatch heartbeat when the system freezes; see dfx/lostpark.rs.

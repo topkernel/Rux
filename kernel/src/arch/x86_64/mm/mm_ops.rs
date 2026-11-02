@@ -406,7 +406,13 @@ impl MmStruct {
             // with MAP_FIXED's multi-phase surgery dropped a live VMA
             // piece. Pick AND insert under ONE guard, like the hint path
             // below and the riscv64 twin.
+            let mp = crate::dfx::mmprof::on();
+            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+            }
+            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
             let chosen = if map_flags & map::MAP_32BIT != 0 {
                 // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces
                 // the mapping into the FIRST 2GB, bottom-up from 1GB
@@ -419,6 +425,10 @@ impl MmStruct {
             } else {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+            }
+            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -429,6 +439,9 @@ impl MmStruct {
             drop(vma_mgr);
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+            }
             vma_installed = true;
             chosen
         } else {
@@ -454,7 +467,13 @@ impl MmStruct {
             // an unaligned hint used to reach Vma::new and trip its
             // page-alignment assert (Vma::new asserts; Linux masks the
             // hint instead).
+            let mp = crate::dfx::mmprof::on();
+            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+            }
+            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
             let chosen = if addr.as_usize() != 0 {
                 let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
                 let hint_end = hint.checked_add(aligned_size);
@@ -482,6 +501,10 @@ impl MmStruct {
             } else {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+            }
+            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -492,6 +515,9 @@ impl MmStruct {
             drop(vma_mgr);
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+            }
             vma_installed = true;
             chosen
         };
@@ -529,6 +555,8 @@ impl MmStruct {
             // kernel permits any interleaving there too). The b89
             // piece-drop hole cannot recur: pieces are never held across
             // a guard drop by the chunked loop.
+            let mp = crate::dfx::mmprof::on();
+            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
             let mut attempts = 0;
             loop {
                 self.munmap(start, aligned_size)?;
@@ -552,6 +580,9 @@ impl MmStruct {
                 drop(vma_mgr);
                 self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
                 self.update_highest_vm_end(end.as_usize());
+                if mp {
+                    crate::dfx::mmprof::add(crate::dfx::mmprof::M_FIXEDMUN, mp_tf);
+                }
                 vma_installed = true;
                 break;
             }
@@ -740,6 +771,9 @@ impl MmStruct {
         // follows the VMA, not the address).
         const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
 
+        let mp = crate::dfx::mmprof::on();
+        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+
         loop {
             let mut vma_mgr = self.vma_write();
 
@@ -769,6 +803,12 @@ impl MmStruct {
             let seg_start = vs.max(addr_us);
             let seg_end = ve.min(end_addr);
             let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
+
+            // mmprof: chunk counter + surgery bracket (find+release+split).
+            let mp_t_surg = if mp { crate::dfx::mmprof::now() } else { 0 };
+            if mp {
+                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_MUNLOOPS, 1);
+            }
 
             // The pages of this piece leave the mapping: release their
             // virtual-size charge. The preserved head and tail pieces
@@ -813,14 +853,24 @@ impl MmStruct {
                 }
             }
 
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MU_SURG, mp_t_surg);
+            }
             self.unmap_pages(PageVirtAddr::new(seg_start), chunk_end - seg_start)?;
 
             // Drop the guard BEFORE yielding: the write lock must never
             // be held across schedule().
             drop(vma_mgr);
+            let mp_ty = if mp { crate::dfx::mmprof::now() } else { 0 };
             crate::sched::cond_resched();
+            if mp {
+                crate::dfx::mmprof::add(crate::dfx::mmprof::MU_YIELD, mp_ty);
+            }
         }
 
+        if mp {
+            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+        }
         Ok(())
     }
 
@@ -843,11 +893,16 @@ impl MmStruct {
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
+        let mp = crate::dfx::mmprof::on();
+        let mp_tw = if mp { crate::dfx::mmprof::now() } else { 0 };
         let _pte_guard = pte_lock_for(self).lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
 
         while addr < end {
+            if mp {
+                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNPAGES, 1);
+            }
             // SAFETY: self.pgd is a valid root PPN and addr is page-aligned within the range
             // being unmapped from this address space.
             let ppn = unsafe { PageTableWalker::walk(self.pgd, addr as u64) };
@@ -856,6 +911,9 @@ impl MmStruct {
             // slot and clear the PTE. Without this, munmap of a swapped
             // page leaks the slot for the lifetime of the swap area.
             if ppn.is_none() {
+                if mp {
+                    crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNEMPTY, 1);
+                }
                 if let Some(raw) = super::page_fault::read_pte_raw(
                     self.pgd,
                     VirtAddr::new(addr as u64),
@@ -951,6 +1009,10 @@ impl MmStruct {
         // of the pages just unmapped — a stale hit reads/writes freed
         // frames. One broadcast per batch unmap (local-only during x86
         // single-CPU bring-up; the call keeps shape parity).
+        if mp {
+            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
+        }
+        let mp_tt = if mp { crate::dfx::mmprof::now() } else { 0 };
         crate::arch::ipi::flush_tlb_others(
             start.as_usize() as u64,
             end as u64,
@@ -958,6 +1020,9 @@ impl MmStruct {
         // Full TLB flush (CR3 reload); required after clearing PTEs so
         // subsequent accesses use the updated page table.
         crate::arch::mm::asid::flush_tlb_all();
+        if mp {
+            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_TLB, mp_tt);
+        }
 
         Ok(())
     }
