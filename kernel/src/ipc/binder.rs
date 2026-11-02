@@ -4155,6 +4155,11 @@ pub fn pool_census_audit() {
 /// SAFETY: caller holds WORLD.
 unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::string::String {
     let mut found = alloc::string::String::new();
+    // Flood cap (lb310 lesson): a 60-1900-deep legal-interleave stack
+    // turned each census line into a 100-230KB console write that
+    // drowned the boot. Print the first 8 entries verbatim, then a
+    // count summary of the rest.
+    let mut shown = 0usize;
     for p in &world.procs {
         let pim = p.im();
         for (i, wk) in pim.todo.iter().enumerate() {
@@ -4175,27 +4180,33 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
                 if let Work::Transaction(t) = wk {
                     if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                         use core::fmt::Write;
-                        let _ = write!(
-                            found,
-                            " [p{}t{}todo{} txn{} code{}]",
-                            p.pid, ct.tid, i, t.id, t.code
-                        );
+                        shown += 1;
+                        if shown <= 8 {
+                            let _ = write!(
+                                found,
+                                " [p{}t{}todo{} txn{} code{}]",
+                                p.pid, ct.tid, i, t.id, t.code
+                            );
+                        }
                     }
                 }
             }
             for (i, st) in cth.txn_stack.iter().enumerate() {
                 if st.from_tid == Some(tid) && st.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                     use core::fmt::Write;
-                    // SAFETY: to_tid read under WORLD (same contract
-                    // as the rest of this walk).
-                    let tt = unsafe { st.to_tid() };
-                    let _ = write!(
-                        found,
-                        " [p{}t{}stack{} txn{} code{}>{}.{}]",
-                        p.pid, ct.tid, i, st.id, st.code,
-                        st.to_proc.pid,
-                        tt.unwrap_or(0)
-                    );
+                    shown += 1;
+                    if shown <= 8 {
+                        // SAFETY: to_tid read under WORLD (same contract
+                        // as the rest of this walk).
+                        let tt = unsafe { st.to_tid() };
+                        let _ = write!(
+                            found,
+                            " [p{}t{}stack{} txn{} code{}>{}.{}]",
+                            p.pid, ct.tid, i, st.id, st.code,
+                            st.to_proc.pid,
+                            tt.unwrap_or(0)
+                        );
+                    }
                 }
             }
         }
@@ -4203,10 +4214,17 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
             for t in node.st().async_todo.iter() {
                 if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                     use core::fmt::Write;
-                    let _ = write!(found, " [p{}node{} async txn{}]", p.pid, node.id, t.id);
+                    shown += 1;
+                    if shown <= 8 {
+                        let _ = write!(found, " [p{}node{} async txn{}]", p.pid, node.id, t.id);
+                    }
                 }
             }
         }
+    }
+    if shown > 8 {
+        use core::fmt::Write;
+        let _ = write!(found, " +{}more", shown - 8);
     }
     found
 }
