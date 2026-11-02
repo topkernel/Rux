@@ -22,20 +22,17 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 435 |
-| source lines in kernel/src | 327,135 |
-| files fully reviewed | 84 |
-| files partially reviewed | 91 |
+| source lines in kernel/src | 326,854 |
+| files fully reviewed | 81 |
+| files partially reviewed | 94 |
 | files not yet reviewed | 260 |
-| lines in fully reviewed files | 90,842 |
+| lines in fully reviewed files | 84,213 |
 | reviewed files mainline changed since `47d96961` (need re-read) | 156 |
 
 ## Defects found and fixed
 
 | commit | file | defect |
 |---|---|---|
-| `f62a4df6` | `kernel/src/fs/dentry.rs` | The reader-bank drain (692e7623) dropped the retired dentry/inode vecs while holding DENTRY_SLOW_READ under lock_irqsave. The drop cascade frees whole dentry subtrees and runs Inode::drop -> ext4_destroy_inode -> read_inode -> bio::bread — synchronous disk I/O with IRQs and preemption off, where the virtio completion wait degrades to the poll-only MMIO spin (1e6 iterations plus read_block's 5e7-iteration late scan): a cli segment bounded only by device latency, past the 3-7ms IRQ-gate class, tick/IPI loss, watchdog bait. Reachable from every unlink/rmdir whose retired inode is the last reference (they icache_remove BEFORE clear_inode) and from walk-side icache-refresh set_inode retires. Fix: take the vecs under the slow lock, drop AFTER the lock scope — the quiescence proof (banks zero at scan; fresh readers cannot reach the Arcs) never needed the lock held during the drop. |
-| `6a83a090` | `kernel/src/fs/ext4/file.rs` | ext4_file_write returned Err(ENOSPC) from the per-block loop even after earlier blocks of the same request had landed in dirty buffers — a write into an interior hole of a sparse file on a full disk discarded its own partial progress. write(2) and the reference kernel report the partial count when bytes landed; only a request that wrote nothing fails. Every mid-loop failure arm (hole/block allocation, extent materialize, buffer fetch) now degrades to partial success once total_written > 0, and the size tail tracks only what landed (offset + written). Host-mirror proptest added in kernel/verify (fs::ext4::write_partial_test): the old body fails 3/4 tests, the fixed body 4/4. |
-| `2b2a4a52` | `kernel/src/drivers/drm/mod.rs` | gem_close conflated its two None outcomes: 'handle not found' and 'entry kept because another holder still references the object' — the shared case returned -EINVAL although the caller's close succeeded. The reference's per-file handle tables make a close never fail because another file shares the OBJECT, so Mesa's GEM_CLOSE on shared buffers (the oh-glm5 EGLImage shape the shared-keep proxy exists for) must see 0. Outcome split into Removed/SharedKeep/NotFound; the object drop still runs outside the state lock. |
 | `4ee3e430` | `kernel/src/arch/aarch64/mm/asid.rs` | The aarch64 ASID allocator bumped NEXT_ASID monotonically and never consulted the in-use table: after 254 mm creations (any process-churning workload — LTP forks thousands) alloc_asid returned None FOREVER and every later mm fell back to ASID 0 via context.rs's unwrap_or(0) — functionally correct (every leaf write invalidates all-ASID, every switch full-flushes) but every user access TLB-misses for the rest of the boot. The riscv64 twin scans a reuse bitmap and only exhausts under genuine concurrency. Twin divergence fixed: the twin's bitmap allocator ported over the 256-entry pool (TCR_EL1.AS = 0); reuse is safe because stale entries die at every all-ASID leaf invalidation and every full-flush switch. |
 | `cfc04591` | `kernel/src/arch/aarch64/mm/exception.rs` | aarch64 do_page_fault ran handle_mm_fault unconditionally — the in_interrupt guard both twins carry was missing, so a fault taken from an IRQ handler would run the sleeping mm fault path (allocator + PTE section) from interrupt context. Ported the x86_64 guard form: in_interrupt() routes to no_context, which still unwinds a uaccess copy through the exception table before giving up (the riscv64 arm additionally heals preempt-count underflow — no aarch64 counterpart engine, not ported). |
 | `6e808eea` | `kernel/src/arch/aarch64/boot/boot.S` | The 'Save the DTB pointer' step stored x0 into dtb_pointer, but x0 held the aarch64_vector_table address from the VBAR_EL1 setup immediately above — it clobbered the DTB pointer published at .Lat_el1 entry. Latent only: nothing reads dtb_pointer between the clobber and the post-MMU re-publish that repaired it, so the boot worked; the stray store contradicted its own comment and would feed the vector table to the first pre-MMU-republish reader if one ever appeared. Store removed. |
@@ -196,14 +193,14 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 199 | ⬜ |  |
 
-### kernel/src/dfx (40580 lines)
+### kernel/src/dfx (40328 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `allocwatch.rs` | 450 | ⬜ | r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane |
+| `allocwatch.rs` | 450 | ⬜ |  |
 | `backtrace.rs` | 472 | 🔶🔁 | symbolized frame printing; 主线已改动，需重读 |
 | `bug.rs` | 98 | 🔶 | WARN/BUG banners |
-| `cctx.rs` | 247 | ⬜ | r3b bookkeeping: file present on main without a map entry (pre-existing --check drift); awaiting its owner lane |
+| `cctx.rs` | 247 | ⬜ |  |
 | `driftwatch.rs` | 134 | 🔶🔁 | release-site attribution; 主线已改动，需重读 |
 | `filerd.rs` | 160 | ⬜ |  |
 | `forkprof.rs` | 369 | ⬜ |  |
@@ -211,7 +208,7 @@ when the tree gains a file the map does not know about.
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 137 | ✅🔁 | written by this review (symbol table); 主线已改动，需重读 |
-| `ksyms_generated.rs` | 25305 | ⬜ | generated |
+| `ksyms_generated.rs` | 25053 | ⬜ | generated |
 | `leakorigin.rs` | 1020 | ✅🔁 | cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS; 主线已改动，需重读 |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `lostpark.rs` | 94 | ⬜ |  |
@@ -254,11 +251,11 @@ when the tree gains a file the map does not know about.
 | `iostat.rs` | 160 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `mod.rs` | 411 | 🔶🔁 | request path, register_disk; 主线已改动，需重读 |
 
-### kernel/src/drivers/drm (2572 lines)
+### kernel/src/drivers/drm (2556 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 2572 | 🔧🔁 | cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated; r3b: gem_close re-read — BUG FIXED: shared-object GEM_CLOSE returned -EINVAL (None conflated keep-with-not-found; reference close never fails because another file shares the OBJECT) — outcome split, drop still outside the state lock (2b2a4a52); 主线已改动，需重读 |
+| `mod.rs` | 2556 | 🔶🔁 | cr2: GEM lifecycle reviewed against drm_gem_handle_delete — create/close/map dumb, prime export/import (Box<Arc> geometry re-derived), strong_count retention proxy sound (2 residual proxy limitations ledgered in run/review-findings-cr2.md), addfb/addfb2, hunt taps gated; 主线已改动，需重读 |
 
 ### kernel/src/drivers/gpu (2006 lines)
 
@@ -320,22 +317,22 @@ when the tree gains a file the map does not know about.
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 3675 | 🔶🔁 | s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites; r3b: sync read/write_block paths (R8-M2/R22-6/late-scan), walker positional+device-truthed arms, ABANDON-vs-DELIVERY, lossless re-raise, vw_lag_watchdog re-read — R contracts honored, PASS; 主线已改动，需重读 |
+| `mod.rs` | 3675 | 🔶🔁 | s2c: completion walker (collect-under-BLK-lock, deliver outside — INV-LOCK-6/VIRTIO-WQ-1 intact), softirq lock-deferral, assert_no_virtio_lock fence at wake sites; 主线已改动，需重读 |
 | `offset.rs` | 52 | ⬜ |  |
 | `probe.rs` | 714 | ⬜ |  |
 | `queue.rs` | 1246 | 🔶🔁 | s2c: wait_for_used_interruptible + wait_for_desc_completion (prepare/recheck/deadline/dequeue-compensation discipline, poll_only for early boot and lock holders), submit_quiet publish via avail_shadow; 主线已改动，需重读 |
 | `virtio_pci.rs` | 2142 | 🔶🔁 | device-ID match arms + per-arch BAR self-assignment windows (riscv 0x40000000, aarch64 DTB 0x10000000, x86 firmware values) reviewed; 主线已改动，需重读 |
 
-### kernel/src/fs (33945 lines)
+### kernel/src/fs (33929 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `bio.rs` | 2786 | 🔶🔁 | sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS; r3b: bread/get eviction + publication queue re-read in the D-13/ENOSPC context — PASS (dirty-storm wedge filed F-r3b-1/2); 主线已改动，需重读 |
+| `bio.rs` | 2786 | 🔶🔁 | sync_buffers, ordered publications; cr3: publication_batch_drain (PUB_BATCH=64, journal-stop boundary, D-13), getblk_overwrite (full-4096 skip-read, hit requires uptodate), drop_freed_block_forgotten (dirty-unpinned-only drop + jbd2 forget, pinned/clean left), cache 8192/2048 sizing — all three gates PASS; 主线已改动，需重读 |
 | `buffer.rs` | 490 | 🔶🔁 | FileBuffer chunked read/write; 主线已改动，需重读 |
 | `cgroup.rs` | 879 | ⬜ |  |
 | `char_dev.rs` | 251 | ⬜ |  |
 | `debugfs.rs` | 596 | ✅🔁 | written by this review (debugfs); 主线已改动，需重读 |
-| `dentry.rs` | 1348 | 🔧🔁 | r3b: read end to end — reader banks + deferred retirement (692e7623) writer side audited: SeqCst claim/fence pairing re-derived sound, all child/inode mutators retire+bump, drain lock order consistent, DENTRY_DRAIN_DEFERS safety-neutral; BUG FIXED: drain dropped retired vecs under DENTRY_SLOW_READ irqsave and the cascade runs ext4_destroy_inode disk I/O with IRQs+preempt off (virtio poll-only = cli bounded only by device latency) — drops moved outside the lock scope (f62a4df6); 主线已改动，需重读 |
+| `dentry.rs` | 1332 | 🔶🔁 | per-directory locking; 主线已改动，需重读 |
 | `dev_t.rs` | 143 | ⬜ |  |
 | `elf.rs` | 701 | 🔧🔁 | read end to end (abi-review s1); this review: machine-check cfg hole on x86_64 fixed (validate now checks e_machine on every platform); 主线已改动，需重读 |
 | `fifo.rs` | 268 | ⬜ |  |
@@ -361,7 +358,7 @@ when the tree gains a file the map does not know about.
 | `sysfs.rs` | 2176 | 🔶🔁 | sysfs tree, writable attributes; 主线已改动，需重读 |
 | `tmpfs.rs` | 1478 | 🔶🔁 | tmpfs read/write; read_at op reviewed (IN_ACCESS self-notify removed, wrapper owns it); 主线已改动，需重读 |
 | `tty.rs` | 848 | ⬜ |  |
-| `vfs.rs` | 6296 | 🔶🔁 | file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化; r3b: path_lookup walk + follow_symlink_hinted + dentry_walk_no_symlink read in full (claim discipline on every arm verified), all Dentry mutator call sites grep-audited, vfs_rename_locked/rmdir/unlink publication vs the reader-bank protocol — PASS; walk-side icache-refresh set_inode under claim = drain deferral only; 主线已改动，需重读 |
+| `vfs.rs` | 6296 | 🔶🔁 | file_read/file_write 分发、目录权限与 sticky 位、chroot 下的路径归一化; 主线已改动，需重读 |
 | `vt.rs` | 476 | ⬜ |  |
 | `xattr.rs` | 272 | ⬜ |  |
 
@@ -372,7 +369,7 @@ when the tree gains a file the map does not know about.
 | `mod.rs` | 2427 | 🔧🔁 | s2b: read end to end — entry model, devtmpfs populate, mknod/remove/mkdir/lookup walkers, inode ops (lookup/iget/getattr/setattr/open/get_file_ops), reg-file read/write/read_at, SharedFilePages coherent MAP_SHARED backing, null/zero/full/random/con devices. DEFECT FIXED (d1275bce): getattr/lseek sized regular files from the stale entry.data while a shared backing is active — now the authoritative entry.size; A/B devfsmap probe 5->110 both cases. S_IFMT-vs-S_IFCHR classification and cross-open size coherence verified sound; 主线已改动，需重读 |
 | `registry.rs` | 85 | ⬜ |  |
 
-### kernel/src/fs/ext4 (13670 lines)
+### kernel/src/fs/ext4 (13669 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -380,12 +377,12 @@ when the tree gains a file the map does not know about.
 | `csum.rs` | 396 | 🔧🔁 | read end to end (cr2): crc32c + all six checksum classes; 3 write-path divergences vs e2fsprogs fixed (a6b01fd9) — sb le32 full-crc seal, 12-byte dir tail with markers + generation-chained seed + blocksize-12 span, extent seed contract; proven with the run/cr2-csum-harness e2fsck oracle (reseal bit-identical, dirfix clean); 主线已改动，需重读 |
 | `dir.rs` | 182 | 🔶 | directory ops |
 | `extent.rs` | 1876 | 🔧🔁 | read end to end (this review): mapping walkers, multi-level append/split/rebuild engine, merge guards, materialize; 3 defects fixed (b70a5deb); 主线已改动，需重读 |
-| `file.rs` | 2709 | 🔧🔁 | read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); redundant op-level IN_ACCESS self-notifies removed; write body/alloc/lseek/fsync from earlier sessions; r3b: ext4_file_write per-block loop re-read in full — BUG FIXED: mid-loop allocation failure discarded partial progress (Err(ENOSPC) after bytes landed; reference reports the partial count) — partial_or_err arms + partial-safe size tail (6a83a090), host-mirror proptest added in kernel/verify; 主线已改动，需重读 |
+| `file.rs` | 2675 | 🔶🔁 | read/fill machinery + read_at + read(2) paths + write_at_core/flush_dirty re-read this review (Err-vs-hole fixed, atime parity 1db98ff2); this session: redundant op-level IN_ACCESS self-notifies removed (wrapper owns the event); write body/alloc/lseek/fsync from earlier sessions; 主线已改动，需重读 |
 | `indirect.rs` | 375 | ⬜ |  |
 | `inode.rs` | 838 | 🔧🔁 | read end to end (this review): on-disk struct, read/write_inode clamp family, write_inode_disk, inode_table_block_of; s_inode_size clamp fixed (1db98ff2); 主线已改动，需重读 |
 | `journal.rs` | 247 | 🔶🔁 | jbd2 transaction start/stop; 主线已改动，需重读 |
-| `mod.rs` | 2895 | 🔶🔁 | superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites; r3b: ext4_destroy_inode + PENDING_REAPS/flush_pending_reaps re-read (read_inode in Drop context is the irqsave-drain hazard fixed on the dentry side; comment drift filed F-r3b-4); 主线已改动，需重读 |
-| `namei.rs` | 2788 | 🔶🔁 | cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS; r3b: tail_reserve 12-byte tail threading re-verified (deleted-slot + split arms bounded by usable_end; legacy chains fall through on Err) + D-13 publication ordering — PASS; 主线已改动，需重读 |
+| `mod.rs` | 2928 | 🔶🔁 | superblock, mount; cr2 re-read: mount-time csum verify region (32-bit sb compare) + the add_dir_entry/append/delete seal call sites; 主线已改动，需重读 |
+| `namei.rs` | 2788 | 🔶🔁 | cr2: dir-write paths (ext4_add_entry/add_entry_to_block/find_entry_space/create_initial_entry/dir_block_seal — tail-reserve threading + write_group_descriptor converted to read-modify-write, a6b01fd9), mark_inode_used bitmap-csum refresh, alloc/free-inode counter paths; remaining lookup/unlink/rename bodies pending; cr3: in-place dir scans (scan_dir_block_for_name), tail-first add, bidirectional find (unique names — order is speed-only), fresh-block full init verified, write_block_from_vec getblk_overwrite routing (full-block check >=4096 correct for sub-4K fs blocks via the bread RMW arm) — PASS; 主线已改动，需重读 |
 | `superblock.rs` | 334 | 🔶 | cr2: Ext4GroupDesc/Ext4SuperBlock field layout vs on-disk offsets (write_group_descriptor RMW fix) |
 
 ### kernel/src/fs/jbd2 (3505 lines)
@@ -414,7 +411,7 @@ when the tree gains a file the map does not know about.
 | `loadavg.rs` | 151 | 🔶🔁 | load average; 主线已改动，需重读 |
 | `locks.rs` | 71 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `meminfo.rs` | 228 | 🔶🔁 | meminfo fields; 主线已改动，需重读 |
-| `mod.rs` | 2548 | 🔶🔁 | 节点树、read/write 分发、/proc/<pid> 路径解析; r3b: ino scheme (100..2524 ranges collision-free: PidFileKind 100..200, fd-dir 200, fd-links 300..1324, ns 410..416, attr 510..516, task 620, fdinfo 1400/1500..2524), node types + root pid-dir fabrication + refcount get/put — PASS (init trees/generators not re-derived); 主线已改动，需重读 |
+| `mod.rs` | 2548 | 🔶🔁 | 节点树、read/write 分发、/proc/<pid> 路径解析; 主线已改动，需重读 |
 | `mounts.rs` | 187 | ⬜ |  |
 | `net.rs` | 339 | ⬜ |  |
 | `pid.rs` | 1464 | 🔶🔁 | status/stat generators; 主线已改动，需重读 |
@@ -542,7 +539,7 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 862 | ⬜ |  |
 
-### kernel/src/process (15059 lines)
+### kernel/src/process (15063 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -556,7 +553,7 @@ when the tree gains a file the map does not know about.
 | `pid.rs` | 198 | ⬜ |  |
 | `pid_hash.rs` | 266 | 🔶 | task iteration |
 | `ptrace.rs` | 850 | ⬜ |  |
-| `task.rs` | 5862 | 🔶🔁 | task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect); compat-review: cpus_allowed default + default_cpus_allowed/refresh_default_affinity_to_online read (affinity fix 5252505e/a9cbdac2 family); 主线已改动，需重读 |
+| `task.rs` | 5866 | 🔶🔁 | task layout, counters, comm; WAKE_PTR_FLOOR per-arch floors verified against each arch's image link base + linear map (riscv floor admits its vmalloc band — looser than needed, not a defect); compat-review: cpus_allowed default + default_cpus_allowed/refresh_default_affinity_to_online read (affinity fix 5252505e/a9cbdac2 family); 主线已改动，需重读 |
 | `wait.rs` | 512 | ⬜ |  |
 
 ### kernel/src/sched (13099 lines)
