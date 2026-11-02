@@ -82,6 +82,11 @@ static REPORTS: AtomicU32 = AtomicU32::new(0);
 static LAST_REPORT_JIF: AtomicU64 = AtomicU64::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
 
+/// Meter arm check for the mm section-duration meters (Relaxed load).
+pub fn armed() -> bool {
+    ARMED.load(Ordering::Relaxed)
+}
+
 fn enabled() -> bool {
     if ARMED.load(Ordering::Relaxed) {
         return true;
@@ -282,6 +287,25 @@ pub fn tick_check() {
     }
     let now = crate::drivers::timer::get_jiffies() as u64;
     tick_stuck_scan(now);
+    // Section-meter heartbeat (every 10 s): names the per-boot cost
+    // class even when no hold crosses the report threshold.
+    {
+        static LAST_SECT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let last = LAST_SECT.load(Ordering::Relaxed);
+        if now >= last + 1000
+            && LAST_SECT
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let m = crate::mm::small_alloc::audit_section_peek();
+            crate::pr_warn!(
+                "ALLOC-SECT small_alloc max_cyc={:x} over10ms={}",
+                m.iter().map(|x| x.0).max().unwrap_or(0),
+                m.iter().map(|x| x.1).sum::<u64>()
+            );
+        }
+    }
     for i in 0..SLOTS {
         let h = &HOLDERS[i];
         let pid = h.pid.load(Ordering::Relaxed);
@@ -358,6 +382,17 @@ pub fn tick_check() {
         } else {
             "not-found(task exited? stamp stale)"
         };
+        // Section-duration meter (lb268): one bounded section held
+        // 300 ms of real KVM execution — the per-class max/over10ms
+        // counters say whether that is normal for this boot.
+        if site == SITE_SMALL_ALLOC as usize {
+            let m = crate::mm::small_alloc::audit_section_peek();
+            crate::pr_warn!(
+                "ALLOC-SECT small_alloc max_cyc={:x} over10ms={}",
+                m.iter().map(|x| x.0).max().unwrap_or(0),
+                m.iter().map(|x| x.1).sum::<u64>()
+            );
+        }
         // Nested-buddy-spin hint (lb263): the small_alloc section's only
         // unbounded tail is the NESTED buddy-lock acquire — a waiter
         // there has NO stamp (stamps happen after acquire), so a stuck
