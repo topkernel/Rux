@@ -1,0 +1,11 @@
+# idx|test|class|rc|tail
+0|stat01|FAIL|1|IL: stat_buf.st_size (0) != FILE_SIZE (1024) stat01.c:48: TPASS: stat_buf.st_mode & MASK == tc->mode (146) stat01.c:49: TPASS: stat_buf.st_nlink == 1 (1)  Summary: passed   10 failed   2 broken   0 skipped  0 warnings 0
+1|stat01_64|FAIL|1|IL: stat_buf.st_size (0) != FILE_SIZE (1024) stat01.c:48: TPASS: stat_buf.st_mode & MASK == tc->mode (146) stat01.c:49: TPASS: stat_buf.st_nlink == 1 (1)  Summary: passed   10 failed   2 broken   0 skipped  0 warnings 0
+2|fstat02|FAIL|1|at_buf.st_size (0) != FILE_SIZE (1024) fstat02.c:34: TPASS: stat_buf.st_mode & 0777 == FILE_MODE (420) fstat02.c:35: TPASS: stat_buf.st_nlink == NLINK (2)  Summary: passed   5 failed   1 broken   0 skipped  0 warnings 0
+3|fstat02_64|FAIL|1|at_buf.st_size (0) != FILE_SIZE (1024) fstat02.c:34: TPASS: stat_buf.st_mode & 0777 == FILE_MODE (420) fstat02.c:35: TPASS: stat_buf.st_nlink == NLINK (2)  Summary: passed   5 failed   1 broken   0 skipped  0 warnings 0
+4|getpriority01|FAIL|1|ed 0 getpriority01.c:49: TPASS: getpriority(1, 0) returned 0 getpriority01.c:43: TFAIL: getpriority(2, 0) returned -120, expected in the range of [-20, 0]  Summary: passed   2 failed   1 broken   0 skipped  0 warnings 0
+5|mmap02|FAIL|1|st.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap02.c:46: TFAIL: mapped memory area contains invalid data  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0
+6|diotest2|FAIL|1|IL  :  diotest2.c:191: Read with Direct IO, Write without diotest02    3  TPASS  :  Write with Direct IO, Read without diotest02    4  TPASS  :  Read, Write with Direct IO diotest02    0  TINFO  :  1/3 testblocks failed
+7|setpgid03|POISON||
+8|inotify01|FAIL|1|(expected 20) cookie=0 len=0 inotify01.c:124: TFAIL: get event: wd=1 mask=08 (expected 2) cookie=0 len=0 inotify01.c:134: TFAIL: didn't get event: mask=08  Summary: passed   2 failed   5 broken   0 skipped  0 warnings 0
+9|getrusage04|FAIL|1|0us getrusage04    0  TINFO  :  utime:       10000us; stime:      180000us getrusage04    0  TINFO  :  utime:       10000us; stime:      200000us getrusage04    1  TFAIL  :  getrusage04.c:133: stime increased > 11000us:
