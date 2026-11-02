@@ -730,6 +730,10 @@ pub mod si_code {
     pub const CLD_KILLED: i32 = 2;
     /// Child process abnormal termination
     pub const CLD_DUMPED: i32 = 3;
+    /// Child process traced/stopped (SIGCHLD si_code; si_status = stop sig)
+    pub const CLD_STOPPED: i32 = 5;
+    /// Child process continued (SIGCHLD si_code; si_status = SIGCONT)
+    pub const CLD_CONTINUED: i32 = 6;
     /// SEGV: address not mapped (bad_area / SEGV_MAPERR)
     pub const SEGV_MAPERR: i32 = 1;
     /// SEGV: invalid permissions (SEGV_ACCERR)
@@ -2637,13 +2641,55 @@ fn handle_default_signal(sig: i32) {
         17 | 23 | 28 => {
             // Default ignore
         }
-        // SIGCONT(18): wake stopped process
+        // SIGCONT(18): resume a job-control stop AND record the
+        // continuation event (reference prepare_signal/do_notify_parent_
+        // cldstop(CLDCONTINUED)): a parent's waitid/waitpid with
+        // WCONTINUED must see CLD_CONTINUED exactly once per resume. The
+        // event rides the existing stop-report fields — stop_signal
+        // sentinel = -SIGCONT (negative = "continued pending"; the stop
+        // arms only read it while the task is STOPPED, so the sentinel
+        // is invisible to them), stop_reported re-armed = unreported.
         18 => {
-            // SIGCONT: wake stopped process
-            if let Some(current) = sched::current() {
-                if current.state().contains(TaskState::STOPPED) {
-                    current.set_state(TaskState::new(TaskState::RUNNING));
-                    signal_wake_up(current as *const _ as *mut _);
+            // SAFETY: current is a valid task pointer from sched::current().
+            unsafe {
+                if let Some(current) = sched::current() {
+                    // "Resuming from a job-control stop" = stopped right
+                    // now, OR woken from the stop by this signal's own
+                    // send path — signal_wake_up's Task::wake_up already
+                    // flipped STOPPED->RUNNING before delivery re-selects
+                    // SIGCONT, but stop_signal still names the stop
+                    // signal. Both shapes must record the CLD_CONTINUED
+                    // event; the sentinel replacement below makes a
+                    // second SIGCONT (running task, sentinel value) a
+                    // no-op, like the reference's cleared
+                    // SIGNAL_STOP_STOPPED.
+                    let from_stop = (*current).state().contains(TaskState::STOPPED)
+                        || matches!((*current).stop_signal(), 19..=22);
+                    if from_stop {
+                        (*current).set_stop_signal(-(Signal::SIGCONT as i32));
+                        (*current).stop_reported.store(false, core::sync::atomic::Ordering::Release);
+                        (*current).set_state(TaskState::new(TaskState::RUNNING));
+                        signal_wake_up(current as *const _ as *mut _);
+                        // CLD_CONTINUED SIGCHLD to the parent + wake any
+                        // blocked wait(WCONTINUED) sleeper — same
+                        // discipline as the stop arm below (parents
+                        // without a SIGCHLD handler rely on the
+                        // waitqueue wake).
+                        if let Some(parent_ptr) = (*current).parent_ptr() {
+                            let parent = parent_ptr as *mut crate::process::task::Task;
+                            let mut info = SigInfo::new(
+                                Signal::SIGCHLD as i32,
+                                si_code::CLD_CONTINUED,
+                                (*current).pid(),
+                                (*current).cred().uid,
+                            );
+                            info._rest[..4]
+                                .copy_from_slice(&(Signal::SIGCONT as i32).to_le_bytes());
+                            let _ = crate::signal::send_signal_with_info((*parent).pid(), info);
+                            crate::process::exit::wake_group_chldexit(parent);
+                            crate::signal::signal_wake_up(parent);
+                        }
+                    }
                 }
             }
         }
@@ -2659,10 +2705,20 @@ fn handle_default_signal(sig: i32) {
                     // Notify parent. SIGCHLD is discarded for parents without
                     // a handler (default disposition is SIG_IGN here), so the
                     // waitqueue wake is what actually unblocks a wait4/WUNTRACED
-                    // sleeper — same discipline as the exit path.
+                    // sleeper — same discipline as the exit path. The payload
+                    // carries si_code CLD_STOPPED / si_status = stop signal
+                    // (reference do_notify_parent_cldstop) for SA_SIGINFO
+                    // parents that decode it.
                     if let Some(parent_ptr) = (*current).parent_ptr() {
                         let parent = parent_ptr as *mut crate::process::task::Task;
-                        let _ = crate::signal::send_signal((*parent).pid(), Signal::SIGCHLD as i32);
+                        let mut info = SigInfo::new(
+                            Signal::SIGCHLD as i32,
+                            si_code::CLD_STOPPED,
+                            (*current).pid(),
+                            (*current).cred().uid,
+                        );
+                        info._rest[..4].copy_from_slice(&sig.to_le_bytes());
+                        let _ = crate::signal::send_signal_with_info((*parent).pid(), info);
                         crate::process::exit::wake_group_chldexit(parent);
                         crate::signal::signal_wake_up(parent);
                     }
