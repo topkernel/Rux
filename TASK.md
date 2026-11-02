@@ -1312,6 +1312,17 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
    the data), yet the per-user install-list query STILL returns empty (the
    size print is never reached). Structural ~30s early trigger + a query that
    fails even when resolved late.
+2b. SHARPER (lb324 decode): "ready" on cg17 boots is a FAILED-scan
+   completion, not data-landing — the el2/0 SetBundleQuota stream NEVER ran
+   (0 lines on lb322/324 vs 84 on lb317): BMS's scan dies before the
+   per-bundle phase. The failure prints are right there in the window:
+   foundation's *.IOsAccount proxies get error:32 AND error:29189, and the
+   *.IKvStoreDataService proxy gets error:29201 (the OH KV-store error
+   family — service-not-serving/DB-not-ready) at 65-104s. The KVS service
+   (distributeddata) is not serving BMS at trigger time; the whole boot's
+   SLOWTASK output has ZERO fs-family entries (only sys=16/281/202 idle
+   parks) — NO kernel slowpath feeds it. Userspace-internal readiness
+   mismatch, instrument-backed on both sides.
 3. NOT the poison: lb317 WON with 2034 total POISON32 (zero into foundation);
    lb323 LOST with 16 total (zero into foundation). No correlation.
 4. NOT a cg17 regression in the hang shapes: lb323's camera->distributeddata
