@@ -6543,45 +6543,64 @@ fn binder_transaction(
             // on the reference, so our sender-thread state already
             // diverges upstream; the guard is a diagnostic that names
             // those sends until that divergence is fixed).
-            if !reply
-                && !oneway
-                && crate::dfx::switches::enabled(
+            if !reply && !oneway {
+                let sg_reject = crate::dfx::switches::enabled(
                     crate::dfx::switches::DfxSwitch::SyncGuard,
-                )
-            {
-                let st = thread.st();
-                let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
-                let bad_stack_top = match st.txn_stack.last() {
-                    // SAFETY: to_tid read under WORLD.
-                    Some(top) => (unsafe { top.to_tid() }) != Some(thread.tid),
-                    None => false,
-                };
-                if todo_head_txn || bad_stack_top {
-                    sendfail_why(if todo_head_txn { 21 } else { 20 });
-                    *err_cmd = BR_FAILED_REPLY;
-                    static GUARD_N: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
-                        use core::fmt::Write as _;
-                        let depth = st.txn_stack.len();
-                        // SAFETY: reads of the top txn under WORLD.
-                        let (tid_, tcode, tto, fpid, ftid) = st
-                            .txn_stack
-                            .last()
-                            .map(|t| unsafe {
-                                (
-                                    t.id,
-                                    t.code,
-                                    t.to_tid(),
-                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
-                                    t.from_tid.unwrap_or(0),
-                                )
-                            })
-                            .unwrap_or((0, 0, None, 0, 0));
-                        let _ = writeln!(
+                );
+                let sw_watch = crate::dfx::switches::enabled(
+                    crate::dfx::switches::DfxSwitch::SyncWatch,
+                );
+                if sg_reject || sw_watch {
+                    let st = thread.st();
+                    let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
+                    let bad_stack_top = match st.txn_stack.last() {
+                        // SAFETY: to_tid read under WORLD.
+                        Some(top) => (unsafe { top.to_tid() }) != Some(thread.tid),
+                        None => false,
+                    };
+                    if todo_head_txn || bad_stack_top {
+                        static GUARD_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let depth = st.txn_stack.len();
+                            // SAFETY: reads of the top txn under WORLD.
+                            let (tid_, tcode, tto, fpid, ftid) = st
+                                .txn_stack
+                                .last()
+                                .map(|t| unsafe {
+                                    (
+                                        t.id,
+                                        t.code,
+                                        t.to_tid(),
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0),
+                                    )
+                                })
+                                .unwrap_or((0, 0, None, 0, 0));
+                            // SAFETY: read of the todo-head txn under
+                            // WORLD. to_tid=None means proc-addressed
+                            // work landed on a BUSY thread's todo — a
+                            // delivery shape the reference avoids (it
+                            // picks waiting_threads or the proc todo).
+                            let (hid, hcode, hto, hfpid, hftid) = match st.todo.front() {
+                                // SAFETY: same WORLD-held read as above.
+                                Some(Work::Transaction(t)) => unsafe {
+                                    (
+                                        t.id,
+                                        t.code,
+                                        t.to_tid(),
+                                        t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                        t.from_tid.unwrap_or(0),
+                                    )
+                                },
+                                _ => (0, 0, None, 0, 0),
+                            };
+                            let _ = writeln!(
                             w,
-                            "SYNCSEND-GUARD pid={} tid={} why={} stack_depth={} top=txn{} code{:#x} to_tid={:?} from pid{} tid{}",
+                            "SYNCSEND-{} pid={} tid={} why={} stack_depth={} top=txn{} code{:#x} to_tid={:?} from pid{} tid{} todo_head=txn{} code{:#x} to_tid={:?} from pid{} tid{}",
+                            if sg_reject { "GUARD" } else { "WATCH" },
                             proc.pid,
                             thread.tid,
                             if todo_head_txn { "todo-head-txn" } else { "stack-top-not-mine" },
@@ -6590,10 +6609,20 @@ fn binder_transaction(
                             tcode,
                             tto,
                             fpid,
-                            ftid
+                            ftid,
+                            hid,
+                            hcode,
+                            hto,
+                            hfpid,
+                            hftid
                         );
+                        }
+                        if sg_reject {
+                            sendfail_why(if todo_head_txn { 21 } else { 20 });
+                            *err_cmd = BR_FAILED_REPLY;
+                            return;
+                        }
                     }
-                    return;
                 }
             }
             if !reply {
