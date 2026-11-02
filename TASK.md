@@ -1624,3 +1624,88 @@ spiral class).
 - lb341 ran the full 800s healthy (race lost on the 83->115s trigger-vs-
   ready gap as every fresh boot this session; the ladder spin + POISON32
   trickle class, no crash).
+
+## TWENTIETH-SUCCESSOR SESSION (2026-11-03 03:3x-.., branch biofix-fieldpoll @ 5ddc03d2)
+Mission: decode distributeddata's SA:1301 init 29.4s on a post-fix kernel
+(fuxstuck+txnhunt+ams46+mmprof), reference A/B for the same window, quiet-window
+rolls. Outcome so far: THE 31s-CLASS WALL DECOMPOSED into a userspace
+on-demand LOAD cascade with a kernel-measured 5.06s param-watcher stall at its
+root gate — full evidence below; the binder deferral (mission ending (c))
+audited CLEAN at all four tcomplete sites + error paths; lb342 instrument boot
+banked; lb343 (syscost + 3s census bar) rolling at write time.
+
+### Merge + instrument boots
+- 5ddc03d2 = origin/main 113cd2b3 merged (docs; clean).
+- ea6992a6 dfx(futex): stuck-census bar 10s -> 3s (the decisive cascade parks
+  are 4-5s class — invisible at the old bar; diagnostics only, 8-line cap
+  bounds volume). x86_64 build rc=0.
+- lb342 (mmprof=1 + dfx=ams46,txnhunt,syncguard,fuxstuck,slowtask, LOGLEVEL=6,
+  fresh2, load ~5.5): HEALTHY boot, race lost by the usual margin (CreateNewUser
+  71.8s vs bundles.ready 103.2s = 31.4s), SA:1301 init 28,532ms (11.5->40.0),
+  59 POISON32 (ladder-spin family), no panic/ExecReboot. mmprof: mmap tot=24us
+  (n=178,799), fixmun=33us — the vm-op wall stays dead; issuers: sysevent_source
+  165,050 / sa_main 22,137 / appspawn 11,373 / hdf_devhost 8,505 /
+  DB_TaskExecutor **2** (distributeddata is NOT an mmap churner).
+
+### THE DECODE (lb342 evidence, all timestamps host-side serial)
+1. distributeddata (581) shows ZERO futex parks >10s all boot (fuxstuck: not a
+   single tgid=581 line), ZERO binder txns >4s TO it (vs 13 distinct >5s on
+   lb323/cg17) — the 17th's reply-deferral family and any condvar-starvation
+   story are BOTH absent on the post-fix kernel, yet the wall persists at
+   28.1-31.8s across every kernel since cg17 (28.3/28.8/31.8/29.4/28.5).
+2. THE SHAPE IS A LOAD CASCADE WITH 4s METRONOMES. DB_TaskExecutor threads
+   re-send SAMGR_LOAD(4802=device_manager) at 11.98/16.5/20.6/24.6/28.7/32.9/
+   36.9 — 4.05s apart, replies 6-17ms except one 4.0s samgr-side outlier.
+   softbus_server (exec 15.5) likewise re-LOADs 1120/1123
+   (wifi_manager) at 18.96/24.97/28.75/32.47/36.39. Each waiter's loop =
+   the 14th's sys=35 NANOSLEEP poll discipline; the loop releases when the
+   dependency's SA registers.
+3. THE CASCADE TIMELINE: samgr+hilog+param_watcher start 5.3-5.5; hdf_devmgr
+   SETS bootevent.hdf_devmgr.ready at 5.433 but INIT'S PARAM SERVICE DOES NOT
+   HANDLE IT UNTIL 10.496 (**5.06s in the param channel** — PCTL-RECV #2/#4
+   land in one burst at 10.489-10.505; the FIRST param handle of the boot).
+   bootevent.boot.completed fires 3ms later (10.505) — it is gated on
+   hdf_devmgr.ready. The reference handles the same set same-millisecond
+   (refu9: set ~3.52 handled 3.52).
+4. boot.completed releases init's on-demand list: distributeddata execs 11.4
+   (ref 4.5); device_manager loads via samgr (LOAD txn1198 11.98 -> spawn
+   12.42 -> publish 13.0, 0.6s in-stage = reference-class speed);
+   wifi_manager loads 20.0 -> publishes 30.7 (10.9s in-stage); softbus (exec
+   15.5) registers only at 40.02 after its wifi/1123 waits; distributeddata's
+   OnStart (28.1s) releases the moment softbus registers (40.02->40.03).
+   SA:1301 and SA:4700 both print spend:28144ms — the SAME cascade, not a
+   shared release.
+5. CFG NOTE: device_manager.cfg (start-on-demand: BOOT_COMPLETED) is
+   byte-identical between system-lb5 and the stock image — the cascade shape
+   is the image's own semantics on BOTH kernels; the reference just runs
+   every stage 5-25x faster, so the cascade compresses into ~2s there.
+6. Mission ending classification: NOT (a) waker-runnable-starved (no parks to
+   starve), NOT (c) binder deferral (audited below) — (b)-shaped, with the
+   chain's ROOT = init's 5.06s param-service stall + every stage's per-op
+   costs (the 4ms-8s SLOWTASK-blind band). The parks are <10s poll loops,
+   kernel-clean; the per-op wall inside the stages is the lever.
+7. BINDER DEFERRAL AUDIT (ending (c), code): four tcomplete sites — BC_REPLY
+   (immediate, process_todo=true), ONEWAY (immediate), SYNC (deferred per
+   963b3e95) — all balanced; dead_reply_to_sender pushes ReturnError with
+   process_todo=true + exact-thread wake; the send-fail paths return err_cmd
+   BEFORE any tcomplete queue (no dangling deferral). Two SYNCSEND-GUARD
+   prints this boot (pid 485 telephony, 39.05/39.17, why=stack-top-not-mine/
+   todo-head-txn at the 29201 ICommonEvent error) — noted, peripheral to the
+   race path.
+8. Also observed: txn11484 accountmgr(915)->foundation(871) exec 30s+ (server
+   main thread in futex wait on its OWN stack condvar, thtodo=0, OWE says
+   reply deferred userspace-side) — the osaccount chain riding the same
+   stage-cost wall. W2-WAKE-REFUSED-SLEEPING pid=976 x3 (28.8-31.3s,
+   state=0x0 on_cpu=false pk=1) — the wake-refusal-on-running shape, 3
+   prints, no strand confirmed (needs the 3s-bar census to re-adjudicate).
+
+### Mission-2 A/B numbers (same window, refu9 vs lb342)
+- boot.completed: ref ~3.6s / ours 10.5s (the 5.06s param stall is 5s of it).
+- distributeddata exec: ref 4.5 / ours 11.4. store serves: ref 5.9 (1.3s
+  after exec) / ours 40.0 (28.6s after exec). creation: ref 8.3 / ours 71.8.
+  SetBundleQuota stream: ref 8.5 / ours none (race lost). launcher.ready:
+  ref 11.7 / ours never (frozen logo).
+- Reference runs NO dynamic-proc loads (0 "Start dynamic proc" lines); ours
+  routes device_manager/wifi/distributeddata through samgr LOADs — both
+  kernels run the same on-demand cfg semantics; the reference's cascade
+  simply finishes inside the first 2s after boot.completed.
