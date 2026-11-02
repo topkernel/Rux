@@ -1241,3 +1241,14 @@ the stress lane's TASK.md on main.
    interleave; useriam FFRT completion) are userspace-internal under the
    whole-system per-op wall — the perf lane's syscost/pbench territory
    per the merge-gate philosophy, or the futex-stuck census above.
+
+### lb320/lb321 final verdicts (session close 22:27)
+- lb320: late creation (689s, host-loaded) -> empty-set loss; ladder spun
+  87x then the whole AMS chain stalled (last ImplicitQuery a MISS at
+  839s); appspawn alive but idle ("App enable -1" kickdog, no spawn);
+  bootanimation.finished fired; screen stayed frozen-logo md5 06b933b4.
+- lb321: deep slow class (no bootanimation by 933s under host load 12.9).
+- Pattern across the session's rolls: the race needs a quiet-host window
+  (the two fastest boots — lb313/317 — ran when load was ~7; every roll
+  at load 12+ crawled or spiraled). The successor should check `uptime`
+  before rolling and prefer quiet windows.
