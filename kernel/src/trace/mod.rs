@@ -828,6 +828,108 @@ tracepoints! {
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         String::from_utf8_lossy(&bytes[..end]).into_owned()
     };
+    /// kmem:kmalloc — one kernel heap allocation, with the ORIGIN
+    /// (call_site, `%pS`-symbolized) the heap-leak hunts want: every
+    /// Box/Vec/String build flows through the one GlobalAlloc
+    /// chokepoint, so this single event names the allocating function.
+    /// The reference host's events/kmem/kmalloc, field list and print
+    /// fmt verbatim (the `accounted` column is DERIVED from
+    /// __GFP_ACCOUNT there — no field row — and the same derivation
+    /// runs here). Field honesty: Rux's allocator takes no gfp mask;
+    /// the sites pass GFP_KERNEL (the analog of a plain kernel
+    /// allocation), so gfp_flags renders "GFP_KERNEL" and accounted
+    /// renders false — the reference's rendering of that mask. node is
+    /// NUMA_NO_NODE (-1): Rux has no NUMA policy.
+    EVENT_KMALLOC / kmalloc_fmt / trace_kmalloc : "kmem", "kmalloc", 27,
+    print: "\"call_site=%pS ptr=%p bytes_req=%zu bytes_alloc=%zu gfp_flags=%s node=%d accounted=%s\", (void *)REC->call_site, REC->ptr, REC->bytes_req, REC->bytes_alloc, (REC->gfp_flags) ? __print_flags(REC->gfp_flags, \"|\", {( unsigned long)(((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))) | (( gfp_t)((((1UL))) << (10)))), \"GFP_TRANSHUGE\"}, {( unsigned long)((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_TRANSHUGE_LIGHT\"}, {( unsigned long)((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)), \"GFP_HIGHUSER_MOVABLE\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))), \"GFP_HIGHUSER\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))), \"GFP_USER\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))) | (( gfp_t)((((1UL))) << (22)))), \"GFP_KERNEL_ACCOUNT\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))), \"GFP_KERNEL\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6)))), \"GFP_NOFS\"}, {( unsigned long)((( gfp_t)((((1UL))) << (5)))|(( gfp_t)((((1UL))) << (11)))), \"GFP_ATOMIC\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_NOIO\"}, {( unsigned long)((( gfp_t)((((1UL))) << (11))) | (( gfp_t)((((1UL))) << (13)))), \"GFP_NOWAIT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"GFP_DMA32\"}, {( unsigned long)(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))), \"__GFP_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"__GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (1))), \"__GFP_HIGHMEM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"__GFP_DMA32\"}, {( unsigned long)(( gfp_t)((((1UL))) << (3))), \"__GFP_MOVABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (4))), \"__GFP_RECLAIMABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (5))), \"__GFP_HIGH\"}, {( unsigned long)(( gfp_t)((((1UL))) << (6))), \"__GFP_IO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (7))), \"__GFP_FS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (8))), \"__GFP_ZERO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (10))), \"__GFP_DIRECT_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (11))), \"__GFP_KSWAPD_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (12))), \"__GFP_WRITE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (13))), \"__GFP_NOWARN\"}, {( unsigned long)(( gfp_t)((((1UL))) << (14))), \"__GFP_RETRY_MAYFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (15))), \"__GFP_NOFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (16))), \"__GFP_NORETRY\"}, {( unsigned long)(( gfp_t)((((1UL))) << (17))), \"__GFP_MEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (18))), \"__GFP_COMP\"}, {( unsigned long)(( gfp_t)((((1UL))) << (19))), \"__GFP_NOMEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (20))), \"__GFP_HARDWALL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (21))), \"__GFP_THISNODE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (22))), \"__GFP_ACCOUNT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (23))), \"__GFP_ZEROTAGS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (24))), \"__GFP_NO_OBJ_EXT\"}, { 0, ((void *)0) } ) : \"none\", REC->node, (1 && (REC->gfp_flags & ( unsigned long)(( gfp_t)((((1UL))) << (22))))) ? \"true\" : \"false\"",
+    fields: "\tfield:unsigned long call_site;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:const void *ptr;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t bytes_req;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t bytes_alloc;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long gfp_flags;\toffset:40;\tsize:8;\tsigned:0;\n\
+             \tfield:int node;\toffset:48;\tsize:4;\tsigned:1;\n",
+    call (call_site: u64, ptr: u64, bytes_req: u64, bytes_alloc: u64,
+          gfp_flags: u64, node: i32, accounted: bool),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "call_site={} ptr={:#x} bytes_req={} bytes_alloc={} gfp_flags={} node={} accounted={}",
+            ps_render(args[0]),
+            args[1],
+            args[2],
+            args[3],
+            gfp_flags_text(args[4]),
+            args[5] as i32,
+            if args[6] != 0 { "true" } else { "false" },
+        )
+    };
+
+    /// kmem:kfree — one kernel heap free, same origin discipline. The
+    /// reference host's events/kmem/kfree, field list and print fmt
+    /// verbatim: call_site and ptr, nothing else.
+    EVENT_KFREE / kfree_fmt / trace_kfree : "kmem", "kfree", 28,
+    print: "\"call_site=%pS ptr=%p\", (void *)REC->call_site, REC->ptr",
+    fields: "\tfield:unsigned long call_site;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:const void *ptr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (call_site: u64, ptr: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!("call_site={} ptr={:#x}", ps_render(args[0]), args[1])
+    };
+
+    /// kmem:mm_page_alloc — one buddy allocation of 2^order pages, the
+    /// reference's page-allocator return record (mm/page_alloc.c fires
+    /// it at the __alloc_pages return, page NULL on failure). The
+    /// reference host's events/kmem/mm_page_alloc; field rows from
+    /// TP_STRUCT__entry, print fmt from TP_printk with the same
+    /// substitutions the live format files show (fields become REC->,
+    /// show_gfp_flags expands to the __print_flags blob). Divergences
+    /// (noted, none silent): the `page=` column renders Rux's real
+    /// struct-page address, not a %p-hashed value (no kptr restriction
+    /// inside Rux's own trace); gfp_flags carries the REFERENCE mask
+    /// the Rux GfpFlags translate to (Rux's GfpFlags are a private
+    /// namespace — GFP_KERNEL=0x01 there — so the site maps them onto
+    /// the reference values the print fmt's flag table names), and
+    /// migratetype derives from __GFP_MOVABLE exactly the reference's
+    /// gfp_migratetype() way (no RECLAIMABLE bit exists in Rux).
+    EVENT_MM_PAGE_ALLOC / mm_page_alloc_fmt / trace_mm_page_alloc : "kmem", "mm_page_alloc", 29,
+    print: "\"page=%p pfn=0x%lx order=%d migratetype=%d gfp_flags=%s\", REC->pfn != -1UL ? pfn_to_page(REC->pfn) : NULL, REC->pfn != -1UL ? REC->pfn : 0, REC->order, REC->migratetype, (REC->gfp_flags) ? __print_flags(REC->gfp_flags, \"|\", {( unsigned long)(((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))) | (( gfp_t)((((1UL))) << (10)))), \"GFP_TRANSHUGE\"}, {( unsigned long)((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_TRANSHUGE_LIGHT\"}, {( unsigned long)((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)), \"GFP_HIGHUSER_MOVABLE\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))), \"GFP_HIGHUSER\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))), \"GFP_USER\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))) | (( gfp_t)((((1UL))) << (22)))), \"GFP_KERNEL_ACCOUNT\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))), \"GFP_KERNEL\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6)))), \"GFP_NOFS\"}, {( unsigned long)((( gfp_t)((((1UL))) << (5)))|(( gfp_t)((((1UL))) << (11)))), \"GFP_ATOMIC\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_NOIO\"}, {( unsigned long)((( gfp_t)((((1UL))) << (11))) | (( gfp_t)((((1UL))) << (13)))), \"GFP_NOWAIT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"GFP_DMA32\"}, {( unsigned long)(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))), \"__GFP_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"__GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (1))), \"__GFP_HIGHMEM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"__GFP_DMA32\"}, {( unsigned long)(( gfp_t)((((1UL))) << (3))), \"__GFP_MOVABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (4))), \"__GFP_RECLAIMABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (5))), \"__GFP_HIGH\"}, {( unsigned long)(( gfp_t)((((1UL))) << (6))), \"__GFP_IO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (7))), \"__GFP_FS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (8))), \"__GFP_ZERO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (10))), \"__GFP_DIRECT_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (11))), \"__GFP_KSWAPD_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (12))), \"__GFP_WRITE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (13))), \"__GFP_NOWARN\"}, {( unsigned long)(( gfp_t)((((1UL))) << (14))), \"__GFP_RETRY_MAYFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (15))), \"__GFP_NOFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (16))), \"__GFP_NORETRY\"}, {( unsigned long)(( gfp_t)((((1UL))) << (17))), \"__GFP_MEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (18))), \"__GFP_COMP\"}, {( unsigned long)(( gfp_t)((((1UL))) << (19))), \"__GFP_NOMEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (20))), \"__GFP_HARDWALL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (21))), \"__GFP_THISNODE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (22))), \"__GFP_ACCOUNT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (23))), \"__GFP_ZEROTAGS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (24))), \"__GFP_NO_OBJ_EXT\"}, { 0, ((void *)0) } ) : \"none\"",
+    fields: "\tfield:unsigned long pfn;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int order;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:gfp_t gfp_flags;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:int migratetype;\toffset:32;\tsize:4;\tsigned:1;\n",
+    call (pfn: u64, order: u32, gfp_flags: u64, migratetype: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let pfn = args[0];
+        let page = if pfn != u64::MAX {
+            crate::mm::page_desc::pfn_to_page(pfn as usize) as u64
+        } else {
+            0
+        };
+        format!(
+            "page={:#x} pfn={:#x} order={} migratetype={} gfp_flags={}",
+            page,
+            if pfn != u64::MAX { pfn } else { 0 },
+            args[1] as u32,
+            args[3] as i32,
+            gfp_flags_text(args[2]),
+        )
+    };
+
+    /// kmem:mm_page_free — pages returning to the allocator, fired at
+    /// the free_pages() entry (the reference's __free_pages_ok record).
+    /// The reference host's events/kmem/mm_page_free. Divergence: Rux
+    /// fires it for EVERY order at its single free funnel; the
+    /// reference's order-0 PCP frees carry mm_page_free_batched instead
+    /// (an event this table does not carry — mm_page_free is the
+    /// ledger's named pair).
+    EVENT_MM_PAGE_FREE / mm_page_free_fmt / trace_mm_page_free : "kmem", "mm_page_free", 30,
+    print: "\"page=%p pfn=0x%lx order=%d\", pfn_to_page(REC->pfn), REC->pfn, REC->order",
+    fields: "\tfield:unsigned long pfn;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int order;\toffset:16;\tsize:4;\tsigned:0;\n",
+    call (pfn: u64, order: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let page = crate::mm::page_desc::pfn_to_page(args[0] as usize) as u64;
+        format!("page={:#x} pfn={:#x} order={}", page, args[0], args[1] as u32)
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
@@ -1057,6 +1159,12 @@ impl TraceRing {
 static RINGS: [TraceRing; crate::config::MAX_CPUS] =
     [const { TraceRing::new() }; crate::config::MAX_CPUS];
 
+/// The SNAPSHOT buffer set — the second ring array behind the tracefs
+/// `snapshot` file (the reference's max_buffer). Static like the live
+/// rings: .bss cost only, no stored-image bytes.
+static SNAPSHOT_RINGS: [TraceRing; crate::config::MAX_CPUS] =
+    [const { TraceRing::new() }; crate::config::MAX_CPUS];
+
 /// The global sequence counter (one counter for every CPU, so the
 /// reader can merge the rings into the true recording order).
 static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1235,6 +1343,120 @@ pub fn drain_cpu(cpu: usize) -> Vec<TraceRecord> {
         ring.count.store(0, Ordering::Release);
         ring.read_events
             .fetch_add(out.len() as u64, Ordering::Relaxed);
+    }
+    out
+}
+
+// ============================================================================
+// The snapshot buffer (the tracefs `snapshot` file — the reference's
+// max_buffer: a write of 1 swaps it with the live buffer, a read shows
+// the saved records like `trace` does)
+// ============================================================================
+
+/// Save the live buffer into the snapshot set and restart the live
+/// buffer — the reference's `echo 1 > snapshot` (buffer swap + reset of
+/// the new current buffer): afterwards `snapshot` reads the old trace
+/// and `trace` restarts empty. Debug-facility trade (documented, same
+/// class as drain's): the reference excludes writers with the per-CPU
+/// max_lock; a lock on this ring would sit in record()'s path, so the
+/// copy runs lock-free — head/count are read BEFORE the record copy
+/// (a writer landing in between drops out of the saved window instead
+/// of tearing into it), and a record racing the copy may be missed.
+pub fn save_snapshot() {
+    // One save at a time: a second concurrent save (two writers to the
+    // same tracefs file) just returns — the copy below writes the spare
+    // slots through raw pointers, and exclusive ownership is what makes
+    // that not a same-address race.
+    static SAVING: AtomicBool = AtomicBool::new(false);
+    if SAVING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    for (ring, spare) in RINGS.iter().zip(SNAPSHOT_RINGS.iter()) {
+        let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
+        let head = ring.head.load(Ordering::Acquire);
+        // A plain element copy of the whole slot array: the saved
+        // head/count keep the same window semantics as the live ring.
+        //
+        // SAFETY: SAVING above excludes a concurrent save, so this
+        // thread owns every spare slot — the same discipline
+        // TraceRing::push relies on for its own slot writes.
+        unsafe {
+            for i in 0..RING_CAPACITY {
+                let dst = &spare.records[i] as *const TraceRecord as *mut TraceRecord;
+                dst.write(ring.records[i]);
+            }
+        }
+        spare.head.store(head, Ordering::Release);
+        spare.count.store(count, Ordering::Release);
+        spare
+            .read_events
+            .store(ring.read_events.load(Ordering::Relaxed), Ordering::Relaxed);
+        spare.dropped_events.store(
+            ring.dropped_events.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        // Restart the live ring.
+        ring.head.store(0, Ordering::Release);
+        ring.count.store(0, Ordering::Release);
+    }
+    SAVING.store(false, Ordering::Release);
+}
+
+/// Clear the snapshot set — the reference's `echo 0 > snapshot`.
+pub fn clear_snapshot() {
+    for spare in SNAPSHOT_RINGS.iter() {
+        spare.head.store(0, Ordering::Release);
+        spare.count.store(0, Ordering::Release);
+    }
+}
+
+/// The snapshot set's records, every CPU in sequence order (the
+/// `snapshot` file's read side).
+pub fn snapshot_records() -> Vec<TraceRecord> {
+    let mut out: Vec<TraceRecord> = Vec::new();
+    for spare in SNAPSHOT_RINGS.iter() {
+        collect_ring(spare, &mut out);
+    }
+    out.sort_by_key(|r| r.seq);
+    out
+}
+
+/// Render the snapshot buffer the way `trace` renders the live one
+/// (header with the snapshot set's own counts + every saved record).
+pub fn render_snapshot() -> String {
+    let mut out = String::new();
+    if option_enabled(&OPT_CONTEXT_INFO) {
+        let buffered: usize = SNAPSHOT_RINGS
+            .iter()
+            .map(|r| r.count.load(Ordering::Acquire).min(RING_CAPACITY))
+            .sum();
+        let written: u64 = SNAPSHOT_RINGS
+            .iter()
+            .map(|r| r.head.load(Ordering::Acquire) as u64)
+            .sum();
+        out.push_str("# tracer: nop\n");
+        out.push_str("#\n");
+        out.push_str(&format!(
+            "# entries-in-buffer/entries-written: {}/{}   #P:{}\n",
+            buffered,
+            written,
+            crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS)
+        ));
+        out.push_str("#\n");
+        out.push_str("#                                _-----=> irqs-off/BH-disabled\n");
+        out.push_str("#                               / _----=> need-resched\n");
+        out.push_str("#                              | / _---=> hardirq/softirq\n");
+        out.push_str("#                              || / _--=> preempt-depth\n");
+        out.push_str("#                              ||| / _-=> migrate-disable\n");
+        out.push_str("#                              |||| /     delay\n");
+        out.push_str("#           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION\n");
+        out.push_str("#              | |         |   |||||     |         |\n");
+    }
+    for record in snapshot_records().iter() {
+        out.push_str(&render_record(record));
     }
     out
 }
@@ -1547,42 +1769,195 @@ fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-/// page_fault_user / page_fault_kernel: address, ip, error_code. The
-/// `%ps` rendering follows the reference's trace_seq_print_sym +
+/// `%ps`/`%pS` rendering — the reference's trace_seq_print_sym +
 /// seq_print_ip_suffix exactly: `sym-offset` picks `name+0xoff/0xsize`
 /// vs the bare name, `sym-addr` appends ` <0xADDR>`, and an unknown
-/// address falls back to `0x%08lx`-style raw hex.
-fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
-    let ps = |addr: u64| -> String {
-        let sym_offset = option_enabled(&OPT_SYM_OFFSET);
-        let sym_addr = option_enabled(&OPT_SYM_ADDR);
-        let mut out = match crate::dfx::ksyms::lookup(addr) {
-            Some((name, sym, size)) => {
-                if sym_offset {
-                    if size > 0 {
-                        format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
-                    } else {
-                        format!("{}+0x{:x}", name, addr - sym)
-                    }
+/// address falls back to `0x%08lx`-style raw hex. Shared by the
+/// page_fault pair and the kmem origin column.
+pub fn ps_render(addr: u64) -> String {
+    let sym_offset = option_enabled(&OPT_SYM_OFFSET);
+    let sym_addr = option_enabled(&OPT_SYM_ADDR);
+    let mut out = match crate::dfx::ksyms::lookup(addr) {
+        Some((name, sym, size)) => {
+            if sym_offset {
+                if size > 0 {
+                    format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
                 } else {
-                    format!("{}", name)
+                    format!("{}+0x{:x}", name, addr - sym)
                 }
+            } else {
+                format!("{}", name)
             }
-            // No symbol covers the address: the reference prints the
-            // raw value (0x%08lx / IP_FMT).
-            None => format!("0x{:016x}", addr),
-        };
-        if sym_addr {
-            out.push_str(&format!(" <0x{:016x}>", addr));
         }
-        out
+        // No symbol covers the address: the reference prints the
+        // raw value (0x%08lx / IP_FMT).
+        None => format!("0x{:016x}", addr),
     };
+    if sym_addr {
+        out.push_str(&format!(" <0x{:016x}>", addr));
+    }
+    out
+}
+
+/// page_fault_user / page_fault_kernel: address, ip, error_code.
+fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
     format!(
         "address={} ip={} error_code=0x{:x}",
-        ps(args[0]),
-        ps(args[1]),
+        ps_render(args[0]),
+        ps_render(args[1]),
         args[2]
     )
+}
+
+/// gfp_flags rendered the print fmt's way — the reference's
+/// show_gfp_flags: 0 is "none", otherwise the __print_flags walk over
+/// the composite-first table (a name prints when its mask is fully
+/// present, its bits clear, leftover bits append as hex — the exact
+/// iteration include/linux/trace_events.h generates). The table's
+/// order is the blob's order in the kmalloc format capture; the masks
+/// are the reference gfp_types.h compositions (x86_64 bit layout,
+/// which the sites carry: they translate Rux's private GfpFlags onto
+/// these values).
+pub fn gfp_flags_text(gfp: u64) -> String {
+    /// The {mask, name} pairs in the reference's order.
+    const FLAGS: &[(u64, &str)] = &[
+        (0x140cca, "GFP_TRANSHUGE"),
+        (0x14088a, "GFP_TRANSHUGE_LIGHT"),
+        (0x100cca, "GFP_HIGHUSER_MOVABLE"),
+        (0x100cc2, "GFP_HIGHUSER"),
+        (0x100cc0, "GFP_USER"),
+        (0x400cc0, "GFP_KERNEL_ACCOUNT"),
+        (0xcc0, "GFP_KERNEL"),
+        (0xc40, "GFP_NOFS"),
+        (0x820, "GFP_ATOMIC"),
+        (0xc00, "GFP_NOIO"),
+        (0x800, "GFP_NOWAIT"),
+        (0x1, "GFP_DMA"),
+        (0x4, "GFP_DMA32"),
+        (0xc00, "__GFP_RECLAIM"),
+        (0x1, "__GFP_DMA"),
+        (0x2, "__GFP_HIGHMEM"),
+        (0x4, "__GFP_DMA32"),
+        (0x8, "__GFP_MOVABLE"),
+        (0x10, "__GFP_RECLAIMABLE"),
+        (0x20, "__GFP_HIGH"),
+        (0x40, "__GFP_IO"),
+        (0x80, "__GFP_FS"),
+        (0x100, "__GFP_ZERO"),
+        (0x400, "__GFP_DIRECT_RECLAIM"),
+        (0x800, "__GFP_KSWAPD_RECLAIM"),
+        (0x1000, "__GFP_WRITE"),
+        (0x2000, "__GFP_NOWARN"),
+        (0x4000, "__GFP_RETRY_MAYFAIL"),
+        (0x8000, "__GFP_NOFAIL"),
+        (0x10000, "__GFP_NORETRY"),
+        (0x20000, "__GFP_MEMALLOC"),
+        (0x40000, "__GFP_COMP"),
+        (0x80000, "__GFP_NOMEMALLOC"),
+        (0x100000, "__GFP_HARDWALL"),
+        (0x200000, "__GFP_THISNODE"),
+        (0x400000, "__GFP_ACCOUNT"),
+        (0x800000, "__GFP_ZEROTAGS"),
+        (0x1000000, "__GFP_NO_OBJ_EXT"),
+    ];
+    if gfp == 0 {
+        return "none".into();
+    }
+    let mut val = gfp;
+    let mut out = String::new();
+    for &(mask, name) in FLAGS {
+        if val & mask == mask {
+            if !out.is_empty() {
+                out.push('|');
+            }
+            out.push_str(name);
+            val &= !mask;
+        }
+    }
+    if val != 0 {
+        if !out.is_empty() {
+            out.push('|');
+        }
+        out.push_str(&format!("0x{:x}", val));
+    }
+    out
+}
+
+/// Pick the kmalloc/kfree `call_site` out of a frame walk done at the
+/// GlobalAlloc boundary: the first frame ABOVE the allocation plumbing.
+/// The reference's `_RET_IP_` names the caller of kmalloc — which is
+/// inline at the interesting site — while a Rust GlobalAlloc hop adds
+/// TWO OR THREE shim frames (current_frame_pointer's own frame, the
+/// GlobalAlloc impl, `__rust_alloc`, the alloc crate's wrapper), and
+/// the shims are not always in the symbol table (an address inside
+/// `__rust_alloc` then resolves to the closest-below symbol — the
+/// GlobalAlloc impl itself). The skip table names every frame the walk
+/// can legitimately pass through while still inside the allocator; the
+/// first frame resolving elsewhere is the allocating kernel function —
+/// the address the heap-leak hunt needs. Falls back to the first
+/// non-zero frame when nothing resolves (early boot, no table).
+pub fn alloc_call_site(frames: &[u64]) -> u64 {
+    /// Is a resolved name part of the allocation plumbing the walk must
+    /// climb past?
+    fn is_plumbing(name: &str) -> bool {
+        name.contains("mm::buddy_allocator")      // the GlobalAlloc impl + the trace helpers
+            || name.contains("mm::small_alloc")   // the packing layer
+            || name.contains("dfx::memwatch")     // the walker itself
+            || name.contains("dfx::backtrace")    // current_frame_pointer
+            // The compiler shims demangle inside the __rustc module
+            // namespace ("__rustc::__rust_alloc+0x.."): substring, not
+            // prefix, or the origin lands one frame too low.
+            || name.contains("__rust_alloc")
+            || name.contains("__rust_dealloc")
+            || name.contains("__rust_realloc")
+            // The WHOLE alloc crate is allocation machinery (raw_vec's
+            // grow/deallocate, vec's push/reserve, boxed's new — and
+            // their trait impls render as "<alloc::string::String as
+            // ...>", so a starts_with test misses them). No kernel
+            // allocating site lives there; stopping early would name
+            // the growth, not the caller.
+            || name.contains("alloc::alloc::")
+            || name.contains("alloc::raw_vec")
+            || name.contains("alloc::vec")
+            || name.contains("alloc::string")
+            || name.contains("alloc::boxed")
+            || name.contains("alloc::fmt")
+            || name.contains("alloc::collections")
+            || name.contains("alloc::sync")
+    }
+
+    // One pass, two candidates: the best origin is a frame in the
+    // kernel's own rux:: namespace (trait impls render as "<rux::...")
+    // that is not itself plumbing — the GlobalAlloc impl IS a rux::
+    // frame, so the plumbing test runs first. A non-rux frame that is
+    // not plumbing (early boot, foreign code) serves as the fallback
+    // when no kernel frame is within the walk.
+    let mut fallback = 0u64;
+    for &f in frames {
+        if f == 0 {
+            break;
+        }
+        let (name, is_rux) = match crate::dfx::ksyms::lookup(f) {
+            Some((name, _, _)) => {
+                let rux = name.starts_with("rux::") || name.starts_with("<rux::");
+                (name, rux)
+            }
+            None => ("", false),
+        };
+        if !name.is_empty() && is_plumbing(name) {
+            continue;
+        }
+        if is_rux {
+            return f;
+        }
+        if fallback == 0 {
+            fallback = f;
+        }
+    }
+    if fallback != 0 {
+        return fallback;
+    }
+    frames.iter().copied().find(|&f| f != 0).unwrap_or(0)
 }
 
 /// Copy a `&'static str` (an IRQ action name) into the 16-byte comm

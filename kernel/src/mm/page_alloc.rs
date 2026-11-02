@@ -68,24 +68,85 @@ pub fn reclaim_gate_exit_release(pid: u32) {
     }
 }
 
+/// Translate Rux's private GfpFlags namespace onto the reference gfp
+/// mask values (the kmem:mm_page_alloc gfp_flags column carries the
+/// reference mask — its print-fmt flag table names those values, not
+/// Rux's internal bits).
+fn gfp_reference_mask(g: GfpFlags) -> u64 {
+    let mut m = 0u64;
+    if g.0 & GfpFlags::GFP_KERNEL.0 != 0 {
+        m |= 0xcc0;
+    }
+    if g.0 & GfpFlags::GFP_USER.0 != 0 {
+        m |= 0x100cc0;
+    }
+    if g.0 & GfpFlags::GFP_ATOMIC.0 != 0 {
+        m |= 0x820;
+    }
+    if g.0 & GfpFlags::GFP_DMA.0 != 0 {
+        m |= 0x1;
+    }
+    if g.0 & GfpFlags::GFP_DMA32.0 != 0 {
+        m |= 0x4;
+    }
+    if g.0 & GfpFlags::__GFP_ZERO.0 != 0 {
+        m |= 0x100;
+    }
+    if g.0 & GfpFlags::__GFP_HIGHMEM.0 != 0 {
+        m |= 0x2;
+    }
+    if g.0 & GfpFlags::__GFP_MOVABLE.0 != 0 {
+        m |= 0x8;
+    }
+    m
+}
+
+/// The reference's gfp_migratetype(): __GFP_MOVABLE (Rux carries no
+/// __GFP_RECLAIMABLE) selects MIGRATE_MOVABLE, everything else is
+/// MIGRATE_UNMOVABLE.
+fn gfp_migratetype(g: GfpFlags) -> i32 {
+    if g.0 & GfpFlags::__GFP_MOVABLE.0 != 0 {
+        2
+    } else {
+        0
+    }
+}
+
 /// Allocate 2^order contiguous physical pages
 ///
 /// DFX memwatch wrapper: captures the caller chain (frame-pointer walk,
 /// valid at -O0) and feeds the page-level site table in dfx::memwatch —
 /// net growth per call-site is the physical-page leak signature.
 pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
-    if !crate::dfx::memwatch::armed() {
-        return alloc_pages_inner(gfp_flags, order);
-    }
-    let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
-    let phys = alloc_pages_inner(gfp_flags, order);
-    if phys != 0 {
-        let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-            [0; crate::dfx::memwatch::SITE_FRAMES];
-        unsafe {
-            crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+    let phys = if !crate::dfx::memwatch::armed() {
+        alloc_pages_inner(gfp_flags, order)
+    } else {
+        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
+        let phys = alloc_pages_inner(gfp_flags, order);
+        if phys != 0 {
+            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
+                [0; crate::dfx::memwatch::SITE_FRAMES];
+            unsafe {
+                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+            }
+            crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
         }
-        crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
+        phys
+    };
+    // kmem:mm_page_alloc — the reference's __alloc_pages return record
+    // (fired once per allocation, pfn -1 on failure exactly like the
+    // reference's page==NULL path).
+    if crate::trace::EVENT_MM_PAGE_ALLOC.armed() {
+        crate::trace::trace_mm_page_alloc(
+            if phys != 0 {
+                phys_to_pfn(phys) as u64
+            } else {
+                u64::MAX
+            },
+            order as u32,
+            gfp_reference_mask(gfp_flags),
+            gfp_migratetype(gfp_flags),
+        );
     }
     phys
 }
@@ -635,6 +696,14 @@ pub fn free_pages(addr: usize, order: usize) {
     if addr == 0 {
         dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
+    }
+
+    // kmem:mm_page_free — the free-side record at entry (the
+    // reference's __free_pages_ok fires before the page meets the PCP
+    // lists / the buddy; Rux's single free funnel carries every order —
+    // see the event's divergence note).
+    if crate::trace::EVENT_MM_PAGE_FREE.armed() {
+        crate::trace::trace_mm_page_free(phys_to_pfn(addr) as u64, order as u32);
     }
 
     // REUSE-WHILE-MAPPED tripwire (b88 samgr heap corruption hunt): a

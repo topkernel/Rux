@@ -4227,21 +4227,11 @@ pub fn wake_up_enqueue_opt(
         // takes no locks (the sched_switch site relies on the same
         // contract under IRQs-off).
         if crate::trace::EVENT_SCHED_WAKING.armed() {
-            let words = crate::trace::comm_to_words(&*(*task).comm());
-            crate::trace::record(
-                &crate::trace::EVENT_SCHED_WAKING,
-                [
-                    words[0],
-                    words[1],
-                    (*task).pid() as u64,
-                    (*task).prio() as u64,
-                    (*task).ti_cpu() as u64,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
+            crate::trace::trace_sched_waking(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
             );
         }
         //
@@ -4528,7 +4518,7 @@ pub fn wake_up_enqueue_opt(
                 putchar(b'\n');
             }
             false
-        }
+        };
         // The sched:sched_wakeup tracepoint — the reference's
         // ttwu_do_wakeup record: the task left the wait queue and is
         // enqueued (or was still linked in the R42 race window), state
@@ -4537,21 +4527,11 @@ pub fn wake_up_enqueue_opt(
         // event data (a waking with no matching wakeup = refused wake).
         // GRQ is held; record() takes no locks.
         if woken && crate::trace::EVENT_SCHED_WAKEUP.armed() {
-            let words = crate::trace::comm_to_words(&*(*task).comm());
-            crate::trace::record(
-                &crate::trace::EVENT_SCHED_WAKEUP,
-                [
-                    words[0],
-                    words[1],
-                    (*task).pid() as u64,
-                    (*task).prio() as u64,
-                    (*task).ti_cpu() as u64,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
+            crate::trace::trace_sched_wakeup(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
             );
         }
         woken

@@ -749,14 +749,15 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_BLOCK_RQ_COMPLETE,
     ];
     match switch {
-        // The ledger's ready-to-port wave.
+        // The ledger's ready-to-port wave. (WwCensus is deliberately
+        // ABSENT: the ledger keeps the wild-write tripwires frozen —
+        // they are active detectors, not passive observability.)
         DfxSwitch::SchedTrace
         | DfxSwitch::Schb
         | DfxSwitch::PeriodicDump
         | DfxSwitch::TaskDumpKey
         | DfxSwitch::ParkDump
-        | DfxSwitch::SleepSnap
-        | DfxSwitch::WwCensus => Some(SCHED),
+        | DfxSwitch::SleepSnap => Some(SCHED),
         DfxSwitch::SyscallTrace | DfxSwitch::SysForensic | DfxSwitch::SysRing => {
             Some(RAW_SYSCALLS)
         }
@@ -769,12 +770,15 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
             Some(SCHED_AND_SYSCALLS)
         }
         // The round-2 kmem wave: allocator watches map onto the kmem
-        // events (the ledger's allocwatch/leakhunt/mmforensics row) and
-        // memwatch's partial row (oom:mark_victim + the mm family).
+        // events (the ledger's allocwatch/leakhunt/mmforensics/vmap/
+        // poolcensus/monowatch row) and memwatch's partial row
+        // (oom:mark_victim + the mm family).
         DfxSwitch::AllocWatch
         | DfxSwitch::LeakHunt
         | DfxSwitch::MmForensics
-        | DfxSwitch::VmaProbe => Some(KMEM),
+        | DfxSwitch::VmaProbe
+        | DfxSwitch::PoolCensus
+        | DfxSwitch::MonoWatch => Some(KMEM),
         DfxSwitch::MemWatch => Some(MM_PARTIAL),
         // The ledger's writetrace row (partial): the kernel-fault and
         // block-request views of the write path.
