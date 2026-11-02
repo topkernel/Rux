@@ -137,6 +137,10 @@ struct SmallCache {
     /// the census so a boot's lock-traffic win is directly readable
     /// against obj_allocs+obj_frees on the same line.
     lock_holds: AtomicUsize,
+    /// Page-list walks that hit the corruption cap (cycle defense,
+    /// lb260/lb261 OH allocator-freeze) — nonzero means the wild-write
+    /// producer struck this class's list.
+    walk_cycles: AtomicUsize,
 }
 
 impl SmallCache {
@@ -149,6 +153,7 @@ impl SmallCache {
             obj_allocs: AtomicUsize::new(0),
             obj_frees: AtomicUsize::new(0),
             lock_holds: AtomicUsize::new(0),
+            walk_cycles: AtomicUsize::new(0),
         }
     }
 }
@@ -320,9 +325,30 @@ fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
     let objs_per_page: u16 = ((PAGE_SIZE - fo) / s) as u16;
 
     // 1. Serve from an active page; lazy-skip dead heads.
+    //
+    // WALK BOUND (the OH allocator-freeze, lb260/lb261): the unlink-skip
+    // below re-links around dead pages, but a page-list CYCLE (wild-write
+    // corruption: A->B->A with both dead) revisits forever — head=B,
+    // then head=B.next=A, then head=A.next=B ... every iteration under
+    // the class lock at IF=0, so the holder's own tick dies and the
+    // whole machine freezes (os_ds_service t548 held small_alloc class
+    // locks for the rest of the boot on both boots; ALLOC-HOLD named
+    // it). A legit class list is bounded by the heap's page count — cap
+    // the walk at 8192 pages (no legitimate single-class list approaches
+    // that); on cap, taint loudly and fall through to a FRESH page
+    // (path 2): the corrupt cycle is leaked like every other corrupt
+    // page here — "loud beats corrupt", and a leaked cycle beats a
+    // frozen machine.
+    let mut walked: u32 = 0;
     let mut prev: u32 = 0; // page index of the previous live link point (0 = head)
     let mut cur = cache.head.load(Ordering::Relaxed) as u32;
     while cur != 0 {
+        walked += 1;
+        if walked > 8192 {
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
+            break;
+        }
         let page_addr = heap_start + cur as usize * PAGE_SIZE;
         let hdr = hdr_of(page_addr);
         if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE || hdr.free_count == 0 {
@@ -607,7 +633,16 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
             let pi = ((page - heap_start) / PAGE_SIZE) as u32;
             let mut prev: u32 = 0;
             let mut cur = cache.head.load(Ordering::Relaxed) as u32;
+            // Cycle cap (see alloc_locked's WALK BOUND — a corrupted
+            // list must never loop under the class lock at IF=0).
+            let mut steps: u32 = 0;
             while cur != 0 {
+                steps += 1;
+                if steps > 8192 {
+                    crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                    cache.walk_cycles.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
                 let a = heap_start + cur as usize * PAGE_SIZE;
                 if cur == pi {
                     let next = hdr_of(a).next_page;

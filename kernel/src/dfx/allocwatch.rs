@@ -54,6 +54,8 @@ struct Holder {
     pid: AtomicU32,
     tgid: AtomicU32,
     jif: AtomicU64,
+    /// Last report jiffies for THIS slot (per-slot throttle).
+    jif_report: AtomicU64,
 }
 
 impl Holder {
@@ -64,6 +66,7 @@ impl Holder {
             pid: AtomicU32::new(0),
             tgid: AtomicU32::new(0),
             jif: AtomicU64::new(0),
+            jif_report: AtomicU64::new(0),
         }
     }
 }
@@ -285,12 +288,16 @@ pub fn tick_check() {
         if now <= jif || now - jif < 100 {
             continue; // held < 1 s (100 Hz)
         }
-        // Re-report throttle: one line per boot per 5 s.
-        let last = LAST_REPORT_JIF.load(Ordering::Relaxed);
-        if now < last + 500 {
-            return;
+        // Re-report throttle: per-SLOT 5 s (the first version throttled
+        // globally, so a freeze whose chain holds small_alloc AND buddy
+        // printed only the first slot — lb260's onset print named
+        // small_alloc and the machine died before the buddy slot's
+        // window opened).
+        let last = h.jif_report.load(Ordering::Relaxed);
+        if last != 0 && now < last + 500 {
+            continue;
         }
-        LAST_REPORT_JIF.store(now, Ordering::Relaxed);
+        h.jif_report.store(now, Ordering::Relaxed);
         let n = REPORTS.fetch_add(1, Ordering::Relaxed);
         if n > 200 {
             return;
@@ -308,6 +315,7 @@ pub fn tick_check() {
         let mut state_bits = 0u32;
         let mut preempt = 0i32;
         let mut ti_cpu = 0i32;
+        let mut thsp = 0u64;
         let mut comm_out = [0u8; 16];
         let mut comm_len = 0usize;
         unsafe {
@@ -316,6 +324,7 @@ pub fn tick_check() {
                     state_bits = (*t).state().bits();
                     preempt = (*t).preempt_count();
                     ti_cpu = (*t).ti_cpu();
+                    thsp = (*t).thread().sp;
                     let c = (*t).comm();
                     let n = c.iter().position(|&x| x == 0).unwrap_or(16);
                     comm_out[..n].copy_from_slice(&c[..n]);
@@ -360,5 +369,49 @@ pub fn tick_check() {
             ti_cpu,
             cls
         );
+        // Holder kernel-stack PCs (lb260: the onset print named the
+        // holder but not WHERE it is stuck; both cpus died within ~5 s
+        // so this is the only chance to see inside). Same window scan
+        // as HUNG-STK (hung_task.rs R76): text-range words upward from
+        // the saved sp. For a holder LIVE on cpu at IF=0 the sp is its
+        // last switch-in sp — outer frames still name the syscall.
+        if found && (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
+            #[cfg(feature = "x86_64")]
+            extern "C" {
+                static __stext: u8;
+                static __etext: u8;
+            }
+            #[cfg(not(feature = "x86_64"))]
+            extern "C" {
+                static _stext: u8;
+                static _etext: u8;
+            }
+            #[cfg(feature = "x86_64")]
+            let lo = core::ptr::addr_of!(__stext) as u64;
+            #[cfg(feature = "x86_64")]
+            let hi = core::ptr::addr_of!(__etext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let lo = core::ptr::addr_of!(_stext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let hi = core::ptr::addr_of!(_etext) as u64;
+            let base = thsp as *const u64;
+            let mut shown = 0;
+            crate::pr_warn!("ALLOC-HOLD-STK pid={} sp={:#x}", pid, thsp);
+            for k in 0..80 {
+                // SAFETY: diagnostic read within the holder's own kernel
+                // stack pages (the Task exists and pins them).
+                let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+                if v >= lo && v < hi && (v & 1) == 0 {
+                    crate::pr_warn!("ALLOC-HOLD-STK2 {:#x}", v);
+                    shown += 1;
+                    if shown >= 8 {
+                        break;
+                    }
+                }
+            }
+            if shown == 0 {
+                crate::pr_warn!("ALLOC-HOLD-STK2 none-in-text");
+            }
+        }
     }
 }
