@@ -842,36 +842,48 @@ pub struct Task {
     /// +1 never drains — still heal after 2 s.
     ti_pc_zero_jif: AtomicU64,
 
-    /// jiffies of the most recent tick that observed this task's SOFTIRQ
-    /// field ABSENT (0 = never). Per-field contiguity stamp for the
-    /// tick-side PREEMPT-HEAL: d2381bf9's bar (a PREEMPT-pair completion
-    /// re-arms the window) is the right liveness proof for the base
-    /// preempt field — but it shields a stranded SOFTIRQ bit on a
-    /// lock-hot carrier (the lb64/lb65 OH boots: systemui wedged in
-    /// exit_group at pc=0x100 for 600 s, render_service watchdog at
-    /// 0x100, three 0x10000 incumbents — every CPU monopolized, ZERO
-    /// heals fired, because the carriers keep completing ordinary
-    /// spinlock pairs). A SOFTIRQ field observed PRESENT at 200
-    /// consecutive ticks is phantom by the same five-orders argument
-    /// the heal doctrine uses; only the field's OWN absences re-arm it.
-    ti_pc_sirq_zero_jif: AtomicU64,
+    /// CONSECUTIVE-PRESENT observation run for the SOFTIRQ field
+    /// (stress-port r3, 2026-11-02): number of the task's own-CPU tick
+    /// observations, in a row, that saw this field PRESENT since the
+    /// last absence / legal drain / external zeroing. The tick-side
+    /// PREEMPT-HEAL gates on run >= 200. This replaces the
+    /// absence-stamp-age bar, which three producer families defeated:
+    /// (1) stamp-age accrued for FREE while a task was off-CPU (the
+    /// memory2/hunt2 strand: a task parked mid-section through a 100 s
+    /// pick-skip strand resumed "instantly stale" and its first
+    /// post-resume tick healed a LIVE guard — spinlock.rs underflow at
+    /// the page-allocator zone lock); (2) jiffies is timebase-DERIVED
+    /// (timer/x86_64.rs), so a >2 s host steal window inflates stamp
+    /// age by 200+ ticks with zero ticks delivered — steal-window
+    /// false-fires on live guards; (3) the pb3 release-side re-arm
+    /// stored the SUPERSEDED ti_pc_zero_jif field (see below), so the
+    /// per-field bar never actually re-armed on legal 1->0 drains and
+    /// the 100 Hz sampler's missing of microsecond absent-gaps between
+    /// guard pairs produced 200-present-sample streaks on lock-hot
+    /// tasks (memory-hunt2: a heal storm, oage_jif=1 on every line —
+    /// a fresh 0->1 acquire one jiffy before each "2 s hold" heal).
+    /// Observation counting is immune to all three by construction:
+    /// off-CPU and stolen CPUs deliver no ticks (run frozen), and the
+    /// release-side reset (sub_preempt_count_at, on the field this
+    /// gate reads) makes every legal drain re-arm regardless of
+    /// sampler luck. The parked-with-nonzero-count shape stays owned
+    /// by the parkwalk's 4 s PARKED-HEAL, which needs no tick.
+    ti_pc_sirq_present_run: AtomicU64,
 
-    /// Same per-field stamp for the HARDIRQ nesting field: the observer
-    /// tick's own in-flight level is subtracted by the >=2 gate, so one
-    /// phantom hardirq level observed for 200 consecutive ticks heals
-    /// to exactly one kept level (ti_preempt_count_keep_tick_nesting —
-    /// the still-pending irq_exit sub pairs against the kept level).
-    ti_pc_hirq_zero_jif: AtomicU64,
+    /// Same run counter for the HARDIRQ nesting field (bumped only when
+    /// the extra-nesting predicate `>= 2 * HARDIRQ_OFFSET` holds at
+    /// tick, so the observer's own in-flight level never counts). A
+    /// phantom hardirq level with run >= 200 heals to exactly one kept
+    /// level (ti_preempt_count_keep_tick_nesting — the still-pending
+    /// irq_exit sub pairs against the kept level).
+    ti_pc_hirq_present_run: AtomicU64,
 
-    /// Same per-field stamp for the base PREEMPT field (round 3): the
-    /// pb3 lock-hot false-heal family and the sc42 re-leak carriers are
-    /// both distinguished from true base phantoms by exactly this — a
-    /// legal guard pair is microseconds, so a PREEMPT field observed
-    /// ABSENT at most ticks (fresh stamp) is lock churn, protected; a
-    /// field observed PRESENT at 200 consecutive ticks (stale stamp) is
-    /// a stranded +1. Replaces both the sc42 cumulative window and
-    /// d2381bf9's PREEMPT-pair re-arm in the tick-side heal gate.
-    ti_pc_pirq_zero_jif: AtomicU64,
+    /// Same run counter for the base PREEMPT field. Reset by: tick
+    /// absent-sample, the legal outermost 1->0 release
+    /// (sub_preempt_count_at), every external zeroing
+    /// (ti_preempt_count_zero / clear_base / keep_tick_nesting), and
+    /// the underflow clamp. Heals only at run >= 200.
+    ti_pc_pirq_present_run: AtomicU64,
 
     /// khungtaskd bookkeeping (review批次8): timestamp (ns) when this task
     /// was FIRST seen in D-state in the current window; 0 = not in D-state.
@@ -1575,9 +1587,9 @@ impl Task {
             ti_flags: AtomicU32::new(0),
             ti_preempt_count: core::sync::atomic::AtomicI32::new(0),
             ti_pc_zero_jif: AtomicU64::new(0),
-            ti_pc_sirq_zero_jif: AtomicU64::new(0),
-            ti_pc_hirq_zero_jif: AtomicU64::new(0),
-            ti_pc_pirq_zero_jif: AtomicU64::new(0),
+            ti_pc_sirq_present_run: AtomicU64::new(0),
+            ti_pc_hirq_present_run: AtomicU64::new(0),
+            ti_pc_pirq_present_run: AtomicU64::new(0),
             ti_kernel_sp: core::sync::atomic::AtomicU64::new(0),
             ti_user_sp: core::sync::atomic::AtomicU64::new(0),
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
@@ -1831,15 +1843,15 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_sirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_hirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_pirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
@@ -2482,15 +2494,15 @@ impl Task {
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_sirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_sirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_hirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_hirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, ti_pc_pirq_zero_jif)) as *mut core::sync::atomic::AtomicU64,
+            (ptr as usize + offset_of!(Task, ti_pc_pirq_present_run)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // R9-1 (NEW2 engine #3): these fields were NEVER initialized here —
@@ -4185,25 +4197,37 @@ impl Task {
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
             crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
-            // phantom-bits: a LIVE outermost pair just completed — stamp
-            // so the tick-side heal window restarts (hot lock users must
-            // not be adjudicated as phantom holders).
-            self.ti_pc_zero_jif.store(
-                crate::drivers::timer::get_jiffies(),
+            // phantom-bits / stress-port r3: a LIVE outermost pair just
+            // completed — re-arm the run counter the tick-side heal
+            // actually gates on. (The pb3 re-arm stored the superseded
+            // ti_pc_zero_jif field, which nothing reads, so the
+            // per-field bar never re-armed here and hot lock users
+            // accumulated stale bars between absent tick samples.)
+            self.ti_pc_pirq_present_run.store(
+                0,
                 core::sync::atomic::Ordering::Relaxed,
             );
         }
         // phantom-bits: softirq field drained to zero — the +0x100
         // acquire paired; drop the shadow so a later orphan report names
-        // only still-unpaired bookings.
+        // only still-unpaired bookings, and re-arm the sirq run counter
+        // (the drain is the field's own liveness proof).
         if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
             && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
         {
             crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+            self.ti_pc_sirq_present_run.store(
+                0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            // Post-clamp presence is new presence — re-arm all bars so
+            // the corrupted section's successor guards are not adjudged
+            // against the pre-clamp run.
+            self.ti_pc_present_runs_reset_all();
             preempt_underflow_report(self.pid(), prev, val, loc, 0);
         }
     }
@@ -4222,16 +4246,18 @@ impl Task {
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
             crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
-            // phantom-bits: live pair completed — heal window re-arms
-            // (see sub_preempt_count_at).
-            self.ti_pc_zero_jif.store(
-                crate::drivers::timer::get_jiffies(),
+            // phantom-bits / stress-port r3: live pair completed — re-arm
+            // the run counter the heal gates on (see sub_preempt_count_at;
+            // the old store hit the superseded ti_pc_zero_jif field).
+            self.ti_pc_pirq_present_run.store(
+                0,
                 core::sync::atomic::Ordering::Relaxed,
             );
         }
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            self.ti_pc_present_runs_reset_all();
             preempt_underflow_report(self.pid(), prev, val, loc, site);
         }
     }
@@ -4243,6 +4269,11 @@ impl Task {
     #[inline]
     pub fn ti_preempt_count_zero(&self) {
         self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+        // stress-port r3: every external zeroing re-arms the heal bars —
+        // presence observed after the zero is new presence (otherwise
+        // the stale bar re-heals each live guard: the held_jiffies=0
+        // post-heal storm family).
+        self.ti_pc_present_runs_reset_all();
     }
 
     /// Stress-fleet session 3 (2026-10-25): clear ONLY the task-context
@@ -4267,6 +4298,8 @@ impl Task {
                 | crate::interrupt::preempt::NMI_MASK,
             Ordering::Release,
         );
+        // stress-port r3: the fields this heal clears get fresh bars.
+        self.ti_pc_present_runs_reset_base();
     }
 
     /// Tick-side PREEMPT-HEAL, unified form: keep exactly ONE
@@ -4285,6 +4318,11 @@ impl Task {
                 | crate::interrupt::preempt::NMI_MASK,
             Ordering::Release,
         );
+        // stress-port r3: this form clears base AND extra hardirq
+        // levels — all three fields get fresh bars (the kept single
+        // level is the observer tick's own, whose pending irq_exit sub
+        // is not judged by these runs anyway).
+        self.ti_pc_present_runs_reset_all();
     }
 
     /// Get kernel stack pointer (thread_info.kernel_sp)
@@ -4317,56 +4355,85 @@ impl Task {
         self.ti_cpu.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// jiffies of the most recent task-context base-count drain
-    /// (phantom-bits contiguity bar for the tick-side heal; 0 = never).
+    /// LEGACY (superseded 2026-11-02, stress-port r3): the single-field
+    /// drain stamp. The pb3 release-side re-arm stored THIS field while
+    /// the heal gated on the per-field stamps — the re-arm never armed
+    /// the bar that mattered (see ti_pc_*_present_run docs). Kept for
+    /// layout stability; stores removed; no readers.
     #[inline]
     pub fn ti_pc_zero_jif(&self) -> u64 {
         self.ti_pc_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// jiffies of the most recent tick observation of the SOFTIRQ field
-    /// ABSENT (per-field contiguity bar; 0 = never).
+    /// Current consecutive-present run for the SOFTIRQ field (see the
+    /// field docs; read by scheduler_tick's heal gate).
     #[inline]
-    pub fn ti_pc_sirq_zero_jif(&self) -> u64 {
-        self.ti_pc_sirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    pub fn ti_pc_sirq_present_run(&self) -> u64 {
+        self.ti_pc_sirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Stamp the SOFTIRQ-field-absent observation (caller: scheduler_tick
-    /// on the task's own CPU).
+    /// Current consecutive-present run for the HARDIRQ field.
     #[inline]
-    pub fn ti_pc_sirq_zero_jif_stamp(&self, jif: u64) {
-        self.ti_pc_sirq_zero_jif
-            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    pub fn ti_pc_hirq_present_run(&self) -> u64 {
+        self.ti_pc_hirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// jiffies of the most recent tick observation of the HARDIRQ field
-    /// ABSENT (per-field contiguity bar; 0 = never).
+    /// Current consecutive-present run for the base PREEMPT field.
     #[inline]
-    pub fn ti_pc_hirq_zero_jif(&self) -> u64 {
-        self.ti_pc_hirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    pub fn ti_pc_pirq_present_run(&self) -> u64 {
+        self.ti_pc_pirq_present_run.load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Stamp the HARDIRQ-field-absent observation (caller: scheduler_tick
-    /// on the task's own CPU).
+    /// One tick-side observation of all three fields (caller:
+    /// scheduler_tick on the task's own CPU — the only bump writer).
+    /// Present fields extend their run; absent fields re-arm to 0.
+    /// `h_extra` is the extra-hardirq-nesting predicate (>= 2 levels),
+    /// so the observer tick's own in-flight level never counts.
     #[inline]
-    pub fn ti_pc_hirq_zero_jif_stamp(&self, jif: u64) {
-        self.ti_pc_hirq_zero_jif
-            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    pub fn ti_pc_present_runs_tick(&self, p_set: bool, s_set: bool, h_extra: bool) {
+        use core::sync::atomic::Ordering;
+        if p_set {
+            self.ti_pc_pirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        }
+        if s_set {
+            self.ti_pc_sirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
+        }
+        if h_extra {
+            self.ti_pc_hirq_present_run.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ti_pc_hirq_present_run.store(0, Ordering::Relaxed);
+        }
     }
 
-    /// jiffies of the most recent tick observation of the PREEMPT field
-    /// ABSENT (per-field contiguity bar; 0 = never).
+    /// Re-arm the PREEMPT + SOFTIRQ run counters (called by the count
+    /// zeroing/heal methods that clear exactly those fields). Presence
+    /// observed AFTER an external zeroing is new presence and deserves
+    /// a fresh 200-observation window — the stress-port r2 boots showed
+    /// the opposite: the first (correct) heal of a parked phantom left
+    /// the stale bar in place, and every later tick that sampled the
+    /// task inside ANY live guard re-healed instantly (held_jiffies=0
+    /// storm, 17-30 fires per episode), each fire stripping a live
+    /// guard's bit (the spinlock.rs:0x1b8 underflow family at the
+    /// page-allocator zone lock).
     #[inline]
-    pub fn ti_pc_pirq_zero_jif(&self) -> u64 {
-        self.ti_pc_pirq_zero_jif.load(core::sync::atomic::Ordering::Relaxed)
+    fn ti_pc_present_runs_reset_base(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
     }
 
-    /// Stamp the PREEMPT-field-absent observation (caller: scheduler_tick
-    /// on the task's own CPU).
+    /// Re-arm all three run counters (called by whole-word zeroings —
+    /// parked-heal, exit-path clears, underflow clamps).
     #[inline]
-    pub fn ti_pc_pirq_zero_jif_stamp(&self, jif: u64) {
-        self.ti_pc_pirq_zero_jif
-            .store(jif, core::sync::atomic::Ordering::Relaxed);
+    fn ti_pc_present_runs_reset_all(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_pc_pirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_sirq_present_run.store(0, Ordering::Relaxed);
+        self.ti_pc_hirq_present_run.store(0, Ordering::Relaxed);
     }
 
     /// Set running CPU (thread_info.cpu)
