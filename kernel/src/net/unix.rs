@@ -2306,23 +2306,30 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
 /// staged path's contract).
 pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     use crate::arch::uaccess::copy_from_user;
+    // cctx probe (closegap lane): whole-op send sum for lat_unix.
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UW_N);
+    let cc_out = |r: isize| -> isize {
+        crate::dfx::cctx::add(&crate::dfx::cctx::UW_NS, cc_t);
+        r
+    };
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open. `count`
     // is at most RW_CHUNK (the dispatcher's guard): one bounded segment
     // allocation per call, same heap discipline as the generic staging.
     let socket = match unsafe { unix_of_file(file) } {
         Some(s) => s,
-        None => return -9, // EBADF
+        None => return cc_out(-9), // EBADF
     };
     if *socket.shut_wr.lock() {
-        return -32; // EPIPE
+        return cc_out(-32); // EPIPE
     }
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.sndtimeo_deadline();
 
     let mut kbuf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     if kbuf.try_reserve_exact(count).is_err() {
-        return -12; // ENOMEM
+        return cc_out(-12); // ENOMEM
     }
     // SAFETY: capacity is exactly count; copy_from_user fills it before
     // set_len exposes the bytes. A partial copy is EFAULT with nothing
@@ -2331,13 +2338,13 @@ pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     unsafe {
         let uncopied = copy_from_user(kbuf.as_mut_ptr(), src, count);
         if uncopied > 0 {
-            return -14; // EFAULT
+            return cc_out(-14); // EFAULT
         }
         kbuf.set_len(count);
     }
     match unix_send(&socket, kbuf, Vec::new(), None, None, nonblock, deadline) {
-        Ok(n) => n as isize,
-        Err(e) => e as isize,
+        Ok(n) => cc_out(n as isize),
+        Err(e) => cc_out(e as isize),
     }
 }
 
@@ -2416,6 +2423,16 @@ const READ_BOUNCE: usize = 1024;
 /// advisory only: it preserves the EFAULT-before-side-effect errno
 /// ordering the read(2) entry points produce.
 pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
+    // body has many return points — wrap instead of threading stamps).
+    let cc_t = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::UR_N);
+    let r = unix_read_user_inner(file, dst, count);
+    crate::dfx::cctx::add(&crate::dfx::cctx::UR_NS, cc_t);
+    r
+}
+
+fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
     // private_data holds the UnixSocket Arc installed at open.
     let socket = match unsafe { unix_of_file(file) } {

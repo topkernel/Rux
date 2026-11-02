@@ -818,6 +818,9 @@ fn sem_max_idx() -> i32 {
 
 /// sys_semtimedop — Semaphore operations with timeout (NR 192)
 pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
+    // cctx probe (closegap lane): prelude / per-try / block-park sums.
+    let cc_t0 = crate::dfx::cctx::now();
+    crate::dfx::cctx::bump(&crate::dfx::cctx::SM_N);
     let semid = args[0] as i32;
     let sops_ptr = args[1] as *const SemBuf;
     let nsops = args[2] as usize;
@@ -875,15 +878,26 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
     // (review IPC M: uaccess 裸访改 copy_from_user).
     // Allocation discipline (s2-a finding P3): nsops <= 500 and SemBuf
     // is 6 bytes — a bounded stack array replaces the per-call heap Vec.
+    // closegap lane: op sets ≤ MAX_SOPS_FAST stage in a small array (the
+    // old [SemBuf; 500] staging memset 3 KB of stack on every semop —
+    // part of the 318 ns prelude, cctx probe 2026-11-02); larger sets
+    // take one heap Vec allocation.
     const MAX_SOPS: usize = 500;
     assert!(nsops <= MAX_SOPS);
-    let mut sops_buf: [SemBuf; MAX_SOPS] =
-        [SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; MAX_SOPS];
+    let mut sops_small: [SemBuf; MAX_SOPS_FAST] =
+        [SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; MAX_SOPS_FAST];
+    let mut sops_big: alloc::vec::Vec<SemBuf>;
+    let sops_dst: *mut u8 = if nsops <= MAX_SOPS_FAST {
+        sops_small.as_mut_ptr() as *mut u8
+    } else {
+        sops_big = alloc::vec![SemBuf { sem_num: 0, sem_op: 0, sem_flg: 0 }; nsops];
+        sops_big.as_mut_ptr() as *mut u8
+    };
     // SAFETY: sops_ptr was access_ok-validated for nsops * size_of::<SemBuf>()
     // above; exactly nsops entries are written.
     unsafe {
         if crate::arch::uaccess::copy_from_user(
-            sops_buf.as_mut_ptr() as *mut u8,
+            sops_dst,
             sops_ptr as *const u8,
             nsops * core::mem::size_of::<SemBuf>(),
         ) != 0
@@ -891,26 +905,40 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             return -(errno::EFAULT as i64);
         }
     }
-    let sops: &[SemBuf] = &sops_buf[..nsops];
+    // SAFETY: sops_dst points at either the stack array or the heap Vec
+    // above, both alive for the rest of the function; exactly nsops
+    // valid SemBuf entries were written by the copy_from_user above.
+    let sops: &[SemBuf] = unsafe {
+        core::slice::from_raw_parts(sops_dst as *const SemBuf, nsops)
+    };
 
     // Permission: write when any op alters a value (sem_op != 0), otherwise
     // read — reference __do_semtimedop does ipcperms(alter ? S_IWUGO :
     // S_IRUGO); the old unconditional write demand wrongly failed an
     // all-zero (wait-for-zero) operation on a read-only set.
     let alter = sops.iter().any(|s| s.sem_op != 0);
-    let idx = match SEM_IDS.find_with_perms(semid, if alter { 0o2 } else { 0o4 }) {
-        Ok(i) => i,
-        Err(e) => return e as i64,
-    };
-
-    // Get nsems and validate sem_num for all operations
+    // closegap: ONE slots-lock section resolves id→slot, sequence, perms
+    // AND the set's nsems (the old find_with_perms + nsems block took
+    // four lock pairs — find(), find_with_perms' own re-lock, the nsems
+    // block's slots lock, and nsems()' sems lock — three of which were
+    // redundant with each other).
+    let desired: u16 = if alter { 0o2 } else { 0o4 };
+    let idx = ipc_id_to_index(semid);
+    if idx >= super::util::IPC_IDS_MAX {
+        return -(errno::EINVAL as i64);
+    }
     let nsems_in_set;
     {
         let slots = SEM_IDS.slots.lock();
-        nsems_in_set = match slots[idx] {
-            Some(ref entry) => entry.inner.nsems(),
-            None => return -(errno::EINVAL as i64),
+        let entry = match slots[idx] {
+            Some(ref e)
+                if !e.deleted && e.inner.perm.seq == super::util::ipc_id_seq(semid) => e,
+            _ => return -(errno::EINVAL as i64),
         };
+        if !super::util::ipc_check_permissions(entry.inner.get_perm(), desired) {
+            return -(errno::EACCES as i64);
+        }
+        nsems_in_set = entry.inner.nsems();
     }
 
     for sop in sops.iter() {
@@ -920,6 +948,7 @@ pub fn sys_semtimedop(args: [u64; 6]) -> i64 {
             return -(errno::EFBIG as i64);
         }
     }
+    crate::dfx::cctx::add(&crate::dfx::cctx::SM_PRE_NS, cc_t0);
 
     semop_blocking_loop(idx, semid, &sops, deadline, sub_jiffy_timeout)
 }
@@ -972,7 +1001,10 @@ fn semop_blocking_loop(
     sub_jiffy_timeout: bool,
 ) -> i64 {
     'outer: loop {
+        let cc_t_try = crate::dfx::cctx::now();
+        crate::dfx::cctx::bump(&crate::dfx::cctx::SM_TRY_N);
         let result = try_apply_semops(idx, &sops, semid);
+        crate::dfx::cctx::add(&crate::dfx::cctx::SM_TRY_NS, cc_t_try);
         match result {
             Ok(()) => return 0,
             Err(e) => {
@@ -1002,6 +1034,11 @@ fn semop_blocking_loop(
                         // deleted slot, or re-enters this arm and blocks.
                         None => continue 'outer,
                         Some(_) => {
+                            // cctx: the park itself (registration →
+                            // schedule() return), opened here and closed
+                            // after the loop-bottom continue.
+                            let cc_t_blk = crate::dfx::cctx::now();
+                            crate::dfx::cctx::bump(&crate::dfx::cctx::SM_BLK_N);
                             // Check for signals
                             if crate::signal::signal_pending() {
                                 return -(errno::EINTR as i64);
@@ -1211,6 +1248,7 @@ fn semop_blocking_loop(
                                     entry.inner.wq.remove(current as *mut _);
                                 }
                             }
+                            crate::dfx::cctx::add(&crate::dfx::cctx::SM_BLK_NS, cc_t_blk);
 
                             continue 'outer;
                         }
@@ -1232,6 +1270,18 @@ fn e_seq_mismatch(entry: &crate::ipc::util::IpcObjectEntry<SemArray>, semid: i32
     super::util::ipc_id_seq(semid) != entry.inner.perm.seq
 }
 
+/// Per-touched-semaphore scratch for the allocation-free apply path.
+/// Real op sets (LTP, lmbench, OH) touch at most a handful of distinct
+/// semaphores per semop; sets touching more than MAX_TRACKED fall back
+/// to the classic working-copy loop (correct, slower, never taken in
+/// practice — nsops ≤ 500 with 500 distinct sems).
+const MAX_TRACKED: usize = 8;
+
+/// Op sets at or below this size take the stack-scratch fast path (both
+/// here and in sys_semtimedop's sops staging — the old [SemBuf; 500]
+/// staging memset 3 KB of stack on every semop).
+const MAX_SOPS_FAST: usize = 8;
+
 fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> {
     let slots = SEM_IDS.slots.lock();
     let entry = match slots[idx] {
@@ -1246,26 +1296,72 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
     }
 
     if let Some(ref sems) = *entry.inner.sems.lock() {
-        // Working copy: each op must see the effect of the previous ones on
-        // the same semaphore (Linux perform_atomic_semop). The old code
-        // computed every op from the same pre-op value, so semop(-1,-1) on
-        // value=1 "succeeded" while only decrementing once (review 2R.16).
-        let mut work: alloc::vec::Vec<i32> = (0..sems.len())
-            .map(|i| sems[i].value.load(Ordering::Relaxed))
-            .collect();
-        // First pass: compute all resulting values, accumulated.
-        // Allocation discipline (s2-a finding P3): nsops <= 500 — a
-        // bounded stack array replaces the per-call heap Vec.
-        let mut new_vals: [i32; 500] = [0; 500];
-        for (ni, sop) in sops.iter().enumerate() {
-            let cur = work[sop.sem_num as usize];
-            let new_val = cur.wrapping_add(sop.sem_op as i32);
-            new_vals[ni] = new_val;
-            work[sop.sem_num as usize] = new_val;
+        // Per-op accumulated values (Linux perform_atomic_semop semantics:
+        // each op sees the effect of the previous ones on the same
+        // semaphore). The scratch tracks (sem_num, pending value) for the
+        // distinct semaphores touched so far; a hit reads the pending
+        // value, a miss reads the raw value and registers the pair.
+        // Allocation-free for ≤ MAX_TRACKED distinct semaphores AND
+        // nsops ≤ MAX_SOPS_FAST (the old path heap-allocated a working
+        // Vec + an orig_vals Vec and zeroed a [i32; 500] stack array on
+        // EVERY semop — 728 ns/op measured, cctx probe, closegap lane
+        // 2026-11-02). Larger shapes take the classic working-copy loop.
+        let mut new_vals: [i32; MAX_SOPS_FAST] = [0; MAX_SOPS_FAST];
+        let mut sops_result: alloc::vec::Vec<i32>;
+        let new_slice: &mut [i32] = if sops.len() <= MAX_SOPS_FAST {
+            &mut new_vals[..sops.len()]
+        } else {
+            sops_result = alloc::vec![0; sops.len()];
+            &mut sops_result[..]
+        };
+
+        let fits_scratch = sops.len() <= MAX_SOPS_FAST;
+        if fits_scratch {
+            let mut tracked_nums: [u16; MAX_TRACKED] = [0; MAX_TRACKED];
+            let mut tracked_vals: [i32; MAX_TRACKED] = [0; MAX_TRACKED];
+            let mut tracked_n: usize = 0;
+            for (ni, sop) in sops.iter().enumerate() {
+                let snum = sop.sem_num;
+                let mut cur = None;
+                for t in 0..tracked_n {
+                    if tracked_nums[t] == snum {
+                        cur = Some(tracked_vals[t]);
+                        break;
+                    }
+                }
+                let cur = match cur {
+                    Some(v) => v,
+                    None => {
+                        let v = sems[snum as usize].value.load(Ordering::Relaxed);
+                        tracked_nums[tracked_n] = snum;
+                        tracked_vals[tracked_n] = v;
+                        tracked_n += 1;
+                        v
+                    }
+                };
+                let new_val = cur.wrapping_add(sop.sem_op as i32);
+                new_slice[ni] = new_val;
+                for t in 0..tracked_n {
+                    if tracked_nums[t] == snum {
+                        tracked_vals[t] = new_val;
+                        break;
+                    }
+                }
+            }
+        } else {
+            let mut work: alloc::vec::Vec<i32> = (0..sems.len())
+                .map(|i| sems[i].value.load(Ordering::Relaxed))
+                .collect();
+            for (ni, sop) in sops.iter().enumerate() {
+                let cur = work[sop.sem_num as usize];
+                let new_val = cur.wrapping_add(sop.sem_op as i32);
+                new_slice[ni] = new_val;
+                work[sop.sem_num as usize] = new_val;
+            }
         }
 
         // Second pass: verify all operations can succeed
-        for (i, &new_val) in new_vals[..sops.len()].iter().enumerate() {
+        for (i, &new_val) in new_slice.iter().enumerate() {
             // Positive op must not exceed SEMVMX (per Linux perform_atomic_semop)
             if sops[i].sem_op > 0 && new_val > SEMVMX {
                 return Err(-(errno::ERANGE as i32));
@@ -1284,11 +1380,21 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
             }
         }
 
-        // Third pass: apply all atomically
-        // Save original values for rollback if SEM_UNDO adjustment exceeds SEMAEM.
-        let orig_vals: alloc::vec::Vec<i32> = sops.iter().map(|s| sems[s.sem_num as usize].value.load(Ordering::Relaxed)).collect();
+        // Third pass: apply all atomically.
+        // Original values are needed ONLY for the SEM_UNDO rollback path
+        // below (an undo adjustment exceeding SEMAEM) — the common case
+        // (no SEM_UNDO flags, lmbench/LTP fast paths, OH semaphores)
+        // skips both the orig_vals Vec and the task undo-table lock pair.
+        let wants_undo = sops.iter().any(|s| s.sem_flg & super::util::SEM_UNDO != 0);
+        let mut orig_vals: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+        if wants_undo {
+            orig_vals.reserve_exact(sops.len());
+            for s in sops {
+                orig_vals.push(sems[s.sem_num as usize].value.load(Ordering::Relaxed));
+            }
+        }
         let caller_pid = get_current_pid();
-        for (i, &new_val) in new_vals[..sops.len()].iter().enumerate() {
+        for (i, &new_val) in new_slice.iter().enumerate() {
             sems[sops[i].sem_num as usize].value.store(new_val, Ordering::Relaxed);
             // Each operated semaphore records the caller as its last
             // operator (semctl GETPID; Linux perform_atomic_semop).
@@ -1296,47 +1402,49 @@ fn try_apply_semops(idx: usize, sops: &[SemBuf], semid: i32) -> Result<(), i32> 
         }
 
         // Record SEM_UNDO adjustments for current process
-        if let Some(task) = crate::sched::current() {
-            let mut undo_table = task.sem_undo.lock();
-            for sop in sops {
-                if sop.sem_flg & super::util::SEM_UNDO != 0 {
-                    // Dedup: accumulate into existing entry for same (semid, sem_num)
-                    let mut found = false;
-                    for entry in undo_table.iter_mut() {
-                        if entry.semid == semid && entry.sem_num == sop.sem_num {
-                            let new_adj = entry.adjustment.wrapping_add(sop.sem_op as i32);
-                            if new_adj.abs() > SEMAEM {
-                                // Roll back: restore original semaphore values.
+        if wants_undo {
+            if let Some(task) = crate::sched::current() {
+                let mut undo_table = task.sem_undo.lock();
+                for sop in sops {
+                    if sop.sem_flg & super::util::SEM_UNDO != 0 {
+                        // Dedup: accumulate into existing entry for same (semid, sem_num)
+                        let mut found = false;
+                        for entry in undo_table.iter_mut() {
+                            if entry.semid == semid && entry.sem_num == sop.sem_num {
+                                let new_adj = entry.adjustment.wrapping_add(sop.sem_op as i32);
+                                if new_adj.abs() > SEMAEM {
+                                    // Roll back: restore original semaphore values.
+                                    for (j, &orig) in orig_vals.iter().enumerate() {
+                                        sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
+                                    }
+                                    return Err(-(errno::ERANGE as i32));
+                                }
+                                entry.adjustment = new_adj;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            let adj = sop.sem_op as i32;
+                            if adj.abs() > SEMAEM {
                                 for (j, &orig) in orig_vals.iter().enumerate() {
                                     sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
                                 }
                                 return Err(-(errno::ERANGE as i32));
                             }
-                            entry.adjustment = new_adj;
-                            found = true;
-                            break;
+                            undo_table.push(super::util::SemUndoEntry {
+                                semid,
+                                sem_num: sop.sem_num,
+                                adjustment: adj,
+                            });
                         }
-                    }
-                    if !found {
-                        let adj = sop.sem_op as i32;
-                        if adj.abs() > SEMAEM {
-                            for (j, &orig) in orig_vals.iter().enumerate() {
-                                sems[sops[j].sem_num as usize].value.store(orig, Ordering::Relaxed);
-                            }
-                            return Err(-(errno::ERANGE as i32));
-                        }
-                        undo_table.push(super::util::SemUndoEntry {
-                            semid,
-                            sem_num: sop.sem_num,
-                            adjustment: adj,
-                        });
                     }
                 }
             }
         }
 
         entry.inner.sem_otime.store(ipc_current_time(), Ordering::Relaxed);
-        entry.inner.sem_padid.store(get_current_pid(), Ordering::Relaxed);
+        entry.inner.sem_padid.store(caller_pid, Ordering::Relaxed);
 
         // Lost-park ring (dfx=lostpark): the value transition of a
         // successful apply — a=sem0 value, b=sem1 value (2-sem probe

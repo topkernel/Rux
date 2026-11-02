@@ -1,0 +1,6 @@
+Semaphore latency: 3.0686 microseconds
+CCTX1 t=6s sch n=2235626 pre=36 lock=41 acct=47 deq=93 pick=248 pub=21 ctxsws=863408
+CCTX2 t=6s csw n=863408 fpusave=238 mm=469336200/543 (n=863397, avg=543) msr=393 asm=463 fpurest=242
+CCTX3 t=6s wake n=851661 sel=29 enq=178 disp=937 ipi n=825375 avg=935
+CCTX4 t=6s sem n=1519584 pre=318 try n=2370495 avg=728 blk n=850467 avg=9714
+CCTX5 t=6s pipe w n=13 avg=1146 r n=639 avg=17728 unix w n=0 avg=0 r n=0 avg=0
