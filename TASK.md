@@ -1769,3 +1769,11 @@ banked; lb343 (syscost + 3s census bar) rolling at write time.
 5. WAKE-RUN-LEAK "kicked-2x" threads + the W2 refusals: low-rate, but the
    census's own kick contaminates its snapshot — decouple (report first,
    kick next round).
+- lb345 final: foundation SIGKILL wave at 48-51s (watchdog class) ->
+  bundles.ready never fired -> no CreateNewUser -> ladder-spin POISON32
+  trickle to 940s; bootanimation.ready 54.2s (2.4x lb342's 22.3s — this roll
+  ran 3 own QEMUs deep, load-inflated). SA:1301 init reproduced at 29,016ms
+  (12.9->41.7) with the identical cascade (device_manager OpenSo spend 23ms,
+  wifi 12.1-14.5s, softbus 41.6, 1301 releases at softbus). Frozen-logo md5s
+  unchanged. Race tally this session 0/4 (lb342 lost by 31.4s, lb343/344/345
+  spiral-class).
