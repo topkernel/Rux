@@ -4186,10 +4186,15 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
             for (i, st) in cth.txn_stack.iter().enumerate() {
                 if st.from_tid == Some(tid) && st.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
                     use core::fmt::Write;
+                    // SAFETY: to_tid read under WORLD (same contract
+                    // as the rest of this walk).
+                    let tt = unsafe { st.to_tid() };
                     let _ = write!(
                         found,
-                        " [p{}t{}stack{} txn{} code{}]",
-                        p.pid, ct.tid, i, st.id, st.code
+                        " [p{}t{}stack{} txn{} code{}>{}.{}]",
+                        p.pid, ct.tid, i, st.id, st.code,
+                        st.to_proc.pid,
+                        tt.unwrap_or(0)
                     );
                 }
             }
