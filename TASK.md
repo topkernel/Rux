@@ -4,6 +4,75 @@
 
 # LTP r22 SESSION 2 (2026-11-02 evening, second successor; branch ltp-r21 @ main 819a1be2 + 2 commits)
 
+## SESSION 2 CLOSE (2026-11-02 ~23:40, branch ltp-r21 @ merge of main incl. e9029b74)
+
+### Kernel fixes this session (all pushed on ltp-r21)
+1. **58b27dc4 x86_64 stack 80KB -> 128KB** (twin landed on main as c05f13ad):
+   symlink-chain recursion, 2240B/hop x 40 cap, overflowed the 80KB slot
+   (chunk@700 panic). Repro x2 clean + live-scan chunk@700 100/100.
+2. **b5480343 DFX forensics** (KSO census, overflow-zone ra dump,
+   dead-resume guard, rsp0 witnesses, freed-stack ring) — silent on
+   clean boots; panic-path only.
+3. **ad17db72 futex shared-key = PHYSICAL word** — FutexKey::matches for
+   shared keys compared raw uaddr and futex_hash bucketed uaddr, so a
+   parent's FUTEX_WAIT and an exec'd child's FUTEX_WAKE (fresh mmap at a
+   DIFFERENT address — LTP tst_checkpoint) never met: waitid08/sighold02
+   ETIMEDOUT family. Now: resolve (frame<<12|off) from the caller's
+   tables; bucket on it for BOTH private and shared keys (musl cleartid
+   interop preserved — same word); match shared keys on it. Probe V4b:
+   fw=0 fw_errno=0. sighold02 recovered.
+4. **91d005f6 tmpfs MAP_SHARED page-cache alias** — LTP setup_ipc puts
+   the results+checkpoint page on /dev/shm (tmpfs mmap was
+   documented-unsupported -> private copy per mapper). x86_64 SHARED
+   fault arm now admits tmpfs via is_tmpfs_file and populates through
+   the fs-agnostic shared_file_fault_page; invalidate alias entries at
+   inode destroy + truncate. riscv64 already had the generic arm.
+   Isolation: execl01 execlp01 execv01 execve01 execle01 execvp01
+   execve06 ALL PASS (7/7, was 7x TBROK "Test haven't reported results").
+
+### Scans this session (all x86_64+KVM, 1869 list)
+- run/results-r22b-raw.txt: 1028 PASS, main@819a1be2 + stack fix only
+  (zero WEDGE — chunk 700 recovered).
+- run/results-r22c-raw.txt: 1035 PASS, + futex + tmpfs fixes.
+- run/results-r22d-raw.txt: FINAL on the merged tree (main incl.
+  e9029b74 stat-size fix + SP-3 fsync(dirfd) + the 4 commits above) —
+  spliced to results/results-r22.txt at scan completion.
+- r21 -> r22c delta: +25 (gains 40 / losses 15;
+  results/delta-r22-vs-r21.txt). Losses adjudicated 2x isolation:
+  stat01/_64 fstat02/_64 getpriority01 mmap02 = REAL (all six FIXED by
+  main's e9029b74 — VERIFIED on the merged kernel); getrusage04 = known
+  flake family; float_* TIMEOUT = float-bench flake; kill02/crash02
+  POISON = driver artifacts; diotest2/5 dirtyc0w inotify01 setpgid03 =
+  still-open real (isolation 2/2), next-session families.
+
+### Next-session queue (ranked)
+1. waitid08 CRASH: waitid(WCONTINUED) never returns after SIGCONT —
+   child parks at checkpoint, parent stuck at second waitid, harness
+   timeout. Evidence: run/iso22-logs-tmpfsfix2/chunk0000-a1.log.
+2. Still-failing checkpoint tests despite futex+tmpfs fixes:
+   sigtimedwait01 sigwaitinfo01 pselect01 epoll_wait02/06
+   epoll_pwait03 timerfd_settime02 — check whether they share the
+   waitid/WCONTINUED leg; isolate one by one.
+3. diotest2/5 dirtyc0w (O_DIRECT), inotify01 (event coalescing:
+   "mask=08 expected 2"), setpgid03, execveat01/02.
+4. msg_comm "messages leak between namespaces" — reproducer rig in
+   /home/william/rux-agents/stress-port/run/stress-runs/ (stress-lane
+   intel 2026-11-02).
+5. Flaky family (stress-lane intel): exec'd glibc-static children dying
+   silently pre-output (rc=254, waitpid-ECHILD), intermittent under
+   fork-heavy load — isolation-retest before regression verdicts.
+6. fs-lane long-term: follow_symlink is recursive (2240B/hop); the
+   reference kernel resolves chains ITERATIVELY — an iterative rewrite
+   would decouple stack depth from path shape.
+
+### Rig notes
+- Probe image: run/rootfs-x86_64-probe.img with zz_shmprobe(V4b)/
+  zz_statprobe/zz_statprobe2 injected; boot via run/repro-nftw.sh <name>
+  (writes chunk.txt into the image, 180s drain).
+- Coordinator policy (2026-11-02): new probe SOURCES go into
+  userspace/tests/probes.tar.gz (extract.sh restores to test/);
+  host-side drivers stay in test/ or run/.
+
 ## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
 The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
 "PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —
