@@ -3049,6 +3049,28 @@ impl Ext4BigLock {
                             // hold profile; the holder's parked stack
                             // is the ground truth).
                             biglock_holder_stack(owner);
+                            // Coordinator steer: monopolist snapshot on
+                            // the LOCKED starvation variant too (lb285:
+                            // churn shape — holder cycling at <=3j holds
+                            // while the waiter parks 5s; the question is
+                            // the same: who owns the CPUs). Same 10 s
+                            // LAST_WAIT_REPORT budget.
+                            crate::dfx::taskdump::dump_all_tasks(
+                                "biglock-stall",
+                            );
+                            {
+                                let on_rq =
+                                    unsafe { (*cur).sched_entity().is_on_rq() };
+                                crate::pr_err!(
+                                    "EXT4-BIGLOCK-WAITER pid={} state={} preempt={:#x} on_rq={} ti_cpu={} first_park={}j",
+                                    cur_pid,
+                                    unsafe { (*cur).state().bits() },
+                                    unsafe { (*cur).preempt_count() },
+                                    on_rq as u8,
+                                    unsafe { (*cur).ti_cpu() },
+                                    first_park
+                                );
+                            }
                         }
                     }
                 }
