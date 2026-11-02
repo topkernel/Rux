@@ -43,7 +43,24 @@ pub const SITE_MAX: usize = 3;
 
 pub const SITE_NAMES: [&str; SITE_MAX] = ["small_alloc", "slab", "buddy"];
 
-const SLOTS: usize = 16;
+// FIXED per-key slot table (fx9fix): slot = SITE_BASE[site] + class.
+// The first design scanned a shared 16-slot table for a free/exact slot
+// UNDER THE CLASS LOCK — but two DIFFERENT class locks' enters ran that
+// scan CONCURRENTLY (the slot table has no lock of its own), racing
+// slot choice and mixing pid/epoch/jif fields between stamps. A mixed
+// stamp survived its holder's exit (exit matched nothing) and read as
+// "held 300ms+" while the meter showed the real sections at 1500
+// CYCLES — and the roller then killed healthy boots on the print.
+// Dedicated slots make enter/exit lock-free-correct by construction:
+// same key is serialized by the class lock itself; different keys never
+// share a slot.
+const SLOTS: usize = 24; // [0..8) small_alloc, [8..18) slab, [18..19) buddy
+const SITE_BASE: [usize; SITE_MAX] = [0, 8, 18];
+
+fn slot_of(site: u8, class: u8) -> usize {
+    let base = SITE_BASE[(site as usize).min(SITE_MAX - 1)];
+    (base + class as usize).min(SLOTS - 1)
+}
 
 struct Holder {
     /// (site | class << 8) the stamp was written for; also the exit key.
@@ -71,12 +88,7 @@ impl Holder {
     }
 }
 
-static HOLDERS: [Holder; SLOTS] = [
-    Holder::new(), Holder::new(), Holder::new(), Holder::new(),
-    Holder::new(), Holder::new(), Holder::new(), Holder::new(),
-    Holder::new(), Holder::new(), Holder::new(), Holder::new(),
-    Holder::new(), Holder::new(), Holder::new(), Holder::new(),
-];
+static HOLDERS: [Holder; SLOTS] = [const { Holder::new() }; SLOTS];
 static EPOCH: AtomicU64 = AtomicU64::new(1);
 static REPORTS: AtomicU32 = AtomicU32::new(0);
 static LAST_REPORT_JIF: AtomicU64 = AtomicU64::new(0);
@@ -107,43 +119,11 @@ fn enter_keyed(site: u8, class: u8) -> u64 {
         Some(t) => ((*t).pid(), (*t).tgid()),
         None => (0, 0),
     };
-    // Slot choice: exact key match first, then a free slot, then the
-    // oldest stamp (collision eviction — acceptable, see module doc).
-    let mut victim = 0usize;
-    let mut victim_jif = u64::MAX;
-    let mut free = usize::MAX;
-    let mut exact = usize::MAX;
-    for (i, h) in HOLDERS.iter().enumerate() {
-        let p = h.pid.load(Ordering::Relaxed);
-        if p == 0 {
-            if free == usize::MAX {
-                free = i;
-            }
-            continue;
-        }
-        if h.key.load(Ordering::Relaxed) == key {
-            exact = i;
-            break;
-        }
-        let j = h.jif.load(Ordering::Relaxed);
-        if j < victim_jif {
-            victim_jif = j;
-            victim = i;
-        }
-    }
-    let slot = if exact != usize::MAX {
-        exact
-    } else if free != usize::MAX {
-        free
-    } else {
-        victim
-    };
     let ep = EPOCH.fetch_add(1, Ordering::Relaxed);
-    let h = &HOLDERS[slot];
-    // Publish order: everything BEFORE pid; pid last (x86 TSO retires
-    // stores in order even under Relaxed). A reader seeing pid != 0
-    // then sees a coherent fresh stamp — the lb264 shape (fresh pid,
-    // stale jif from the slot's previous tenant) is impossible.
+    let h = &HOLDERS[slot_of(site, class)];
+    // Publish order: everything before pid; pid last (x86 TSO retires
+    // stores in order even under Relaxed) — a reader seeing pid != 0
+    // sees a coherent fresh stamp.
     h.jif
         .store(crate::drivers::timer::get_jiffies() as u64, Ordering::Relaxed);
     h.key.store(key, Ordering::Relaxed);
@@ -156,14 +136,12 @@ fn enter_keyed(site: u8, class: u8) -> u64 {
 /// Clear the stamp (lock released) — only if the slot still carries our
 /// epoch (an evicted/overwritten stamp belongs to someone else now).
 fn exit_keyed(site: u8, class: u8, ep: u64) {
-    let key = site as u32 | ((class as u32) << 8);
-    for h in HOLDERS.iter() {
-        if h.key.load(Ordering::Relaxed) == key
-            && h.epoch.load(Ordering::Relaxed) == ep
-        {
-            h.pid.store(0, Ordering::Relaxed);
-            return;
-        }
+    let h = &HOLDERS[slot_of(site, class)];
+    // Clear only our epoch (same-key serialization makes this exact;
+    // the epoch check is belt-and-braces for a torn interleaving on
+    // the same slot).
+    if h.epoch.load(Ordering::Relaxed) == ep {
+        h.pid.store(0, Ordering::Relaxed);
     }
 }
 
