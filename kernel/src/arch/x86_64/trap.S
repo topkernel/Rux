@@ -420,7 +420,104 @@ syscall_entry:
     movq $SYSCALL_VECTOR, %rdx
     call trap_handler
     movq %rbp, %rsp
-    jmp trap_exit
+    jmp trap_exit_syscall
+
+/* ============================================================================
+ * trap_exit_syscall — trap_exit for SYSCALL frames (gap-net / syscall
+ * floor): same signal/resched check loop, then an OPPORTUNISTIC SYSRET
+ * tail.  The entry stub parked the hardware rcx/r11 (user rip/rflags)
+ * in PT_RCX/PT_R11; on the untouched fast path they still mirror
+ * PT_RIP/PT_EFLAGS and SYSRET can return with them — cheaper than the
+ * full iretq state machine (the Linux syscall_return_via_sysret
+ * discipline).  ANY frame rewrite (signal delivery, ptrace, sigreturn,
+ * execve) breaks the mirror and falls into the common iret tail.
+ *
+ * The mirror checks double as the canonical-rip guard for the SYSRET
+ * #GP class: a non-canonical PT_RIP cannot pass the (sar/inc/ja) range
+ * test below, and a rewritten PT_RIP without a matching PT_RCX fails
+ * the mirror compare.
+ * ============================================================================
+ */
+.global trap_exit_syscall
+.hidden trap_exit_syscall
+trap_exit_syscall:
+    movq %rsp, %rbp
+    andq $-16, %rsp
+    /* A syscall frame is always user-origin (cs & 3 == 3 by construction);
+     * the kernel-tail branch exists only for frame-tearing paranoia —
+     * borrow trap_exit's kernel-tail path (same file scope). */
+    testb $3, PT_CS(%rbp)
+    jz .Lrestore_kernel
+    movq %rbp, %rdi
+    call check_and_deliver_signals
+.Lcheck_resched_sc:
+    call asm_need_resched
+    testq %rax, %rax
+    jz .Lrestore_all_sc
+    call x86_preemptible
+    testq %rax, %rax
+    jz .Lrestore_all_sc
+    call asm_schedule
+    /* After the switch back, RSP/RBP are restored from thread.sp /
+     * thread.callee.rbp saved at switch-out — both still point at this
+     * frame (same contract as trap_exit's loop). */
+    jmp .Lcheck_resched_sc
+
+.Lrestore_all_sc:
+    movq %rbp, %rsp
+    testb $3, PT_CS(%rsp)
+    jz .Lrestore_kernel_tail
+    cmpq $__USER_CS, PT_CS(%rsp)
+    jne .Lbad_frame
+    cmpq $__USER_DS, PT_SS(%rsp)
+    jne .Lbad_frame
+    /* Opportunistic SYSRET eligibility:
+     * 1) PT_RCX still mirrors PT_RIP (entry parked user rip in rcx; any
+     *    kernel rewrite of the frame's rip breaks it),
+     * 2) PT_R11 still mirrors PT_EFLAGS,
+     * 3) PT_RIP is canonical (sar/inc/ja: 0 -> 1 or -1 -> 0, anything
+     *    else is non-canonical). */
+    movq PT_RIP(%rbp), %rax
+    cmpq %rax, PT_RCX(%rbp)
+    jne 2f
+    movq PT_RFLAGS(%rbp), %rax
+    cmpq %rax, PT_R11(%rbp)
+    jne 2f
+    movq PT_RIP(%rbp), %rax
+    sarq $47, %rax
+    incq %rax
+    cmpq $1, %rax
+    ja 2f
+    /* SYSRET path.  IF is cleared here and SYSRET re-enables it from
+     * the restored r11 (user rflags) — the same contract iretq gives.
+     * Pops keep the KERNEL GS active (the SMP pairing rule); rsp only
+     * becomes the user stack at the final pop, the Linux
+     * popq-rsp/swapgs/sysretq shape. */
+    cli
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r11                 /* = user rflags (mirror check passed) */
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rax
+    popq %rcx                 /* = user rip (mirror check passed) */
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    addq $8, %rsp             /* skip orig_rax */
+    addq $8, %rsp             /* skip PT_RIP — returns via RCX */
+    addq $8, %rsp             /* skip PT_CS — SYSRET loads 0x33 */
+    popq %r11                 /* user rflags (frame slot, same value) */
+    popq %rsp                 /* user rsp; ss slot abandoned */
+    swapgs
+    sysretq
+2:  /* Mirror broken or rip non-canonical — the full iret tail. */
+    jmp .Lrestore_all
 
 /* ============================================================================
  * trap_exit — common return path (rsp -> pt_regs)

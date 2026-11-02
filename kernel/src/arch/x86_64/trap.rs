@@ -23,12 +23,12 @@
 //! | 6   | 64-bit user code| 0x33     |
 //! | 7/8 | TSS (16-byte)   | 0x38     |
 //!
-//! STAR = (0x20<<48) | (0x08<<32): SYSCALL enters on CS=0x08/SS=0x10;
+//! STAR = (0x23<<48) | (0x08<<32): SYSCALL enters on CS=0x08/SS=0x10;
 //! SYSRET64 returns to CS = STAR[63:48]+16 = 0x33, SS = +8 = 0x2b.
 //! FMASK = TF|IF|DF — syscalls enter with IF clear; `handle_syscall`
-//! re-enables interrupts like the riscv64 twin.  Return is via iretq
-//! (never sysretq): avoids the SYSRET canonical-RSP crash class and
-//! keeps one uniform exit path.
+//! re-enables interrupts like the riscv64 twin.  Returns use SYSRET on
+//! the untouched fast path (trap.S trap_exit_syscall; rcx/r11 mirror
+//! checks) and IRETQ everywhere else — the Linux discipline.
 
 use super::cpu::{inb, outb, rdmsr, wrmsr};
 use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
@@ -172,9 +172,13 @@ const _: () = assert!(TSS_OFF_RSP0 == 4 && TSS_OFF_SP2 == 0x14 && TSS_OFF_IST1 =
 /// entry — syscalls arrive through LSTAR).
 pub const SYSCALL_VECTOR: u64 = 0x80;
 
-/// STAR value: kernel CS 0x08 on SYSCALL; user base 0x20 so SYSRET64
-/// computes CS = 0x20+16 = 0x33 (user code64), SS = 0x20+8 = 0x2b.
-const MSR_STAR_VALUE: u64 = (0x20u64 << 48) | (0x08u64 << 32);
+/// STAR value: kernel CS 0x08 on SYSCALL; user base 0x23 (the user-code
+/// GDT index 6 << 3 | RPL3) so SYSRET64 computes CS = 0x23+16 = 0x33
+/// (user code64) and SS = 0x23+8 = 0x2b — both with RPL 3. The base
+/// used to be 0x20, which SYSRET would have loaded as CS=0x30/SS=0x28
+/// (RPL 0); nothing exercised it while returns were iretq-only
+/// (gap-net added the SYSRET tail in trap.S).
+const MSR_STAR_VALUE: u64 = (0x23u64 << 48) | (0x08u64 << 32);
 /// FMASK: TF(8) | IF(9) | DF(10) cleared on syscall entry.
 const MSR_FMASK_VALUE: u64 = (1 << 8) | (1 << 9) | (1 << 10);
 
@@ -951,16 +955,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
             unsafe { core::arch::asm!("cli; hlt") };
         }
     }
-    // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin entry (trap,
-    // IRQ, or syscall) must land inside the CURRENT task's kernel stack —
-    // TSS.rsp0 / PER_CPU.tss_rsp0 name exactly that stack.  A frame
-    // anywhere else is the cross-stack engine caught in the act: this CPU
-    // would push frames through the victim's live data (torn return
-    // addresses — the byte-flip/#GP/#UD family).  Report the full
-    // ownership picture on raw serial and park THIS CPU (the others keep
-    // their state for their own reports).
-    if cpu_id < crate::config::MAX_CPUS {
-        let user_entry = unsafe { ((*regs).cs & 3) != 0 || vector == SYSCALL_VECTOR };
+    // SCRIBBLE2-GUARD (foreign-frame entry): a user-origin TRAP or IRQ
+    // entry must land inside the CURRENT task's kernel stack — TSS.rsp0 /
+    // PER_CPU.tss_rsp0 name exactly that stack.  A frame anywhere else is
+    // the cross-stack engine caught in the act: this CPU would push frames
+    // through the victim's live data (torn return addresses — the
+    // byte-flip/#GP/#UD family).  Report the full ownership picture on raw
+    // serial and park THIS CPU (the others keep their state for their own
+    // reports).
+    //
+    // (gap-net) SYSCALL entries skip the walk: the entry stub validated
+    // the GS base against the PerCpu magic BEFORE reading rsp0, and the
+    // context switch validated the stack top it published into rsp0 (see
+    // x86_64/context.rs) — a syscall frame is at tss_rsp0-168 by
+    // construction, so this guard's content for syscalls (3 dependent
+    // loads on the hottest path in the kernel) is already established by
+    // those two checks.
+    if cpu_id < crate::config::MAX_CPUS && vector != SYSCALL_VECTOR {
+        let user_entry = unsafe { ((*regs).cs & 3) != 0 };
         if user_entry {
             let tp = super::smp::PER_CPU[cpu_id]
                 .current_task
