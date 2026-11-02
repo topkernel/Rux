@@ -54,7 +54,20 @@ fn parse_proc_fd_dir_path(path: &str) -> Option<u64> {
     }
 }
 /// sys_openat - Open file
+///
+/// (21st successor) Thin wrapper when the fsw probe is armed: brackets
+/// the WHOLE syscall (all error returns included — the pre-ENOENT bias
+/// of the inner PRE/TAIL brackets) for the wall-vs-exec anatomy that
+/// attributes the syscost 85us-under-load open row. One relaxed load
+/// when off.
 pub fn sys_openat(args: SyscallArgs) -> i64 {
+    let (w0, exec_armed) = crate::dfx::fsw::open_exec_stamp();
+    let rc = sys_openat_impl(args);
+    crate::dfx::fsw::open_close(w0, exec_armed);
+    rc
+}
+
+fn sys_openat_impl(args: SyscallArgs) -> i64 {
     let dirfd = args[0] as i32;
     let pathname_ptr = args[1] as *const u8;
     let flags = args[2] as u32;

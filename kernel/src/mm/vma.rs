@@ -570,6 +570,11 @@ impl VmaManager {
     /// # Performance
     /// O(log n) overlap check + O(log n) insert + O(k log n) chain merge
     pub fn add(&mut self, vma: Vma) -> Result<(), VmaError> {
+        // mmprof (cmdline mmprof=1): tree-add attempt counter (merges and
+        // rejects visible from the delta against the other mmprof slots).
+        if crate::dfx::mmprof::on() {
+            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_VMAADD, 1);
+        }
         let start = vma.start();
         let end = vma.end();
 

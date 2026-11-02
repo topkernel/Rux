@@ -1484,3 +1484,404 @@ watchdog-restart path) — then wedged at 107s (the fix's target).
   avg 1.56s (waits); nr=77 futex avg 15ms (condvar waits). The vm-op family
   (mmap+mprotect: 210k ops, ~15s wall per CPU-minute) is the concrete
   per-op lever candidate behind distributeddata's 27-32s SA init.
+
+## NINETEENTH-SUCCESSOR SESSION (2026-11-03 01:30-.., branch biofix-fieldpoll @ 60e223dd)
+Mission: the perf handoff — WHY is mmap 72µs when the reference is 1-5µs? Outcome:
+ATTRIBUTED TO ITS LAST LAYER and FIXED (mm guarded domain); the per-op mmap wall
+dropped 72->30µs under OH load (fixmun 210->40-45µs, -79%); P8 A/B and the full
+stage table below. Same image, same accel (KVM), reference vs ours, same binary
+(work/pbench + test/pbench.c P8 case).
+
+### Merge + instrumentation landed (all pushed)
+- 3587fd4b = origin/main merged (d2be598d: the dfx-trace lane — tracefs +
+  reference-exact set_event grammar; TASK.md resolved ours-by-intent per the
+  standing rule; main's copy is the dfx-trace charter).
+- f3bf6d8b dfx(mmprof): cmdline `mmprof=1` (forkprof pattern, zero cost when
+  off) — TSC stage brackets: mmap {tot, vma_write lockwait, find_free_area,
+  VmaManager::add, MAP_FIXED's munmap+install}, munmap {body, surgery, walk,
+  tlb, cond_resched yields}, mprotect {tot, lock, coverage+EACCES, pte walk,
+  tlb}; scalars {fixed/hint/anon0 placement, unmap pages+empties, mprotect
+  pages, vma adds, munmap chunks}; mmap length buckets; per-comm issuer table.
+  Dumps from a 60s cadence.
+- f1606bb8: scalar-slot namespace fix (the first boot panicked at 1.0s —
+  bump() indexed the phase array; bounds-tolerant counters now).
+- 1feb7e20 + 60e223dd: console discipline — the printk emit-lock gives
+  softirq emitters 100µs while the OH hilog flood holds the console ~17ms
+  per 256B line (emulated baud): a 6-line burst lost all but 1-2 lines
+  (lb332/333), and even one 60s line raced (lb336). Final form: ONE compact
+  line per dump rotating A/B/C, emitted by a task-context kthread "mmprofd"
+  (2s emit budget — always gets through).
+
+### THE ATTRIBUTION (the 18th's handoff question, answered layer by layer)
+lb335 t=60s (pre-fix, fresh2, syscost window): mmap tot=84µs avg (n=154k,
+max 749.9ms); **fixmun=210µs avg (n=51k) carries everything**; the non-fixed
+path is CHEAP (vma_write lockwait 0µs at 3k mmap/s — the RwSpinlock TTAS is
+NOT the story; find=7µs; add=2µs); mprot-tot=47µs (n=26.6k).
+Inside munmap (lb333): body=177µs = **yld 132µs (the per-chunk cond_resched
+ACTUALLY SCHEDULES — need_resched is set at ~3.5k chunks/s under the churn,
+each yield a full re-queue: the 722ms-class mmap max is a yield that waited
+behind the storm) + walk 23µs (a full 4-level PageTableWalker::walk PER PAGE
+— 4 dependent memory refs per 4KB) + surg 4µs + tlb 2µs**.
+Reference A/B (pbench P8, quiet, same rootfs/binary/KVM): ref 0.22 (mmap0 4k/
+128k) / 1.24 (fixed-cold) / 3.42µs (fixed-hot) vs ours 6.10 / 24.4 / 64.3µs;
+mprotect 0.51/0.53 vs 3.77/5.84µs. The mission's 50-70x load class = these
+19-28x quiet per-op ratios x the yield amplification under load.
+
+### THE FIX (f1daca15, mm guarded domain, reference-shape semantics)
+1. unmap_pages: resolve the upper chain ONCE per 2MB block and iterate the
+   leaf PTEs directly (the reference's walk shape). Per-page semantics
+   bit-exact with the old body (swap/P=0-marker/U-bit/foreign-frame/rmap/
+   refcount/PCACHE-pin/device-window-restore discipline); upper-level-leaf
+   shapes fall back to the old per-page walk (unmap_pages_slow). Also kills
+   the old double walk (walk None -> read_pte_raw).
+2. munmap: the per-chunk cond_resched is GONE — the reference does not
+   schedule inside munmap; every chunk boundary still drops vma_write (the
+   same-mm racer handoff points, mm-audit invariant intact); ONE yield at
+   the operation boundary.
+3. mprotect: the EACCES pre-check walks the RANGE only (seed containing-VMA
+   + iter_after, break past span) instead of every VMA of the mm under the
+   write lock (reference mprotect_fixup shape).
+Gates: x3 builds rc=0 (x86_64/riscv64/aarch64), make test ALL PASSED
+(cg19-maketest.log; the tail VW-WEDGE prints are post-halt noise).
+
+### Verification numbers
+- pbench P8 quiet A/B (same binary/rootfs/KVM): fixed-cold 24.4->17.0µs,
+  fixed-hot 64.3->59.3µs, mmap0/mprotect unchanged (untouched paths; their
+  residual is BTreeMap+split surgery + 3 lock acquires + IPI+CR3 pair).
+- Under OH load (lb337/lb338 t=60s): mmap tot 84->22-30µs, fixmun
+  210->40-45µs, mprot-tot 47->32µs, mpcov 1µs, mplock 0. syscost cross-check
+  (lb336): nr=9 n=270,912 avg 45µs (lb325: n=179,154 avg 72µs — -37% per-op,
+  +51% ops throughput). The vm-op family wall: ~15s/CPU-min -> ~5s/CPU-min.
+- distributeddata SA:1301 init did NOT compress (lb336: 29,443ms vs the
+  28.3-31.8s family) — the SA init wall is NOT the vm-op per-op cost; the
+  KVS txns' deferred-reply/FFRT-pool family (17th's decode) stands as the
+  next candidate. The issuers table (C-line) on the next healthy boot names
+  who churns the 100-270k mmaps.
+
+### Boot classes this session (system-lb5 + fresh2, SMP2, LOGLEVEL6)
+lb330 (panic 1.0s = my slot bug), lb331/332/333 (pre-fix: race lost, ladder
+spin; lb333 wedged 181->473s then recovered; lb332 bootanimation.ready 51s),
+lb334/337/338 (ExecReboot panic 27-56s: lb334 storage_manager, lb338
+hdf_devmgr crash + audio_host watchdog SIGKILLs — the 16th's lb314 spiral
+class, ~50% rate, NOT attributed to the fix; lb337's dump thread landed its
+line from the SECOND boot after reboot), lb335/336/338-second (healthy,
+evidence above), lb339 rolling at close. NO PIXELS yet: the two structural
+losers remain (BMS trigger ~40-82s vs store ready ~104-113s; the early-death
+spiral class).
+
+### Successor entry points (in order)
+1. The remaining vm-op gap (fixmun 34µs vs ref ~3µs): the fixed path runs 3
+   vma_write acquires + 2 BTreeMap removes + 1 add + pin/unpin + 2 Vma::new
+   + IPI+CR3 pair per re-map. A single-hold unified MAP_FIXED surgery (the
+   reference mmap_region shape) would chase it — but the chunked-munmap
+   discipline is load-bearing (mm-audit invariant comments); design first.
+   The present-page teardown path inside unmap walks runs ~1.2µs/page
+   (rmap_alt_remove + page_remove_rmap + put_page_site + free) — 7.4M
+   present pages per boot through munmap — a second-order lever.
+2. THE CHURNERS ARE NAMED (lb341 issuers, eviction working): sysevent_source
+   93,308 mmaps by t=180s (32% — the hiSysEvent boot scan), sa_main 22,137,
+   appspawn 11,555, hdf_devhost 7,695, processdump 3,316. NOT
+   distributeddata's DB_TaskExecutor threads directly. The 18th's "FFRT
+   arena" attribution was the family; the top comm is the sys-event scan.
+3. ROLL THE RACE (mission 2): the four coin-flips need one clean boot.
+   Recipe unchanged (system-lb5 + fresh2 + dfx=ams46,txnhunt + syscost=1).
+   Any frame change from frozen-logo md5 06b933b4: driver auto-writes
+   run/oh-<tag>-shot-*.ppm — convert + report IMMEDIATELY.
+4. The early-death spiral (3/8 boots tonight, 27-56s ExecReboot panic:
+   storage_manager/hdf_devmgr crashes + watchdog SIGKILL waves) — pre-exist-
+   ing class (16th's lb314 family, ~50% rate then as now); lb340/341 (the
+   no-yield kernel) both ran healthy 800s, so the yield removal is not the
+   trigger.
+
+### lb339-341 addendum — the yield lesson and the final numbers
+- lb339's B-line exposed the flaw in the first fix: with ~1.05 chunks per
+  munmap call, moving the cond_resched from per-chunk to end-of-call fired
+  it just as often (need_resched is ~always set under the OH churn — 1-2k
+  munmap calls/s, each schedule 132µs behind ~165 runnable tasks). The
+  REFERENCE kernel never schedules inside munmap; preemption is handled at
+  syscall exit. ee42c599 removes the yield entirely.
+- lb340/341 (no-yield kernel) t=60s: mmap tot=27µs (n=160k, MAX 2.1ms —
+  the 749ms tail is GONE), fixmun=34µs (was 210), munmap body=52µs (was
+  177-185), yld absent, mpcov=1µs, mplock=0; >16M mmap median 5.6ms ->
+  415-427µs; mprotect 47µs (variance band 32-47 across boots — the cover
+  fix is in (mpcov 1µs) but the whole-body write-lock hold under flood
+  dominates the residual; an A/B candidate for the same surgery shape).
+- syscost cross-check lb340 t=180s: nr=9 n=269,567 avg=32µs max=3ms
+  (lb325: 179k avg 72µs max 722ms). The vm-op family wall: ~15s/CPU-min ->
+  ~5s/CPU-min (-67%).
+- unpg=7.4M present pages per boot through munmap at ~1.2µs/page of
+  descriptor work (rmap/put/free) — the next mm-lever if the store window
+  still matters after the userspace-internal residual.
+- Final P8 quiet row on the no-yield binary (p8d, perf-gate re-bank):
+  fixed-cold 16.8µs (ref 1.24), fixed-hot 58.8µs (ref 3.42), mmap0
+  6.3-6.4µs (ref 0.22), mprotect 3.9/5.9µs (ref 0.51/0.53). The mmap0 and
+  mprotect quiet residuals (BTreeMap+split surgery, 3 lock acquires, the
+  per-call full TLB flush) are the successor's single-hold surgery target.
+- mprotect load residual (lb341 A-line): tot=47µs = lock 0 + cov 1 + pte 4
+  + ~42µs in the split surgery (Vec alloc + 3x Vma::new + 2-3 BTreeMap ops
+  per overlapping VMA) + the per-call full flush — the same single-hold
+  surgery shape applies.
+- lb341 ran the full 800s healthy (race lost on the 83->115s trigger-vs-
+  ready gap as every fresh boot this session; the ladder spin + POISON32
+  trickle class, no crash).
+
+## TWENTIETH-SUCCESSOR SESSION (2026-11-03 03:3x-.., branch biofix-fieldpoll @ 5ddc03d2)
+Mission: decode distributeddata's SA:1301 init 29.4s on a post-fix kernel
+(fuxstuck+txnhunt+ams46+mmprof), reference A/B for the same window, quiet-window
+rolls. Outcome so far: THE 31s-CLASS WALL DECOMPOSED into a userspace
+on-demand LOAD cascade with a kernel-measured 5.06s param-watcher stall at its
+root gate — full evidence below; the binder deferral (mission ending (c))
+audited CLEAN at all four tcomplete sites + error paths; lb342 instrument boot
+banked; lb343 (syscost + 3s census bar) rolling at write time.
+
+### Merge + instrument boots
+- 5ddc03d2 = origin/main 113cd2b3 merged (docs; clean).
+- ea6992a6 dfx(futex): stuck-census bar 10s -> 3s (the decisive cascade parks
+  are 4-5s class — invisible at the old bar; diagnostics only, 8-line cap
+  bounds volume). x86_64 build rc=0.
+- lb342 (mmprof=1 + dfx=ams46,txnhunt,syncguard,fuxstuck,slowtask, LOGLEVEL=6,
+  fresh2, load ~5.5): HEALTHY boot, race lost by the usual margin (CreateNewUser
+  71.8s vs bundles.ready 103.2s = 31.4s), SA:1301 init 28,532ms (11.5->40.0),
+  59 POISON32 (ladder-spin family), no panic/ExecReboot. mmprof: mmap tot=24us
+  (n=178,799), fixmun=33us — the vm-op wall stays dead; issuers: sysevent_source
+  165,050 / sa_main 22,137 / appspawn 11,373 / hdf_devhost 8,505 /
+  DB_TaskExecutor **2** (distributeddata is NOT an mmap churner).
+
+### THE DECODE (lb342 evidence, all timestamps host-side serial)
+1. distributeddata (581) shows ZERO futex parks >10s all boot (fuxstuck: not a
+   single tgid=581 line), ZERO binder txns >4s TO it (vs 13 distinct >5s on
+   lb323/cg17) — the 17th's reply-deferral family and any condvar-starvation
+   story are BOTH absent on the post-fix kernel, yet the wall persists at
+   28.1-31.8s across every kernel since cg17 (28.3/28.8/31.8/29.4/28.5).
+2. THE SHAPE IS A LOAD CASCADE WITH 4s METRONOMES. DB_TaskExecutor threads
+   re-send SAMGR_LOAD(4802=device_manager) at 11.98/16.5/20.6/24.6/28.7/32.9/
+   36.9 — 4.05s apart, replies 6-17ms except one 4.0s samgr-side outlier.
+   softbus_server (exec 15.5) likewise re-LOADs 1120/1123
+   (wifi_manager) at 18.96/24.97/28.75/32.47/36.39. Each waiter's loop =
+   the 14th's sys=35 NANOSLEEP poll discipline; the loop releases when the
+   dependency's SA registers.
+3. THE CASCADE TIMELINE: samgr+hilog+param_watcher start 5.3-5.5; hdf_devmgr
+   SETS bootevent.hdf_devmgr.ready at 5.433 but INIT'S PARAM SERVICE DOES NOT
+   HANDLE IT UNTIL 10.496 (**5.06s in the param channel** — PCTL-RECV #2/#4
+   land in one burst at 10.489-10.505; the FIRST param handle of the boot).
+   bootevent.boot.completed fires 3ms later (10.505) — it is gated on
+   hdf_devmgr.ready. The reference handles the same set same-millisecond
+   (refu9: set ~3.52 handled 3.52).
+4. boot.completed releases init's on-demand list: distributeddata execs 11.4
+   (ref 4.5); device_manager loads via samgr (LOAD txn1198 11.98 -> spawn
+   12.42 -> publish 13.0, 0.6s in-stage = reference-class speed);
+   wifi_manager loads 20.0 -> publishes 30.7 (10.9s in-stage); softbus (exec
+   15.5) registers only at 40.02 after its wifi/1123 waits; distributeddata's
+   OnStart (28.1s) releases the moment softbus registers (40.02->40.03).
+   SA:1301 and SA:4700 both print spend:28144ms — the SAME cascade, not a
+   shared release.
+5. CFG NOTE: device_manager.cfg (start-on-demand: BOOT_COMPLETED) is
+   byte-identical between system-lb5 and the stock image — the cascade shape
+   is the image's own semantics on BOTH kernels; the reference just runs
+   every stage 5-25x faster, so the cascade compresses into ~2s there.
+6. Mission ending classification: NOT (a) waker-runnable-starved (no parks to
+   starve), NOT (c) binder deferral (audited below) — (b)-shaped, with the
+   chain's ROOT = init's 5.06s param-service stall + every stage's per-op
+   costs (the 4ms-8s SLOWTASK-blind band). The parks are <10s poll loops,
+   kernel-clean; the per-op wall inside the stages is the lever.
+7. BINDER DEFERRAL AUDIT (ending (c), code): four tcomplete sites — BC_REPLY
+   (immediate, process_todo=true), ONEWAY (immediate), SYNC (deferred per
+   963b3e95) — all balanced; dead_reply_to_sender pushes ReturnError with
+   process_todo=true + exact-thread wake; the send-fail paths return err_cmd
+   BEFORE any tcomplete queue (no dangling deferral). Two SYNCSEND-GUARD
+   prints this boot (pid 485 telephony, 39.05/39.17, why=stack-top-not-mine/
+   todo-head-txn at the 29201 ICommonEvent error) — noted, peripheral to the
+   race path.
+8. Also observed: txn11484 accountmgr(915)->foundation(871) exec 30s+ (server
+   main thread in futex wait on its OWN stack condvar, thtodo=0, OWE says
+   reply deferred userspace-side) — the osaccount chain riding the same
+   stage-cost wall. W2-WAKE-REFUSED-SLEEPING pid=976 x3 (28.8-31.3s,
+   state=0x0 on_cpu=false pk=1) — the wake-refusal-on-running shape, 3
+   prints, no strand confirmed (needs the 3s-bar census to re-adjudicate).
+
+### Mission-2 A/B numbers (same window, refu9 vs lb342)
+- boot.completed: ref ~3.6s / ours 10.5s (the 5.06s param stall is 5s of it).
+- distributeddata exec: ref 4.5 / ours 11.4. store serves: ref 5.9 (1.3s
+  after exec) / ours 40.0 (28.6s after exec). creation: ref 8.3 / ours 71.8.
+  SetBundleQuota stream: ref 8.5 / ours none (race lost). launcher.ready:
+  ref 11.7 / ours never (frozen logo).
+- Reference runs NO dynamic-proc loads (0 "Start dynamic proc" lines); ours
+  routes device_manager/wifi/distributeddata through samgr LOADs — both
+  kernels run the same on-demand cfg semantics; the reference's cascade
+  simply finishes inside the first 2s after boot.completed.
+
+### lb343/lb344 (3s-bar census + periodic taskdump + syscost) — the cascade under the microscope
+- lb343: param-watcher stall present but variable (first param RECV 8.36s vs
+  sends from 5.4s; lb344: sent 5.8 handled 14.1 = **8.3s**; lb342 5.06s). The
+  stall is a per-boot variance band of the same shape: init's param service
+  does not drain its queue while the service-start storm runs; boot.completed
+  (gated on hdf_devmgr.ready) fires only after it drains — 10.5-14.5s on ours
+  vs ~3.6s on the reference. ~7-11s of the structural gap sits HERE.
+- THE SAMGR-INTERNAL INTERLEAVE (both boots): SLOW-TXN rows "queue 0 ms,
+  exec Ns" — samgr's own threads call EACH OTHER (Executor->OS_IPC_2,
+  OS_IPC_0->OS_IPC_1, OS_IPC_8->OS_IPC_9, OS_IPC_13->OS_IPC_7...) and every
+  handler takes seconds with ZERO queue wait: code 2 x1.5-6.6s, code 3
+  x2.2-6.0s, code 12 x9.0-9.6s, code 30 x2.3-26.3s, one code-20 x113s
+  (audio_service->samgr), time_service->samgr x95s+. The handler threads show
+  state=0x0 (RUNNING) sys=16 while "executing" for seconds — the handler is
+  in USERSPACE code (past the BWR ioctl), either burning CPU at the per-op
+  wall or spinning on a userspace lock whose holder is descheduled. The 12-deep
+  OWE stacks on tid 339 (txn71/110/116/119/129/132 code20>328.458) are the
+  nested-sync chain riding these per-hop seconds. samgr is the boot's
+  serialization point; per-hop seconds compose into every SA registration,
+  LOAD reply (the 4.0s outlier), and the 4s metronomes.
+- vruntime CAVEAT for the successor: the periodic taskdump's vruntime field is
+  STALE (mmprofd's dumps landed at 61/121/181s while its dumped vruntime stayed
+  byte-identical) — do NOT use frozen vruntime as a not-picked proof. The
+  strand adjudication needs sum_exec_runtime/last-pick in the dump line (the
+  stress lane's W3-FROZEN-EXEC-SLOT shape).
+- syscost t=240s (only clean window; 60/120/180 rows lost to the doubled-
+  console interleave — R34 corruption eats our own telemetry, mmprofd-style
+  task-context emitter is the fix): **nr=2 open() n=193,537 avg=85us
+  tot=16,470ms per 60s** (the top syscall — the sysevent-scan class), nr=83
+  mkdir n=844 avg=3,646us tot=3,077ms, nr=257 openat n=12,791 avg=181us,
+  nr=77 futex n=92 avg=19ms. open() at 85us vs reference 1-5us class = the
+  next per-op lever family (mkdir 3.6ms vs ~50us class).
+- SPIRALS (mission-4 note): lb343 accesstoken_service exit 270.8s -> KOT-KILL
+  waves (storage_manager group kills 294s) -> init sysrq-c 326.2s; lb344
+  ExecReboot at 25.0s then crash-looped (3 ExecReboot/PANIC). lb342 healthy.
+  2/3 this session vs the 19th's ~50% rate — same pre-existing class, not
+  chase-attributed.
+- PIXELS: none (md5 unchanged where shots landed). Race not reached on
+  lb343/344 (both spiraled before/inside the cascade); lb342 lost by 31.4s
+  as usual.
+
+### Successor entry points (20th, in order)
+1. THE SAMGR HANDLER BLACK BOX: instrument ONE samgr-internal slow handler
+   end-to-end (code 12/30, queue-0/exec-seconds): is it userspace CPU at the
+   open()/mkdir() wall, a userspace spin, or a chain? A per-tgid syscall-tap
+   (scmtap exists) behind dfx, or fsw counters, inside the 15-40s window.
+   The open()/mkdir() per-op rows above are the named kernel lever family.
+2. init's param-service drain stall (5-8.3s variance): catch init's param
+   thread posture DURING the stall with the 3s-bar census (its parks are
+   <3s/cycle or non-futex — a 1s bar or a taskdump at t=8-12s would name it);
+   kernel-side check the param socket queue wakeup path (unix socket
+   readability for the param channel).
+3. Roll the race (recipe unchanged + periodic): the four coin-flips still
+   need one clean boot; 2/3 boots spiral early — the spiral is the dice.
+4. mmprofd-style task-context emitter for syscost (the 60/120s rows are
+   lost to console interleave today).
+5. WAKE-RUN-LEAK "kicked-2x" threads + the W2 refusals: low-rate, but the
+   census's own kick contaminates its snapshot — decouple (report first,
+   kick next round).
+- lb345 final: foundation SIGKILL wave at 48-51s (watchdog class) ->
+  bundles.ready never fired -> no CreateNewUser -> ladder-spin POISON32
+  trickle to 940s; bootanimation.ready 54.2s (2.4x lb342's 22.3s — this roll
+  ran 3 own QEMUs deep, load-inflated). SA:1301 init reproduced at 29,016ms
+  (12.9->41.7) with the identical cascade (device_manager OpenSo spend 23ms,
+  wifi 12.1-14.5s, softbus 41.6, 1301 releases at softbus). Frozen-logo md5s
+  unchanged. Race tally this session 0/4 (lb342 lost by 31.4s, lb343/344/345
+  spiral-class).
+
+### 21st session (2026-11-03) — THE PARAM STALL DECODED + THE OPEN() WALL CUT 3x (104->33us)
+
+Synced origin/main ee332f51 (tree identical to the 20th's tip; no code delta).
+
+**Lever-2 decode: the param drain stall is NOT a lost wakeup — it is init's
+single main-loop thread BUSY for ~5s in the boot-job file-command storm.**
+lb342 serial, timestamps host-side: last `le_epoll.c:122 timeout:-1` (wait
+entry) at 5.036s; hdf_devmgr SETS ready at 5.433 (PCTL-SEND #3); init's
+epoll loop does NOT return until 10.144-10.160 (next timeout:-1 line), and
+the signalfd SIGCHLD reaps + PCTL-RECV #0..#5 drain in ONE burst right
+after. In between, pid=1 prints are a continuous per-file command stream:
+`boot job post-fs-data start` 5.605 -> finish diff **2,306ms** (reference
+refu9: **275ms**, 8.4x), `early-boot finish diff 981ms` (ref 85ms, 11.5x),
+`pre-init 2,033ms` (ref 733ms), then the `boot` job runs to ~10.1s. The
+param messages land at 5.36-5.49s — just as the loop leaves for the job
+chain — and queue behind it. Reference runs the same jobs in 0.36s
+total, so its param set is handled same-millisecond. WAKE PATH IS CLEAN
+(this round's named kernel question answered: the drain waits because
+the reader is BUSY, not because a wake is lost — the 5.06/8.3s variance
+= job-storm variance). Lever-2 collapses into Lever-1: cut the per-op fs
+wall and the storm compresses.
+
+**Lever-1 attribution (lb346, fsw=1 anatomy — infra from the perf-path
+lane + new brackets, commit fd950765):** at t=330s: open n=218,469 wall
+avg **99.6us** (matches syscost 104us — no contradiction, digits
+re-read); walk loop wall 51.7s of which **miss=44.2s (85%)** over 339k
+misses (130us each), **misseo=177,610** (52% of misses = ENOENT
+existence probes, each paying the FULL ext4 dir scan: get_data_blocks
+Vec + per-block extent walk + every dirent parsed — ENOENT was never
+cached, the old no-negative-cache objection was the unbounded-heap
+leak); walk PROLOGUE **66.6us/walk over 781k walks = 52s wall** — every
+OH service is chrooted and paid make_absolute_rooted +
+get_process_root(String) + normalize_with_root + dentry_walk_no_symlink
+RE-WALK of the jail prefix PER LOOKUP; openexecavg (lb346 lacked PC2 —
+truncation) — fixed by the PC1/PC2 split.
+
+**Two kernel fixes (b21e126b, both pushed):**
+1. **Bounded negative-lookup memo** (cmdline negmemo=1): ext4 ENOENT
+   misses insert a NEGATIVE dentry child stamped with the parent
+   INODE's dir_mut_gen; the 8 VFS mutation sites (create/mkdir/unlink/
+   rmdir/rename/link/symlink/mknod) bump parent_inode.dir_mut_gen.
+   Stamp on the INODE (not the dentry) because bind-mount aliases are
+   separate dentries over one shared inode — a sandbox-view memo must
+   invalidate when the file appears host-side. Ext4-only (ops.lookup
+   fn-pointer gate; dynamic fs change without VFS mutations — procfs
+   pid reuse). Cap 32 negatives/parent, first-found eviction. A stale
+   memo (gen mismatch) is detached and re-resolved (NEGSTALE).
+   Reference parity: the reference kernel caches negative dentries in
+   its dcache with the same mutation-invalidation semantics.
+2. **Chroot fast base**: with the jail root recorded as a dentry
+   (set_root_with_dentry) and an absolute path, path_lookup STARTS at
+   the jail-root dentry and feeds raw components to the loop ('.'/'..'
+   /trailing-slash arms carry the semantics; '..' clamps at the same
+   dentry). Kills the root-string allocation train AND the jail-prefix
+   re-walk. Reference parity: nd->root IS a resolved dentry there; and
+   the old code permission-checked the whole jail prefix per lookup,
+   which the reference does not.
+
+**A/B (lb346 off vs lb347 on, same recipe, fsw=1+syscost=1):**
+- syscost open() t=240s: n=200,012 avg=**104us** tot=20.8s/min ->
+  n=249,477 avg=**33us** tot=8.3s/min (3.2x; volume UP 25% = the boot
+  gets more done per minute).
+- walk prologue: 66.6us -> **2.0us/walk** (1.89s total vs 52s).
+- negmemo: neghit=50,522 probes served from the memo, negstale=**90**
+  (invalidation scheme stable), misseo 177,610 -> 163,891.
+- boot.completed: 11.8s -> **9.2s** (hdf_devmgr.ready handled 11.5 ->
+  9.09s); post-fs-data 2,843 -> 2,081ms (-27%); early-boot 1,291 ->
+  938ms (-27%); pre-init 1,321ms. Remaining vs reference: post-fs-data
+  7.6x — the residue is REAL-file cold-dcache misses (the found-miss
+  half of the 130us miss class), mkdir/jbd2, and the sync-exec storm.
+- **openexecavg = 29.6us exec vs 33us wall (PC2)** — after the fixes
+  the open row is ~90% real kernel CPU (was ~70% waiting). The wall is
+  no longer scheduling-inflated; the remaining sink is the miss path
+  (ext4 dir scan) — next fs lever.
+- open max 179ms/165ms class remains (blocking open tail —
+  VFS_MUTATION_LOCK/jbd2-commit family, unattributed this round).
+
+**Rolls: lb346 (off) + lb347 (on) BOTH wedged in the pre-existing
+300-900s TXN-HANG exec family** (lb346: 334s exec 778->336, killed;
+lb347: 333s exec 822->337 + POISON32 wave, killed). NOT a regression:
+lb342 maxed 741s, lb345 941s on the 20th's kernels — the samgr
+nested-call wall class. Race tally this session 0/2 so far. lb348
+(same kernel, negmemo=1) rolling at write time.
+
+**Successor entry points (21st, in order):**
+1. **The miss path is now THE fs sink**: 40.8s walk-loop wall over 329k
+   remaining misses (found-misses ~19.5s + unmemoed ENOENT ~21.3s).
+   The ext4 lookup pays get_data_blocks (Vec alloc + FULL extent walk
+   per block index) + every dirent parsed + bread per block, per miss.
+   Cache the dir-block list per directory inode, or parse the on-disk
+   htree index. fs is a guarded domain: pbench fs rows + boot-job A/B
+   after any change.
+2. The 165-179ms blocking open tail: bracket VFS_MUTATION_LOCK wait vs
+   jbd2 commit vs bio wait on the O_CREAT path (the mkdir 3.6ms row's
+   big sibling).
+3. Roll the race on the nm2 kernel (recipe: SMP=2 LOGLEVEL=6
+   USERDATA=run/userdata-warm2.img lb-boot.py <tag> 1500
+   run/system-lb5.img run/bzImage-ladder-nm2 " syscost=1 fsw=1
+   negmemo=1 dfx=fuxstuck,txnhunt,ams46,slowtask"). The wedge dice are
+   the odds (pre-existing family); boot.completed now fires ~9.2s —
+   1.3s earlier than the 20th's best gate.
+4. PC2's openexecavg is the health check for any fs change: exec should
+   track wall within ~20%; a widening gap = a new wait crept in.
+5. The 70M slab.rs:640 rest-site n at t=180 (19.1s) — allocator
+   class-lock volume 2.8x the 25M/boot band figure, worth a glance
+   from the memory-domain owner (rest-site charging may differ from
+   the allocwatch counter; do not merge the two numbers blindly).
