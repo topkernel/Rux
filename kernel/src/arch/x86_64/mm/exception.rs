@@ -321,9 +321,138 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         let fault_addr_usize = fault_addr.bits() as usize;
 
         if current.is_in_kernel_stack(fault_addr_usize) || current.is_stack_overflow(regs.rsp as usize) {
+            // DFX (LTP chunk@700 panic hunt): the classification can be a
+            // false positive when `current` is stale (lying-slot family) or
+            // when the fault is an unrelated NULL deref on a foreign rsp —
+            // carry rip + both stack bounds so the dump names the faulting
+            // instruction and adjudicates the classification offline.
+            let kb = current.kernel_stack_bottom();
+            let kt = current.kernel_stack_top();
+            // One-shot census (allocation-free, raw UART): every CPU slot
+            // and every task's stack ownership vs the faulting rsp, so a
+            // lying slot / stale-kstack task / freed-stack resume is
+            // adjudicated directly from the dump.
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn phex(mut v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for sh in (0..16).rev() {
+                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                    }
+                }
+                fn ptag(m: &[u8]) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for &b in m {
+                        putchar(b);
+                    }
+                }
+                ptag(b"\nKSO-CENSUS cpu=");
+                phex(crate::arch::cpu_id() as u64);
+                for c in 0..crate::config::MAX_CPUS {
+                    let cur = crate::sched::sched::cpu_state(c).current as usize as u64;
+                    if cur != 0 {
+                        ptag(b" slot");
+                        phex(c as u64);
+                        ptag(b"=pid:");
+                        // SAFETY: header reads only.
+                        unsafe {
+                            phex((*(cur as *mut crate::process::Task)).pid() as u64);
+                        }
+                    }
+                }
+                ptag(b"\n");
+                // DFX: adjudicate the freed-stack execution engine — is
+                // the faulting rsp inside a recently FREED stack?
+                if let Some((top, fpid, age)) =
+                    crate::process::task::freed_stack_containing(regs.rsp as usize)
+                {
+                    ptag(b"KSO-FREED-STACK rsp in freed kstack top=");
+                    phex(top as u64);
+                    ptag(b" freed_by_pid=");
+                    phex(fpid as u64);
+                    ptag(b" age_jiffies=");
+                    phex(age);
+                    ptag(b"\n");
+                }
+                // DFX: live TSS.rsp0 per CPU — a kernel-mode fault whose
+                // rsp sits just below a CPU's rsp0 inside non-stack memory
+                // is the trap-entry-on-stale/scribbled-rsp0 engine.
+                for c in 0..crate::config::MAX_CPUS {
+                    let r0 = crate::arch::x86_64::smp::PER_CPU[c]
+                        .tss_rsp0
+                        .load(core::sync::atomic::Ordering::Acquire);
+                    if r0 != 0 {
+                        ptag(b"KSO-RSP0 cpu");
+                        phex(c as u64);
+                        ptag(b"=");
+                        phex(r0);
+                        ptag(b"\n");
+                    }
+                }
+                // DFX: dump surviving kernel-text return addresses from the
+                // fault rsp up through the overflow zone into the legal
+                // stack (the deep recursion's frame chain names itself).
+                {
+                    let mut a = regs.rsp as usize & !7;
+                    let end = (kb + 0x400).min(kt);
+                    let mut shown = 0u32;
+                    while a < end && shown < 200 {
+                        // SAFETY: best-effort diagnostic read inside the
+                        // direct map; faults here are impossible (linear
+                        // map is fully mapped) — raw read.
+                        let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+                        if v >= 0xffff_ffff_8000_0000u64 && v <= 0xffff_ffff_ffff_f000u64 {
+                            ptag(b"KSO-F +");
+                            phex((a - (regs.rsp as usize & !7)) as u64);
+                            ptag(b" ra=");
+                            phex(v);
+                            ptag(b"\n");
+                            shown += 1;
+                        }
+                        a += 8;
+                    }
+                }
+                // SAFETY: read-only header walk via the pid hash.
+                unsafe {
+                    crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                        let bottom = (*task).kernel_stack_bottom() as u64;
+                        let top = (*task).kernel_stack_top() as u64;
+                        let sp = (*task).thread().sp;
+                        let rsp = regs.rsp;
+                        let hit = rsp >= bottom && rsp < top;
+                        let dead = (*task).state().is_dead();
+                        // Only print tasks whose stack is near the fault
+                        // (±4MB) or dead-with-stack — keeps the dump short.
+                        if hit
+                            || dead
+                            || (rsp + 0x400000 > bottom && rsp < bottom + 0x400000)
+                        {
+                            ptag(b"KSO-T pid=");
+                            phex((*task).pid() as u64);
+                            ptag(b" dead=");
+                            ptag(if dead { b"Y" } else { b"N" });
+                            ptag(b" kstack=[");
+                            phex(bottom);
+                            ptag(b", ");
+                            phex(top);
+                            ptag(b"] sp=");
+                            phex(sp as u64);
+                            ptag(if hit { b" <RSP-IN-THIS-STACK" } else { b"" });
+                            ptag(b"\n");
+                        }
+                        // keep walking
+                    });
+                }
+            }
             panic!(
-                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x})",
-                current.pid(), fault_addr_usize, regs.rsp
+                "Kernel stack overflow in task {} (fault_addr={:#x}, rsp={:#x}, rip={:#x}, kstack=[{:#x},{:#x}])",
+                current.pid(),
+                fault_addr_usize,
+                regs.rsp,
+                regs.rip,
+                kb,
+                kt
             );
         }
 
