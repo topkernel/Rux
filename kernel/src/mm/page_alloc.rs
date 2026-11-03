@@ -626,7 +626,7 @@ pub fn oom_forensic_dump(site: &str) {
         RECLAIM_GATE_EXIT_RELEASES.load(Ordering::Relaxed)
     );
     crate::println!(
-        "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={} taken_age={}j acqs={} longholds={}",
+        "OOM-FORENSIC: gate phase={} rounds={} freed={} deep={} waiters={} exhausted={} selffight={} taken_age={}j acqs={} longholds={} now_j={} taken_j={} prog={}",
         GATE_PHASE.load(Ordering::Relaxed),
         GATE_ROUNDS.load(Ordering::Relaxed),
         GATE_FREED.load(Ordering::Relaxed),
@@ -637,20 +637,21 @@ pub fn oom_forensic_dump(site: &str) {
         crate::drivers::timer::get_jiffies()
             .saturating_sub(GATE_TAKEN_J.load(Ordering::Relaxed)),
         GATE_ACQS.load(Ordering::Relaxed),
-        GATE_LONGHOLDS.load(Ordering::Relaxed)
+        GATE_LONGHOLDS.load(Ordering::Relaxed),
+        crate::drivers::timer::get_jiffies(),
+        GATE_TAKEN_J.load(Ordering::Relaxed),
+        RECLAIM_PROGRESS.load(Ordering::Relaxed)
     );
 
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
         let (n, slow, max_ns) = super::swap::swap_write_census();
-        if n > 0 {
-            crate::println!(
-                "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
-                n,
-                slow,
-                max_ns / 1_000_000
-            );
-        }
+        crate::println!(
+            "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
+            n,
+            slow,
+            max_ns / 1_000_000
+        );
     }
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
