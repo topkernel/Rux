@@ -92,6 +92,20 @@ pub struct VscanCensus {
     pub toctou: u64,
     /// try_to_unmap replaced zero PTEs (page not found in any page table).
     pub unmap0: u64,
+    /// SP-8 split of unmap0: mapcount STILL >= bias+1 after the failed
+    /// walk (the page really is mapped somewhere the slots did not
+    /// reach — the missed-walk face: stale/degraded slots, VMA-type
+    /// miss). These pages stay on the LRU and are re-skipped each scan.
+    pub u0_live: u64,
+    /// SP-8 split of unmap0: mapcount already back at/below bias by the
+    /// arm (a teardown raced between the filter and the walk — the page
+    /// is on its way out; benign transient, self-correcting).
+    pub u0_dead: u64,
+    /// SP-8 split of unmap0: RmapOverflow flag set (the 4-slot table
+    /// degraded to single-value recording — the known architectural
+    /// limit; expected to carry the live-skip residue after the
+    /// FileBacked-COW VMA-filter fix).
+    pub u0_ovf: u64,
     /// Partial unmap (slot leaked).
     pub partial: u64,
     /// swap_write_page returned Err.
@@ -127,6 +141,9 @@ vscan_ctr!(VS_ROTREF);
 vscan_ctr!(VS_SLOTNONE);
 vscan_ctr!(VS_TOCTOU);
 vscan_ctr!(VS_UNMAP0);
+vscan_ctr!(VS_U0LIVE);
+vscan_ctr!(VS_U0DEAD);
+vscan_ctr!(VS_U0OVF);
 vscan_ctr!(VS_PARTIAL);
 vscan_ctr!(VS_WERR);
 vscan_ctr!(VS_WOK);
@@ -153,6 +170,9 @@ pub fn vscan_census() -> VscanCensus {
         slot_none: VS_SLOTNONE.load(Relaxed),
         toctou: VS_TOCTOU.load(Relaxed),
         unmap0: VS_UNMAP0.load(Relaxed),
+        u0_live: VS_U0LIVE.load(Relaxed),
+        u0_dead: VS_U0DEAD.load(Relaxed),
+        u0_ovf: VS_U0OVF.load(Relaxed),
         partial: VS_PARTIAL.load(Relaxed),
         w_err: VS_WERR.load(Relaxed),
         w_ok: VS_WOK.load(Relaxed),
@@ -166,10 +186,11 @@ pub fn vscan_census_line() -> alloc::string::String {
     use alloc::format;
     let c = vscan_census();
     format!(
-        "VSCAN-CENSUS calls={} want={} got={} nullp={} notanon={} notsb={} unmapped={} rc(2/3/4+ last)={}/{}/{} {} rsvlock={} rotref={} slotnone={} toctou={} unmap0={} partial={} wok={} werr={} putnz={} freed={}",
+        "VSCAN-CENSUS calls={} want={} got={} nullp={} notanon={} notsb={} unmapped={} rc(2/3/4+ last)={}/{}/{} {} rsvlock={} rotref={} slotnone={} toctou={} unmap0={} u0(live/dead/ovf)={}/{}/{} partial={} wok={} werr={} putnz={} freed={}",
         c.calls, c.want, c.got, c.null_page, c.not_anon, c.not_sb,
         c.unmapped, c.rc2, c.rc3, c.rc4p, c.last_rc, c.rsv_lock,
-        c.rot_ref, c.slot_none, c.toctou, c.unmap0, c.partial,
+        c.rot_ref, c.slot_none, c.toctou, c.unmap0, c.u0_live,
+        c.u0_dead, c.u0_ovf, c.partial,
         c.w_ok, c.w_err, c.put_nz, c.freed
     )
 }
@@ -698,6 +719,20 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     swap::swap_clear_pending(swap_type, swap_offset);
                     swap::swap_free_slot(swap_type, swap_offset);
                     VS_UNMAP0.fetch_add(1, Relaxed);
+                    // SP-8 split: dead = a teardown raced the filter→walk
+                    // window (mapcount already back at/below bias; the
+                    // page leaves the LRU on its own — benign). live =
+                    // the page is still mapped and the walk missed it
+                    // (stale/degraded slots — the missed-walk face; the
+                    // page stays LRU-linked and is re-skipped each scan).
+                    if p.mapcount() < 0 {
+                        VS_U0DEAD.fetch_add(1, Relaxed);
+                    } else {
+                        VS_U0LIVE.fetch_add(1, Relaxed);
+                    }
+                    if p.test_flag(PageFlag::RmapOverflow) {
+                        VS_U0OVF.fetch_add(1, Relaxed);
+                    }
                 } else {
                     // Partial unmap: at least one PTE now references the swap
                     // entry — freeing the slot would be a UAF. Leak it (and
@@ -748,6 +783,16 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 } else if unmapped == 0 {
                     swap::swap_free_slot(swap_type, swap_offset);
                     VS_UNMAP0.fetch_add(1, Relaxed);
+                    // SP-8 split (same classification as the
+                    // single-mapping arm above).
+                    if p.mapcount() < 0 {
+                        VS_U0DEAD.fetch_add(1, Relaxed);
+                    } else {
+                        VS_U0LIVE.fetch_add(1, Relaxed);
+                    }
+                    if p.test_flag(PageFlag::RmapOverflow) {
+                        VS_U0OVF.fetch_add(1, Relaxed);
+                    }
                 } else {
                     VS_PARTIAL.fetch_add(1, Relaxed);
                     crate::pr_warn!(

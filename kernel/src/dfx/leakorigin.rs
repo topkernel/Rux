@@ -438,6 +438,89 @@ pub fn note_release(task: *mut crate::process::Task) {
         n -= 1;
         putchar(buf[n]);
     }
+    // stress-port r8 discriminators: the RECORDED task's live state at
+    // print time. The r7 forker boot saturated this print's 40-line
+    // budget with osite=sched.rs:2641 pairs (including symmetric
+    // swapped releaser/recorded pairs across cpu0/cpu1) — the shape of
+    // two live tasks sharing one 2048-entry hash slot under fork churn,
+    // their __schedule GRQ acquire/release windows (~µs) interleaving
+    // across CPUs, each release observing the other's still-armed
+    // o-record. That cross-talk shows the recorded task OWNED (slot- or
+    // SWITCHING_OUT-named) with its base count in flight or already 0;
+    // a GENUINE cross-task booking (the lying-slot family) shows the
+    // recorded task owned by nothing with base stuck at 1 (its release
+    // truly never ran). rpid/rpc/rown let every line self-adjudicate.
+    // SAFETY: diagnostic reads of stable Task fields on a pointer that
+    // was executing on `ocpu` moments ago; same discipline as
+    // note_acquire's sched-slot read.
+    if ot >= 0x80000000 {
+        unsafe {
+            let rt = ot as *mut crate::process::Task;
+            for &c in b" rpid=" {
+                putchar(c);
+            }
+            let mut v = (*rt).pid() as u64;
+            let mut n = 0;
+            if v == 0 {
+                putchar(b'0');
+            }
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+            for &c in b" rpc=" {
+                putchar(c);
+            }
+            let mut v = ((*rt).preempt_count()
+                & crate::interrupt::preempt::PREEMPT_MASK) as u64;
+            let mut n = 0;
+            if v == 0 {
+                putchar(b'0');
+            }
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+            // rown bit 1: some cpu's sched slot names it; bit 2: some
+            // cpu is switching it out right now.
+            let mut rown: u64 = 0;
+            for c in 0..crate::config::MAX_CPUS {
+                if crate::sched::sched::cpu_state(c).current == rt {
+                    rown |= 1;
+                }
+            }
+            if crate::sched::sched::task_is_mid_switch_out(rt) {
+                rown |= 2;
+            }
+            for &c in b" rown=" {
+                putchar(c);
+            }
+            let mut v = rown;
+            let mut n = 0;
+            if v == 0 {
+                putchar(b'0');
+            }
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+        }
+    }
     putchar(b'\n');
 }
 
