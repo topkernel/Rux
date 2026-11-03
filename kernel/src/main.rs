@@ -982,6 +982,17 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "khungtaskd hung-task detector", true);
         }
 
+        // fd-table retire reaper (fs/fdreap): every close/dup2
+        // displacement parks the removed occupant for a post-grace
+        // drop. Late-boot slot for the same reason as khungtaskd — its
+        // sleeps and grace waits need secondaries online; it must be up
+        // before the first userspace close (until then parks take the
+        // inline bounded-grace fallback).
+        {
+            crate::fs::fdreap::init();
+            print_status("fs", "fdreapd fd retire reaper", true);
+        }
+
         // sc-series soft-wedge heartbeat (dfx=schb): same late-boot slot
         // as khungtaskd — its timer wakeups need secondaries online. The
         // switch gates everything; schbd prints its own armed line.

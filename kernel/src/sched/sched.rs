@@ -2730,6 +2730,28 @@ unsafe fn __schedule() {
     // Capture next_pid while we still hold references (before unlock)
     let next_pid = if !next.is_null() { (*next).pid() } else { 0 };
 
+    // R63 + stress-port r8: publish the switch-out ownership BEFORE the
+    // per-CPU slot flips to next. The marker makes every mid-switch
+    // observer (parkwalk census, heals, pick ownership) treat prev as
+    // still-owned from the first instruction after the pick until
+    // __switch_to's release store lands. Storing it after the slot flip
+    // left a gap — slot already names next, marker not yet set — in
+    // which a racy census walk on another CPU classified a parking prev
+    // (sleeping state set, its own GRQ guard still in hand) as "parked
+    // with a live count": stress-port round 7's PARKED-WILDWRITE /
+    // PARKED-LEAK datum (pc=1, LEAK-ORIGIN sched.rs:2641 = prev's OWN
+    // scheduler acquire, self-resolved within the jiffy). The reference
+    // kernel's prev->on_cpu covers the whole switch — prev stays owned
+    // from its pick until finish_task_switch clears it — so publishing
+    // earlier is strictly closer to that shape. The original R63 waker
+    // invariant is preserved (the marker still lands inside this GRQ
+    // hold, before any GRQ-serialized observer can act) and only
+    // widens the protection window.
+    let switching = next != prev && !next.is_null();
+    if switching {
+        SWITCHING_OUT[cpu_id].store(prev as u64, core::sync::atomic::Ordering::Release);
+    }
+
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
     slot_tag_write(cpu_id, SLOT_W_SCHED_PICK, next);
@@ -2773,14 +2795,10 @@ unsafe fn __schedule() {
         }
     }
 
-    // R63: publish the switch-out ownership BEFORE releasing the GRQ (a
-    // waker serialized by this lock must see it), so wake_up_enqueue's
-    // phantom heal cannot clear prev's on_cpu mark while prev's context
-    // is still being saved below.
-    let switching = next != prev && !next.is_null();
-    if switching {
-        SWITCHING_OUT[cpu_id].store(prev as u64, core::sync::atomic::Ordering::Release);
-    }
+    // R63 (marker stored above, before the slot flip — stress-port r8
+    // moved it up; a waker serialized by this lock still sees it before
+    // the GRQ drops, so wake_up_enqueue's phantom heal cannot clear
+    // prev's on_cpu mark while prev's context is still being saved).
 
     // Release lock but keep IRQs disabled for context_switch
     let flags = grq_guard.unlock_irqretain();
@@ -5705,6 +5723,19 @@ pub fn scheduler_tick() {
                 task: *mut crate::process::Task,
                 pc: i32,
                 running: bool,
+                // stress-port r8: was ANY cpu's ARCH tp register naming
+                // the task AT SAMPLE TIME? The slot-based "running" test
+                // alone cannot distinguish "parked" from "parking" — a
+                // voluntary sleeper inside its own __schedule (state set,
+                // own GRQ guard in hand, slot already flipped to next) is
+                // slotless yet very much executing. tpexec=1 on a
+                // parked-classified sample proves the sample caught that
+                // transient (benign); tpexec=0 with pc!=0 is the genuine
+                // wild-write/lying-slot face. Sampled here, not at print
+                // time — the µs-scale window closes long before the
+                // walk's post-processing runs (the r7 datum's report-time
+                // tp=-1 was exactly this latency artifact).
+                tp_named: bool,
             }
             // The pid-hash walk holds bucket locks; do the side-table
             // bookkeeping after collecting the snapshot (no locks held
@@ -5730,10 +5761,15 @@ pub fn scheduler_tick() {
                     }
                     let pc = (*task).preempt_count();
                     let mut running = false;
+                    let mut tp_named = false;
                     for c in 0..crate::config::MAX_CPUS {
                         if cpu_state(c).current == task {
                             running = true;
-                            break;
+                        }
+                        if crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::Task
+                            == task
+                        {
+                            tp_named = true;
                         }
                     }
                     // s14 (canary r1 msgstress01 capture): a task being
@@ -5760,7 +5796,8 @@ pub fn scheduler_tick() {
                     if nvisited < 128 {
                         let interesting = pc != 0;
                         if interesting || (nvisited < 32) {
-                            visited[nvisited] = Some(Visit { task, pc, running });
+                            visited[nvisited] =
+                                Some(Visit { task, pc, running, tp_named });
                             nvisited += 1;
                         }
                     }
@@ -5784,7 +5821,7 @@ pub fn scheduler_tick() {
                 }
             });
             for v in visited.iter().take(nvisited) {
-                let Visit { task, pc, running } = match v {
+                let Visit { task, pc, running, tp_named } = match v {
                     Some(x) => x,
                     None => continue,
                 };
@@ -5847,8 +5884,10 @@ pub fn scheduler_tick() {
                 // zeroed. A parked task holds no legal guard (guards live
                 // on the executing task), so the count is phantom by
                 // definition; zeroing lets the sleeper actually sleep.
+                // stress-port r8: a task whose arch tp register names it
+                // IS executing (its guard is live) — never heal it.
                 if let Some(s) = slot {
-                    if !*running && *pc != 0 {
+                    if !*running && !*tp_named && *pc != 0 {
                         let bad0 = s.bad_since.load(core::sync::atomic::Ordering::Relaxed);
                         if bad0 == 0 {
                             s.bad_since.store(now, core::sync::atomic::Ordering::Relaxed);
@@ -5913,6 +5952,15 @@ pub fn scheduler_tick() {
                         putchar(b);
                     }
                     ph(*pc as u32 as u64);
+                    // stress-port r8: tpexec=1 => the sample caught the
+                    // task EXECUTING (its own park in flight — the
+                    // slot-based classification is the artifact);
+                    // tpexec=0 => genuinely parked at sample time.
+                    const M2b: &[u8] = b" tpexec=";
+                    for &b in M2b {
+                        putchar(b);
+                    }
+                    ph(*tp_named as u64);
                     putchar(b'\n');
                 }
                 if *running || *pc == 0 {
@@ -5963,6 +6011,11 @@ pub fn scheduler_tick() {
                         putchar(b);
                     }
                     ph(unsafe { (**task).ti_cpu() } as u32 as u64);
+                    const M4b: &[u8] = b" tpexec=";
+                    for &b in M4b {
+                        putchar(b);
+                    }
+                    ph(*tp_named as u64);
                     putchar(b'\n');
                     // dfx=leakhunt: name the acquire site of the leaked
                     // count (last PREEMPT_OFFSET acquire on this task).

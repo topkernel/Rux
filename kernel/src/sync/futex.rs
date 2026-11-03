@@ -887,10 +887,11 @@ fn pool_full_backoff() {
     };
     let target = crate::drivers::timer::get_jiffies() + 1;
     let pid = unsafe { (*current).pid() };
-    let timer_id = crate::timer::add_timer_wakeup(target, pid);
-    if timer_id == 0 {
+    // arch-s5: typed one-shot guard — the scope-exit Drop cancels the
+    // registration (the old explicit trailing del_timer).
+    let Some(wake) = crate::timer::WakeArmed::arm_jiffy(target, pid) else {
         return; // no timer slot: busy retry (rare, bounded by wakers)
-    }
+    };
     loop {
         if crate::drivers::timer::get_jiffies() >= target {
             break;
@@ -919,7 +920,7 @@ fn pool_full_backoff() {
             crate::sched::schedule();
         }
     }
-    crate::timer::del_timer(timer_id);
+    drop(wake);
 }
 
 /// Calculate futex hash value
@@ -1326,23 +1327,23 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // wakeup timer when a deadline is set: nothing else would wake a
         // futex that is never signaled (pthread_cond_timedwait would hang).
         crate::arch::cpu::restore_irq(true);
-        let timer_id = deadline
-            .map(|dl| crate::timer::add_timer_wakeup(
-                dl, crate::sched::get_current_pid(),
-            ))
-            .unwrap_or(0);
+        // arch-s5: typed one-shot guard (scoped wake for the timed
+        // wait). Drop below cancels the registration after schedule()
+        // returns — the old explicit del_timer, now unreachable to
+        // forget.
+        let wake = deadline.map(|dl| {
+            crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid())
+        });
         // R32 (NEW-3): if a deadline was requested but the timer pool is
-        // exhausted (add_timer_wakeup → 0), schedule() below would sleep
+        // exhausted (arm → None), schedule() below would sleep
         // FOREVER — nothing else wakes an un-signaled futex, so the timed
         // wait degenerated into an untimed hang. Unlink and fail instead.
-        if deadline.is_some() && timer_id == 0 {
+        if deadline.is_some() && wake.is_none() {
             remove_waiter(bucket_idx, waiter_idx);
             return -ENOMEM as i64;
         }
         crate::sched::schedule();
-        if timer_id != 0 {
-            crate::timer::del_timer(timer_id);
-        }
+        drop(wake);
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 

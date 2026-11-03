@@ -949,6 +949,17 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
             crate::fs::inotify::inotify_poll_unwait,
         ));
     }
+    // /dev/binder: reference binder_poll registers the polling tid on its
+    // per-thread binder wait queue (26th session reference-parity port);
+    // without this arm any poll()/epoll_wait() over a binder fd fell back
+    // to the 10 ms re-check slice — latency plus a full fd-set rescan per
+    // slice per waiter.
+    if is(&crate::ipc::binder::BINDER_OPS) {
+        return Some((
+            crate::ipc::binder::binder_poll_wait,
+            crate::ipc::binder::binder_poll_unwait,
+        ));
+    }
     if is(&crate::drivers::input::evdev::EVDEV_OPS) {
         return Some((
             crate::drivers::input::evdev::evdev_poll_wait,

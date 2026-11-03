@@ -2187,7 +2187,13 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 // 64 KiB below the mapping for printable runs so the
                 // crash site names its library (unmapped gaps stop the
                 // scan safely; page-table walks never fault).
-                if path.contains("anon") {
+                // cfi4 (22nd): the scan must also fire when the path is
+                // unrecoverable for ANY reason, not just the anon/memfd
+                // class — lb348's usb_host crasher mapped a file-backed
+                // r-x VMA whose fd was already closed (ripfile "?", voff
+                // 0x15bac, bytes absent from every image = memfd/removed
+                // file). Same scan, same caps.
+                if path.contains("anon") || path == "?" {
                     let mut line = alloc::string::String::from("USEGV-FOR: memfd-strs");
                     use core::fmt::Write;
                     let mut hits = 0usize;

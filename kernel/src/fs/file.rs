@@ -887,50 +887,22 @@ struct FdTableEntry {
     count: usize,
 }
 
-/// Number of per-CPU reader banks (leg-52 lever B). Kernel.toml's SMP
-/// ceiling is 4; 8 leaves headroom. A cpu id at or above this bound
-/// falls back to the slow-path lock (the r8final discipline — bank
-/// selection happens with interrupts off, so the id is stable).
-const FD_READER_BANKS: usize = 8;
-
-/// One per-CPU reader-nesting counter, padded to its own cacheline so
-/// the CPUs' counter RMWs never share a line — the fast path's whole
-/// point is that a get_file touches no cross-CPU line except the File's
-/// own refcount.
-#[repr(align(64))]
-struct FdReaderBank(core::sync::atomic::AtomicUsize);
-
 /// One lock-free fd slot: the Arc<File> as a raw pointer, null = empty.
 /// Single-word aligned stores, so a lock-free load can never observe a
 /// torn value.
 struct FdSlot(core::sync::atomic::AtomicPtr<File>);
 
-/// Drain-give-up counter (dfx observability): a drain that could not
-/// observe all reader banks at zero within its spin budget defers the
-/// retired drop to the next writer / the final Drop. Correctness is
-/// never affected; a non-zero count on a standard boot would name a
-/// reader-starvation shape worth looking at.
-static FD_DRAIN_DEFERS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
 pub struct FdTable {
     /// Lock-free slot array (leg-52 lever B, perf-report 8.10.22):
     /// get_file ran 132-144M times/boot through entry.lock_irqsave —
     /// an irq_save + preempt_count pair + a contended per-TABLE TTAS RMW
-    /// per lookup. Readers now take NO lock: irqs off for the section,
-    /// a SeqCst bump of this CPU's reader bank, an Acquire slot load,
-    /// a strong-count increment, a Release bank drop. Writers mutate
+    /// per lookup. Readers are now RCU readers (see get_file): an
+    /// Acquire slot load + strong-count increment inside a read-side
+    /// critical section, no lock and no bank claim. Writers mutate
     /// slots with single-word stores under the entry lock and park any
-    /// removed occupant in `retired` until a reader-quiescent drain.
+    /// removed occupant in the global retire queue (fs::fdreap), which
+    /// drops it after a full RCU grace period.
     slots: alloc::boxed::Box<[FdSlot; MAX_FDS]>,
-    /// Per-CPU reader-nesting banks (see get_file for the protocol).
-    readers: [FdReaderBank; FD_READER_BANKS],
-    /// Slot occupants removed by close/dup2/displacement, parked until a
-    /// drain can drop them with no reader mid-clone.
-    retired: crate::sync::spinlock::Spinlock<alloc::vec::Vec<Arc<File>>>,
-    /// Slow-path exclusion for readers whose cpu id falls outside the
-    /// bank range (r8final family); drains hold it across the drop.
-    slow_read: crate::sync::spinlock::Spinlock<()>,
     /// Writer serialization + descriptor metadata (cloexec bits,
     /// allocation hint, count).
     entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
@@ -947,13 +919,6 @@ impl FdTable {
                     ))
                 }; MAX_FDS],
             ),
-            readers: [const {
-                FdReaderBank(core::sync::atomic::AtomicUsize::new(0))
-            }; FD_READER_BANKS],
-            retired: crate::sync::spinlock::Spinlock::new(
-                alloc::vec::Vec::new(),
-            ),
-            slow_read: crate::sync::spinlock::Spinlock::new(()),
             entry: crate::sync::spinlock::Spinlock::new(Box::new(
                 FdTableEntry {
                     cloexec_bits: [0; MAX_FDS / 64],
@@ -1124,69 +1089,54 @@ impl FdTable {
 
     /// Get file object for file descriptor.
     ///
-    /// Leg-52 lever B fast path — NO entry lock, NO preempt machinery:
-    /// with irqs off for the section, bump this CPU's reader bank (a
-    /// SeqCst RMW — aqrl AMO on riscv, locked xadd on x86 — so the claim
-    /// is globally visible before the slot load below executes), load
-    /// the slot (Acquire — pairs the installer's Release store so the
-    /// File's fields are visible through the reconstructed Arc), clone
-    /// via a strong-count increment, and drop the claim.
+    /// RCU fast path (the reference fget shape; replaced the leg-52
+    /// lever B per-CPU reader banks, whose SeqCst claim/release pair
+    /// cost two extra locked RMWs per lookup on a path that runs 130M+
+    /// times per boot): NO entry lock, NO irq save — an Acquire slot
+    /// load (pairs the installer's Release store so the File's fields
+    /// are visible through the reconstructed Arc) plus a strong-count
+    /// increment, inside a read-side critical section.
     ///
-    /// SAFETY of the increment (the reason the bank exists): a slot's
-    /// Arc is owned by the table while published; any writer that
-    /// removes it (close / dup2 displacement) parks the Arc in
-    /// `retired`, and the drain drops it only after observing EVERY
-    /// bank at zero with the slow-path lock held. A reader can therefore
-    /// only load a pointer whose reference is provably alive: either the
-    /// slot still publishes it (the table's reference), or the removing
-    /// writer's drain is waiting for THIS reader's bank to return to
-    /// zero before its drop. The reader's SeqCst claim-before-load and
-    /// the drain's SeqCst-fence-then-scan close the store-load ordering
-    /// hole (a reader whose claim was not yet visible may load a
-    /// pre-removal pointer — but in that ordering the drain's scan read
-    /// the bank before the claim, so it cannot have completed the drop).
+    /// SAFETY of the increment: a slot's Arc is owned by the table
+    /// while published; any writer that removes it (close / dup2
+    /// displacement) parks the Arc in the global retire queue
+    /// (fs::fdreap), which drops it only after a full RCU grace
+    /// period. A reader can therefore only load a pointer whose
+    /// reference is provably alive: either the slot still publishes it,
+    /// or the retire queue holds it — and a grace period cannot
+    /// complete while any reader is between its load and this
+    /// increment (that window holds no schedule point; the protocol
+    /// is written up in fs/fdreap.rs).
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
         if fd >= MAX_FDS {
             return None;
         }
-        let flags = crate::arch::cpu::save_and_disable_irq();
-        let cpu = crate::arch::cpu_id() as usize;
-        let out = if cpu < FD_READER_BANKS {
-            let bank = &self.readers[cpu];
-            bank.0.fetch_add(1, Ordering::SeqCst);
-            let p = self.slots[fd].0.load(Ordering::Acquire);
-            let out = if !p.is_null() {
-                // SAFETY: p was stored by a writer from an owned Arc
-                // (install/dup/fork) and is kept alive by the slot or by
-                // `retired` until a drain observes all banks zero — our
-                // bank claim is exactly what that drain waits for.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    Some(Arc::from_raw(p))
-                }
-            } else {
-                None
-            };
-            bank.0.fetch_sub(1, Ordering::Release);
-            out
-        } else {
-            // r8final family: cpu id outside the bank range. Serialize
-            // with drains through slow_read instead of a bank claim.
-            let _slow = self.slow_read.lock_irqsave();
-            let p = self.slots[fd].0.load(Ordering::Acquire);
-            if !p.is_null() {
-                // SAFETY: drains hold slow_read across the drop of
-                // retired Arcs (see drain_retired), so either the slot
-                // or a parked reference keeps p alive here.
-                unsafe {
-                    Arc::increment_strong_count(p);
-                    Some(Arc::from_raw(p))
-                }
-            } else {
-                None
+        // The load→increment window must not admit ANY quiescent-state
+        // report of this CPU. preempt_count alone is not enough here:
+        // this kernel tolerates in-handler schedule() and IRQ-return
+        // reschedules that do not honor a nonzero preempt count (the
+        // SCHED-IRQOFF family), and a context switch from inside the
+        // window would report a QS, let the grace pass, and free the
+        // Arc under this increment. IRQs OFF across the window closes
+        // every report site (user-return, __schedule, idle) for its
+        // duration; rcu_read_lock stays as the formal read-side marker.
+        let irq = crate::arch::cpu::save_and_disable_irq();
+        crate::sync::rcu::rcu_read_lock();
+        // SAFETY: p was stored by a writer from an owned Arc
+        // (install/dup/fork); it stays alive through the slot or the
+        // retire queue (see the doc comment above), so the increment
+        // can never act on freed memory.
+        let p = self.slots[fd].0.load(Ordering::Acquire);
+        let out = if !p.is_null() {
+            unsafe {
+                Arc::increment_strong_count(p);
+                Some(Arc::from_raw(p))
             }
+        } else {
+            None
         };
-        crate::arch::cpu::restore_irq(flags);
+        crate::sync::rcu::rcu_read_unlock();
+        crate::arch::cpu::restore_irq(irq);
         out
     }
 
@@ -1233,16 +1183,17 @@ impl FdTable {
 
         // R13-4/R14-5 (lock-free slots update): the removal — slot null
         // store + metadata — runs under the entry lock exactly as before;
-        // the removed Arc is PARKED in `retired` and the last-reference
-        // close decision runs at the DRAIN point outside the lock. The
-        // drain is where the count==1 decision is sound now: lock-free
-        // readers do not pass through the entry lock, so the old
-        // "decision under the lock" argument does not hold against them —
-        // quiescence (every reader bank at zero) is what proves no
-        // in-flight get_file clone can bump the count. The close op still
-        // never executes with IRQs off under the entry lock (R14-5), and
-        // it still runs at close_fd return time in practice (reader
-        // sections are ~100ns, so the drain's wait is a scan or two).
+        // the removed Arc is PARKED for the fdreap reaper and the
+        // last-reference close decision runs POST-GRACE outside the lock.
+        // The grace period is where the count==1 decision is sound:
+        // lock-free readers do not pass through the entry lock, so the
+        // old "decision under the lock" argument does not hold against
+        // them — a completed grace period is what proves no in-flight
+        // get_file clone can bump the count. The close op still never
+        // executes with IRQs off under the entry lock (R14-5); it now
+        // runs in the reaper kthread a grace period after the close
+        // (µs on a standard boot — see fs/fdreap.rs for the timing
+        // implications for blocked peers).
         let removed: Option<Arc<File>> = {
             let mut entry = self.entry.lock_irqsave();
             // SAFETY: the swap atomically takes the slot's reference; the
@@ -1268,97 +1219,31 @@ impl FdTable {
             Some(unsafe { Arc::from_raw(p) })
         };
         if let Some(file) = removed {
-            self.park_and_drain(file);
+            // Park for the post-grace drop in the fdreap reaper (the
+            // deferred-fput shape): the slot-null store precedes the
+            // park, and the reaper's grace period is what proves no
+            // lock-free reader is mid-clone for the count==1 decision.
+            crate::fs::fdreap::retire(file);
         }
         Ok(())
     }
 
-    /// Park a removed slot occupant and attempt the drain. Writers call
-    /// this AFTER releasing the entry lock (R14-5: nothing here may spin
-    /// or run close ops under it).
+    /// Park a removed slot occupant for the post-grace drop. Writers
+    /// call this AFTER releasing the entry lock (R14-5: nothing here
+    /// may spin or run close ops under it).
     fn park_and_drain(&self, file: Arc<File>) {
-        {
-            let mut r = self.retired.lock_irqsave();
-            r.push(file);
-        }
-        // (review-s2b perf) this caller just parked, so the vec cannot be
-        // empty — drain_retired's emptiness check would only re-take the
-        // irqsave lock pair to rediscover that. `parked: true` skips it
-        // (one lock round-trip off every close).
-        self.drain_retired(false, true);
+        crate::fs::fdreap::retire(file);
     }
 
-    /// Drop retired slot occupants once no reader can be mid-clone.
-    ///
-    /// Quiescence: every bank reads 0 (each scan load Acquire — reading
-    /// 0 synchronizes with that reader's Release decrement, so its
-    /// strong-count increment has completed) AND the slow-path lock is
-    /// held across the take (excludes the bank-range fallback readers).
-    /// Readers that START after a successful scan cannot load these Arcs:
-    /// their slots were nulled before the park, the null stores precede
-    /// this drain's SeqCst fence, and a fresh reader's slot load follows
-    /// its own SeqCst bank claim.
-    ///
-    /// `final_drop`: at FdTable::drop no &self borrowers can exist, so no
-    /// reader can run at all — skip the wait.
-    ///
-    /// `parked`: the caller just pushed an entry under the retired lock
-    /// (park_and_drain) — the emptiness pre-check is skipped.
-    fn drain_retired(&self, final_drop: bool, parked: bool) {
-        if !parked {
-            // Cheap emptiness check first: most writers park nothing and
-            // most drains find a previous drain already took the vec.
-            let r = self.retired.lock_irqsave();
-            if r.is_empty() {
-                return;
-            }
-        }
-        if !final_drop {
-            let mut scans: usize = 0;
-            loop {
-                // The fence orders the writer's earlier slot-null stores
-                // before the bank reads below (the reader side of the
-                // handshake is its SeqCst bank claim before its slot
-                // load — see get_file).
-                core::sync::atomic::fence(Ordering::SeqCst);
-                let mut all_zero = true;
-                for b in self.readers.iter() {
-                    if b.0.load(Ordering::Acquire) != 0 {
-                        all_zero = false;
-                        break;
-                    }
-                }
-                if all_zero {
-                    break;
-                }
-                scans += 1;
-                if scans >= 8192 {
-                    // Defer, never fail: reader sections are irq-off and
-                    // bounded, so this is practically unreachable; the
-                    // next writer op and the final Drop retry. Only the
-                    // close-op TIMING can be delayed, never correctness.
-                    FD_DRAIN_DEFERS.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                core::hint::spin_loop();
-            }
-        }
-        let taken = {
-            let _slow = self.slow_read.lock_irqsave();
-            let mut r = self.retired.lock_irqsave();
-            core::mem::take(&mut *r)
-        };
-        for file in taken {
-            Self::displaced_close_decision(&file);
-        }
-    }
-
-    /// The last-reference close discipline shared by the drain (close_fd,
-    /// dup2 displacement, exec-cloexec) and the Drop path — R13-4/R14-5/
-    /// R10-2/R31-B3/P0-5 preserved verbatim in shape: POSIX record-lock
-    /// release first, then run the close op NOW when this is the last
-    /// reference, else arm close_pending for the final dropper.
-    fn displaced_close_decision(file: &Arc<File>) {
+    /// The last-reference close discipline shared by the retire reaper
+    /// (close_fd, dup2 displacement, exec-cloexec) and the Drop path —
+    /// R13-4/R14-5/R10-2/R31-B3/P0-5 preserved verbatim in shape: POSIX
+    /// record-lock release first, then run the close op NOW when this is
+    /// the last reference, else arm close_pending for the final dropper.
+    /// Callers must hold quiescence for the count read: the fdreap
+    /// reaper runs this only after a grace period, Drop after the last
+    /// table reference is gone.
+    pub(crate) fn displaced_close_decision(file: &Arc<File>) {
         // P0-5 POSIX record locks: closing ANY fd referring to the file
         // releases ALL of the closing process's record locks on it —
         // even when other fds (dup'd or separately opened) stay open.
@@ -1367,7 +1252,7 @@ impl FdTable {
         // R10-2 (PIPE2 EBADF root cause): release only on the LAST Arc
         // reference — running the close op per EVENT let pipe_file_close
         // STEAL private_data from the File that fd 1 still pointed at
-        // after `dup3(w,1); close(w)`. At a drain this count is QUIESCENT
+        // after `dup3(w,1); close(w)`. Post-grace this count is QUIESCENT
         // (no in-flight clone can race it).
         if Arc::strong_count(file) == 1 {
             unsafe {
@@ -1475,7 +1360,7 @@ impl FdTable {
             if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
         };
 
-        // Run the displaced file's close decision at the drain, outside
+        // Run the displaced file's close decision in the retire reaper, outside
         // the entry lock — the same quiescent last-reference discipline
         // as close_fd (P0-5 lock release + R10-2/R31-B3 decision).
         if let Some(file) = displaced {
@@ -1539,8 +1424,8 @@ impl Drop for FdTable {
         // but never applied here.
         //
         // Lock-free slots note: at drop no &self borrowers can exist, so
-        // no lock-free reader can be mid-clone — everything parks into
-        // `retired` and the final drain runs WITHOUT the bank wait.
+        // no RCU reader can be mid-clone against THIS table — the close
+        // decisions run directly, without a grace wait.
         let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
             let mut entry = self.entry.lock_irqsave();
@@ -1554,14 +1439,12 @@ impl Drop for FdTable {
                 }
             }
         }
-        // Merge with anything a deferring drain left behind, then run the
-        // shared discipline (P0-5 record-lock release, R10-2/R31-B3
-        // last-reference / close_pending) for every displaced file.
-        {
-            let mut r = self.retired.lock_irqsave();
-            r.extend(to_close);
+        // Run the shared discipline (P0-5 record-lock release, R10-2/
+        // R31-B3 last-reference / close_pending) for every remaining
+        // occupant.
+        for file in &to_close {
+            Self::displaced_close_decision(file);
         }
-        self.drain_retired(true, true);
         // Boxes are deallocated automatically after this.
     }
 }

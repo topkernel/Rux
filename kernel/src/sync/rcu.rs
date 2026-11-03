@@ -239,7 +239,190 @@ pub fn synchronize_rcu() {
 /// empty tree for late readers; deferred_free holds the struct free
 /// another 1.5 s) are unchanged.
 pub fn synchronize_rcu_bounded(max_ms: u64, site: &'static str) {
+    let _ = synchronize_rcu_bounded_checked(max_ms, site);
+}
+
+/// Bounded grace-period wait that reports whether the grace period
+/// completed in budget. Callers whose drop REQUIRES the grace (the
+/// fd-table retire reaper requeues its batch on a timeout instead of
+/// dropping) need the outcome; everyone else keeps the void form.
+///
+/// NOTE (fake-grace hazard): this form snapshots the current RCU_GEN
+/// without advancing it. The generation only advances when an RCU
+/// softirq finishes a callback batch, so on a quiet system the snapshot
+/// equals the value every CPU already reported at the LAST grace — the
+/// wait returns instantly with no grace at all. Correct only for
+/// callers whose lifetimes do not hinge on a fresh grace. Lifetime
+/// callers use `synchronize_rcu_forced`.
+pub fn synchronize_rcu_bounded_checked(max_ms: u64, site: &'static str) -> bool {
     let gen = RCU_GEN.load(Ordering::Acquire);
+    announce_and_wait(gen, max_ms, site)
+}
+
+/// Snapshot-form grace wait with SLEEPING polls — the exit-path form.
+///
+/// Same snapshot semantics as `synchronize_rcu_bounded_checked` (an
+/// instant pass stays possible when reports are already fresh — e.g.
+/// right after another waiter's round), but the wait SLEEPS between
+/// checks instead of yielding in a runnable spin: a waiter that is the
+/// only runnable task on its CPU repicks itself through `schedule()`
+/// and never idles, which on single-accelerator boots both burns the
+/// CPU and starves the tick (measured as the ~1s TIMER-SOFTIRQ-STALL
+/// class during long userspace phases). The exit paths pay this wait
+/// per exit, so the fast-pass matters: keep the snapshot, sleep only
+/// while actually behind.
+pub fn synchronize_rcu_bounded_sleepy(max_ms: u64, site: &'static str) -> bool {
+    let gen = RCU_GEN.load(Ordering::Acquire);
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+    rcu_note_context_switch();
+    wait_qs_sleepy(gen, max_ms, site)
+}
+
+/// TRUE bounded grace period, for callers that free objects on its
+/// strength: advance RCU_GEN first, so every quiescent-state report
+/// already recorded is BELOW the waited-for generation and cannot
+/// satisfy the check. Every CPU must then pass a report site
+/// (user-return, context switch, idle) that executed after this call
+/// began — which is exactly the guarantee an RCU read-side window
+/// (preempt-off load→increment, no schedule point inside) needs.
+pub fn synchronize_rcu_forced(max_ms: u64, site: &'static str) -> bool {
+    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    announce_and_wait(gen, max_ms, site)
+}
+
+/// Forced grace period with SLEEPING polls — the fd-table reaper's form.
+///
+/// Same protocol as `synchronize_rcu_forced` (forced epoch, every CPU
+/// must report a fresh QS), but the wait SLEEPS one jiffy between
+/// checks instead of yielding in a runnable loop: a kthread that is the
+/// only runnable task on its CPU repicks itself through `schedule()`
+/// (the same-task repick fast path never enters idle), so its CPU never
+/// reaches an idle QS report and a quiet boot livelocks the wait. The
+/// sleep is the khungtaskd idiom: arm a one-shot timer, INTERRUPTIBLE,
+/// re-check, schedule, clean up the racing timer. Checks come first —
+/// a grace round whose reporters are already past (idle and
+/// syscall-exiting CPUs report continuously while a waiter is armed)
+/// still completes without sleeping at all.
+pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
+    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+    rcu_note_context_switch();
+    wait_qs_sleepy(gen, max_ms, site)
+}
+
+/// The sleeping poll loop shared by the sleepy wait forms: check first
+/// (fresh reporters pass without ever sleeping), then one-jiffy
+/// INTERRUPTIBLE sleeps armed by a one-shot timer (the khungtaskd
+/// idiom), until every online CPU reports at/after `gen` or the budget
+/// expires. Returns whether the round completed.
+fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
+    use crate::process::task::TaskState;
+
+    let hz = crate::drivers::timer::HZ as u64;
+    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+
+    loop {
+        if all_online_cpus_reported(gen) {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            return true;
+        }
+        if crate::drivers::timer::get_jiffies() >= deadline {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            static SGP_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SGP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 200 {
+                // Explicit integers, not {:?} arrays — array Debug
+                // formatting pulls enough core::fmt code to push the
+                // debug image over the boot.S 20MB window (the window
+                // margin is single-digit KB).
+                let (q0, q1, q2, q3) = (
+                    RCU_QS_GEN[0].load(Ordering::Acquire),
+                    RCU_QS_GEN[1].load(Ordering::Acquire),
+                    RCU_QS_GEN[2].load(Ordering::Acquire),
+                    RCU_QS_GEN[3].load(Ordering::Acquire),
+                );
+                crate::pr_warn!(
+                    "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} qs={},{},{},{} on={},{},{},{}",
+                    site,
+                    max_ms,
+                    gen,
+                    q0,
+                    q1,
+                    q2,
+                    q3,
+                    crate::sched::sched::cpu_online(0),
+                    crate::sched::sched::cpu_online(1),
+                    crate::sched::sched::cpu_online(2),
+                    crate::sched::sched::cpu_online(3)
+                );
+            }
+            return false;
+        }
+
+        let current = match crate::sched::current() {
+            Some(t) => t,
+            None => {
+                // Early-boot / no-task context: no sleep possible —
+                // plain yield rounds keep the wait alive.
+                crate::sched::schedule();
+                continue;
+            }
+        };
+        // SAFETY: current is this task's own pointer.
+        let my_pid = unsafe { (*current).pid() };
+        let target = crate::drivers::timer::get_jiffies() + 1;
+        let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+        if timer_id != 0 {
+            // SAFETY: current is this task's own pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            }
+            // Re-check AFTER marking sleeping: the one-shot may have
+            // fired between arming and set_state (khungtaskd lesson).
+            if crate::drivers::timer::get_jiffies() >= target {
+                // SAFETY: current is this task's own pointer.
+                unsafe {
+                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    // NEW-C2: a racing wake may have enqueued us while
+                    // still executing — take ourselves back off.
+                    crate::sched::dequeue_task(&*current);
+                }
+                crate::timer::del_timer(timer_id);
+            } else {
+                crate::arch::cpu::restore_irq(true);
+                crate::sched::schedule();
+                // Spurious wake before the deadline: drop the timer and
+                // loop (re-armed next iteration).
+                if crate::timer::timer_pending(timer_id) {
+                    crate::timer::del_timer(timer_id);
+                }
+            }
+        } else {
+            // Timer table full — stay runnable, yield one round.
+            crate::sched::schedule();
+        }
+    }
+}
+
+/// Whether every online CPU has reported a quiescent state at or after
+/// generation `gen`.
+fn all_online_cpus_reported(gen: u32) -> bool {
+    for i in 0..MAX_CPUS {
+        if !crate::sched::sched::cpu_online(i) {
+            continue;
+        }
+        if RCU_QS_GEN[i].load(Ordering::Acquire) < gen {
+            return false;
+        }
+    }
+    true
+}
+
+/// Shared body of both bounded waits: announce a waiter, report our own
+/// QS, then wait (bounded, resched between checks) for every online
+/// CPU's QS generation to reach `gen`.
+fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
     RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
     rcu_note_context_switch();
 
@@ -261,7 +444,7 @@ pub fn synchronize_rcu_bounded(max_ms: u64, site: &'static str) {
         }
         if all_qs {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
-            return;
+            return true;
         }
         if crate::drivers::timer::get_jiffies() >= deadline {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
@@ -276,7 +459,7 @@ pub fn synchronize_rcu_bounded(max_ms: u64, site: &'static str) {
                     stuck_cpu
                 );
             }
-            return;
+            return false;
         }
         crate::sched::schedule();
     }

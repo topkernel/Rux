@@ -376,10 +376,34 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 
                 // Hold VMA lock across both the check and page table walk
                 // to prevent concurrent munmap from freeing page tables (fixes F03-07).
+                //
+                // SP-8 (stress-port r8): admit FileBacked VMAs too. A
+                // PRIVATE file VMA hosts anonymous COW pages (the fault
+                // paths' FileBacked write-fault arm flags the exclusive
+                // copy Anonymous+SwapBacked and links it on the anon LRU
+                // — do_cow_fault parity), and the reference kernel swaps
+                // those pages: page_add_new_anon_rmap chains them into
+                // the VMA's anon_vma and rmap_walk_anon never looks at
+                // the VMA type. Our old Anonymous-only filter made every
+                // private-COW page (an exec'd binary's .data/.bss under
+                // fork churn) permanently unswappable: vmscan passed all
+                // its filters, the walk found no Anonymous VMA at the
+                // recorded address, unmap0 freed the slot, and the page
+                // was re-skipped on every later scan (the r7 unmap0
+                // residual bucket). The PTE ppn==target_pfn match below
+                // stays the authority — widening the VMA gate can only
+                // find MORE real mappings of the target frame; shared
+                // file VMAs never host Anonymous-flagged frames, and
+                // shmem pages (Anonymous but not SwapBacked) never reach
+                // this walk from vmscan.
                 let vma_mgr = mm.vma_read();
                 let vma_matches = vma_mgr.iter().any(|vma| {
-                    vma.vma_type() == super::vma::VmaType::Anonymous
-                        && vma.contains(super::page::VirtAddr::new(target_vaddr))
+                    vma.contains(super::page::VirtAddr::new(target_vaddr))
+                        && matches!(
+                            vma.vma_type(),
+                            super::vma::VmaType::Anonymous
+                                | super::vma::VmaType::FileBacked
+                        )
                 });
 
                 if !vma_matches {

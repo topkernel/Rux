@@ -73,6 +73,54 @@ pre-6fdada6b wake-path class, superseded on main). Strong-class gate
 runs judge p2_ctxsw against 1.38 µs ±20% (quiet window) or 2.0 µs
 (loaded window), never against the 15.4 debug cell.
 
+## SP-7 whole-column re-bank: Tier-2 pbench anchor moves to the KVM debug class (2026-11-03, stress-port round 7)
+
+The pb1 TCG debug column had drifted ~30% stale on p2 (r4sp5 11.245,
+r6 10.687/10.091 vs the 15.409 cell) and the r7 re-measure showed WHY
+that class cannot anchor a gate row: TCG `thread=multi` p2 readings are
+load-hostage — the SAME round-7 kernel read **28.151 µs at host load
+5-6** where r6's quieter windows read 10.1-10.7. KVM is 10x tighter:
+three full boards on the round-7 kernel (main 91de1d04 + the SP-7 mm
+fix; debug bzImage, q35 smp2 2G, quiet windows, foreign_qemus<=2,
+every rep `PBENCH DONE rc=0`) agree within ±1% on p2:
+
+| rep | p2_ctxsw med (µs) |
+|-----|-------------------|
+| sp7pb-kvm1 | 1.237 |
+| sp7pb-kvm2 | 1.262 |
+| sp7pb-kvm3 | 1.242 |
+
+**Re-banked Tier-2 anchor (run/perf-gate.sh ANCHOR, KVM debug class,
+median of 3 boards):** p1_null 0.300, p1_clock 0.371, **p2_ctxsw
+1.242**, p3b_cow 8.075, p6_write_fsync 8442.6 (worst spread +11%),
+p6_mkdrmdir 216.7, p6_unlink 54.6, p6_append 5.19 µs. The Tier-2
+invocation now boots pbench with `--accel kvm` (PB_ACCEL env
+override retains the TCG escape hatch). The retired TCG columns stay
+in this file's history for provenance; a TCG tier-2 run must NOT be
+judged against these cells (cross-class comparison is meaningless —
+same rule as debug-vs-strong). The debug-KVM p2 class (1.24) now sits
+closest to the release-strong TCG-era class (1.37-1.39): expect the
+strong-class KVM column to re-bank lower still when the perf lane
+next measures it.
+
+### Strong-class KVM verification (2026-11-03, stress-port round 8)
+
+The re-banked KVM anchor's load-immunity is now VERIFIED at the
+strong-workload class: one full board on the round-8 kernel (debug
+bzImage, q35 smp2 2G, `--accel kvm`, CPU-affinity pin class — P2's
+own aff=1 pin held — booted UNDER host load 4.3-4.7 with 2 foreign
+QEMUs running, tag r8sp8-load, DONE rc=0) reads **p2_ctxsw 1.267 µs
+= +2.0% of the 1.242 quiet anchor**, where TCG at comparable load
+read 28.151 (the load-hostage class). Whole board vs the anchor
+column: p1_null 0.300 (0%), p1_clock 0.371 (0%), p2 1.267 (+2.0%),
+p3b_cow 8.366 (+3.6%), p6_write_fsync 9661.2 (+14.4% — the I/O row's
+load face; the quiet class already spread ±11%), p6_mkdrmdir 217.7
+(+0.5%), p6_unlink 54.6 (0%), p6_append 5.07 (−2.3%). All rows inside
+±20%. The `p2_ctxsw strong` row's TCG-era cells (1.37-1.39 quiet /
+1.9-2.0 loaded) are now historical: the KVM strong class anchors at
+the SAME 1.24-1.27 band quiet and loaded — the strong-class KVM p2
+column re-banks to **1.267 loaded / 1.242 quiet**.
+
 ## Whole-table refresh (2026-10-29, leg 52/53 — the 2d3df4a7 merge passed its own tier via the pa91 chain)
 
 ### Tier-2 debug-class board + append re-bank (2026-10-30, the aarch64 merge b238ebd1)
@@ -113,7 +161,7 @@ next main-class board (pa94 chain armed).
 | small_alloc REST share | 9.2% | 1.1-1.2% (pa86/pa88/pa91) | syscost |
 | get_file REST site | (not a row) | file.rs:1032: 94.5M calls / 31.2s / 330ns (was :941 132.3M / 50.8s / 383ns pre-leg-52) — NEW guarded row (fdtable) | syscost, leg-52 A+B |
 | p5b_dgram send/recv | 39-43 us loaded class | 4.3/3.8 us med-of-2 (pa91q; the class moved with lever A at the SAME load1 13-15 window) | strong, loaded |
-| p2_ctxsw strong | 1.37-1.39 quiet / 1.9-2.0 loaded | 1.30-1.31 at load1 13-15 (pa91) — re-banks post-CFS | strong, loaded |
+| p2_ctxsw strong | 1.37-1.39 quiet / 1.9-2.0 loaded | KVM re-bank (r8): 1.267 loaded (load 4.3-4.7, aff pin, 2 foreign qemus) / 1.242 quiet — TCG-era cells historical | strong, loaded |
 | p6_append J | 85-90 us | 82.7-104 us family (pa91q 82.7/84.2, pa93j 104.4) | strong, loaded |
 | p6_mkdrmdir | 15.4-16.4 ms | 495-497 us (pa93, branch e3c1ec35 PRE-MERGE — adopts when the coordinator merges) | strong, loaded, both arms |
 | p6_openclose | 27.4-29.4 | 28.8/28.9 (pa91q) | strong, loaded |

@@ -324,7 +324,7 @@ unsafe fn free_dead_member(member: *mut Task) {
     }
     // BOUNDED (lb125 decode): monopolist windows stalled this wait for
     // tens of seconds, freezing the exit — and every parent behind it.
-    crate::sync::rcu::synchronize_rcu_bounded(1500, "thread-stack-free");
+    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "thread-stack-free");
 
     (*member).free_kernel_stack();
 
@@ -484,7 +484,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
     // and microseconds long; an unbounded wait here parked init's reaping
     // behind monopolist windows. 1.5 s is ~1000x any real reader.
-    crate::sync::rcu::synchronize_rcu_bounded(1500, "release-task");
+    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "release-task");
 
     // Detach from parent's children list (must happen before freeing task memory)
     // E8-REPAR: screen the parent pointer first — do_wait claimed the

@@ -290,6 +290,12 @@ fn binder_object_size(ty: u32) -> usize {
 const LOOPER_REGISTERED: u32 = 0x01;
 const LOOPER_ENTERED: u32 = 0x02;
 const LOOPER_EXITED: u32 = 0x04;
+/// Reference BINDER_LOOPER_STATE_POLL: the thread waits on the binder fd
+/// via poll()/epoll_wait() rather than a blocking BWR read. Such threads
+/// are never on waiting_threads; binder_enqueue_thread_work_ilocked and
+/// the no-candidate wake path (binder_wakeup_poll_threads_ilocked) give
+/// them an explicit wake on the per-thread wait queue.
+const LOOPER_POLL: u32 = 0x20;
 
 /// /dev/binder misc device numbers (Linux uses dynamic minors; 0xB0-0xB2
 /// are unused in-tree — loop-control owns 237 on major 10).
@@ -1754,23 +1760,66 @@ unsafe fn drain_deliver_parked_txn(
 /// dispatch a child stub (its ProcessSkeleton has no such object — the
 /// sc156 AMS→child black hole). The read-side ownership gate
 /// (work_readable_by) is the backstop; this is the routing hint.
+///
+/// Reference parity (26th session): the pick filter no longer requires
+/// LOOPER_ENTERED/REGISTERED — binder_select_thread_ilocked pops
+/// whichever thread is on waiting_threads, and the reference's
+/// membership rule (binder_wait_for_work) never checked looper flags.
+/// The old flag gate could strand proc-todo work when the only parked
+/// reader was unflagged. Fallback parity too: when no waiting reader
+/// exists, binder_wakeup_thread_ilocked wakes all POLL-mode available
+/// threads (threads blocked in poll()/epoll_wait() on the binder fd are
+/// never on waiting_threads — the reference wakes them all because it
+/// cannot know which one will take the work).
 fn wake_proc_one(p: &Arc<BinderProc>, prefer_tgid: u32) {
     let w = world_lock();
-    // SAFETY: read-only scan under WORLD.
-    let mut pick = unsafe {
-        pm(w.as_ref().unwrap(), p)
-            .im()
+    // SAFETY: thread/proc scans below run under WORLD.
+    let (mut pick, poll_wake) = unsafe {
+        let pim = pm(w.as_ref().unwrap(), p);
+        let im = pim.im();
+        let pick = im
             .threads
             .iter()
             .filter(|t| {
                 let th = t.st();
-                th.waiting_for_proc_work
-                    && th.todo.is_empty()
-                    && th.txn_stack.is_empty()
-                    && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
             })
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // Routing-aware ordering (kept from sc161; the reference needs no
+        // ordering because every reader may take every item): prefer a
+        // reader that can actually consume something queued — a pick that
+        // cannot would wake, re-check has_work, and re-park, eating the
+        // single wake.
+        let mut pick = pick;
+        if !im.todo.is_empty() {
+            pick.sort_by_key(|t| {
+                let readable = im
+                    .todo
+                    .iter()
+                    .any(|wk| work_readable_by(wk, t.tgid, pim));
+                if readable { 0 } else { 1 }
+            });
+        }
+        // binder_wakeup_poll_threads_ilocked: POLL-mode threads with
+        // empty stack+todo are never on waiting_threads; the reference
+        // wakes them when the select found no candidate.
+        let poll_wake = pick
+            .is_empty()
+            .then(|| {
+                im.threads
+                    .iter()
+                    .filter(|t| {
+                        let th = t.st();
+                        (th.looper & LOOPER_POLL) != 0
+                            && th.txn_stack.is_empty()
+                            && th.todo.is_empty()
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        (pick, poll_wake)
     };
     drop(w);
     if let Some(t) = if prefer_tgid != 0 {
@@ -1778,6 +1827,9 @@ fn wake_proc_one(p: &Arc<BinderProc>, prefer_tgid: u32) {
     } else {
         if !pick.is_empty() { Some(pick.remove(0)) } else { None }
     } {
+        wake_thread(&t);
+    }
+    for t in poll_wake {
         wake_thread(&t);
     }
 }
@@ -2814,7 +2866,13 @@ pub fn binder_on_tgid_exit(tgid: u32) {
     }
 }
 
-/// FileOps.poll: readable while work is pending for this open.
+/// FileOps.poll — reference binder_poll (6.6): the polling tid's OWN
+/// binder thread state decides readiness (binder_get_thread creates it on
+/// first poll), the thread gains BINDER_LOOPER_STATE_POLL, and readiness
+/// is binder_has_work(thread, wait_for_proc_work). poll_wait(filp,
+/// &thread->wait) is carried by binder_poll_wait/binder_poll_unwait via
+/// the sys_poll wait-registry (our FileOps::poll hook has no poll-table
+/// parameter; the registration pair delivers the wake instead).
 fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     // SAFETY: fd-backed lifetime; see proc_ref.
     let Some(proc) = (unsafe { proc_ref(file) }) else {
@@ -2822,16 +2880,114 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
     };
     let tid = current_tid();
     let w = world_lock();
-    // SAFETY: under WORLD.
+    // SAFETY: under WORLD (find-or-create thread + predicate reads).
     let has = unsafe {
-        let p = pm(w.as_ref().unwrap(), &proc);
-        !p.im().todo.is_empty() || p.im().threads.iter().any(|t| t.tid == tid && !t.st().todo.is_empty())
+        let world = w.as_ref().unwrap();
+        if !proc_alive(world, &proc) {
+            false
+        } else {
+            let pim = pm(world, &proc);
+            let inner = pim.im();
+            let thread = match inner.threads.iter().find(|t| t.tid == tid) {
+                Some(t) => t.clone(),
+                // binder_get_thread parity: a tid's first poll creates
+                // its thread state. A fresh thread has empty todo/stack,
+                // so its readiness is exactly "proc todo has work this
+                // tid may read".
+                None => {
+                    let tgid = crate::sched::current()
+                        .map(|t| (*t).tgid() as u32)
+                        .unwrap_or(0);
+                    let t = Arc::new(BinderThread::new(tid, tgid));
+                    inner.threads.push(t.clone());
+                    t
+                }
+            };
+            let th = thread.st();
+            th.looper |= LOOPER_POLL;
+            let avail = th.txn_stack.is_empty() && th.todo.is_empty();
+            th.process_todo
+                || (avail && {
+                    inner
+                        .todo
+                        .iter()
+                        .any(|wk| work_readable_by(wk, thread.tgid, pim))
+                })
+        }
     };
     drop(w);
     if has {
         crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
     } else {
         0
+    }
+}
+
+/// poll_wait registration, reference `poll_wait(filp, &thread->wait)`:
+/// park the polling task on the CALLING TID's per-thread binder wait
+/// queue. Every producer wake (reply/tcomplete wake_thread, proc-work
+/// wake_proc_one including the POLL-thread fallback) reaches the poller
+/// through the same queue the blocking BWR read wait uses, so a parked
+/// poll() on the binder fd wakes the moment thread work arrives — no
+/// 10 ms re-check slice.
+pub fn binder_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: fd-backed lifetime; see proc_ref.
+    let Some(proc) = (unsafe { proc_ref(file) }) else {
+        return false;
+    };
+    // SAFETY: task is the parking poller (the current task when the
+    // poll core registers it).
+    let tid = unsafe { (*task).ns_pid_local() };
+    let w = world_lock();
+    // SAFETY: under WORLD (find-or-create thread + wait-queue add).
+    unsafe {
+        let world = w.as_ref().unwrap();
+        if !proc_alive(world, &proc) {
+            return false;
+        }
+        let pim = pm(world, &proc);
+        let inner = pim.im();
+        let thread = match inner.threads.iter().find(|t| t.tid == tid) {
+            Some(t) => t.clone(),
+            None => {
+                let tgid = crate::sched::current()
+                    .map(|t| (*t).tgid() as u32)
+                    .unwrap_or(0);
+                let t = Arc::new(BinderThread::new(tid, tgid));
+                inner.threads.push(t.clone());
+                t
+            }
+        };
+        thread.st().looper |= LOOPER_POLL;
+        thread
+            .wait
+            .add(crate::process::wait::WaitQueueEntry::new(task, false));
+    }
+    true
+}
+
+/// Remove a registration added by binder_poll_wait (poll round teardown;
+/// the reference has no analogue because its poll_table owns the entry —
+/// our registry is per wait round, so no pollfree hazard exists).
+pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+    // SAFETY: fd-backed lifetime; see proc_ref.
+    let Some(proc) = (unsafe { proc_ref(file) }) else {
+        return;
+    };
+    // SAFETY: task is the same parking poller that registered.
+    let tid = unsafe { (*task).ns_pid_local() };
+    let w = world_lock();
+    // SAFETY: under WORLD.
+    unsafe {
+        let world = w.as_ref().unwrap();
+        if let Some(t) = pm(world, &proc)
+            .im()
+            .threads
+            .iter()
+            .find(|t| t.tid == tid)
+        {
+            t.wait.remove(task);
+        }
     }
 }
 
@@ -7934,8 +8090,6 @@ fn binder_transaction(
                                         th.waiting_for_proc_work
                                             && th.todo.is_empty()
                                             && th.txn_stack.is_empty()
-                                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED))
-                                                != 0
                                     })
                                     .count() as u8;
                             }
@@ -8090,8 +8244,6 @@ fn binder_transaction(
                                         th.waiting_for_proc_work
                                             && th.todo.is_empty()
                                             && th.txn_stack.is_empty()
-                                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED))
-                                                != 0
                                     })
                                     .count() as u8;
                             }
@@ -8527,8 +8679,16 @@ unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<Bi
     if th.process_todo {
         return true;
     }
-    let avail_for_proc = th.txn_stack.is_empty()
-        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+    // Reference parity (binder_available_for_proc_work_ilocked, 6.6):
+    // availability is ONLY "no stacked txn + empty own todo" — no looper
+    // flag requirement. The old LOOPER_ENTERED/REGISTERED gate here was a
+    // b85-era local patch that the reference never had: it parked
+    // unflagged BWR readers with waiting_for_proc_work=false, hid proc
+    // todo from them in has_work, and excluded them from wake_proc_one's
+    // pick — a single unflagged reader of a proc could then sleep forever
+    // with work queued (the never-woken class the 26th session removed;
+    // the reference drains such readers unconditionally).
+    let avail_for_proc = th.txn_stack.is_empty() && th.todo.is_empty();
     // sc161: only items this thread OWNS count as work for it (child-tgid
     // routing) — otherwise a daemon reader sees "work available", pops,
     // and would steal a child's transaction (or spin on requeue).
@@ -8630,15 +8790,14 @@ fn binder_thread_read(
                 let _w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe {
-                    // waiting_threads membership: only a thread that can
-                    // actually take proc work registers for wakeups
-                    // (binder_available_for_proc_work_ilocked). A reader
-                    // without looper flags or with a stacked txn must not
-                    // — it would eat wake_proc_one's single pick.
+                    // waiting_threads membership (reference parity,
+                    // binder_wait_for_work: `if (do_proc_work)
+                    // list_add(waiting_thread_node)`: availability is
+                    // empty stack + empty own todo, NO looper-flag
+                    // requirement — the b85 flag gate is gone; the
+                    // reference registers every such reader for wakeups).
                     let th = thread.st();
-                    th.waiting_for_proc_work = th.todo.is_empty()
-                        && th.txn_stack.is_empty()
-                        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+                    th.waiting_for_proc_work = th.todo.is_empty() && th.txn_stack.is_empty();
                     if t_armed {
                         t_proc_work = th.waiting_for_proc_work;
                         t_txn_stack = !th.txn_stack.is_empty();
@@ -8710,9 +8869,13 @@ fn binder_thread_read(
                         break;
                     }
                     let from_thread = !thread.st().todo.is_empty();
+                    // Reference parity: list choice is own-todo first,
+                    // else proc todo when the read entered available
+                    // (binder_thread_read drain arm, 6.6) — no looper
+                    // flag requirement.
                     let avail_for_proc = {
                         let th = thread.st();
-                        th.txn_stack.is_empty() && th.todo.is_empty() && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                        th.txn_stack.is_empty() && th.todo.is_empty()
                     };
                     let work = if from_thread {
                         thread.st().todo.pop_front()

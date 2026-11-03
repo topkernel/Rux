@@ -724,3 +724,290 @@ bands, tick rate, and P2 all in shape on the same kernel.
   family, see watch items).
 - Pushed origin/stress-port (dcdee4e9 driver, 87c51458 SP-6 fix +
   findings, session-close commit with TASK.md).
+
+# Round 7 (2026-11-03) — SP-7: why swap never completes, NAMED and FIXED;
+# PARKED-LEAK becomes a family; P2 anchor re-banked to KVM
+
+Sync: merge d734ed49 = origin/main 91de1d04 (r6 close round-trip; the
+vfs.rs conflict was the known SP-6 double-fix convergence, comment-only,
+main's wording kept + r6 validation note). Kernel commits: fe6279c9
+(instrument; also carries the vmscan rotation-direction hunk — it was
+edited before the split, noted here for the merge reviewer), 5c95f612
+(fix), e4d70ee6 (perf-gate re-bank).
+
+## Mission 1 — the mm-owner residuals: swap starvation decoded, fixed, verified
+
+Instrument (fe6279c9): per-page skip-reason census in
+reclaim_anonymous_pages — every filter branch and terminal path counted
+(notanon/notsb/unmapped/rc-buckets/rsvlock/rotref/slotnone/toctou/
+unmap0/partial/werr/putnz/freed + want-vs-got), printed by OOM-FORENSIC
+next to the swapwrite line + a self-gated 1 Hz delta heartbeat (silent
+without anon pressure, 300-line budget) + the reference-shaped
+vmscan:mm_vmscan_lru_shrink_inactive tracepoint (unified trace table,
+id 31; flags field omitted on TRACE_ARGS capacity; anon arm).
+
+BASELINE (exhaustion class = memory-fix2 cmds, instrument-only kernel,
+sp7-instr2-memory.log): lru[0]=245,515 anon pages, swap active.
+calls=11 invocations the WHOLE boot; want=got=3,589 examined (1.5% of
+the pile); rotref=1,642 (46%); freed=wok=1,240; notanon=236; EVERY
+error bucket zero (werr=putnz=partial=toctou=rc*=slotnone=0). The swap
+pipeline completes 100% of admitted pages — locking, accounting, and
+zone wiring are all CLEAN. The skip mass is one bucket: rotref.
+
+WHY (three producers, all reference divergences):
+1. The ALLOCATOR plants Referenced on fresh pages (zone.rs block-leader
+   set + pcp.rs to_in_use). The reference's prep_new_page hands out
+   flag-clear pages; PG_referenced exists only after
+   mark_page_accessed(). NOTHING in Rux legitimately flags anon pages
+   (lru_note_refs has no callers; no accessed-bit propagation) — every
+   flag was false-hot.
+2. vmscan's referenced rotation moved pages to the TAIL — the COLLECT
+   end (lru_collect_cold walks tail-first). The code's own comment said
+   "MRU end"; the reference protects referenced pages at the YOUNG end.
+3. page_add_anon_lru linked new pages at the TAIL — the same collect
+   end. The reference (lru_cache_add → list_add at head) keeps the tail
+   the oldest end. Under the fault storm the scan window was
+   permanently full of freshly-faulted, falsely-flagged pages while the
+   old pages never reached it. The file side already had the correct
+   shape (page_add_file_lru_young → link_head_locked, policy doc).
+
+FIX (5c95f612 + the rotation hunk in fe6279c9): fresh pages flag-clear
+(zone.rs + pcp.rs); compact.rs PRESERVES src's Referenced on migration
+(folio_migrate_flags parity) instead of re-planting; anon insertion at
+the HEAD; rotation to the HEAD.
+
+VERIFIED (sp7-fix1-memory.log, same cmds/rig): rotref 1,642 -> 0;
+freed/examined 1,240/3,589 (35%) -> 2,163/2,629 (82%); +75% swap
+writes; third rep in the park-census boot 2,990/3,346 (89%). Zero
+panics/wedges-new; malloc/mmap/bigheap op rates +2-5% (5.63M/1.27M/
+2,222 by t=100); kills remain TRUE-exhaustion class (dumps free_cnt=0
+plus post-kill refilling moments 50-56k; demand 2.9 GB anon vs 960 MB
+zone). make test 1297/1297 on the fixed kernel.
+
+RESIDUALS for the mm owner (second-order, 7-13% combined): unmap0
+(107-181/boot: try_to_unmap finds no PTE for aged pages — rmap is 4
+slots then single-value degraded, page_get_mappings is a placeholder);
+unmapped (95-111: mapcount<=bias while still LRU-linked — exit-path
+races); notanon (52-190: non-anon members on the anon list).
+
+The alloc-fail-with-free>0 skew (dump #37 class): evidence-ordering,
+not a free-list bug — the dump's zone reads race the refill between
+the alloc-fail decision and the print (free_cnt moves 8108 -> 7248
+between two reads INSIDE one dump; walkable tracks free at each read).
+The waiter loop retries zone.alloc_pages every iteration with
+RECLAIM_PROGRESS resets (should_reclaim_retry parity) — no missed
+retry found.
+
+## Mission 2 — PARKED-LEAK: second sample = FAMILY (benign so far)
+
+Memory-class re-census (dfx=leakhunt,allocwatch,fuxstuck + syscost,
+sp7-parkcensus-memory.log): ZERO lines, 11,000 walks / 102,820 obs,
+parkednz=0 the whole boot. Forker-class (same dfx set,
+sp7-forker.log): SECOND sample — PARKED-WILDWRITE + PARKED-LEAK pid
+29860 pc=1 state=0x20 tcpu=0; LEAK-ORIGIN site sched.rs:2641 (the GRQ
+lock_irqsave in the context switch), hsite trap.rs:1113 (IRQ vector
+dispatch), hage/cnt/age all ~0 (count went 0 -> 1 BETWEEN walks on a
+parked task); ACQUIRE-PAIR-SPLIT releaser != recorded acquire
+(cross-task booking). Zero heals/underflows/strands; fork+exec both
+rc=0; RS-ALL-DONE. VERDICT: family = 2 boots x 1 self-resolved line,
+fork/exec churn class, no downstream damage. The pair-split at the GRQ
+lock + IRQ dispatch is the lying-slot/cross-task family the strand
+hunt owns — this is its sharpest datum (a booked acquire released by a
+DIFFERENT task pointer). Not chased here.
+
+## Mission 3 — TIMER-SOFTIRQ-STALL at halt-time: cosmetic, mechanism named
+
+Not reproduced this round (make-test serial ends clean at "All tests
+passed! Halting..."; r6 saw it in 1 of 2 runs). Code reading bounds it:
+the unit-test halt path (main.rs) drains pending softirqs DIRECTLY then
+loops wfi forever — the WW watchdog inside that drain invocation
+blind-scans every CPU and can print a stall for a CPU whose tick
+legitimately stopped during the halt quiescence (r6 line: age 1053 ms
+~= tick_age 1054 ms, pid=0 idle, kernel-text rip). NOT a lost wakeup:
+post-verdict nothing awaits a wakeup and the halt never schedules again
+by design. No timers-work connection; stays a watch item only if it
+ever fires PRE-verdict (never observed).
+
+## Mission 4 — Tier-2 pbench anchor re-banked to the KVM debug class
+
+The pb1 TCG debug column was ~30% stale on p2 (r4sp5 11.245, r6
+10.687/10.091 vs the 15.409 cell) — and the r7 re-measure showed the
+TCG class cannot anchor a gate row at all: the SAME kernel read p2
+28.151 µs at host load 5-6 (r6's quieter windows: 10.1-10.7). KVM is
+10x tighter: three full boards on the round-7 kernel (debug bzImage,
+q35 smp2 2G, quiet, foreign_qemus<=2, DONE rc=0 each) — p2
+1.237/1.262/1.242 µs (±1%). Re-banked the WHOLE gated column (median
+of 3): p1_null 0.300, p1_clock 0.371, p2_ctxsw 1.242, p3b_cow 8.075,
+p6_write_fsync 8442.6, p6_mkdrmdir 216.7, p6_unlink 54.6, p6_append
+5.19 µs; tier2 now boots pbench --accel kvm (PB_ACCEL override
+retains TCG). Provenance + retired-TCG note in
+docs/development/perf-gate-baseline.md. Cross-class comparison
+(TCG run vs KVM cells) stays meaningless.
+
+## Mission 5 — family sweep on the fixed kernel
+
+memory x2 (sp7-fix1, sp7-parkcensus): RS-ALL-DONE both; worker
+SIGKILL-wedges only at TRUE exhaustion (same class as r6); census
+bands in shape (IF=0 ~1 s/60 s per CPU under exhaustion; heal counts
+~2-3 samples; allocwatch sections max 48 CYCLES, over10ms=0);
+VSCAN rotref=0 in every boot. forker: fork+exec rc=0, zero
+heals/underflows/strands. fsmeta (sp7-fsmeta-v3.log): renameco 300 iters plain=0 chmod=0
+rename=0 (SP-2 area holds), fsmeta 4 workers full budget rc=0,
+RS-ALL-DONE, zero panics. Gates: x3 builds rc=0 (x86_64 post-fix, riscv64 clean
+config, aarch64 with dtb_blob.S restored), make test GREEN attempt 1
+(1297/1297).
+
+## Round 8 — Mission 1: the ACQUIRE-PAIR-SPLIT / PARKED-WILDWRITE family
+## ROOT-CAUSED (both faces benign; census gaps closed; no lying-slot
+## wild write exists on this tree)
+
+The r7 datum (PARKED-WILDWRITE + PARKED-LEAK pid 29860 pc=1 site=
+sched.rs:2641 hsite=trap.rs:1113, releaser != recorded) decomposes
+into TWO distinct mechanisms, both now proven:
+
+1. PARKED-WILDWRITE/PARKED-LEAK = the parkwalk census sampling a
+   voluntary-parking task inside its OWN __schedule, in the window
+   [per-CPU slot publish -> SWITCHING_OUT store]. Facts (code):
+   the census classifies "parked" as "named by no sched slot and no
+   SWITCHING_OUT marker"; __schedule publishes cpu_state.current=next
+   (sched.rs) BEFORE storing the R63 SWITCHING_OUT marker (which sat
+   behind the schedstat block); the parking task legitimately holds
+   its OWN GRQ guard through that whole window (acquire at
+   sched.rs:2641 = the recorded site — the task's own scheduler lock;
+   hsite=1113 is just its most recent tick stamp). The count returns
+   to 0 at unlock_irqretain microseconds later (before the asm
+   switch) — hence "self-resolved, all ages 0, pc=0 at report". The
+   wildwrite predicate (parked two consecutive walks + 0->1 between)
+   is satisfied when walk N sampled an earlier full park and walk N+1
+   landed in the gap of a later park (wake->run->re-park between
+   walks is invisible to the two-walk predicate). The report-time
+   tp=-1 (no arch tp names the victim) does NOT falsify this: the
+   report runs after the walk's bucket-lock latency, long past the
+   us-scale window.
+2. ACQUIRE-PAIR-SPLIT (40/boot cap under fork churn, ALL
+   osite=sched.rs:2641, including symmetric releaser/recorded pairs
+   swapped across cpu0/cpu1) = leakorigin slot-table cross-talk:
+   two LIVE tasks hashing to the same 2048-entry Fibonacci slot
+   (birthday collisions are certain at ~2700 concurrent tasks), both
+   paying __schedule's GRQ outermost pair — the dominant outermost
+   acquire under churn (every context switch) with a ~5-6 us armed
+   window (the GRQ hold class) — their pairs interleaving across the
+   2 CPUs so each release observes the other's still-armed o-record.
+   A GENUINE cross-task release of this pair is impossible on this
+   tree: preempt booking resolves through the arch tp register, which
+   cannot change between the 2641 acquire and the unlock release (the
+   window is IF=0; the asm switch runs strictly after the release).
+
+FIXES (this round, minimal):
+- sched.rs: SWITCHING_OUT is now stored BEFORE the slot publish
+  (strictly widens the R63 protection; still inside the same GRQ
+  hold; closer to the reference's prev->on_cpu which covers the whole
+  switch). The [slot flip -> marker] gap no longer exists.
+- parkwalk census: Visit now records tp_named (any arch tp register
+  naming the task AT SAMPLE TIME); PARKED-WILDWRITE/PARKED-LEAK print
+  tpexec=; the 4 s PARKED-HEAL never fires on a tp-named (executing)
+  task.
+- leakorigin: ACQUIRE-PAIR-SPLIT prints rpid/rpc/rown (recorded
+  task's pid, CURRENT base count, ownership: slot/marker) so every
+  line self-adjudicates: cross-talk => rpc=0 (pair completed) or
+  freed-descriptor rpid (0xdeadbeef = TASK_POISON, slot succession);
+  a real lying-slot orphan => rown=0 with rpc=1 persisting.
+
+VERIFICATION (forker-lh boot, fixed kernel, dfx=leakhunt,allocwatch):
+fork 492,292 ops rc=0 + exec 178,724 ops rc=0, RS-ALL-DONE;
+PARKED-WILDWRITE 0 (r7: 1), PARKED-LEAK 0 (r7: 1), heals/strands/
+underflows 0. ACQUIRE-PAIR-SPLIT 20 lines: every live recorded task
+rpc=0 (its own pair completed); one line rpid=0xdeadbeef (recorded
+task freed before print — slot succession). ZERO lines with a live
+rpc=1 orphan. VERDICT: the "lying-slot wild-write family" as a
+cross-task preempt-count write does not exist on this tree; the r7
+datum family is closed.
+
+## Round 8 — Mission 2: rmap residual buckets ADJUDICATED (one real
+## divergence found + fixed; the rest are correct teardown behavior)
+
+Battery: memory2 class (malloc 4x256M + mmap 4 + bigheap 2x384M,
+100 s budgets each) on the r8 kernel, vs the r7 sp7-parkcensus
+baseline (same class shape). Final census: calls=12 want=2868
+got=2868 freed=2546 (88.8% — r7 band 82-89%), rotref=0, werr=0,
+zero panics/deadlocks; class verdicts identical to r7 (malloc rc=1 =
+true-exhaustion worker kill; bigheap errno=12 mode switch; mmap rc=0).
+
+1. unmap0 (r7: 119-161/boot) — WAS A REAL MISSED-RMAP-WALK DIVERGENCE,
+   now FIXED. Producer: private file VMAs host anonymous COW pages
+   (the fault paths' FileBacked write-fault arm flags the copy
+   Anonymous+SwapBacked and links it on the anon LRU — do_cow_fault
+   parity; the reference swaps these via page_add_new_anon_rmap), but
+   try_to_unmap_inner's VMA filter only admitted VmaType::Anonymous —
+   every private-COW page (an exec'd binary's written .data/.bss)
+   passed all vmscan filters, got a slot, found no admissible VMA at
+   its recorded address, unmap0'd, freed the slot, and was re-skipped
+   on every later scan: permanently unswappable dead weight at the
+   LRU's cold end. Fix: admit FileBacked VMAs in the walk's filter
+   (the PTE ppn==target match stays the authority; shared file VMAs
+   never host Anonymous-flagged frames; shmem pages never reach this
+   walk from vmscan). After: unmap0 5/boot (−96%), and the new
+   u0(live/dead/ovf) split reads 0/5/0 — the entire residue is the
+   dead face (mapcount already drained when the arm runs = a
+   teardown raced the filter→walk window; benign transient). ZERO
+   live faces (missed walks) and ZERO RmapOverflow faces remain in
+   this workload.
+2. unmapped (r7: 104-111; r8: 226) — CORRECT BEHAVIOR (sampling of
+   in-flight teardown), not a leak. Two producers: (a) exit-path
+   last-unmap (page_remove_rmap decs to −1, clears flags, then
+   removes from LRU — the unlocked filter can read in that window);
+   (b) the swap-out success path keeps the page LRU-linked THROUGH
+   the swap device write (dec_mapcount at PTE-replace ... write (ms
+   class) ... clear flags ... page_remove_lru — the no-swap-cache
+   shape, review 4.12). (b) grew because the fix lets ~2.5k more
+   pages complete swap-out per boot; the share (226/2868 ≈ 8%) is
+   the in-flight overlap, and every such page completes its teardown
+   and leaves the list. The reference hides this class behind
+   PG_swapcache (page leaves the LRU at isolation, before the
+   write) — a swap-cache refactor is architectural, out of scope,
+   and NOT needed for correctness.
+3. notanon (r8: 91 ≈ r7's 83) — same teardown-sampling class (the
+   clear_flag(Anonymous) → page_remove_lru window, plus the exit
+   path). Benign; self-correcting.
+
+VERDICT per the round-8 question: unmap0 was a missed rmap walk (now
+fixed); unmapped and notanon are correct aging/teardown behavior.
+The degraded 4-slot rmap (RmapOverflow) and page_get_mappings
+placeholder never fired in this workload (u0ovf=0) — the
+architectural rmap limit stays a known constraint, not an observed
+face here.
+
+## Round 8 — Mission 3: KVM p2 anchor VERIFIED at the strong class
+
+Full board on the r8 kernel (debug bzImage, --accel kvm, q35 smp2 2G,
+P2's CPU-affinity pin class — aff=1 held), booted UNDER host load
+4.3-4.7 with 2 foreign QEMUs (OH 27 + LTP r24 lanes), tag r8sp8-load,
+PBENCH DONE rc=0:
+  p1_null 0.300 (0% vs anchor) | p1_clock 0.371 (0%) |
+  p2_ctxsw 1.267 (+2.0%) | p3b_cow 8.366 (+3.6%) |
+  p6_write_fsync 9661.2 (+14.4%) | p6_mkdrmdir 217.7 (+0.5%) |
+  p6_unlink 54.6 (0%) | p6_append 5.069 (-2.3%)
+p2 at +2.0% under load+pin where TCG read 28.151 (the load-hostage
+class) closes the r7 re-bank's open question: the KVM anchor HOLDS at
+the strong class. The strong-class p2 column re-banks to
+1.267 loaded / 1.242 quiet (perf-gate-baseline.md updated). The
+fsync row's +14.4% is the I/O row's load face (quiet class already
+spread +/-11%; max tail 51 ms tracks host I/O scheduling) — no
+mechanism in this round's changes touches that path (rmap filter is
+reclaim-only, the sched change is one store inside the GRQ hold);
+this board doubles as the Tier-2 row for the round-8 sched change —
+all rows inside +/-20%.
+
+## Round 8 — Mission 4: ltplong long-horizon PASS (the round-5 leftover
+## re-run on the r8 kernel)
+
+ltplong5 (single pass, 8 entries, budgets 600-900): mmapstress01 /
+mmap-corruption01 / mmapstress09 -p 40 -t 0.4 / mmapstress07 /
+mmapstress10 -p 40 -t 0.4 / fork_procs -n 500 / growfiles ALL rc=0;
+msgstress01 rc=2 (msgsnd EINVAL — the r2/r3-adjudicated intermittent
+family, known-flake list; not re-adjudicated here). ltplong6 (mm trio +
+fork_procs x3 consecutive loops in ONE boot): 12/12 rc=0, RS-ALL-DONE,
+zero panics/wedges, leakhunt+allocwatch armed throughout (0 wildwrite,
+0 parked-leak, alloc sections max 0x43e cycles, over10ms=0). The
+rc=254 silent-child-death family: no recurrence (20 execs of
+glibc-static LTP binaries all reported results).
