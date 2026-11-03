@@ -49,6 +49,10 @@ pub mod vma_kani;
 pub mod spinlock_kani;
 
 #[cfg(kani)]
+#[path = "sync/mutex_kani.rs"]
+pub mod mutex_kani;
+
+#[cfg(kani)]
 #[path = "arch/pt_regs_kani.rs"]
 pub mod pt_regs_kani;
 #[cfg(kani)]
