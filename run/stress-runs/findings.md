@@ -536,3 +536,25 @@ One boot, sequential budgets: mmapstress07 x2 (canonical tmpfile args
 `<file> 4096 1 0` — TPASS both; the round-2 usage gap closed),
 mmapstress01, mmap-corruption01, fork_procs -n 200, growfiles,
 mmapstress09 -p 40 -t 0.4 — all rc=0/TPASS, no panics, no wedges.
+
+## Round-4 gates
+
+- Builds: x86_64 rc=0 (several), riscv64 rc=0 (clean config), aarch64
+  rc=0 (dtb_blob.S restored after the build, per policy).
+- make test (riscv64 suite): verdict GREEN (wrapper rc=124 after the
+  kernel halt = the normal pattern); suite QEMU killed by exact
+  rootfs.img cmdline match.
+- Tier-1 note for the mm change (b5a6dc3d + census commits): the
+  changed code is exhaustion-slowpath-only (unreachable on standard
+  boots); always-on delta = one relaxed fetch_add per reclaim round
+  (balance_pgdat) + dump-only prints. All round-4 stress boots carried
+  syscost=1: no new IRQ-OFF / panic / OOM classes outside the known
+  exhaustion family.
+- Tier-2 pbench (r4sp5, debug profile, DONE t=240s, 25/25 rows):
+  p1_null / p1_clock / p3b_cow / p6_write_fsync / p6_mkdrmdir in band
+  vs the pb1 anchor; p2_ctxsw -27%, p6_append -84%, p6_unlink -98% —
+  all out-of-band rows are on the FAST side, consistent with main's
+  own vm-op fast paths + negmemo + chroot fast base (which postdate
+  the pb1 anchor), not with this round's slowpath-only change. Zero
+  regressions; anchor re-bank belongs to the perf lane.
+- Pushed origin/stress-port 65123b48.
