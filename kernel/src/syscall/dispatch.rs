@@ -161,6 +161,13 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 /// Diverging paths (do_exit on exit_group / fatal signals) skip the
 /// exit hook, so those calls are undercounted — acceptable for a
 /// ranking probe.
+/// Whether the per-task LASTSYS latch runs on every syscall (perf:
+/// 1 per-CPU load + 3 stores; the reference carries this in
+/// thread_info flags that are only set under ptrace/audit). Turned on
+/// by taskdump / dfx when a dump is requested; off = zero cost.
+static LASTSYS_LATCH_ON: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
     let sc_t0 = crate::dfx::syscost::enter();
@@ -211,7 +218,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // later entry point showed its PREVIOUS syscall (a prctl!) instead
     // of the epoll_wait it is sleeping in. The raw native number is
     // stored; decode against the x86_64 table.
-    {
+    // LASTSYS latch: serves taskdump lastsys attribution (parked tasks).
+    // Gated by a static AtomicBool (set by taskdump when it runs; zero
+    // cost on the fast path when no dump has been requested — saves a
+    // per-CPU load + 3 stores per syscall).
+    if LASTSYS_LATCH_ON.load(core::sync::atomic::Ordering::Relaxed) {
         let cur = crate::sched::current();
         if let Some(cur) = cur {
             use core::sync::atomic::Ordering::Relaxed;

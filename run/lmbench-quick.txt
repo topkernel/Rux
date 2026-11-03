@@ -1,0 +1,22 @@
+=== lmbench QUICK 05:37:45 load=6.93 kernel=9af241b4 [INDICATIVE — no load gate]
+===CASE lat_syscall,null
+Simple syscall: 0.0767 microseconds
+===CASE lat_syscall,read
+Simple read: 0.1568 microseconds
+===CASE lat_syscall,write
+Simple write: 0.1311 microseconds
+===CASE lat_syscall,stat
+LMBENCH TIMEOUT lat_syscall
+===CASE lat_syscall,fstat
+Simple fstat: 0.1145 microseconds
+===CASE lat_syscall,open
+Simple open/close: 1.1995 microseconds
+===CASE lat_proc,fork
+===CASE lat_proc,exec
+Process fork+execve: 68.1087 microseconds
+===CASE lat_pipe,
+Pipe latency: 7.8813 microseconds
+===CASE lat_ctx,-s,64,2
+"size=64k ovr=1.07
+2 4.61
+=== wall 300[-0]s (should be < 180)
