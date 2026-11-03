@@ -581,6 +581,21 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     let nfds = args[1] as usize;
     let timeout_ms = args[2] as i32;
 
+    // Reference do_sys_poll bounds nfds by the caller's RLIMIT_NOFILE
+    // soft limit BEFORE touching anything — poll(nfds=-1) is EINVAL, not
+    // a 32 GB kernel allocation (LTP ppoll01 INVALID_NFDS used to hit
+    // bigalloc REJECTED -> task-context-ENOMEM SIGKILL here). ppoll and
+    // ppoll_time64 both delegate to this core, so the bound covers all
+    // three entry points. RLIM_INFINITY (u64::MAX) means uncapped.
+    {
+        let nofile = crate::sched::current()
+            .map(|t| unsafe { (*t).rlimits.lock()[crate::process::task::rlimit_res::NOFILE].0 })
+            .unwrap_or(1024);
+        if nfds as u64 > nofile {
+            return -(errno::EINVAL as i64);
+        }
+    }
+
     // nfds == 0 with a NULL array is the classic poll(NULL, 0, ms) sleep
     // idiom — legal on Linux. Only a NULL array with nfds != 0 is EFAULT.
     let fds_size = core::mem::size_of::<PollFd>().saturating_mul(nfds);
