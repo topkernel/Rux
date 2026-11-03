@@ -603,7 +603,10 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
     // three entry points. RLIM_INFINITY (u64::MAX) means uncapped.
     {
         let nofile = crate::sched::current()
-            .map(|t| unsafe { (*t).rlimits.lock()[crate::process::task::rlimit_res::NOFILE].0 })
+            // irqsave: current's rlimits lock is shared with IRQ context
+            // (scheduler_tick -> Task::rlimit -> lock_irqsave); a plain
+            // holder interrupted by the tick self-deadlocks the CPU.
+            .map(|t| unsafe { (*t).rlimits.lock_irqsave()[crate::process::task::rlimit_res::NOFILE].0 })
             .unwrap_or(1024);
         if nfds as u64 > nofile {
             return -(errno::EINVAL as i64);
