@@ -6801,6 +6801,21 @@ fn task_is_dying(task: *mut Task) -> bool {
     }
 }
 
+/// True when the CURRENT task is dying (PF_EXITING or SIGKILL pending).
+/// The reference kernel's fatal_signal_pending(current) checks: reclaim
+/// and allocation-stall loops bail out early for a dying allocator
+/// (mm/page_alloc.c __alloc_pages_slowpath, vmscan's shrink loops) —
+/// a task being killed must not crawl through swap I/O it will never
+/// use, nor keep other tasks waiting on the reclaim gate (SP-5).
+pub fn current_is_dying() -> bool {
+    // SAFETY: sched::current() returns the running task's valid pointer
+    // (same contract as signal_pending's use).
+    match current() {
+        Some(t) => task_is_dying(t as *mut Task),
+        None => false,
+    }
+}
+
 /// Returns true when something was healed.
 pub fn harvest_relink(task: *mut Task) -> bool {
     if task.is_null() {

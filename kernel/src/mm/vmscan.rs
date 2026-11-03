@@ -81,6 +81,14 @@ pub fn balance_pgdat(order: i32) -> usize {
         priority -= 1;
     }
 
+    // SP-5 waiter-side progress witness (page_alloc's gate wait): pages
+    // freed by ANY reclaimer — kswapd here, or the direct-reclaim gate
+    // holder through try_to_free_pages — tell stalled allocations that
+    // the system IS making progress, so they keep retrying instead of
+    // failing (reference should_reclaim_retry semantics).
+    if sc.nr_reclaimed > 0 {
+        super::page_alloc::RECLAIM_PROGRESS.fetch_add(sc.nr_reclaimed as u64, core::sync::atomic::Ordering::Relaxed);
+    }
     sc.nr_reclaimed
 }
 

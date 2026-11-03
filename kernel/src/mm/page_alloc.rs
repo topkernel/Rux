@@ -127,6 +127,15 @@ static GATE_LAST_EXH_J: AtomicU64 = AtomicU64::new(0);
 static GATE_ACQS: AtomicU64 = AtomicU64::new(0);
 /// Cumulative holds whose age at release crossed the strand bar (2 s).
 static GATE_LONGHOLDS: AtomicU64 = AtomicU64::new(0);
+/// Cumulative pages freed by ANY reclaim (kswapd rounds + direct-reclaim
+/// holder rounds + the deep pre-OOM drain) — the SP-5 waiter-side
+/// progress witness. The reference kernel's __alloc_pages_slowpath
+/// retries the allocation while system-wide reclaim is making progress
+/// (should_reclaim_retry consulting pgsteal deltas; no_progress only
+/// accumulates across progress-free passes) — an allocation must not
+/// FAIL just because a different task is mid-reclaim. Bumped from
+/// balance_pgdat (covers both kswapd and the gate holder).
+pub static RECLAIM_PROGRESS: AtomicU64 = AtomicU64::new(0);
 
 /// Release the gate from the holder's allocation path. Every
 /// alloc_pages_inner release site funnels through here so the SP-5
@@ -363,8 +372,46 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         let pid = crate::process::current_pid();
                         if pid == 0 { usize::MAX } else { pid as usize }
                     };
+                    // PF_MEMALLOC parity (reference): an allocation made
+                    // BY the current gate holder (reclaim's I/O paths
+                    // re-entering alloc_pages mid-round) gets
+                    // ALLOC_NO_WATERMARKS-style access instead of
+                    // queueing — it must never wait on its own gate.
+                    // Serve it from the zone fastpath; on failure fall
+                    // through WITHOUT the wait loop (the holder's own
+                    // round continues; a retry after release may serve
+                    // it). Counted as the self-fight face by the census.
+                    let nested_holder_alloc = holder != usize::MAX
+                        && IN_DIRECT_RECLAIM.load(Ordering::Relaxed) == holder;
+                    if nested_holder_alloc {
+                        GATE_SELF.fetch_add(1, Ordering::Relaxed);
+                        if let Some(pfn) = zone.alloc_pages(order) {
+                            ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                            return pfn_to_phys(pfn);
+                        }
+                    } else {
                     GATE_WAITERS.fetch_add(1, Ordering::Relaxed);
+                    // SP-5 fix (reference parity): track system-wide
+                    // reclaim progress while waiting. The reference's
+                    // allocation stalls RETRY as long as reclaim is
+                    // freeing pages anywhere (should_reclaim_retry +
+                    // pgsteal deltas); only progress-free passes
+                    // accumulate toward giving up. A fixed 64-attempt
+                    // cap converted a holder's slow-but-working swap
+                    // reclaim into allocation FAILURE for every waiter
+                    // — the fake-OOM kill chain (sweep boots 1-3:
+                    // exhausted=4..8 vs acqs=2, holder crawling in
+                    // SWAPW while the zone refilled around it).
+                    let mut prog_last = RECLAIM_PROGRESS.load(Ordering::Relaxed);
+                    let mut fatal_bail = false;
                     while gate_attempts < 64 {
+                        // Reference fatal_signal_pending discipline: a
+                        // dying allocator stops waiting (its fault
+                        // owner is the kill path, not this loop).
+                        if crate::sched::current_is_dying() {
+                            fatal_bail = true;
+                            break;
+                        }
                         if IN_DIRECT_RECLAIM
                             .compare_exchange(0, holder, Ordering::AcqRel, Ordering::Acquire)
                             .is_ok()
@@ -386,11 +433,20 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             GATE_WAITERS.fetch_sub(1, Ordering::Relaxed);
                             return pfn_to_phys(pfn);
                         }
+                        // Progress reset: pages were freed by the holder
+                        // or kswapd since the last check — keep waiting
+                        // (the reference retries the allocation on
+                        // exactly this evidence).
+                        let prog = RECLAIM_PROGRESS.load(Ordering::Relaxed);
+                        if prog != prog_last {
+                            prog_last = prog;
+                            gate_attempts = 0;
+                        }
                         crate::sched::yield_cpu();
                         gate_attempts += 1;
                     }
                     GATE_WAITERS.fetch_sub(1, Ordering::Relaxed);
-                    if !held_gate && gate_attempts >= 64 {
+                    if !held_gate && gate_attempts >= 64 && !fatal_bail {
                         // SP-5: this allocation is about to FAIL because it
                         // never got the gate — the zone may refill moments
                         // later (the round-3 #3/#4 forensics: alloc failed
@@ -402,6 +458,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                                 .store(crate::drivers::timer::get_jiffies(), Ordering::Relaxed);
                         }
                     }
+                    } // !nested_holder_alloc
                     if held_gate {
                         // SP-5 census: reset the per-hold progress stamps,
                         // then follow the holder's phases.
@@ -415,6 +472,13 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                         GATE_DEEP.store(0, Ordering::Relaxed);
                         gate_note_phase(GATE_PHASE_ENTERED);
                         for _ in 0..8 {
+                            // Reference fatal_signal_pending: a dying
+                            // holder stops reclaiming — its pages return
+                            // at exit and the gate must not be carried
+                            // through swap I/O it will never use.
+                            if crate::sched::current_is_dying() {
+                                break;
+                            }
                             let freed = super::vmscan::try_to_free_pages(order as i32);
                             gate_note_phase(GATE_PHASE_RETRY);
                             if let Some(pfn) = zone.alloc_pages(order) {
@@ -449,6 +513,11 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             .saturating_add(1usize << order)
                             .saturating_sub(zone.nr_free());
                         let deep_target = shortfall.clamp(32, 8192);
+                        // fatal_signal_pending parity (see the rounds
+                        // loop): a dying holder skips the deep drain too.
+                        if crate::sched::current_is_dying() {
+                            gate_release(holder);
+                        } else {
                         gate_note_phase(GATE_PHASE_DEEP);
                         let deep_freed =
                             super::vmscan::drain_file_cache_before_oom(deep_target);
@@ -461,6 +530,7 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                             }
                         }
                         gate_release(holder);
+                        }
                     }
                 }
 
@@ -570,6 +640,18 @@ pub fn oom_forensic_dump(site: &str) {
         GATE_LONGHOLDS.load(Ordering::Relaxed)
     );
 
+    // SP-5 round 4: the reclaim round's per-page cost driver.
+    {
+        let (n, slow, max_ns) = super::swap::swap_write_census();
+        if n > 0 {
+            crate::println!(
+                "OOM-FORENSIC: swapwrite n={} slow={} max_ms={}",
+                n,
+                slow,
+                max_ns / 1_000_000
+            );
+        }
+    }
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
     if let Some(node) = unsafe { first_online_node_mut() } {
