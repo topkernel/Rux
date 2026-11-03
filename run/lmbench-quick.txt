@@ -1,22 +1,33 @@
-=== lmbench QUICK 05:37:45 load=6.93 kernel=9af241b4 [INDICATIVE — no load gate]
+=== lmbench QUICK 21:54:42 load=6.03 kernel=02d9cbde [INDICATIVE — no load gate]
 ===CASE lat_syscall,null
-Simple syscall: 0.0767 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+LMBENCH TIMEOUT lat_syscall
 ===CASE lat_syscall,read
-Simple read: 0.1568 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Simple read: 0.1074 microseconds
 ===CASE lat_syscall,write
-Simple write: 0.1311 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+LMBENCH TIMEOUT lat_syscall
 ===CASE lat_syscall,stat
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
 LMBENCH TIMEOUT lat_syscall
 ===CASE lat_syscall,fstat
-Simple fstat: 0.1145 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Simple fstat: 0.0851 microseconds
 ===CASE lat_syscall,open
-Simple open/close: 1.1995 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Simple open/close: 0.7124 microseconds
 ===CASE lat_proc,fork
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Process fork+exit: 62.9537 microseconds
 ===CASE lat_proc,exec
-Process fork+execve: 68.1087 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Process fork+execve: 69.0378 microseconds
 ===CASE lat_pipe,
-Pipe latency: 7.8813 microseconds
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+Pipe latency: 3.9445 microseconds
 ===CASE lat_ctx,-s,64,2
-"size=64k ovr=1.07
-2 4.61
-=== wall 300[-0]s (should be < 180)
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+"size=64k ovr=1.01
+2 1.90
+=== wall 240[-0]s (should be < 180)

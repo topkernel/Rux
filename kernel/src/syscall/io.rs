@@ -136,24 +136,29 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller (same contract the sys_read path had at its lookup point).
 fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
+    // One flags load + one ops load classify this fd for every gate
+    // and fast path below: the mode/O_PATH checks and the O_DIRECT
+    // check each re-loaded file.flags (Relaxed loads are not
+    // CSE-able), and each is_X_file() re-read the ops cell — three
+    // loads to conclude "none of the above" for a plain file.
+    let flags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
     // Linux: reading from an O_WRONLY-only descriptor fails with
     // EBADF (the fd is "not open for reading") — LTP read03.
-    let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-        & crate::fs::file::FileFlags::O_ACCMODE;
-    if mode == crate::fs::file::FileFlags::O_WRONLY {
+    if flags & crate::fs::file::FileFlags::O_ACCMODE
+        == crate::fs::file::FileFlags::O_WRONLY
+    {
         return -errno::EBADF as i64;
     }
     // O_PATH descriptors permit no I/O — the fast paths below
     // bypass File::read's gates (LTP open13).
-    if file.flags.load(core::sync::atomic::Ordering::Relaxed)
-        & crate::fs::file::FileFlags::O_PATH != 0
-    {
+    if flags & crate::fs::file::FileFlags::O_PATH != 0 {
         return -errno::EBADF as i64;
     }
+    let ops = file.get_ops();
     // Pipe fast path: transfer directly user↔ring. The generic
     // staging below costs an alloc + 2 copies per op; on pipes
     // that was ~half the per-syscall time under TCG.
-    if crate::fs::pipe::is_pipe_file(&file) {
+    if ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::pipe::PIPE_OPS as *const _)) {
         let n = crate::fs::pipe::pipe_read_user(&file, buf as *mut u8, count) as i64;
         // perf-audit (pa9): positive-read census — which fd
         // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
@@ -171,7 +176,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     // double copy were the kernel-owned share of the 40-44 us
     // cross-process class; the dispatch itself was proven free
     // (p5d control row), so only the staging goes.
-    if crate::net::unix::is_unix_file(&file) {
+    if ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::net::unix::UNIX_SOCKET_OPS as *const _)) {
         // buf was access_ok-validated against count at sys_read entry
         // (same contract as the pipe path).
         let n = crate::net::unix::unix_read_user(&file, buf as *mut u8, count) as i64;
@@ -183,8 +188,8 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     // ext4 fast path: page cache → user memory without the
     // staging buffer (O_DIRECT keeps the generic staged path —
     // it serves straight from the block layer).
-    if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
-        && crate::fs::ext4::file::is_ext4_file(&file)
+    if flags & crate::fs::file::FileFlags::O_DIRECT == 0
+        && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::ext4::file::EXT4_FILE_OPS as *const _))
     {
         let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf as *mut u8, count) as i64;
         if n > 0 {
@@ -564,18 +569,19 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller.
 fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: usize, count: usize) -> i64 {
+    // One flags load serves both gates (see read_file_core — the
+    // Relaxed loads were not CSE-able).
+    let flags = file.flags.load(core::sync::atomic::Ordering::Relaxed);
     // Linux: writing to a read-only (O_RDONLY) descriptor fails
     // with EBADF (the fd is "not open for writing") — LTP
     // write03/write04.
-    let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-        & crate::fs::file::FileFlags::O_ACCMODE;
-    if mode == crate::fs::file::FileFlags::O_RDONLY {
+    if flags & crate::fs::file::FileFlags::O_ACCMODE
+        == crate::fs::file::FileFlags::O_RDONLY
+    {
         return -errno::EBADF as i64;
     }
     // O_PATH descriptors permit no I/O (LTP open13).
-    if file.flags.load(core::sync::atomic::Ordering::Relaxed)
-        & crate::fs::file::FileFlags::O_PATH != 0
-    {
+    if flags & crate::fs::file::FileFlags::O_PATH != 0 {
         return -errno::EBADF as i64;
     }
     // Check if this is the original console (UART) stdout/stderr
@@ -653,8 +659,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         || file.path(),
     );
     // Pipe fast path: transfer directly user↔ring (see the
-    // matching branch in sys_read).
-    if crate::fs::pipe::is_pipe_file(&file) {
+    // matching branch in sys_read). ops was loaded once above for
+    // the UART check — the is_X_file() helpers re-read the cell.
+    if ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::pipe::PIPE_OPS as *const _)) {
         return crate::fs::pipe::pipe_write_user(&file, buf as *const u8, count) as i64;
     }
     // AF_UNIX write fast path (perf-ipc): build the segment with the ONE
@@ -664,7 +671,9 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // no giant single segment); larger writes keep the generic chunked
     // shape. Semantics identical (EFAULT on a faulting source with
     // nothing sent; blocking/EPIPE per the engine).
-    if count <= RW_CHUNK && crate::net::unix::is_unix_file(&file) {
+    if count <= RW_CHUNK
+        && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::net::unix::UNIX_SOCKET_OPS as *const _))
+    {
         return crate::net::unix::unix_write_user(&file, buf as *const u8, count) as i64;
     }
     // Small-count stack staging (perf-r3): same lever as read_file_core —
