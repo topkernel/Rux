@@ -1,0 +1,14 @@
+# idx|test|class|rc|tail
+0|epoll_wait02|PASS|0|O: min 1000099us, max 1000102us, median 1000099us, trunc mean 1000099.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+1|pselect01|PASS|0|O: min 1000049us, max 1000055us, median 1000049us, trunc mean 1000049.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
+2|ppoll01|FAIL|1|e INVALID_NFDS ppoll01.c:285: TPASS: ret: -1, errno: EINVAL (22) ppoll01.c:246: TINFO: case INVALID_FDS ppoll01.c:285: TPASS: ret: -1, errno: EFAULT (14)  Summary: passed   18 failed   2 broken   0 skipped  0 warnings 0
+3|timerfd_settime02|FAIL|2|el/git/torvalds/linux.git/commit/?id=1e38da300e1e  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-10661  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+4|sigtimedwait01|TIMEOUT|143|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s Test timeouted, sending SIGKILL!
+5|sigwaitinfo01|POISON||
+6|msg_comm|PASS|0|c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s msg_comm.c:64: TPASS: messages does not leak between namespaces  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+7|msgctl01|PASS|0|:92: TPASS: msg_perm.gid = 0 msgctl01.c:99: TPASS: msg_perm.cuid = 0 msgctl01.c:106: TPASS: msg_perm.cgid = 0 msgctl01.c:113: TPASS: msg_perm.mode = 0660  Summary: passed   14 failed   0 broken   0 skipped  0 warnings 0
+8|msgget01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s msgget01.c:46: TPASS: message received = message sent  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+9|msgsnd01|PASS|0|c:44: TPASS: queue bytes and number of queues matched msgsnd01.c:49: TPASS: PID of last msgsnd(2) matched msgsnd01.c:54: TPASS: msg_stime = 83 in [83, 83]  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+10|msgrcv01|PASS|0|c:46: TPASS: queue bytes and number of queues matched msgrcv01.c:50: TPASS: PID of last msgrcv(2) matched msgrcv01.c:55: TPASS: msg_rtime = 83 in [83, 83]  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+11|semget01|PASS|0|un_arg.buf->sem_nsems == PSEMS (10) semget01.c:30: TPASS: un_arg.buf->sem_perm.cuid == geteuid() (0) semget01.c:32: TPASS: basic semaphore values are okay  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+12|shmget01|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/shmget01: No such file or directory
