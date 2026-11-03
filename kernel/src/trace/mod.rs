@@ -1102,13 +1102,19 @@ unsafe impl Sync for TraceRing {}
 impl TraceRing {
     const fn new() -> Self {
         Self {
+            // ALL-ZERO record init: the flag bytes of unwritten slots
+            // are never read (only slots below `count` render, and push
+            // always writes the real flags), and a zero initializer is
+            // what keeps the ring arrays in .bss — a '.' initializer
+            // would put 512 KiB of stored bytes into the image PER
+            // ring set (the live one AND the snapshot spare).
             records: [TraceRecord {
                 seq: 0,
                 ts_ns: 0,
                 pid: 0,
                 cpu: 0,
                 event_id: 0,
-                flags: [b'.', b'.', b'.', b'.', b'.'],
+                flags: [0; 5],
                 comm: [0; COMM_LEN],
                 args: [0; TRACE_ARGS],
             }; RING_CAPACITY],
