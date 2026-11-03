@@ -695,3 +695,32 @@ default-off, so the execaudit/forker verdicts are unaffected).
   this fix. Other rows in family with r4sp5 (p3a 0.080, p5b
   20.7/41.7, p6 openclose 106.9, append 83.1; p6_unlink 861.6 vs
   751.7 = +15%, in the ±20% band; p3b 23.5, p5e 1640).
+
+## Mission 3b — Tier-1 quiet census boot on the OH image with the fix
+
+pa-boot r6fix (q35 KVM smp2 4G, syscost=1 dfx=wwcensus, 780 s window,
+tok109 userdata lineage, debug kernel with SP-6; serial
+run/pa-r6fix-serial.log / -stamped.log):
+- census TERM-DESCHED engaged = 8 (band 8 +- 2 — dead center),
+  WAKE-REFUSED = 32 (band 32 +- 4 — dead center).
+- WAKE-STRANDED = 6, all organic shapes: three 1.0-1.7 s strands
+  (visits 2.6k-8.3k, healthy ms-class activations) + pid 305 at
+  25.9 s / 48.2 s (inside the baseline's 32-107 s organic envelope);
+  NO 1001 ms-grid class.
+- tick rate sustained to window end: c0 5,981 ticks in the last 60 s
+  window = 99.7/s; c1 5,997 = 99.95/s (bar >= 99.5/s).
+- 0 kernel panics, 0 OOM lines across the boot.
+The sched guarded domain holds with the dead-tick fix in: census
+bands, tick rate, and P2 all in shape on the same kernel.
+
+## Round-6 gates
+
+- x3 builds rc=0: x86_64 (pre- and post-SP-6), riscv64 (clean config,
+  post-SP-6), aarch64 (dtb_blob.S restored after the build).
+- make test (riscv64 suite) GREEN twice this round: post-merge
+  pre-SP-6 and post-SP-6 (ALL TESTS PASSED; suite QEMU killed by
+  exact-match discipline; one halt-time TIMER-SOFTIRQ-STALL line at
+  the very end of the pre-SP-6 run = the known post-verdict halt
+  family, see watch items).
+- Pushed origin/stress-port (dcdee4e9 driver, 87c51458 SP-6 fix +
+  findings, session-close commit with TASK.md).

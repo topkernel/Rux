@@ -2052,3 +2052,82 @@ nested-call wall class. Race tally this session 0/2 so far. lb348
    class-lock volume 2.8x the 25M/boot band figure, worth a glance
    from the memory-domain owner (rest-site charging may differ from
    the allocwatch counter; do not merge the two numbers blindly).
+---
+
+# stress-port lane (rounds 1-6; this section = the r6 session close)
+
+NOTE: this file was the dfx-trace/arch-s1 charter carrier; the
+stress-port round 1-4 session log lived in this file until the arch-s1
+merge replaced it — full r1-r4 history: `git show 524d68bc:TASK.md`.
+Round 5 died on quota AFTER landing the headline fix (8884c2b3,
+merged to main as d3700224). Standing lane docs:
+run/stress-runs/findings.md (all rounds' verdicts) and this section.
+
+## Round 6 (2026-11-03, verification round) — fix verified end-to-end,
+## all families re-baselined, one NEW crash found+fixed+verified (SP-6)
+
+Sync: merge 1a560c8c = origin/main e264a64b (r5 fix as d3700224, r23
+LTP wave, gap-fs lock-free walk 3f377d13) + r5 instruments + SP-6.
+
+1. DEAD-TICK FIX VERIFIED (mission 1): tickreg boots fix1/fix2 on the
+   exhaustion cascade — OOM-FORENSIC clock lines monotonic+advancing
+   (58/61->97/109 and 69/74->117/100), TICKTRAP all verdict=counting,
+   census/PARKWALK lines flow under load, zero irr-stuck. Regression
+   driver in-tree: test/stressng/tick-regression-x86.sh (dcdee4e9;
+   VERDICT_ONLY=1 re-adjudicates a log; its first revision had a
+   parser bug — bare number-split matched the digits inside the
+   irq0/irq1 field names — fixed with by-name sed extraction).
+2. SP-5 RE-ADJUDICATED: TRANSFORMED, not merely improved. Kills now
+   only at TRUE exhaustion (dumps free_cnt=0..2), 2 strike-outs at
+   free_cnt=32 (designed 3-strike discipline with live 1 s windows),
+   1 score-based oom-killer kill, class completes its FULL budget
+   (5.42M ops, beats to t=100, RS-ALL-DONE). The pre-fix fake-OOM
+   chain (mass strike-only kills while the zone refilled) is GONE.
+   Residual for the mm owner: the alloc_pages-fail-with-free>0 dump
+   class (skew or free-list) + zero completed swap writes — unchanged
+   threads, now with live clocks (tickreg-fix2.log has the dumps).
+3. ALL FAMILIES RE-BASELINED (mission 2): memory/sched/timer/ipc/
+   fsmeta/dirstorm/execaudit/forker PASS post-fix (numbers in
+   findings.md r6 table; heals/underflows/strands all 0; renameco
+   300/300 fail=0; execaudit 4,800 execs 0 events — rc=254 family no
+   recurrence; ticks alive through every memory cascade).
+4. SP-6 (NEW, fixed+verified): negstorm PANIC — the gap-fs lock-free
+   walk (3f377d13) turned the stale-negmemo arm's `None` (arm
+   selector -> fs re-lookup) into a null child_raw VALUE; first stale
+   hit hit the dcache-hit deref: KERNPANIC badaddr=0x98
+   path_lookup->is_negative. Deterministic under negmemo=1 (default
+   OFF — why only the negstorm oracle saw it; r4's validation
+   predates 3f377d13). Fix 87c51458: stale -> found=None BEFORE the
+   match (exact pre-gap-fs semantics). Verified: negstorm 8w+16w
+   rc=0, 568,699 stale normalizations through the fixed path, zero
+   oracle events.
+5. SCHED GUARDED DOMAIN EVIDENCE (mission 3): pbench P2 10.687/10.091
+   µs post-fix vs 11.245 pre-fix (same rig; no regression, ~5-10%
+   fast) — both ~30% fast of the STALE pb1 anchor (perf lane should
+   re-bank). Tier-1 quiet OH census boot: TERM=8 REFUSED=32 (both
+   dead-center in band), strands organic (no 1001ms grid), ticks
+   99.7/99.95 per CPU to window end, 0 panics/OOM.
+
+Gates: x3 builds rc=0 (x86_64 pre/post-SP-6, riscv64 clean-config,
+aarch64 with dtb_blob.S restored), make test GREEN twice (pre- and
+post-SP-6), pushed origin/stress-port.
+
+## Entry points for pair 2
+
+- gap-fs owner: SP-6's lesson is structural — audit EVERY
+  `Option<*const T>` match from 3f377d13 for arms that emit sentinel
+  VALUES where the old code used arm SELECTORS (lookup_child_fast is
+  the clean counter-example); negstorm (negmemo=1) is the standing
+  oracle and it CRASHES main's 3f377d13 within seconds — cherry-pick
+  87c51458 if the fix has not reached main yet.
+- mm owner: the exhaustion-cascade residuals with live clocks
+  (tickreg-fix2.log): dump #37's alloc fail with free_cnt=8108/zone
+  53k, and zero completed swap writes at every dump.
+- OH/strand hunt: ONE PARKED-LEAK line in forker-lh (pc=1, state=0,
+  self-resolved, parkednz 1/80,744 obs — rounds 3-5 had 0; possibly
+  the fix widening park/sampling interleavings). Re-census before
+  adjudicating.
+- perf lane: re-bank the Tier-2 pb1 anchor (P2 debug-class reality is
+  ~10-11 µs on main-derived kernels, not 15.4).
+- Next stress round: ltplong long-horizon loops were NOT re-run this
+  round (compaction priority); re-run on the SP-6 kernel next.
