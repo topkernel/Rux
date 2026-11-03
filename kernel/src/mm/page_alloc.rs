@@ -642,6 +642,15 @@ pub fn oom_forensic_dump(site: &str) {
         GATE_TAKEN_J.load(Ordering::Relaxed),
         RECLAIM_PROGRESS.load(Ordering::Relaxed)
     );
+    // SP-5 clock discrimination: raw timebase + tick IRQ counts —
+    // separates "read_time broke backward" from "timer IRQs stopped"
+    // (the two ways now_j can lag or freeze).
+    crate::println!(
+        "OOM-FORENSIC: clock tb={} irq0={} irq1={}",
+        crate::drivers::timer::read_time(),
+        crate::timer::WW_TICK_IRQ[0].load(core::sync::atomic::Ordering::Relaxed),
+        crate::timer::WW_TICK_IRQ[1].load(core::sync::atomic::Ordering::Relaxed),
+    );
 
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
