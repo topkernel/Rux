@@ -172,6 +172,14 @@ impl SleepMutex {
     /// lock() (no task context or preempt_count != 0 — it cannot
     /// register on the waitqueue, so gating it would livelock it behind
     /// a queue that never drains under load).
+    ///
+    /// The recursion arm requires `locked`: `owner == 0` also names the
+    /// FREE state, and a pid-0 caller (get_current_pid() with no
+    /// current task — the very contexts the degrade path serves) would
+    /// otherwise "recurse into" a momentarily free lock during a
+    /// handoff window (depth=1 on locked=false; the bogus guard's later
+    /// release can then free a lock another task genuinely holds).
+    /// Found by the S-1 loom harness (kernel/verify mutex_loom.rs).
     fn try_acquire_or_recurse(&'static self, pid: u32) -> Option<SleepMutexGuard> {
         let mut st = self.state.lock();
         if !st.locked {
@@ -180,7 +188,7 @@ impl SleepMutex {
             st.depth = 1;
             st.acquired_at = crate::drivers::timer::get_jiffies();
             Some(SleepMutexGuard { lock: self })
-        } else if st.owner == pid {
+        } else if st.locked && st.owner == pid {
             st.depth += 1;
             Some(SleepMutexGuard { lock: self })
         } else {
@@ -196,6 +204,12 @@ impl SleepMutex {
     /// just-released lock during the scheduling window of the waiter
     /// that release() had woken, and under KVM's .so-page-fault churn
     /// the bargers never stopped.
+    ///
+    /// The recursion arm requires `locked` for the same reason as in
+    /// try_acquire_or_recurse: lock() runs its adaptive fair-try BEFORE
+    /// the can_sleep check, so a pid-0 no-task caller reaches this arm;
+    /// gated on the free branch (waiters > 0), it must be refused, not
+    /// "recursed" into the free lock via the owner == 0 alias.
     fn try_acquire_or_recurse_fair(&'static self, pid: u32) -> Option<SleepMutexGuard> {
         let mut st = self.state.lock();
         if !st.locked && st.waiters == 0 {
@@ -204,7 +218,7 @@ impl SleepMutex {
             st.depth = 1;
             st.acquired_at = crate::drivers::timer::get_jiffies();
             Some(SleepMutexGuard { lock: self })
-        } else if st.owner == pid {
+        } else if st.locked && st.owner == pid {
             st.depth += 1;
             Some(SleepMutexGuard { lock: self })
         } else {
@@ -219,9 +233,12 @@ impl SleepMutex {
     /// holds fresh callers at the gate until ownership has actually
     /// changed hands. A held lock or a lost race against another token
     /// holder returns None: the caller re-parks and keeps its count.
+    ///
+    /// The recursion arm requires `locked` (same owner == 0 alias as
+    /// the other acquires; see try_acquire_or_recurse).
     fn try_acquire_wake_token(&'static self, pid: u32) -> Option<SleepMutexGuard> {
         let mut st = self.state.lock();
-        if st.owner == pid {
+        if st.locked && st.owner == pid {
             st.depth += 1;
             Some(SleepMutexGuard { lock: self })
         } else if !st.locked {
@@ -395,7 +412,9 @@ impl SleepMutex {
                     counted = true;
                     first_park = now;
                 }
-                let take = if st.owner == pid {
+                // The recursion arm requires `locked` (owner == 0 also
+                // names the free state; see try_acquire_or_recurse).
+                let take = if st.locked && st.owner == pid {
                     // Unreachable while parked (a counted waiter has not
                     // taken the lock, so it cannot own it), kept so
                     // recursion is honored on every path.

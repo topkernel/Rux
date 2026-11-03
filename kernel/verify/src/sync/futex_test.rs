@@ -46,15 +46,25 @@ pub struct FutexKey {
     /// across processes and across fork().
     pub mm: usize,
     pub flags: u32,
+    /// PHYSICAL word identity — (page frame << 12) | byte offset.
+    /// Mirrors the kernel field (0 = unresolved: unit tests always build
+    /// keys via `new`, which leaves it 0 like the kernel's torn-down and
+    /// kernel-thread paths; only `new_user` resolves it in the kernel).
+    pub phys: usize,
 }
 
 impl FutexKey {
     pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags }
+        Self { uaddr, mm, flags, phys: 0 }
     }
 
     pub fn matches(&self, other: &FutexKey) -> bool {
-        if !(self.flags & FLAGS_SHARED != 0) {
+        if (self.flags & FLAGS_SHARED != 0) && self.phys != 0 && other.phys != 0 {
+            // Shared waiter with resolved physical identity: any mapping
+            // of the same word matches (kernel comment: cross-address
+            // after exec/fresh mmap; musl cleartid interop).
+            self.phys == other.phys
+        } else if !(self.flags & FLAGS_SHARED != 0) {
             self.uaddr == other.uaddr && self.mm == other.mm
         } else {
             self.uaddr == other.uaddr

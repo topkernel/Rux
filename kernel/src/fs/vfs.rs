@@ -1744,7 +1744,7 @@ fn sbx_trace(kind: &str, key: &str, detail: &str) {
 }
 
 /// Parent-state summary for walk traces: name, inode presence+type, mount.
-fn sbx_dentry_state(d: &Arc<Dentry>) -> String {
+fn sbx_dentry_state(d: &Dentry) -> String {
     let mnt = if d.get_mount().is_some() { "+mnt" } else { "-mnt" };
     match d.get_inode() {
         Some(i) => format!("'{}' ino={:#x} mode={:#o} {}", d.get_name(), i.ino, i.mode.bits(), mnt),
@@ -1899,10 +1899,24 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // (21st successor) CHROOT FAST BASE: with a recorded jail-root dentry
     // the walk starts THERE (no jail-prefix re-walk, no root string);
     // the same dentry anchors the ".." clamp.
-    let mut current = match fast_base {
-        Some(ref rd) => follow_mount(rd.clone()),
-        None => follow_mount(vfs_root.clone()),
+    //
+    // (gap-fs lane) Walk position under a reader-bank claim: `current`
+    // OWNS the position dentry whenever an arm produced an Arc (miss /
+    // symlink / mount / ".." hops); after a lock-free memo advance the
+    // position is `current_raw` alone — kept alive by the child map (or
+    // a pending retire that our claim's bank blocks from draining; see
+    // the dentry reader-bank protocol). Every dentry the walk can land
+    // on is reachable that way (root: mount-held/pinned; children:
+    // parent map; follow_mount: mount descriptor; symlink landings:
+    // tree dentries from the recursive lookup). The claim is dropped
+    // before any operation that can sleep (fs lookup, symlink follow);
+    // those arms materialize owned Arcs first.
+    let mut current: Option<alloc::sync::Arc<Dentry>> = match fast_base {
+        Some(ref rd) => Some(follow_mount(rd.clone())),
+        None => Some(follow_mount(vfs_root.clone())),
     };
+    let mut current_raw: *const Dentry = core::ptr::null();
+    let mut claim: Option<crate::fs::dentry::WalkClaim> = None;
     let mut symlink_depth: usize = 0;
     let task_root_dentry: Option<Arc<Dentry>> = if let Some(ref rd) = fast_base {
         Some(rd.clone())
@@ -1948,9 +1962,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // iterations: every hop into a child already fetched that child's
     // inode (dcache-hit refresh / iget), so the next iteration's parent
     // dir+search checks reuse it instead of re-taking the dentry inode
-    // lock + Arc clone. None after mount hops and symlink follows (the
-    // landed-on dentry's inode was not fetched) — None re-fetches.
-    let mut cur_inode_opt: Option<Arc<crate::fs::inode::Inode>> = current.get_inode();
+    // lock + Arc clone. (gap-fs lane) now a RAW pointer — valid only
+    // while the walk claim is held; arms that drop the claim null it
+    // and the next iteration re-fetches through the mirror.
+    let mut cur_inode_raw: *const crate::fs::inode::Inode = core::ptr::null();
 
     crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_PRE_NS, pc_pre);
     let pc_loop = crate::dfx::fsw::pc_now();
@@ -1967,23 +1982,38 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             return Err(-(errno::constants::ENAMETOOLONG));
         }
 
+        // (gap-fs lane) (Re)acquire the reader claim for this iteration
+        // (an arm that could sleep dropped it) and refresh the raw
+        // position from the owned Arc.
+        if claim.is_none() {
+            claim = Some(crate::fs::dentry::WalkClaim::acquire());
+            current_raw = Arc::as_ptr(
+                current.as_ref().expect("walk position dentry"),
+            );
+        }
+        let cl = claim.as_ref().unwrap();
+        // SAFETY: current_raw is protected by the claim (see the dentry
+        // reader-bank protocol); it is non-null (set from a live Arc or
+        // a memo-slot hit the same protocol validates).
+        let cur_d: &Dentry = unsafe { &*current_raw };
+
         // ENOTDIR (Linux link_path_walk): `current` must be a directory to
         // walk INTO the next component — a regular file / FIFO / device in
         // the middle of a path fails with ENOTDIR, not ENOENT (LTP
         // chmod06 "t_file/tfile_3" expects ENOTDIR).
         // DAC: search (x) permission is required on every directory we
         // traverse through (Linux checks MAY_EXEC per component).
-        // (perf-syscall lane) ONE get_inode() serves both checks — it
-        // takes the dentry inode spinlock and clones the Arc, and the
-        // two separate calls doubled that cost on every component of
-        // every walk. (perf-path lane) the carried inode from the
-        // previous iteration removes even that one for every component
-        // after the first.
+        // (perf-path lane) the carried inode from the previous iteration
+        // removes the per-component get_inode lock pair; (gap-fs lane)
+        // the first fetch of a position goes through the lock-free inode
+        // pointer mirror instead.
         let pc_a = crate::dfx::fsw::pc_now();
-        if cur_inode_opt.is_none() {
-            cur_inode_opt = current.get_inode();
+        if cur_inode_raw.is_null() {
+            cur_inode_raw = cur_d.inode_ptr_walk(cl);
         }
-        if let Some(ref cur_inode) = cur_inode_opt {
+        if !cur_inode_raw.is_null() {
+            // SAFETY: carried under the claim (see above).
+            let cur_inode = unsafe { &*cur_inode_raw };
             if !cur_inode.mode.is_directory() {
                 return Err(errno::Errno::NotADirectory.as_neg_i32());
             }
@@ -2004,22 +2034,27 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // stray ".." can never walk out of the jail via the dentry tree.
         if *component == ".." {
             if let Some(ref root_d) = task_root_dentry {
-                if Arc::ptr_eq(&current, root_d) {
+                if core::ptr::eq(current_raw, Arc::as_ptr(root_d)) {
                     continue; // at (task) root, stay
                 }
             }
-            let parent_name = current.get_name();
-            if parent_name == "/" {
+            let at_root = {
+                let name = cur_d.name.lock();
+                name.as_str() == "/"
+            };
+            if at_root {
                 // Already at root, stay
                 continue;
             }
-            let parent_opt = current.parent.lock().clone();
+            let parent_opt = cur_d.parent.lock().clone();
             match parent_opt {
                 Some(p) => {
                     // Go to parent, then follow mount (for mount point traversal)
-                    current = follow_mount(p);
-                    // (perf-path lane) landed dentry's inode not fetched.
-                    cur_inode_opt = None;
+                    let landed = follow_mount(p);
+                    current_raw = Arc::as_ptr(&landed);
+                    current = Some(landed);
+                    // (gap-fs lane) landed dentry's inode not carried.
+                    cur_inode_raw = core::ptr::null();
                 }
                 None => {
                     // No parent (shouldn't happen), stay
@@ -2030,126 +2065,63 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         }
 
         // Look up child in dentry tree
-        // (perf-syscall lane) the hit arm's inode is hoisted so the
-        // symlink check below does not re-take the dentry inode lock.
-        let mut hit_inode: Option<alloc::sync::Arc<crate::fs::inode::Inode>> = None;
+        // (gap-fs lane) lock-free under the reader claim: memo hit path
+        // = version check + per-slot seqlock pair + one name compare —
+        // no lock pair, no Arc traffic; miss falls to the locked map
+        // lookup and refills the memo for the next walk.
         let pc_b = crate::dfx::fsw::pc_now();
+        let found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
         // (21st successor) STALE negative memo normalization: the parent
         // mutated since the memo was inserted (its mut_gen moved past the
-        // child's stamp). Detach and re-resolve from the filesystem —
-        // the reference kernel drops negative dentries on every parent
+        // child's stamp). Detach and re-resolve from the filesystem — the
+        // reference kernel drops negative dentries on every parent
         // mutation; ours refreshes lazily on the next walk.
-        let looked_up = match current.lookup_child(component) {
-            Some(c)
-                if c.is_negative() && crate::dfx::fsw::negmemo_on() =>
-            {
+        let child_raw: *const Dentry = match found {
+            Some(p) if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() => {
                 // The stamp lives on the parent's INODE (shared across
-                // bind-mount aliases) — carried here in cur_inode_opt.
-                let parent_gen = match cur_inode_opt.as_ref() {
-                    Some(i) => i.dir_mut_gen_load(),
-                    None => match current.get_inode() {
+                // bind-mount aliases) — carried here in cur_inode_raw.
+                let parent_gen = if !cur_inode_raw.is_null() {
+                    // SAFETY: carried under the claim (see above).
+                    unsafe { &*cur_inode_raw }.dir_mut_gen_load()
+                } else {
+                    match cur_d.get_inode_fast() {
                         Some(i) => i.dir_mut_gen_load(),
                         None => 0,
-                    },
+                    }
                 };
-                if c.neg_gen_load() != parent_gen {
+                // SAFETY: p is protected by the claim (memo/map-held).
+                if (unsafe { &*p }).neg_gen_load() != parent_gen {
                     // STALE memo: the parent mutated since the memo was
                     // inserted (through this dentry OR any bind alias).
                     // Detach and re-resolve from the filesystem — the
                     // reference kernel drops negative dentries on every
                     // parent mutation; ours refreshes lazily here.
                     crate::dfx::fsw::note_negstale();
-                    current.remove_child(component);
-                    None
+                    cur_d.remove_child(component);
+                    core::ptr::null()
                 } else {
-                    Some(c)
+                    p
                 }
             }
-            other => other,
-        };
-        let child = match looked_up {
-            Some(c) => {
-                crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
-                // Negative dentry — file known not to exist (valid memo:
-                // stamped at the parent's current content generation)
-                if c.is_negative() {
-                    crate::dfx::fsw::note_neghit();
-                    if sbx_tracing {
-                        sbx_trace(
-                            "walk",
-                            &format!("NEG {}", normalized),
-                            &format!(
-                                "'{}' NEG-dentry at '{}' | parent {} | crossed={} | trail={}",
-                                normalized,
-                                component,
-                                sbx_dentry_state(&current),
-                                crossed,
-                                trail
-                            ),
-                        );
-                    }
-                    // datatap (el2/100 hunt): the negative cache has NO
-                    // invalidation on parent mutation, so a stale NEG entry
-                    // permanently hides freshly created files. Name hits
-                    // under /data so the dt boot can attribute each
-                    // "invisible" dir to either this cache or a real
-                    // on-disk absence.
-                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
-                        let mut prefix = String::new();
-                        for c2 in components.iter().take(ci + 1) {
-                            prefix.push('/');
-                            prefix.push_str(c2);
-                        }
-                        if prefix.starts_with("/data/") {
-                            crate::pr_warn!(
-                                "apptap negdentry hit '{}' (cached ENOENT, pid {})",
-                                prefix,
-                                crate::process::current_pid()
-                            );
-                        }
-                    }
-                    return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-                }
-                // Check icache for fresh inode data
-                // (perf-syscall lane) skip the set_inode lock+Arc swap
-                // when the icache hands back the SAME inode the dentry
-                // already holds — a no-op replace that still took the
-                // inode spinlock and churned the Arc refcount on every
-                // walk of every cached component.
-                // (perf-path lane) generation guard: the identity mapping
-                // (ino, fs_id) -> Arc only changes when icache membership
-                // changes, and every membership change bumps icache's
-                // generation. While the dentry's stamp matches the current
-                // generation, the cached Arc IS the icache's object — the
-                // global-lock icache_lookup is skipped entirely (it cost a
-                // lock pair + Arc churn on EVERY hit of EVERY walk).
-                let pc_c = crate::dfx::fsw::pc_now();
-                let mut cur = c.get_inode();
-                let gen_now = crate::fs::inode::icache_regen();
-                if c.get_inode_gen() != gen_now {
-                    if let Some(ref cached_inode) = cur {
-                        if let Some(fresh) = crate::fs::inode::icache_lookup(cached_inode.ino, cached_inode.fs_id) {
-                            if !alloc::sync::Arc::ptr_eq(&fresh, cached_inode) {
-                                c.set_inode(alloc::sync::Arc::clone(&fresh));
-                                cur = Some(fresh);
-                            }
-                        }
-                    }
-                    // Stamp whatever verdict this slow path reached; a
-                    // later change bumps the generation again.
-                    c.set_inode_gen(crate::fs::inode::icache_regen());
-                }
-                crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_C_NS, pc_c);
-                hit_inode = cur;
-                crate::dfx::fsw::note_walk_hit();
-                c
-            }
+            Some(p) => p,
             None => {
-                // Not in dentry cache — ask the filesystem to look it up
+                // Not in dentry cache — ask the filesystem to look it up.
+                // (gap-fs lane) this arm can sleep (fs lookup / iget):
+                // materialize the owned position Arc, drop the claim.
                 crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
+                cur_inode_raw = core::ptr::null();
+                current = Some(match current.take() {
+                    Some(a) => a,
+                    // SAFETY: current_raw is protected by the claim held
+                    // by `claim` (still alive — dropped below, AFTER this
+                    // strong-count increment).
+                    None => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+                });
+                drop(claim.take());
                 let pc_m = crate::dfx::fsw::pc_now();
                 crate::dfx::fsw::note_walk_miss();
-                let dir_inode = match current.get_inode() {
+                let cur_now = current.as_ref().unwrap();
+                let dir_inode = match cur_now.get_inode() {
                     Some(i) => i,
                     None => {
                         if sbx_tracing {
@@ -2160,7 +2132,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                     "'{}' parent dentry NO INODE at '{}' | state {} | crossed={} | trail={}",
                                     normalized,
                                     component,
-                                    sbx_dentry_state(&current),
+                                    sbx_dentry_state(&**cur_now),
                                     crossed,
                                     trail
                                 ),
@@ -2208,7 +2180,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                             && ops.lookup == Some(crate::fs::ext4::ext4_lookup)
                                         {
                                             let pgen = dir_inode.dir_mut_gen_load();
-                                            current.memo_negative(component, pgen);
+                                            cur_now.memo_negative(component, pgen);
                                         }
                                     }
                                     if sbx_tracing {
@@ -2220,7 +2192,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                                 normalized,
                                                 component,
                                                 e.as_neg_i32(),
-                                                sbx_dentry_state(&current),
+                                                sbx_dentry_state(&**cur_now),
                                                 crossed,
                                                 trail
                                             ),
@@ -2243,8 +2215,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     let name = String::from(*component);
                     let d = Arc::new(Dentry::new(name.clone()));
                     d.set_inode(child_inode.clone());
-                    d.set_parent(current.clone());
-                    current.add_child(name.clone(), d.clone());
+                    d.set_parent(cur_now.clone());
+                    cur_now.add_child(name.clone(), d.clone());
 
                     // Add to icache (clone: the symlink-check hint below
                     // still needs the Arc)
@@ -2255,16 +2227,17 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     if hopped {
                         crossed += 1;
                     }
-                    current = follow_mount(d);
+                    current = Some(follow_mount(d));
                     // (perf-path lane) carry the iget'd inode across the
                     // iteration boundary (no mount hop = current IS d).
-                    cur_inode_opt = if hopped { None } else { Some(child_inode.clone()) };
+                    // (gap-fs lane) claim is dropped here; the next
+                    // iteration refetches through the mirror.
                     if sbx_tracing {
                         trail.push_str(&format!(
                             "{}{}={} ",
                             component,
                             if hopped { "*" } else { "" },
-                            current.get_name()
+                            current.as_ref().unwrap().get_name()
                         ));
                     }
                     // Respect LOOKUP_NOFOLLOW on the final component here as
@@ -2275,16 +2248,16 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
                         // Don't follow symlink on the final component
                     } else {
-                        let pre_ptr = Arc::as_ptr(&current) as usize;
+                        let pre_ptr = Arc::as_ptr(current.as_ref().unwrap()) as usize;
                         let hint = if hopped { None } else { Some(&child_inode) };
                         let landed =
-                            follow_symlink_hinted(current, hint, components, &mut symlink_depth)?;
+                            follow_symlink_hinted(current.clone().unwrap(), hint, components, &mut symlink_depth)?;
                         // A symlink follow landed elsewhere: its inode was
                         // not fetched (perf-path carried-inode discipline).
                         if Arc::as_ptr(&landed) as usize != pre_ptr {
-                            cur_inode_opt = None;
+                            // landed elsewhere — carried inode invalid
                         }
-                        current = landed;
+                        current = Some(landed);
                     }
                     crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_MISSCOST_NS, pc_m);
                     continue;
@@ -2292,54 +2265,175 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             }
         };
 
+        // ---- dcache hit ----
+        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
+        // SAFETY: child_raw came from lookup_child_walk under the claim
+        // (memo slot or the child map — the claim pins its lifetime).
+        let c: &Dentry = unsafe { &*child_raw };
+        // Negative dentry — file known not to exist
+        if c.is_negative() {
+            crate::dfx::fsw::note_neghit();
+            if sbx_tracing {
+                sbx_trace(
+                    "walk",
+                    &format!("NEG {}", normalized),
+                    &format!(
+                        "'{}' NEG-dentry at '{}' | parent {} | crossed={} | trail={}",
+                        normalized,
+                        component,
+                        sbx_dentry_state(cur_d),
+                        crossed,
+                        trail
+                    ),
+                );
+            }
+            // datatap (el2/100 hunt): the negative cache has NO
+            // invalidation on parent mutation, so a stale NEG entry
+            // permanently hides freshly created files. Name hits
+            // under /data so the dt boot can attribute each
+            // "invisible" dir to either this cache or a real
+            // on-disk absence.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
+                let mut prefix = String::new();
+                for c2 in components.iter().take(ci + 1) {
+                    prefix.push('/');
+                    prefix.push_str(c2);
+                }
+                if prefix.starts_with("/data/") {
+                    crate::pr_warn!(
+                        "apptap negdentry hit '{}' (cached ENOENT, pid {})",
+                        prefix,
+                        crate::process::current_pid()
+                    );
+                }
+            }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+        // Check icache for fresh inode data
+        // (perf-syscall lane) skip the set_inode lock+Arc swap
+        // when the icache hands back the SAME inode the dentry
+        // already holds — a no-op replace that still took the
+        // inode spinlock and churned the Arc refcount on every
+        // walk of every cached component.
+        // (perf-path lane) generation guard: the identity mapping
+        // (ino, fs_id) -> Arc only changes when icache membership
+        // changes, and every membership change bumps icache's
+        // generation. While the dentry's stamp matches the current
+        // generation, the cached Arc IS the icache's object — the
+        // global-lock icache_lookup is skipped entirely (it cost a
+        // lock pair + Arc churn on EVERY hit of EVERY walk).
+        // (gap-fs lane) the cached inode is a raw pointer through
+        // the mirror; only an identity change pays the Arc swap.
+        let pc_c = crate::dfx::fsw::pc_now();
+        let mut inode_raw: *const crate::fs::inode::Inode = c.inode_ptr_walk(cl);
+        let gen_now = crate::fs::inode::icache_regen();
+        if c.get_inode_gen() != gen_now {
+            if !inode_raw.is_null() {
+                // SAFETY: read under the claim.
+                let cached = unsafe { &*inode_raw };
+                if let Some(fresh) = crate::fs::inode::icache_lookup(cached.ino, cached.fs_id) {
+                    if Arc::as_ptr(&fresh) as *const crate::fs::inode::Inode != inode_raw {
+                        c.set_inode(alloc::sync::Arc::clone(&fresh));
+                        inode_raw = Arc::as_ptr(&fresh);
+                    }
+                }
+            }
+            // Stamp whatever verdict this slow path reached; a
+            // later change bumps the generation again.
+            c.set_inode_gen(crate::fs::inode::icache_regen());
+        }
+        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_C_NS, pc_c);
+        crate::dfx::fsw::note_walk_hit();
+
         // Follow mount point at child, then follow symlink
         // (perf-path lane) has_mount() keeps the common no-mountpoint
         // case at one Relaxed load; follow_mount (lock + Arc clone) only
         // runs when there is actually a mount to follow.
+        // (gap-fs lane) the no-hop advance is a RAW pointer move — no
+        // Arc clone, no refcount traffic; the mount-hop arm materializes
+        // (rare).
         let pc_d = crate::dfx::fsw::pc_now();
-        let hopped = child.has_mount();
+        let hopped = c.has_mount();
         if hopped {
             crossed += 1;
         }
-        current = if hopped { follow_mount(child) } else { child };
-        // (perf-path lane) hit arm already fetched the child's inode.
-        cur_inode_opt = if hopped { None } else { hit_inode.clone() };
+        if hopped {
+            // SAFETY: child_raw protected by the claim (see above).
+            let child_arc = unsafe { crate::fs::dentry::dentry_arc_from_raw(child_raw) };
+            let landed = follow_mount(child_arc);
+            current_raw = Arc::as_ptr(&landed);
+            current = Some(landed);
+            cur_inode_raw = core::ptr::null();
+        } else {
+            current_raw = child_raw;
+            // Position is map-held; drop any arm-materialized pin.
+            current = None;
+            // (perf-path lane) hit arm already fetched the child's inode.
+            cur_inode_raw = inode_raw;
+        }
         if sbx_tracing {
             trail.push_str(&format!(
                 "{}{}={} ",
                 component,
                 if hopped { "*" } else { "" },
-                current.get_name()
+                unsafe { &*current_raw }.get_name()
             ));
         }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
-        // (perf-syscall lane) no mount hop: current is the child whose
-        // inode the hit arm already fetched.
+        // (gap-fs lane) the is-symlink test runs through the raw inode
+        // under the claim; only a real follow pays the materialize +
+        // claim drop (the follow can read the target, i.e. sleep).
         let is_last = ci == components.len() - 1;
+        let is_symlink = !hopped
+            && !inode_raw.is_null()
+            && (unsafe { &*inode_raw }).mode.is_symlink();
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
             // Don't follow symlink on the final component
-        } else {
-            let pre_ptr = Arc::as_ptr(&current) as usize;
-            let hint = if hopped { None } else { hit_inode.as_ref() };
+        } else if is_symlink {
+            // SAFETY: inode_raw protected by the claim.
+            let inode_arc =
+                unsafe { crate::fs::dentry::inode_arc_from_raw(inode_raw) };
+            let d_arc = match current.take() {
+                Some(a) if Arc::as_ptr(&a) == current_raw => a,
+                // SAFETY: current_raw protected by the claim (still held —
+                // dropped below, after this increment).
+                _ => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+            };
+            cur_inode_raw = core::ptr::null();
+            drop(claim.take());
+            let pre_ptr = Arc::as_ptr(&d_arc) as usize;
             let landed =
-                follow_symlink_hinted(current, hint, components, &mut symlink_depth)?;
+                follow_symlink_hinted(d_arc, Some(&inode_arc), components, &mut symlink_depth)?;
             // Symlink follow landed elsewhere: drop the carried inode
             // (perf-path discipline — its inode was not fetched).
-            if Arc::as_ptr(&landed) as usize != pre_ptr {
-                cur_inode_opt = None;
-            }
-            current = landed;
+            current = Some(landed);
+            // (claim is None: the next iteration / the tail re-claims and
+            // refreshes current_raw from the owned Arc.)
+            let _ = pre_ptr;
         }
         crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_D_NS, pc_d);
     }
     crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_LOOP_NS, pc_loop);
     let pc_tail = crate::dfx::fsw::pc_now();
 
-    // Build VfsPath from final dentry
-    let dentry = current.clone();
-    let inode = match dentry.get_inode() {
-        Some(i) => i,
-        None => {
+    // (gap-fs lane) An arm may have dropped the claim on the final
+    // component (symlink follow); re-acquire for the tail reads.
+    if claim.is_none() {
+        claim = Some(crate::fs::dentry::WalkClaim::acquire());
+        current_raw = Arc::as_ptr(
+            current.as_ref().expect("walk position dentry"),
+        );
+    }
+    let cl = claim.as_ref().unwrap();
+    // SAFETY: protected by the claim (see the protocol).
+    let dentry_d: &Dentry = unsafe { &*current_raw };
+
+    // Build VfsPath from final dentry — materialize BOTH owned Arcs
+    // while the claim is held (the strong-count increments must not
+    // race a drain), then release.
+    let inode = {
+        let p = dentry_d.inode_ptr_walk(cl);
+        if p.is_null() {
             if sbx_tracing {
                 sbx_trace(
                     "walk",
@@ -2347,7 +2441,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     &format!(
                         "'{}' FINAL dentry no inode | state {} | crossed={} | trail={}",
                         normalized,
-                        sbx_dentry_state(&dentry),
+                        sbx_dentry_state(dentry_d),
                         crossed,
                         trail
                     ),
@@ -2355,7 +2449,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             }
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
+        // SAFETY: protected by the claim.
+        unsafe { crate::fs::dentry::inode_arc_from_raw(p) }
     };
+    let dentry: Arc<Dentry> = match current.take() {
+        Some(a) if Arc::as_ptr(&a) == current_raw => a,
+        // SAFETY: protected by the claim.
+        _ => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
+    };
+    drop(claim.take());
 
     // POSIX/Linux path resolution: a TRAILING SLASH demands a directory —
     // "file/" on a regular file is ENOTDIR, never a silent success (Linux
@@ -3223,7 +3325,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
-                        *child.inode.lock() = None;
+                        child.clear_inode();
                         parent_dentry.remove_child(&name);
                     }
                 }
@@ -3361,7 +3463,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
-                        *child.inode.lock() = None;
+                        child.clear_inode();
                         parent_dentry.remove_child(&name);
                     }
                 }
@@ -3623,7 +3725,7 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
             // name slot.
             if let Some(replaced) = new_pd.lookup_child(&new_name) {
                 replaced.set_negative();
-                *replaced.inode.lock() = None;
+                replaced.clear_inode();
                 new_pd.remove_child(&new_name);
             }
         }
@@ -3639,7 +3741,7 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
                     // subtree from — fall back to plain invalidation (the
                     // entry is reachable again through a fresh lookup).
                     child.set_negative();
-                    *child.inode.lock() = None;
+                    child.clear_inode();
                 }
             }
         }

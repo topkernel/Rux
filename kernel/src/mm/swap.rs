@@ -452,6 +452,15 @@ pub fn swap_read_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<(
 ///
 /// # Arguments
 /// - `swap_type`: Swap device index
+/// SP-5 round-4: swap-write latency census — the reclaim round's
+/// per-page cost driver (a 32-page round of >10 ms writes is a 300+
+/// ms no-progress window for allocation stalls; the fake-OOM kill
+/// chain starts exactly there). Relaxed counters, read by the OOM
+/// forensic dump.
+static SWAPW_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SWAPW_SLOW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SWAPW_MAX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// - `offset`: Slot offset
 /// - `phys_addr`: Physical address of the source page
 pub fn swap_write_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<(), i32> {
@@ -468,10 +477,30 @@ pub fn swap_write_page(swap_type: u32, offset: u64, phys_addr: usize) -> Result<
         core::slice::from_raw_parts(virt_addr as *const u8, PAGE_SIZE)
     };
 
-    match crate::drivers::blkdev::blkdev_write(device, sector, buf) {
+    // SP-5 round-4: swap-write latency census (module statics above).
+    let t0 = crate::drivers::timer::read_time();
+    let r = crate::drivers::blkdev::blkdev_write(device, sector, buf);
+    let dt_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 1_000_000_000
+        / crate::config::TIMER_CLOCK_FREQ_HZ;
+    SWAPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if dt_ns > 10_000_000 {
+        SWAPW_SLOW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    SWAPW_MAX_NS.fetch_max(dt_ns, core::sync::atomic::Ordering::Relaxed);
+    match r {
         Ok(_) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// SP-5: the swap-write latency census (see swap_write_page) —
+/// (writes, writes over 10 ms, max write ns).
+pub fn swap_write_census() -> (u64, u64, u64) {
+    (
+        SWAPW_N.load(core::sync::atomic::Ordering::Relaxed),
+        SWAPW_SLOW.load(core::sync::atomic::Ordering::Relaxed),
+        SWAPW_MAX_NS.load(core::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// Swap statistics for /proc/meminfo.

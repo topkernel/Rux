@@ -1,0 +1,41 @@
+===CASE lat_syscall null
+[    0.024727] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple syscall: 0.0416 microseconds
+[    3.935471] reboot: Power down
+===CASE lat_syscall read
+[    0.024736] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple read: 0.0661 microseconds
+[    8.827412] reboot: Power down
+===CASE lat_syscall write
+[    0.025231] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple write: 0.0577 microseconds
+[   14.538603] reboot: Power down
+===CASE lat_syscall stat
+[    0.024723] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple stat: 0.2266 microseconds
+[    4.020873] reboot: Power down
+===CASE lat_syscall fstat
+[    0.025307] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple fstat: 0.1181 microseconds
+[    4.689283] reboot: Power down
+===CASE lat_syscall open
+[    0.024665] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Simple open/close: 0.3596 microseconds
+[    3.925439] reboot: Power down
+===CASE lat_proc fork
+[    0.025024] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Process fork+exit: 53.9880 microseconds
+[    3.589864] reboot: Power down
+===CASE lat_proc exec
+[    0.024959] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Process fork+execve: 87.4317 microseconds
+[    3.908310] reboot: Power down
+===CASE lat_pipe
+[    0.024919] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+Pipe latency: 13.2961 microseconds
+[    7.774480] reboot: Power down
+===CASE lat_ctx -s 64 2
+[    0.024421] RDSEED32 is broken. Disabling the corresponding CPUID bit.
+"size=64k ovr=0.99
+2 6.71
+[    6.969373] reboot: Power down
