@@ -21,13 +21,76 @@
 //!     compare, never on the jiffy clock);
 //!   - periodic re-arm delivers on EVERY expiry (R37 bug);
 //!   - budget carry and catch-up advance drain nothing late or twice.
+//!
+//! Allocation-free by design: this group runs at the suite tail where
+//! earlier groups have been shown to exhaust the heap (syscall:time
+//! SKIPs on this very run class) — a Vec push here would trip
+//! alloc_error_handler (panic = abort = parked CPU), freezing the
+//! suite with no diagnostic. Counters and fixed arrays only.
 
 use crate::timer::wheel::{self, Action, Now, TimerWheel};
 use super::{test_fail, test_group_start, test_pass};
-use alloc::vec::Vec;
 
 /// Fired-token scratch (the suite is single-CPU here).
 const BUDGET: usize = wheel::EXPIRY_BUDGET;
+
+/// Ids of interest for one collect pass (64 = budget bound).
+struct FiredLog {
+    ids: [u64; BUDGET],
+    n: usize,
+}
+
+impl FiredLog {
+    const fn new() -> Self {
+        FiredLog { ids: [0; BUDGET], n: 0 }
+    }
+    fn record(&mut self, id: u64) {
+        if self.n < BUDGET {
+            self.ids[self.n] = id;
+            self.n += 1;
+        }
+    }
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn contains(&self, id: u64) -> bool {
+        self.ids[..self.n].contains(&id)
+    }
+    fn only(&self) -> Option<u64> {
+        if self.n == 1 { Some(self.ids[0]) } else { None }
+    }
+}
+
+/// Aggregate fire ledger across passes (test totals stay far below
+/// 2^16; 256 slots is 4x the largest case).
+struct FireTotals {
+    counts: [u16; 256],
+    total: u32,
+}
+
+impl FireTotals {
+    const fn new() -> Self {
+        FireTotals { counts: [0; 256], total: 0 }
+    }
+    fn add(&mut self, log: &FiredLog) {
+        for &id in &log.ids[..log.n] {
+            self.counts[(id % 256) as usize] += 1;
+            self.total += 1;
+        }
+    }
+    fn of(&self, id: u64) -> u16 {
+        self.counts[(id % 256) as usize]
+    }
+}
+
+/// Step the wheel to (jiffies, time) and collect into `log`.
+fn run_pass(w: &mut TimerWheel, now: Now, out: &mut [wheel::FiredToken], log: &mut FiredLog) {
+    w.advance(now);
+    let n = w.collect(now, out);
+    for t in &out[..n] {
+        log.record(t.id);
+    }
+}
 
 fn tokens() -> [wheel::FiredToken; BUDGET] {
     [wheel::FiredToken {
@@ -35,14 +98,6 @@ fn tokens() -> [wheel::FiredToken; BUDGET] {
         action: Action::None,
         late_ticks: 0,
     }; BUDGET]
-}
-
-/// Step the wheel to (jiffies, time) and collect, returning the fired
-/// ids.
-fn run_pass(w: &mut TimerWheel, now: Now, out: &mut [wheel::FiredToken]) -> Vec<u64> {
-    w.advance(now);
-    let n = w.collect(now, out);
-    out[..n].iter().map(|t| t.id).collect()
 }
 
 pub fn test_timer_wheel() {
@@ -95,24 +150,26 @@ pub fn test_timer_wheel() {
                 return;
             }
         }
-        let mut fired_at: Vec<(u64, u64)> = Vec::new();
+        // fire jiffy per id: id 100+i fired at targets[i]?
+        let mut fire_jiffy = [0u64; 6];
+        let mut seen = [false; 6];
+        let mut log = FiredLog::new();
         for j in base..=base + 130 {
-            for id in run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out) {
-                fired_at.push((id, j));
+            log = FiredLog::new();
+            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            for i in 0..6 {
+                if log.contains(100 + i as u64) {
+                    fire_jiffy[i] = j;
+                    seen[i] = true;
+                }
             }
         }
-        let mut ok = fired_at.len() == targets.len();
-        for (i, t) in targets.iter().enumerate() {
-            let id = 100 + i as u64;
-            match fired_at.iter().find(|(fid, _)| *fid == id) {
-                Some((_, j)) if j == t => {}
-                _ => ok = false,
-            }
-        }
+        let ok = seen.iter().all(|s| *s)
+            && (0..6).all(|i| fire_jiffy[i] == targets[i]);
         if ok {
             test_pass("wrap/cascade exact-jiffy fires");
         } else {
-            test_fail("wrap/cascade exact-jiffy fires", &format!("{:?}", fired_at));
+            test_fail("wrap/cascade exact-jiffy fires", "fire jiffy mismatch");
         }
     }
 
@@ -126,31 +183,34 @@ pub fn test_timer_wheel() {
         let start_j = 500u64;
         let start_t = start_j * tpj;
         w.advance(Now { jiffies: start_j, time: start_t });
-        // Precise deadline 2.5 jiffies out. Grid-derived horizon (the
-        // wheel derives it; here we pass floor(2.5)+0 = jiffy 502 — the
-        // first jiffy whose span covers the deadline).
+        // Precise deadline 2.5 jiffies out; grid-derived horizon (the
+        // wheel derives it in the kernel via jiffy_floor_of_time; here
+        // we pass floor(2.5)+0 = jiffy 502 — the first jiffy whose
+        // span covers the deadline).
         let precise = start_t + (5 * tpj) / 2;
         let horizon = start_j + 2;
         if !w.arm_hres(precise, horizon, Action::Wake { pid: 7 }, None, 42) {
             test_fail("arm hres", "pool");
             return;
         }
+        let mut log = FiredLog::new();
         // Advance jiffies well past the horizon while time stays short:
         // the entry must NOT fire (the old jiffy fallback did).
-        let mut fired = run_pass(&mut w, Now { jiffies: start_j + 10, time: start_t + tpj }, &mut out);
-        if !fired.is_empty() {
+        run_pass(&mut w, Now { jiffies: start_j + 10, time: start_t + tpj }, &mut out, &mut log);
+        if log.len() != 0 {
             test_fail("hres early-fire guard", "fired on jiffy clock");
             return;
         }
         // Time reaches the deadline (jiffies unchanged): must fire NOW.
-        fired = run_pass(&mut w, Now { jiffies: start_j + 10, time: precise }, &mut out);
-        if fired != vec![42] {
-            test_fail("hres precise fire", &format!("{:?}", fired));
+        run_pass(&mut w, Now { jiffies: start_j + 10, time: precise }, &mut out, &mut log);
+        if log.only() != Some(42) {
+            test_fail("hres precise fire", "wrong token set");
             return;
         }
         // And exactly once (one-shot: the slot is gone).
-        fired = run_pass(&mut w, Now { jiffies: start_j + 12, time: precise + tpj }, &mut out);
-        if !fired.is_empty() {
+        log = FiredLog::new();
+        run_pass(&mut w, Now { jiffies: start_j + 12, time: precise + tpj }, &mut out, &mut log);
+        if log.len() != 0 {
             test_fail("hres one-shot", "double fire");
             return;
         }
@@ -168,25 +228,23 @@ pub fn test_timer_wheel() {
             test_fail("arm periodic", "pool");
             return;
         }
-        let mut deliveries = 0u64;
+        let mut totals = FireTotals::new();
         for j in 0..31u64 {
-            for t in run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out) {
-                if t != 77 {
-                    test_fail("periodic id", "id changed");
-                    return;
-                }
-                deliveries += 1;
-            }
+            let mut log = FiredLog::new();
+            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            totals.add(&log);
         }
-        if deliveries == 10 {
+        if totals.of(77) == 10 && totals.total == 10 {
             test_pass("periodic delivery on every expiry (10/10)");
         } else {
-            test_fail("periodic delivery count", &format!("{}", deliveries));
+            test_fail("periodic delivery count", "not 10/10");
         }
     }
 
     // ---- Test 5: budget carry — more due entries than one pass can
-    // collect; nothing lost, nothing double-fired. ----
+    // collect; nothing lost, nothing double-fired. (This case caught
+    // the first-version link_tail bug: linking after the head orphaned
+    // every entry between head and tail.) ----
     {
         let mut w = TimerWheel::new();
         let mut out = tokens();
@@ -198,18 +256,24 @@ pub fn test_timer_wheel() {
                 return;
             }
         }
-        let first = run_pass(&mut w, Now { jiffies: 5, time: 0 }, &mut out);
-        if first.len() != BUDGET {
-            test_fail("budget cap", &format!("{} != {}", first.len(), BUDGET));
+        let mut log = FiredLog::new();
+        run_pass(&mut w, Now { jiffies: 5, time: 0 }, &mut out, &mut log);
+        if log.len() != BUDGET {
+            test_fail("budget cap", "first pass != budget");
             return;
         }
-        let mut total = first.len();
-        total += run_pass(&mut w, Now { jiffies: 6, time: 0 }, &mut out).len();
-        total += run_pass(&mut w, Now { jiffies: 7, time: 0 }, &mut out).len();
-        if total == BUDGET + 10 {
+        let mut totals = FireTotals::new();
+        totals.add(&log);
+        log = FiredLog::new();
+        run_pass(&mut w, Now { jiffies: 6, time: 0 }, &mut out, &mut log);
+        totals.add(&log);
+        log = FiredLog::new();
+        run_pass(&mut w, Now { jiffies: 7, time: 0 }, &mut out, &mut log);
+        totals.add(&log);
+        if totals.total == (BUDGET + 10) as u32 {
             test_pass("budget carry drains all, none double-fired");
         } else {
-            test_fail("budget carry total", &format!("{}", total));
+            test_fail("budget carry total", "lost or double");
         }
     }
 
@@ -228,11 +292,13 @@ pub fn test_timer_wheel() {
             }
         }
         // One jump from 10 to 500.
-        let fired = run_pass(&mut w, Now { jiffies: 500, time: 0 }, &mut out);
-        if fired.len() == 6 {
+        let mut log = FiredLog::new();
+        run_pass(&mut w, Now { jiffies: 500, time: 0 }, &mut out, &mut log);
+        let all = (0..6).all(|i| log.contains(2000 + i as u64));
+        if all && log.len() == 6 {
             test_pass("catch-up advance drains all intermediates");
         } else {
-            test_fail("catch-up advance", &format!("{:?}", fired));
+            test_fail("catch-up advance", "missing intermediates");
         }
     }
 
@@ -289,24 +355,27 @@ pub fn test_timer_wheel() {
             test_fail("far route", "probe mismatch");
             return;
         }
-        let mut fired: Vec<u64> = Vec::new();
+        let mut totals = FireTotals::new();
         // Step in 4096-jiffy chunks (each level-2 boundary triggers a
         // FAR rescan), stopping short of the target, then per-jiffy
         // steps through the fire jiffy.
         let mut j = 0u64;
         while j + 4096 < target - 8 {
             j += 4096;
-            fired.extend(run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out));
+            let mut log = FiredLog::new();
+            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            totals.add(&log);
         }
         while j <= target + 4 {
-            fired.extend(run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out));
+            let mut log = FiredLog::new();
+            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            totals.add(&log);
             j += 1;
         }
-        let hits = fired.iter().filter(|id| **id == 4000).count();
-        if hits == 1 {
+        if totals.of(4000) == 1 {
             test_pass("far-list rescan fires exactly once, on time");
         } else {
-            test_fail("far-list fire count", &format!("{}", hits));
+            test_fail("far-list fire count", "not exactly one");
         }
     }
 
@@ -323,7 +392,7 @@ pub fn test_timer_wheel() {
         if armed == wheel::MAX_TIMERS {
             test_pass("pool full boundary");
         } else {
-            test_fail("pool full boundary", &format!("{}", armed));
+            test_fail("pool full boundary", "armed != MAX_TIMERS");
         }
     }
 }
