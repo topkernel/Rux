@@ -198,7 +198,7 @@ pub fn synchronize_rcu() {
             if !crate::sched::sched::cpu_online(i) {
                 continue;
             }
-            if RCU_QS_GEN[i].load(Ordering::Acquire) < gen {
+            if !cpu_quiescent(i, gen) {
                 all_qs = false;
                 break;
             }
@@ -310,6 +310,32 @@ pub fn synchronize_rcu_forced_sleepy(max_ms: u64, site: &'static str) -> bool {
     wait_qs_sleepy(gen, max_ms, site)
 }
 
+/// Forced grace period with a bounded POLL phase before the sleepy
+/// fallback — the fd-close completion form (r26).
+///
+/// A busy peer CPU stores its QS report at its next return to user
+/// (microseconds away), but the sleepy form would only notice at its
+/// next 1-jiffy poll — turning every synchronous close into a ~1-jiffy
+/// stall (measured: LTP inotify11's 10k-file churn blew its 30 s
+/// budget). This form spin-polls (with the pause hint) for the
+/// typical µs-scale report window FIRST, and only falls back to the
+/// sleeping poll for a genuinely monopolist CPU.
+pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
+    let gen = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
+    rcu_note_context_switch();
+    // Poll phase: ~100 µs of pause-hinted checks covers a peer's
+    // user-return several times over on KVM.
+    for _ in 0..50_000 {
+        if all_online_cpus_reported(gen) {
+            RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    wait_qs_sleepy(gen, max_ms, site)
+}
+
 /// The sleeping poll loop shared by the sleepy wait forms: check first
 /// (fresh reporters pass without ever sleeping), then one-jiffy
 /// INTERRUPTIBLE sleeps armed by a one-shot timer (the khungtaskd
@@ -412,11 +438,27 @@ fn all_online_cpus_reported(gen: u32) -> bool {
         if !crate::sched::sched::cpu_online(i) {
             continue;
         }
-        if RCU_QS_GEN[i].load(Ordering::Acquire) < gen {
+        if !cpu_quiescent(i, gen) {
             return false;
         }
     }
     true
+}
+
+/// Whether CPU `i` is quiescent with respect to generation `gen`:
+/// either it stored a QS report at/after `gen`, or it is currently
+/// executing its idle task. A halted idle CPU stores reports only once
+/// per wake, so its `RCU_QS_GEN` entry can lag arbitrarily far behind
+/// reality while the CPU is in fact executing nothing — the fd-table
+/// reader window (get_file's load→increment) runs only over a non-idle
+/// `current`, so idle-loop execution is quiescent by construction.
+/// This keeps grace periods from stalling on parked secondary CPUs
+/// (r26: without it, every synchronous close-completion wait paid the
+/// sleepy poll's 1-jiffy granularity).
+#[inline]
+fn cpu_quiescent(i: usize, gen: u32) -> bool {
+    RCU_QS_GEN[i].load(Ordering::Acquire) >= gen
+        || crate::sched::sched::cpu_running_idle(i)
 }
 
 /// Shared body of both bounded waits: announce a waiter, report our own
@@ -436,7 +478,7 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
             if !crate::sched::sched::cpu_online(i) {
                 continue;
             }
-            if RCU_QS_GEN[i].load(Ordering::Acquire) < gen {
+            if !cpu_quiescent(i, gen) {
                 all_qs = false;
                 stuck_cpu = i;
                 break;
