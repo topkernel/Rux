@@ -12,6 +12,132 @@ use crate::arch::uaccess::strncpy_from_user;
 /// Maximum path length (PATH_MAX)
 const PATH_MAX: usize = 4096;
 
+/// (28th successor) BMS scan-leg fs probe — dfx=ams46 cohort.
+///
+/// The initial user-0 preinstall scan never installs on fresh boots
+/// (dead since cg17), so user 100's per-user bundle query comes back
+/// empty and the launcher never spawns. Every branch verdict inside
+/// BMSEventHandler::OnBmsStarting is an hilog I/E line the image
+/// level-gates out of the hilog socket tap, so the discriminating
+/// instrument is FS-SIDE: which of the scan's filesystem touchpoints
+/// actually ran. Watched (substring match, covers both raw and
+/// chroot-prefixed resolved forms):
+///   - "bms/bundle_manager_service" / "bmsdb" — the BMS local SQLite
+///     RDB (/data/service/el1/public/bms/bundle_manager_service/
+///     bmsdb.db, table preinstalled_bundle = the preinstall list that
+///     GetAllPreInstallBundleInfos reads; written only by the scan).
+///   - "/data/app/el1" — ScanAndAnalyzeUserDatas' user-data scan
+///     (the GuardAgainstInstallInfosLossedStrategy probe that decides
+///     first-boot vs recover).
+///   - "/system/app" — the preinstall roots the bundle scan walks
+///     (GetPreInstallRootDirList default "/system" + "/app").
+/// Prints openat attempts (flags name the R/W/C intent — the scan
+/// SAVING records opens bmsdb.db writable) and per-directory getdents
+/// outcomes (an empty ScanDir result is the first-boot verdict; a
+/// walked /system/app tree is the install branch firing). Budgeted;
+/// OFF unless dfx=ams46.
+fn bmsscan_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+}
+
+#[inline]
+fn bmsscan_match(path: &str) -> bool {
+    path.contains("bms/bundle_manager_service")
+        || path.contains("bmsdb")
+        || path.contains("/data/app/el1")
+        || path.contains("/system/app")
+        // The pre-bundle profile leg (LoadPreInstallProFile): /system/etc/
+        // app/install_list.json + uninstall_list.json + the app_service
+        // fwk list — seeing these opens names the FIRST-BOOT branch;
+        // their absence after the KVS wait = the reboot path taken.
+        || path.contains("install_list")
+        || path.contains("/etc/app/")
+}
+
+fn bmsscan_watch_open(path: &str, flags: u32) {
+    if !bmsscan_on() || !bmsscan_match(path) {
+        return;
+    }
+    // The /system/app tree open flood gets its own tight budget — the
+    // first lines prove the scan branch fired and name the scanner;
+    // every later hap open is the same story (console volume would
+    // inflate the very boot timings this probe measures).
+    let sysapp = path.contains("/system/app") && !path.contains("bmsdb");
+    if sysapp {
+        static SYS_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 100 {
+            return;
+        }
+    }
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n >= 800 {
+        return;
+    }
+    // Flag bits of interest only (raw hex carries the rest).
+    const O_ACCMODE: u32 = 0o3;
+    const O_CREAT: u32 = 0o00000100;
+    const O_DIRECTORY: u32 = crate::fs::file::FileFlags::O_DIRECTORY;
+    let mode = match flags & O_ACCMODE {
+        0 => "RD",
+        1 => "WR",
+        2 => "RDWR",
+        _ => "?",
+    };
+    let (pid, comm) = crate::sched::current()
+        .map(|t| (crate::process::current_pid(), t.comm_str().into_owned()))
+        .unwrap_or((0, alloc::string::String::new()));
+    // Parent-dir state: a CREAT open whose parent is missing WILL fail
+    // ENOENT — naming the broken link in the RDB store's dir chain.
+    let parent_txt = match path.rfind('/') {
+        Some(0) | None => "/".into(),
+        Some(i) => {
+            let parent = &path[..i];
+            match crate::fs::vfs::path_lookup(parent, 0) {
+                Ok(_) => "ok".into(),
+                Err(_) => alloc::format!("MISSING({})", parent),
+            }
+        }
+    };
+    crate::pr_warn!(
+        "BMSSCAN-OPEN[{}] pid={} {} {} {}{}{} parent={}",
+        n,
+        pid,
+        comm,
+        path,
+        mode,
+        if flags & O_CREAT != 0 { "+CREAT" } else { "" },
+        if flags & O_DIRECTORY != 0 { "+DIR" } else { "" },
+        parent_txt,
+    );
+}
+
+/// (28th successor) mkdir-side of the scan probe: the RDB layer creates
+/// its own store directory chain (RdbSqlUtils::CreateDirectory walks the
+/// components access+mkdir). Watching the attempts names the exact
+/// component whose mkdir fails (or never runs) on the empty-store boots.
+pub fn bmsscan_watch_mkdir(path: &str) {
+    if !bmsscan_on() || !bmsscan_match(path) {
+        return;
+    }
+    static MN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = MN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n >= 128 {
+        return;
+    }
+    let comm = crate::sched::current()
+        .map(|t| t.comm_str().into_owned())
+        .unwrap_or_default();
+    crate::pr_warn!(
+        "BMSSCAN-MKDIR[{}] pid={} {} {}",
+        n,
+        crate::process::current_pid(),
+        comm,
+        path
+    );
+}
+
 /// sys_open - Open file (legacy interface, wrapped to openat)
 ///
 /// NOTE: riscv64 (asm-generic) has NO plain `open` syscall — this wrapper
@@ -158,6 +284,9 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
             }
         }
     };
+
+    // (28th successor) BMS scan-leg probe: watched open attempt.
+    bmsscan_watch_open(full_path, flags);
 
     // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
     // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
@@ -1088,6 +1217,52 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
 
+    // (28th successor) BMS scan-leg probe: per-directory getdents
+    // outcome on the watched roots. Deduped per (pid, fd) slot — a
+    // scanned directory issues a handful of getdents calls; the FIRST
+    // result per fd decides empty (0 bytes = no entries) vs walked.
+    if bmsscan_on() {
+        let wpath = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd))
+            .and_then(|f| {
+                let p = f.path();
+                if p.is_empty() { None } else { Some(p) }
+            });
+        if let Some(p) = wpath {
+            if bmsscan_match(&p) {
+                static SLOT_PID: [core::sync::atomic::AtomicU32; 16] =
+                    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+                static SLOT_FD: [core::sync::atomic::AtomicU32; 16] =
+                    [const { core::sync::atomic::AtomicU32::new(u32::MAX) }; 16];
+                static DN: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let pid = crate::process::current_pid();
+                let slot = (pid % 16) as usize;
+                let sp = SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+                let sf = SLOT_FD[slot].load(core::sync::atomic::Ordering::Relaxed);
+                let first = sp != pid || sf != (fd as u32);
+                SLOT_PID[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+                SLOT_FD[slot].store(fd as u32, core::sync::atomic::Ordering::Relaxed);
+                if first {
+                    let n = DN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 500 {
+                        let bytes = match &result {
+                            Ok(b) => alloc::format!("{}", b),
+                            Err(e) => alloc::format!("errno {}", -e),
+                        };
+                        let comm = crate::sched::current()
+                            .map(|t| t.comm_str().into_owned())
+                            .unwrap_or_default();
+                        crate::pr_warn!(
+                            "BMSSCAN-DENTS[{}] pid={} {} '{}' -> {}",
+                            n, pid, comm, p, bytes
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // OH DRM bring-up (rs-egl): the composer VDI's FindAndOpenKmsCard
     // opendir()s /dev/dri then openat()s "card0" per readdir entry; a
     // getdents that returns no entries (or errors) leaves the loop empty
@@ -1225,6 +1400,9 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // (28th successor) BMS scan-leg probe: mkdir attempt watch.
+    bmsscan_watch_mkdir(&full_path);
 
     // OH param-workspace hunt (b70) — see the open tracer in sys_open.
     if full_path.starts_with("/dev/__parameters") {
@@ -2681,6 +2859,39 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
     // mountpoint re-arms its expire state (umount2(2) then answers EAGAIN
     // until the mount stays untouched across two umount2 attempts).
     MNT_EXPIRE_STATE.lock().note_access(full_path.as_bytes());
+
+    // (28th successor) BMS scan-leg probe: RdbDataManager::GetRdbStoreFromNative
+    // probes the store's existence with access(path, F_OK) before opening —
+    // the is-new-db branch decision, visible here. The bmsdb SIZE is the
+    // live divergence meter (reference populates it to ~1.1 MB / 43
+    // preinstalled rows during its 6-8 s scan; ours staying at the empty
+    // 4 KB skeleton = the silent-empty scan), so resolve and report it.
+    if bmsscan_on() && full_path.contains("bmsdb") {
+        static AN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = AN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 64 {
+            let size = match crate::fs::vfs::path_lookup(&full_path, 0) {
+                Ok(vp) => vp
+                    .inode
+                    .as_ref()
+                    .map(|i| i.size.load(core::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(u64::MAX),
+                Err(_) => u64::MAX,
+            };
+            let size_txt = if size == u64::MAX {
+                "ENOENT".into()
+            } else {
+                alloc::format!("{}B", size)
+            };
+            let comm = crate::sched::current()
+                .map(|t| t.comm_str().into_owned())
+                .unwrap_or_default();
+            crate::pr_warn!(
+                "BMSSCAN-ACCESS[{}] pid={} {} '{}' mode={:#o} size={}",
+                n, crate::process::current_pid(), comm, full_path, mode, size_txt
+            );
+        }
+    }
 
     let mut may_mask: u32 = 0;
     if mode & 0o004 != 0 { may_mask |= crate::fs::permission::MAY_READ; }

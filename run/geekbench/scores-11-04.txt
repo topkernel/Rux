@@ -1,0 +1,141 @@
+== run @1970-01-01 00:00:05 +0000  (runtime 79.8 s)
+  Single-Core Score  2274
+  Multi-Core Score   7114
+  [Single-Core] section score 2274
+    AES-XTS              AES-XTS          8047
+    Text Compression     Integer          1427
+    Image Compression    Integer          1777
+    Navigation           Integer          1354
+    HTML5                Integer          2090
+    SQLite               Integer          1837
+    PDF Rendering        Integer          1835
+    Text Rendering       Integer          1690
+    Clang                Integer          1855
+    Camera               Integer          2032
+    N-Body Physics       Floating Point   2131
+    Rigid Body Physics   Floating Point   1874
+    Gaussian Blur        Floating Point   2167
+    Face Detection       Floating Point   2477
+    Horizon Detection    Floating Point   1932
+    Image Inpainting     Floating Point   4504
+    HDR                  Floating Point   4493
+    Ray Tracing          Floating Point   2823
+    Structure from Motion Floating Point   1837
+    Speech Recognition   Floating Point   1769
+    Machine Learning     Floating Point   2443
+  [Multi-Core] section score 7114
+    AES-XTS              AES-XTS          9962
+    Text Compression     Integer          6236
+    Image Compression    Integer          6911
+    Navigation           Integer          4212
+    HTML5                Integer          7131
+    SQLite               Integer          5895
+    PDF Rendering        Integer          7053
+    Text Rendering       Integer          5563
+    Clang                Integer          7444
+    Camera               Integer          5718
+    N-Body Physics       Floating Point   7259
+    Rigid Body Physics   Floating Point   7381
+    Gaussian Blur        Floating Point   7824
+    Face Detection       Floating Point   8177
+    Horizon Detection    Floating Point   7406
+    Image Inpainting     Floating Point  12758
+    HDR                  Floating Point  18032
+    Ray Tracing          Floating Point  13519
+    Structure from Motion Floating Point   7342
+    Speech Recognition   Floating Point   6757
+    Machine Learning     Floating Point   5576
+== run @1970-01-01 00:00:05 +0000  (runtime 78.5 s)
+  Single-Core Score  2297
+  Multi-Core Score   7458
+  [Single-Core] section score 2297
+    AES-XTS              AES-XTS          8140
+    Text Compression     Integer          1383
+    Image Compression    Integer          1846
+    Navigation           Integer          1360
+    HTML5                Integer          2045
+    SQLite               Integer          1834
+    PDF Rendering        Integer          1976
+    Text Rendering       Integer          1867
+    Clang                Integer          1930
+    Camera               Integer          1973
+    N-Body Physics       Floating Point   2279
+    Rigid Body Physics   Floating Point   1834
+    Gaussian Blur        Floating Point   2158
+    Face Detection       Floating Point   2471
+    Horizon Detection    Floating Point   1814
+    Image Inpainting     Floating Point   4608
+    HDR                  Floating Point   4682
+    Ray Tracing          Floating Point   2616
+    Structure from Motion Floating Point   1822
+    Speech Recognition   Floating Point   1811
+    Machine Learning     Floating Point   2357
+  [Multi-Core] section score 7458
+    AES-XTS              AES-XTS          9511
+    Text Compression     Integer          6024
+    Image Compression    Integer          7654
+    Navigation           Integer          4410
+    HTML5                Integer          7197
+    SQLite               Integer          7201
+    PDF Rendering        Integer          7358
+    Text Rendering       Integer          6081
+    Clang                Integer          7573
+    Camera               Integer          7353
+    N-Body Physics       Floating Point   7349
+    Rigid Body Physics   Floating Point   7460
+    Gaussian Blur        Floating Point   7837
+    Face Detection       Floating Point   9191
+    Horizon Detection    Floating Point   7338
+    Image Inpainting     Floating Point  15576
+    HDR                  Floating Point  16557
+    Ray Tracing          Floating Point  12014
+    Structure from Motion Floating Point   7225
+    Speech Recognition   Floating Point   6434
+    Machine Learning     Floating Point   5981
+== run @1970-01-01 00:00:06 +0000  (runtime 81.5 s)
+  Single-Core Score  2115
+  Multi-Core Score   7332
+  [Single-Core] section score 2115
+    AES-XTS              AES-XTS          4898
+    Text Compression     Integer          1446
+    Image Compression    Integer          1901
+    Navigation           Integer          1416
+    HTML5                Integer          1991
+    SQLite               Integer          1833
+    PDF Rendering        Integer          1758
+    Text Rendering       Integer          1771
+    Clang                Integer          1891
+    Camera               Integer          2005
+    N-Body Physics       Floating Point   2227
+    Rigid Body Physics   Floating Point   1885
+    Gaussian Blur        Floating Point   2136
+    Face Detection       Floating Point   2401
+    Horizon Detection    Floating Point   1834
+    Image Inpainting     Floating Point   4100
+    HDR                  Floating Point   4563
+    Ray Tracing          Floating Point   2725
+    Structure from Motion Floating Point   1806
+    Speech Recognition   Floating Point   1712
+    Machine Learning     Floating Point   2511
+  [Multi-Core] section score 7332
+    AES-XTS              AES-XTS          9331
+    Text Compression     Integer          5787
+    Image Compression    Integer          7410
+    Navigation           Integer          4187
+    HTML5                Integer          8087
+    SQLite               Integer          7069
+    PDF Rendering        Integer          6566
+    Text Rendering       Integer          5794
+    Clang                Integer          7359
+    Camera               Integer          7191
+    N-Body Physics       Floating Point   7174
+    Rigid Body Physics   Floating Point   7463
+    Gaussian Blur        Floating Point   7682
+    Face Detection       Floating Point   9949
+    Horizon Detection    Floating Point   7111
+    Image Inpainting     Floating Point  14838
+    HDR                  Floating Point  17872
+    Ray Tracing          Floating Point  13374
+    Structure from Motion Floating Point   7155
+    Speech Recognition   Floating Point   5939
+    Machine Learning     Floating Point   5641
