@@ -170,3 +170,7 @@ userspace/tests/smoke_test/*.c
 
 # lmbench benchmark sources are tarball-packed, not tracked (2026-10-31)
 userspace/lmbench/src/
+
+# arch-s5 lane boot artifacts (kernels, logs, stop markers)
+run/s5-*
+!run/s5-boot.sh
