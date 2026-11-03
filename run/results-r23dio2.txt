@@ -1,0 +1,8 @@
+# idx|test|class|rc|tail
+0|diotest2|PASS|0|SS  :  Read with Direct IO, Write without diotest02    2  TPASS  :  Write with Direct IO, Read without diotest02    3  TPASS  :  Read, Write with Direct IO diotest02    0  TINFO  :  3 testblocks 100 iterations completed
+1|diotest5|PASS|0|ect IO, Write without diotest05    2  TPASS  :  Write with Direct IO, Read without diotest05    3  TPASS  :  Read, Write with Direct IO diotest05    0  TINFO  :  3 testblocks 20 iterations with 20 vector array completed
+2|diotest1|PASS|0|diotest01    1  TPASS  :  Test passed
+3|diotest4|FAIL|1|21  TPASS  :  read, write buffer in read-only space diotest4   22  TPASS  :  read, write in non-existant space diotest4   23  TPASS  :  read, write for file with O_SYNC diotest4    0  TINFO  :  3/15 test blocks failed
+4|diotest6|PASS|0|Direct IO, Write without diotest06    2  TPASS  :  Write with Direct IO, Read without diotest06    3  TPASS  :  Read, Write with Direct IO diotest06    0  TINFO  :  3 testblocks 100 iterations with 1 children completed
+5|dio_read|FAIL|3|nt processes tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   1 broken   1 skipped  0 warnings 0
+6|dio_write|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/dio_write: No such file or directory

@@ -114,6 +114,30 @@ bimodal tail on lat_unix (base boots showed 16.7/6.05us bimodal; the
 
 Semop ping-pong under load stayed 2M-round clean through the soak.
 
+
+
+## Standing (2026-11-03 19:15, kernel e264a64b — fair KVM-vs-KVM, LASTSYS gated)
+
+Both kernels under the same q35+KVM rig. The LASTSYS gating (this
+kernel) cut the syscall floor across the board.
+
+| Case | Rux | Reference (KVM) | Ratio |
+|---|---|---|---|
+| lat_ctx -s64 2 | **1.98 µs** | 6.71 µs | **ahead 3.4x** |
+| lat_pipe | **5.11 µs** | 13.30 µs | **ahead 2.6x** |
+| lat_proc exec | **62.9 µs** | 87.43 µs | **ahead 1.39x** |
+| lat_syscall fstat | **0.099 µs** | 0.118 µs | **ahead 1.19x** |
+| lat_proc fork | 63.3 µs | 53.99 µs | 1.17x |
+| lat_syscall null | **0.057 µs** | 0.042 µs | 1.37x |
+| lat_syscall write | **0.094 µs** | 0.058 µs | 1.63x |
+| lat_syscall stat | **0.377 µs** | 0.227 µs | 1.66x |
+| lat_syscall read | **0.111 µs** | 0.066 µs | 1.68x |
+| lat_syscall open | 0.820 µs | 0.360 µs | 2.28x |
+
+4 rows ahead (ctx/pipe/exec/fstat), the rest in the 1.17-2.28x band.
+The remaining read/write/stat/open gaps live in the VFS dispatch layer
+(fdtable → file → ops-ptr), not the syscall entry (null is at 1.37x).
+
 ## Reading the table
 
 - **Ratio** = Rux value / reference value for latency cases; for the

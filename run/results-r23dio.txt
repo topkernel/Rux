@@ -1,0 +1,3 @@
+# idx|test|class|rc|tail
+0|diotest2|FAIL|1|IL  :  diotest2.c:191: Read with Direct IO, Write without diotest02    3  TPASS  :  Write with Direct IO, Read without diotest02    4  TPASS  :  Read, Write with Direct IO diotest02    0  TINFO  :  1/3 testblocks failed
+1|diotest5|FAIL|1|IL  :  diotest5.c:228: Read with Direct IO, Write without diotest05    3  TPASS  :  Write with Direct IO, Read without diotest05    4  TPASS  :  Read, Write with Direct IO diotest05    0  TINFO  :  1/3 testblocks failed
