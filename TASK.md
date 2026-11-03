@@ -2325,3 +2325,122 @@ negmemo=1). Verdict:
    init sysrq-c, ~30-50%): unresolved for many sessions; a forensic
    boot with dfx=taskdump from t=0 + hilog keys for the FIRST crash
    (not the cascade) would name the origin service crash.
+
+## TWENTY-SIXTH-SUCCESSOR SESSION (2026-11-03 20:00-.., branch biofix-fieldpoll @ 491ebc09)
+Mission (user-overridden stagger, launch priority): the launcher wall is
+NOT performance (microbench ahead: ctx 3.4x, pipe 2.6x, exec 1.39x) —
+decode the parked-poll signature (lb360 tid 749 sys=16 40+s), prime
+suspect binder fd poll-wake semantics, fix per reference, roll.
+
+### 1. THE PARKED POLLS DECODED (mission item 1, complete)
+- The parks are NOT poll() syscalls. sys=16 on x86_64 = ioctl, a0=0x5,
+  a1=0xffffffffc0306201 = BINDER_WRITE_READ on /dev/binder fd 5. AMS46-T
+  reads the parked task's entry frame (orig_rax/rdi) — tid 749 was in
+  ONE blocking BWR read from j=92 through j=172+ (80+s), state=0x1
+  (INTERRUPTIBLE). SLOWTASK: ~a dozen services (el5_filekey_man,
+  storage_manager/daemon, OS_IPC_0_*, av_session, deviceprofile) parked
+  in the same BWR shape, ages 92-104s — all entered ~t=5.5s (idle).
+- Timeout argument: none — BWR read parks until work or a signal.
+- Wait queue: the thread's per-thread binder wait queue (thread.wait via
+  wait_event_interruptible, mirroring binder_wait_for_work's
+  prepare_to_wait(&thread->wait)) with waiting_for_proc_work membership.
+- fd class for actual poll()/epoll_wait() users (init le_epoll, ffrt,
+  netstack, dsoftbus): timerfd/eventfd/sockets — and OH NEVER polls the
+  binder fd (oh-robot sources checked: ipc framework is pure blocking
+  BWR; ipc_process_skeleton.cpp has a leftover epoll include, zero uses).
+
+### 2. THE DISCRIMINATION (mission item 2): wake path EXONERATED by data
+- Every tracked txn pick in lb360: SLOW-TXN queue=0 ms (only 4 SLOW-TXN
+  all boot, all queue 0) — work-to-wake-and-dispatch is 0 ms-class on
+  the exercised path. The 32 sys=16 TXN-HANG samples all show
+  wait-proc-work=false with a userspace-deferred reply or an FFRT
+  futex-parked handler (the adjudicated wedge family) — zero
+  "parked with pending proc work" shapes. The reference cannot beat
+  0 ms-class by a margin that explains 31 s; the poll-wake channel is
+  NOT the launcher wall. (25th's binder-parity adjudication stands.)
+
+### 3. REFERENCE-PARITY FIXES LANDED ANYWAY (mission item 3) — 491ebc09
+Source diff vs the fetched 6.6 binder.c found four divergences in the
+suspect family; all fixed (reference wins):
+1. Availability semantics: binder_available_for_proc_work_ilocked is
+   empty txn stack + empty own todo, NO looper flags. Removed the
+   LOOPER_ENTERED/REGISTERED gates from thread_has_work, the read drain
+   arm, waiting_threads membership, and wake_proc_one's pick. The old
+   gates (b85-era) could park a proc's only unflagged reader forever
+   with work queued (wake_proc_one found no pick; has_work hid the proc
+   todo) — a never-woken class the reference cannot have. sc161's
+   work_readable_by routing KEPT (narrower divergence preventing the
+   sc156 daemon-reader black hole); wake pick now prefers readers that
+   can actually read something queued (avoids routing-shaped wake eats).
+2. binder_poll ported: polling tid's binder thread state (created on
+   first poll, binder_get_thread parity), LOOPER_POLL (0x20) state,
+   has_work readiness predicate.
+3. binder poll_wait registration: binder_poll_wait/unwait in the
+   sys_poll wait registry (poll_wait(filp, &thread->wait) parity) —
+   poll()/epoll_wait() over a binder fd now wakes on the per-thread
+   queue instead of the 10 ms re-check slice (was: binder absent from
+   poll_wait_impls → NotWired fallback).
+4. binder_wakeup_poll_threads_ilocked parity: no-candidate wake now
+   wakes POLL-mode available threads.
+enq_elig probe predicate updated to match. x3 builds rc=0, make test
+green, pushed. Roll kernel: run/bzImage-ladder-pollwake (two-pass
+x86_64 release).
+
+### 4. ext4 wave (mission item 4): 9cc6188f + cbc6db61 verified intact
+on the branch after the origin/main merge (a31e9a4a; merge touched only
+docs/test/lmbench-report.md). The wave lands on main when this branch
+merges — no rebase needed; coordinator's earlier cherry-pick abort was
+main's diverged ext4 structure, and the branch lineage is the fix.
+
+### 5. ROLLS: lb361+ with the pollwake kernel (results appended below)
+
+### 6. ROLL RESULTS (pollwake kernel, bzImage-ladder-pollwake @ 491ebc09)
+- lb361 (load 2->5): LOST, wedge boot. Early cascade crawled
+  (foundation start 32.5s vs 8.4-8.8s on lb359/360), hiview exit-255 at
+  28.9s + write_updater-255; never reached bootanimation.ready;
+  appspawn->607 strand txn1737 exec 1467s at close.
+- lb362 (load 5->7): LOST, no-ladder boot. foundation 12.9s,
+  bootanimation.ready 14.9s / finished 22.4s, SetBundleQuota stream at
+  18s (the BMS store serving EARLY - a good sign), but zero
+  create-user/bundle-size ladder and no launcher.ready by 1500s (the
+  osaccount error:32 readiness family, 16.8s).
+- Pixels: 20 shots across both boots, all frozen classes (06b933b4 x9,
+  82f0a25f x11) - no change. Race tally with the parity kernel: 0/2
+  (25th was 0/3 on cg26b-class) - same dice, no outcome regression.
+- Regression watch on the fix: SLOW-TXN queue=0ms on BOTH new boots
+  (lb361 n=10, lb362 n=4 - the pick/wake path stays clean); USEGV
+  counts stable (lb358:0 - it spiraled before the segv window, lb359:62,
+  lb360:61, lb361:61, lb362:60 - usb_host same-rip segv present pre AND
+  post); hiview
+  exit-255 is 1/boot UNIVERSAL on historical boots (lb302-355 all have
+  it; lb358/359/360 were the exceptions) - NOT a fix artifact; lb361's
+  32.5s foundation crawl is within the known load-variance family
+  (lb345: 29s walls under 3-QEMU load) but watch it on the next rolls.
+- A/B wake-latency verdict (mission item 2, banked): our work-to-wake
+  is 0ms-class on every boot pre AND post fix (queue=0ms on all
+  SLOW-TXN across lb359-362); the reference boots the same image in
+  ~12s end-to-end and cannot beat 0ms-class picks by any margin that
+  explains a 31s gap. The binder poll/wake channel is EXONERATED as
+  the launcher wall. The wall remains: (a) the BMS/osaccount readiness
+  gap (error:32/29201 family - empty query ladder), (b) the early
+  spiral/wedge dice (userspace-internal FFRT waits, adjudicated).
+
+### Successor entry points (26th, in order)
+1. THE RACE: same recipe, quiet window (load <4): system-lb5 +
+   USERDATA=run/userdata-fresh2.img SMP=2 LOGLEVEL=6 " dfx=ams46,txnhunt
+   negmemo=1". Watch lb362's good sign (SetBundleQuota at 18s) repeat;
+   the account side (create user:100 bundle size:34) is the deciding
+   half. Pixels: md5 leaving {5f8b704d,06b933b4,82f0a25f,23312e5b} =
+   convert + report IMMEDIATELY.
+2. The osaccount error:32 (GetOsAccountProxy) family at ~16s is the
+   sharpest un-hunted structural loss visible on healthy boots - the
+   17th's empty-set decode's direct predecessor print. A probe boot
+   naming WHY the osaccount proxy fails at 16.8s (which SA load/order)
+   would close the last named gap on the losing side.
+3. lb361's early crawl (foundation 32.5s) under load 5: if the next
+   quiet-window roll shows foundation >15s, bisect between the parity
+   fix (491ebc09) and load noise by rolling the cg26b kernel once.
+4. Coordinator: 491ebc09 is pushed on biofix-fieldpoll (contains the
+   negstale fix lineage + ext4 htree/memo wave + this parity fix) -
+   merging the BRANCH (not cherry-picks) lands everything cleanly;
+   run the merge gate's tier-2 check (binder/ is a hot path).
