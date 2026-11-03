@@ -96,6 +96,52 @@ sustained load — then kernel-side fixes.
   userspace/tests/probes.tar.gz (extract.sh restores to test/);
   host-side drivers stay in test/ or run/.
 
+## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
+
+### Kernel fixes this session (3 commits, on top of the fs-lane negmemo/chroot base)
+1. **d326c72e poll: nfds > RLIMIT_NOFILE rejected before allocating**
+   (reference do_sys_poll parity) — ppoll01 INVALID_NFDS arm.
+2. **0115667a timers: poll-family waiters wake at the PRECISE ns deadline;
+   timerfd accepts TFD_TIMER_CANCEL_ON_SET** — recovered the whole
+   checkpoint-timer family: epoll_wait02 epoll_pwait03 pselect01
+   pselect01_64 select02 poll02 timerfd_settime02 (+ timerfd_settime01,
+   waitid08 WCONTINUED leg). The coarse-tick wait was the r22 "checkpoint
+   tests still failing" family's engine.
+3. **e2169c01 ipc: namespace-scope SysV IPC objects — per-ipc_namespace ids
+   tables** (the msg_comm "messages leak between namespaces" fix).
+   VERIFIED: msg_comm PASS x2 (fix1/fix2 chunks) + msgctl01 msgget01
+   msgsnd01 msgrcv01 semget01 semctl01 shmctl02 all PASS. Census gains:
+   msg_comm sem_comm shm_comm (the whole *_comm namespace family).
+
+### Census (x86_64+KVM, 1869 list, final kernel = the 3 fixes on the
+merged base): PASS 1042 -> **1059 (+17)**; 21 gains / 4 losses.
+Full table: results/delta-r23-vs-r22.txt. Gains include all r22-close
+queue targets: waitid08 (was CRASH), diotest2/5, dirtyc0w, inotify01,
+setpgid03, execveat01/02, fcntl17, setns02, float_exp_log, getrusage04.
+
+### Loss adjudication pending (r24 first item): getpriority01 FAIL
+(PRIO_USER arm, was PASS r22), pidns20 FAIL (was PASS), creat07
+FAIL->TIMEOUT (checkpoint family), shm_test TIMEOUT->CRASH 255,
+mmap3 POISON->FAIL (slow-machine class). cve-2017-17052 + kill02 =
+POISON (scan-driver artifacts, known flake family).
+
+### STILL OPEN (top): rt_sigprocmask01 CRASH 139 + rt_sigsuspend01 FAIL
+("Test killed by SIGSEGV") — r21 PASS -> r22 broken (window pinned:
+NOT caused by this session's fixes; producers are the r21->r22 set:
+preempt-heal observation bar 1918c4b5, binder deferral 963b3e95,
+128KB stacks e336143a, futex physical keys 122d8a78, tmpfs MAP_SHARED
+799cb942, WCONTINUED/waitid ab5b5da9, pretcode SA_RESTORER 2515424b,
+execveat 26540f5f, futex page-in 1ed73f7d). 2x isolation confirmed
+REAL (results-r23iso-a/b). Other open families: sigrelse01 (signal 34
+EINVAL), kill10 (SIGTERM), ppoll01 FAIL 2 cases, sigtimedwait01/
+sigwaitinfo01 (timeout class), msgstress01 (msgsnd EINVAL, flaky),
+shmat1 CRASH 255, shm_test CRASH.
+
+### Gates on final tree (predecessor logs): x3 builds rc=0
+(build-r23fix2-x86 / build-r23final-rv / build-r23final-aa64),
+make test GREEN (maketest-r23final4, "MT_GREEN attempt=10" — the
+rootfs.img write-lock trap needs the retry loop).
+
 ## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
 The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
 "PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —

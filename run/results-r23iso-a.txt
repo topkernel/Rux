@@ -1,0 +1,6 @@
+# idx|test|class|rc|tail
+0|rt_sigprocmask01|CRASH|139|
+1|rt_sigsuspend01|FAIL|2|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s tst_test.c:1677: TBROK: Test killed by SIGSEGV!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+2|waitid08|CRASH|137|CONTINUED waitid08.c:26: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110) Test timeouted, sending SIGKILL! Sending SIGKILL to test process... Test timeouted, sending SIGKILL! Test timeouted, sending SIGKILL!
+3|setpgid03|FAIL|2|: EPERM (1) setpgid03.c:58: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110) tst_test.c:1665: TINFO: Killed the leftover descendant processes  Summary: passed   2 failed   0 broken   1 skipped  0 warnings 0
+4|inotify01|PASS|0|wd=1 mask=20 cookie=0 len=0 inotify01.c:117: TPASS: get event: wd=1 mask=02 cookie=0 len=0 inotify01.c:117: TPASS: get event: wd=1 mask=08 cookie=0 len=0  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
