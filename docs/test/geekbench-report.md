@@ -1,4 +1,4 @@
-# Geekbench on Rux — Rig, Scores, and Findings (2026-11-01)
+# Geekbench on Rux — Rig, Scores, and Findings (2026-11-01, refreshed 2026-11-04)
 
 Lane `perf-geekbench`, first full Geekbench run on the Rux x86_64 kernel.
 Geekbench 5.5.1, AMD Ryzen 9 9950X, KVM (`-M q35 -accel kvm -cpu host
@@ -10,11 +10,21 @@ evidence below.
 
 ## Headline
 
-| | Rux (4 vCPU guest) | Reference, 4-CPU pinned | Reference, 32T full |
-|---|---|---|---|
-| **Single-Core Score** | **1941** | 2165 | 2549 |
-| **Multi-Core Score** | **7139** | 7027 | 20402 |
-| **vs 4-CPU reference** | 90% single / 102% multi | 100% | (topology differs) |
+| | Rux 11-01 | Rux 11-04 (main=8d81c5da) | Reference, 4-CPU pinned | Reference, 32T full |
+|---|---|---|---|---|
+| **Single-Core Score** | 1941 → 2274 (11-02 rounds) | **2115** | 2165 | 2549 |
+| **Multi-Core Score** | 7139 | **7332** | 7027 | 20402 |
+| **vs 4-CPU reference** | 90% / 102% | **97.7% single / 104% multi** | 100% | (topology differs) |
+
+The 2026-11-04 refresh (kernel 8d81c5da — RCU fd lookup + retire
+reaper + dispatch consolidation) ran under host loadavg ~5.5 (the
+11-02 quiet-window SC reading was 2274; single-core deltas under ~15%
+are noise per the note below, so 2115 vs 2274 is a load-window
+reading, not a regression signal). Multi-core 7332 is the best
+recorded value. All 21 workloads completed in both sections; scores
+recovered from the upload-capture path (see the rig section), full
+per-workload table for this run: `run/geekbench/` capture of
+2026-11-04T00:19 (parse via `userspace/geekbench/parse-capture.py`).
 
 All 21 workloads complete in both the single-core and the multi-core
 section. No section dies. The reference columns are the same Geekbench
@@ -95,6 +105,59 @@ Artifacts: `run/geekbench/{native5-*.log, rux-serial.log,
 captures-native.log, captures-rux.log}`.
 
 ## Per-workload scores
+
+### Single-Core (2026-11-04, main=8d81c5da)
+
+| Category | Workload | Rux 11-04 | Rux 11-01 | Ref 4-CPU | Rux/4CPU 11-04 |
+|---|---|---|---|---|---|
+| AES-XTS | AES-XTS | 4898 | 1219 | 7643 | 64% |
+| Integer | Text Compression | 1446 | 805 | 1536 | 94% |
+| Integer | Image Compression | 1901 | 2001 | 1813 | 105% |
+| Integer | Navigation | 1416 | 1364 | 1753 | 81% |
+| Integer | HTML5 | 1991 | 2262 | 1651 | 121% |
+| Integer | SQLite | 1833 | 1974 | 1480 | 124% |
+| Integer | PDF Rendering | 1758 | 2035 | 2074 | 85% |
+| Integer | Text Rendering | 1771 | 1945 | 1456 | 122% |
+| Integer | Clang | 1891 | 1964 | 2161 | 88% |
+| Integer | Camera | 2005 | 2105 | 1861 | 108% |
+| Float | N-Body Physics | 2227 | 2341 | 1956 | 114% |
+| Float | Rigid Body Physics | 1885 | 1913 | 1737 | 109% |
+| Float | Gaussian Blur | 2136 | 2344 | 2149 | 99% |
+| Float | Face Detection | 2401 | 2675 | 2770 | 87% |
+| Float | Horizon Detection | 1834 | 1904 | 1459 | 126% |
+| Float | Image Inpainting | 4100 | 4055 | 4092 | 100% |
+| Float | HDR | 4563 | 4414 | 3614 | 126% |
+| Float | Ray Tracing | 2725 | 2772 | 2042 | 133% |
+| Float | Structure from Motion | 1806 | 1889 | 1661 | 109% |
+| Float | Speech Recognition | 1712 | 1737 | 1741 | 98% |
+| Float | Machine Learning | 2511 | 2277 | 2028 | 124% |
+
+### Multi-Core (2026-11-04, main=8d81c5da)
+
+| Category | Workload | Rux 11-04 | Rux 11-01 | Ref 4-CPU | Rux/4CPU 11-04 |
+|---|---|---|---|---|---|
+| AES-XTS | AES-XTS | 9331 | 9278 | 8972 | 104% |
+| Integer | Text Compression | 5787 | 5792 | 3851 | 150% |
+| Integer | Image Compression | 7410 | 7552 | 7481 | 99% |
+| Integer | Navigation | 4187 | 4033 | 3546 | 118% |
+| Integer | HTML5 | 8087 | 7227 | 7151 | 113% |
+| Integer | SQLite | 7069 | 7012 | 6829 | 104% |
+| Integer | PDF Rendering | 6566 | 7253 | 7632 | 86% |
+| Integer | Text Rendering | 5794 | 4569 | 5924 | 98% |
+| Integer | Clang | 7359 | 7300 | 7823 | 94% |
+| Integer | Camera | 7191 | 7137 | 7477 | 96% |
+| Float | N-Body Physics | 7174 | 6484 | 7501 | 96% |
+| Float | Rigid Body Physics | 7463 | 7501 | 7589 | 98% |
+| Float | Gaussian Blur | 7682 | 7592 | 7694 | 100% |
+| Float | Face Detection | 9949 | 8936 | 10296 | 97% |
+| Float | Horizon Detection | 7111 | 7380 | 7616 | 93% |
+| Float | Image Inpainting | 14838 | 15136 | 12349 | 120% |
+| Float | HDR | 17872 | 18577 | 18962 | 94% |
+| Float | Ray Tracing | 13374 | 13410 | 11370 | 118% |
+| Float | Structure from Motion | 7155 | 7231 | 7486 | 96% |
+| Float | Speech Recognition | 5939 | 5869 | 4537 | 131% |
+| Float | Machine Learning | 5641 | 5005 | 5635 | 100% |
+
 
 ### Single-Core
 
