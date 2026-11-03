@@ -1000,6 +1000,11 @@ pub const SLOT_W_R56D: u32 = 2;
 pub const SLOT_W_R56C: u32 = 3;
 pub const SLOT_W_STEAL: u32 = 4;
 pub const SLOT_W_ABORT_REPUB: u32 = 5;
+/// r24 (kill10 wedge): idle-loop own-slot heal — the executing idle task
+/// found its own slot naming a real task (the lying-busy-slot shape that
+/// parks wake victims forever on x86_64, where the pid-hash harvester is
+/// gated off).
+pub const SLOT_W_IDLE_HEAL: u32 = 6;
 pub static SLOT_WRITER: [core::sync::atomic::AtomicU32; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
 pub static SLOT_WRITER_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -3714,6 +3719,82 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 /// Returns true if the task was transitioned and enqueued.
 pub fn wake_up_enqueue(task: *mut Task) -> bool {
     wake_up_enqueue_opt(task, None)
+}
+
+/// r24 (kill10 wedge hunt): discriminator census for the W2
+/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
+/// line tells "linked but starved" from "orphaned live pick mark" from
+/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
+/// formats; the caller prints after the guard is dropped.
+pub struct W2RefusalCensus {
+    pub linked: bool,
+    pub on_rq: bool,
+    pub busy_slot: i32,
+    pub idle_slot: i32,
+    pub exec_ns: u64,
+    pub jiffies: u64,
+    pub quantum_ms: u32,
+}
+
+impl core::fmt::Display for W2RefusalCensus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
+            self.linked,
+            self.on_rq,
+            self.busy_slot,
+            self.idle_slot,
+            self.exec_ns,
+            self.jiffies,
+            self.quantum_ms
+        )
+    }
+}
+
+/// Snapshot the refusing guard's view of `task` (used by task.rs's W2
+/// report). Takes the GRQ lock briefly, mirroring wake_up_enqueue_opt's
+/// own acquisition (same context, same IRQ discipline).
+pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
+    let mut out = W2RefusalCensus {
+        linked: false,
+        on_rq: false,
+        busy_slot: -1,
+        idle_slot: -1,
+        exec_ns: 0,
+        jiffies: crate::drivers::timer::get_jiffies(),
+        quantum_ms: 0,
+    };
+    if task.is_null() {
+        return out;
+    }
+    let grq_guard = grq().lock_irqsave();
+    unsafe {
+        out.linked = match (*task).policy() {
+            SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
+            SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                grq_guard.cfs_rq.is_linked(task)
+            }
+        };
+        let se = (*task).sched_entity();
+        out.on_rq = se.on_rq.load(core::sync::atomic::Ordering::Acquire);
+        out.exec_ns = se
+            .sum_exec_runtime
+            .load(core::sync::atomic::Ordering::Acquire);
+        out.quantum_ms = (*task).get_time_slice();
+        let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+        for c in 0..MAX_CPUS {
+            if cpu_state(c).current == task {
+                if idle_mask & (1u32 << c) != 0 {
+                    out.idle_slot = c as i32;
+                } else {
+                    out.busy_slot = c as i32;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// INV-LOCK-5 load-bearing twin: wake while a futex bucket lock is
@@ -7556,6 +7637,74 @@ fn lp_idle_lie_report(cpu: usize) {
     }
 }
 
+/// r24 (kill10 wedge, LTP lane): idle-loop own-slot heal.
+///
+/// The executing context is this CPU's IDLE task (the only caller is
+/// cpu_idle_loop, after its schedule() returned) — that fact alone makes
+/// the CPU the sole authority on what it is running. If this CPU's slot
+/// names a REAL task at that point, the name is provably stale: every
+/// in-tree path that publishes a real task into a slot does so from
+/// that CPU's own pick inside schedule(), and if the pick had switched,
+/// control would not be back in the idle loop. The named task is left
+/// RUNNING/unlinked with every future wake refused by the curr_on scan
+/// (the WAKE-HEAL-SKIP why=c / W2 family) — permanent on x86_64, where
+/// the pid-hash orphan harvester is gated off (the x86-scribble4 steal
+/// crash) and R56c only heals IDLE-marked slots. kill10's fork/exit
+/// signal storm produces this shape within seconds and parks the whole
+/// process graph; the r23 census carries it as the kill10 FAIL.
+///
+/// Heal deterministically (no time heuristics, no steal of a possibly
+/// live task — the executing idle task IS the proof the slot lies):
+/// rewrite the slot to the idle task under the GRQ, return the un-named
+/// task PINNED (caller requeues it via wake_up_enqueue and task_put's
+/// the pin). Foreign slot writers all hold the GRQ, so the re-read
+/// under the lock closes the race with a concurrent repair.
+pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
+    if cpu >= MAX_CPUS {
+        return core::ptr::null_mut();
+    }
+    let idle_task = cpu_state(cpu).idle;
+    if idle_task.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut victim: *mut Task = core::ptr::null_mut();
+    let mut victim_pid = 0u32;
+    let mut prev_tag = 0u32;
+    {
+        let _g = grq().lock_irqsave();
+        let curr = cpu_state(cpu).current;
+        if curr.is_null() || curr == idle_task || unsafe { (*curr).pid() == 0 } {
+            return core::ptr::null_mut();
+        }
+        prev_tag = SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        victim_pid = unsafe { (*curr).pid() };
+        // Pin the page before dropping the slot's implicit pin; if the
+        // page is at its last refcount (exiting), still rewrite the
+        // stale name but do not hand a dead page to the wake path.
+        if !unsafe { crate::process::task::Task::try_pin(curr) } {
+            cpu_state_mut(cpu).current = idle_task;
+            slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
+            return core::ptr::null_mut();
+        }
+        cpu_state_mut(cpu).current = idle_task;
+        slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
+        victim = curr;
+    }
+    // Census (rate-limited): the healed pid + the tag of the writer that
+    // left the stale name — the producer hunt's anchor.
+    static HEAL_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+        crate::pr_warn!(
+            "SLOT-LIE-HEALED cpu={} pid={} prev_writer_tag={}",
+            cpu,
+            victim_pid,
+            prev_tag
+        );
+    }
+    victim
+}
+
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 
@@ -7715,6 +7864,34 @@ pub fn cpu_idle_loop() -> ! {
             )
         {
             lp_idle_lie_report(cpu_id);
+        }
+
+        // r24 (kill10 wedge): the same condition, healed instead of only
+        // reported. We are the executing idle task of THIS cpu — the
+        // slot naming a real task here is provably a stale pick mark.
+        // Rewrite it to the idle task and requeue the un-named victim;
+        // its parked wake waiters (WAKE-HEAL-SKIP why=c / W2 refusals)
+        // then succeed on the next kick. Without this, x86_64 has no
+        // healer for the shape at all (harvester gated riscv64-only) and
+        // the whole process graph parks forever (kill10, and the
+        // both-CPU permanent halt variant).
+        let mut is_idle = is_idle;
+        if !is_idle {
+            let victim = idle_heal_own_slot(cpu_id);
+            if !victim.is_null() {
+                is_idle = {
+                    let pcpu = this_cpu();
+                    let curr = pcpu.current;
+                    !curr.is_null() && unsafe { (*curr).pid() == 0 }
+                };
+                // Requeue outside the heal's GRQ section (probe-lock
+                // discipline): the pin keeps the page alive; the R46
+                // phantom path inside re-verifies linkage/ownership
+                // under its own lock and refuses a task that exited
+                // under the pin.
+                wake_up_enqueue(victim);
+                unsafe { crate::process::task::Task::task_put(victim) };
+            }
         }
 
         if is_idle {

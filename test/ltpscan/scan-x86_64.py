@@ -61,7 +61,7 @@ def debugfs_write(image, local_path, remote_path):
         os.unlink(cmdfile.name)
 
 
-def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path, accel="kvm"):
+def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path, accel="kvm", append=""):
     """Boot once and run `tests`. Returns {name: (rc, tail)} for reported tests."""
     chunk_local = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
     chunk_local.write("\n".join(tests) + "\n")
@@ -76,7 +76,8 @@ def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path, accel="kvm
         "-drive", f"file={image},if=none,id=rootfs,format=raw,file.locking=off",
         "-device", "virtio-blk-pci,drive=rootfs",
         "-kernel", kernel,
-        "-append", "root=/dev/vda rw init=/test/ltpscan console=ttyS0",
+        "-append", ("root=/dev/vda rw init=/test/ltpscan console=ttyS0 "
+                    + append.strip()).strip(),
     ]
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
@@ -156,6 +157,8 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--accel", default="kvm")
+    ap.add_argument("--append", default="",
+                    help="extra kernel cmdline tokens (e.g. 'negmemo=1')")
     ap.add_argument("--keep-logs", help="directory to keep per-chunk serial logs")
     args = ap.parse_args()
 
@@ -183,7 +186,7 @@ def main():
                 if args.keep_logs else tempfile.mktemp(suffix=".log")
             got = run_chunk(args.image, args.kernel, remaining,
                             args.qemu_timeout, args.smp, args.mem, log_path,
-                            args.accel)
+                            args.accel, args.append)
             for name in list(remaining):
                 if name in got:
                     rc, tail = got[name]

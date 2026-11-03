@@ -1,0 +1,19 @@
+[delta] results/results-r23.txt: Counter({'PASS': 1059, 'TCONF': 503, 'FAIL': 245, 'CRASH': 29, 'EXECFAIL': 17, 'TIMEOUT': 13, 'POISON': 3})
+[delta] results/results-r24.txt: Counter({'PASS': 1060, 'TCONF': 503, 'FAIL': 246, 'CRASH': 30, 'EXECFAIL': 17, 'TIMEOUT': 12, 'POISON': 1})
+
+[delta] PASS gains (5):
+  + creat07 (was TIMEOUT)
+  + cve-2017-17052 (was POISON)
+  + getpriority01 (was FAIL)
+  + kill02 (was POISON)
+  + pidns20 (was FAIL)
+
+[delta] PASS losses (4):
+  - creat06 (now CRASH)
+  - epoll_pwait03 (now FAIL)
+  - ftest03 (now FAIL)
+  - getrusage04 (now FAIL)
+
+[delta] non-PASS class moves:
+
+[delta] PASS 1059 -> 1060 (+1)
