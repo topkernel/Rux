@@ -2827,14 +2827,24 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         // LOGLEVEL=6 — and lb348's mprotect-ENOMEM desync happened
         // INSIDE this fill cycle, 270ms before two canary deaths. The
         // call is boot-time-rare (per-DSO fill), volume is bounded.
-        crate::pr_info!(
-            "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
-            crate::process::current_pid(),
-            old_addr,
-            old_size_aligned,
-            new_addr_arg,
-            new_size_aligned
-        );
+        // 24th session: bounded it for real — the per-THREAD slice moves
+        // make this 4.5-8.2k lines/boot (lb353-355), the largest single
+        // print class on the roll kernel and a named wedge-window
+        // amplifier (print-path CPU keeps binder picks at seconds). The
+        // cfi4 hunt is decoded; a 60-line presence sample keeps the
+        // shape identifiable.
+        static MRC_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if MRC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            crate::pr_info!(
+                "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
+                crate::process::current_pid(),
+                old_addr,
+                old_size_aligned,
+                new_addr_arg,
+                new_size_aligned
+            );
+        }
     }
 
     // 1. Find VMA covering old_addr (full attributes: the remap paths
