@@ -6,6 +6,7 @@
 //! Virtual File System (VFS)
 
 pub mod file;
+pub mod fdreap;
 pub mod inode;
 pub mod dentry;
 pub mod pipe;

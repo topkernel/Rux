@@ -335,17 +335,13 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     let ns_to_ticks = ((total_nanos as u64).saturating_mul(freq_hz) / 1_000_000_000).saturating_add(1);
     let hres_deadline = now0.saturating_add(ns_to_ticks);
 
-    // Jiffy bookkeeping for the wheel entry: the first jiffy that FULLY
-    // covers the precise deadline (ceil + 1 grid tick). The softirq's
-    // expiry decision uses expires_time exclusively for hres entries (a
-    // jiffy fallback firing these EARLY — jiffies lag the time grid under
-    // load — consumed the one-shot wake and hung the sleeper), so this
-    // value no longer arms anything by itself; it is kept for wheel
-    // diagnostics/readback symmetry.
-    let start_jiffies = timer::get_jiffies();
-    let ticks_per_jiffy = freq_hz / timer::HZ;
-    let sleep_jiffies = (ns_to_ticks + ticks_per_jiffy - 1) / ticks_per_jiffy + 1;
-    let target_jiffies = start_jiffies.saturating_add(sleep_jiffies);
+    // Jiffy bookkeeping note (arch-s5): the first wheel version still
+    // computed a first-check jiffy here and passed it to the arm; the
+    // typed arm (`WakeGuard::arm_hres`) derives the routing horizon
+    // inside the wheel from the precise deadline alone (the driver's
+    // exact grid mapping), so caller-side jiffy bookkeeping is gone
+    // from this path entirely — the early-fire mixed-compare bug class
+    // has no caller-side residue left.
 
     // Get current task pointer + PID for timer wakeup
     let current = match crate::sched::current() {
@@ -363,11 +359,11 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // precise deadline (jiffy fallback inside the wheel).
     // Without this, the sleep below would have no mechanism to wake us up
     // — timer softirq would fire but nobody would call wake_up_process.
-    let mut timer_id = crate::timer::add_timer_wakeup_hres(target_jiffies, hres_deadline, my_pid);
-    // The hart timer may already be armed for the NEXT GRID TICK, which can
-    // be LATER than our precise deadline — re-arm it now (we are running on
-    // the hart that will sleep).
-    timer::rearm_for_hres();
+    // arch-s5: the typed WakeGuard owns the registration — cancel and
+    // re-arm are consuming ops (double-del / stale-id-del are compile
+    // errors), the hart re-program for the precise deadline is baked
+    // into the arm, and Drop cancels on every early return.
+    let mut wake = crate::timer::WakeArmed::arm_hres(hres_deadline, my_pid);
 
     // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
     // The timer softirq's wake is ONE-SHOT: it fires wake_up_process exactly
@@ -388,7 +384,8 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
 
         // Check if target time has been reached
         if now >= hres_deadline {
-            crate::timer::del_timer(timer_id);
+            // Drop cancels the (already-fired) registration — same
+            // single del_timer the old explicit call made.
             return 0;  // Success
         }
 
@@ -399,7 +396,11 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         // Check for pending signals
         use crate::signal;
         if signal::signal_pending() {
-            crate::timer::del_timer(timer_id);
+            // Cancel BEFORE the rem copy (the old explicit del order):
+            // a registration left armed could self-wake during the copy.
+            if let Some(g) = wake.take() {
+                g.cancel();
+            }
             // Write remaining time to rem (if rem_ptr is provided).
             // A faulting rem write is EFAULT — Linux reports the copy
             // failure over the EINTR (LTP clock_nanosleep01's
@@ -430,28 +431,15 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         // already be spent while the deadline is still in the future — any
         // early expiry consumed the entry, and a refused/captured early
         // wake is absorbed by the re-checks below while the SLEEP ITSELF
-        // would have no waker left. Re-arm a fresh timer in that case
-        // (mirrors the wheel-side fix that stops hres entries firing on
-        // the lagging jiffy clock; this guards against any other
-        // early-consumption source). A failed re-arm (pool full) falls
-        // through to the runnable-yield branch — never sleep waker-less.
-        if timer_id != 0 && !crate::timer::timer_pending(timer_id) {
-            // Wakewatch: this branch firing means the one-shot token was
-            // consumed before the deadline (early-fire family). Counted
-            // + printed (rate-gated) so a load-dependent regression of
-            // the early-consumption bug is visible.
-            crate::timer::ww_note_rearm();
-            timer_id = crate::timer::add_timer_wakeup_hres(
-                target_jiffies,
-                hres_deadline,
-                my_pid,
-            );
-            if timer_id != 0 {
-                timer::rearm_for_hres();
-            }
-        }
+        // would have no waker left. `rearm_if_spent` consumes the stale
+        // guard and returns the fresh one (a stale-id del after this point
+        // is unrepresentable); a failed re-arm (pool full) yields None and
+        // falls through to the runnable-yield branch — never sleep
+        // waker-less. The None case stays None (the old id-0 code never
+        // retried the arm either).
+        wake = wake.and_then(|g| g.rearm_if_spent());
 
-        if timer_id != 0 {
+        if wake.is_some() {
             // Mark INTERRUPTIBLE BEFORE the final re-check (state-first).
             // SAFETY: current is the running task's pointer (see above).
             unsafe {

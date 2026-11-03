@@ -1,0 +1,12 @@
+exec 900 /test/linux-ltp/testcases/bin/mmapstress01
+exec 900 /test/linux-ltp/testcases/bin/mmap-corruption01
+exec 900 /test/linux-ltp/testcases/bin/mmapstress09 -p 40 -t 0.4
+exec 600 /test/linux-ltp/testcases/bin/fork_procs -n 500
+exec 900 /test/linux-ltp/testcases/bin/mmapstress01
+exec 900 /test/linux-ltp/testcases/bin/mmap-corruption01
+exec 900 /test/linux-ltp/testcases/bin/mmapstress09 -p 40 -t 0.4
+exec 600 /test/linux-ltp/testcases/bin/fork_procs -n 500
+exec 900 /test/linux-ltp/testcases/bin/mmapstress01
+exec 900 /test/linux-ltp/testcases/bin/mmap-corruption01
+exec 900 /test/linux-ltp/testcases/bin/mmapstress09 -p 40 -t 0.4
+exec 600 /test/linux-ltp/testcases/bin/fork_procs -n 500

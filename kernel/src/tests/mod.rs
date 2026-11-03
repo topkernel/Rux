@@ -353,6 +353,8 @@ pub mod syscall_memory;
 #[cfg(feature = "unit-test")]
 pub mod syscall_time;
 #[cfg(feature = "unit-test")]
+pub mod timer_wheel;
+#[cfg(feature = "unit-test")]
 pub mod syscall_network;
 #[cfg(feature = "unit-test")]
 pub mod syscall_sched;
@@ -669,6 +671,9 @@ pub fn run_all_tests() {
 
     test_group_start("syscall_time");
     syscall_time::test_syscall_time();
+
+    test_group_start("timer-wheel");
+    timer_wheel::test_timer_wheel();
 
     test_group_start("syscall_network");
     syscall_network::test_syscall_network();

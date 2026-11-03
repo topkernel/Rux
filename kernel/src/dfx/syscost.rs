@@ -644,6 +644,41 @@ pub fn zone_uart_pop() {
 
 /// Is the current CPU modeled IF=0 right now (for the putc if0 split)?
 #[inline]
+/// SP-5 r5 frozen-tick trap: the CURRENTLY-OPEN IF=0 segment on `cpu` —
+/// its opener site (file:line of the disable call) and raw-TSC age.
+/// `None` when the probe is off or no segment is open on that CPU.
+/// Cross-CPU diagnostic read (the trap fires on the other CPU's behalf
+/// too); the location reference is a kernel static.
+pub fn open_cli_segment(cpu: usize) -> Option<(&'static str, u32, u64)> {
+    if !on() || cpu >= crate::config::MAX_CPUS {
+        return None;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let age = crate::arch::cpu::read_counter()
+        .saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
+    let s = IFZ.slot[cpu].load(Ordering::Relaxed);
+    if s == SLOT_OF {
+        return Some(("(overflow-row)", 0, age));
+    }
+    if (s as usize) >= REST_SITES_N {
+        return Some(("(no-rest-slot)", 0, age));
+    }
+    let key = REST_SITES[s as usize].loc.load(Ordering::Relaxed);
+    if key == 0 {
+        return Some(("(site-key-0)", 0, age));
+    }
+    // SAFETY: keys are &'static Location references stored at open time
+    // by the disable hook on this kernel's own code (same read the
+    // heartbeat's rest-site table uses).
+    let (file, line) = unsafe {
+        let l = &*(key as *const core::panic::Location<'static>);
+        (l.file(), l.line())
+    };
+    Some((file, line, age))
+}
+
 pub fn if0_now() -> bool {
     let cpu = crate::arch::cpu_id() as usize;
     cpu < crate::config::MAX_CPUS && IFZ.if0[cpu].load(Ordering::Relaxed) != 0

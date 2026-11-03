@@ -432,7 +432,19 @@ impl Zone {
                         // SAFETY: leader pfn valid; lock held.
                         unsafe {
                             (*leader).set_order(order as u8);
-                            (*leader).set_flag(PageFlag::Referenced);
+                            // SP-7 (stress-port r7): NO Referenced flag
+                            // here. The reference kernel's prep_new_page
+                            // hands out flag-clear pages — PG_referenced
+                            // exists only after mark_page_accessed(). The
+                            // old plant made every freshly allocated page
+                            // look hot to reclaim: measured on the
+                            // exhaustion class, 46% of all examined anon
+                            // candidates rotated away on flags that no
+                            // access ever set (the SP-7 VSCAN-CENSUS
+                            // baseline; nothing in Rux sets Referenced on
+                            // anon pages legitimately — lru_note_refs has
+                            // no callers and the hardware accessed bit is
+                            // never propagated).
                         }
                     }
                 }

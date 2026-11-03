@@ -306,7 +306,15 @@ tier2_check() {
     echo "== Tier 2: pbench medians =="
     local bz="$1"
     local pbtag="${TAG}-pb"
+    # SP-7 re-bank (stress-port r7): the pbench anchor column is now the
+    # KVM debug class (x86-FIRST platform priority; TCG cells proved
+    # load-hostage: the same kernel read p2 10.1-10.7 at load ~7 and
+    # 28.2 at load 5-6 across host windows, while three KVM reps agree
+    # within +-1%). Override back to the retired TCG class with
+    # PB_ACCEL=tcg,thread=multi — but then the anchor below is the wrong
+    # class (see the P2 provenance note in perf-gate-baseline.md).
     python3 "$ROOT/test/pbench_boot.py" --bzimage "$bz" --tag "$pbtag" \
+        --accel "${PB_ACCEL:-kvm}" \
         --timeout 1200 > "$ROOT/run/perf-gate-$pbtag.log" 2>&1
     local rc=$?
     local res
@@ -323,20 +331,24 @@ tier2_check() {
     python3 - "$res" "${PB_BASELINE:-}" <<'EOF'
 import re, sys
 res, basefile = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
-# pb1 smoke anchor column (perf-report.md 8.5 notes; ONE boot, TCG,
-# minimal rootfs — sanity anchor, not a banked baseline). All cells are
-# pb1's own medians from run/pb1-results.txt (us). Leg-31 fix: four
-# cells (write_fsync/mkdir_rmdir/unlink/append) had been transcribed
-# from the REFERENCE kernel column of the 8.10 gap table — values 4-1000x
-# below anything a Rux boot can read, making those rows FAIL by
-# construction. Pass --pbench-baseline <results file> to override.
+# SP-7 re-bank (stress-port r7, 2026-11-03): KVM debug-class anchor —
+# median of THREE full boards (sp7pb-kvm1/2/3) on the round-7 kernel
+# (main 91de1d04 + SP-7 mm fix), quiet windows (foreign_qemus<=2),
+# every rep DONE rc=0; worst spread across reps: write_fsync +11%,
+# everything else within a few percent. Supersedes the pb1 smoke
+# column (ONE TCG boot, sanity anchor): TCG-class p2 cells were
+# load-hostage (same kernel: 10.1-10.7 at load ~7 in r6, 28.2 at
+# load 5-6 in r7) while the KVM family is +-1%. Full provenance in
+# docs/development/perf-gate-baseline.md (P2_CTXSW ANCHOR
+# PROVENANCE). Cross-class comparison (TCG run vs these cells)
+# is meaningless. Pass --pbench-baseline <results file> to override.
 ANCHOR = {
-    "p1_null": 4.57, "p1_clock": 4.95, "p2_ctxsw": 15.4,
-    "p3b_cow": 24.6, "p6_write_fsync": 18124.666,
+    "p1_null": 0.300, "p1_clock": 0.371, "p2_ctxsw": 1.242,
+    "p3b_cow": 8.075, "p6_write_fsync": 8442.573,
     # key spelling must equal pbench's report_ticks() name (p6_mkdrmdir);
     # the b6 gate run silently skipped this row on the mismatch
-    "p6_mkdrmdir": 83191.968, "p6_unlink": 32815.925,
-    "p6_append": 500.378,
+    "p6_mkdrmdir": 216.733, "p6_unlink": 54.638,
+    "p6_append": 5.189,
 }
 if basefile:
     for line in open(basefile, errors="replace"):
@@ -363,8 +375,9 @@ for name, med in sorted(rows.items()):
               "med=%.3f" % med, "anchor %.3f +-20%%" % ANCHOR[name])
     else:
         print("INFO pbench %s med=%.3f  no anchor (baseline cell PENDING)" % (name, med))
-print("INFO pbench note: anchor is the pb1 SMOKE column (one TCG boot) —"
-      " treat FAIL as a lead, rerun before calling a regression")
+print("INFO pbench note: anchor is the SP-7 KVM debug-class re-bank"
+      " (median of 3 boards, round-7 kernel) — treat FAIL as a lead,"
+      " rerun before calling a regression")
 EOF
 }
 

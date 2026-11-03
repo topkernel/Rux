@@ -712,6 +712,11 @@ pub fn oom_forensic_dump(site: &str) {
         crate::timer::WW_TICK_IRQ[1].load(core::sync::atomic::Ordering::Relaxed),
     );
 
+    // SP-5 round 5: frozen-tick four-way discrimination (LAPIC LVT/TMICT/
+    // TMCCT/IRR/ISR live snapshot, self + peer-via-IPI, arm trail). The
+    // dump context still executes during the cascade by construction.
+    crate::timer::tick_trap_report("oom");
+
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
         let (n, slow, max_ns) = super::swap::swap_write_census();
@@ -722,6 +727,9 @@ pub fn oom_forensic_dump(site: &str) {
             max_ns / 1_000_000
         );
     }
+    // SP-7: per-page skip reasons — why anon candidates never reach the
+    // swap write above.
+    crate::println!("OOM-FORENSIC: {}", super::vmscan::vscan_census_line());
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
     if let Some(node) = unsafe { first_online_node_mut() } {
