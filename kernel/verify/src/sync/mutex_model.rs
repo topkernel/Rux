@@ -115,7 +115,9 @@ impl MutexState {
 
     /// Try to take the lock / recurse into it, UNGATED: a free lock goes
     /// to whoever asks. Kernel call sites: the no-task / preempt-count
-    /// degraded spinner loop in `lock()`.
+    /// degraded spinner loop in `lock()`. The recursion arm requires
+    /// `locked` (owner == 0 also names the free state — pid-0 callers
+    /// must not "recurse into" a free lock; found by the loom harness).
     pub fn try_acquire_or_recurse(&mut self, now: u64, pid: u32) -> bool {
         if !self.locked {
             self.locked = true;
@@ -123,7 +125,7 @@ impl MutexState {
             self.depth = 1;
             self.acquired_at = now;
             true
-        } else if self.owner == pid {
+        } else if self.locked && self.owner == pid {
             self.depth += 1;
             true
         } else {
@@ -134,7 +136,10 @@ impl MutexState {
     /// The acquire for fresh sleepable callers: identical to
     /// `try_acquire_or_recurse` except a FREE lock is only taken when
     /// no waiter is parked and no wake token is outstanding
-    /// (`waiters == 0`) — the R84 fairness gate.
+    /// (`waiters == 0`) — the R84 fairness gate. The recursion arm
+    /// requires `locked` (same owner == 0 alias; lock()'s adaptive
+    /// fair-try runs before the can_sleep check, so pid-0 no-task
+    /// callers reach this arm gated, and must be refused).
     pub fn try_acquire_or_recurse_fair(&mut self, now: u64, pid: u32) -> bool {
         if !self.locked && self.waiters == 0 {
             self.locked = true;
@@ -142,7 +147,7 @@ impl MutexState {
             self.depth = 1;
             self.acquired_at = now;
             true
-        } else if self.owner == pid {
+        } else if self.locked && self.owner == pid {
             self.depth += 1;
             true
         } else {
@@ -154,9 +159,9 @@ impl MutexState {
     /// lock unconditionally and leaves the waiter count in the same
     /// critical section. A held lock or a lost race against another
     /// token holder returns false: the caller re-parks and keeps its
-    /// count.
+    /// count. The recursion arm requires `locked` (same alias).
     pub fn try_acquire_wake_token(&mut self, now: u64, pid: u32) -> bool {
-        if self.owner == pid {
+        if self.locked && self.owner == pid {
             self.depth += 1;
             true
         } else if !self.locked {
@@ -195,7 +200,7 @@ impl MutexState {
             *counted = true;
             *first_park = now;
         }
-        let take = if self.owner == pid {
+        let take = if self.locked && self.owner == pid {
             // Unreachable while parked (a counted waiter has not taken
             // the lock, so it cannot own it), kept so recursion is
             // honored on every path.
@@ -284,7 +289,7 @@ pub mod planted {
             *counted = true;
             *first_park = now;
         }
-        let take = if st.owner == pid {
+        let take = if st.locked && st.owner == pid {
             st.waiters -= 1;
             *counted = false;
             st.depth += 1;
@@ -313,7 +318,7 @@ pub mod planted {
         now: u64,
         pid: u32,
     ) -> bool {
-        if st.owner == pid {
+        if st.locked && st.owner == pid {
             st.depth += 1;
             true
         } else if !st.locked {
@@ -341,7 +346,7 @@ pub mod planted {
         st.waiters += 1;
         *counted = true;
         *first_park = now;
-        let take = if st.owner == pid {
+        let take = if st.locked && st.owner == pid {
             st.waiters -= 1;
             *counted = false;
             st.depth += 1;
