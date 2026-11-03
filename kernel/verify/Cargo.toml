@@ -5,8 +5,15 @@ edition = "2021"
 
 [workspace]
 
+[features]
+# S-1 pilot: loom interleaving harness. Optional so the plain test /
+# kani / miri paths never build it. Run with:
+#   RUSTFLAGS="--cfg loom" cargo test --features loom --lib sync::mutex_loom
+loom = ["dep:loom"]
+
 [dependencies]
 proptest = "1.5"
+loom = { version = "0.7.2", optional = true }
 
 # Note: kani is injected by `cargo kani` at verification time, not listed as a dependency.
 # It is available via #[cfg(kani)] gates only when running `cargo kani`.
