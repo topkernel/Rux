@@ -140,7 +140,7 @@ def normalize(text):
     text = re.sub(r'#\[inline[^\]]*\]\s*\n?', '', text)
 
     # Remove all comments (doc comments /// and regular //)
-    text = re.sub(r'\s*//[^\n]*\n', '\n', text)
+    text = re.sub(r'\s*//[^\n]*\n?', '\n', text)
 
     # pub(crate) -> pub
     text = re.sub(r'pub\(crate\)\s+', 'pub ', text)
@@ -208,6 +208,69 @@ MAPPINGS = [
         "type": "RawSpinlock",
         "compare": ["try_lock", "unlock", "is_locked"],
         "skip": ["lock", "new"],  # lock has deadlock warn stripped by design
+    },
+    {
+        # S-1 model-checking pilot: the extracted SleepMutex handoff
+        # state machine. The model (impl MutexState) mirrors the kernel
+        # transition bodies (impl SleepMutex) with environment hooks as
+        # parameters; `transforms` canonicalize those hooks plus the
+        # spinlock guard so the STATE LOGIC compares text-for-text.
+        # Signatures are stripped (parameter lists differ by design),
+        # whitespace is collapsed (wrap-insensitive). Inline regions
+        # cover the pieces the kernel keeps inside lock()/release()
+        # control flow. release_if_owner is mirrored but not compared
+        # (its guard+clears are pinned by unit tests instead).
+        "name": "sync/mutex_model",
+        "verify": "kernel/verify/src/sync/mutex_model.rs",
+        "kernel": "kernel/src/sync/mutex.rs",
+        "type": None,
+        "type_verify": "MutexState",
+        "type_kernel": "SleepMutex",
+        "strip_signature": True,
+        "collapse_ws": True,
+        "check_new": False,
+        "compare": [
+            "try_acquire_or_recurse",
+            "try_acquire_or_recurse_fair",
+            "try_acquire_wake_token",
+        ],
+        "skip": [],
+        "transforms": [
+            (r'\s*let mut st = self\.state\.lock\(\);\s*\n?', '\n'),   # spinlock guard
+            (r'\s*let st = self\.state\.lock\(\);\s*\n?', '\n'),        # read-only guard
+            (r'crate::drivers::timer::get_jiffies\(\)', 'now'),          # jiffies env hook
+            (r'Some\(SleepMutexGuard \{ lock: self \}\)', 'true'),       # guard -> bool
+            (r'\bNone\b', 'false'),
+            (r'Self::ANTI_STARVE_JIFFIES', 'anti_starve'),               # bound -> param
+            (r'\bcounted\b', '*counted'),                                # loop local -> &mut param
+            (r'\bfirst_park\b', '*first_park'),
+            (r'\bst\.', 'self.'),                                        # state guard -> method self
+        ],
+        "regions": [
+            {
+                # lock()'s registration critical section (R7-B6b / R84/R85)
+                "fn": "register_and_recheck",
+                "in_fn": "lock",
+                "start": "let now = crate::drivers::timer::get_jiffies();",
+                "end": "drop(st);",
+                "post": [(r'\s*let now = now;\s*\n?', '\n'), (r';\s*$', '; take')],
+            },
+            {
+                # release()'s outermost-drop section
+                "fn": "release_outermost",
+                "in_fn": "release",
+                "start": "if st.depth > 0 {",
+                "end": "let woke = self.wait.wake_up_one();",
+                "post": [(r'\s*\}\s*$', '')],  # slice includes the wrapper close
+            },
+            {
+                # release()'s orphaned-handoff epoch bump (3 fixed lines)
+                "fn": "note_dropped_handoff",
+                "in_fn": "release",
+                "start": "if !st.locked && st.waiters > 0 {",
+                "lines": 3,
+            },
+        ],
     },
     {
         "name": "arch/riscv64/pagetable",
@@ -1448,12 +1511,58 @@ MAPPINGS = [
 # Check logic
 # ============================================================
 
+def strip_signature(fn_text):
+    """Drop the fn signature: keep only the body (after the first '{')."""
+    idx = fn_text.find('{')
+    if idx == -1:
+        return fn_text
+    return fn_text[idx + 1:]
+
+
+def collapse_ws(text):
+    """Collapse all whitespace runs to single spaces (line-wrap-insensitive)."""
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def extract_region(fn_text, start_anchor, end_anchor=None, lines=None):
+    """Slice an inline region out of a function body.
+
+    Either an end anchor (exclusive) or a fixed line count after the
+    start anchor. Returns None if the anchor is missing.
+    """
+    flines = fn_text.split('\n')
+    start = None
+    for i, line in enumerate(flines):
+        if start_anchor in line:
+            start = i
+            break
+    if start is None:
+        return None
+    if lines is not None:
+        end = min(start + lines, len(flines))
+    else:
+        end = None
+        for j in range(start + 1, len(flines)):
+            if end_anchor in flines[j]:
+                end = j
+                break
+        if end is None:
+            return None
+    return '\n'.join(flines[start:end])
+
+
 def check_mapping(m, verbose=False):
     """Check one mapping. Returns list of result tuples."""
     name = m["name"]
     vpath = ROOT / m["verify"]
     kpath = ROOT / m["kernel"]
     type_name = m.get("type", "")
+    vtype = m.get("type_verify", type_name)
+    ktype = m.get("type_kernel", type_name)
+    transforms = m.get("transforms", [])
+    v_transforms = m.get("v_transforms", [])
+    do_strip_sig = m.get("strip_signature", False)
+    do_collapse = m.get("collapse_ws", False)
 
     if not vpath.exists():
         return [("ERROR", f"verify file not found: {m['verify']}")]
@@ -1466,10 +1575,20 @@ def check_mapping(m, verbose=False):
     skip_diff = set(m.get("skip_diff", []))
     results = []
 
+    def canon(text, xforms, strip_sig=True):
+        out = normalize(text)
+        for pat, repl in xforms:
+            out = re.sub(pat, repl, out)
+        if do_strip_sig and strip_sig:
+            out = strip_signature(out)
+        if do_collapse:
+            out = collapse_ws(out)
+        return out
+
     # 1. Compare listed functions (scoped to impl type)
     for fn_name in m["compare"]:
-        vfn = extract_fn(vtext, fn_name, impl_type=type_name)
-        kfn = extract_fn(ktext, fn_name, impl_type=type_name)
+        vfn = extract_fn(vtext, fn_name, impl_type=vtype)
+        kfn = extract_fn(ktext, fn_name, impl_type=ktype)
 
         if vfn is None:
             results.append(("ERROR", f"'{fn_name}' not found in verify"))
@@ -1478,8 +1597,8 @@ def check_mapping(m, verbose=False):
             results.append(("WARN", f"'{fn_name}' not found in kernel (removed?)"))
             continue
 
-        vnorm = normalize(vfn)
-        knorm = normalize(kfn)
+        vnorm = canon(vfn, v_transforms)
+        knorm = canon(kfn, transforms)
 
         if vnorm == knorm:
             if verbose:
@@ -1501,6 +1620,35 @@ def check_mapping(m, verbose=False):
 
             results.append(("DIFF", fn_name, diff_line, vlines, klines))
 
+    # 1b. Inline regions: model fns mirrored against anchor-sliced
+    # regions of kernel fns (for state machines extracted out of a
+    # larger control flow). Same canonicalization as above plus any
+    # per-region post transforms.
+    for reg in m.get("regions", []):
+        model_fn = reg["fn"]
+        khost = extract_fn(ktext, reg["in_fn"], impl_type=ktype or None)
+        vfn = extract_fn(vtext, model_fn, impl_type=vtype or None)
+        if khost is None or vfn is None:
+            results.append(("ERROR", f"region '{model_fn}': host/model fn not found"))
+            continue
+        kregion = extract_region(
+            khost,
+            reg.get("start", ""),
+            end_anchor=reg.get("end"),
+            lines=reg.get("lines"),
+        )
+        if kregion is None:
+            results.append(("ERROR", f"region '{model_fn}': anchors not found in kernel {reg['in_fn']}"))
+            continue
+        vnorm = canon(vfn, v_transforms + [(r'\s*\}\s*$', '')])  # drop the fn's closing brace
+        # regions have no fn signature: keep their leading `{`
+        knorm = canon(kregion, transforms + reg.get("post", []), strip_sig=False)
+        if vnorm == knorm:
+            if verbose:
+                results.append(("OK", f"{model_fn} (region)"))
+        else:
+            results.append(("DIFF", f"{model_fn} (region)", 0, [collapse_ws(vnorm)], [collapse_ws(knorm)]))
+
     # 2. Check for new pub methods in kernel not covered by verify
     if type_name and m.get("check_new", True):
         k_methods = set(extract_impl_pub_methods(ktext, type_name))
@@ -1509,7 +1657,7 @@ def check_mapping(m, verbose=False):
 
         for method in sorted(k_methods):
             if method not in v_methods and method not in covered:
-                results.append(("NEW", f"kernel has new method '{method}' on {type_name} not in verify"))
+                results.append(("NEW", f"kernel has new method '{method}' on {type_name}' not in verify"))
 
     return results
 

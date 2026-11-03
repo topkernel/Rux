@@ -1,0 +1,60 @@
+name: Loom Concurrency Model Checking
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # nightly, off the per-push path
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  loom:
+    name: Loom (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup default $(cat rust-toolchain.toml 2>/dev/null | grep channel | cut -d'"' -f2 || echo stable)
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: Cache loom workspace
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            kernel/verify/target
+          key: loom-${{ runner.os }}-${{ hashFiles('kernel/verify/Cargo.lock') }}
+          restore-keys: loom-${{ runner.os }}-
+
+      - name: Sync check
+        run: python3 scripts/verify_sync_check.py
+
+      # The mutex handoff harness (S-1 pilot): exhaustive interleaving
+      # over the sync-checked extraction of the SleepMutex state machine.
+      # Preemption bound 3 keeps the state space inside CI budget; the
+      # clean scenarios must pass, the planted-bug scenarios must be
+      # CAUGHT (they are should_panic tests).
+      - name: Run loom scenarios (mutex handoff state machine)
+        env:
+          RUSTFLAGS: "--cfg loom"
+          LOOM_MAX_PREEMPTIONS: "3"
+        run: |
+          set -o pipefail
+          cd kernel/verify
+          cargo test --features loom --release --target x86_64-unknown-linux-gnu --lib sync::mutex_loom 2>&1 | tee loom-output.txt
+          if grep -q "FAILED\|deadlock" loom-output.txt; then
+            echo "::error::Loom detected a failing scenario"
+            exit 1
+          fi
+
+      - name: Upload loom output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-output
+          path: kernel/verify/loom-output.txt
