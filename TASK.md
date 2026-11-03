@@ -1900,3 +1900,134 @@ four rolls in the pre-existing 300-900s TXN-HANG exec family (lb342
 unambiguously the samgr nested-call handler wall (userspace poll-loop
 interleave per the 20th's decode; syscost nr=35 poll tot=592s/min),
 NOT the fs per-op wall this session fixed.
+
+### 23rd session (2026-11-03) — THE WEDGE SEED NAMED (reply-vs-nested-call race), probes landed, 22nd's ext4 work completed+hardened
+
+Synced nothing new from origin/main (d2b2672a was already merged; tip
+6ab1b0e5 was the 22nd's, never rolled before this session).
+
+**THE 22ND'S UNCOMMITTED ext4 WORK — completed, verified, pushed.**
+The uncommitted mod.rs diff + untracked htree.rs were the miss-path
+lever (21st's successor entry 1): a read-only parity port of the
+reference dx_probe/ext4_dx_find_entry/__ext4fs_dirhash (commit 9cc6188f)
+plus a bounded (32, replace-oldest) dir data-block-LIST memo keyed
+(ino, i_size) serving lookup()/list_dir() without the per-block extent
+walk. Review findings fixed before commit: parse_index_block now
+enforces count<=limit (the reference's ERR_BAD_DX_DIR check; without it
+the binary search could read past the block buffer on a corrupt count).
+x3 builds rc=0, make test 1291/1291. SECOND fix (cbc6db61): the
+(ino, size) key does NOT protect against inode REUSE — a deleted dir's
+ino reallocated to a new dir of equal size would be served the old
+list (the exact reuse class namei free_inode already purges for page
+cache + icache). dir_blocks_purge() now runs at ext4_add_entry_locked,
+ext4_delete_entry_locked (both under ENTRY_MUTEX — covers every
+create/mkdir/link/symlink/mknod/rename/unlink/rmdir parent) and at
+free_inode itself.
+
+**IMAGE FACT that reframes the lever: system-lb5 has ZERO indexed
+directories.** Superblock has DIR_INDEX (compat=0x38 bit 0x20 — note
+0x4 is the WRONG bit, first read said no-dir_index, corrected), but a
+full inode-table scan shows 379 dirs, ALL >1 block, NONE with
+EXT4_INDEX_FL (verified two ways: kernel-independent Python scan of the
+image + run/htree-verify.py). e2fsprogs never converted them. So the
+htree port NEVER ENGAGES on the OH campaign images (it stays correct
+parity code for dir_index images); the live miss-path lever here is the
+BLOCK-LIST MEMO alone. Successor fs A/B should read PC2 miss/misseo vs
+lb347's t=90s miss=23.5s misseo=161k with that in mind.
+
+**MISSION-1 DECODE: the 300-900s TXN-HANG wedge has a NAME — the
+reply-vs-nested-call race, lost.** From lb348/lb349's existing prints
+(no new instrumentation needed to see it):
+1. samgr -> foundation code-5 txn (lb349 txn8148 j=3637; lb348 txn9879
+   — same code path both boots).
+2. foundation's handler thread (OS_IPC_0_881/883) issues a nested sync
+   call (code 6, the ohos.samgr.accessToken family per the SAREG
+   parcels) ~10ms later: enq_j=3640, pick_j=0.
+3. ~960ms later the DEFERRED BC_REPLY for the code-5 fires while the
+   nested txn is still UNPICKED on the target proc todo. Our kernel
+   rejects it (why=7 reply-stack-top, BR 0x7211) — and the rejection is
+   REFERENCE PARITY (in_reply_to->to_thread != thread = BR_FAILED_REPLY
+   in the reference's binder_transaction reply path).
+4. The OH ipc lib does NOT retry the failed reply (AMS46-SENDFAIL,
+   h=-1) -> the code-5 txn is NEVER replied -> samgr's caller thread
+   parks forever -> the whole dependency tree above it polls forever
+   (the "userspace poll-loop interleave"). lb349: txn8148 exec 505s at
+   kill; lb348: txn9879 exec 776s. This IS the wedge family.
+5. WHY the reference never wedges here: (a) source — the reference
+   parks a sync sender INSIDE its BWR until the reply (the 16th's
+   963b3e95 parity work), so userspace never regains control between
+   send and reply to fire the early reply; AND (b) empirics — the
+   archived reference-kernel serials (oh-refu8/9) show ZERO
+   reply-stack/bad-transaction-stack binder user-errors on the same
+   image (only benign early-boot "cannot find target node" and
+   kill-time "undelivered death notification" classes), because the
+   nested call is picked+replied in sub-ms there, so the deferred reply
+   always loses the race SAFELY (fires after the nested call popped).
+6. The kernel-side lever is therefore the NESTED CALL'S PICK LATENCY
+   (ours 1.25s in lb349 = the race window) — NOT the rejection (parity)
+   and NOT the poll loops (they are downstream symptoms).
+
+**Wedge-window CPU sink (rip census, t=240s lb349, symbolized on a
+rebuilt d2b2672a ELF in /tmp/nm2elf):** >50% of kernel-text tick
+samples = core atomics/spinlock pages (~30%: 0x804a2-0x804a4xxx
+load/store/cxchg + preempt), fmt/log/console pages ~20%
+(0x8084e/0x8084f/0x8085/0x8086/0x802f4 UartRxBuf), syscost self-cost
+5% (0x806fa), cli/sti page 20% (0x807e9). The wedged userspace's kmsg
+flood + our own telemetry prints burn both vCPUs in the print path and
+contended locks — that is the AMPLIFIER that keeps pick latencies at
+seconds once the wedge seeds. (Console itself is already batched +
+stall-bounded; volume is the cost.)
+
+**Probes landed for the next wedge (bab4fe06 + 31dd5388, all ams46-
+gated, print-only):** PICK-LATE (sync pickup with enq->pick >= 250
+jiffies, names server/sender/lateness/enq_elig), SYNCSEND-EARLYRET (a
+BWR returning rc<0 or staging NOTHING while an unresolved outgoing
+sync txn sits on the stack — every hit is a park-divergence instance
+the reference structurally forbids), R7-STACK entries now carry
+to_pid. enq_elig (eligible-reader count at proc-todo enqueue) decides
+lost-wake (elig>0, late pick) vs all-readers-busy (elig=0).
+
+**Early-boot pick data (lb352):** PICK-LATE fired at t=8s for txns
+4-7 (code 0x5f504e47, late=2.85s, enq_elig=1 then 0) — the pre-samgr
+window; no late-boot hits yet (all four rolls died in the 60s spiral
+before the wedge window).
+
+**The samgr-FFRT segfault scare — exonerated, with evidence.** All
+four rolls this session died at ~60s in the storage_manager kill-wave ->
+init sysrq-c spiral, and lb351/352/353 each showed ONE samgr FFRT
+segfault (3/3 vs 0/4 on the 21st's kernel — alarming). Chase: (a) the
+22nd's htree port CANNOT be the cause (zero indexed dirs, above); (b)
+the memo-purge kernel (lb353) still segfaulted; (c) the fault context
+(USEGV-FOR, 22nd's forensics working): rip in ld-musl
+`mov rax,[rax+0x88]; mov rax,[rax+rcx*8]` with rax=0 — a NULL object
+after a dlopen-family failure; the new-kernel-only ENOENTs were all
+libzmq.so.5 / libBulletSoftBody.so.3.25 probes and an on-image walk
+PROVES those files are genuinely absent (walker now validates against
+known-present files: ld-musl 2447, sandbox.json 1564, bin/init 285);
+(d) baseline recount: samgr segvs exist on old kernels too (lb332,
+lb334, lb343 — 3/15 boots ~20%). Verdict: pre-existing userspace dice
+(NULL-handle on missing optional libs), not a kernel regression; the
+session's 4/4 spiral rate rode host load 8.8-11 (17 foreign QEMUs).
+
+**Rolls: 0/4 (lb351/352/353 sysrq-c at ~62s; lb354 light-telemetry
+roll launched at session close).** No pixel change (frozen-logo md5
+06b933b4 where shots landed).
+
+**Successor entry points (23rd, in order):**
+1. ROLL UNTIL A WEDGE with the h23c-class kernel + dfx=ams46,txnhunt:
+   the three probes decide the wedge-seed fix in one boot —
+   PICK-LATE.enq_elig=0 => nested-call tower capacity (chase the
+   handler CPU), enq_elig>0 => wake-path bug (chase wake_proc_one);
+   SYNCSEND-EARLYRET>0 => our park has a hole (fix per reference);
+   R7 with to_pid => the exact server whose slow pick opened the race.
+2. The pick-latency lever itself: the wedge window's CPU is
+   print-path+spinlock (rip census). Cheapest kernel-side cuts: rate-
+   cap the per-txn SAREG/SACB parcel dumps (100+ hex chars per txn in
+   a txn storm), and consider a quiet-mode for txnhunt prints during
+   rolls (the mission-4 recipe could drop fsw/fuxstuck/slowtask —
+   lb354 runs this config).
+3. If a clean race boot happens: uptime check at 38-47s (startUser
+   window) — pixels may light; report immediately.
+4. The memo A/B (PC2 miss/misseo vs lb347) still needs a surviving
+   boot past t=90s; the htree port is dead weight on THIS image — do
+   not spend on it until an indexed image matters.
