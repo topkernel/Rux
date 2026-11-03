@@ -1190,6 +1190,19 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     // semantics — see ExecFile). Both come from the single resolutions
     // above; a None only drops the /proc/<pid>/maps path column, never
     // the exec.
+    // The MAIN image's text-hold key, computed before the File Arc moves
+    // into the ELF loader: on the Ok path below the exec takes a
+    // deny_write_access hold (reference do_open_execat), so a write-mode
+    // open/creat of the running image fails ETXTBSY (LTP creat07). A
+    // failed exec must NOT hold — the hold is only taken at commit.
+    // Scripts do not reach the commit (the shebang leg recurses into the
+    // interpreter and this frame's Ok arm never runs) — matching the
+    // reference, which allows the script's write access back when
+    // binfmt_script swaps in the interpreter.
+    let exe_text_key = unsafe { &*exec_file.file.inode.get() }
+        .as_ref()
+        .filter(|ino| ino.mode.is_regular_file())
+        .map(|ino| crate::fs::locks::inode_text_hold_key(ino));
     let exe_file_arc = Some(exec_file.file);
     let interp_file_arc = interp_exec.map(|f| f.file);
     if ec { ec_pre = crate::arch::cpu::read_time(); }
@@ -1225,6 +1238,17 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
             // SAFETY: current is the running task.
             unsafe { (*current).mark_execed(); }
+            // Exec commit takes the text hold (reference deny_write_access
+            // in do_open_execat, released when this mm lineage dies — our
+            // MmStruct::drop of the mm->exe_file stand-in): write-mode
+            // opens of the running image now fail ETXTBSY (LTP creat07).
+            // The new mm was installed by do_execve_elf above.
+            if let Some(key) = exe_text_key {
+                crate::fs::locks::inode_text_hold_acquire_key(key);
+                if let Some(mm) = (*current).address_space_arc() {
+                    mm.set_exe_text_key(key);
+                }
+            }
             if xt_on {
                 crate::pr_info!(
                     "EXECTRACE: OK pid={} path={} dt_jiffies={}",
