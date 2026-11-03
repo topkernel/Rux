@@ -46,9 +46,26 @@ impl Ext4Extent {
         ((self.ee_start_hi as u64) << 32) | (self.ee_start_lo as u64)
     }
 
-    /// Get the length (number of blocks), masking the initialized flag (bit 15).
+    /// Unwritten-extent predicate (reference parity: ee_len STRICTLY
+    /// greater than EXT_INIT_MAX_LEN (0x8000) is unwritten — a WRITTEN
+    /// extent of exactly 32768 blocks stores ee_len == 0x8000 and is
+    /// NOT unwritten; the old bit-15 test misread it as unwritten and
+    /// the 0x7FFF mask read its length as 0, turning maximal written
+    /// extents — exactly what mkfs gives journal inodes — into holes;
+    /// init_journal then saw a "journal inode empty" and every /data
+    /// mount of the OH campaign ran journal-less).
+    pub fn is_unwritten(&self) -> bool {
+        self.ee_len > EXT4_EXT_UNWRITTEN
+    }
+
+    /// Get the actual length in blocks (reference ext4_ext_get_actual_len:
+    /// unwritten stores len + 0x8000, written stores len up to 0x8000).
     pub fn length(&self) -> u16 {
-        (self.ee_len as u32 & 0x7FFF) as u16
+        if self.ee_len > EXT4_EXT_UNWRITTEN {
+            self.ee_len - EXT4_EXT_UNWRITTEN
+        } else {
+            self.ee_len
+        }
     }
 }
 
@@ -155,7 +172,7 @@ pub fn ext4_ext_get_block_ex(
         let end = start + ext.length() as u64;
         if logical_block >= start && logical_block < end {
             let offset = logical_block - start;
-            let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            let unwritten = ext.is_unwritten();
             return Ok((ext.start_block() + offset, unwritten));
         }
     }
@@ -206,7 +223,7 @@ fn materialize_block_inline(
             let start = ext.ee_block as u64;
             let end = start + ext.length() as u64;
             if logical_block >= start && logical_block < end {
-                if ext.ee_len & EXT4_EXT_UNWRITTEN == 0 {
+                if !ext.is_unwritten() {
                     // Already written — nothing to convert.
                     return Ok(Some(ext.start_block() + (logical_block - start)));
                 }
@@ -320,7 +337,7 @@ fn insert_written_inline(
             let e = &mut entries[i];
             let start = e.ee_block as u64;
             let end = start + e.length() as u64;
-            let e_unwritten = e.ee_len & EXT4_EXT_UNWRITTEN != 0;
+            let e_unwritten = e.is_unwritten();
             // u15 headroom (append_node's discipline, review EXT4-MERGE):
             // ee_len's bit 15 is the unwritten flag, so a written extent
             // can cover at most 0x7FFF blocks. `ee_len += len` without
@@ -958,7 +975,7 @@ fn find_block_in_external_extent_ex(
                 let end = start + ext.length() as u64;
                 if logical_block >= start && logical_block < end {
                     let offset = logical_block - start;
-                    let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+                    let unwritten = ext.is_unwritten();
                     hit = Ok((ext.start_block() + offset, unwritten));
                     break;
                 }
@@ -1042,7 +1059,7 @@ fn find_block_in_external_extent(
 
                 if logical_block >= start && logical_block < end {
                     let offset = logical_block - start;
-                    let unwritten = ext.ee_len & EXT4_EXT_UNWRITTEN != 0;
+                    let unwritten = ext.is_unwritten();
                     bio::brelse(bh);
                     // Ok(phys) loses the unwritten flag; callers that need
                     // it use find_block_external_ex below.
@@ -1120,7 +1137,7 @@ impl RawExtent {
             ee_block: e.ee_block,
             phys: e.start_block(),
             len: e.length(),
-            unwritten: e.ee_len & EXT4_EXT_UNWRITTEN != 0,
+            unwritten: e.is_unwritten(),
         }
     }
 
@@ -1690,7 +1707,7 @@ pub fn ext4_ext_materialize_block(
         let start = e.ee_block as u64;
         let end = start + e.length() as u64;
         if logical_block >= start && logical_block < end {
-            if e.ee_len & EXT4_EXT_UNWRITTEN == 0 {
+            if !e.is_unwritten() {
                 return Ok(Some(e.start_block() + (logical_block - start)));
             }
             hit = Some(i);
