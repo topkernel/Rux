@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|kill10|CRASH|137|kill10      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 306).
