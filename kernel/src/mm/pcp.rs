@@ -337,7 +337,10 @@ fn to_in_use(pfn: usize) {
             (*page).clear_all_flags();
             (*page).reset_mapcount();
             (*page).set_refcount(1);
-            (*page).set_flag(PageFlag::Referenced);
+            // SP-7 (stress-port r7): no Referenced flag on handout (see
+            // the zone.rs alloc-path note — the reference's prep_new_page
+            // produces flag-clear pages; the plant made every PCP-served
+            // order-0 fault page look hot to reclaim).
             (*page).set_order(0);
         }
     }
