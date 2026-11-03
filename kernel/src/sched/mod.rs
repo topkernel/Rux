@@ -31,6 +31,7 @@ pub mod stats;
 
 pub use sched::{
     current,
+    w2_refusal_census,
     current_is_dying,
     get_current_pid,
     get_current_ppid,
