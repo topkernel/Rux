@@ -558,3 +558,169 @@ mmapstress09 -p 40 -t 0.4 — all rc=0/TPASS, no panics, no wedges.
   the pb1 anchor), not with this round's slowpath-only change. Zero
   regressions; anchor re-bank belongs to the perf lane.
 - Pushed origin/stress-port 65123b48.
+
+# stress-port round-6 findings (2026-11-03, verification round)
+
+Kernel = merge 1a560c8c: origin/main e264a64b (carries the round-5
+dead-tick fix as d3700224 + r23 LTP wave + gap-fs lock-free walk
+3f377d13 + code-review-perf) + this lane's r5 instruments + SP-6 fix
+(this round). Vehicle unchanged (x86_64+KVM q35, 2G/2cpu, lane image,
+one family per boot). DFX: allocwatch,taskdump,watchdog + syscost=1
+(leakhunt where noted). Logs: run/stress-runs/*-r6*.{out,log} +
+tickreg-fix2/negstorm*/forker-lh.
+
+## Mission 1 — dead-tick fix verified end-to-end (2 boots, deterministic repro)
+
+- tickreg-fix1 (round-5 fix kernel) and tickreg-fix2 (this round's
+  merged kernel), malloc 4x256M exhaustion cascade, dfx=leakhunt:
+  OOM-FORENSIC clock lines MONOTONIC and ADVANCING on both CPUs
+  (fix1: irq 58/61 -> 97/109; fix2: 69/74 -> 117/100). Pre-fix round-4
+  signature (tb advances, counters frozen at 46/50) is gone.
+- TICKTRAP verdicts: all "counting" (LAPIC live, arms advancing,
+  armop=1, tmcct>0); ZERO irr-stuck / lvt-masked / apic-disabled.
+- Census lines FLOW under load: SYSCOST t=...s lines to window end,
+  PARKWALK-CENSUS every 1000 walks, GATE-CENSUS would print (0 lines =
+  no >=2 s gate holds; consistent with r4/r5 sub-second-hold findings).
+- Regression driver committed (test/stressng/tick-regression-x86.sh,
+  dcdee4e9): PASS on both fix boots. NOTE its parser originally
+  mis-grouped columns (bare "[0-9]+" split also matched the digits in
+  the irq0/irq1 FIELD NAMES) — fixed; r4 pre-fix logs SKIP (the clock
+  instrument postdates them), the pre-fix evidence lives in the
+  8884c2b3 commit message (TICKTRAP IF=false irr7=0x29 tmcct=0).
+
+## Mission 1b — SP-5 re-adjudicated with living clocks: TRANSFORMED, closes as a timers-domain kill (fixed)
+
+Post-fix kill timeline (tickreg-fix2, the deterministic SP-5 shape):
+dumps #1-#3 at TRUE exhaustion (free_cnt=0..2, zone_free=1-2); two
+faulting tasks strike out and die at free_cnt=32 (the designed
+3-strikes-after-3-consumed-kill-windows discipline, clocks alive so
+the 1 s windows elapse properly); ONE score-based oom-killer kill
+("oom-killer: Killed process 308 (rs) score 63954"); the class then
+runs its FULL 100 s budget — 5.42M ops, RS-BEAT every 10 s to t=100,
+RS-ALL-DONE. The pre-fix fake-OOM chain (workers dying en masse by
+strike-only kills while the zone refilled, class truncating at ~4M ops
+with RES rc=1 "wedge" mislabels) is GONE. Zero strike-ONLY kills.
+The same shape held in the memory-family boot (malloc 4.30M ops rc=1
+with one score-based kill at exhaustion; mmap rc=0; bigheap
+malloc-mode rc=1 at exhaustion). Residual for the mm owner (unchanged
+from r4/r5, now with live clocks): dump #37 shows an
+alloc_pages(order=0) failure site with free_cnt=8108/zone 53k — the
+failure-instant vs dump-instant skew (or broken-free-list class);
+swap reclaim still produced zero completed writes at every dump.
+
+## Mission 2 — family re-baseline post-fix (one boot per family)
+
+| family | boot | verdict |
+|---|---|---|
+| memory | memory (r6) | PASS on panics/wedges; ticks alive through the cascade (51/56 -> 100/89); kills only at true exhaustion (see SP-5); malloc 4.30M rc=1, mmap 1.14M rc=0, bigheap-malloc-mode 16 ops rc=1 (musl brk limit -> malloc fallback at zone exhaustion; brk coverage itself = brkchurn PASS r2/r3) |
+| sched | sched (r6) | PASS — futex 377,847 rc=0, sched 17.3M rc=0; 16 W2-WAKE-REFUSED lines (futex-storm in-band class), 0 strands |
+| timer | timer (r6) | PASS — 1.72M ops rc=0, 0 panics |
+| ipc | ipc (r6) | PASS — pipe 33.2M / sock 19.9M / sem 285.9M / msg 58.6M / shm 61.6k ops, all rc=0, 0 RS-ERR |
+| fsmeta | fsmeta-v3 (r6) | PASS — renameco chmod/link/symlink 300/300 fail=0 each (SP-2 area), fsmeta 799,332 ops rc=0 |
+| dirstorm | dirstorm (r6) | PASS — 1,315,133 ops rc=0 |
+| negstorm | negstorm (r6) | **CRASH — SP-6 below**; after the fix: 8w 1.63M ops rc=0 (neghit 156,575 / negstale 275,007, 0 oracle events) and 16w 1.57M ops rc=0 (neghit 121,608 / negstale 293,508, 0 oracle events) |
+| execaudit | execaudit (r6) | PASS — 5 variants one boot: 4,800 audited execs, events=0, echild=0, wrongpid=0, badstatus=0 (rc=254 family: no recurrence; campaign total incl. r3/r4 now 8,880 execs / 0 events) |
+| forker | forker + forker-lh (r6) | PASS — fork 475,892 / exec 178,290 rc=0 (default DFX); leakhunt boot fork 447,552 / exec 169,274 rc=0 with PREEMPT-HEAL 0 / UNDERFLOW 0 / WAKE-STRANDED 0 (SP-1 stays dead with the fix in); ACQUIRE-PAIR-SPLIT 40 (cap) — the known benign slot-succession class |
+
+Kernel-provenance note: the campaign's first six boots (memory ..
+negstorm-crash) ran the pre-SP-6 kernel; execaudit/forker boots and
+every verification boot after SP-6 ran the fixed kernel (bzImage
+rebuilt mid-campaign; the crash family is negmemo-gated and
+default-off, so the execaudit/forker verdicts are unaffected).
+
+## SP-6 (NEW this round, FIXED + VERIFIED) — stale negmemo hit hands a NULL dentry to the dcache-hit deref
+
+- Class: CORRUPTION-adjacent crash (kernel NULL deref) — fs walk,
+  negmemo-gated (cmdline negmemo=1, default OFF).
+- Face: r6 negstorm boot 1 + repro (deterministic, first stale hit):
+  `KERNPANIC pfault badaddr=0x98` in path_lookup -> Dentry::
+  is_negative -> Atomic<bool>::load; two tasks faulted at the same
+  rip (second = "re-entered during dump"); VFS-MUTATION-STALL
+  holder=311 held=18001j with 6 waiters followed (the panic froze the
+  holder); ops froze at 65. Symbolized chain: file_open ->
+  path_lookup -> is_negative; RDI=0x98 = &NULL.negative.
+- Root cause: the gap-fs lane's lock-free walk translation (3f377d13,
+  2026-11-03 08:04, on main AFTER the round-4 negmemo validation
+  boots) rewrote the 21st-successor stale-memo arm. The pre-gap-fs
+  code returned `None` (the Option arm selector) on a stale hit ->
+  the fs re-lookup arm ran ("detach and re-resolve"). The new code
+  returned `core::ptr::null()` as the match VALUE for child_raw,
+  which flowed straight into the unconditional dcache-hit deref
+  (`let c: &Dentry = unsafe { &*child_raw }` at vfs.rs:2272) — first
+  stale hit = kernel panic. negmemo is default-off, which is why
+  standard boots, LTP, and the gap-fs lane's own validation never
+  saw it; the negstorm oracle (negmemo=1) walks into it within
+  seconds.
+- Fix (this round, kernel/src/fs/vfs.rs): the stale case now sets
+  `found = None` BEFORE the match (if let Some(p) = found ... stale ->
+  remove_child + found = None), restoring exactly the pre-gap-fs
+  fall-through-to-fs-re-lookup semantics. No behavior invented.
+- Verification: negstorm 8w + 16w on the fixed kernel (numbers in the
+  table): 568,699 stale normalizations processed through the fixed
+  path, zero panics, zero oracle events. Also forker-lh boot (walk
+  heavy, negmemo off) clean.
+- DISCIPLINE NOTE for the gap-fs owner (pair 2 entry point): any
+  `Option<*const T>` match whose arms produce raw VALUES must keep
+  the miss path as an ARM SELECTOR, never as a sentinel value;
+  lookup_child_fast (dentry.rs:813) is the clean counter-example.
+
+## Watch items (recorded, not chased)
+
+- PARKED-LEAK 1 line in forker-lh (pid 0x657c pc=1 state=0 tcpu=1;
+  PARKWALK-CENSUS parkednz 0 -> 1 over 5,000 walks / 80,744 obs,
+  stayed 1): a single runnable-not-running task sampled with
+  preempt_count=1, self-resolved, zero heals/underflows/strands all
+  boot. Rounds 3-5 leakhunt boots: 0. Possibly the first face of the
+  fix widening park/sampling interleavings (IRQs now on across
+  switches). OH lane's strand hunt owns the family; re-census next
+  round before adjudicating.
+- riscv64 make-test (r6, post-merge pre-SP-6 + post-SP-6 suite runs
+  both verdict-green): ONE "WW: TIMER-SOFTIRQ-STALL cpu=2 age=1053ms
+  tick_age=1054ms pid=0" at the very end of the suite = the known
+  post-verdict halt-time family (idle context, kernel halted; same
+  class as the halt-drain cosmetic in r4 gates). Not a live class.
+- p2 anchor drift: pb1's 15.409 µs debug anchor is now ~30% slower
+  than reality on main-derived kernels (r4sp5 11.245 -> r6 10.687/
+  10.091); the perf lane should re-bank the Tier-2 anchor.
+
+## Mission 3 — sched-domain perf evidence with the fix
+
+- pbench P2 (context-switch half-rt; TCG smp2 mem2G, debug profile,
+  same rig as r4sp5): pre-fix r4sp5 med 11.245 µs; post-fix r6 two
+  reps 10.687 / 10.091 µs (DONE rc=0 both, zero panics, foreign_qemus
+  2-4). The fix does NOT regress context-switch cost (min-of-2 is
+  ~10% FASTER than pre-fix; single-run caveat on both sides). Both
+  sit ~27-31% fast of the stale pb1 anchor (15.409) — the same
+  fast-side drift round 4 attributed to main's own fast paths; not
+  this fix. Other rows in family with r4sp5 (p3a 0.080, p5b
+  20.7/41.7, p6 openclose 106.9, append 83.1; p6_unlink 861.6 vs
+  751.7 = +15%, in the ±20% band; p3b 23.5, p5e 1640).
+
+## Mission 3b — Tier-1 quiet census boot on the OH image with the fix
+
+pa-boot r6fix (q35 KVM smp2 4G, syscost=1 dfx=wwcensus, 780 s window,
+tok109 userdata lineage, debug kernel with SP-6; serial
+run/pa-r6fix-serial.log / -stamped.log):
+- census TERM-DESCHED engaged = 8 (band 8 +- 2 — dead center),
+  WAKE-REFUSED = 32 (band 32 +- 4 — dead center).
+- WAKE-STRANDED = 6, all organic shapes: three 1.0-1.7 s strands
+  (visits 2.6k-8.3k, healthy ms-class activations) + pid 305 at
+  25.9 s / 48.2 s (inside the baseline's 32-107 s organic envelope);
+  NO 1001 ms-grid class.
+- tick rate sustained to window end: c0 5,981 ticks in the last 60 s
+  window = 99.7/s; c1 5,997 = 99.95/s (bar >= 99.5/s).
+- 0 kernel panics, 0 OOM lines across the boot.
+The sched guarded domain holds with the dead-tick fix in: census
+bands, tick rate, and P2 all in shape on the same kernel.
+
+## Round-6 gates
+
+- x3 builds rc=0: x86_64 (pre- and post-SP-6), riscv64 (clean config,
+  post-SP-6), aarch64 (dtb_blob.S restored after the build).
+- make test (riscv64 suite) GREEN twice this round: post-merge
+  pre-SP-6 and post-SP-6 (ALL TESTS PASSED; suite QEMU killed by
+  exact-match discipline; one halt-time TIMER-SOFTIRQ-STALL line at
+  the very end of the pre-SP-6 run = the known post-verdict halt
+  family, see watch items).
+- Pushed origin/stress-port (dcdee4e9 driver, 87c51458 SP-6 fix +
+  findings, session-close commit with TASK.md).

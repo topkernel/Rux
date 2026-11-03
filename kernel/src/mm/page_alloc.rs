@@ -712,6 +712,11 @@ pub fn oom_forensic_dump(site: &str) {
         crate::timer::WW_TICK_IRQ[1].load(core::sync::atomic::Ordering::Relaxed),
     );
 
+    // SP-5 round 5: frozen-tick four-way discrimination (LAPIC LVT/TMICT/
+    // TMCCT/IRR/ISR live snapshot, self + peer-via-IPI, arm trail). The
+    // dump context still executes during the cascade by construction.
+    crate::timer::tick_trap_report("oom");
+
     // SP-5 round 4: the reclaim round's per-page cost driver.
     {
         let (n, slow, max_ns) = super::swap::swap_write_census();
