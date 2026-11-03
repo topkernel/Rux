@@ -181,6 +181,24 @@ instances; `pkill` stays forbidden), and (4) relaunch the queue at full
 concurrency without waiting for instructions. The user only ever says
 "继续".
 
+**Safety-and-performance ledger (user directive 2026-11-03):
+docs/architecture/safety-and-performance.md is the continuously-grown
+answer to "did they trade safety for speed" — every merged round that
+lands a safety property, a performance number, or a bug-class
+elimination appends its evidence there in the same change. The bug
+taxonomy (§2) tracks that every memory-corruption-class bug lived in
+audited unsafe and none in safe code; honest gaps go to §5, closures
+move them up. Artifact pointers and same-rig A/B numbers only.**
+
+**Design-register rule (user directive 2026-11-03): every landed
+architectural advantage — performance, safety, correctness,
+observability — is recorded in docs/architecture/rust-native-register.md
+WITH measured evidence in the same change (numbers, same-rig A/B). The
+register's purpose: a reader must see original Rust-native engineering,
+not a C-to-Rust translation. Interface-level divergences additionally
+carry D-numbers in docs/architecture/design-divergences.md. No numbers =
+placeholder, not an entry.**
+
 **Test-case archive (user rule 2026-11-02): guest test-case sources are
 archived under `userspace/tests/` as a tarball + extraction script ONLY
 (`userspace/tests/probes.tar.gz` + `extract.sh`) — never commit loose

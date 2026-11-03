@@ -1,340 +1,47 @@
-# stress-port lane: port industry stress tests, find stability bugs
+# arch-research lane: industry OS design survey — what the reference kernel lacks, what Rux can adopt
 
-## Charter (user directive 2026-11-02)
-"Supplement stress test cases — stability is still a problem. If the
-industry has stress tests for the reference kernel, port them directly
-and run them." PRIMARY vehicle: x86_64 + KVM (platform priority).
-Goal: panics, wedges, leaks, and scheduler starvation exposed by
-sustained load — then kernel-side fixes.
+## Charter (user directive 2026-11-03)
+Survey industry OS architectures for designs the mainstream reference
+kernel does NOT have; for each, judge whether Rux can adopt it
+INTERNALLY under the house rule: external POSIX/ABI compatibility
+intact + LTP passes the affected families + no upper-layer software
+breaks (advantageous internal divergences are KEPT and registered —
+see docs/architecture/design-divergences.md; D-1 GRQ and D-2 compact
+stacks are the existing entries).
 
-## What to port, in order
-1. stress-ng (the industry standard, ~300 stressors). Build a static
-   x86_64 subset against the toolchain already used for probes (see
-   test/ build patterns; musl static preferred). Inject via the LTP
-   vehicle in /home/william/rux-images/testimages/ (boot rig there
-   already runs x86_64+KVM). Start with the classes our bug ledger
-   says are weak:
-   - memory: malloc/mmap churn (allocator class-lock family),
-     mmapfixed, bigheap (zone exhaustion vs the fake-OOM history)
-   - fork/exec churn (p4 regression history; exit-path RCU grace)
-   - filesystem metadata churn (mkdir/rmdir/unlink storms — the OH
-     chmod-storm shape; bio write-plan under load)
-   - IPC: pipe/socket storms, SysV sem/msg/shm
-   - sched: many-thread yield/wakeup storms (phantom preempt family,
-     WAKE-STRANDED census)
-   - timer/clock: settime/interval storms (tick discipline)
-2. LTP robustness subset already in the tree (fork12, mmapstress,
-   mmap-corruption, sem/msg stress) — run long-loop, not just once.
-3. (later) syscall-fuzzer class (trinity-like) once 1-2 are clean.
+## Candidate map (starting list — extend freely; use web research)
+- Rust-native kernels: Redox (scheme/URL namespace),
+  Theseus (intralingual design — types carry invariants),
+  Hermit (unikernel no-syscall fast paths)
+- Capability/object kernels: seL4 (formal verification, capabilities),
+  Fuchsia/Zircon (handle table, vDSO-only syscall surface)
+- Multikernel/scalability: Barrelfish (per-core replicated state,
+  cross-core messaging instead of shared locks)
+- Async/batch syscall interfaces: io_uring-style pervasive async,
+  FlexSC (detached system-call batching — syscall as data)
+- Scheduler designs beyond CFS/EEVDF
+- Lock-free / flat-combining structures, MSG-passing IPC vs shared mem
+- Memory: folios→larger, persistent-memory-first designs, userspace
+  page-fault handling (uffd-style delegation)
+- Build on the in-house eight-lever list:
+  docs/development/rust-design-headroom.md (capability traits, typed
+  per-CPU, procfile macros...) — evaluate each lever against industry
+  precedent and evidence.
 
-## SESSION 2 CLOSE (2026-11-02 ~23:40, branch ltp-r21 @ merge of main incl. e9029b74)
-
-### Kernel fixes this session (all pushed on ltp-r21)
-1. **58b27dc4 x86_64 stack 80KB -> 128KB** (twin landed on main as c05f13ad):
-   symlink-chain recursion, 2240B/hop x 40 cap, overflowed the 80KB slot
-   (chunk@700 panic). Repro x2 clean + live-scan chunk@700 100/100.
-2. **b5480343 DFX forensics** (KSO census, overflow-zone ra dump,
-   dead-resume guard, rsp0 witnesses, freed-stack ring) — silent on
-   clean boots; panic-path only.
-3. **ad17db72 futex shared-key = PHYSICAL word** — FutexKey::matches for
-   shared keys compared raw uaddr and futex_hash bucketed uaddr, so a
-   parent's FUTEX_WAIT and an exec'd child's FUTEX_WAKE (fresh mmap at a
-   DIFFERENT address — LTP tst_checkpoint) never met: waitid08/sighold02
-   ETIMEDOUT family. Now: resolve (frame<<12|off) from the caller's
-   tables; bucket on it for BOTH private and shared keys (musl cleartid
-   interop preserved — same word); match shared keys on it. Probe V4b:
-   fw=0 fw_errno=0. sighold02 recovered.
-4. **91d005f6 tmpfs MAP_SHARED page-cache alias** — LTP setup_ipc puts
-   the results+checkpoint page on /dev/shm (tmpfs mmap was
-   documented-unsupported -> private copy per mapper). x86_64 SHARED
-   fault arm now admits tmpfs via is_tmpfs_file and populates through
-   the fs-agnostic shared_file_fault_page; invalidate alias entries at
-   inode destroy + truncate. riscv64 already had the generic arm.
-   Isolation: execl01 execlp01 execv01 execve01 execle01 execvp01
-   execve06 ALL PASS (7/7, was 7x TBROK "Test haven't reported results").
-
-### Scans this session (all x86_64+KVM, 1869 list)
-- run/results-r22b-raw.txt: 1028 PASS, main@819a1be2 + stack fix only
-  (zero WEDGE — chunk 700 recovered).
-- run/results-r22c-raw.txt: 1035 PASS, + futex + tmpfs fixes.
-- run/results-r22d-raw.txt: FINAL on the merged tree (main incl.
-  e9029b74 stat-size fix + SP-3 fsync(dirfd) + the 4 commits above) —
-  spliced to results/results-r22.txt at scan completion.
-- r21 -> r22c delta: +25 (gains 40 / losses 15;
-  results/delta-r22-vs-r21.txt). Losses adjudicated 2x isolation:
-  stat01/_64 fstat02/_64 getpriority01 mmap02 = REAL (all six FIXED by
-  main's e9029b74 — VERIFIED on the merged kernel); getrusage04 = known
-  flake family; float_* TIMEOUT = float-bench flake; kill02/crash02
-  POISON = driver artifacts; diotest2/5 dirtyc0w inotify01 setpgid03 =
-  still-open real (isolation 2/2), next-session families.
-
-### Next-session queue (ranked)
-1. waitid08 CRASH: waitid(WCONTINUED) never returns after SIGCONT —
-   child parks at checkpoint, parent stuck at second waitid, harness
-   timeout. Evidence: run/iso22-logs-tmpfsfix2/chunk0000-a1.log.
-2. Still-failing checkpoint tests despite futex+tmpfs fixes:
-   sigtimedwait01 sigwaitinfo01 pselect01 epoll_wait02/06
-   epoll_pwait03 timerfd_settime02 — check whether they share the
-   waitid/WCONTINUED leg; isolate one by one.
-3. diotest2/5 dirtyc0w (O_DIRECT), inotify01 (event coalescing:
-   "mask=08 expected 2"), setpgid03, execveat01/02.
-4. msg_comm "messages leak between namespaces" — reproducer rig in
-   /home/william/rux-agents/stress-port/run/stress-runs/ (stress-lane
-   intel 2026-11-02).
-5. Flaky family (stress-lane intel): exec'd glibc-static children dying
-   silently pre-output (rc=254, waitpid-ECHILD), intermittent under
-   fork-heavy load — isolation-retest before regression verdicts.
-6. fs-lane long-term: follow_symlink is recursive (2240B/hop); the
-   reference kernel resolves chains ITERATIVELY — an iterative rewrite
-   would decouple stack depth from path shape.
-
-### Rig notes
-- Probe image: run/rootfs-x86_64-probe.img with zz_shmprobe(V4b)/
-  zz_statprobe/zz_statprobe2 injected; boot via run/repro-nftw.sh <name>
-  (writes chunk.txt into the image, 180s drain).
-- Coordinator policy (2026-11-02): new probe SOURCES go into
-  userspace/tests/probes.tar.gz (extract.sh restores to test/);
-  host-side drivers stay in test/ or run/.
-
-## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
-
-### Kernel fixes this session (3 commits, on top of the fs-lane negmemo/chroot base)
-1. **d326c72e poll: nfds > RLIMIT_NOFILE rejected before allocating**
-   (reference do_sys_poll parity) — ppoll01 INVALID_NFDS arm.
-2. **0115667a timers: poll-family waiters wake at the PRECISE ns deadline;
-   timerfd accepts TFD_TIMER_CANCEL_ON_SET** — recovered the whole
-   checkpoint-timer family: epoll_wait02 epoll_pwait03 pselect01
-   pselect01_64 select02 poll02 timerfd_settime02 (+ timerfd_settime01,
-   waitid08 WCONTINUED leg). The coarse-tick wait was the r22 "checkpoint
-   tests still failing" family's engine.
-3. **e2169c01 ipc: namespace-scope SysV IPC objects — per-ipc_namespace ids
-   tables** (the msg_comm "messages leak between namespaces" fix).
-   VERIFIED: msg_comm PASS x2 (fix1/fix2 chunks) + msgctl01 msgget01
-   msgsnd01 msgrcv01 semget01 semctl01 shmctl02 all PASS. Census gains:
-   msg_comm sem_comm shm_comm (the whole *_comm namespace family).
-
-### Census (x86_64+KVM, 1869 list, final kernel = the 3 fixes on the
-merged base): PASS 1042 -> **1059 (+17)**; 21 gains / 4 losses.
-Full table: results/delta-r23-vs-r22.txt. Gains include all r22-close
-queue targets: waitid08 (was CRASH), diotest2/5, dirtyc0w, inotify01,
-setpgid03, execveat01/02, fcntl17, setns02, float_exp_log, getrusage04.
-
-### Loss adjudication pending (r24 first item): getpriority01 FAIL
-(PRIO_USER arm, was PASS r22), pidns20 FAIL (was PASS), creat07
-FAIL->TIMEOUT (checkpoint family), shm_test TIMEOUT->CRASH 255,
-mmap3 POISON->FAIL (slow-machine class). cve-2017-17052 + kill02 =
-POISON (scan-driver artifacts, known flake family).
-
-### STILL OPEN (top): rt_sigprocmask01 CRASH 139 + rt_sigsuspend01 FAIL
-("Test killed by SIGSEGV") — r21 PASS -> r22 broken (window pinned:
-NOT caused by this session's fixes; producers are the r21->r22 set:
-preempt-heal observation bar 1918c4b5, binder deferral 963b3e95,
-128KB stacks e336143a, futex physical keys 122d8a78, tmpfs MAP_SHARED
-799cb942, WCONTINUED/waitid ab5b5da9, pretcode SA_RESTORER 2515424b,
-execveat 26540f5f, futex page-in 1ed73f7d). 2x isolation confirmed
-REAL (results-r23iso-a/b). Other open families: sigrelse01 (signal 34
-EINVAL), kill10 (SIGTERM), ppoll01 FAIL 2 cases, sigtimedwait01/
-sigwaitinfo01 (timeout class), msgstress01 (msgsnd EINVAL, flaky),
-shmat1 CRASH 255, shm_test CRASH.
-
-### Gates on final tree (predecessor logs): x3 builds rc=0
-(build-r23fix2-x86 / build-r23final-rv / build-r23final-aa64),
-make test GREEN (maketest-r23final4, "MT_GREEN attempt=10" — the
-rootfs.img write-lock trap needs the retry loop).
-
-## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
-The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
-"PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —
-ROOT CAUSE = KERNEL STACK EXHAUSTION by the recursive symlink resolver.
-Decode chain (all evidence in run/repro-nftw01.log + gdb dumps):
-1. The call-trace frame below trap_handler was the fault STUB's return
-   address (mis-symbolized as census_peek3::is_userva / AlignedStorage —
-   DWARF pollution over the stub region); the real RIP never printed.
-   Added rip + kstack bounds to the panic line: rip=0x0 (instruction
-   FETCH at NULL), rsp 19KB BELOW task 307's stack bottom.
-2. KSO census (new, in exception.rs): task 307 cpu1 slot CORRECT, rsp0
-   CORRECT, no dead-task resume, no foreign-sp switch-in, no
-   freed-stack/rsp0 staleness — the freed-slot theory died; the plain
-   classification was right: the task overflowed its own stack INTO the
-   adjacent (free) kstack slot [0x7c5a8000,0x7c5bc000) of the 256KB
-   block, tearing through stale "./loop" path-buffer data; a return
-   through a zeroed slot jumped to rip=0.
-3. Overflow-zone frame dump (new): follow_symlink/follow_symlink_hinted
-   frames at a measured 2240-BYTE STRIDE per nested hop. The resolver is
-   depth-capped at 40 (MAX_SYMLINKS, review 5.1) but 40 hops x 2240B =
-   ~90KB of chain frames alone — past the 80KB x86_64 kernel stack
-   before the counter can return ELOOP. nftw01's tree has the symlinks.
-4. FIX: Kernel.toml kernel_stack_size_x86_64 81920 -> 131072 (128KB,
-   riscv64 parity; this file's own history documents the same lesson for
-   riscv64), kstack slab 3 slots/block -> 2 (zero tail waste; buddy
-   fallback = one perfect order-5 block). OH-floor memory cost +48KB/
-   stack (~+125MB at 2690 stacks) — flagged to coordinator for the
-   merge gate (mm guarded domain).
-5. Also landed (b5480343): KSO census + overflow-zone ra dump + dead-task
-   resume guard at switch-in + rsp0 skip/free-vs-live-rsp0 witnesses +
-   freed-stack ring. All silent on clean boots; they convert this panic
-   class into named prints.
-6. GATES: x3 builds rc=0 (x86_64/riscv64/aarch64); make test GREEN
-   (run/maketest-128k.log "All tests passed!"); repro-nftw.sh x2 clean
-   (nftw01 completes, rc=1 = its r21-class real FAIL, SCAN_DONE).
-7. Long-term note for the fs lane: the reference kernel resolves symlink
-   chains ITERATIVELY (link_path_walk) — 40 hops cost ~0 stack there.
-   Making follow_symlink iterative would decouple stack size from path
-   shape entirely (big surgery in fs/vfs.rs; NOT done this session).
+## Deliverable (docs/architecture/industry-design-survey.md)
+Per design: what it is + where it ships (papers/projects/numbers);
+what the reference kernel lacks; Rux adoption verdict — ADOPT /
+PROTOTYPE / REJECT (with the three-gate risk note); cost estimate;
+dependencies. End with a ranked adoption shortlist (top 5) with
+prototype plans sized for a worktree lane each. Register any accepted
+divergence in docs/architecture/design-divergences.md per template.
 
 ## Method
-- One stressor class per boot; serial console is the log.
-- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
-  run/findings.md + minimal reproducer.
-- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
-  clean before push (origin/stress-port).
-- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
-  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
-  double as Tier-1-under-load evidence for the perf gate.
-- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
-  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
-  by exact cmdline).
-## Session log (append per session)
-
-### 2026-11-02, round 1 — rs suite ported, 2 kernel bug families fixed, 2 stressors re-run clean
-
-**Ported** (stress-ng stressor logic as standalone static musl probes,
-per charter method; sources archived in userspace/tests/probes.tar.gz
-per the 394c16ce policy, host driver test/stressng/run-class-x86.sh):
-14 classes — malloc/mmap/bigheap (memory churn), fork/exec, fsmeta
-(metadata storm with read-back verify), pipe/sock/sem/msg/shm (IPC),
-futex/sched (wakeup storms), timer (create/settime/delete + CLOCK_
-MONOTONIC discipline + nanosleep latency), plus --spawn passthrough
-for minimal reproducers. Vehicle: the x86_64+KVM LTP rootfs (copy of
-the permanent-store image in run/, rs/rsrun/renameco injected via
-debugfs); PID-1 rsrun runs cmds.txt lines with per-class budgets.
-
-**Round-1 campaign** (baseline 819a1be2, one family per boot,
-dfx=allocwatch,taskdump,watchdog + syscost=1, logs in
-run/stress-runs/): ipc / sched / timer / memory PASS (0 panics, 0
-wedges, 0 probe errors); fsmeta FAIL (SP-2); forker survived but lit
-up the SP-1 storm. Verdicts + census numbers: run/stress-runs/
-findings.md.
-
-**SP-1 (fixed, verified)**: PREEMPT-HEAL false-fires stripped live
-guard bits of fresh fork/exec tasks (15,577 heals + 169 underflows per
-120 s of fork churn). Two producers: (1) stale_200's j==0 arm treated
-never-stamped fields as instantly stale — fixed with arm-on-first-
-observation (sched.rs); (2) new_task_at did not zero the four
-ti_pc_*_zero_jif stamps on recycled Task pages — same class as R68a
-(task.rs). Verification boot (fork 8 + exec 4, full 100 s budgets):
-**0 heals, 0 underflows, 0 panics** (was 15,577/169/0).
-
-**SP-2 (fixed, verified)**: ext4 setattr corrupted freshly-written
-files — the success tail ran page-cache invalidate_inode for EVERY
-attr flavor (chmod dropped dirty unflushed pages) and metadata-only
-setattrs wrote back the disk-read inode's stale i_size (0 for pending
-writeback). renameco minimal reproducer isolated chmod (3/300 fails,
-reads returned EOF; rename alone clean). Fix: invalidate gated to
-ATTR_SIZE, metadata setattrs carry the live VFS size (ext4/mod.rs).
-Verification boot: renameco 0/300 on every sequence; fsmeta 4-worker
-class full 120 s rc=0 (was: all 4 workers corrupt on cycle 1).
-
-**Driver bug found+fixed in-flight**: rsrun killed classes at an
-absolute 60 s (RES rc=137 truncation in the first campaign's memory/
-forker boots); now parses --timeout per class.
-
-**Tier-1-under-load evidence** (syscost, memory boot): IF=0 cpu0
-17.6 s/60 s (rest 17.2 s, hard 408 ms, uart 3 ms), top rest-site
-sched.rs:2568 (37.4M ops avg 834 ns); no ALLOCTHROW / DEADLOCK /
-KERNPANIC classes in any boot. Follow-up hunts queued: IRQ-OFF-WINDOW
-idle-wake prints 65-142 ms under load (pre-existing, guarded domain
-interrupts); WAKE-STRANDED 118 s face under memory churn (SP-1
-family; re-check on fixed kernel in round 2).
-
-## SCAN RESULT (raw, unspliced)
-run/results-r22-raw.txt (3431s, x86_64+KVM, main@2fd5215f):
-  PASS=966 FAIL=258 TCONF=482 CRASH=30 EXECFAIL=17 TIMEOUT=14 POISON=2
-  WEDGE=100  <- ALL of chunk 700 (tests 700-799) lost to the boot panic
-Headline 966 vs r21's 1010 (-44) is PANIC-DRIVEN: r21 scored ~72 PASSes in
-the 700-799 range, so on the comparable 1769 tests r22 is ~+28 (the
-r21-bugs fixes + sockets + sched trio + ftest04 recovery visible live:
-"RES|ftest04|0|Test passed" in chunk1400 log). PRIORITY 1 for the successor:
-fix the chunk-700 panic, rerun tests 700-799 (bash run/rerun-chunk.sh 700
-799 r22c7), splice into results/results-r22.txt (currently only the raw
-copy exists), then run run/r22-pipeline.sh for the delta table.
-NOTE: pipeline script run/r22-pipeline.sh copies raw -> results/, prints
-class counts + delta vs r21 (adapt as needed after the splice).
-
-## LTP IPC path fact (for the execl-family fix)
-The rig's LTP uses a FIXED ipc path: guest env LTP_IPC_PATH=/tmp/ltp-ipc
-(companions TBROK "File /tmp/ltp-ipc does not exist!" when run standalone —
-chunk1700/1800 logs). /tmp is the ext4 root (boot mounts tmpfs only on
-/dev/shm and /run). So the execl01-family coherence failure is on the EXT4
-MAP_SHARED arm (kernel/src/arch/x86_64/mm/page_fault.rs "session 25"
-filemap_pin_cache_page path), NOT tmpfs (tmpfs mmap is separately
-documented-unsupported in kernel/src/fs/tmpfs.rs:31 — future landmine if
-any test ever mmaps /dev/shm files). waitid08's tst_checkpoint ETIMEDOUT
-(chunk1300 log) is the same page's futex leg.
-
-## Successor immediate queue (in order)
-1. Bash-recovery burst: grep PARKWALK in kernel/src/sched/sched.rs; boot
-   run/repro-nftw.sh nftw01 (full KERNPANIC dump); addr2line the rip.
-2. Fix the chunk-700 panic; x3 builds + make test; rerun chunk 700;
-   splice; rerun run/r22-pipeline.sh for the real r22 delta.
-3. Recompile+reinject the V1-V4 probe (run/zz_shmprobe.c has V4 now;
-   the injected binary is the older V1-V3 build): musl-gcc -O2 -static,
-   debugfs-write zz_shmprobe/zz_shmchild/zz_shmchild2 into
-   run/rootfs-x86_64-probe.img, chunk.txt=zz_shmprobe, boot, read the
-   ZZP verdict line. v1/v2/v3/v4 discriminate: double-mmap / fork-inherit
-   / exec-fresh-mmap / exec-futex-wake coherence on ext4 MAP_SHARED.
-4. Commit results/ + TASK.md; push origin/ltp-r21.
-
-## Mission
-1. Reconstruct deleted infra from git (main + `git branch -r | grep archived`): the LTP runner, the 1,869-case list, the per-round results layout (convention /home/william/rux-agents/ltp-r<N>/results/). test/patrol-runbook.md + test/suite.sh carry conventions. LTP source: userspace/linux-ltp/ltp-20240524.tar.xz (extract-build convention like toybox; musl SDK via `make sdk`; soft-fp overlay discipline userspace/build-softfp.sh — BUG-S005 zcb pin).
-2. Build kernel (riscv64) + LTP with the pinned march.
-3. Full 1,869 scan (detached/setsid; long runs survive tool timeouts). Known flake families (rerun 2x in isolation before counting new failures): accept02 getrusage04 kill02 genfmod rename/statfs.
-4. Results to /home/william/rux-agents/ltp-r20/results/. Deliver r20 vs r19 delta table.
-5. New real failures: triage against recent main merges (aarch64 merge b238ebd1 shared diffs: virtio device-ID table, wake floor per-arch, ELF machine checks, boot-table honesty) — compare failing syscall surface vs merge diff.
-6. Small kernel fixes welcome (small commits, English, NEVER "Linux"); rerun affected family.
----
-
-(main carries the stress-port charter below — other lane's TASK content, keep)
-
-## Charter (user directive 2026-11-02)
-"Supplement stress test cases — stability is still a problem. If the
-industry has stress tests for the reference kernel, port them directly
-and run them." PRIMARY vehicle: x86_64 + KVM (platform priority).
-Goal: panics, wedges, leaks, and scheduler starvation exposed by
-sustained load — then kernel-side fixes.
-
-## What to port, in order
-1. stress-ng (the industry standard, ~300 stressors). Build a static
-   x86_64 subset against the toolchain already used for probes (see
-   test/ build patterns; musl static preferred). Inject via the LTP
-   vehicle in /home/william/rux-images/testimages/ (boot rig there
-   already runs x86_64+KVM). Start with the classes our bug ledger
-   says are weak:
-   - memory: malloc/mmap churn (allocator class-lock family),
-     mmapfixed, bigheap (zone exhaustion vs the fake-OOM history)
-   - fork/exec churn (p4 regression history; exit-path RCU grace)
-   - filesystem metadata churn (mkdir/rmdir/unlink storms — the OH
-     chmod-storm shape; bio write-plan under load)
-   - IPC: pipe/socket storms, SysV sem/msg/shm
-   - sched: many-thread yield/wakeup storms (phantom preempt family,
-     WAKE-STRANDED census)
-   - timer/clock: settime/interval storms (tick discipline)
-2. LTP robustness subset already in the tree (fork12, mmapstress,
-   mmap-corruption, sem/msg stress) — run long-loop, not just once.
-3. (later) syscall-fuzzer class (trinity-like) once 1-2 are clean.
-
-## Method
-- One stressor class per boot; serial console is the log.
-- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
-  run/findings.md + minimal reproducer.
-- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
-  clean before push (origin/stress-port).
-- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
-  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
-  double as Tier-1-under-load evidence for the perf gate.
-- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
-  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
-  by exact cmdline).
+- Web research is the core tool (papers, project docs, LWN, talks);
+  record sources inline. Numbers over adjectives.
+- No kernel code changes this round (research + docs + the register);
+  prototype spikes are follow-up lanes from the shortlist.
+- x86_64+KVM is the evaluation rig for any numbers you produce.
 
 ## Session log (append per session)
 
@@ -2273,3 +1980,163 @@ delta beyond it). Commits: d1184d2d (kernel), 18aa1363 (docs).
    -p 40 / fork_procs -n 500 / growfiles ALL rc=0; msgstress01 rc=2
    (msgsnd EINVAL — the r2/r3-adjudicated flaky family). ltplong6
    (mm trio x3 loops) running at close.
+
+---
+
+### Session 1 (2026-11-03) — round 1 research + survey doc
+
+- Read the in-house anchors: `docs/architecture/rust-design-headroom.md`
+  (eight levers; note: it lives under docs/architecture/, not
+  docs/development/ as the charter guessed) and
+  `docs/architecture/design-divergences.md` — the register has grown to
+  D-1..D-18; levers §1/§3/§4/§5 already landed as D-6/D-7+D-11/
+  D-4+D-15/D-10. Open levers: §2 (ownership), §6 (binder FSM),
+  §7 (timer wheel), §8 (driver proofs).
+- Grounding greps (no edits): x86_64 ships NO vDSO (exec.rs keeps
+  AT_SYSINFO_EHDR absent) — recorded as a parity gap for the perf lane,
+  not a divergence; binder.rs = 9,170 lines behind the WORLD lock;
+  timer.rs = 1,309 lines; io_uring module exists.
+- Web research done on: Redox schemes, Theseus (OSDI '20, not ASPLOS),
+  RustyHermit/OSv, seL4 (8.7kLoC / ~170k lines proof / ~20 py; CertiKOS),
+  Zircon (170+ syscalls, vDSO-only entry, per-process handle rights,
+  Nest Hub), Barrelfish (SOSP '09) + Barrelfish/DC, flat combining
+  (SPAA '10), FlexSC (OSDI '10, Soares & Stumm — not ATC '10),
+  io_uring (5.1+; ~20% over epoll; within ~10% of SPDK per SOSP '22),
+  EEVDF (v6.6) + ghOSt (SOSP '21) + sched_ext (v6.12), userfaultfd
+  (4.3/4.11/5.13), NOVA/PMFS + Optane EOL 2022, Capsicum (USEC '10,
+  FreeBSD 9), Plan 9 namespaces (Pike), RUMP anykernel (Kantee),
+  Kani/loom. Sources recorded inline in the doc.
+- Wrote `docs/architecture/industry-design-survey.md` (~730 lines):
+  18 designs, verdicts (ADOPT: intralingual continuation, verification
+  method; PROTOTYPE: Zircon internal rights, internal writeback
+  completion-ring, RUMP-style in-host fs tests; REJECT with reasons:
+  11 more incl. FlexSC/unikernel/Barrelfish/PM/Plan9/flat-combining —
+  flat combining rejected on OUR GRQ volume-coupled data, EEVDF
+  reclassified as parity-not-divergence). §8 cross-reference: levers
+  §4 and §7 have NO industry precedent (in-house validated / internal
+  risk-free); ranked top-5 shortlist with per-lane cost/exit criteria:
+  S-1 model-checking pilot, S-2 binder typed FSM, S-3 anykernel test
+  slice, S-4 writeback completion-ring, S-5 typed timer wheel.
+- No kernel code changes; no register entries this round (per charter —
+  register only on prototype evidence).
+- Discipline: worked only in this worktree; no QEMUs started.
+- Next round (suggestions): coordinator picks shortlist lanes; S-1 and
+  S-5 are the cheapest; S-2 needs OH-lane coordination on binder.rs;
+  S-4 depends on S-3's replay scenarios.
+
+### Session 2 (2026-11-03) — round 2: complete the Rust-native register
+
+Mission (user directive 2026-11-03, record-everything): make
+docs/architecture/rust-native-register.md COMPLETE and unassailably
+evidenced. Merged main (4fecef2d register skeleton) — one TASK.md
+conflict resolved in favor of this lane's charter (lane-local file).
+
+- Mined every lane's evidence: TASK.md records across the 63 lane
+  worktrees, run/ artifacts (stress-port/run/stress-runs/findings.md,
+  arch-s5/run/arch-s5-s2/type-catches.txt, perf-audit/run/
+  pa68-d7-rootcause.txt, dfx-trace TASK round-1 verification), the
+  main-tree perf-gate-baseline.md and docs/test/lmbench-report.md,
+  and git log on main (~30 candidate commits hash-verified as
+  ancestors of main before citing).
+- Register rewritten (skeleton 91 lines -> ~260): thesis paragraph up
+  front (reference-compatible kernel, Rust-native internals, measured
+  ledger, 30-second read); evidence conventions (numbers inlined,
+  source pointer per entry; reference-parity fixes filed under C, not
+  claimed as originals).
+- New entries vs the skeleton: D-11 lock keys (with the 2b092c49
+  conviction -> #[must_use] story), D-7 CpuLocal (with the .rodata
+  incident), WalkClaim reader banks (3f377d13, incl. the honest
+  revert/re-land history), D-2 packed stacks (numbers inlined), the
+  reference-parity receipt list in C (12 commits: ETXTBSY, SysV
+  namespaces, futex physical keys, tmpfs MAP_SHARED, binder poll,
+  dead-tick with the 5.42M-ops number, execveat, O_DIRECT, poll
+  RLIMIT, timerfd deadlines, SYSRET TF|RF), section D now carries the
+  generated TCB-ledger numbers (3158/1340 unsafe tokens, 47
+  forbid(unsafe_code) files, 64% SAFETY coverage, 157 Kani harnesses,
+  1104 proptests), E gains the bio write-plan closure (lb229 decode,
+  allocation-free fix, verification state kept honest), the x86_64
+  ctx-switch levers (9d6980b1: lat_ctx -58%/-59%, PCID gating
+  honesty), p5/fs re-bank families; F gains the census+heal machinery
+  (miss=0, IF=0 25.7->20.4%, cli 594-599ms->6-9ms, strands 233->31)
+  and the allocwatch/lostpark exonerate-instruments entry (the mirage
+  verdict recorded as evidence discipline).
+- Fixes to skeleton claims: lmbench pointer corrected to
+  docs/test/lmbench-report.md (the standing table lives there, not in
+  perf-gate-baseline.md); "ledger retires 59 switches" corrected to
+  what the ledger actually says (59-entry table mapped, waves ported
+  with census A/B identical); dead-tick moved from E (redesign) to C
+  (reference-parity receipt) since the fix adopts the reference's
+  switch-boundary rule.
+- Landed D-19 (typed timer wheel) in design-divergences.md from the
+  arch-s5 session-2 draft — the branch reached main (0b396384) but the
+  D-entry never landed; also removed the stale "pending entries"
+  comment block (D-2 landed long ago).
+- Section G stays placeholder-honest (S-2/S-3/S-4 + the standing
+  rule); no kernel code changes; no QEMUs started.
+
+### Session 3 (2026-11-03) — round 3: safety-and-performance ledger v1 (taxonomy + gaps)
+
+Mission (coordinator): land the two decisive artifacts of
+docs/architecture/safety-and-performance.md — the §2 bug taxonomy and
+the §5 honest gaps register — plus §3 pairing polish. Synced
+origin/main first (picked up dced3cb7, the seeded ledger; fdreap RCU
+retire; ltp_family_boot).
+
+§2 taxonomy v1 (the decisive statistic):
+- Sweep: 3,358 deduped non-merge commit subjects (cherry-picks
+  deduped by subject), 2,702 kernel-code subjects after excluding
+  docs/session-logs/LTP-scans/test-drivers; 169 corruption/race/panic
+  vocabulary candidates individually adjudicated; cross-checked the
+  lane hunt ledgers (wildwrite-hunt.md 3,284 lines, r74-scribble-hunt,
+  review-coverage.md defect table, security-posture.md).
+- 33 memory-corruption-class bugs adjudicated to root cause, each
+  fix-diff inspected for defect residency: 23 inside explicit unsafe
+  blocks / arch asm / unsafe interiors; 10 in SAFE code — all ten
+  ownership/refcount/lock-protocol/stack-depth decisions through
+  trusted unsafe boundaries (vmscan <=0 free, page_cache stale put,
+  exec guard drop, Arc-swap race, 2 stack overruns, ti_cpu TOCTOU,
+  GRQ guard discard, recvmsg re-fetch, PCACHE bit-10). Zero
+  pointer-expression classes (indexing overrun, iterator
+  invalidation, format-string) in safe code; the one safe-code
+  would-be OOB write (pcp refill race) panicked at the bounds check.
+- The draft claim "zero memory-corruption bugs in safe code" was
+  FALSIFIED in strict form and replaced by the 23/10 residency split
+  with per-row citations — the honest version is stronger: the
+  language killed the C expression-level classes everywhere; the
+  safe-code residue is exactly the manual-ownership surface §5
+  targets (typed Refcount, lockdep-class coverage).
+- 4 boundary rows (user-memory/on-disk corruption via bookkeeping:
+  mremap expand, R71 pos race, VMA surgery, ext4 extent/bitmap
+  aliasing) counted separately, not in the 33.
+- Class (c) receipts: 15 panic-surface rows listed with commits
+  (pcp refill bounds catch, UTF-8 printer family, negstale, mmprof
+  slots, SWITCH_COUNT, memwatch PFN, R81/R73 prints, taskdump scan,
+  ext4 empty-index, aarch64 regs[31], binder expect, timer
+  reentrancy, Wave-1 batch).
+- Honesty notes kept: PTGUARD/FREEGUARD misdiagnosis revert, PT_LEDGER
+  hash-collision false reports, the 2b092c49 mechanism correction.
+
+§5 gaps register v1: ordered by-construction (4 rows: bulk memory
+safety, bounds checks, data-race freedom, iterator/format classes)
+→ have-with-artifacts (13 rows: SMAP+AC with G1 fixed 763e9f3c,
+  CR0.WP, no-identity-window D-17, user W^X, seccomp+nnp, 41-cap
+  model, kstack canary/quarantine/audit, deferred-free quarantine,
+  oops/pstore, tracefs, Kani/loom rig)
+→ partial (7: lockdep-class coverage, refcount saturation — tied to
+  §2 rows 24-25, release overflow-checks, KASAN-breadth, LSM,
+  namespaces, cap breadth)
+→ absent-plainly (8: KASLR, kernel W^X tightening, compiler stack
+  protector, hardened usercopy, module signing — moot while
+  registration-only, KCSAN-class checker, eBPF channel,
+  kallsyms masking). Each absent names the closing shape.
+
+§3 pairing: every perf row now carries its safety-pairing clause
+(lmbench standing table numbers from docs/test/lmbench-report.md;
+ctx-lever -58% with the FP-free-binary/af464fb9 pairing; p5/fs
+re-banks from perf-gate-baseline.md board; Geekbench on D-1 with the
+census bands). Fixed the stale tcb.md pointer →
+docs/development/tcb-ledger.md; capability count corrected to 41
+(code truth, CAP_LAST_CAP=40).
+
+No kernel code changes; no QEMUs started. Pushed branch
+arch-research.
