@@ -198,6 +198,109 @@ the write-lock retry loop).
    the CRASH 255 variant may be a real bug — needs one isolation boot
    with the 255 shape captured).
 3. ftest03 handoff follow-up with the sync lane (recipe above).
+
+## SESSION 5 (r25) LOG — branch ltp-r21 @ 0ca98990+ (2026-11-04)
+
+Base: origin/main d08f8cd7 merged (dad20901). FOUR notes for the
+coordinator:
+
+**MERGE GAP (action needed): d08f8cd7 does NOT contain the contents of
+four earlier ltp-lane fixes** (verified by tree-diff origin/main vs the
+merged worktree, 11 files): 2515424b x86_64 SA_RESTORER-mandatory
+(signal.rs still has the in-frame trampoline on main), ab5b5da9
+WCONTINUED wait events (process/exit.rs), 33a4936a ETXTBSY exec text
+holds (errno/locks/vfs/mm_struct/fork/syscall-process), 1ed73f7d futex
+page-in on physical-key resolve (sync/futex.rs). On main those tests
+(rt_sigprocmask01/rt_sigsuspend01 parity shapes, waitid08 WCONTINUED,
+creat07 ETXTBSY, sighold02-class futex waits) will read as the OLD
+behavior — the r24 census numbers were measured with the fixes. The
+r24-census artifacts merged fine; the KERNEL bits did not follow. My
+branch carries them (merge kept my versions); cherry-pick or merge the
+branch whole.
+
+**Rootfs.img lock reversal this round:** the main session's merge gate
+(w28b) held test/rootfs.img legitimately while my make test needed it;
+my suite now waits lock-aware (run/r25-maketest-wait.sh). No gate was
+blocked by me this round.
+
+### Fixes landed (4 kernel commits + 1 test commit)
+1. **a6f7a562 ppoll/pselect6 apply their sigmask argument** — sys_ppoll
+   IGNORED args[3] (doc said so), pselect6 ignored args[5]; only
+   epoll_pwait implemented the wait-scoped mask. ppoll01's
+   SEND_SIGINT_RACE_TEST (both variants) slept out its 2s timeout and
+   returned 0 instead of EINTR: the caller-blocked SIGINT stayed blocked
+   through the wait. Now: WaitScopedMask guard (install, restore on
+   every exit; EINTR exits DEFER the restore to the signal-delivery
+   path via sigmask_restore — reference -ERESTARTNOHAND discipline, same
+   mechanism rt_sigsuspend uses); ppoll validates sigsetsize==8 first;
+   pselect6 parses the raw {ss,size} pair. Verified: ppoll01 PASS 20/0/0
+   + pselect01/_64, select02, poll02, epoll_pwait03 no regressions.
+2. **66192155 reference IPC limits** — IPC_IDS_MAX 256→32768 (IPCMNI;
+   id encoding keeps positive i32), msgmni default 256→32000, shmmni
+   pinned 4096. Root cause of msgstress01: the test creates 1000 queues
+   on its DEFAULT run (the -n clamp never applies without the option),
+   msgget ENOSPC'd at 257, cleanup RMID cascaded EINVAL into every
+   child (broken 44–263). VERIFIED CORRECT: full run with
+   LTP_TIMEOUT_MUL=3 PASSES. The plain 30s-harness census verdict is now
+   throughput-bound (msg+usleep churn needs minutes at -smp 2) — not a
+   correctness bug; msg-path perf (per-queue locks vs the one global
+   ids Spinlock) is perf-lane material.
+3. **27d244ab shmat EIDRM errno parity** — shmat on an IPC_RMID-marked
+   but still-live segment returned EINVAL (find_with_perms' !deleted
+   filter made the EIDRM check dead code); reference shm_obtain_object_
+   check says EIDRM (EINVAL only for freed/reused ids). Lookup+perms+
+   deleted+size now one slots lock with seq/ns revalidation (the old
+   two-lock shape had a slot-reuse window).
+4. **sysfs(2) implemented (x86_64-native 139)** — 139 was missing from
+   the x86_64→generic translate table, so native sysfs() hit the
+   generic table's rt_sigreturn(139), which popped a garbage signal
+   frame and resumed at a STACK address (NX fault): LTP sysfs01..05 all
+   died "Test killed by SIGSEGV" in setup. Implemented over a shared
+   FS_TABLE (also drives /proc/filesystems): option1 index-by-name
+   (EINVAL/EFAULT), option2 name-by-index returns 0 (modern reference;
+   sysfs02's TST_EXP_PASS demands exactly 0), option3 count, else
+   EINVAL. Verified: sysfs01-05 ALL PASS (5-point family, host parity
+   confirmed first).
+
+### Verdicts (results/verdicts-r25.txt — the NOT-OURS ledger)
+- **shmat1 CRASH-255 = NOT-OURS**: the musl binary on the HOST
+  reference kernel dies identically (rc=255, "caught signal 11 --
+  exiting.", -l 400): sig_handler's sigsetjmp recovery is #ifdef
+  __i386__ ONLY, so the test's by-design shmdt race kills it on every
+  x86_64 kernel. Full transcript in the r25 log below.
+- **mmapstress family DISSOLVES (8 members)**: 02/03/05/08 (the
+  "errno=12 couldn't round up brk" arm) fail IDENTICALLY on the host
+  (same TFAIL lines, rc=1) — NOT-OURS; 06/07/09/10 fail only because
+  our tests-all.txt invokes them BARE while LTP's runtest passes args
+  (06 "20", 09/10 "-p 20 -t 0.2", 07 needs a tmpfile argument) —
+  invocation artifacts. A follow-up rig improvement (ltpscan arg
+  support) could recover up to 4, but the runner currently execs bare
+  names only.
+- **shm_test = racy legacy mtest07** (byte-wise sched_yield churn;
+  intrinsic shmget/shmat-vs-RMID thundering race the reference also
+  loses with nonzero probability — host passes only at small -l/-t).
+  Census stays non-PASS; errno parity fixed kernel-side.
+
+### Leads captured (not chased)
+- **Post-test exit hang after msgstress01** (mul3 run): after "Test
+  passed" + summary, a task (pid 306, state=2) stays blocked; khungtaskd
+  reports but its victim-stack dump prints its own frame (walker bug?).
+  RWFRZ TID-VANISHED (reader-exit window) prints nearby. Exit-path hunt
+  under IPC+futex churn; log run/r25-msgstress-mul3.log.
+- **ftest03**: still FAIL 2/2 on the stress-r8 merged tree (children
+  fail DATA checks + one out-of-order virtio completion witness) —
+  stress lane round-9 owns the fs/biglock fix; re-verify when it lands.
+- **epoll_pwait** still uses the direct-restore (pre-defer) mask exit —
+  same TIF_RESTORE_SIGMASK nuance ppoll now has; no LTP test observes
+  it today; switch it to WaitScopedMask when touching that file next.
+
+### Gates
+x3 builds rc=0 (x86_64 after each fix + riscv64/aarch64 twice,
+dtb_blob.S restored each time); make test GREEN 1301/1301
+(maketest-r25-2.log; attempt 3 hit the shared rootfs.img lock held by
+the main-session merge gate — relaunched lock-aware, see above). Full
+r25 census WITH negmemo=1 launched on the final tree
+(results/results-r25.txt + run/r25-scan-logs).
 4. The kill10 freeze face with the timers owner (evidence pack).
 
 ## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869

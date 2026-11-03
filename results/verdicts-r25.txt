@@ -1,0 +1,84 @@
+r25 family verdicts — the NOT-OURS ledger (host-reference parity evidence)
+============================================================================
+Method: the rig's LTP is MUSL-built. The ground truth for "is this a
+kernel bug" is running the SAME musl binary on the host reference kernel
+(7.0.0-31-generic). Identical verdict = musl/test artifact, NOT-OURS.
+This file makes those closures explicit so the census narrative counts
+them as adjudicated, not "open".
+
+--- Signal family (r24 adjudication, evidence: run/results-r24sig-a.txt
+    and the r24 close in TASK.md; the r21 PASSes rode the in-frame
+    executable signal trampoline crutch that stack-NX removed) ---
+
+rt_sigaction01   CRASH 139/132  NOT-OURS (r21, results/bugs-r21-followup.txt
+                                Bug 5: musl never fills oldact.sa_restorer;
+                                host dies identically at signal 35)
+rt_sigprocmask01 CRASH 139      NOT-OURS (host rc=139 SIGSEGV at rip=0:
+                                LTP sig_initial harvests oact.sa_restorer,
+                                musl leaves 0 -> SA_RESTORER|0 -> handler
+                                returns to NULL)
+rt_sigsuspend01  FAIL "killed   NOT-OURS (host rc=2 TBROK "Test killed by
+                 by SIGSEGV"    SIGSEGV" — identical)
+sigrelse01       FAIL signal 34 NOT-OURS (host rc=2, same EINVAL print)
+sigtimedwait01   FAIL timeout   NOT-OURS (host rc=2 TBROK timeout class)
+sigwaitinfo01    FAIL timeout   NOT-OURS (host rc=2 TBROK timeout class)
+
+kill10           FAIL SIGTERM   REAL divergence (host rc=0 in 1.0s).
+                                r24 landed the park-face fix (idle heals
+                                its own lying busy slot); freeze face is
+                                with the timers owner (SP-5/ticktrap).
+
+--- r25 additions (this round's host-parity runs) ---
+
+shmat1           CRASH 255      NOT-OURS (host run 2026-11-04, musl binary,
+                                -l 400: rc=255 "caught signal 11 --
+                                exiting." — IDENTICAL. The test's sigsetjmp/
+                                siglongjmp recovery in sig_handler is
+                                #ifdef __i386__ ONLY; on x86_64 its
+                                by-design shmdt race kills the process on
+                                every kernel. Evidence:
+                                run/r25-shm-diag + host transcript in
+                                TASK.md r25 log.)
+
+shm_test         TIMEOUT/CRASH  RACY LEGACY TEST (mtest07): byte-wise
+                                sched_yield churn (30 threads) exceeds the
+                                30s harness wall on any kernel at this
+                                scale; the CRASH-255 face is the intrinsic
+                                shmget/shmat-vs-IPC_RMID thundering race
+                                (host loses it with nonzero probability
+                                too; host passes only at small -l/-t).
+                                Kernel-side errno parity FIXED in r25
+                                (shmat on a marked-deleted segment now
+                                EIDRM, was EINVAL — commit d4cb6954).
+                                Census verdict stays non-PASS; honest
+                                class = racy/budget, not an open bug.
+
+msgstress01      FAIL EINVAL    ROOT CAUSE FIXED (r25): our msgmni default
+                                (256) was far below the reference default
+                                (32000) and the ids table capped at 256;
+                                the test's default run creates 1000
+                                queues (its -n clamp never applies without
+                                the option), the parent's msgget hit
+                                ENOSPC at 257 and the cleanup RMID
+                                cascade turned every child's msgsnd/msgrcv
+                                EINVAL. Now: IPCMNI 32768 table, msgmni
+                                32000, shmmni pinned 4096. VERIFIED
+                                CORRECT: full run with LTP_TIMEOUT_MUL=3
+                                PASSES ("Test passed. All messages have
+                                been received", passed 1 failed 0). The
+                                plain 30s-harness census verdict is now
+                                throughput-bound (msg+usleep churn needs
+                                minutes at -smp 2), not a correctness
+                                bug. Follow-up lead captured: a task can
+                                stay blocked (state=2, khungtaskd report)
+                                after the test's summary during leftover-
+                                descendant teardown — exit-path hunt,
+                                logged in TASK.md.
+
+ppoll01          FAIL 2 arms    REAL, FIXED (r25, commit a6f7a562): ppoll
+                                ignored its sigmask argument (pselect6
+                                too); SEND_SIGINT_RACE_TEST slept out the
+                                2s timeout (ret 0) instead of EINTR
+                                because the caller-blocked SIGINT stayed
+                                blocked through the wait. Verified
+                                PASS 20/0/0 with no family regressions.
