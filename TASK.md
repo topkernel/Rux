@@ -2840,3 +2840,25 @@ left alone; it wedged in the DEADLOCK class at ~1319s).
    kernel (bzImage-ladder-bmsscan26) narrates the scan leg for free.
    Pixels: md5 leaving {5f8b704d,06b933b4,82f0a25f,23312e5b} ->
    convert + report IMMEDIATELY.
+
+### Session close (28th, 2026-11-04 00:4x)
+- bmsrace1 (mission-3 roll, load 4.7-6.4): WEDGE — the DEADLOCK
+  spinlock-stuck class from 265s (same lock word as the coordinator's
+  ab9cg-1 wedge — 0xffff88807a44f4b8-class), SA inserts frozen early;
+  race tally 0/1 this session (host never gave a load<4.5 window; the
+  three healthy forensic boots all told the same scan story).
+  Foundation started EARLY on this boot (6.2s) but its own boot-job
+  mkdirs failed err=2 at 6.5s (/data not staged yet — including
+  /data/service/el1/public/database/bundle_manager_service) — the
+  early-BMS-start face of the /data-staging timing, worth remembering
+  for the branch dice.
+- Gates on the final tree (9094970b + probe commits): x86_64 debug +
+  two-pass release, riscv64, aarch64 all rc=0 (dtb_blob.S clean);
+  make test ALL TESTS PASSED (run/cg28-maketest.log, PRIVATE rootfs
+  copy test/rootfs-mine.img per the 17th's pattern — LTP r24's suite
+  QEMU left untouched; my leftover suite QEMU killed by exact match).
+- Pushed: branch biofix-fieldpoll (probe commits 923399da.. + TASK).
+- Assets: run/bms-ref.img + run/bmsref-bmsdb.db (golden reference
+  preinstall store), run/bzImage-ladder-bmsscan26 (cg26b+probe, the
+  roll kernel), run/bzImage-ladder-bmsscan (mainline-tip+probe),
+  run/bmsdump.sh + run/sp-ref-n.py (rig).
