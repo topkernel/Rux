@@ -2131,3 +2131,77 @@ post-SP-6), pushed origin/stress-port.
   ~10-11 µs on main-derived kernels, not 15.4).
 - Next stress round: ltplong long-horizon loops were NOT re-run this
   round (compaction priority); re-run on the SP-6 kernel next.
+
+## Round 7 (2026-11-03) — SP-7 swap starvation fixed; PARKED-LEAK a
+## family; Tier-2 pbench anchor re-banked to KVM
+
+Sync: d734ed49 = merge origin/main 91de1d04 (comment-only vfs.rs
+conflict = the known SP-6/ea26d923 convergence; main's wording kept).
+
+1. MM-OWNER RESIDUALS (mission 1) — NAMED, FIXED, VERIFIED. The SP-7
+   per-page skip-reason census (fe6279c9: counters at every
+   reclaim_anonymous_pages filter/terminal arm, OOM-FORENSIC line +
+   self-gated 1 Hz heartbeat + reference-shaped
+   vmscan:mm_vmscan_lru_shrink_inactive tracepoint id 31) read the
+   exhaustion class: 245,515 anon LRU pages, 3,589 examined ALL BOOT,
+   rotref=1,642 (46%), every error bucket ZERO — the pipeline completes
+   100% of admitted pages; the mass is the Referenced rotation. Three
+   reference divergences produced it: the ALLOCATOR plants Referenced
+   on fresh pages (zone.rs leader + pcp to_in_use; nothing in Rux
+   legitimately flags anon pages — lru_note_refs has no callers);
+   vmscan rotation moved pages to the TAIL (the COLLECT end; its own
+   comment said MRU); anon insertion ALSO at the tail (reference:
+   lru_cache_add at head, isolate from tail; our file side already
+   correct via page_add_file_lru_young). FIX (5c95f612 + rotation hunk
+   that rode in fe6279c9): flag-clear handouts, compact preserves src
+   flag, insert at head, rotate to head. VERIFIED: rotref 1,642 -> 0,
+   freed/examined 35% -> 82-89%, swap writes +75%, op rates +2-5%,
+   kills stay true-exhaustion (free_cnt=0 dumps), make test green.
+   Residuals for the mm owner: unmap0/unmapped/notanon buckets (7-13%,
+   rmap resolution on aged pages — second order). The
+   alloc-fail-with-free>0 skew: evidence-ordering (dump reads race the
+   post-fail refill; walkable tracks free at each read); no missed
+   retry (waiter re-allocs each iteration with progress resets).
+2. PARKED-LEAK (mission 2): memory class 0 lines (102,820 obs);
+   forker class SECOND sample -> FAMILY: PARKED-WILDWRITE + LEAK pid
+   29860 pc=1, count 0->1 BETWEEN walks on a parked task, LEAK-ORIGIN
+   sched.rs:2641 (GRQ lock_irqsave, context switch) hsite trap.rs:1113
+   (IRQ dispatch), ACQUIRE-PAIR-SPLIT releaser != recorded. 2 boots x 1
+   self-resolved line, no damage. The lying-slot/cross-task family the
+   strand hunt owns — sharpest datum yet; not chased here.
+3. TIMER-SOFTIRQ-STALL at halt (mission 3): not reproduced (clean
+   halt). Mechanism named from the code: the halt path drains softirqs
+   directly then wfis forever; the WW watchdog inside the drain
+   blind-scans CPUs whose ticks legitimately stopped during halt
+   quiescence. Not a lost wakeup (post-verdict nothing awaits one);
+   cosmetic; watch only if it ever fires PRE-verdict.
+4. P2 ANCHOR RE-BANK (mission 4): TCG p2 cells are load-hostage (same
+   kernel 10.1-10.7 quiet vs 28.15 at load 5-6); three KVM boards on
+   the round-7 kernel agree ±1% (p2 1.237/1.262/1.242 µs). Whole gated
+   column re-banked (median of 3; p6_write_fsync 8442.6 worst spread
+   +11%); tier2 boots pbench --accel kvm (PB_ACCEL override).
+   Provenance in perf-gate-baseline.md (e4d70ee6). Cross-class
+   comparison stays meaningless.
+5. FAMILY SWEEP (mission 5): memory x2 / forker / fsmeta all PASS on
+   the fixed kernel (renameco 300 iters plain=chmod=rename=0; census
+   bands in shape; allocwatch sections max 48 cycles over10ms=0).
+
+Gates: x3 builds rc=0 (x86_64 post-fix, riscv64 clean-config, aarch64
+dtb_blob.S restored), make test GREEN attempt 1 (1297/1297, riscv64;
+suite leftovers killed by exact rootfs.img match). Pushed
+origin/stress-port.
+
+### Entry points for round 8
+- mm owner: the unmap0/unmapped/notanon residual buckets (rmap on aged
+  pages) — the census is in-tree and free to read on any exhaustion
+  boot; also consider an anon deep-drain parity question (the pre-OOM
+  deep drain is file-only; anon loads rely on the 8x32 round budget —
+  reference retry semantics decide if that needs widening).
+- strand hunt: the ACQUIRE-PAIR-SPLIT shape (sched.rs:2641 GRQ lock +
+  trap.rs:1113 IRQ dispatch) from the forker boot — a booked acquire
+  released by a DIFFERENT task pointer is the lying-slot producer with
+  the cleanest signature so far.
+- perf lane: the strong-class KVM p2 column still reads from the TCG
+  era (1.37-1.39); expect it to re-bank lower on KVM.
+- ltplong long-horizon loops remain un-run since r6 compaction —
+  re-run on an SP-7 kernel next round.
