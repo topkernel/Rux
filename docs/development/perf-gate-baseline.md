@@ -103,6 +103,24 @@ closest to the release-strong TCG-era class (1.37-1.39): expect the
 strong-class KVM column to re-bank lower still when the perf lane
 next measures it.
 
+### Strong-class KVM verification (2026-11-03, stress-port round 8)
+
+The re-banked KVM anchor's load-immunity is now VERIFIED at the
+strong-workload class: one full board on the round-8 kernel (debug
+bzImage, q35 smp2 2G, `--accel kvm`, CPU-affinity pin class — P2's
+own aff=1 pin held — booted UNDER host load 4.3-4.7 with 2 foreign
+QEMUs running, tag r8sp8-load, DONE rc=0) reads **p2_ctxsw 1.267 µs
+= +2.0% of the 1.242 quiet anchor**, where TCG at comparable load
+read 28.151 (the load-hostage class). Whole board vs the anchor
+column: p1_null 0.300 (0%), p1_clock 0.371 (0%), p2 1.267 (+2.0%),
+p3b_cow 8.366 (+3.6%), p6_write_fsync 9661.2 (+14.4% — the I/O row's
+load face; the quiet class already spread ±11%), p6_mkdrmdir 217.7
+(+0.5%), p6_unlink 54.6 (0%), p6_append 5.07 (−2.3%). All rows inside
+±20%. The `p2_ctxsw strong` row's TCG-era cells (1.37-1.39 quiet /
+1.9-2.0 loaded) are now historical: the KVM strong class anchors at
+the SAME 1.24-1.27 band quiet and loaded — the strong-class KVM p2
+column re-banks to **1.267 loaded / 1.242 quiet**.
+
 ## Whole-table refresh (2026-10-29, leg 52/53 — the 2d3df4a7 merge passed its own tier via the pa91 chain)
 
 ### Tier-2 debug-class board + append re-bank (2026-10-30, the aarch64 merge b238ebd1)
@@ -143,7 +161,7 @@ next main-class board (pa94 chain armed).
 | small_alloc REST share | 9.2% | 1.1-1.2% (pa86/pa88/pa91) | syscost |
 | get_file REST site | (not a row) | file.rs:1032: 94.5M calls / 31.2s / 330ns (was :941 132.3M / 50.8s / 383ns pre-leg-52) — NEW guarded row (fdtable) | syscost, leg-52 A+B |
 | p5b_dgram send/recv | 39-43 us loaded class | 4.3/3.8 us med-of-2 (pa91q; the class moved with lever A at the SAME load1 13-15 window) | strong, loaded |
-| p2_ctxsw strong | 1.37-1.39 quiet / 1.9-2.0 loaded | 1.30-1.31 at load1 13-15 (pa91) — re-banks post-CFS | strong, loaded |
+| p2_ctxsw strong | 1.37-1.39 quiet / 1.9-2.0 loaded | KVM re-bank (r8): 1.267 loaded (load 4.3-4.7, aff pin, 2 foreign qemus) / 1.242 quiet — TCG-era cells historical | strong, loaded |
 | p6_append J | 85-90 us | 82.7-104 us family (pa91q 82.7/84.2, pa93j 104.4) | strong, loaded |
 | p6_mkdrmdir | 15.4-16.4 ms | 495-497 us (pa93, branch e3c1ec35 PRE-MERGE — adopts when the coordinator merges) | strong, loaded, both arms |
 | p6_openclose | 27.4-29.4 | 28.8/28.9 (pa91q) | strong, loaded |
