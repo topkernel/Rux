@@ -2,13 +2,13 @@
 
 <div align="center">
 
-**A Linux-compatible kernel, ~310,000 lines of Rust — written entirely by AI.**
+**A Linux-compatible kernel, ~330,000 lines of Rust — written entirely by AI.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#platforms)
 [![Tests](https://img.shields.io/badge/tests-4%2C200%2B%20cases-brightgreen.svg)](#numbers)
-[![Code](https://img.shields.io/badge/code-~310%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-~330%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
 Unmodified OpenHarmony boots its full 135+ services.
@@ -34,7 +34,7 @@ No userspace patches, rebuilds, or configuration changes.
   Where an internal design differs from the mainstream, the
   divergence and its compatibility evidence are recorded in the
   [design-divergence register](docs/architecture/design-divergences.md)
-  (13 entries). Scheduling, for example, uses a single global run
+  (18 entries). Scheduling, for example, uses a single global run
   queue rather than per-CPU queues with load balancing. On the 2–4
   vCPU systems Rux targets, this eliminates work stealing and
   migration entirely; the measured queue hold is 5.1–6.1 µs, flat
@@ -49,6 +49,26 @@ No userspace patches, rebuilds, or configuration changes.
 - **One source tree, three architectures.** riscv64 (primary),
   x86_64, aarch64 — each to a booting shell; Ubuntu runs on two of
   the three.
+
+### Architectural highlights
+
+The ABI is the contract; the internals are original Rust-native
+designs. The essence, each with measured evidence in the
+[Rust-native register](docs/architecture/rust-native-register.md):
+
+- **Types eliminate bug classes.** Timer-class misuse (one-shot vs
+  periodic, IRQ vs task context) and use-after-cancel are compile
+  errors; the mutex handoff state machine is loom/Kani model-checked
+  — the first run found a real bug in 90 s.
+- **Ownership is the fast path.** Allocation-free dentry and timer
+  walks took mmap 72→30 µs under load and cut timer-lock holds
+  25–33% per operation.
+- **Safe by construction.** Userspace-writable strings cannot panic
+  the kernel printer; diagnostics are bounded and allocation-free,
+  so the observer cannot become the pathology.
+- **Observability as a subsystem.** Reference-parity tracefs with
+  per-CPU rings; a disabled site costs one load (asm-verified),
+  enabled ≈18–19 ns per record.
 
 ---
 
@@ -143,11 +163,11 @@ make verify && make kani          # proofs
 
 | | |
 |---|---|
-| Kernel source | ~310,000 lines, 422 files |
+| Kernel source | ~330,000 lines, 432 files |
 | Syscalls dispatched | 345+ |
 | Kernel unit tests | 1,122 (riscv64) · 1,119 (aarch64), all green |
 | Formal verification | 1,116+ functions · 157 Kani proofs · 4 SPIN models |
-| Linux LTP | **1,005 / 1,869** (35 → 524 → 801 → 945 → 1,005) |
+| Linux LTP | **1,059 / 1,869** (35 → 524 → 801 → 945 → 1,005 → 1,059) |
 | Swap under load | 2,064 MiB working set through 256 MB swap, verified |
 | Boot to Ubuntu login | ~4.5 s (4-CPU MTTCG) |
 | Design divergences | 13 registered, each with compatibility evidence |
