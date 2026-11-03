@@ -2545,8 +2545,135 @@ the readiness gap's mechanism CAUGHT LIVE:
   anywoken=0 run=0-class.
 - Pixels: frozen class only (82f0a25f).
 
-### 4. Race tally on the pollwake+parity kernel: 0/2 this session
-(lb363 crawl excluded as host-polluted), 0/4 with the 26th's. The dice:
-wedge (lb361, lb364), distributeddata-hang/no-ladder (lb362). No
-outcome regression from 491ebc09 (SLOW-TXN queue=0ms held on lb364;
-no new panic classes; USEGV stable).
+### 4. Race tally on the pollwake+parity kernel: 0/3 this session
+(lb363 crawl excluded as host-polluted), 0/5 with the 26th's. The dice:
+wedge (lb361, lb364, lb365, lb367), distributeddata-hang/no-ladder
+(lb362). No outcome regression from 491ebc09 on the clean legs
+(SLOW-TXN queue=0ms held on lb364; no new panic classes; USEGV stable).
+
+### 5. lb366 — the cg26b A/B roll (isolates 491ebc09: cg26b has the
+ext4 wave 9cc6188f/cbc6db61 but LACKS only the parity fix)
+- OnStart-SA:1301 COMPLETED, spend 27509 ms, published 38.3s — the same
+  27.5-27.8s as lb359/360. With lb361 (pollwake, crawl boot) also
+  completing OnStart at 73.5s, the parity fix is NOT proven to cause
+  the distributeddata OnStart hang (pollwake clean-cascade samples:
+  1 hang / 1 complete; cg26b: 3/3 complete). The lb362-class hang
+  stays in the FFRT dice family.
+- HEALTHIEST cascade of the campaign: appspawn 6.4s, bootanimation
+  ready 18.8s / finished 34.5s; KVS serving from 38.3s; creation
+  start 67.3 / bundles.ready 98.7 / end 98.7 / startUser 98.9; i18n
+  (USER_ADDED) at 113.7s. The 31s readiness gap CLOSED — creation met
+  a long-serving store. AND STILL LOST: zero "create user:100 bundle
+  size" prints, zero SetBundleQuota, installs service parked in an
+  EMPTY binder read 108+s (nobody ever sent it work).
+- Pixels: 5 shots all 06b933b4 (frozen).
+
+### 6. THE SCAN-LEG DECODE (the session's main structural find, from
+oh-robot sources + lb317/lb362/lb366 logs)
+- The loss hierarchy on healthy fast boots is NOT the KVS timing. With
+  the store serving 29+s before creation (lb366), CreateNewUser still
+  produced nothing: source chain = CheckInitialUser parks on a
+  BundlePromise until the INITIAL USER-0 scan completes
+  (bundle_user_mgr_host_impl.cpp:520), then GetAllPreInstallBundleInfos
+  returns !empty() (:383) — empty set -> "GetAllPreInstallBundleInfos
+  failed" -> return ERR_OK SILENTLY (no size print, no error on
+  serial). The ROOT is upstream: the initial user-0 preinstall stream
+  never installs ANYTHING.
+- The scan lifecycle IS observable via the param channel:
+  bms.scanning_apps.status 0 (BeforeBmsStart) -> 1 (scan end).
+  lb366: 0 at 34.5s -> 1 at 74.6s, ZERO SetBundleQuota in between —
+  the scan "completed" WITHOUT INSTALLING (the 17th's "failed-scan
+  completion", now instrument-named). lb362: 0 at 16.5s -> 1 at
+  565.9s with exactly 2 quota lines at 18s (systemres) — the install
+  loop STARTED then stalled ~549s on the not-yet-published KVS
+  (SA:1301 never came up that boot). lb317 (the campaign's only scan
+  win, cg16f): scan 164.5 -> quota stream 167.7-204.4 (84 lines) ->
+  CreateNewUser at 183.4 found bundle size 34 INSTANTLY.
+- SetBundleQuota census across ALL fresh rolls: lb317=84; lb322/324
+  (cg17) = 0; lb358-361, 364-366 = 0; lb362 = 2. THE SCAN LEG HAS BEEN
+  DEAD SINCE cg17 (2026-11-02) — since the kernel got 2x faster, NOT
+  since the ext4 wave (9cc6188f landed 11-03 08:07, after lb322-324
+  already showed 0) and NOT since the parity fix (lb366 = cg26b-class,
+  no parity fix, still 0).
+- lb317's win mechanics: init SIGKILLed the first foundation at 152.2s
+  (watchdog/critical-service kill) + installs at 154.5s; the RESTARTED
+  foundation (pid 1009) re-ran BMS with the KVS long-serving (up since
+  ~36s) and its scan WON. No boot since got the restart, and the
+  first-pass scan on fast kernels never installs. The 17th's entry
+  point 1 ("a restart landing after ~105s should hit a populated
+  store and WIN") is confirmed as the win mechanism — but it needs the
+  first foundation to die, which is itself dice.
+- ams46 tap extension (e304836f): added the BMS boot-scan verdict keys
+  (BmsStartEvent / OnBmsStarting / first boot / no space / ReInstall
+  all haps / Guard against / QueryAllData failed / persistent data is
+  empty / GetAllPreInstallBundleInfos failed / Bms initial user).
+  lb367 verdict: the image LEVEL-GATES those I-lines out of the hilog
+  socket the tap reads (not even lb317 shows them, while its W-level
+  and the size-print I-line DID flow) — the tap cannot name the branch.
+  Next instrument for this leg must be fs-side (opendir/readdir probe
+  on the preinstall roots) or perf-side (make the scan's dependencies
+  reference-fast). The preinstall list itself is a LOCAL RDB
+  (PreInstallDataStorageRdb), not the KVS; the KVS dependency is
+  LoadInstallInfosFromDb (bundleInfos persistence) which blocks the
+  pipeline until SA:1301 serves or times out.
+
+### 7. lb367 (scanverdict kernel = pollwave + tap): samgr wedge AGAIN,
+seeded ~27s (right at the scan start), fresh parks 211s+, no
+OnStart/creation. WEDGE-RATE TABLE for the coordinator (pollwake
+family = 491ebc09+ lineage vs cg26b = everything else same):
+- pollwake-family rolls: lb361 crawl+wedge, lb362 healthy-but-KVS-hang,
+  lb364 wedge, lb365 wedge, lb367 wedge => 4 wedges / 5 rolls.
+- cg26b rolls: lb358 early spiral, lb359 healthy, lb360 healthy, lb366
+  healthy => 1 bad / 4 rolls.
+NOT statistically decisive at these n, but the direction (samgr-
+centered total-freeze wedges clustering on the parity kernel) plus
+the fact that main has 491ebc09 merged warrants a targeted A/B:
+5 cg26b vs 5 pollwake rolls counting wedge-class outcomes. The parity
+fix is reference-correct (gate audit above); if the A/B confirms a
+wedge-rate shift, the divergence to hunt is WHICH unflagged reader
+class our kernel parks in BWR that the reference would not (the 26th's
+own decode showed OH never polls the binder fd; the parked sys=16
+shape with looper=0x0 taking proc work — lb364 tid 443 — is new
+post-fix behavior that matches the reference's LETTER; check it
+against the reference's actual thread states on a reference boot).
+
+### 8. Housekeeping
+- Killed only own QEMUs (lb363/364/365/366/367 + their drivers by
+  exact pgrep tag match). make test's suite QEMU self-reaped (rc=124
+  post-halt kill is the wrapper's normal shape; verdict line green).
+- Kernels: run/bzImage-ladder-scanverdict (e304836f, two-pass x86_64
+  release; ksyms regenerated — gen-ksyms ran between the two cargo
+  passes; x3 debug builds rc=0; make test green).
+- Pushed: 08ae518b (TASK banking), e304836f (ams46 tap). Branch
+  biofix-fieldpoll.
+
+### Successor entry points (27th, in order)
+1. THE SCAN LEG (the named root): on a healthy-cascade boot (cg26b
+   class gives them most often), the initial user-0 preinstall never
+   installs. The branch verdict is invisible to hilog taps (image
+   level-gating) — the discriminating instrument is FS-SIDE: a gated
+   probe counting opendir/getdents on the preinstall roots
+   (/system/app*, cfg dirs) by tgid, plus the installs-service inbound
+   txn count. If the scan dir-list runs and finds the bundles, the
+   failure is in ProcessSystemBundleInstall's proxy legs (installd
+   proxy acquisition); if the dir-list is EMPTY, it is our
+   readdir/sandbox-pivot path — a kernel bug class. Either answer
+   closes the leg's biggest fork.
+2. THE WEDGE-RATE A/B (coordinator-relevant, main has 491ebc09): 5x
+   cg26b vs 5x pollwake rolls, count wedge-class outcomes (samgr
+   total-freeze with pending txns). 4/5 vs 1/4 is the current
+   uncontrolled estimate.
+3. THE RACE (unchanged recipe, quiet window load <4):
+   system-lb5 + USERDATA=run/userdata-fresh2.img SMP=2 LOGLEVEL=6
+   " dfx=ams46,txnhunt,fuxstuck,slowtask negmemo=1" on
+   run/bzImage-ladder-scanverdict. Pixels: md5 leaving
+   {5f8b704d,06b933b4,82f0a25f,23312e5b} = convert + report IMMEDIATELY.
+   lb366 shows the healthy fast cascade reaches startUser at ~99s with
+   the store serving — the account half is there; the scan half is
+   entry point 1.
+4. Host-load discipline for rolls: a 30-core stress burst (shm_test
+   class) mid-roll produced the 175x rlimits spin-stuck storm on
+   lb363 — check `uptime` AND `ps aux --sort=-%cpu` for >200% single
+   processes right before and (if possible) during the first 60s of
+   every roll; kill own roll early if the host jumps above ~5.
+
