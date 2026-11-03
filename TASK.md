@@ -375,3 +375,71 @@ input for the stale-tp booking hunt (omis), zero wedges alongside.
   run/tr1-kvm-proof-serial.log (full transcript).
 - test/tracefs-smoke.sh updated: per-event set_event writes (the
   reference applies ONE token per write — trace_get_user).
+
+### 2026-11-03, round 4 (in progress) — negmemo validated 2/2, execaudit
+### clean, SP-5 root-cause rewritten twice (holder-strand -> fake-OOM kill
+### chain -> frozen-clock question), reference-parity mm fixes landed
+
+**Sync**: merged origin/main d2b2672a (negmemo + chroot fast base + vm-op
+fast paths) — merge a409deaa. Commits this round: 63e80291 (negstorm
+probe + driver fix), 02c7... discriminator, b5a6dc3d (reference-parity
+reclaim-wait fixes + swap census), + clock discriminators (see git log).
+
+**Baseline re-verify on new main**: fsmeta 8x180 PASS rc=0 (~1.34M ops).
+
+**Negmemo validation (queue 4) PASS x2**: new negstorm class (strict
+ENOENT-prime -> create/link/rename-in/mkdir/symlink -> verify oracle,
+common-set churn; needs cmdline negmemo=1): 8-worker boot 1.9M ops
+neghit=274,763 negstale=479,832 ZERO events; 16-worker boot rc=0
+neghit=200,402 negstale=483,127 ZERO events. d2b2672a holds.
+
+**execaudit (queue 2) no recurrence**: 5 variants one boot (burst 16,
+both disciplines, growfiles+fork_procs targets): 3,520 execs 0 events
+(4,080 across both boots incl. r3). Family stays rare-intermittent.
+
+**SP-5 (queue 1) — the hunt log so far** (boots: sweep 6 + swapcensus +
+rawj + clock):
+1. 6-boot sweep: the face is deterministic (every boot: holder caught
+   phase=5 SWAPW rounds=0 freed=0, exhausted=4..8, selffight=0; workers
+   die by kernel SIGKILL = rs's "needed SIGKILL (wedge)" mislabel — the
+   15s-unreapable line never fires).
+2. Discriminator fields killed the "minutes-long hold" reading:
+   taken_age=0-1j, acqs=1-2 TOTAL, longholds=0 — holds are sub-second;
+   round-3's "stuck across 4+ dumps" was a snapshot artifact.
+3. Real damage: allocation FAILURE via 64-attempt gate-wait exhaustion
+   while the holder's round is in flight -> pagefault fake-OOM kills
+   (dump site: "alloc_pages(order=0) failed with free_cnt>0"; ledger
+   shows 253MB free / zone refills 0->104k pages around the kills).
+4. Reference-parity fixes LANDED (b5a6dc3d): progress-aware gate wait
+   (RECLAIM_PROGRESS from balance_pgdat), fatal-signal bails (waiter +
+   holder rounds + deep drain; current_is_dying exported),
+   PF_MEMALLOC-parity holder-nested skip. Class verdict UNCHANGED
+   (kills persist) — the fix is correct semantics but not the breaker.
+5. swapwrite census: n=0 completed swap writes at EVERY dump — the
+   anon-reclaim engine produces zero (lru[0]=225,700 anon pages,
+   file-lru=27: reclaim is swap-only territory at exhaustion).
+6. RAW-JIFFIES CONTRADICTION (open): now_j=50 frozen at both dumps
+   (HZ=100 -> 0.5s) while SYSCOST printed t=60s nearby and negstorm
+   boots' jiffies-derived PC2 advanced to 270s. Either read_time broke
+   backward on some CPU or timer IRQs stopped during the cascade —
+   the clock boot (OOM-FORENSIC: clock tb= irq0= irq1=) discriminates.
+   If the tick dies during the cascade, the 1Hz census silence AND the
+   kill-window misbehavior (strikes-only kills) both resolve.
+RESOLVED by the clock boot: "clock tb=6173251 irq0=46 irq1=50" ->
+"tb=7051524 irq0=46 irq1=50" — tb ADVANCES, tick-IRQ counters frozen:
+the TIMER IRQs STOP on both CPUs ~0.5 s in (exhaustion ramp). jiffies
+died with them (increment runs only from the timer IRQ); every
+jiffies-derived silence during the cascade is the dead clock. NOT
+reproduced by fork-only / mmap-churn / negstorm / fsmeta / timer
+boots (tick alive through t=60-270s in all). Trigger is in the
+reclaim/OOM-slowpath machinery — timers/interrupts-domain handoff
+(LAPIC LVT/TMICT/IRR dump + last-re-arm stamp on the
+frozen-counter-while-tb-advances signature). Swap reclaim still
+produces zero completed writes at every dump (n=0) — second open
+thread for the mm owner (per-page skip-reason instrument in
+reclaim_anonymous_pages).
+
+**ltplong4 long boot (queue 3) RUNNING**: mmapstress07 x2 TPASS with
+canonical args (/tmpfile 4096 1 0) — the round-2 usage gap closed.
+Rest of the battery in flight (mmapstress01, mmap-corruption01,
+fork_procs -n 200, growfiles, mmapstress09 -p 40 -t 0.4).
