@@ -27,8 +27,19 @@
 //! SKIPs on this very run class) — a Vec push here would trip
 //! alloc_error_handler (panic = abort = parked CPU), freezing the
 //! suite with no diagnostic. Counters and fixed arrays only.
+//!
+//! STACK-FREE by design too: `run_all_tests` executes on the 64 KB
+//! boot stack and one wheel is ~67 KB — the first version's
+//! `TimerWheel::new()` locals overflowed it, and the slot writes
+//! scribbled over whatever sat below the stack. The corruption
+//! surfaced two groups later as the scheduler-group KERNPANIC /
+//! GRQ-deadlock family (idle-CPU illegal-instruction at a data
+//! address, WAKE-STRANDED, sys_sched_yield wedged on the GRQ). All
+//! cases share the fixed .bss wheel via `TimerWheel::test_shared()` —
+//! exactly how the kernel itself stores the wheel (`static
+//! TIMER_TABLE`).
 
-use crate::timer::wheel::{self, Action, Now, TimerWheel};
+use crate::timer::wheel::{self, Action, Now, OneshotAction, PeriodicAction, TimerWheel};
 use super::{test_fail, test_group_start, test_pass};
 
 /// Fired-token scratch (the suite is single-CPU here).
@@ -105,9 +116,10 @@ pub fn test_timer_wheel() {
 
     // ---- Test 1: slot round-trip (probe_route <-> armed bucket) ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let cur = 1000u64;
-        w.advance(Now { jiffies: cur, time: 0 });
+        w.advance(Now::new(cur, 0));
         // distances: due-now, near (L0), mid (L1), far-in-wheel (L2),
         // beyond span (FAR)
         let cases: [(u64, &str); 5] = [
@@ -120,7 +132,7 @@ pub fn test_timer_wheel() {
         let mut ok = true;
         for (i, (abs, name)) in cases.iter().enumerate() {
             let id = 10 + i as u64;
-            if !w.arm_jiffy(*abs, Action::None, None, id) {
+            if !w.arm_oneshot_jiffy(*abs, OneshotAction::None, id) {
                 test_fail("arm", name);
                 ok = false;
                 continue;
@@ -139,13 +151,14 @@ pub fn test_timer_wheel() {
     // boundaries (a timer armed for J fires at J, not J±1, including
     // across the 64-bucket wrap and the L1 cascade boundary). ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
         let base = 62u64; // near the level-0 wrap
-        w.advance(Now { jiffies: base, time: 0 });
+        w.advance(Now::new(base, 0));
         let targets = [base + 1, base + 2, base + 63, base + 64, base + 65, base + 128];
         for (i, t) in targets.iter().enumerate() {
-            if !w.arm_jiffy(*t, Action::None, None, 100 + i as u64) {
+            if !w.arm_oneshot_jiffy(*t, OneshotAction::None, 100 + i as u64) {
                 test_fail("arm boundary", "t");
                 return;
             }
@@ -156,7 +169,7 @@ pub fn test_timer_wheel() {
         let mut log = FiredLog::new();
         for j in base..=base + 130 {
             log = FiredLog::new();
-            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            run_pass(w, Now::new(j, 0), &mut out, &mut log);
             for i in 0..6 {
                 if log.contains(100 + i as u64) {
                     fire_jiffy[i] = j;
@@ -177,39 +190,40 @@ pub fn test_timer_wheel() {
     // fires ONLY on the precise time compare, never because its jiffy
     // horizon passed (the lost-timer-wakeup root cause). ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
         let tpj = 100_000u64; // synthetic ticks per jiffy
         let start_j = 500u64;
         let start_t = start_j * tpj;
-        w.advance(Now { jiffies: start_j, time: start_t });
+        w.advance(Now::new(start_j, start_t));
         // Precise deadline 2.5 jiffies out; grid-derived horizon (the
         // wheel derives it in the kernel via jiffy_floor_of_time; here
         // we pass floor(2.5)+0 = jiffy 502 — the first jiffy whose
         // span covers the deadline).
         let precise = start_t + (5 * tpj) / 2;
         let horizon = start_j + 2;
-        if !w.arm_hres(precise, horizon, Action::Wake { pid: 7 }, None, 42) {
+        if !w.arm_oneshot_hres(precise, horizon, OneshotAction::Wake { pid: 7 }, 42) {
             test_fail("arm hres", "pool");
             return;
         }
         let mut log = FiredLog::new();
         // Advance jiffies well past the horizon while time stays short:
         // the entry must NOT fire (the old jiffy fallback did).
-        run_pass(&mut w, Now { jiffies: start_j + 10, time: start_t + tpj }, &mut out, &mut log);
+        run_pass(w, Now::new(start_j + 10, start_t + tpj), &mut out, &mut log);
         if log.len() != 0 {
             test_fail("hres early-fire guard", "fired on jiffy clock");
             return;
         }
         // Time reaches the deadline (jiffies unchanged): must fire NOW.
-        run_pass(&mut w, Now { jiffies: start_j + 10, time: precise }, &mut out, &mut log);
+        run_pass(w, Now::new(start_j + 10, precise), &mut out, &mut log);
         if log.only() != Some(42) {
             test_fail("hres precise fire", "wrong token set");
             return;
         }
         // And exactly once (one-shot: the slot is gone).
         log = FiredLog::new();
-        run_pass(&mut w, Now { jiffies: start_j + 12, time: precise + tpj }, &mut out, &mut log);
+        run_pass(w, Now::new(start_j + 12, precise + tpj), &mut out, &mut log);
         if log.len() != 0 {
             test_fail("hres one-shot", "double fire");
             return;
@@ -220,18 +234,18 @@ pub fn test_timer_wheel() {
     // ---- Test 4: periodic re-arm delivers on EVERY expiry and keeps
     // the same id (R37: the re-arm path once delivered nothing). ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
-        w.advance(Now { jiffies: 0, time: 0 });
         let interval = core::num::NonZeroU64::new(3).unwrap();
-        if !w.arm_jiffy(3, Action::Signal { pid: 9, signo: 14 }, Some(interval), 77) {
+        if !w.arm_periodic_jiffy(3, PeriodicAction::Signal { pid: 9, signo: 14 }, interval, 77) {
             test_fail("arm periodic", "pool");
             return;
         }
         let mut totals = FireTotals::new();
         for j in 0..31u64 {
             let mut log = FiredLog::new();
-            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            run_pass(w, Now::new(j, 0), &mut out, &mut log);
             totals.add(&log);
         }
         if totals.of(77) == 10 && totals.total == 10 {
@@ -246,18 +260,18 @@ pub fn test_timer_wheel() {
     // the first-version link_tail bug: linking after the head orphaned
     // every entry between head and tail.) ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
-        w.advance(Now { jiffies: 0, time: 0 });
         // BUDGET + 10 one-shots all due at jiffy 5.
         for i in 0..(BUDGET + 10) as u64 {
-            if !w.arm_jiffy(5, Action::None, None, 1000 + i) {
+            if !w.arm_oneshot_jiffy(5, OneshotAction::None, 1000 + i) {
                 test_fail("arm storm", "pool");
                 return;
             }
         }
         let mut log = FiredLog::new();
-        run_pass(&mut w, Now { jiffies: 5, time: 0 }, &mut out, &mut log);
+        run_pass(w, Now::new(5, 0), &mut out, &mut log);
         if log.len() != BUDGET {
             test_fail("budget cap", "first pass != budget");
             return;
@@ -265,10 +279,10 @@ pub fn test_timer_wheel() {
         let mut totals = FireTotals::new();
         totals.add(&log);
         log = FiredLog::new();
-        run_pass(&mut w, Now { jiffies: 6, time: 0 }, &mut out, &mut log);
+        run_pass(w, Now::new(6, 0), &mut out, &mut log);
         totals.add(&log);
         log = FiredLog::new();
-        run_pass(&mut w, Now { jiffies: 7, time: 0 }, &mut out, &mut log);
+        run_pass(w, Now::new(7, 0), &mut out, &mut log);
         totals.add(&log);
         if totals.total == (BUDGET + 10) as u32 {
             test_pass("budget carry drains all, none double-fired");
@@ -280,20 +294,21 @@ pub fn test_timer_wheel() {
     // ---- Test 6: catch-up advance — a multi-jiffy jump (tick stall)
     // drains every intermediate due entry through the DUE carry. ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
-        w.advance(Now { jiffies: 10, time: 0 });
+        w.advance(Now::new(10, 0));
         // Entries at several intermediate jiffies + one far (L1) entry
         // whose bucket cascades during the jump.
         for (i, jf) in [11u64, 15, 40, 64, 73, 200].iter().enumerate() {
-            if !w.arm_jiffy(*jf, Action::None, None, 2000 + i as u64) {
+            if !w.arm_oneshot_jiffy(*jf, OneshotAction::None, 2000 + i as u64) {
                 test_fail("arm catchup", "pool");
                 return;
             }
         }
         // One jump from 10 to 500.
         let mut log = FiredLog::new();
-        run_pass(&mut w, Now { jiffies: 500, time: 0 }, &mut out, &mut log);
+        run_pass(w, Now::new(500, 0), &mut out, &mut log);
         let all = (0..6).all(|i| log.contains(2000 + i as u64));
         if all && log.len() == 6 {
             test_pass("catch-up advance drains all intermediates");
@@ -304,9 +319,10 @@ pub fn test_timer_wheel() {
 
     // ---- Test 7: remove/pending/state (del_timer semantics). ----
     {
-        let mut w = TimerWheel::new();
-        w.advance(Now { jiffies: 100, time: 0 });
-        if !w.arm_jiffy(140, Action::Wake { pid: 3 }, None, 3000) {
+        let w = TimerWheel::test_shared();
+        w.reset();
+        w.advance(Now::new(100, 0));
+        if !w.arm_oneshot_jiffy(140, OneshotAction::Wake { pid: 3 }, 3000) {
             test_fail("arm remove", "pool");
             return;
         }
@@ -326,7 +342,7 @@ pub fn test_timer_wheel() {
             return;
         }
         // hres remove reports the class (HRES_NEXT recompute driver).
-        if !w.arm_hres(9_999_999, 120, Action::None, None, 3001) {
+        if !w.arm_oneshot_hres(9_999_999, 120, OneshotAction::None, 3001) {
             test_fail("arm hres remove", "pool");
             return;
         }
@@ -343,11 +359,11 @@ pub fn test_timer_wheel() {
     // ---- Test 8: FAR routing round-trip — a horizon beyond the wheel
     // span fires exactly on time after FAR rescans. ----
     {
-        let mut w = TimerWheel::new();
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut out = tokens();
-        w.advance(Now { jiffies: 0, time: 0 });
         let target = 300000u64; // > 262144 span
-        if !w.arm_jiffy(target, Action::None, None, 4000) {
+        if !w.arm_oneshot_jiffy(target, OneshotAction::None, 4000) {
             test_fail("arm far", "pool");
             return;
         }
@@ -363,12 +379,12 @@ pub fn test_timer_wheel() {
         while j + 4096 < target - 8 {
             j += 4096;
             let mut log = FiredLog::new();
-            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            run_pass(w, Now::new(j, 0), &mut out, &mut log);
             totals.add(&log);
         }
         while j <= target + 4 {
             let mut log = FiredLog::new();
-            run_pass(&mut w, Now { jiffies: j, time: 0 }, &mut out, &mut log);
+            run_pass(w, Now::new(j, 0), &mut out, &mut log);
             totals.add(&log);
             j += 1;
         }
@@ -381,11 +397,11 @@ pub fn test_timer_wheel() {
 
     // ---- Test 9: pool exhaustion reports failure (the old `0` ABI). ----
     {
-        let mut w = TimerWheel::new();
-        w.advance(Now { jiffies: 0, time: 0 });
+        let w = TimerWheel::test_shared();
+        w.reset();
         let mut armed = 0usize;
         for i in 0..wheel::MAX_TIMERS as u64 + 1 {
-            if w.arm_jiffy(i + 1, Action::None, None, 5000 + i) {
+            if w.arm_oneshot_jiffy(i + 1, OneshotAction::None, 5000 + i) {
                 armed += 1;
             }
         }
