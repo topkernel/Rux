@@ -46,6 +46,12 @@ fn bmsscan_match(path: &str) -> bool {
         || path.contains("bmsdb")
         || path.contains("/data/app/el1")
         || path.contains("/system/app")
+        // The pre-bundle profile leg (LoadPreInstallProFile): /system/etc/
+        // app/install_list.json + uninstall_list.json + the app_service
+        // fwk list — seeing these opens names the FIRST-BOOT branch;
+        // their absence after the KVS wait = the reboot path taken.
+        || path.contains("install_list")
+        || path.contains("/etc/app/")
 }
 
 fn bmsscan_watch_open(path: &str, flags: u32) {
