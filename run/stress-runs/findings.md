@@ -856,3 +856,144 @@ rename=0 (SP-2 area holds), fsmeta 4 workers full budget rc=0,
 RS-ALL-DONE, zero panics. Gates: x3 builds rc=0 (x86_64 post-fix, riscv64 clean
 config, aarch64 with dtb_blob.S restored), make test GREEN attempt 1
 (1297/1297).
+
+## Round 8 — Mission 1: the ACQUIRE-PAIR-SPLIT / PARKED-WILDWRITE family
+## ROOT-CAUSED (both faces benign; census gaps closed; no lying-slot
+## wild write exists on this tree)
+
+The r7 datum (PARKED-WILDWRITE + PARKED-LEAK pid 29860 pc=1 site=
+sched.rs:2641 hsite=trap.rs:1113, releaser != recorded) decomposes
+into TWO distinct mechanisms, both now proven:
+
+1. PARKED-WILDWRITE/PARKED-LEAK = the parkwalk census sampling a
+   voluntary-parking task inside its OWN __schedule, in the window
+   [per-CPU slot publish -> SWITCHING_OUT store]. Facts (code):
+   the census classifies "parked" as "named by no sched slot and no
+   SWITCHING_OUT marker"; __schedule publishes cpu_state.current=next
+   (sched.rs) BEFORE storing the R63 SWITCHING_OUT marker (which sat
+   behind the schedstat block); the parking task legitimately holds
+   its OWN GRQ guard through that whole window (acquire at
+   sched.rs:2641 = the recorded site — the task's own scheduler lock;
+   hsite=1113 is just its most recent tick stamp). The count returns
+   to 0 at unlock_irqretain microseconds later (before the asm
+   switch) — hence "self-resolved, all ages 0, pc=0 at report". The
+   wildwrite predicate (parked two consecutive walks + 0->1 between)
+   is satisfied when walk N sampled an earlier full park and walk N+1
+   landed in the gap of a later park (wake->run->re-park between
+   walks is invisible to the two-walk predicate). The report-time
+   tp=-1 (no arch tp names the victim) does NOT falsify this: the
+   report runs after the walk's bucket-lock latency, long past the
+   us-scale window.
+2. ACQUIRE-PAIR-SPLIT (40/boot cap under fork churn, ALL
+   osite=sched.rs:2641, including symmetric releaser/recorded pairs
+   swapped across cpu0/cpu1) = leakorigin slot-table cross-talk:
+   two LIVE tasks hashing to the same 2048-entry Fibonacci slot
+   (birthday collisions are certain at ~2700 concurrent tasks), both
+   paying __schedule's GRQ outermost pair — the dominant outermost
+   acquire under churn (every context switch) with a ~5-6 us armed
+   window (the GRQ hold class) — their pairs interleaving across the
+   2 CPUs so each release observes the other's still-armed o-record.
+   A GENUINE cross-task release of this pair is impossible on this
+   tree: preempt booking resolves through the arch tp register, which
+   cannot change between the 2641 acquire and the unlock release (the
+   window is IF=0; the asm switch runs strictly after the release).
+
+FIXES (this round, minimal):
+- sched.rs: SWITCHING_OUT is now stored BEFORE the slot publish
+  (strictly widens the R63 protection; still inside the same GRQ
+  hold; closer to the reference's prev->on_cpu which covers the whole
+  switch). The [slot flip -> marker] gap no longer exists.
+- parkwalk census: Visit now records tp_named (any arch tp register
+  naming the task AT SAMPLE TIME); PARKED-WILDWRITE/PARKED-LEAK print
+  tpexec=; the 4 s PARKED-HEAL never fires on a tp-named (executing)
+  task.
+- leakorigin: ACQUIRE-PAIR-SPLIT prints rpid/rpc/rown (recorded
+  task's pid, CURRENT base count, ownership: slot/marker) so every
+  line self-adjudicates: cross-talk => rpc=0 (pair completed) or
+  freed-descriptor rpid (0xdeadbeef = TASK_POISON, slot succession);
+  a real lying-slot orphan => rown=0 with rpc=1 persisting.
+
+VERIFICATION (forker-lh boot, fixed kernel, dfx=leakhunt,allocwatch):
+fork 492,292 ops rc=0 + exec 178,724 ops rc=0, RS-ALL-DONE;
+PARKED-WILDWRITE 0 (r7: 1), PARKED-LEAK 0 (r7: 1), heals/strands/
+underflows 0. ACQUIRE-PAIR-SPLIT 20 lines: every live recorded task
+rpc=0 (its own pair completed); one line rpid=0xdeadbeef (recorded
+task freed before print — slot succession). ZERO lines with a live
+rpc=1 orphan. VERDICT: the "lying-slot wild-write family" as a
+cross-task preempt-count write does not exist on this tree; the r7
+datum family is closed.
+
+## Round 8 — Mission 2: rmap residual buckets ADJUDICATED (one real
+## divergence found + fixed; the rest are correct teardown behavior)
+
+Battery: memory2 class (malloc 4x256M + mmap 4 + bigheap 2x384M,
+100 s budgets each) on the r8 kernel, vs the r7 sp7-parkcensus
+baseline (same class shape). Final census: calls=12 want=2868
+got=2868 freed=2546 (88.8% — r7 band 82-89%), rotref=0, werr=0,
+zero panics/deadlocks; class verdicts identical to r7 (malloc rc=1 =
+true-exhaustion worker kill; bigheap errno=12 mode switch; mmap rc=0).
+
+1. unmap0 (r7: 119-161/boot) — WAS A REAL MISSED-RMAP-WALK DIVERGENCE,
+   now FIXED. Producer: private file VMAs host anonymous COW pages
+   (the fault paths' FileBacked write-fault arm flags the copy
+   Anonymous+SwapBacked and links it on the anon LRU — do_cow_fault
+   parity; the reference swaps these via page_add_new_anon_rmap), but
+   try_to_unmap_inner's VMA filter only admitted VmaType::Anonymous —
+   every private-COW page (an exec'd binary's written .data/.bss)
+   passed all vmscan filters, got a slot, found no admissible VMA at
+   its recorded address, unmap0'd, freed the slot, and was re-skipped
+   on every later scan: permanently unswappable dead weight at the
+   LRU's cold end. Fix: admit FileBacked VMAs in the walk's filter
+   (the PTE ppn==target match stays the authority; shared file VMAs
+   never host Anonymous-flagged frames; shmem pages never reach this
+   walk from vmscan). After: unmap0 5/boot (−96%), and the new
+   u0(live/dead/ovf) split reads 0/5/0 — the entire residue is the
+   dead face (mapcount already drained when the arm runs = a
+   teardown raced the filter→walk window; benign transient). ZERO
+   live faces (missed walks) and ZERO RmapOverflow faces remain in
+   this workload.
+2. unmapped (r7: 104-111; r8: 226) — CORRECT BEHAVIOR (sampling of
+   in-flight teardown), not a leak. Two producers: (a) exit-path
+   last-unmap (page_remove_rmap decs to −1, clears flags, then
+   removes from LRU — the unlocked filter can read in that window);
+   (b) the swap-out success path keeps the page LRU-linked THROUGH
+   the swap device write (dec_mapcount at PTE-replace ... write (ms
+   class) ... clear flags ... page_remove_lru — the no-swap-cache
+   shape, review 4.12). (b) grew because the fix lets ~2.5k more
+   pages complete swap-out per boot; the share (226/2868 ≈ 8%) is
+   the in-flight overlap, and every such page completes its teardown
+   and leaves the list. The reference hides this class behind
+   PG_swapcache (page leaves the LRU at isolation, before the
+   write) — a swap-cache refactor is architectural, out of scope,
+   and NOT needed for correctness.
+3. notanon (r8: 91 ≈ r7's 83) — same teardown-sampling class (the
+   clear_flag(Anonymous) → page_remove_lru window, plus the exit
+   path). Benign; self-correcting.
+
+VERDICT per the round-8 question: unmap0 was a missed rmap walk (now
+fixed); unmapped and notanon are correct aging/teardown behavior.
+The degraded 4-slot rmap (RmapOverflow) and page_get_mappings
+placeholder never fired in this workload (u0ovf=0) — the
+architectural rmap limit stays a known constraint, not an observed
+face here.
+
+## Round 8 — Mission 3: KVM p2 anchor VERIFIED at the strong class
+
+Full board on the r8 kernel (debug bzImage, --accel kvm, q35 smp2 2G,
+P2's CPU-affinity pin class — aff=1 held), booted UNDER host load
+4.3-4.7 with 2 foreign QEMUs (OH 27 + LTP r24 lanes), tag r8sp8-load,
+PBENCH DONE rc=0:
+  p1_null 0.300 (0% vs anchor) | p1_clock 0.371 (0%) |
+  p2_ctxsw 1.267 (+2.0%) | p3b_cow 8.366 (+3.6%) |
+  p6_write_fsync 9661.2 (+14.4%) | p6_mkdrmdir 217.7 (+0.5%) |
+  p6_unlink 54.6 (0%) | p6_append 5.069 (-2.3%)
+p2 at +2.0% under load+pin where TCG read 28.151 (the load-hostage
+class) closes the r7 re-bank's open question: the KVM anchor HOLDS at
+the strong class. The strong-class p2 column re-banks to
+1.267 loaded / 1.242 quiet (perf-gate-baseline.md updated). The
+fsync row's +14.4% is the I/O row's load face (quiet class already
+spread +/-11%; max tail 51 ms tracks host I/O scheduling) — no
+mechanism in this round's changes touches that path (rmap filter is
+reclaim-only, the sched change is one store inside the GRQ hold);
+this board doubles as the Tier-2 row for the round-8 sched change —
+all rows inside +/-20%.
