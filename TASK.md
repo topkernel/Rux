@@ -135,3 +135,70 @@ conflict resolved in favor of this lane's charter (lane-local file).
   comment block (D-2 landed long ago).
 - Section G stays placeholder-honest (S-2/S-3/S-4 + the standing
   rule); no kernel code changes; no QEMUs started.
+
+### Session 3 (2026-11-03) — round 3: safety-and-performance ledger v1 (taxonomy + gaps)
+
+Mission (coordinator): land the two decisive artifacts of
+docs/architecture/safety-and-performance.md — the §2 bug taxonomy and
+the §5 honest gaps register — plus §3 pairing polish. Synced
+origin/main first (picked up dced3cb7, the seeded ledger; fdreap RCU
+retire; ltp_family_boot).
+
+§2 taxonomy v1 (the decisive statistic):
+- Sweep: 3,358 deduped non-merge commit subjects (cherry-picks
+  deduped by subject), 2,702 kernel-code subjects after excluding
+  docs/session-logs/LTP-scans/test-drivers; 169 corruption/race/panic
+  vocabulary candidates individually adjudicated; cross-checked the
+  lane hunt ledgers (wildwrite-hunt.md 3,284 lines, r74-scribble-hunt,
+  review-coverage.md defect table, security-posture.md).
+- 33 memory-corruption-class bugs adjudicated to root cause, each
+  fix-diff inspected for defect residency: 23 inside explicit unsafe
+  blocks / arch asm / unsafe interiors; 10 in SAFE code — all ten
+  ownership/refcount/lock-protocol/stack-depth decisions through
+  trusted unsafe boundaries (vmscan <=0 free, page_cache stale put,
+  exec guard drop, Arc-swap race, 2 stack overruns, ti_cpu TOCTOU,
+  GRQ guard discard, recvmsg re-fetch, PCACHE bit-10). Zero
+  pointer-expression classes (indexing overrun, iterator
+  invalidation, format-string) in safe code; the one safe-code
+  would-be OOB write (pcp refill race) panicked at the bounds check.
+- The draft claim "zero memory-corruption bugs in safe code" was
+  FALSIFIED in strict form and replaced by the 23/10 residency split
+  with per-row citations — the honest version is stronger: the
+  language killed the C expression-level classes everywhere; the
+  safe-code residue is exactly the manual-ownership surface §5
+  targets (typed Refcount, lockdep-class coverage).
+- 4 boundary rows (user-memory/on-disk corruption via bookkeeping:
+  mremap expand, R71 pos race, VMA surgery, ext4 extent/bitmap
+  aliasing) counted separately, not in the 33.
+- Class (c) receipts: 15 panic-surface rows listed with commits
+  (pcp refill bounds catch, UTF-8 printer family, negstale, mmprof
+  slots, SWITCH_COUNT, memwatch PFN, R81/R73 prints, taskdump scan,
+  ext4 empty-index, aarch64 regs[31], binder expect, timer
+  reentrancy, Wave-1 batch).
+- Honesty notes kept: PTGUARD/FREEGUARD misdiagnosis revert, PT_LEDGER
+  hash-collision false reports, the 2b092c49 mechanism correction.
+
+§5 gaps register v1: ordered by-construction (4 rows: bulk memory
+safety, bounds checks, data-race freedom, iterator/format classes)
+→ have-with-artifacts (13 rows: SMAP+AC with G1 fixed 763e9f3c,
+  CR0.WP, no-identity-window D-17, user W^X, seccomp+nnp, 41-cap
+  model, kstack canary/quarantine/audit, deferred-free quarantine,
+  oops/pstore, tracefs, Kani/loom rig)
+→ partial (7: lockdep-class coverage, refcount saturation — tied to
+  §2 rows 24-25, release overflow-checks, KASAN-breadth, LSM,
+  namespaces, cap breadth)
+→ absent-plainly (8: KASLR, kernel W^X tightening, compiler stack
+  protector, hardened usercopy, module signing — moot while
+  registration-only, KCSAN-class checker, eBPF channel,
+  kallsyms masking). Each absent names the closing shape.
+
+§3 pairing: every perf row now carries its safety-pairing clause
+(lmbench standing table numbers from docs/test/lmbench-report.md;
+ctx-lever -58% with the FP-free-binary/af464fb9 pairing; p5/fs
+re-banks from perf-gate-baseline.md board; Geekbench on D-1 with the
+census bands). Fixed the stale tcb.md pointer →
+docs/development/tcb-ledger.md; capability count corrected to 41
+(code truth, CAP_LAST_CAP=40).
+
+No kernel code changes; no QEMUs started. Pushed branch
+arch-research.
