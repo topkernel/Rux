@@ -2637,7 +2637,34 @@ shape with looper=0x0 taking proc work — lb364 tid 443 — is new
 post-fix behavior that matches the reference's LETTER; check it
 against the reference's actual thread states on a reference boot).
 
-### 8. Housekeeping
+### 8. lb368 (cg26b, final roll, IN FLIGHT at session close — driver
+self-terminates at 1500s) — THE SCAN LEG FIRED, then stalled mid-stream
+- FIRST fresh-boot install stream since lb317 on a cg26b-class kernel:
+  scan start (param 0) 19.3s; installs uid 10000-10005 at 21.3-26.5s
+  (PRE-KVS — the install loop does not need the KVS to start); stream
+  PAUSED 20s during distributeddata OnStart (10.9-45.9s window);
+  resumed uid 10006-10008 at 46.7-50.3s once the KVS published; then
+  DIED at 50.3s on distributeddata serving-capacity collapse (direct
+  evidence: powermgr txn15601 -> distributeddata OS_IPC_0_1332 exec
+  287s+, reply deferred userspace-side — the FFRT family's THIRD role:
+  store-side serving wedge under install load).
+- CreateNewUser start 52.6s READ THE PREINSTALL LIST: "create user:100
+  bundle size:34" PRINTED (the campaign's first since lb317) — the
+  deciding half of the race WON on this boot. But the per-user install
+  loop needs the (now wedged) KVS/installs pipeline: no CreateNewUser
+  end, no startUser, stream frozen at 18 SetBundleQuota lines.
+  Pixels: 5 shots all 82f0a25f (frozen).
+- Net: lb366+lb368 together decompose the scan leg completely:
+  (a) whether the first-boot install branch fires at all is timing
+  dice (lb368 fired with scan at 19.3s; lb366 didn't with 34.5s —
+  earlier BMS start correlates with firing), (b) the stream's knees
+  are BOTH distributeddata (its OnStart window pauses the stream; its
+  serving collapse kills it), (c) with the store nominally up the
+  per-user installs still ride the same store. The single lever that
+  moves every knee: distributeddata speed/robustness under load — the
+  per-op wall (perf lane) plus its 27-35s OnStart (fs-bound DB init).
+
+### 9. Housekeeping
 - Killed only own QEMUs (lb363/364/365/366/367 + their drivers by
   exact pgrep tag match). make test's suite QEMU self-reaped (rc=124
   post-halt kill is the wrapper's normal shape; verdict line green).
