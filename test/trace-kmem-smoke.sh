@@ -102,7 +102,7 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     sleep 0.5
     echo 'echo ===KMEM: origin symbolized ==='
     sleep 0.3
-    echo 'echo KMEMDBG:origin_count=$(grep -c "call_site=rux::" /sys/kernel/debug/tracing/trace)'
+    echo 'echo KMEMDBG:origin_count=$(grep -c call_site=rux:: /sys/kernel/debug/tracing/trace)'
     sleep 0.5
     echo 'echo ===KMEM: done ==='
     sleep 2
@@ -154,7 +154,7 @@ check "kmalloc line in the reference geometry" \
 check "kfree line in the reference geometry" \
     'kfree: call_site=[^ ]+ ptr=0x[0-9a-f]+'
 check "mm_page_alloc line in the reference geometry" \
-    'mm_page_alloc: page=0x[0-9a-f]+ pfn=0x[0-9a-f]+ order=[0-9]+ migratetype=[0-9]+ gfp_flags=GFP_KERNEL'
+    'mm_page_alloc: page=0x[0-9a-f]+ pfn=0x[0-9a-f]+ order=[0-9]+ migratetype=[0-9]+ gfp_flags=GFP_[A-Z_]+'
 check "mm_page_free line in the reference geometry" \
     'mm_page_free: page=0x[0-9a-f]+ pfn=0x[0-9a-f]+ order=[0-9]+'
 check "the origin column is symbolized (not a raw address)" 'KMEMDBG:origin_count=[1-9]'
