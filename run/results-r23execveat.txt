@@ -1,0 +1,3 @@
+# idx|test|class|rc|tail
+0|execveat01|FAIL|1|t_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected execveat01.c:58: TFAIL: execveat() returns unexpected errno: ENOENT (2)  Summary: passed   3 failed   1 broken   0 skipped  0 warnings 0
+1|execveat02|FAIL|1|edly execveat02.c:59: TFAIL: execveat() fails unexpectedly, expected: ELOOP: ENOENT (2) execveat02.c:63: TPASS: execveat() fails as expected: ENOTDIR (20)  Summary: passed   1 failed   3 broken   0 skipped  0 warnings 0

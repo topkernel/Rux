@@ -200,12 +200,14 @@ fn shm_total_pages() -> u64 {
     total
 }
 
-/// Live (non-deleted, slot-occupying) segment count — the SHMMNI budget.
+/// Live (non-deleted, slot-occupying) segment count — the SHMMNI budget,
+/// counted in the CALLER'S IPC namespace (reference: ns->ids in_use).
 fn shm_live_ids() -> u64 {
+    let ns = super::util::caller_ipc_ns_inum();
     let slots = SHM_IDS.slots.lock();
     slots
         .iter()
-        .filter(|e| matches!(e, Some(x) if !x.deleted))
+        .filter(|e| matches!(e, Some(x) if !x.deleted && x.inner.get_perm().ns_inum == ns))
         .count() as u64
 }
 
@@ -720,10 +722,11 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
         out,
         "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime       rss       swap"
     );
+    let ns = super::util::caller_ipc_ns_inum();
     let slots = SHM_IDS.slots.lock();
     for (i, slot) in slots.iter().enumerate() {
         if let Some(ref entry) = slot {
-            if entry.deleted {
+            if entry.deleted || entry.inner.get_perm().ns_inum != ns {
                 continue;
             }
             let seg = &entry.inner;
