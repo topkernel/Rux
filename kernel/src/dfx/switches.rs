@@ -763,7 +763,7 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         }
         DfxSwitch::ExecCost | DfxSwitch::OhHunt | DfxSwitch::TreeHunt => Some(SCHED_AND_SYSCALLS),
         DfxSwitch::SigTrace => Some(SIGNAL),
-        DfxSwitch::BinderTrace | DfxSwitch::TxnHang => Some(BINDER),
+        DfxSwitch::BinderTrace | DfxSwitch::DbFileTrace | DfxSwitch::TxnHang => Some(BINDER),
         // The futex family: reference-shaped visibility only (see the
         // doc comment above).
         DfxSwitch::FutexTrace | DfxSwitch::FuxStuck | DfxSwitch::ThPark => {
