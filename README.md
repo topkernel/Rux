@@ -66,9 +66,10 @@ designs. The essence, each with measured evidence in the
 - **Safe by construction.** Userspace-writable strings cannot panic
   the kernel printer; diagnostics are bounded and allocation-free,
   so the observer cannot become the pathology.
-- **Observability as a subsystem.** Reference-parity tracefs with
-  per-CPU rings; a disabled site costs one load (asm-verified),
-  enabled ≈18–19 ns per record.
+- **Lock-free reads on shared structures.** The dcache walk runs on
+  typed reader banks (WalkClaim) instead of RCU-style epochs:
+  stat 0.64→0.42 µs, open 1.13→0.89 µs — reader progress is a type
+  property, not a protocol discipline.
 
 ---
 
