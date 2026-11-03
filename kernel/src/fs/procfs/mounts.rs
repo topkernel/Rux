@@ -126,21 +126,35 @@ pub fn generate() -> Vec<u8> {
     content.into_bytes()
 }
 
+/// The registered filesystem types, in the order /proc/filesystems lists
+/// them — sysfs(2) indexes into THIS list (reference sys_sysfs walks the
+/// file_systems registration list; this stable table is our stand-in).
+pub const FS_TABLE: [(&str, bool); 8] = [
+    ("rootfs", true),
+    ("proc", true),
+    ("devtmpfs", true),
+    ("devpts", true),
+    ("ext4", false),
+    ("sysfs", true),
+    ("cgroup2", true),
+    ("tmpfs", true),
+];
+
 /// Generate /proc/filesystems content
 ///
 /// Lists all supported filesystem types.
 pub fn generate_filesystems() -> Vec<u8> {
     let mut content = String::new();
 
-    // Filesystem types supported by Rux
-    content.push_str("nodev\trootfs\n");
-    content.push_str("nodev\tproc\n");
-    content.push_str("nodev\tdevtmpfs\n");
-    content.push_str("nodev\tdevpts\n");
-    content.push_str("\text4\n");
-    content.push_str("nodev\tsysfs\n");
-    content.push_str("nodev\tcgroup2\n");
-    content.push_str("nodev\ttmpfs\n");
+    for (name, nodev) in FS_TABLE.iter() {
+        if *nodev {
+            content.push_str("nodev\t");
+        } else {
+            content.push('\t');
+        }
+        content.push_str(name);
+        content.push('\n');
+    }
 
     content.into_bytes()
 }
