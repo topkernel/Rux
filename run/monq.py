@@ -1,21 +1,27 @@
+#!/usr/bin/env python3
+"""monq.py — send HMP commands to a QEMU unix monitor socket, print replies."""
 import socket, sys, time
+path = sys.argv[1]
+cmds = sys.argv[2:]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sys.argv[1])
-s.settimeout(2)
-def rd():
+s.settimeout(3)
+s.connect(path)
+time.sleep(0.3)
+try:
+    s.recv(4096)  # banner
+except Exception:
+    pass
+for c in cmds:
+    s.sendall((c + "\n").encode())
+    time.sleep(0.7)
     out = b""
     try:
         while True:
-            b = s.recv(65536)
-            if not b: break
-            out += b
+            d = s.recv(4096)
+            if not d:
+                break
+            out += d
     except socket.timeout:
         pass
-    return out.decode(errors="replace")
-time.sleep(0.3)
-print(rd()[-2000:])
-for cmd in sys.argv[2:]:
-    s.sendall((cmd + "\n").encode())
-    time.sleep(0.7)
-    print("=== " + cmd)
-    print(rd()[-6000:])
+    print(f"$ {c}\n{out.decode(errors='replace')}")
+s.close()
