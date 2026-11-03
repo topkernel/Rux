@@ -2815,17 +2815,33 @@ pub fn sys_faccessat(args: SyscallArgs) -> i64 {
 
     // (28th successor) BMS scan-leg probe: RdbDataManager::GetRdbStoreFromNative
     // probes the store's existence with access(path, F_OK) before opening —
-    // the is-new-db branch decision, visible here.
+    // the is-new-db branch decision, visible here. The bmsdb SIZE is the
+    // live divergence meter (reference populates it to ~1.1 MB / 43
+    // preinstalled rows during its 6-8 s scan; ours staying at the empty
+    // 4 KB skeleton = the silent-empty scan), so resolve and report it.
     if bmsscan_on() && full_path.contains("bmsdb") {
         static AN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         let n = AN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if n < 64 {
+            let size = match crate::fs::vfs::path_lookup(&full_path, 0) {
+                Ok(vp) => vp
+                    .inode
+                    .as_ref()
+                    .map(|i| i.size.load(core::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(u64::MAX),
+                Err(_) => u64::MAX,
+            };
+            let size_txt = if size == u64::MAX {
+                "ENOENT".into()
+            } else {
+                alloc::format!("{}B", size)
+            };
             let comm = crate::sched::current()
                 .map(|t| t.comm_str().into_owned())
                 .unwrap_or_default();
             crate::pr_warn!(
-                "BMSSCAN-ACCESS[{}] pid={} {} '{}' mode={:#o}",
-                n, crate::process::current_pid(), comm, full_path, mode
+                "BMSSCAN-ACCESS[{}] pid={} {} '{}' mode={:#o} size={}",
+                n, crate::process::current_pid(), comm, full_path, mode, size_txt
             );
         }
     }
