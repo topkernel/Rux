@@ -109,12 +109,53 @@ impl<C> Clone for Deadline<C> {
 }
 impl<C> Copy for Deadline<C> {}
 
+/// A reading of clock domain `C` — the now-side twin of `Deadline<C>`.
+/// Session 2 tightening: the first version typed only the DEADLINE and
+/// kept `is_due(now: u64)`, so `hres_deadline.is_due(jiffies)` still
+/// compiled (both plain u64) and the mixed-compare guard was a naming
+/// convention, not a type. With `Time<C>` on the now side too, the
+/// compare only type-checks when BOTH sides carry the same clock
+/// domain — the lost-wakeup mixed-compare is a compile error.
+pub struct Time<C> {
+    v: u64,
+    _clock: PhantomData<fn() -> C>,
+}
+
+impl<C> Clone for Time<C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<C> Copy for Time<C> {}
+
+impl Time<JiffyClock> {
+    #[inline]
+    pub fn from_jiffies(v: u64) -> Self {
+        Time { v, _clock: PhantomData }
+    }
+}
+
+impl Time<HresClock> {
+    #[inline]
+    pub fn from_time(v: u64) -> Self {
+        Time { v, _clock: PhantomData }
+    }
+}
+
+impl<C> Time<C> {
+    /// Raw value (cursor arithmetic, HRES_NEXT maintenance, tests).
+    #[inline]
+    pub fn as_u64(self) -> u64 {
+        self.v
+    }
+}
+
 impl Deadline<JiffyClock> {
     /// Jiffy-domain due check. The ONLY due check reachable for a
-    /// jiffy deadline — there is no overload accepting time ticks.
+    /// jiffy deadline — and it only accepts a `Time<JiffyClock>` now.
     #[inline]
-    pub fn is_due(&self, now_jiffies: u64) -> bool {
-        self.abs <= now_jiffies
+    pub fn is_due(&self, now_jiffies: Time<JiffyClock>) -> bool {
+        self.abs <= now_jiffies.v
     }
 
     /// The absolute jiffy (readback for get_timer_state / timer_list).
@@ -128,11 +169,12 @@ impl Deadline<HresClock> {
     /// Hres-domain due check: fires EXACTLY when the time CSR reaches
     /// the deadline and never otherwise. The historical early-fire bug
     /// (jiffy fallback consuming a one-shot hres wake) required
-    /// comparing this value against jiffies; that method does not
-    /// exist, by construction.
+    /// comparing this value against jiffies; with the now side typed
+    /// (`Time<JiffyClock>` is not `Time<HresClock>`) that call does not
+    /// compile, by construction.
     #[inline]
-    pub fn is_due(&self, now_time: u64) -> bool {
-        self.abs <= now_time
+    pub fn is_due(&self, now_time: Time<HresClock>) -> bool {
+        self.abs <= now_time.v
     }
 
     /// The absolute time-CSR tick (HRES_NEXT maintenance).
@@ -195,11 +237,23 @@ impl Expiry {
 /// A time snapshot: both clocks, read once by the caller. Passing this
 /// struct (instead of reading clocks inside the wheel) keeps the wheel
 /// pure-logic — the unit tests drive it with synthetic times (the test
-/// suite runs with timer IRQs off).
+/// suite runs with timer IRQs off). Both fields are CLOCK-TYPED: the
+/// per-domain due checks cannot be fed the other clock's reading.
 #[derive(Clone, Copy)]
 pub struct Now {
-    pub jiffies: u64,
-    pub time: u64,
+    pub jiffies: Time<JiffyClock>,
+    pub time: Time<HresClock>,
+}
+
+impl Now {
+    /// Build a snapshot from the raw driver readings (facade helper).
+    #[inline]
+    pub fn new(jiffies: u64, time: u64) -> Self {
+        Now {
+            jiffies: Time::from_jiffies(jiffies),
+            time: Time::from_time(time),
+        }
+    }
 }
 
 // ==================== Actions ====================
@@ -223,24 +277,82 @@ pub enum Action {
 }
 
 impl Action {
-    /// Map the legacy `add_timer_with_action` parameter set onto the
-    /// enum (same priority order as the old delivery chain: tfd wins
-    /// over signal; wake arms never carried either).
-    pub fn from_legacy(pid: u32, signo: i32, tfd_addr: u64) -> Action {
-        if tfd_addr != 0 {
-            Action::TimerFd { tfd: tfd_addr }
-        } else if pid != 0 && signo != 0 {
-            Action::Signal { pid, signo }
-        } else {
-            Action::None
-        }
-    }
-
     /// Whether this action delivers anything at all (None arms occupy a
     /// slot but fire nothing — the old behavior for all-zero fields).
     #[inline]
     pub fn delivers(&self) -> bool {
         !matches!(self, Action::None)
+    }
+}
+
+// ==================== Arming classes (session 2 typestate) ====================
+
+/// The action of a ONE-SHOT arm. Every delivery kind is representable:
+/// wakes (nanosleep/poll/futex timeouts), signals (one-shot itimers and
+/// POSIX timers), timerfds (one-shot reads), and the degenerate None
+/// (all-zero legacy fields).
+#[derive(Clone, Copy)]
+pub enum OneshotAction {
+    None,
+    Wake { pid: u32 },
+    Signal { pid: u32, signo: i32 },
+    TimerFd { tfd: u64 },
+}
+
+/// The action of a PERIODIC arm. `Wake` is deliberately ABSENT: no
+/// periodic-wake caller exists (a wake that re-arms forever would
+/// re-wake a dead-or-running pid every interval — nonsense), so the
+/// class is unrepresentable rather than merely unused. `None` stays
+/// (SIGEV_NONE POSIX timers with an interval re-arm silently — the
+/// reference behavior for a notification-less periodic timer).
+#[derive(Clone, Copy)]
+pub enum PeriodicAction {
+    None,
+    Signal { pid: u32, signo: i32 },
+    TimerFd { tfd: u64 },
+}
+
+impl OneshotAction {
+    /// Map the legacy `add_timer_with_action` one-shot parameter set
+    /// (same priority as the old delivery chain: tfd over signal).
+    pub fn from_legacy_oneshot(pid: u32, signo: i32, tfd_addr: u64) -> OneshotAction {
+        if tfd_addr != 0 {
+            OneshotAction::TimerFd { tfd: tfd_addr }
+        } else if pid != 0 && signo != 0 {
+            OneshotAction::Signal { pid, signo }
+        } else {
+            OneshotAction::None
+        }
+    }
+
+    fn action(self) -> Action {
+        match self {
+            OneshotAction::None => Action::None,
+            OneshotAction::Wake { pid } => Action::Wake { pid },
+            OneshotAction::Signal { pid, signo } => Action::Signal { pid, signo },
+            OneshotAction::TimerFd { tfd } => Action::TimerFd { tfd },
+        }
+    }
+}
+
+impl PeriodicAction {
+    /// Map the legacy `add_timer_with_action` periodic parameter set.
+    pub fn from_legacy_periodic(pid: u32, signo: i32, tfd_addr: u64) -> PeriodicAction {
+        if tfd_addr != 0 {
+            PeriodicAction::TimerFd { tfd: tfd_addr }
+        } else if pid != 0 && signo != 0 {
+            PeriodicAction::Signal { pid, signo }
+        } else {
+            PeriodicAction::None
+        }
+    }
+
+    fn action(self) -> Action {
+        match self {
+            PeriodicAction::None => Action::None,
+            PeriodicAction::Signal { pid, signo } => Action::Signal { pid, signo },
+            PeriodicAction::TimerFd { tfd } => Action::TimerFd { tfd },
+        }
     }
 }
 
@@ -545,62 +657,124 @@ impl TimerWheel {
         self.bitmap.iter().map(|w| w.count_ones() as usize).sum()
     }
 
-    /// Arm a timer (jiffy domain). `id` must be non-zero and fresh
-    /// (the facade's monotonic counter). Returns false when the pool
-    /// is full (the facade maps that to the old `0` result).
-    pub fn arm_jiffy(
+    /// Arm a ONE-SHOT jiffy timer. There is no interval parameter — a
+    /// one-shot that secretly re-arms has no code path (the first-wheel
+    /// `arm_jiffy(expires, action, Some(interval), id)` shape could express
+    /// it). `id` must be non-zero and fresh (the facade's monotonic
+    /// counter). Returns false when the pool is full.
+    pub fn arm_oneshot_jiffy(
         &mut self,
         expires: u64,
-        action: Action,
-        interval: Option<NonZeroU64>,
+        action: OneshotAction,
         id: u64,
     ) -> bool {
-        let b = self.route_for(expires);
-        let idx = match self.find_free_slot() {
-            Some(i) => i,
-            None => return false,
-        };
-        let entry = WheelEntry {
-            id,
-            expiry: Expiry::Jiffy(Deadline::<JiffyClock> {
+        self.arm_entry(
+            Expiry::Jiffy(Deadline::<JiffyClock> {
                 abs: expires,
                 _clock: PhantomData,
             }),
-            action,
-            interval,
-            next: NIL,
-            bucket: b,
-        };
-        self.occupy(idx, entry, b);
-        true
+            action.action(),
+            None,
+            id,
+        )
     }
 
-    /// Arm a high-resolution timer. `horizon` MUST be the grid-derived
-    /// first-check jiffy (`super::hres_horizon_for` computes it from
-    /// the precise deadline — callers' jiffy parameters stay
-    /// diagnostics-only, exactly as the pre-wheel comment promised).
-    pub fn arm_hres(
+    /// Arm a PERIODIC jiffy timer. The interval is REQUIRED and nonzero
+    /// by type ("interval 0 periodic" — the busy-loop class — cannot be
+    /// constructed), and the action class excludes Wake (no periodic
+    /// wake caller exists; the class is unrepresentable).
+    pub fn arm_periodic_jiffy(
+        &mut self,
+        expires: u64,
+        action: PeriodicAction,
+        interval: NonZeroU64,
+        id: u64,
+    ) -> bool {
+        self.arm_entry(
+            Expiry::Jiffy(Deadline::<JiffyClock> {
+                abs: expires,
+                _clock: PhantomData,
+            }),
+            action.action(),
+            Some(interval),
+            id,
+        )
+    }
+
+    /// Arm a ONE-SHOT high-resolution timer. `horizon` MUST be the
+    /// grid-derived first-check jiffy (`super::hres_horizon_for`
+    /// computes it from the precise deadline — callers' jiffy
+    /// parameters stay diagnostics-only, exactly as the pre-wheel
+    /// comment promised).
+    pub fn arm_oneshot_hres(
         &mut self,
         precise: u64,
         horizon: u64,
-        action: Action,
-        interval: Option<NonZeroU64>,
+        action: OneshotAction,
         id: u64,
     ) -> bool {
-        let b = self.route_for(horizon);
-        let idx = match self.find_free_slot() {
-            Some(i) => i,
-            None => return false,
-        };
-        let entry = WheelEntry {
-            id,
-            expiry: Expiry::Hres {
+        self.arm_entry(
+            Expiry::Hres {
                 precise: Deadline::<HresClock> {
                     abs: precise,
                     _clock: PhantomData,
                 },
                 horizon,
             },
+            action.action(),
+            None,
+            id,
+        )
+    }
+
+    /// Arm a PERIODIC high-resolution timer (POSIX timers armed by
+    /// timer_settime): precise first expiry, then interval re-arms in
+    /// the jiffy domain (the collect path drops the precise deadline on
+    /// re-arm — same semantics as the old `expires_time = 0` reset).
+    pub fn arm_periodic_hres(
+        &mut self,
+        precise: u64,
+        horizon: u64,
+        action: PeriodicAction,
+        interval: NonZeroU64,
+        id: u64,
+    ) -> bool {
+        self.arm_entry(
+            Expiry::Hres {
+                precise: Deadline::<HresClock> {
+                    abs: precise,
+                    _clock: PhantomData,
+                },
+                horizon,
+            },
+            action.action(),
+            Some(interval),
+            id,
+        )
+    }
+
+    /// Shared arm core (the split entry points above are the public
+    /// shape; this keeps one routing/linking path). Returns false when
+    /// the pool is full (the facade maps that to the old `0` result).
+    fn arm_entry(
+        &mut self,
+        expiry: Expiry,
+        action: Action,
+        interval: Option<NonZeroU64>,
+        id: u64,
+    ) -> bool {
+        let route_abs = match expiry {
+            Expiry::Jiffy(d) => d.abs(),
+            Expiry::Hres { horizon, .. } => horizon,
+        };
+        let b = self.route_for(route_abs);
+        let idx = match self.find_free_slot() {
+            Some(i) => i,
+            None => return false,
+        };
+        let entry = WheelEntry {
+            id,
+            expiry,
             action,
             interval,
             next: NIL,
@@ -664,8 +838,10 @@ impl TimerWheel {
         next
     }
 
-    /// Overdue hres entries (wakewatch heartbeat census).
-    pub fn overdue_hres(&self, now_time: u64) -> u64 {
+    /// Overdue hres entries (wakewatch heartbeat census). The now side
+    /// is clock-typed like every other hres compare.
+    pub fn overdue_hres(&self, now_time: Time<HresClock>) -> u64 {
+        let now = now_time.as_u64();
         let mut od = 0u64;
         for w in 0..TIMER_WORDS {
             let mut word = self.bitmap[w];
@@ -674,7 +850,7 @@ impl TimerWheel {
                 word &= !(1u64 << bit);
                 if let Some(slot) = &self.slots[w * 64 + bit] {
                     if let Some(t) = slot.expiry.hres_abs() {
-                        if t <= now_time {
+                        if t <= now {
                             od += 1;
                         }
                     }
@@ -720,7 +896,8 @@ impl TimerWheel {
     /// crosses level boundaries; the FAR list is rescanned on every
     /// level-2 cascade.
     pub fn advance(&mut self, now: Now) {
-        while self.current < now.jiffies {
+        let now_jiffies = now.jiffies.as_u64();
+        while self.current < now_jiffies {
             // Vacate the bucket of the jiffy being LEFT: its remaining
             // entries (budget leftovers, hres pending precision) move
             // to the DUE carry wholesale.
@@ -832,14 +1009,14 @@ impl TimerWheel {
                 // is structurally avoided: only the hres arm computes
                 // a lateness).
                 let late_ticks = match slot.expiry {
-                    Expiry::Hres { precise, .. } => now.time.saturating_sub(precise.abs()),
+                    Expiry::Hres { precise, .. } => now.time.as_u64().saturating_sub(precise.abs()),
                     Expiry::Jiffy(_) => 0,
                 };
                 match slot.interval {
                     Some(interval) => {
                         // Periodic: unlink, re-arm the SAME slot at
                         // now + interval, and deliver — one step.
-                        let next_expires = now.jiffies.saturating_add(interval.get());
+                        let next_expires = now.jiffies.as_u64().saturating_add(interval.get());
                         let idx = cur as usize;
                         self.unlink(idx);
                         if let Some(s) = self.slots[idx].as_mut() {
@@ -876,6 +1053,34 @@ impl TimerWheel {
     }
 
     // ---- shape-test / diagnostics introspection ----
+
+    /// Reset to the freshly-constructed state (test isolation between
+    /// cases sharing the unit-test wheel).
+    #[cfg(feature = "unit-test")]
+    pub fn reset(&mut self) {
+        *self = TimerWheel::new();
+    }
+
+    /// Borrow the shared UNIT-TEST wheel. The wheel is ~67 KB of fixed
+    /// storage BY DESIGN (the R37 no-alloc discipline) — the suite runs
+    /// `run_all_tests` on the 64 KB BOOT STACK, so a stack-constructed
+    /// test wheel overflows it and the slot writes scribble over
+    /// whatever sits below the stack (the first version of the shape
+    /// tests did exactly that: the corruption surfaced as the
+    /// scheduler-group KERNPANIC / GRQ-deadlock family — CPU-3 idle
+    /// illegal-instruction, WAKE-STRANDED, then sys_sched_yield wedged
+    /// on the GRQ). Tests use this static exactly like the kernel uses
+    /// its `static TIMER_TABLE`: fixed .bss storage, never the stack.
+    ///
+    /// SAFETY (inside): the unit-test suite is single-threaded (boot
+    /// CPU, timer IRQs disabled before run_all_tests) and the test
+    /// group is non-reentrant, so the exclusive borrow is sound.
+    #[cfg(feature = "unit-test")]
+    pub fn test_shared() -> &'static mut TimerWheel {
+        static mut TEST_WHEEL: TimerWheel = TimerWheel::new();
+        // SAFETY: see the doc comment — single-threaded suite.
+        unsafe { &mut *core::ptr::addr_of_mut!(TEST_WHEEL) }
+    }
 
     /// Routing probe: which bucket would `abs_jiffies` route to at
     /// cursor `current`. Pure function; mirrors route_for exactly.

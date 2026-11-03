@@ -34,9 +34,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::drivers::timer;
 
+pub mod oneshot;
 pub mod wheel;
 
-pub use wheel::{Action, Deadline, Expiry, FiredToken, HresClock, JiffyClock, Now, SoftirqCtx};
+pub use oneshot::{WakeArmed, WakeSpent};
+pub use wheel::{
+    Action, Deadline, Expiry, FiredToken, HresClock, JiffyClock, Now, OneshotAction,
+    PeriodicAction, SoftirqCtx, Time,
+};
 
 /// Maximum number of concurrent timers (pool size, unchanged).
 pub const MAX_TIMERS: usize = wheel::MAX_TIMERS;
@@ -160,9 +165,9 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
     }
 
     let action = if wake_pid != 0 {
-        Action::Wake { pid: wake_pid }
+        OneshotAction::Wake { pid: wake_pid }
     } else {
-        Action::None
+        OneshotAction::None
     };
 
     // R37 discipline: fixed-slot occupy — a plain store, replacing the
@@ -170,7 +175,7 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
     // allocations under the TIMERS→ACTIONS locks (the R36 OOM-deadlock
     // family).
     let mut table = TIMER_TABLE.lock_irqsave();
-    if table.arm_jiffy(expires, action, None, id) {
+    if table.arm_oneshot_jiffy(expires, action, id) {
         id
     } else {
         0 // pool full (the old `timers.len() >= MAX_TIMERS` check)
@@ -195,14 +200,14 @@ pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> 
     }
 
     let action = if wake_pid != 0 {
-        Action::Wake { pid: wake_pid }
+        OneshotAction::Wake { pid: wake_pid }
     } else {
-        Action::None
+        OneshotAction::None
     };
     let horizon = hres_horizon_for(expires_time);
 
     let mut table = TIMER_TABLE.lock_irqsave();
-    if !table.arm_hres(expires_time, horizon, action, None, id) {
+    if !table.arm_oneshot_hres(expires_time, horizon, action, id) {
         return 0; // pool full
     }
     // Keep the global earliest-hres view current so the caller (on its own
@@ -240,13 +245,25 @@ pub fn add_timer_with_action(
     }
 
     // R37: zero allocation under the lock (see add_timer_wakeup).
+    // The interval split maps the legacy `interval_jiffies` parameter
+    // onto the typed classes: 0 = one-shot (no interval to mis-pass),
+    // n > 0 = periodic (NonZeroU64 by type — the busy-loop class is
+    // unconstructible).
     let mut table = TIMER_TABLE.lock_irqsave();
-    if table.arm_jiffy(
-        expires,
-        Action::from_legacy(pid, signo, tfd_addr),
-        non_zero_interval(interval_jiffies),
-        id,
-    ) {
+    let armed = match non_zero_interval(interval_jiffies) {
+        None => table.arm_oneshot_jiffy(
+            expires,
+            OneshotAction::from_legacy_oneshot(pid, signo, tfd_addr),
+            id,
+        ),
+        Some(interval) => table.arm_periodic_jiffy(
+            expires,
+            PeriodicAction::from_legacy_periodic(pid, signo, tfd_addr),
+            interval,
+            id,
+        ),
+    };
+    if armed {
         id
     } else {
         0 // pool full
@@ -273,13 +290,22 @@ pub fn add_timer_with_action_hres(
 
     let horizon = hres_horizon_for(expires_time);
     let mut table = TIMER_TABLE.lock_irqsave();
-    if !table.arm_hres(
-        expires_time,
-        horizon,
-        Action::from_legacy(pid, signo, tfd_addr),
-        non_zero_interval(interval_jiffies),
-        id,
-    ) {
+    let armed = match non_zero_interval(interval_jiffies) {
+        None => table.arm_oneshot_hres(
+            expires_time,
+            horizon,
+            OneshotAction::from_legacy_oneshot(pid, signo, tfd_addr),
+            id,
+        ),
+        Some(interval) => table.arm_periodic_hres(
+            expires_time,
+            horizon,
+            PeriodicAction::from_legacy_periodic(pid, signo, tfd_addr),
+            interval,
+            id,
+        ),
+    };
+    if !armed {
         return 0; // pool full
     }
     if expires_time != 0 && expires_time < HRES_NEXT.load(Ordering::Acquire) {
@@ -523,7 +549,7 @@ pub fn timer_softirq_handler(_nr: usize) {
     let buf_ptr: *mut [FiredToken; wheel::EXPIRY_BUDGET] =
         unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [FiredToken; wheel::EXPIRY_BUDGET]).add(cpu) };
     let expired_len = {
-        let now = Now { jiffies: current, time: now_time };
+        let now = Now::new(current, now_time);
         let mut table = TIMER_TABLE.lock_irqsave();
         table.advance(now);
         // SAFETY: per-CPU row, non-reentrant via SOFTIRQ guard; the
@@ -853,7 +879,7 @@ fn ww_heartbeat(now_time: u64) {
     // locks at this point). Wheel-side: len + overdue hres backlog.
     let (wheel_len, overdue) = {
         let table = TIMER_TABLE.lock_irqsave();
-        (table.len(), table.overdue_hres(now_time))
+        (table.len(), table.overdue_hres(Time::from_time(now_time)))
     };
 
     let sched = crate::sched::sched::ww_sched_snapshot();
