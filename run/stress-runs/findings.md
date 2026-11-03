@@ -397,3 +397,142 @@ stability failure; useful input to the stale-tp booking hunt (omis).
 - make test (riscv64 suite, post-fix kernel): ALL TESTS PASSED
   (MAKE-TEST-RC=0) — including the sgid_mode group that the round-3c
   heal policy once wedged.
+
+## Round 4 (2026-11-03, new main a409deaa = origin/main d2b2672a + SP-5 census)
+
+Baseline re-verify on the merged main (negmemo + vm-op fast paths +
+chroot fast base landed): fsmeta 8x180 PASS rc=0 (fsmeta-r4base boot,
+~1.34M ops by t=180; SP-2 area still clean under the new fs path).
+
+## Negmemo validation (queue item 4) — boot 1 PASS
+
+negstorm class (new probe, committed 63e80291): 8 workers x 180 s,
+cmdline negmemo=1 fsw=1, shared parents + per-worker unique names,
+stat-ENOENT-prime -> create/link/rename-in/mkdir/symlink -> strict
+verify (STALENEG = stale negative hit), teardown ghost check, common
+24-name churn. VERDICT: PASS rc=0 — 1.9M ops, neghit=274,763,
+negstale=479,832 (memo heavily exercised + invalidated), ZERO
+STALENEG / VERIFY-OPEN / GHOST / TAG / PRIME events. d2b2672a's
+invalidation holds under this oracle on boot 1. (Sweep continues —
+more boots below.)
+
+## SP-5 (queue item 1) — sweep boot 1: the face reproduces, phase named
+
+malloc 4x256M boot (sp5-r4-boot1): RES rc=1 with the round-3 face —
+worker 307 WEDGED (parent SIGKILL), 4.07M ops first. OOM-FORENSIC
+caught the gate held: in_direct_reclaim=310 across BOTH gate-bearing
+dumps with **phase=5 (SWAPW), rounds=0, freed=0, deep=0, waiters=1,
+exhausted=4, selffight=0** — the holder is INSIDE the first
+try_to_free_pages round, in reclaim_anonymous_pages ->
+swap_write_page (synchronous blkdev_write -> virtio park), NOT
+self-fighting (selffight=0: no nested alloc_pages from the holder's
+reclaim I/O) and NOT progressing (rounds=0 across dumps). Meanwhile
+zone_free moved 0 -> 19,966 between the two dump contexts (other
+tasks' deaths returned memory) — matching round 3's "memory returned,
+holder still in reclaim".
+
+Census mystery: ZERO GATE-CENSUS lines in boot 1 despite the 1 Hz
+heartbeat census being unconditional and holder present across dumps
+— either (a) gate CHURN (short release+reacquire holds, age never
+reaches the 200 j bar; the OOM snapshots just always catch pid 310
+holding because it lives in the slowpath), or (b) the 1 Hz heartbeat
+slot starved under the OOM storm. Discriminating instrumentation
+committed: GATE_ACQS cumulative acquire counter + taken_age on the
+OOM-FORENSIC gate line + GATE-LONGHOLD release-audit line (prints at
+RELEASE from process context — immune to heartbeat starvation).
+Boots 3+ of the sweep run this kernel.
+
+## SP-5 root-cause correction (sweep boots 1-6 + discriminator)
+
+The discriminator fields killed the "holder stuck for minutes"
+reading: taken_age=0-1j, acqs=1-2 TOTAL, longholds=0 at every dump —
+the gate is acquired once or twice in the whole cascade, every hold is
+sub-second (no GATE-LONGHOLD line ever printed), and the phase=5 SWAPW
+snapshots catch a FRESH round. Round-3's "in_direct_reclaim across 4+
+dumps" was the same snapshot artifact: dumps are rate-limited to the
+cascade's first seconds, and in_direct_reclaim is held most of that
+wall time because every fault goes direct-reclaim.
+
+The REAL damage: (a) rs's "worker N needed SIGKILL (wedge)" line is
+NOT a 15 s wedge — reap_all's escalation prints "unreapable, SIGKILLed"
+(a different line) which NEVER fires; the SIGKILL deaths are the
+KERNEL's pagefault fake-OOM self-kills. (b) The kill chain: waiters
+exhaust the 64-attempt gate-wait (exhausted=4..8 vs acqs=1-2) while
+the holder's first round is in flight -> alloc_pages returns 0 ->
+pagefault OOM strikes -> worker dies by SIGKILL while the zone is
+about to refill (dump #2 site: "alloc_pages(order=0) failed with
+free_cnt>0" — free 15,963 pages minutes later; failure instant and
+dump instant differ).
+
+Committed (b5a6dc3d): reference-parity progress-reset gate wait
+(RECLAIM_PROGRESS from balance_pgdat), fatal-signal bails (waiter +
+holder rounds + deep drain), PF_MEMALLOC-parity holder-nested skip,
+swap-write latency census in the OOM dump. Fixed-kernel boots 5-6:
+same class rc=1 (kills persist) — kill-chain breaker still open;
+swap-write latency is the measured next step (boot sp5-swapcensus).
+
+## execaudit multi-boot sweep (queue item 2) — no recurrence
+
+5 variants in one boot (burst 16 x 80 rounds x both disciplines on
+brkchurn; growfiles + fork_procs LTP targets with anyexitok):
+3,520 audited execs, events=0, echild=0, wrongpid=0, badstatus=0.
+Including round 3's boot: 4,080 audited execs across 2 boots, zero
+events. The rc=254 silent-child-death family did NOT fire; it stays
+rare-intermittent (round-2 cadence: ~1 boot in 2 — today 0/2). The
+standing reproducer (execaudit in the vehicle) is the right tool;
+next round should sweep more boots with the SP-5 fix in place (the
+family shared boots with the strand/leak + fake-OOM history).
+
+## Negmemo validation boot 2 — PASS (16 workers, 2 vCPU = tighter interleaving)
+
+negstorm 16x180: rc=0, neghit=200,402, negstale=483,127, zero oracle
+events. Combined with boot 1: ~1,055k neghits + ~963k stale
+normalizations across both shapes, ZERO stale-negative deliveres.
+d2b2672a's negative memo invalidation is holding under the full
+create/link/rename-in/mkdir/symlink oracle with cap-eviction churn.
+(NOTE: negmemo requires cmdline negmemo=1 — it is default-OFF; the
+stress vehicle now carries that in the negstorm boots.)
+
+## SP-5: the clock discriminator settled it — TIMER IRQs STOP on both
+## CPUs during the malloc-exhaustion ramp (timers/interrupts domain)
+
+Clock boot (boot-sp5-clock): "OOM-FORENSIC: clock tb=6173251 irq0=46
+irq1=50" at dump #2 and "tb=7051524 irq0=46 irq1=50" at dump #3 —
+the TSC/timebase ADVANCES between dumps while the per-CPU timer-IRQ
+counters are frozen at 46/50 (~0.5 s into the boot, right as the
+malloc class's fault storm ramps). jiffies froze at 45 because its
+increment runs only from the timer IRQ (increment_jiffies_from_timebase
+is called in timer_interrupt_handler; nominal from tb would be ~70).
+
+Consequences (all observed): the 1 Hz heartbeat slot dies (GATE-CENSUS,
+WW, fuxstuck, binder audits — every "silent" census during the SP-5
+cascade), the fault-OOM kill windows never elapse (strikes-only kills
+— CAS(last==now) always succeeds, strike table is count-based and
+still works), syscost's jiffies cadence dies, watchdog heartbeats die.
+
+NOT reproduced by: fork-only storm (t=60s syscost fired, tick alive),
+mmap churn (same), negstorm 16w (PC2 census advanced to t=270s),
+fsmeta/timer classes (t=180s syscost). The death is specific to the
+zone-to-zero exhaustion ramp — the trigger lives in the
+reclaim/OOM-slowpath machinery (kswapd launch, first direct reclaim,
+or an LAPIC arm/mask interaction on that path).
+
+Handoff for the timers/interrupts owner (guarded domain): instrument
+the LAPIC state (timer LVT mask bit, TMICT, IRR/ISR for vector 0xE0)
+plus the last re-arm site stamp, sampled when WW_TICK_IRQ[c] is frozen
+>5 s while tb advances. The one-shot re-arm chain is
+trap.rs:1546 -> set_next_trigger -> apic::timer_arm_oneshot (counts
+clamped [1, u32::MAX]; a reg_write of TMICT=0 or an LVT mask from any
+other path would exactly produce this signature).
+
+NOTE for SP-5 verdicts: every jiffies-derived silence during the
+cascade (zero GATE-CENSUS/GATE-LONGHOLD context) is explained by the
+dead tick, NOT by short holds alone; the reference-parity reclaim-wait
+fixes (b5a6dc3d) remain correct on their own semantics.
+
+## ltplong4 (queue item 3) — FULL PASS
+
+One boot, sequential budgets: mmapstress07 x2 (canonical tmpfile args
+`<file> 4096 1 0` — TPASS both; the round-2 usage gap closed),
+mmapstress01, mmap-corruption01, fork_procs -n 200, growfiles,
+mmapstress09 -p 40 -t 0.4 — all rc=0/TPASS, no panics, no wedges.
