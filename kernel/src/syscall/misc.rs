@@ -566,7 +566,21 @@ fn poll_deadline_ns(timeout_ns: i64) -> Option<u64> {
 /// Jiffy-grid deadline that never falls before the ns deadline (ceil of
 /// the remaining ns, minimum 1 jiffy so a sub-tick wait still re-checks
 /// at the next tick instead of spinning).
-fn jiffies_covering_deadline(deadline_ns: u64) -> u64 {
+/// Convert an absolute monotonic-ns deadline into an ABSOLUTE time-CSR
+/// tick deadline for hres wake timers (+1 guard tick so the wake is never
+/// early; never armed in the past). Same timebase as
+/// monotonic_ns_since_boot() (read_time-derived), so the conversion is
+/// exact — this is what lets a 1 ms poll timeout actually wake at ~1 ms
+/// instead of the next 10 ms grid tick (LTP epoll_wait02/pselect01
+/// "slept for too long", median 9998us for a 1000us request).
+pub fn deadline_ns_to_hres_ticks(deadline_ns: u64) -> u64 {
+    let freq_hz = crate::config::TIMER_CLOCK_FREQ_HZ as u128;
+    let ticks = (deadline_ns as u128 * freq_hz / 1_000_000_000u128) as u64;
+    let now = crate::drivers::timer::read_time();
+    ticks.saturating_add(1).max(now + 1)
+}
+
+pub fn jiffies_covering_deadline(deadline_ns: u64) -> u64 {
     let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
     let rem_ns = deadline_ns.saturating_sub(now_ns);
     let j = ((rem_ns as u128 * crate::drivers::timer::HZ as u128)
@@ -784,7 +798,7 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                 match poll_event_wait_round(
                     &files,
                     task,
-                    deadline_ns.map(jiffies_covering_deadline),
+                    deadline_ns,
                     &quick_ready,
                 ) {
                     PollEventWait::Interrupted => return -(errno::EINTR as i64),
@@ -800,14 +814,14 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
         // iteration took the global runqueue lock against every CPU's
         // scheduler_tick (xkbcomp's ppoll ground three harts into a GRQ
         // spinlock storm and Xorg never progressed past XKB init).
-        poll_sleep_slice(deadline_ns.map(jiffies_covering_deadline));
+        poll_sleep_slice(deadline_ns);
     }
 }
 
 /// Block the calling task for one poll/select re-check slice (min of
 /// remaining timeout and EPOLL_RECHECK_JIFFIES), timer-woken. Degrades to
 /// a single schedule() round when the timer pool is exhausted.
-fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
+fn poll_sleep_slice(deadline_ns: Option<u64>) {
     use crate::process::task::TaskState;
 
     let current = match crate::sched::current() {
@@ -819,17 +833,36 @@ fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
     };
     // SAFETY: current is the running task's pointer.
     let my_pid = unsafe { (*current).pid() };
-    let slice = match deadline_jiffies {
-        Some(deadline) => {
-            let remaining = deadline
-                .saturating_sub(crate::drivers::timer::get_jiffies())
-                .max(1);
-            remaining.min(EPOLL_RECHECK_JIFFIES)
+    let slice_ns: u64 = EPOLL_RECHECK_JIFFIES
+        .saturating_mul(1_000_000_000 / crate::drivers::timer::HZ as u64);
+    // Deadline precision (nanosleep discipline): when the remaining wait
+    // fits inside one re-check slice, arm a HIGH-RESOLUTION wake at the
+    // precise ns deadline (between grid ticks); earlier slices keep the
+    // jiffy cadence. Without this the final slice rounded a <=10 ms
+    // timeout up to the next 10 ms grid tick — a 1 ms poll timeout slept
+    // ~10 ms (LTP epoll_wait02/pselect01 precision budgets).
+    let remaining_ns = deadline_ns.map(|dl| {
+        dl.saturating_sub(crate::drivers::timer::monotonic_ns_since_boot())
+    });
+    let timer_id = match deadline_ns {
+        // Remaining wait fits inside one slice (or already due): precise
+        // hres wake at the ns deadline (deadline_ns_to_hres_ticks clamps
+        // an already-due deadline to now+1, firing at once).
+        Some(dl) if remaining_ns.unwrap_or(u64::MAX) <= slice_ns => {
+            let id = crate::timer::add_timer_wakeup_hres(
+                jiffies_covering_deadline(dl),
+                deadline_ns_to_hres_ticks(dl),
+                my_pid,
+            );
+            crate::drivers::timer::rearm_for_hres();
+            id
         }
-        None => EPOLL_RECHECK_JIFFIES,
+        // Longer than a slice (or no deadline): plain jiffy-cadence slice.
+        _ => crate::timer::add_timer_wakeup(
+            crate::drivers::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
+            my_pid,
+        ),
     };
-    let target = crate::drivers::timer::get_jiffies() + slice;
-    let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
     if timer_id == 0 {
         // Timer pool exhausted: degrade to one scheduling round rather
         // than sleeping forever (nothing else is guaranteed to wake us).
@@ -842,8 +875,14 @@ fn poll_sleep_slice(deadline_jiffies: Option<u64>) {
     }
     // Lost-wake discipline (khungtaskd pattern): the timer may have fired
     // between arming and the state transition — either its wake captured
-    // the INTERRUPTIBLE state, or the deadline is already visible.
-    if crate::drivers::timer::get_jiffies() >= target {
+    // the INTERRUPTIBLE state, or the deadline is already visible. With a
+    // deadline the check is the precise ns clock (the hres wake may be
+    // mid-tick); without one the slice never "expires" early.
+    let already_due = match deadline_ns {
+        Some(dl) => crate::drivers::timer::monotonic_ns_since_boot() >= dl,
+        None => false,
+    };
+    if already_due {
         // SAFETY: current is the running task's pointer; a racing wake may
         // have enqueued us while still executing — take ourselves back off.
         unsafe {
@@ -980,6 +1019,9 @@ enum PollEventWait {
 fn poll_event_wait_round(
     files: &[alloc::sync::Arc<crate::fs::File>],
     task: *mut crate::process::task::Task,
+    // ABSOLUTE monotonic-ns deadline (None = wait forever). Armed as a
+    // HIGH-RESOLUTION wake (same discipline as nanosleep) so short
+    // timeouts fire between grid ticks, not at the next 10 ms jiffy.
     deadline: Option<u64>,
     ready: &dyn Fn() -> bool,
 ) -> PollEventWait {
@@ -1066,14 +1108,22 @@ fn poll_event_wait_round(
     }
 
     // 4. Arm the timeout timer for the FULL remaining wait (no re-check
-    //    slice: fd-side events are the wake source now).
+    //    slice: fd-side events are the wake source now). HIGH-RESOLUTION:
+    //    the precise ns deadline rides the time CSR (between grid ticks);
+    //    the jiffy value is the wheel bookkeeping/fallback.
     let timer_id = deadline
         .map(|dl| {
-            crate::timer::add_timer_wakeup(
-                dl.max(crate::drivers::timer::get_jiffies() + 1),
+            let id = crate::timer::add_timer_wakeup_hres(
+                jiffies_covering_deadline(dl),
+                deadline_ns_to_hres_ticks(dl),
                 // SAFETY: task is the current task; pid() is a read.
                 unsafe { (*task).pid() },
-            )
+            );
+            // We are on the CPU that is about to sleep: re-arm the local
+            // timer so the precise deadline is not delayed to the next
+            // grid tick (nanosleep discipline).
+            crate::drivers::timer::rearm_for_hres();
+            id
         })
         .unwrap_or(0);
     if deadline.is_some() && timer_id == 0 {
@@ -1535,7 +1585,7 @@ fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64
 
         // P1 (busy-yield elimination): block for one re-check slice
         // instead of yield_cpu()-ing — see sys_poll / poll_sleep_slice.
-        poll_sleep_slice(deadline_ns.map(jiffies_covering_deadline));
+        poll_sleep_slice(deadline_ns);
     }
 }
 
@@ -2323,7 +2373,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                     &watched.iter().map(|(f, _, _)| alloc::sync::Arc::clone(f))
                         .collect::<alloc::vec::Vec<_>>(),
                     current,
-                    deadline_ns.map(jiffies_covering_deadline),
+                    deadline_ns,
                     &quick_ready,
                 ) {
                     PollEventWait::Interrupted => return -(errno::EINTR as i64),
@@ -2356,19 +2406,32 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             unsafe { crate::sched::dequeue_task(&*current); }
             return -(errno::EINTR as i64);
         }
-        // One slice = min(remaining timeout, 10ms re-check interval).
-        let slice = deadline_ns
-            .map(|dl| jiffies_covering_deadline(dl)
-                .saturating_sub(crate::drivers::timer::get_jiffies())
-                .max(1)
-                .min(EPOLL_RECHECK_JIFFIES))
-            .unwrap_or(EPOLL_RECHECK_JIFFIES);
+        // One slice = min(remaining timeout, 10ms re-check interval) —
+        // and when the remaining wait fits inside one slice, the wake is
+        // a HIGH-RESOLUTION timer at the precise ns deadline (grid-tick
+        // rounding made a 1 ms epoll_wait timeout sleep ~10 ms; LTP
+        // epoll_wait02 precision budget, median 9998us for a 1000us).
+        let slice_ns: u64 = EPOLL_RECHECK_JIFFIES
+            .saturating_mul(1_000_000_000 / crate::drivers::timer::HZ as u64);
         // SAFETY: current is the running task's pointer.
         let my_pid = unsafe { (*current).pid() };
-        let timer_id = crate::timer::add_timer_wakeup(
-            crate::drivers::timer::get_jiffies() + slice,
-            my_pid,
-        );
+        let remaining_ns = deadline_ns
+            .map(|dl| dl.saturating_sub(crate::drivers::timer::monotonic_ns_since_boot()));
+        let timer_id = match (deadline_ns, remaining_ns) {
+            (Some(dl), Some(_rem)) if _rem <= slice_ns => {
+                let id = crate::timer::add_timer_wakeup_hres(
+                    jiffies_covering_deadline(dl),
+                    deadline_ns_to_hres_ticks(dl),
+                    my_pid,
+                );
+                crate::drivers::timer::rearm_for_hres();
+                id
+            }
+            _ => crate::timer::add_timer_wakeup(
+                crate::drivers::timer::get_jiffies() + EPOLL_RECHECK_JIFFIES,
+                my_pid,
+            ),
+        };
         if timer_id == 0 {
             // Timer pool exhausted: degrade to a single yield rather than
             // sleep forever (nothing else is guaranteed to wake us).
@@ -3616,10 +3679,25 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
-    // R32-B10: validate flags — only TFD_TIMER_ABSTIME is legal here;
-    // garbage bits were silently treated as relative mode.
+    // R32-B10: validate flags — only TFD_TIMER_ABSTIME and
+    // TFD_TIMER_CANCEL_ON_SET are legal (reference TFD_SETTIME_FLAGS);
+    // garbage bits were silently treated as relative mode. CANCEL_ON_SET
+    // only has semantics for realtime-derived clocks (cancellation on
+    // clock_settime); for CLOCK_MONOTONIC the reference accepts it as a
+    // no-op — rejecting it broke LTP timerfd_settime02 (the
+    // CVE-2017-10661 regression test arms ABSTIME|CANCEL_ON_SET and
+    // expects success).
+    // CANCEL_ON_SET is bit 1 (value 2) per the uapi header and
+    // musl/glibc alike — a stale note had it as bit 2, so LTP
+    // timerfd_settime02 (which arms ABSTIME|CANCEL_ON_SET through musl's
+    // constant, value 3) died on EINVAL. Verified against the host
+    // reference kernel: flags=3 accepted, flags=5 rejected. The flag only
+    // has semantics for realtime-derived clocks (cancellation on
+    // clock_settime); accepting it for CLOCK_MONOTONIC as a no-op matches
+    // the reference.
     const TFD_TIMER_ABSTIME: i32 = 1;
-    if flags & !TFD_TIMER_ABSTIME != 0 {
+    const TFD_TIMER_CANCEL_ON_SET: i32 = 1 << 1;
+    if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
         return -(errno::EINVAL as i64);
     }
 

@@ -3560,9 +3560,17 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
             return -(errno::EINVAL as i64);
         }
-        let hz = crate::drivers::timer::HZ as i64;
-        let jiffies = sec.saturating_mul(hz).saturating_add(nsec.saturating_mul(hz) / 1_000_000_000);
-        Some(crate::drivers::timer::get_jiffies().saturating_add(jiffies.max(1) as u64))
+        // ABSOLUTE monotonic-ns deadline (high-resolution: the expiry
+        // check and the wake timer both ride the ns clock — the old
+        // jiffy-rounded deadline quantized every sub-10ms sigtimedwait
+        // to a full grid tick, blowing tst_timer_test precision runs).
+        let ns = sec
+            .saturating_mul(1_000_000_000)
+            .saturating_add(nsec);
+        Some(
+            crate::drivers::timer::monotonic_ns_since_boot()
+                .saturating_add(ns.max(1) as u64),
+        )
     } else {
         None
     };
@@ -3598,7 +3606,7 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
 
         // Timeout expired?
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
                 return -(errno::EAGAIN as i64);
             }
         }
@@ -3628,10 +3636,22 @@ pub fn sys_rt_sigtimedwait(args: SyscallArgs) -> i64 {
         // Arm the deadline wakeup BEFORE sleeping: nothing else would wake
         // a task that only has a timeout pending (same pattern as futex).
         crate::arch::cpu::restore_irq(true);
+        // HIGH-RESOLUTION wake at the precise ns deadline (between grid
+        // ticks); the jiffy value is wheel bookkeeping only. Same
+        // discipline as nanosleep (rearm so the already-armed later grid
+        // tick cannot delay the precise wake).
         let timer_id = deadline
-            .map(|dl| crate::timer::add_timer_wakeup(
-                dl, crate::sched::get_current_pid(),
-            ))
+            .map(|dl| {
+                let expires_time = crate::syscall::misc::deadline_ns_to_hres_ticks(dl);
+                let jiffies = crate::syscall::misc::jiffies_covering_deadline(dl);
+                let id = crate::timer::add_timer_wakeup_hres(
+                    jiffies,
+                    expires_time,
+                    crate::sched::get_current_pid(),
+                );
+                crate::drivers::timer::rearm_for_hres();
+                id
+            })
             .unwrap_or(0);
         // R32 (NEW-3, sixth site — the futex/sem/mq fix missed this one):
         // pool exhausted → timer_id == 0. Sleeping now would hang forever
