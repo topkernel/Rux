@@ -88,8 +88,20 @@ fn bmsscan_watch_open(path: &str, flags: u32) {
     let (pid, comm) = crate::sched::current()
         .map(|t| (crate::process::current_pid(), t.comm_str().into_owned()))
         .unwrap_or((0, alloc::string::String::new()));
+    // Parent-dir state: a CREAT open whose parent is missing WILL fail
+    // ENOENT — naming the broken link in the RDB store's dir chain.
+    let parent_txt = match path.rfind('/') {
+        Some(0) | None => "/".into(),
+        Some(i) => {
+            let parent = &path[..i];
+            match crate::fs::vfs::path_lookup(parent, 0) {
+                Ok(_) => "ok".into(),
+                Err(_) => alloc::format!("MISSING({})", parent),
+            }
+        }
+    };
     crate::pr_warn!(
-        "BMSSCAN-OPEN[{}] pid={} {} {} {}{}{}",
+        "BMSSCAN-OPEN[{}] pid={} {} {} {}{}{} parent={}",
         n,
         pid,
         comm,
@@ -97,6 +109,32 @@ fn bmsscan_watch_open(path: &str, flags: u32) {
         mode,
         if flags & O_CREAT != 0 { "+CREAT" } else { "" },
         if flags & O_DIRECTORY != 0 { "+DIR" } else { "" },
+        parent_txt,
+    );
+}
+
+/// (28th successor) mkdir-side of the scan probe: the RDB layer creates
+/// its own store directory chain (RdbSqlUtils::CreateDirectory walks the
+/// components access+mkdir). Watching the attempts names the exact
+/// component whose mkdir fails (or never runs) on the empty-store boots.
+pub fn bmsscan_watch_mkdir(path: &str) {
+    if !bmsscan_on() || !bmsscan_match(path) {
+        return;
+    }
+    static MN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = MN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n >= 128 {
+        return;
+    }
+    let comm = crate::sched::current()
+        .map(|t| t.comm_str().into_owned())
+        .unwrap_or_default();
+    crate::pr_warn!(
+        "BMSSCAN-MKDIR[{}] pid={} {} {}",
+        n,
+        crate::process::current_pid(),
+        comm,
+        path
     );
 }
 
@@ -1362,6 +1400,9 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+
+    // (28th successor) BMS scan-leg probe: mkdir attempt watch.
+    bmsscan_watch_mkdir(&full_path);
 
     // OH param-workspace hunt (b70) — see the open tracer in sys_open.
     if full_path.starts_with("/dev/__parameters") {
