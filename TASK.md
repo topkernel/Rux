@@ -85,3 +85,53 @@ divergence in docs/architecture/design-divergences.md per template.
 - Next round (suggestions): coordinator picks shortlist lanes; S-1 and
   S-5 are the cheapest; S-2 needs OH-lane coordination on binder.rs;
   S-4 depends on S-3's replay scenarios.
+
+### Session 2 (2026-11-03) — round 2: complete the Rust-native register
+
+Mission (user directive 2026-11-03, record-everything): make
+docs/architecture/rust-native-register.md COMPLETE and unassailably
+evidenced. Merged main (4fecef2d register skeleton) — one TASK.md
+conflict resolved in favor of this lane's charter (lane-local file).
+
+- Mined every lane's evidence: TASK.md records across the 63 lane
+  worktrees, run/ artifacts (stress-port/run/stress-runs/findings.md,
+  arch-s5/run/arch-s5-s2/type-catches.txt, perf-audit/run/
+  pa68-d7-rootcause.txt, dfx-trace TASK round-1 verification), the
+  main-tree perf-gate-baseline.md and docs/test/lmbench-report.md,
+  and git log on main (~30 candidate commits hash-verified as
+  ancestors of main before citing).
+- Register rewritten (skeleton 91 lines -> ~260): thesis paragraph up
+  front (reference-compatible kernel, Rust-native internals, measured
+  ledger, 30-second read); evidence conventions (numbers inlined,
+  source pointer per entry; reference-parity fixes filed under C, not
+  claimed as originals).
+- New entries vs the skeleton: D-11 lock keys (with the 2b092c49
+  conviction -> #[must_use] story), D-7 CpuLocal (with the .rodata
+  incident), WalkClaim reader banks (3f377d13, incl. the honest
+  revert/re-land history), D-2 packed stacks (numbers inlined), the
+  reference-parity receipt list in C (12 commits: ETXTBSY, SysV
+  namespaces, futex physical keys, tmpfs MAP_SHARED, binder poll,
+  dead-tick with the 5.42M-ops number, execveat, O_DIRECT, poll
+  RLIMIT, timerfd deadlines, SYSRET TF|RF), section D now carries the
+  generated TCB-ledger numbers (3158/1340 unsafe tokens, 47
+  forbid(unsafe_code) files, 64% SAFETY coverage, 157 Kani harnesses,
+  1104 proptests), E gains the bio write-plan closure (lb229 decode,
+  allocation-free fix, verification state kept honest), the x86_64
+  ctx-switch levers (9d6980b1: lat_ctx -58%/-59%, PCID gating
+  honesty), p5/fs re-bank families; F gains the census+heal machinery
+  (miss=0, IF=0 25.7->20.4%, cli 594-599ms->6-9ms, strands 233->31)
+  and the allocwatch/lostpark exonerate-instruments entry (the mirage
+  verdict recorded as evidence discipline).
+- Fixes to skeleton claims: lmbench pointer corrected to
+  docs/test/lmbench-report.md (the standing table lives there, not in
+  perf-gate-baseline.md); "ledger retires 59 switches" corrected to
+  what the ledger actually says (59-entry table mapped, waves ported
+  with census A/B identical); dead-tick moved from E (redesign) to C
+  (reference-parity receipt) since the fix adopts the reference's
+  switch-boundary rule.
+- Landed D-19 (typed timer wheel) in design-divergences.md from the
+  arch-s5 session-2 draft — the branch reached main (0b396384) but the
+  D-entry never landed; also removed the stale "pending entries"
+  comment block (D-2 landed long ago).
+- Section G stays placeholder-honest (S-2/S-3/S-4 + the standing
+  rule); no kernel code changes; no QEMUs started.
