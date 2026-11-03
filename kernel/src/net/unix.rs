@@ -1628,7 +1628,7 @@ pub fn unix_send(
                 // retry ladder's spin reason), accountmgr's adapter
                 // results, and AMS's own handler narration. Rare lines
                 // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 38] = [
+                const AMS_KEYS: [&str; 49] = [
                     "SwitchToUser",
                     "startUser in service",
                     "highest priority ability",
@@ -1690,6 +1690,34 @@ pub fn unix_send(
                     "fail, result:",
                     "WriteTransaction ERROR",
                     "failed to increment strong reference count",
+                    // 27th session (lb362/366 decode): the BMS boot-scan
+                    // verdict cohort. The fresh-boot loss is the initial
+                    // user-0 preinstall stream never installing (0
+                    // SetBundleQuota lines vs 84 on the lb317 win), and
+                    // every branch verdict in OnBmsStarting is an I/E
+                    // hilog line this tap never forwarded. These keys
+                    // name the exact branch taken on the next roll:
+                    // BmsStartEvent start/end, the CheckInitialUser wait
+                    // ("Bms initial user"), the bail-outs ("no space",
+                    // "preInstall bundleInfos failed", "QueryAllData
+                    // failed", "persistent data is empty"), the branch
+                    // verdicts ("first boot", "ReInstall all haps",
+                    // "Guard against install infos lossed strategy"),
+                    // and the CreateNewUser empty-set verdict
+                    // ("GetAllPreInstallBundleInfos failed").
+                    // Once-per-boot or once-per-user lines; volume < 20
+                    // per boot against the 600-line budget.
+                    "BmsStartEvent",
+                    "Bms initial user",
+                    "OnBmsStarting",
+                    "no space",
+                    "preInstall bundleInfos failed",
+                    "QueryAllData failed",
+                    "persistent data is empty",
+                    "first boot",
+                    "ReInstall all haps",
+                    "Guard against install infos lossed strategy",
+                    "GetAllPreInstallBundleInfos failed",
                 ];
                 let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
                 if ams_family {
