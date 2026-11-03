@@ -331,9 +331,34 @@ pub fn lru_page_total() -> usize {
     }
 }
 
-/// Add an anonymous page to LRU_INACTIVE_ANON on first mapping.
+/// Add an anonymous page to LRU_INACTIVE_ANON on first mapping — at the
+/// HEAD (young end).
+///
+/// SP-7 (stress-port r7): the reference kernel adds newly faulted pages
+/// at the HEAD of the inactive list (lru_cache_add → list_add) and
+/// isolates reclaim candidates from the TAIL, so the tail stays the
+/// oldest end. Rux linked anon pages at the TAIL — the SAME end
+/// `lru_collect_cold` consumes — so under an anon fault storm the scan
+/// window was permanently occupied by freshly-faulted pages while the
+/// genuinely-old pages could never reach it (measured: 11 reclaim
+/// invocations examined 3,589 of 245,515 anon-LRU pages in the
+/// exhaustion boot; the SP-7 census banked the distribution). The file
+/// side already uses this shape (`page_add_file_lru_young` →
+/// link_head_locked, whose doc spells out head-young/tail-old).
 pub fn page_add_anon_lru(page: &Page) {
-    lru_add_page(page, super::pglist::LRU_INACTIVE_ANON);
+    // SAFETY: same node-access discipline as lru_add_page.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+    let _guard = node.lru_lock.lock();
+    // SAFETY: page is not linked (Lru flag checked) and the lock is held.
+    unsafe {
+        if !page.test_flag(PageFlag::Lru) {
+            link_head_locked(node, page, super::pglist::LRU_INACTIVE_ANON);
+            page.set_flag(PageFlag::Lru);
+        }
+    }
 }
 
 /// Add a file-backed page to LRU_INACTIVE_FILE on first mapping.

@@ -418,7 +418,15 @@ unsafe fn migrate_page_window(
     dst.set_index(index);
     dst.set_flag(PageFlag::Anonymous);
     dst.set_flag(PageFlag::SwapBacked);
-    dst.set_flag(PageFlag::Referenced);
+    // SP-7 (stress-port r7): PRESERVE the source's Referenced state
+    // (the reference's folio_migrate_flags copies PG_referenced only
+    // when set) — dst is a freshly allocated, flag-clear frame, and the
+    // old unconditional set re-planted the stale-hot flag on every
+    // compacted page (the allocator-side plants were removed the same
+    // round; see the zone.rs alloc-path note).
+    if src.test_flag(PageFlag::Referenced) {
+        dst.set_flag(PageFlag::Referenced);
+    }
     dst.set_refcount(1);
 
     // LRU handover (mm-lane review): try_to_unmap_migration only
