@@ -3716,6 +3716,82 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
     wake_up_enqueue_opt(task, None)
 }
 
+/// r24 (kill10 wedge hunt): discriminator census for the W2
+/// WAKE-REFUSED-SLEEPING report — captured under the GRQ lock so the
+/// line tells "linked but starved" from "orphaned live pick mark" from
+/// "lying busy slot". Probe-lock discipline: this helper ONLY reads and
+/// formats; the caller prints after the guard is dropped.
+pub struct W2RefusalCensus {
+    pub linked: bool,
+    pub on_rq: bool,
+    pub busy_slot: i32,
+    pub idle_slot: i32,
+    pub exec_ns: u64,
+    pub jiffies: u64,
+    pub quantum_ms: u32,
+}
+
+impl core::fmt::Display for W2RefusalCensus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "linked={} on_rq={} busy_slot={} idle_slot={} exec_ns={} jif={} q_ms={}",
+            self.linked,
+            self.on_rq,
+            self.busy_slot,
+            self.idle_slot,
+            self.exec_ns,
+            self.jiffies,
+            self.quantum_ms
+        )
+    }
+}
+
+/// Snapshot the refusing guard's view of `task` (used by task.rs's W2
+/// report). Takes the GRQ lock briefly, mirroring wake_up_enqueue_opt's
+/// own acquisition (same context, same IRQ discipline).
+pub fn w2_refusal_census(task: *mut Task) -> W2RefusalCensus {
+    let mut out = W2RefusalCensus {
+        linked: false,
+        on_rq: false,
+        busy_slot: -1,
+        idle_slot: -1,
+        exec_ns: 0,
+        jiffies: crate::drivers::timer::get_jiffies(),
+        quantum_ms: 0,
+    };
+    if task.is_null() {
+        return out;
+    }
+    let grq_guard = grq().lock_irqsave();
+    unsafe {
+        out.linked = match (*task).policy() {
+            SchedPolicy::Fifo | SchedPolicy::Rr => grq_guard.rt_rq.is_linked(task),
+            SchedPolicy::Deadline => grq_guard.dl_rq.is_linked(task),
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                grq_guard.cfs_rq.is_linked(task)
+            }
+        };
+        let se = (*task).sched_entity();
+        out.on_rq = se.on_rq.load(core::sync::atomic::Ordering::Acquire);
+        out.exec_ns = se
+            .sum_exec_runtime
+            .load(core::sync::atomic::Ordering::Acquire);
+        out.quantum_ms = (*task).get_time_slice();
+        let idle_mask = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire);
+        for c in 0..MAX_CPUS {
+            if cpu_state(c).current == task {
+                if idle_mask & (1u32 << c) != 0 {
+                    out.idle_slot = c as i32;
+                } else {
+                    out.busy_slot = c as i32;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// INV-LOCK-5 load-bearing twin: wake while a futex bucket lock is
 /// held (futex_wake's R12-2 section). The proof is required by
 /// `lock_irqsave_nested`, which only exists for the

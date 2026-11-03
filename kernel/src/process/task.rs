@@ -3334,16 +3334,23 @@ impl Task {
                     // unconsumed on parked readers' todos for minutes.
                     // Rate-limited branch report so the refusing guard
                     // names itself live.
+                    // r24 extension (kill10 wedge): capture the refusing
+                    // guard's own discriminators under the lock — class
+                    // linkage, owning busy/idle slots, exec clock, quantum —
+                    // so "linked but starved" vs "orphaned live pick mark"
+                    // vs "lying busy slot" are told apart on the line.
                     static W2_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     if W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                        let w2 = crate::sched::w2_refusal_census(task);
                         crate::pr_warn!(
-                            "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={}",
+                            "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={} {}",
                             pid,
                             (*task).state().bits(),
                             (*task).on_cpu(),
                             (*task).pick_state(),
-                            (*task).ti_cpu()
+                            (*task).ti_cpu(),
+                            w2
                         );
                     }
                     return false;
