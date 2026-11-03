@@ -628,6 +628,18 @@ impl Ext4FileSystem {
         memo.push((dir.ino, dir.size, blocks));
     }
 
+    /// Drop every memo entry for an inode (23rd soundness fix). The
+    /// (ino, size) key alone does not protect against inode REUSE: a
+    /// deleted directory's ino reallocated to a new directory of equal
+    /// size would be served the old block list. Every ext4 entry
+    /// mutation purges the parent here (add/delete entry sites in
+    /// namei.rs, under ENTRY_MUTEX) and namei's free_inode purges the
+    /// freed inode itself, so a stale list can never be served.
+    pub fn dir_blocks_purge(&self, ino: u32) {
+        let mut memo = self.dir_blocks_memo.lock();
+        memo.retain(|(i, _, _)| *i != ino);
+    }
+
     pub fn lookup(&self, dir: &inode::Ext4Inode, name: &str) -> Result<dir::Ext4DirEntry, i32> {
         // HTREE fast path (22nd, miss-path lever): indexed directories
         // resolve through the dx tree in 2-3 block reads instead of the
