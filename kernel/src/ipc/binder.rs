@@ -5211,6 +5211,59 @@ fn binder_ioctl_write_read(
             &mut bwr.read_consumed,
             non_block,
         );
+        // 23rd session SYNCSEND-EARLYRET probe (lb348/349 wedge decode):
+        // the reference parks a sync sender INSIDE its read until the
+        // reply (963b3e95 parity), so an ioctl that hands control back
+        // to userspace with an unresolved OUTGOING sync txn still on the
+        // thread stack is a divergence instance — that shape lets the
+        // userspace issue its deferred BC_REPLY while the nested call is
+        // unpicked, takes the why=7 rejection, and strands the outer txn
+        // (the 300-900 s wedge family). Probed only on the cold exits
+        // (rc<0, or a read that staged NOTHING — a normal park always
+        // stages >= BR_NOOP), ams46-gated, budget 40.
+        if ams46_on() && (ret < 0 || bwr.read_consumed == 0) {
+            let top = {
+                let w = world_lock();
+                // SAFETY: read-only peek under WORLD.
+                unsafe {
+                    w.as_ref()
+                        .unwrap()
+                        .procs
+                        .iter()
+                        .find(|p| Arc::ptr_eq(p, proc))
+                        .and_then(|p| {
+                            p.im()
+                                .threads
+                                .iter()
+                                .find(|t| t.tid == thread.tid)
+                                .and_then(|t| t.st().txn_stack.last().cloned())
+                        })
+                }
+            };
+            if let Some(t) = top {
+                if t.from_tid == Some(thread.tid)
+                    && t.flags & TF_ONE_WAY == 0
+                    && !Arc::ptr_eq(&t.to_proc, proc)
+                {
+                    static ER_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if ER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        crate::pr_warn!(
+                            "SYNCSEND-EARLYRET pid={} tid={} rc={} rcons={} txn{} code{:#x} to pid{} enq_j={} pick_j={}",
+                            proc.pid,
+                            thread.tid,
+                            ret,
+                            bwr.read_consumed,
+                            t.id,
+                            t.code,
+                            t.to_proc.pid,
+                            t.enq_j,
+                            unsafe { *t.pick_j.get() }
+                        );
+                    }
+                }
+            }
+        }
         if ret < 0 {
             // SAFETY: same 48-byte copy-back.
             unsafe {
@@ -6324,11 +6377,12 @@ fn binder_transaction(
                             // SAFETY: reads under WORLD.
                             let _ = writeln!(
                                 w,
-                                "  R7[{}] txn{} code{:#x} to_tid={:?} from pid{} tid{} oneway={} enq_j={} pick_j={}",
+                                "  R7[{}] txn{} code{:#x} to_tid={:?} to_pid={} from pid{} tid{} oneway={} enq_j={} pick_j={}",
                                 i,
                                 e.id,
                                 e.code,
                                 e.to_tid(),
+                                e.to_proc.pid,
                                 e.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                 e.from_tid.unwrap_or(0),
                                 e.flags & TF_ONE_WAY != 0,
@@ -8845,9 +8899,45 @@ fn binder_thread_read(
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
                                 // sc208 SLOW-TXN probe: server-pickup stamp.
+                                let nowj = crate::drivers::timer::get_jiffies() as u32;
                                 unsafe {
-                                    *t.pick_j.get() =
-                                        crate::drivers::timer::get_jiffies() as u32;
+                                    *t.pick_j.get() = nowj;
+                                }
+                                // 23rd session PICK-LATE probe (lb348/349
+                                // forensics): the wedge seed is a nested
+                                // sync txn sitting UNPICKED on proc todo for
+                                // ~1 s (R7[1] pick_j=0 ~100 ticks after
+                                // enq) — the deferred reply then fires with
+                                // the outgoing txn still stacked and the
+                                // reference-parity why=7 rejection strands
+                                // the outer txn forever. This probe names
+                                // which server was slow to pick and who
+                                // sent. 250 jiffies = 2.5 s bar (the R7
+                                // family shape, not the busy-storm noise),
+                                // rate-capped 40 lines, ams46-gated.
+                                if ams46_on()
+                                    && t.enq_j != 0
+                                    && nowj.wrapping_sub(t.enq_j) >= 250
+                                {
+                                    static PL_N: core::sync::atomic::AtomicUsize =
+                                        core::sync::atomic::AtomicUsize::new(0);
+                                    if PL_N.fetch_add(
+                                        1,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    ) < 40
+                                    {
+                                        crate::pr_warn!(
+                                            "PICK-LATE txn{} code{:#x} server pid={} tid{} from pid{} enq_j={} pick_j={} late={}",
+                                            t.id,
+                                            t.code,
+                                            proc.pid,
+                                            thread.tid,
+                                            t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                            t.enq_j,
+                                            nowj,
+                                            nowj.wrapping_sub(t.enq_j)
+                                        );
+                                    }
                                 }
                                 let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
