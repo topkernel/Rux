@@ -69,7 +69,7 @@ static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
 /// re-raises the vector through the interrupt path.
 pub fn timer_softirq_work_pending() -> bool {
     TIMER_EVER_ARMED.load(Ordering::Acquire)
-        || HRES_NEXT.load(Ordering::Acquire) <= timer::read_time()
+        || HRES_NEXT.load(Ordering::Acquire) <= crate::drivers::timer::read_time()
         // perf events: an armed sampler needs this softirq every tick
         // to charge the IRQ-stashed samples (perf::softirq_tick). One
         // relaxed load when nothing is armed (the sc184 discipline).
@@ -592,7 +592,7 @@ pub fn timer_softirq_handler(_nr: usize) {
 
     // High-resolution timers are NOT jiffy-deduped: an extra hart IRQ fired
     // at a sub-jiffy deadline re-runs this scan even in the same jiffy.
-    let now_time = timer::read_time();
+    let now_time = crate::drivers::timer::read_time();
     let hres_due = HRES_NEXT.load(Ordering::Acquire) <= now_time;
 
     // Wakewatch forensics: stamp this CPU's Hrtimer-softirq entry
@@ -1312,3 +1312,149 @@ fn ww_latefire_budget_ok() -> bool {
 // only seeded LAST_TICK and printed a banner) was removed in the review
 // batch-8 dead-code cleanup; the softirq scan self-seeds LAST_TICK on its
 // first run (line ~197).
+
+// ============================================================================
+// SP-5 round 5: frozen-tick trap (timers/interrupts guarded domain, x86_64)
+// ============================================================================
+//
+// Round-4 clock discriminator proved the SP-5 cascade runs with the timer
+// IRQs dead on BOTH CPUs while the timebase advances (tb 6.17M -> 7.05M,
+// WW_TICK_IRQ frozen 46/50). This trap fires from contexts that provably
+// still execute during the cascade (the OOM-FORENSIC dump on the
+// allocation-failure path) and prints the four-way discrimination:
+//   (a) LAPIC timer programmed off / one-shot exhausted (who re-arms?)
+//   (b) IF=0 stuck on a CPU (peer IPI probe times out)
+//   (c) IRR bit stuck (APIC accepted, delivery blocked)
+//   (d) halt wakeup lost (peer idle + TMCCT exhausted)
+//
+// Everything is printed on ONE line per CPU so the known doubled-console
+// interleave cannot split a report across lines.
+
+#[cfg(target_arch = "x86_64")]
+pub fn tick_trap_report(site: &str) {
+    use crate::drivers::intc::apic;
+
+    let me = crate::arch::cpu_id() as usize;
+    let tb_now = crate::drivers::timer::read_time();
+
+    // --- SELF (the CPU executing the dump) ---
+    let if_self = crate::arch::cpu::get_interrupts_state();
+    let snap_self = apic::lapic_timer_snapshot();
+    let (idle_phase_self, pid_self) = {
+        let cur = crate::sched::current();
+        let p = cur.map(|t| t.pid()).unwrap_or(0);
+        (crate::sched::sched::WW_IDLE_PHASE[me].load(Ordering::Relaxed), p)
+    };
+    match &snap_self {
+        Some(s) => crate::println!(
+            "TICKTRAP[{}] self cpu={} lvt={:#x} tmict={} tmcct={} svr={:#x} tpr={:#x} irr7={:#x} isr7={:#x} IF={} pid={} idlephase={} schedphase={} verdict={} arms={} armop={} arm_tb_delta={} arm_deadline={} arm_counts={} tickirq={} tickage_ms={} freq={} cli_open={}",
+            site, me,
+            s.lvt, s.tmict, s.tmcct, s.svr, s.tpr, s.irr7, s.isr7,
+            if_self, pid_self, idle_phase_self,
+            crate::sched::sched::SCHED_CS_PHASE[me].load(Ordering::Relaxed),
+            apic::tick_trap_adjudicate(s),
+            apic::TIMER_ARM_SEQ[me].load(Ordering::Relaxed),
+            apic::TIMER_ARM_OP[me].load(Ordering::Relaxed),
+            tb_now.saturating_sub(apic::TIMER_ARM_TB[me].load(Ordering::Relaxed)),
+            apic::TIMER_ARM_DEADLINE[me].load(Ordering::Relaxed),
+            apic::TIMER_ARM_COUNTS[me].load(Ordering::Relaxed),
+            WW_TICK_IRQ[me].load(Ordering::Relaxed),
+            ww_tick_age_ms(me),
+            apic::LAPIC_TIMER_FREQ.load(Ordering::Relaxed),
+            match crate::dfx::syscost::open_cli_segment(me) {
+                Some((file, line, age_raw)) => alloc::format!(
+                    "{}:{} age_ms~{}",
+                    file,
+                    line,
+                    // raw TSC -> ms (indicative; KVM TSCs are synced)
+                    age_raw / (apic::TSC_FREQ.load(Ordering::Relaxed) / 1000).max(1)
+                ),
+                None => alloc::string::String::from("-"),
+            },
+        ),
+        None => crate::println!(
+            "TICKTRAP[{}] self cpu={} apic-not-ready IF={} pid={} tickirq={}",
+            site, me, if_self, pid_self, WW_TICK_IRQ[me].load(Ordering::Relaxed)
+        ),
+    }
+
+    // --- PEERS via IRQ_WORK snapshot probe ---
+    for cpu in 0..crate::config::MAX_CPUS {
+        if cpu == me || !crate::arch::smp::cpu_started(cpu) {
+            continue;
+        }
+        let lapic_id = apic::lapic_id(cpu);
+        if lapic_id == u32::MAX {
+            continue;
+        }
+        let req = crate::arch::ipi::SNAP_REQ[cpu].fetch_add(1, Ordering::AcqRel) + 1;
+        apic::send_ipi(lapic_id, crate::arch::ipi::VECTOR_IRQ_WORK as u8);
+        // Timebase-bounded poll (50 ms nominal): jiffies are dead by
+        // hypothesis, and this CPU must not hang on an unresponsive peer.
+        let deadline = tb_now + crate::config::TIMER_CLOCK_FREQ_HZ / 20;
+        let mut served = false;
+        while crate::drivers::timer::read_time() < deadline {
+            if crate::arch::ipi::SNAP_DONE[cpu].load(Ordering::Acquire) >= req {
+                served = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !served {
+            // The peer did not service the IPI within 50 ms: it is either
+            // stuck with IF=0, halted with no interrupt source, or its
+            // LAPIC is not accepting. Its frozen tickirq counter plus the
+            // timeout is itself the (b)/(d) discrimination; the peer's
+            // OPEN cli segment (syscost model, cross-CPU read) names the
+            // stuck region's opener.
+            crate::println!(
+                "TICKTRAP[{}] peer cpu={} TIMEOUT no-ipi-service tickirq={} tickage_ms={} armseq={} armop={} schedphase={} cli_open={}",
+                site, cpu,
+                WW_TICK_IRQ[cpu].load(Ordering::Relaxed),
+                ww_tick_age_ms(cpu),
+                apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
+                apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
+                crate::sched::sched::SCHED_CS_PHASE[cpu].load(Ordering::Relaxed),
+                match crate::dfx::syscost::open_cli_segment(cpu) {
+                    Some((file, line, age_raw)) => alloc::format!(
+                        "{}:{} age_ms~{}",
+                        file,
+                        line,
+                        age_raw / (apic::TSC_FREQ.load(Ordering::Relaxed) / 1000).max(1)
+                    ),
+                    None => alloc::string::String::from("-"),
+                },
+            );
+            continue;
+        }
+        let s = apic::LapicTimerSnapshot {
+            lvt: crate::arch::ipi::SNAP_LVT[cpu].load(Ordering::Relaxed),
+            tmict: crate::arch::ipi::SNAP_TMICT[cpu].load(Ordering::Relaxed),
+            tmcct: crate::arch::ipi::SNAP_TMCCT[cpu].load(Ordering::Relaxed),
+            tdcr: 0,
+            svr: crate::arch::ipi::SNAP_SVR[cpu].load(Ordering::Relaxed),
+            tpr: crate::arch::ipi::SNAP_TPR[cpu].load(Ordering::Relaxed),
+            irr7: crate::arch::ipi::SNAP_IRR7[cpu].load(Ordering::Relaxed),
+            isr7: crate::arch::ipi::SNAP_ISR7[cpu].load(Ordering::Relaxed),
+        };
+        let peer_tb = crate::arch::ipi::SNAP_TB[cpu].load(Ordering::Relaxed);
+        crate::println!(
+            "TICKTRAP[{}] peer cpu={} lvt={:#x} tmict={} tmcct={} svr={:#x} tpr={:#x} irr7={:#x} isr7={:#x} verdict={} armseq={} armop={} arm_tb_delta={} arm_deadline={} arm_counts={} tickirq={} tickage_ms={} snap_age_ms={}",
+            site, cpu,
+            s.lvt, s.tmict, s.tmcct, s.svr, s.tpr, s.irr7, s.isr7,
+            apic::tick_trap_adjudicate(&s),
+            crate::arch::ipi::SNAP_ARMSEQ[cpu].load(Ordering::Relaxed),
+            apic::TIMER_ARM_OP[cpu].load(Ordering::Relaxed),
+            crate::drivers::timer::read_time().saturating_sub(apic::TIMER_ARM_TB[cpu].load(Ordering::Relaxed)),
+            apic::TIMER_ARM_DEADLINE[cpu].load(Ordering::Relaxed),
+            apic::TIMER_ARM_COUNTS[cpu].load(Ordering::Relaxed),
+            WW_TICK_IRQ[cpu].load(Ordering::Relaxed),
+            ww_tick_age_ms(cpu),
+            crate::drivers::timer::read_time().saturating_sub(peer_tb) * 1000
+                / crate::config::TIMER_CLOCK_FREQ_HZ,
+        );
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn tick_trap_report(_site: &str) {}
