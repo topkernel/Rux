@@ -387,16 +387,20 @@ impl TimerWheel {
 
     /// Link `idx` at the tail of bucket `b`'s list (rewrites the
     /// entry's own link fields — the entry must be detached).
+    /// Caught by the shape tests' budget-carry case: the first version
+    /// linked after the HEAD, orphaning every entry between head and
+    /// the previous tail — buckets deeper than two entries silently
+    /// lost their middle (lost-wakeup wedge in the suite).
     fn link_tail(&mut self, b: u8, idx: usize) {
         let idx32 = idx as u32;
         if let Some(s) = self.slots[idx].as_mut() {
             s.next = NIL;
             s.bucket = b;
         }
-        let head = self.heads[b as usize];
-        if head == NIL {
+        let tail = self.tails[b as usize];
+        if tail == NIL {
             self.heads[b as usize] = idx32;
-        } else if let Some(s) = self.slots[head as usize].as_mut() {
+        } else if let Some(s) = self.slots[tail as usize].as_mut() {
             s.next = idx32;
         }
         self.tails[b as usize] = idx32;
@@ -918,6 +922,7 @@ impl TimerWheel {
 
 /// Result of `remove` (which class was deleted — drives HRES_NEXT
 /// recomputation exactly like the old `removed_hres` flag).
+#[derive(PartialEq)]
 pub enum RemoveOutcome {
     NotFound,
     RemovedJiffy,
