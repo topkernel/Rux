@@ -61,6 +61,21 @@ pub fn get_jiffies() -> u64 {
     JIFFIES.load(Ordering::Acquire)
 }
 
+/// Floor-map an absolute timebase value onto the jiffy grid — the
+/// read side of increment_jiffies' `floor((now - base) / period)`
+/// derivation (0 before the grid origin is established). The timer
+/// wheel uses this to derive an hres entry's first-check jiffy from
+/// its precise counter deadline, so routing never trusts
+/// caller-supplied jiffy bookkeeping.
+#[inline]
+pub fn jiffy_floor_of_time(t: u64) -> u64 {
+    let base = JIFFIES_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return 0;
+    }
+    t.saturating_sub(base) / ticks_per_period()
+}
+
 /// Coarse time in nanoseconds since boot, snapped to the NOMINAL tick
 /// grid and computed from the LIVE timebase (riscv64 twin has the LTP
 /// utime01 history; same contract here)
