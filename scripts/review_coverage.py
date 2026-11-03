@@ -41,7 +41,7 @@ STATUS = {
     "kernel/src/arch/riscv64/vext.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/memory_layout.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/mmu_init.rs": ("part", "kernel image mapping"),
-    "kernel/src/arch/x86_64/trap.rs": ("fixed", "arch2 round: read end to end (GDT/TSS/IDT build, PIC, dispatch, all fault handlers, KP latch, histographs) — s2c findings re-verified; SYSRET-side fix is in trap.S this round"),
+    "kernel/src/arch/x86_64/trap.rs": ("fixed", "arch2 round: read end to end (GDT/TSS/IDT build, PIC, dispatch, all fault handlers, KP latch, histograms) — s2c findings re-verified; BUG FIXED: handle_debug killed every untraced user #DB with do_exit instead of delivering a catchable SIGTRAP (reference do_debug force_sig_fault; handler-first routing + blocked-forced-default, cb1bdc6b, A/B tfprobe 200/200 + PASS); SYSRET-side fix is in trap.S (3f1b0cd0, A-side guard vs B-side neutralized: identical 200/200 — behavior-preserving, hazard-eliminating)"),
     "kernel/src/cmdline.rs": ("part", "parameter parsing"),
     "kernel/src/dfx/backtrace.rs": ("part", "symbolized frame printing"),
     "kernel/src/dfx/bug.rs": ("part", "WARN/BUG banners"),
