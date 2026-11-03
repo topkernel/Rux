@@ -2704,3 +2704,139 @@ self-terminates at 1500s) — THE SCAN LEG FIRED, then stalled mid-stream
    processes right before and (if possible) during the first 60s of
    every roll; kill own roll early if the host jumps above ~5.
 
+
+## TWENTY-EIGHTH-SUCCESSOR SESSION (2026-11-03 23:00-.., branch biofix-fieldpoll @ 9094970b = merged main 91fed16d)
+Mission: the fs-side scan probe (the 27th's top entry point), the
+distributeddata serving-collapse profile, quiet-window rolls. Outcome:
+THE SCAN LEG IS DECODED END-TO-END — the preinstall store DIRECTORY
+never exists on our boots (no mkdir ever fires on the chain; every
+bmsdb.db create-open dies on the missing parent), while the reference
+kernel on the SAME image populates it to 43 preinstalled rows in the
+first 8.5s. Plus one NEW kernel-side divergence candidate: our /data
+image after a hard kill cannot journal-recover (e2fsck clears inodes),
+where the reference's image replays its journal clean.
+
+### Merge + instruments (all committed, pushed at close)
+- 9094970b = origin/main 91fed16d merged (TASK.md ours-by-intent).
+- BMSSCAN fs-side probe (dfx=ams46 cohort, 4 commits): openat attempts
+  on the scan's watched paths (bms RDB store chain, /data/app/el1,
+  /system/app, /system/etc/app install_list) with R/W/C intent +
+  PARENT-DIR state; per-directory first-getdents outcome; the
+  access(bmsdb.db, F_OK) is-new-db probes WITH THE FILE SIZE (live
+  divergence meter); mkdir attempt watch on the same set. Budgets
+  800/100(sysapp)/500/64/128, OFF unless dfx=ams46.
+- Rig: run/bmsdump.sh (debugfs extraction + sqlite3 row counts — NOTE
+  the image root IS the /data content: paths are /service/el1/..., not
+  /data/service/...); run/sp-ref-n.py (reference kernel, NOSNAP
+  writable userdata, for post-boot /data state extraction).
+- Rig bug fixed: mmprof=1 belongs on the KERNEL CMDLINE (env var is a
+  no-op — bmsours boot 1 lost its mmprof data to this).
+
+### MISSION 1: the reference-vs-ours preinstall store A/B (decisive)
+- REFERENCE (bzImage 6.6.101, system-lb5 + fresh2 reflink copy, NOSNAP,
+  150s, booted to GUI): /data/service/el1/public/bms/bundle_manager_
+  service/ EXISTS (uid 5523:1000 = foundation-created via
+  BundleUtil::CreateDir's recursive ForceCreateDirectory), bmsdb.db =
+  1,093,632 B, preinstalled_bundle = 43 rows (com.ohos.launcher +
+  com.ohos.systemui verified), installed_bundle = 42 rows. Asset kept:
+  run/bms-ref.img + run/bmsref-bmsdb.db (the golden reference store).
+- OURS (cg26b-class 52067191 + probe, bzImage-ladder-bmsscan26, 3
+  healthy boots bmsours3/4/5): the store DIRECTORY NEVER EXISTS. Probe
+  timeline on every healthy boot: RDB ctor storm at ~33-35s (access x4
+  + RDWR+CREAT + RD, ~40 cycles = BMS OnStart's RdbDataManager table
+  creation), scanning_apps.status 0 at the same moment, then a ~40s
+  park (LoadInstallInfosFromDb's KVS read), status 1 at ~73-75s — and
+  between 33s and kill: ZERO mkdirs on the bms chain, ZERO installd
+  ScanDir calls (installs pid idle since ~15s, "waiting for work (no
+  pending txn)" at 180s), ZERO /system/app walks, ZERO install sends.
+  bmsdb.db stays ENOENT through t=105s+ (size prints), parent MISSING
+  at every open. The late mkdirs at 70.7s are storage_daemon's user-100
+  dirs (StartUser(100) prep) — still not the bms chain.
+- ROOT: OnBmsStarting's post-KVS legs never execute their fs actions —
+  the scan flow that would CreateDir the store (recursively, chown
+  5523:1000 — exactly the reference's dir ownership) and install 34+
+  bundles dies at/after the KVS-read leg. NOT a kernel fs bug: the dir
+  is missing because USERSPACE never created it (lb368 proved this
+  kernel family runs the install stream when the branch fires; the
+  reference kernel creates it on the same image). NOT mount ordering,
+  NOT negmemo/htree (nothing to hide — the dir was never made).
+- The branch mechanism (source + timing): LoadInstallInfosFromDb's
+  answer decides the flow. lb368's scan FIRED at 19.3s because BMS
+  reached the KVS read while the SA:1301 proxy was still unobtainable
+  (instant false -> first-boot branch -> installs). Tonight's boots
+  reach it at ~33-35s with the proxy obtainable-but-slow (SA:1301
+  publishes at 41-43s after its 28.5s OnStart), the read waits ~40s,
+  and the flow then completes EMPTY without touching the fs (the
+  40s-park + fail-fast-everything shape). The 27th's "earlier BMS start
+  correlates with firing" is now instrument-confirmed as the proxy-
+  obtainability race at the KVS read.
+- NET: pixels still need either (a) the lb368-class early branch dice,
+  or (b) the store serving fast enough that the KVS read resolves
+  FALSE-FAST or with real data before OnBmsStarting gives up — both
+  route through distributeddata's time-to-serve (mission 2 / perf).
+
+### MISSION 2: distributeddata under the scan window (banked data)
+- Wedge boots (bmsours 1/2): OnStart-SA:1301 NEVER finishes; main
+  thread parked on a stack/FFRT-arena futex (0x7ff0007b2c00 class),
+  DB pool churning sub-minute re-parks, tgidthr run=0 — the lb362/364
+  family; SA inserts freeze at 12-33s; BMS parks in LoadInstallInfos-
+  FromDb forever (zero BMSSCAN lines = the scan never even starts).
+- Healthy boots (bmsours3/5): OnStart 28.5s (12.6->41-43s publish),
+  then the store serves CLEAN (zero SLOW-TXN targeting it, threads
+  idle "no pending txn" by 180s). The 33->73s cost is NOT store
+  serving — it is the CLIENT-side wait (foundation's KVS read parked
+  in userspace; the store was up at 43s and the read still resolved
+  ~30s later). No serving-collapse reproduced tonight (the lb368
+  collapse needs the install stream actually running).
+- The 4s-metronome DB_TaskExecutor samgr LOAD polls (the 20th's
+  cascade) present on every boot — unchanged.
+
+### NEW: ext4 crash-consistency divergence candidate (fs guarded domain)
+After a hard-killed NOSNAP boot: the REFERENCE image's e2fsck runs
+"recovering journal" and lands clean (only free-count fixes); OUR image
+has NO journal-recovery line, block-bitmap checksum mismatches at
+debugfs open, inode checksum mismatches, and e2fsck -fy CLEARS the el1
+subtree ("inode contains invalid data") — i.e., our committed writes do
+not survive a hard kill the way the reference's do. This poisoned two
+forensic extractions tonight (evidence destroyed by my own fsck) and
+matters for ANY NOSNAP population work (written state may not survive
+resets). FOLLOW-UP (controlled, cheap): minimal-rootfs boot, write+fsync
+files, hard-kill, e2fsck — if a cleanly-fsynced fs still fails journal
+recovery on our kernel, that is a real jbd2/metadata-csum bug class.
+Suspects: journal commit not covering metadata_csum updates, or bitmap
+checksums never rewritten on allocation.
+
+### Boots this session
+bmsours1 (spiral->sysrq-c 31.7s: hdf_devmgr+hiview exit-255 cascade),
+bmsours2 (early samgr wedge, SA inserts froze 12.9s — scan never
+started), bmsref (reference, GUI, golden store extracted), bmsours3
+(healthy, scan-empty decode), bmsours4 (healthy, size-meter boot),
+bmsours5 (healthy, parent-state+mkdir watch: the decisive boot),
+bmsrace1 (mission-3 roll, in flight at write time). Coordinator's
+ab9cg-1 cg26b A/B roll ran concurrently from this worktree (not mine —
+left alone; it wedged in the DEADLOCK class at ~1319s).
+
+### Successor entry points (28th, in order)
+1. THE KVS-READ BRANCH: the sharpest un-instrumented hop is WHAT
+   LoadInstallInfosFromDb RETURNS after its ~40s wait (empty-TRUE ->
+   BundleRebootStartEvent no-install path vs FALSE -> first-boot path
+   that would CreateDir+install). The branch verdicts are I-lines the
+   image level-gates from the hilog tap; the fs-side discriminator is
+   now cheap: IF the first-boot branch ever fires on a roll, BMSSCAN
+   shows the /system/etc/app/install_list.json opens + the /system/app
+   walk + the store-dir mkdirs. Roll until a boot shows status-0 BEFORE
+   SA:1301's OpenSo (the lb368 ordering) and the probe will narrate the
+   whole install stream.
+2. STORE TIME-TO-SERVE (the lever both knees share): everything above
+   routes through distributeddata's 28.5s OnStart + the client's 40s
+   wait. The OnStart window is the 20th's load cascade (samgr/softbus/
+   wifi chains) — perf-lane territory (syscost rows for the window are
+   in bmsours3/5 serials).
+3. EXT4 CRASH-CONSISTENCY (above): the controlled fsync-kill-fsck test
+   on the minimal rootfs; if it reproduces, it is a correctness bug
+   ahead of every NOSNAP population plan.
+4. Race rolls: recipe unchanged (system-lb5 + fresh2 + SMP2 LOGLEVEL6
+   dfx=ams46,txnhunt negmemo=1, quiet window load <4-5); the probe
+   kernel (bzImage-ladder-bmsscan26) narrates the scan leg for free.
+   Pixels: md5 leaving {5f8b704d,06b933b4,82f0a25f,23312e5b} ->
+   convert + report IMMEDIATELY.
