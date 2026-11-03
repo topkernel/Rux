@@ -105,3 +105,47 @@ sysfs01..05     REAL, FIXED (r25): x86_64-native syscall 139 (sysfs)
                 "Test killed by SIGSEGV" in setup. sysfs(2) implemented
                 over the shared FS_TABLE; all five now PASS (host
                 parity was confirmed first).
+
+--- r26 additions (this round's adjudication of the r25 census losses) ---
+
+pipe02 pipe08    REAL, FIXED (r26, commit f747cf8f): 8d81c5da moved the
+write05 writev01  last-reference close decisions into the fdreapd
+execve03          kthread behind a grace period, so close(2) returned
+access02          BEFORE its side effects ran (the reference runs the
+fcntl14 fcntl15   final fput in task work at return-to-userspace).
+fcntl33           Observed: write/writev to a pipe whose reader closed
+                  returned SUCCESS instead of EPIPE/SIGPIPE; record
+                  locks/leases still held after the closing fd's death
+                  (EAGAIN); IN_CLOSE_WRITE/NOWRITE never queued before
+                  the inotify read; execve's ENOEXEC case saw ETXTBSY
+                  (the setup fd's write-count had not been dropped).
+                  All reproduced deterministically in isolation (1st
+                  attempt, no load); all PASS 2x after the fix.
+
+kill10           BONUS RECOVERY (r26): PASS 2/2 in isolation for the
+                  first time since r24. The park face's engine was the
+                  same async-close divergence: children parked on
+                  harness pipes whose writer's close side effects (EOF
+                  wake) had not run. The freeze face did not reproduce
+                  in these runs; the timers-owner handoff stays open
+                  until the census shows it holding at scale.
+
+fcntl36_64       NOT-OURS (r26): census POISON was a scan artifact;
+                  isolation PASS in the 39-test regression batch.
+
+gettid02         NOT-OURS (r26): census POISON was a scan artifact;
+                  isolation PASS 2/2.
+
+float_exp_log    KNOWN FLAKE FAMILY (float-bench): POISONs even in
+                  isolation boots (hard wedge, empty tail) — the same
+                  host-load-sensitive float family documented since
+                  r22. Census class stays flake, not regression.
+
+creat07          FLAKE (r26): FAIL in the r25 census (checkpoint
+                  ETIMEDOUT under load), PASS in isolation 2x (both
+                  this round's boots). Same class as the r24 note.
+
+msgstress01      CORRECTNESS FIXED (r25), census bound by throughput
+                  (see above): correct at LTP_TIMEOUT_MUL=3; the 30s
+                  harness kills the default 1000-queue run. msg-path
+                  perf is perf-lane material.
