@@ -128,6 +128,12 @@ pub struct Ext4FileSystem {
     pub desc_size: u16,
     /// Inode size
     pub inode_size: u16,
+    /// want_extra_isize (reference super.c rule): the extra-isize value
+    /// stamped on every fresh inode. e2fsprogs folds i_checksum_hi into
+    /// the inode checksum only when i_extra_isize >= 4 — a zero value
+    /// makes sealed inodes unverifiable by e2fsck (cc crash-consistency
+    /// campaign).
+    pub want_extra_isize: u16,
     /// Blocks per group
     pub blocks_per_group: u32,
     /// Inodes per group
@@ -185,6 +191,7 @@ impl Ext4FileSystem {
             block_size_bits: 12,
             desc_size: 32,  // Default, will be updated from superblock
             inode_size: 256,
+            want_extra_isize: 0,
             blocks_per_group: 0,
             inodes_per_group: 0,
             group_count: 0,
@@ -482,6 +489,31 @@ impl Ext4FileSystem {
             self.block_size_bits = block_size_bits;
             self.desc_size = desc_size as u16;
             self.inode_size = ext4_sb.s_inode_size;
+            // want_extra_isize (reference super.c:4558): base
+            // sizeof(struct ext4_inode) - 128 == 32; with the
+            // EXTRA_ISIZE ro_compat feature take the max with the
+            // superblock's s_want/s_min fields, clamped to what fits.
+            if self.inode_size > 128 {
+                let mut want: u16 = 32;
+                if ext4_sb.s_feature_ro_compat
+                    & features::ro_compat::EXTRA_ISIZE
+                    != 0
+                {
+                    if ext4_sb.s_want_extra_isize > want {
+                        want = ext4_sb.s_want_extra_isize;
+                    }
+                    if ext4_sb.s_min_extra_isize > want {
+                        want = ext4_sb.s_min_extra_isize;
+                    }
+                }
+                let max_extra = self.inode_size - 128;
+                if want > max_extra {
+                    want = max_extra;
+                }
+                self.want_extra_isize = want;
+            } else {
+                self.want_extra_isize = 0;
+            }
             self.blocks_per_group = blocks_per_group;
             self.inodes_per_group = inodes_per_group;
             self.group_count = group_count as u32;
@@ -3019,18 +3051,23 @@ pub fn mount_loop_instance(
     // (s_start == 0 skips recovery); read-only mounts skip entirely —
     // replay WRITES, and ro is how system/vendor/sys_prod mount.
     //
-    // After the one-shot replay the journal handle is DROPPED:
-    // subsequent metadata writes keep this driver's direct-write
-    // discipline (buffer-cache dirty + inline sync), which the
-    // allocator's F4 notes and the journal-revocation comments are
-    // built around. The next mount sees the clean journal superblock
-    // the replay wrote (write_clean_sb: s_start = 0), so this stays
-    // idempotent across boots.
+    // Reference parity (cc crash-consistency campaign): the journal
+    // stays LIVE after the one-shot replay. The old code dropped it
+    // (`fs.journal = None`) — every write path then armed the
+    // null-journal handle whose stop commits nothing, while
+    // sync_dirty_buffer's under-handle deferral kept deferring the
+    // allocator's inline bitmap/group-descriptor syncs: persistence rode
+    // buffer-cache eviction, so an fsync'd create could be killed with
+    // its entry/inode-table on disk but the block bitmap still only in
+    // RAM — the torn-allocation crash class. With the journal live,
+    // ext4_journal_start returns real handles, the allocator registers
+    // its metadata blocks (journal_note_meta_block), and the fsync
+    // forced commit write-throughs the registered set exactly like the
+    // root-ext4 mount path always has.
     if !fs.read_only {
         if let Err(e) = fs.init_journal() {
             crate::pr_debug!("ext4: loop-instance journal init failed: {}", e);
         }
-        fs.journal = None;
     }
     let fs_ptr = alloc::boxed::Box::into_raw(fs) as *mut Ext4FileSystem;
     // SAFETY: fs_ptr is a leaked, valid instance pointer.

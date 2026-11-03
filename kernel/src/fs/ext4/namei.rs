@@ -280,8 +280,24 @@ pub fn ext4_new_inode(
     inode.i_mtime = now;
     inode.i_ctime = now;
 
-    // Update group descriptor
+    // i_extra_isize (reference parity: super.c's want_extra_isize rule +
+    // ialloc.c's `ei->i_extra_isize = sbi->s_want_extra_isize`): fresh
+    // inodes on an inode_size > 128 filesystem carry the full extra area
+    // as valid. e2fsprogs folds i_checksum_hi into the inode checksum
+    // only when i_extra_isize >= 4 — a zero extra_isize makes every
+    // sealed inode UNVERIFIABLE by e2fsck (it computes with the hi half
+    // as raw data; the kernel sealed with it zeroed), the whole pass-1
+    // "inode checksum mismatch" family that made e2fsck clear freshly
+    // written subtrees after a crash (the cc crash-consistency
+    // campaign's data-loss engine).
+    if fs.want_extra_isize > 0 {
+        inode.i_extra_isize = fs.want_extra_isize;
+    }
+
+    // Update group descriptor (free-inode count and, when this claim
+    // extends the group's used watermark, bg_itable_unused).
     update_group_descriptor_inodes(fs, group, -1)?;
+    update_group_desc_itable_unused_on_claim(fs, group, free_ino_in_group as u32 + 1)?;
 
     // Update superblock
     update_superblock_free_inodes(fs, -1)?;
@@ -347,6 +363,49 @@ fn update_group_descriptor_inodes(fs: &Ext4FileSystem, group: u32, delta: i32) -
     Ok(())
 }
 
+/// Maintain bg_itable_unused on an inode claim (reference parity:
+/// ialloc.c __ext4_new_inode — "Check the relative inode number against
+/// the last used relative inode number in this group. if it is greater
+/// we need to update the bg_itable_unused count"). The field defines the
+/// "unused inode region" e2fsck interprets in pass 1/2: a stale value
+/// makes a freshly allocated inode look like it lives in the never-used
+/// region, and e2fsck then treats directory entries pointing at it as
+/// referencing deleted inodes — the mass-clear class observed on
+/// crash-killed images (the cc crash-consistency campaign). The FREE
+/// path never touches this field (reference ext4_free_inode does not).
+fn update_group_desc_itable_unused_on_claim(
+    fs: &Ext4FileSystem,
+    group: u32,
+    rel_ino_1based: u32,
+) -> Result<(), i32> {
+    let ipg = fs.inodes_per_group;
+    if ipg == 0 || rel_ino_1based == 0 || rel_ino_1based > ipg {
+        return Ok(());
+    }
+    {
+        let mut group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return Ok(());
+        }
+        let gd = &mut group_descs[group as usize];
+        let unused =
+            (gd.bg_itable_unused_lo as u32) | ((gd.bg_itable_unused_hi as u32) << 16);
+        // Watermark: the highest 1-based relative inode considered used.
+        let watermark = ipg.saturating_sub(unused);
+        if rel_ino_1based > watermark {
+            let new_unused = ipg - rel_ino_1based;
+            gd.bg_itable_unused_lo = (new_unused & 0xFFFF) as u16;
+            gd.bg_itable_unused_hi = (new_unused >> 16) as u16;
+        } else {
+            // Inside the already-used region — nothing to extend.
+            return Ok(());
+        }
+    }
+    // Publish the field to the on-disk descriptor (RMW, re-sealed).
+    write_group_descriptor(fs, group)?;
+    Ok(())
+}
+
 /// Update superblock free inode count
 fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), i32> {
     // Update in-memory sb_info
@@ -396,6 +455,10 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
             super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
         }
         (*bh).set_state_bit(BufferState::BH_Dirty);
+        // Durability parity (see allocator::journal_note_meta_block): the
+        // superblock free-inode counter is journaled metadata in the
+        // reference kernel — register it with the running transaction.
+        unsafe { super::allocator::journal_note_meta_block(bh); }
         bio::brelse(bh);
     }
 
@@ -448,6 +511,17 @@ fn write_group_descriptor(fs: &Ext4FileSystem, group: u32) -> Result<(), i32> {
     if desc_size >= 0x2E + 2 {
         block_data[offset + 0x2E..offset + 0x30]
             .copy_from_slice(&gd.bg_free_inodes_count_hi.to_le_bytes());
+    }
+    // bg_itable_unused (0x1C lo / 0x32 hi) — maintained by the claim
+    // helper (update_group_desc_itable_unused_on_claim); publish it with
+    // the same RMW discipline. A stale on-disk value puts freshly
+    // allocated inodes inside e2fsck's "unused inode region" (dirents to
+    // them read as deleted — the cc campaign's mass-clear class).
+    block_data[offset + 0x1C..offset + 0x1E]
+        .copy_from_slice(&gd.bg_itable_unused_lo.to_le_bytes());
+    if desc_size >= 0x32 + 2 {
+        block_data[offset + 0x32..offset + 0x34]
+            .copy_from_slice(&gd.bg_itable_unused_hi.to_le_bytes());
     }
 
     // metadata_csum: this descriptor was just rewritten — re-seal its

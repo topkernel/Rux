@@ -20,6 +20,29 @@ use crate::errno;
 use crate::fs::bio;
 use crate::fs::ext4::superblock::Ext4GroupDesc;
 
+/// Register a dirty allocation-metadata buffer with the RUNNING journal
+/// transaction (reference parity: block bitmaps, inode bitmaps, group
+/// descriptors and the superblock counters are journaled metadata in the
+/// reference kernel — every jbd2 commit makes them durable). Our
+/// allocator historically left them buffer-cache dirty riding eviction:
+/// an fsync'd create could be killed with its directory entry and inode
+/// table on disk but the bitmaps and counters still only in RAM — the
+/// torn-allocation crash class (cc crash-consistency campaign). With the
+/// registration, the commit's write-through loop persists them exactly
+/// like the namei-registered entry/inode-table blocks.
+///
+/// No-op when no journal handle is armed on this task (the F4 null-handle
+/// write path or handle-less callers) — those keep the eviction/sync(2)
+/// persistence of today.
+///
+/// SAFETY: `bh` must be a valid BufferHead pointer returned by
+/// bio::bread/getblk and still owned by the cache.
+pub(crate) unsafe fn journal_note_meta_block(bh: *mut crate::fs::bio::BufferHead) {
+    if let Some(handle) = crate::fs::ext4::namei::get_current_handle() {
+        let _ = crate::fs::jbd2::jbd2_journal_dirty_metadata(&mut *handle, bh);
+    }
+}
+
 // ============================================================================
 // Preallocation State
 // ============================================================================
@@ -387,6 +410,8 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             (*bh).b_data.copy_from_slice(bitmap);
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
             sync_res?;
@@ -453,6 +478,8 @@ impl<'a> BlockAllocator<'a> {
                 );
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             bio::brelse(bh);
             Ok(())
         }
@@ -490,6 +517,8 @@ impl<'a> BlockAllocator<'a> {
                 super::csum::superblock_csum_set(&mut data[sb_start..sb_start + 1024]);
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             bio::brelse(bh);
             Ok(())
         }
@@ -563,6 +592,10 @@ pub(crate) fn set_bitmap_csum_in_gd(
         }
         super::csum::group_desc_csum_set(fs.csum_seed, group_idx as u32, d);
         (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+        // Durability parity (see journal_note_meta_block): the bitmap
+        // checksum lands in the GROUP DESCRIPTOR — a journaled metadata
+        // block in the reference kernel.
+        journal_note_meta_block(bh);
         bio::brelse(bh);
     }
     Ok(())
@@ -801,6 +834,31 @@ impl<'a> InodeAllocator<'a> {
                 // Update group descriptor (decrement free inode count)
                 self.update_group_desc_free_inodes(group_idx as u64, free_inodes - 1)?;
 
+                // bg_itable_unused (reference parity, ialloc.c:848): when
+                // the claimed bit extends the group's used watermark,
+                // advance the unused count. A stale value puts freshly
+                // allocated inodes inside e2fsck's "unused inode region"
+                // — dirents to them read as deleted (the cc campaign's
+                // mass-clear class).
+                {
+                    let unused = {
+                        let group_descs = self.fs.group_descs.lock();
+                        let gd = &group_descs[group_idx as usize];
+                        (gd.bg_itable_unused_lo as u32)
+                            | ((gd.bg_itable_unused_hi as u32) << 16)
+                    };
+                    // Watermark: highest 0-based bit considered used.
+                    let watermark = (inodes_per_group as u32).saturating_sub(unused);
+                    if (inode_offset as u32) >= watermark {
+                        let new_unused =
+                            (inodes_per_group as u32) - (inode_offset as u32) - 1;
+                        self.update_group_desc_itable_unused(
+                            group_idx as u64,
+                            new_unused,
+                        )?;
+                    }
+                }
+
                 // Update superblock (decrement free inode count)
                 self.update_superblock_free_inodes(-1)?;
 
@@ -890,6 +948,8 @@ impl<'a> InodeAllocator<'a> {
             data.copy_from_slice(bitmap);
 
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             let sync_res = bio::sync_dirty_buffer(bh);
 
             bio::brelse(bh);
@@ -975,10 +1035,64 @@ impl<'a> InodeAllocator<'a> {
                 );
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             bio::brelse(bh);
 
             Ok(())
         }
+    }
+
+    /// Update bg_itable_unused in the on-disk group descriptor (RMW with
+    /// bg_checksum re-seal) and the in-memory copy. Reference parity:
+    /// maintained ONLY on inode claim (ext4_free_inode never touches it).
+    fn update_group_desc_itable_unused(&self, group_idx: u64, unused: u32) -> Result<(), i32> {
+        // In-memory copy first (mount-time view readers).
+        {
+            let mut group_descs = self.fs.group_descs.lock();
+            if (group_idx as usize) < group_descs.len() {
+                group_descs[group_idx as usize].bg_itable_unused_lo =
+                    (unused & 0xFFFF) as u16;
+                group_descs[group_idx as usize].bg_itable_unused_hi =
+                    (unused >> 16) as u16;
+            }
+        }
+
+        let group_desc_size = self.fs.desc_size as usize;
+        let group_desc_start_block = if self.fs.block_size == 1024 { 2 } else { 1 };
+        let desc_per_block = self.fs.block_size as u64 / group_desc_size as u64;
+        let desc_block = group_desc_start_block + (group_idx / desc_per_block);
+        let desc_offset = ((group_idx % desc_per_block) as usize) * group_desc_size;
+
+        // SAFETY: bread on a valid device; offsets bounds-checked below.
+        unsafe {
+            let bh = bio::bread(self.fs.device, desc_block)
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let data = &mut (*bh).b_data;
+            if desc_offset + group_desc_size <= data.len() {
+                let lo_ptr = data.as_mut_ptr().add(desc_offset + 0x1C) as *mut u16;
+                lo_ptr.write_volatile((unused & 0xFFFF) as u16);
+                if group_desc_size >= 0x32 + 2 {
+                    let hi_ptr = data.as_mut_ptr().add(desc_offset + 0x32) as *mut u16;
+                    hi_ptr.write_volatile((unused >> 16) as u16);
+                }
+                if self.fs.metadata_csum {
+                    super::csum::group_desc_csum_set(
+                        self.fs.csum_seed,
+                        group_idx as u32,
+                        &mut data[desc_offset..desc_offset + group_desc_size],
+                    );
+                }
+                (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+                // Durability parity: allocation metadata is journaled
+                // metadata in the reference kernel — register the buffer
+                // with the running transaction so the commit write-through
+                // persists it (see journal_note_meta_block).
+                journal_note_meta_block(bh);
+            }
+            bio::brelse(bh);
+        }
+        Ok(())
     }
 
     /// Update free inode count in superblock
@@ -1022,6 +1136,8 @@ impl<'a> InodeAllocator<'a> {
                 );
             }
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
+            // Durability parity (see journal_note_meta_block).
+            journal_note_meta_block(bh);
             bio::brelse(bh);
 
             Ok(())
