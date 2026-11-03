@@ -477,6 +477,41 @@ pub fn timer_softirq_handler(_nr: usize) {
             // line per second ONLY while anon reclaim is being exercised
             // (self-gated on census deltas; zero serial otherwise).
             crate::mm::vmscan::vscan_heartbeat();
+            // stress-port r9 (kill10 face-1 handoff): overdue-wheel
+            // anomaly — an entry still IN the wheel more than 2 s past
+            // its deadline is a wheel-side loss (the delivery-loss face
+            // leaves the wheel EMPTY while the waiter stays parked;
+            // absence + a parked waiter is the other branch). Anomaly-
+            // gated unconditional print (ticktrap precedent), globally
+            // rate-capped at 1/s, max 4 entries per heartbeat.
+            {
+                let snaps = snapshot_timers();
+                let mut budget = if ww_latefire_budget_ok() { 4u32 } else { 0u32 };
+                for t in snaps.iter() {
+                    let overdue_ticks = if t.expires_time != 0 {
+                        now_time.saturating_sub(t.expires_time)
+                    } else {
+                        // jiffy-only entry: compare at the jiffy grid
+                        current
+                            .saturating_sub(t.expires)
+                            .saturating_mul(crate::config::TIMER_CLOCK_FREQ_HZ
+                                / crate::config::KERNEL_HZ as u64)
+                    };
+                    if overdue_ticks > 2 * crate::config::TIMER_CLOCK_FREQ_HZ && budget > 0 {
+                        budget -= 1;
+                        crate::pr_err!(
+                            "HRES-OVERDUE id={:#x} expires_time={} age_ms={} pid={} signo={} wake_pid={} interval_jiffies={}",
+                            t.id,
+                            t.expires_time,
+                            overdue_ticks / (crate::config::TIMER_CLOCK_FREQ_HZ / 1000),
+                            t.pid,
+                            t.signo,
+                            t.wake_pid,
+                            t.interval_jiffies
+                        );
+                    }
+                }
+            }
         }
     }
 
