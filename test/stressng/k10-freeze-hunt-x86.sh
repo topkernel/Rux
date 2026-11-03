@@ -24,18 +24,19 @@ FIFO="run/stress-runs/k10-$TAG.fifo"
 rm -f "$LOG" "$MON" "$FIFO"; mkfifo "$FIFO"
 
 # ---- serial feeder: shell up, then kill10 loop with completion marks ----
-(
-  sleep 14
-  for i in $(seq 1 "$LOOPS"); do
-    echo "/test/linux-ltp/testcases/bin/kill10 -d 4 -n 10 -g 2 > /tmp/k10-$i.out 2>&1 </dev/null; echo K10RET-$i=\$? > /dev/console" > "$FIFO"
-    sleep 34
-    printf 'DUMP!\n' > "$FIFO"
-    sleep 6
-    printf 'DUMP!\n' > "$FIFO"
-    sleep 20
+
+# Dribble bytes into the FIFO: a long line blasted at once overflows the
+# emulated 16550 RX FIFO (16B) and the shell drops bytes -> syntax errors.
+send_line() {
+  local str="$1"
+  for (( k=0; k<${#str}; k+=8 )); do
+    printf '%s' "${str:k:8}" > "$FIFO"
+    sleep 0.12
   done
-  sleep 30
-) &
+  printf '\n' > "$FIFO"
+  sleep 0.3
+}
+( sleep 8 ) &
 FEEDER=$!
 
 # ---- freeze watcher: serial stall >10s while QEMU alive -> monitor dump ----
@@ -93,8 +94,8 @@ timeout "$BUDGET" qemu-system-x86_64 -M q35 -accel kvm -cpu max \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,drive=rootfs \
   -kernel "$KERNEL" \
-  -append "root=/dev/vda rw init=/bin/sh console=ttyS0 dfx=taskdump,watchdog" \
-  < "$FIFO" > "$LOG" 2>&1
+  -append "root=/dev/vda rw init=/test/stress-ng/k10loop console=ttyS0 dfx=taskdump,watchdog" \
+  < /dev/null > "$LOG" 2>&1
 kill $FEEDER $WATCHER 2>/dev/null
 rm -f "$FIFO"
 echo "=== K10 HUNT $TAG verdict input ==="
