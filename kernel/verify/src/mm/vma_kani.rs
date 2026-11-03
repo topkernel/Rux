@@ -47,6 +47,23 @@ impl Vma {
         self.start.as_usize() < other.end.as_usize()
             && other.start.as_usize() < self.end.as_usize()
     }
+    /// Simplified merge predicate for this 3-field kani copy (the
+    /// kernel Vma also compares vma_type/file_fd/file_size, elided
+    /// here). Restores the methods VmaManager::add calls — this file
+    /// had drifted out of compile (pre-existing; found by the S-1
+    /// pilot's kani runs).
+    pub fn can_merge(&self, other: &Vma) -> bool {
+        self.end.as_usize() == other.start.as_usize()
+            && self.flags.bits() == other.flags.bits()
+    }
+    pub fn merge(&mut self, other: Vma) -> bool {
+        if self.can_merge(&other) {
+            self.end = other.end;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -73,9 +73,24 @@ pub fn kernel_thread(
     // 4. Zero out pt_regs (clean slate for ret_from_exception)
     // SAFETY: pt_regs_ptr points to the saved-register area at the top of the
     // kernel stack allocated by alloc_task_slot; size matches PtRegs layout.
+    //
+    // write_bytes' third argument is the ELEMENT count, not the byte
+    // count: the old form passed size_of::<PtRegs>() ELEMENTS through a
+    // *mut PtRegs — 168*168 = 28,224 bytes on x86_64 (288*288 = 82,944
+    // on riscv64, 320*320 = 102,400 on aarch64) — zeroing ~27-100 KB
+    // PAST the frame, off the top of the kthread's stack slot into
+    // unrelated memory. Every kthread creation stamped zeros over
+    // whatever followed the stack block; when the layout put a live
+    // buffer-cache page there, whole inode-table blocks read back
+    // zeroed (the block-280 /usr/include/linux ENOTDIR family that
+    // forced the lock-free dentry-walk revert — walk+SMP2 landed the
+    // klogd stack directly under the kmsg inode block's buffer; A/B on
+    // an otherwise identical binary with this length patched
+    // 0x6e40 -> 0xa8 went 6/6 corrupt to 6/6 clean). Cast to *mut u8 so
+    // the count reads as bytes.
     unsafe {
         core::ptr::write_bytes(
-            pt_regs_ptr, 0u8,
+            pt_regs_ptr as *mut u8, 0u8,
             core::mem::size_of::<crate::arch::pt_regs::PtRegs>(),
         );
     }

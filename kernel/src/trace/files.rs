@@ -22,6 +22,10 @@
 //! ├── available_events    0440  "group:name\n" per event
 //! ├── set_event           0640  the enabled events; write to (dis)arm
 //! ├── buffer_size_kb      0640  the per-CPU ring size in KiB
+//! ├── snapshot            0644  the saved-away buffer ("1" saves and
+//! │                              restarts the live buffer, "0" clears
+//! │                              the saved copy, read shows it like
+//! │                              `trace`)
 //! ├── options/            0755  one boolean file per trace option
 //! │   └── <option>        0644  "1\n"/"0\n"; write toggles
 //! └── events/
@@ -402,6 +406,26 @@ pub fn register() {
         Some(|buf: &[u8]| {
             trace::record_marker(buf);
             0
+        }),
+    );
+
+    // --- the snapshot buffer -------------------------------------------
+    // The reference's snapshot file: a second (max) buffer swapped in
+    // by writing 1, cleared by writing 0, rendered like `trace` on
+    // read. The swap here is a copy-out + live restart (the spare ring
+    // set is documented in trace::save_snapshot).
+    tracefs::create_file(
+        &format!("{}/snapshot", TRACING_DIR),
+        0o644,
+        || trace::render_snapshot().into_bytes(),
+        Some(|buf: &[u8]| {
+            bool_write(buf, |on| {
+                if on {
+                    trace::save_snapshot();
+                } else {
+                    trace::clear_snapshot();
+                }
+            })
         }),
     );
 

@@ -94,6 +94,18 @@ fn class_of(size: usize, align: usize) -> usize {
     idx
 }
 
+/// The effective allocated size of a layout this layer would serve:
+/// its size class (kmalloc-8 .. kmalloc-1024 — the same bin family the
+/// reference's kmalloc caches use). The kmem:kmalloc tracepoint's
+/// bytes_alloc column; read-only arithmetic over the same table
+/// class_of uses.
+pub fn effective_size(size: usize, align: usize) -> usize {
+    if size == 0 || size > SMALL_MAX || align > SMALL_MAX {
+        return size.max(align);
+    }
+    CLASSES[class_of(size, align)]
+}
+
 // ---------------------------------------------------------------------------
 // Per-heap-page "is a slab page" bitmap: 1 bit per page of the max 1 GiB
 // heap window = 32 KiB of .bss. Indexed by (addr - heap_start) / 4096.
