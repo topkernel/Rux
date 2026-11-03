@@ -273,7 +273,12 @@ pub fn timer_start() -> bool {
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, ticks as u32);
     let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC;
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
-    timer_arm_trail(crate::arch::cpu_id() as usize, TIMER_OP_PERIODIC);
+    timer_event_record(
+        crate::arch::cpu_id() as usize,
+        TIMER_OP_PERIODIC,
+        0,
+        ticks as u32,
+    );
     true
 }
 
@@ -282,7 +287,7 @@ pub fn timer_mask() {
     if READY.load(Ordering::Acquire) {
         let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC | LVT_MASKED;
         reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
-        timer_arm_trail(crate::arch::cpu_id() as usize, TIMER_OP_MASK);
+        timer_event_record(crate::arch::cpu_id() as usize, TIMER_OP_MASK, 0, 0);
     }
 }
 
@@ -328,15 +333,118 @@ pub fn timer_arm_oneshot(deadline_nominal: u64) -> bool {
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, counts);
     // SP-5 r5 arm trail: who programmed this CPU's timer last, with what.
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu < crate::config::MAX_CPUS {
-        TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed);
-        TIMER_ARM_OP[cpu].store(TIMER_OP_ONESHOT, Ordering::Relaxed);
-        TIMER_ARM_DEADLINE[cpu].store(deadline_nominal, Ordering::Relaxed);
-        TIMER_ARM_COUNTS[cpu].store(counts, Ordering::Relaxed);
-        TIMER_ARM_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
-    }
+    // r6: the recording (scalar fields + freeze ring) is unified in
+    // timer_event_record.
+    timer_event_record(
+        crate::arch::cpu_id() as usize,
+        TIMER_OP_ONESHOT,
+        deadline_nominal,
+        counts,
+    );
     true
+}
+
+// ---------------------------------------------------------------------------
+// SP-5 round 6 (LTP r24 kill10 handoff): freeze-face arm/service ring
+// ---------------------------------------------------------------------------
+// The both-CPU interrupt-freeze face leaves NOTHING executing in-guest —
+// every print-based instrument (ticktrap included) is dead at the exact
+// moment it is needed. This ring keeps the last TICK_ARM_RING_SLOTS
+// timer events per CPU in plain memory; init() publishes its physical
+// address so the HOST can dump it through the QEMU monitor after a
+// freeze (HMP `xp/<n>x <phys>` — no guest involvement; NMI proved it
+// does not resume the machine, k10-rux-nmi1). Ops 1-3 come from the
+// programming sites below, TIMER_OP_SERVICE from the LOCAL_TIMER IRQ
+// entry: the service->arm->service heartbeat is legible in the dump —
+// a ring ending on an ARM entry with no following SERVICE = the timer
+// was programmed but never fired (delivery loss); ending on a SERVICE
+// with no re-arm = the nobody-re-arms face (a) of the r5 trap header.
+pub const TIMER_OP_SERVICE: u32 = 4;
+pub const TICK_ARM_RING_SLOTS: usize = 16;
+
+/// One timer programming/service event (atomics-per-field, the
+/// page_desc TEXT_EVT_RING pattern — no locks on the tick path).
+pub struct TickArmEvent {
+    /// TIMER_ARM_SEQ value at this event (monotone per CPU).
+    pub seq: AtomicU64,
+    /// read_time() at the event.
+    pub tb: AtomicU64,
+    /// Return address one frame above the recording site (frame
+    /// pointers are forced on) — symbolize with addr2line.
+    pub ra: AtomicU64,
+    /// One-shot deadline (nominal ticks); 0 for service/mask/periodic.
+    pub deadline: AtomicU64,
+    /// Initial count written to TMICT.
+    pub counts: AtomicU32,
+    /// TIMER_OP_*.
+    pub op: AtomicU32,
+}
+const fn tick_arm_new() -> TickArmEvent {
+    TickArmEvent {
+        seq: AtomicU64::new(0),
+        tb: AtomicU64::new(0),
+        ra: AtomicU64::new(0),
+        deadline: AtomicU64::new(0),
+        counts: AtomicU32::new(0),
+        op: AtomicU32::new(0),
+    }
+}
+const TICK_ARM_NEW: TickArmEvent = tick_arm_new();
+const TICK_ARM_ROW: [TickArmEvent; TICK_ARM_RING_SLOTS] =
+    [TICK_ARM_NEW; TICK_ARM_RING_SLOTS];
+pub static TICK_ARM_RING: [[TickArmEvent; TICK_ARM_RING_SLOTS]; crate::config::MAX_CPUS] =
+    [TICK_ARM_ROW; crate::config::MAX_CPUS];
+pub static TICK_ARM_IDX: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+#[inline(always)]
+fn tick_arm_ra() -> u64 {
+    #[cfg(feature = "x86_64")]
+    {
+        let ra: u64;
+        // SAFETY: pure register-relative read, no side effects.
+        unsafe {
+            core::arch::asm!(
+                "mov {}, qword ptr [rbp + 8]",
+                out(reg) ra,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ra
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        0
+    }
+}
+
+/// Record one timer event: refresh the scalar last-* fields the TICKTRAP
+/// line reads AND append to the freeze ring (single SEQ bump per event).
+pub fn timer_event_record(cpu: usize, op: u32, deadline: u64, counts: u32) {
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    let seq = TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed) + 1;
+    let tb = crate::drivers::timer::read_time();
+    TIMER_ARM_OP[cpu].store(op, Ordering::Relaxed);
+    TIMER_ARM_DEADLINE[cpu].store(deadline, Ordering::Relaxed);
+    TIMER_ARM_COUNTS[cpu].store(counts, Ordering::Relaxed);
+    TIMER_ARM_TB[cpu].store(tb, Ordering::Relaxed);
+    let idx =
+        TICK_ARM_IDX[cpu].fetch_add(1, Ordering::Relaxed) as usize % TICK_ARM_RING_SLOTS;
+    let e = &TICK_ARM_RING[cpu][idx];
+    e.seq.store(seq, Ordering::Relaxed);
+    e.tb.store(tb, Ordering::Relaxed);
+    e.ra.store(tick_arm_ra(), Ordering::Relaxed);
+    e.deadline.store(deadline, Ordering::Relaxed);
+    e.counts.store(counts, Ordering::Relaxed);
+    e.op.store(op, Ordering::Relaxed);
+}
+
+/// Physical address of the ring for the boot-time host-side forensics
+/// line (kernel image VMA-LMA constant, linker.ld KERNEL_VMA).
+pub fn tick_arm_ring_phys() -> usize {
+    (&TICK_ARM_RING as *const _ as usize).wrapping_sub(0xffff_ffff_8000_0000)
 }
 
 // ---------------------------------------------------------------------------
@@ -373,15 +481,6 @@ pub static TIMER_ARM_COUNTS: [AtomicU32; crate::config::MAX_CPUS] =
 /// Timebase value at the last programming event.
 pub static TIMER_ARM_TB: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
-
-fn timer_arm_trail(cpu: usize, op: u32) {
-    if cpu >= crate::config::MAX_CPUS {
-        return;
-    }
-    TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed);
-    TIMER_ARM_OP[cpu].store(op, Ordering::Relaxed);
-    TIMER_ARM_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
-}
 
 /// Live LAPIC timer + delivery state of THIS CPU, for the frozen-tick trap.
 #[derive(Clone, Copy, Debug)]
@@ -1054,6 +1153,17 @@ pub fn init() {
 
     // One-time calibration (TSC + LAPIC timer vs PIT ch2).
     calibrate();
+
+    // SP-5 r6: publish the freeze-face ring for host-side forensics
+    // (one line; the QEMU monitor `xp` dump needs the address BEFORE
+    // any freeze can silence the console).
+    crate::println!(
+        "TICKARM-RING va={:#x} phys={:#x} slots={} stride={}",
+        &TICK_ARM_RING as *const _ as usize,
+        tick_arm_ring_phys(),
+        TICK_ARM_RING_SLOTS,
+        core::mem::size_of::<TickArmEvent>()
+    );
 }
 
 /// Per-CPU bring-up on an AP: enable the local APIC in the same mode the

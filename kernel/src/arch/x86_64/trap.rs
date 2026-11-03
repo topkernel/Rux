@@ -1084,6 +1084,16 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     // bit landed during the tick" (pctick==0). The riscv64
                     // twin has written this since fleet s2; the x86 side
                     // (the OH lane's arch) read a dead 0 until now.
+                    // SP-5 r6 freeze ring: the 0xe0 service heartbeat
+                    // entry, at entry before anything else (the re-arm
+                    // lands as its own TIMER_OP_ONESHOT entry later in
+                    // the tick handling).
+                    crate::drivers::intc::apic::timer_event_record(
+                        cpu_id,
+                        crate::drivers::intc::apic::TIMER_OP_SERVICE,
+                        0,
+                        0,
+                    );
                     crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id].store(
                         crate::sched::current()
                             .map(|t| t.preempt_count())
@@ -1584,6 +1594,14 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
 /// fallback; the LAPIC timer vector routes to `handle_timer_tick`
 /// directly with a LAPIC EOI).
 fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
+    // SP-5 r6 freeze ring: the service heartbeat entry (the following
+    // set_next_trigger re-arm lands as its own TIMER_OP_ONESHOT entry).
+    crate::drivers::intc::apic::timer_event_record(
+        cpu,
+        crate::drivers::intc::apic::TIMER_OP_SERVICE,
+        0,
+        0,
+    );
     // EOI FIRST (early-Linux discipline): the handler below can call
     // schedule(); with the ISR bit still set the PIC would block every
     // same/lower-priority line — the timer included — until the task we
