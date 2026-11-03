@@ -1226,6 +1226,12 @@ struct BinderTxn {
     /// picking up vs handler running long) names the next chain link.
     enq_j: u32,
     pick_j: core::cell::UnsafeCell<u32>,
+    /// 23rd PICK-LATE evidence: eligible proc-work readers on the target
+    /// at proc-todo enqueue time (the wake_proc_one predicate count).
+    /// 0 = nobody to wake — every reader busy in its own handler (a
+    /// capacity signal, not a lost wake). SAFETY: written under WORLD at
+    /// enqueue, read in the PICK-LATE probe under WORLD.
+    enq_elig: core::cell::UnsafeCell<u8>,
 }
 
 impl BinderTxn {
@@ -7110,6 +7116,7 @@ fn binder_transaction(
         security_ctx,
         enq_j: crate::drivers::timer::get_jiffies() as u32,
         pick_j: core::cell::UnsafeCell::new(0),
+        enq_elig: core::cell::UnsafeCell::new(0),
     });
 
     // binder:binder_transaction — the transaction was built and is about
@@ -7855,6 +7862,23 @@ fn binder_transaction(
                     match posted_thread {
                         Some(ct) => wake_ths.push(ct),
                         None => {
+                            // PICK-LATE evidence (23rd): see the twin at
+                            // the sync-route push (SAFETY: under WORLD).
+                            unsafe {
+                                *txn.enq_elig.get() = pm(world, &target)
+                                    .im()
+                                    .threads
+                                    .iter()
+                                    .filter(|t| {
+                                        let th = t.st();
+                                        th.waiting_for_proc_work
+                                            && th.todo.is_empty()
+                                            && th.txn_stack.is_empty()
+                                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED))
+                                                != 0
+                                    })
+                                    .count() as u8;
+                            }
                             pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
                             thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
                             if pref != 0 {
@@ -7993,6 +8017,24 @@ fn binder_transaction(
                             txn_route_label = "child-looper";
                         }
                         None => {
+                            // PICK-LATE evidence (23rd): eligible readers
+                            // on the target at enqueue (SAFETY: under
+                            // WORLD).
+                            unsafe {
+                                *txn.enq_elig.get() = pm(world, &target)
+                                    .im()
+                                    .threads
+                                    .iter()
+                                    .filter(|t| {
+                                        let th = t.st();
+                                        th.waiting_for_proc_work
+                                            && th.todo.is_empty()
+                                            && th.txn_stack.is_empty()
+                                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED))
+                                                != 0
+                                    })
+                                    .count() as u8;
+                            }
                             pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
                             thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
                             if pref != 0 {
@@ -8927,7 +8969,7 @@ fn binder_thread_read(
                                     ) < 40
                                     {
                                         crate::pr_warn!(
-                                            "PICK-LATE txn{} code{:#x} server pid={} tid{} from pid{} enq_j={} pick_j={} late={}",
+                                            "PICK-LATE txn{} code{:#x} server pid={} tid{} from pid{} enq_j={} pick_j={} late={} enq_elig={}",
                                             t.id,
                                             t.code,
                                             proc.pid,
@@ -8935,7 +8977,8 @@ fn binder_thread_read(
                                             t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                             t.enq_j,
                                             nowj,
-                                            nowj.wrapping_sub(t.enq_j)
+                                            nowj.wrapping_sub(t.enq_j),
+                                            unsafe { *t.enq_elig.get() }
                                         );
                                     }
                                 }
