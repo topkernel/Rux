@@ -46,6 +46,158 @@ pub struct ScanControl {
     pub order: i32,
 }
 
+// ==================== SP-7: per-page swap skip-reason census ====================
+//
+// The round-6 exhaustion re-adjudication left one thread: with 237k
+// anonymous pages on LRU_INACTIVE_ANON and swap active, only ~611 swap
+// writes completed per boot. The reference kernel under the same load
+// swaps aggressively. This census counts, per candidate page examined
+// by reclaim_anonymous_pages, EXACTLY which filter rejected it (or
+// which terminal path it took) — the skip reason names the fix.
+//
+// Cost: one relaxed fetch_add per filter branch on the reclaim path
+// (only exercised under memory pressure), read by the OOM forensic
+// dump and a 1 Hz delta heartbeat. Zero output on standard boots.
+
+/// The census counter set. All monotonically increasing.
+#[derive(Default)]
+pub struct VscanCensus {
+    /// reclaim_anonymous_pages invocations.
+    pub calls: u64,
+    /// Sum of requested nr_to_scan (priority-derived scan budget).
+    pub want: u64,
+    /// Sum of candidates lru_collect_cold actually returned.
+    pub got: u64,
+    /// Candidates whose descriptor pointer was null.
+    pub null_page: u64,
+    /// !is_anonymous.
+    pub not_anon: u64,
+    /// !SwapBacked.
+    pub not_sb: u64,
+    /// !is_mapped (mapcount at or below bias).
+    pub unmapped: u64,
+    /// refcount != 1 — split by observed value 2 / 3 / >=4.
+    pub rc2: u64,
+    pub rc3: u64,
+    pub rc4p: u64,
+    /// Last observed non-1 refcount (context for the buckets).
+    pub last_rc: u32,
+    /// is_reserved || is_locked.
+    pub rsv_lock: u64,
+    /// Referenced set → cleared + rotated back to the collect end.
+    pub rot_ref: u64,
+    /// swap_alloc_slot returned None (break — swap full).
+    pub slot_none: u64,
+    /// Post-slot-allocation TOCTOU recheck rejected the page.
+    pub toctou: u64,
+    /// try_to_unmap replaced zero PTEs (page not found in any page table).
+    pub unmap0: u64,
+    /// Partial unmap (slot leaked).
+    pub partial: u64,
+    /// swap_write_page returned Err.
+    pub w_err: u64,
+    /// swap_write_page returned Ok (single- and multi-mapping arms).
+    pub w_ok: u64,
+    /// put_page after swap-out did NOT reach 0 (slot leaked).
+    pub put_nz: u64,
+    /// Pages actually freed via the swap-out path.
+    pub freed: u64,
+}
+
+macro_rules! vscan_ctr {
+    ($name:ident) => {
+        static $name: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+    };
+}
+
+vscan_ctr!(VS_CALLS);
+vscan_ctr!(VS_WANT);
+vscan_ctr!(VS_GOT);
+vscan_ctr!(VS_NULLP);
+vscan_ctr!(VS_NOTANON);
+vscan_ctr!(VS_NOTSB);
+vscan_ctr!(VS_UNMAPPED);
+vscan_ctr!(VS_RC2);
+vscan_ctr!(VS_RC3);
+vscan_ctr!(VS_RC4P);
+static VS_LAST_RC: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+vscan_ctr!(VS_RSVLOCK);
+vscan_ctr!(VS_ROTREF);
+vscan_ctr!(VS_SLOTNONE);
+vscan_ctr!(VS_TOCTOU);
+vscan_ctr!(VS_UNMAP0);
+vscan_ctr!(VS_PARTIAL);
+vscan_ctr!(VS_WERR);
+vscan_ctr!(VS_WOK);
+vscan_ctr!(VS_PUTNZ);
+vscan_ctr!(VS_FREED);
+
+/// Read the whole census (the OOM dump prints it verbatim).
+pub fn vscan_census() -> VscanCensus {
+    use core::sync::atomic::Ordering::Relaxed;
+    VscanCensus {
+        calls: VS_CALLS.load(Relaxed),
+        want: VS_WANT.load(Relaxed),
+        got: VS_GOT.load(Relaxed),
+        null_page: VS_NULLP.load(Relaxed),
+        not_anon: VS_NOTANON.load(Relaxed),
+        not_sb: VS_NOTSB.load(Relaxed),
+        unmapped: VS_UNMAPPED.load(Relaxed),
+        rc2: VS_RC2.load(Relaxed),
+        rc3: VS_RC3.load(Relaxed),
+        rc4p: VS_RC4P.load(Relaxed),
+        last_rc: VS_LAST_RC.load(Relaxed),
+        rsv_lock: VS_RSVLOCK.load(Relaxed),
+        rot_ref: VS_ROTREF.load(Relaxed),
+        slot_none: VS_SLOTNONE.load(Relaxed),
+        toctou: VS_TOCTOU.load(Relaxed),
+        unmap0: VS_UNMAP0.load(Relaxed),
+        partial: VS_PARTIAL.load(Relaxed),
+        w_err: VS_WERR.load(Relaxed),
+        w_ok: VS_WOK.load(Relaxed),
+        put_nz: VS_PUTNZ.load(Relaxed),
+        freed: VS_FREED.load(Relaxed),
+    }
+}
+
+/// One compact census line (the OOM dump and the heartbeat share it).
+pub fn vscan_census_line() -> alloc::string::String {
+    use alloc::format;
+    let c = vscan_census();
+    format!(
+        "VSCAN-CENSUS calls={} want={} got={} nullp={} notanon={} notsb={} unmapped={} rc(2/3/4+ last)={}/{}/{} {} rsvlock={} rotref={} slotnone={} toctou={} unmap0={} partial={} wok={} werr={} putnz={} freed={}",
+        c.calls, c.want, c.got, c.null_page, c.not_anon, c.not_sb,
+        c.unmapped, c.rc2, c.rc3, c.rc4p, c.last_rc, c.rsv_lock,
+        c.rot_ref, c.slot_none, c.toctou, c.unmap0, c.partial,
+        c.w_ok, c.w_err, c.put_nz, c.freed
+    )
+}
+
+/// SP-7 heartbeat: print the census line once per second while new
+/// anon-scan activity accrues (self-gated — the line is silent unless
+/// reclaim_anonymous_pages ran since the last heartbeat). Sits next to
+/// the SP-5 reclaim-gate census on the 1 Hz timer heartbeat; standard
+/// boots (no anon pressure) never print.
+pub fn vscan_heartbeat() {
+    use core::sync::atomic::Ordering::Relaxed;
+    const VS_HB_BUDGET: u64 = 300;
+    static LAST_CALLS: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    static PRINTS: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let calls = VS_CALLS.load(Relaxed);
+    if calls == LAST_CALLS.load(Relaxed) {
+        return; // no anon scan activity since the last heartbeat
+    }
+    LAST_CALLS.store(calls, Relaxed);
+    if PRINTS.fetch_add(1, Relaxed) >= VS_HB_BUDGET {
+        return; // bounded: an hours-long storm cannot flood the console
+    }
+    crate::pr_info!("{}", vscan_census_line());
+}
+
+
 // ==================== Public API ====================
 
 /// Reclaim batch size (Linux SWAP_CLUSTER_MAX).
@@ -308,8 +460,29 @@ fn shrink_inactive_list(
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap
         super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ANON);
+        let c0 = vscan_census();
         let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
         sc.nr_reclaimed += anon_reclaimed;
+        // The reference-shaped batch tracepoint (see the declaration's
+        // divergence note in kernel/src/trace/mod.rs). Argument evaluation
+        // is two census reads (relaxed atomics) — paid only on the anon
+        // reclaim path, never on any standard-boot path.
+        let c1 = vscan_census();
+        let d = |a: u64, b: u64| a.saturating_sub(b) as i64;
+        crate::trace::trace_mm_vmscan_lru_shrink_inactive(
+            0,
+            nr_to_scan as i64,
+            anon_reclaimed as i64,
+            0,
+            0,
+            0,
+            0,
+            d(c1.rot_ref, c0.rot_ref),
+            d(c1.unmap0, c0.unmap0)
+                + d(c1.partial, c0.partial)
+                + d(c1.toctou, c0.toctou),
+            sc.priority,
+        );
     }
 
     sc.nr_scanned += nr_to_scan;
@@ -336,10 +509,18 @@ fn shrink_inactive_list(
 ///   3. Free the physical page
 fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
     use super::rmap::try_to_unmap_with_swap;
+    use core::sync::atomic::Ordering::Relaxed;
 
     let mut reclaimed = 0usize;
 
+    // SP-7 skip-reason census: invocation + collect-vs-want accounting
+    // (a want >> got gap means the LRU list itself is short; a large
+    // got with a dominant skip bucket names the filter).
+    VS_CALLS.fetch_add(1, Relaxed);
+    VS_WANT.fetch_add(nr_to_scan as u64, Relaxed);
+
     let candidates = super::lru::lru_collect_cold(LRU_INACTIVE_ANON, nr_to_scan);
+    VS_GOT.fetch_add(candidates.len() as u64, Relaxed);
 
     for pfn in candidates {
         if reclaimed >= nr_to_scan {
@@ -348,6 +529,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
 
         let page = pfn_to_page_mut(pfn);
         if page.is_null() {
+            VS_NULLP.fetch_add(1, Relaxed);
             continue;
         }
 
@@ -357,16 +539,19 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
 
             // Skip non-anonymous pages
             if !p.is_anonymous() {
+                VS_NOTANON.fetch_add(1, Relaxed);
                 continue;
             }
 
             // Must be swap-backed (set by page_add_anon_rmap)
             if !p.test_flag(PageFlag::SwapBacked) {
+                VS_NOTSB.fetch_add(1, Relaxed);
                 continue;
             }
 
             // Skip unmapped pages
             if !p.is_mapped() {
+                VS_UNMAPPED.fetch_add(1, Relaxed);
                 continue;
             }
 
@@ -377,19 +562,41 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             // slot while the installed PTEs still referenced it (slot UAF,
             // review MM-C3).
             if p.refcount() != 1 {
+                // SP-7: bucket the observed value — rc2 is the fork-COW
+                // face, rc4+ is a pinning/leak face; last_rc carries the
+                // exact value of the most recent reject.
+                let rc = p.refcount();
+                VS_LAST_RC.store(rc as u32, Relaxed);
+                match rc {
+                    2 => VS_RC2.fetch_add(1, Relaxed),
+                    3 => VS_RC3.fetch_add(1, Relaxed),
+                    _ => VS_RC4P.fetch_add(1, Relaxed),
+                };
                 continue;
             }
 
             // Skip reserved/locked pages
             if p.is_reserved() || p.is_locked() {
+                VS_RSVLOCK.fetch_add(1, Relaxed);
                 continue;
             }
 
             // Check referenced flag (recently accessed — give it another
-            // chance at the MRU end instead of just clearing in place)
+            // chance at the MRU end instead of just clearing in place).
+            // SP-7 (stress-port r7): the MRU end is the HEAD (the same
+            // young end `page_add_anon_lru` links at; see link_head_
+            // locked's policy doc). The old call moved the page to the
+            // TAIL — the COLLECT end — so every rotation fed the page
+            // straight back to the next scan (and the measured rotref
+            // share of the scan budget was 46%, flags planted by the
+            // allocator, not accesses). The reference kernel protects a
+            // referenced inactive page at the young end (activate / head
+            // of inactive); head-rotation is the single-list form of
+            // that protection.
             if p.test_flag(PageFlag::Referenced) {
                 p.clear_flag(PageFlag::Referenced);
-                super::lru::lru_move_to_tail(p, LRU_INACTIVE_ANON);
+                super::lru::lru_move_to_head(p, LRU_INACTIVE_ANON);
+                VS_ROTREF.fetch_add(1, Relaxed);
                 sc.nr_scanned += 1;
                 continue;
             }
@@ -399,7 +606,10 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             // Allocate a swap slot
             let (swap_type, swap_offset) = match swap::swap_alloc_slot() {
                 Some(slot) => slot,
-                None => break, // No swap space left
+                None => {
+                    VS_SLOTNONE.fetch_add(1, Relaxed);
+                    break; // No swap space left
+                }
             };
 
             // Re-check page state after potential preemption during swap
@@ -413,6 +623,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 || p.test_flag(PageFlag::Referenced)
             {
                 swap::swap_free_slot(swap_type, swap_offset);
+                VS_TOCTOU.fetch_add(1, Relaxed);
                 continue;
             }
 
@@ -442,6 +653,11 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     );
                     let write_ok = swap::swap_write_page(swap_type, swap_offset, phys).is_ok();
                     swap::swap_clear_pending(swap_type, swap_offset);
+                    if write_ok {
+                        VS_WOK.fetch_add(1, Relaxed);
+                    } else {
+                        VS_WERR.fetch_add(1, Relaxed);
+                    }
 
                     if !write_ok {
                         // The PTE already holds the entry — nothing to roll
@@ -467,7 +683,9 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;
+                        VS_FREED.fetch_add(1, Relaxed);
                     } else {
+                        VS_PUTNZ.fetch_add(1, Relaxed);
                         crate::pr_warn!(
                             "vmscan: swapped-out page refcount={} (slot leaked)",
                             refcount
@@ -479,12 +697,14 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     // in-flight mark and free it.
                     swap::swap_clear_pending(swap_type, swap_offset);
                     swap::swap_free_slot(swap_type, swap_offset);
+                    VS_UNMAP0.fetch_add(1, Relaxed);
                 } else {
                     // Partial unmap: at least one PTE now references the swap
                     // entry — freeing the slot would be a UAF. Leak it (and
                     // clear the in-flight mark: the write never happened, so
                     // a swap-in must not wait on it).
                     swap::swap_clear_pending(swap_type, swap_offset);
+                    VS_PARTIAL.fetch_add(1, Relaxed);
                     crate::pr_warn!(
                         "vmscan: partial unmap during swap-out (slot leaked)"
                     );
@@ -495,8 +715,10 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
                     // Write failed — free the slot and skip this page
                     swap::swap_free_slot(swap_type, swap_offset);
+                    VS_WERR.fetch_add(1, Relaxed);
                     continue;
                 }
+                VS_WOK.fetch_add(1, Relaxed);
 
                 // Replace PTEs with swap entry
                 let unmapped = try_to_unmap_with_swap(p, swap_entry);
@@ -515,7 +737,9 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;
+                        VS_FREED.fetch_add(1, Relaxed);
                     } else {
+                        VS_PUTNZ.fetch_add(1, Relaxed);
                         crate::pr_warn!(
                             "vmscan: swapped-out page refcount={} (slot leaked)",
                             refcount
@@ -523,7 +747,9 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     }
                 } else if unmapped == 0 {
                     swap::swap_free_slot(swap_type, swap_offset);
+                    VS_UNMAP0.fetch_add(1, Relaxed);
                 } else {
+                    VS_PARTIAL.fetch_add(1, Relaxed);
                     crate::pr_warn!(
                         "vmscan: partial unmap during swap-out (slot leaked)"
                     );

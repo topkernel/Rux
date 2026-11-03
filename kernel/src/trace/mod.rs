@@ -930,6 +930,39 @@ tracepoints! {
         let page = crate::mm::page_desc::pfn_to_page(args[0] as usize) as u64;
         format!("page={:#x} pfn={:#x} order={}", page, args[0], args[1] as u32)
     };
+
+    /// vmscan:mm_vmscan_lru_shrink_inactive — one record per
+    /// shrink_inactive_list() call on the anonymous LRU (the SP-7 swap
+    /// skip-reason hunt's tracefs vehicle). Field set and print fmt
+    /// follow the reference's events/vmscan/mm_vmscan_lru_shrink_inactive
+    /// with two divergences, both noted: the trailing `flags` field is
+    /// omitted (TRACE_ARGS capacity; Rux has no reclaim-state flags
+    /// bitmap), and only the ANON arm fires it (the file arm's
+    /// shrink_reclaim carries no batch accounting yet).
+    EVENT_MM_VMSCAN_LRU_SHRINK_INACTIVE / mm_vmscan_lru_shrink_inactive_fmt
+        / trace_mm_vmscan_lru_shrink_inactive : "vmscan", "mm_vmscan_lru_shrink_inactive", 31,
+    print: "\"nid=%d nr_scanned=%ld nr_reclaimed=%ld nr_dirty=%ld nr_writeback=%ld nr_congested=%ld nr_immediate=%ld nr_ref_keep=%ld nr_unmap_fail=%ld priority=%d\", REC->nid, REC->nr_scanned, REC->nr_reclaimed, REC->nr_dirty, REC->nr_writeback, REC->nr_congested, REC->nr_immediate, REC->nr_ref_keep, REC->nr_unmap_fail, REC->priority",
+    fields: "\tfield:int nid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:long nr_scanned;\toffset:16;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_reclaimed;\toffset:24;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_dirty;\toffset:32;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_writeback;\toffset:40;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_congested;\toffset:48;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_immediate;\toffset:56;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_ref_keep;\toffset:64;\tsize:8;\tsigned:1;\n\
+             \tfield:long nr_unmap_fail;\toffset:72;\tsize:8;\tsigned:1;\n\
+             \tfield:int priority;\toffset:80;\tsize:4;\tsigned:1;\n",
+    call (nid: i32, nr_scanned: i64, nr_reclaimed: i64, nr_dirty: i64, nr_writeback: i64,
+          nr_congested: i64, nr_immediate: i64, nr_ref_keep: i64, nr_unmap_fail: i64,
+          priority: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "nid={} nr_scanned={} nr_reclaimed={} nr_dirty={} nr_writeback={} nr_congested={} nr_immediate={} nr_ref_keep={} nr_unmap_fail={} priority={}",
+            args[0] as i32, args[1] as i64, args[2] as i64, args[3] as i64,
+            args[4] as i64, args[5] as i64, args[6] as i64, args[7] as i64,
+            args[8] as i64, args[9] as i32
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
