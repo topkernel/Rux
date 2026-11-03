@@ -3371,7 +3371,14 @@ unsafe fn send_signal_locked_info(
     // bitmap and never take this path.
     if let Some(info) = si {
         if info.si_signo >= SIGRTMIN && info.si_code < 0 {
-            let limit = task.rlimits.lock()[crate::process::task::rlimit_res::SIGPENDING].0;
+            // irqsave: the rlimits spinlock is shared with IRQ context
+            // (scheduler_tick reads RLIMIT_CPU of current via
+            // Task::rlimit's lock_irqsave). A plain-lock holder
+            // interrupted by its own CPU's tick self-deadlocks the tick
+            // at IF=0 — the both-CPU-freeze DEADLOCK-spin class (the
+            // spinner prints at Task::rlimit+0x89; verified byte-exact
+            // on the OH A/B pollwake roll pw-5 and cg-1's storm).
+            let limit = task.rlimits.lock_irqsave()[crate::process::task::rlimit_res::SIGPENDING].0;
             if limit != u64::MAX && task.pending.rt_queued_count() as u64 >= limit {
                 emit(4);
                 return Err(crate::errno::Errno::TryAgain.as_neg_i32());
