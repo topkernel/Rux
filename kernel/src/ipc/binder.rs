@@ -5224,10 +5224,23 @@ fn binder_ioctl_write_read(
         // thread stack is a divergence instance — that shape lets the
         // userspace issue its deferred BC_REPLY while the nested call is
         // unpicked, takes the why=7 rejection, and strands the outer txn
-        // (the 300-900 s wedge family). Probed only on the cold exits
-        // (rc<0, or a read that staged NOTHING — a normal park always
-        // stages >= BR_NOOP), ams46-gated, budget 40.
-        if ams46_on() && (ret < 0 || bwr.read_consumed == 0) {
+        // (the 300-900 s wedge family).
+        // 24th session: the cold-exit gate (rc<0 || rcons==0) missed the
+        // LB349 SEED SHAPE — tid 881 returned with its deferred
+        // TRANSACTION_COMPLETE staged (rcons>0, rc=0: the tcomplete was
+        // made visible without the reply), so the probe was silent at
+        // the exact moment it was built for. Fire on EVERY BWR exit that
+        // leaves an unresolved outgoing sync txn stacked; rc + the first
+        // staged read command name the hole: rc=-4 signal-broken park,
+        // rc=-11 nonblocking shape, rc=0 + BR_TRANSACTION_COMPLETE first
+        // = process_todo was set without the reply (kernel-side park
+        // hole), rc=0 + BR_TRANSACTION = proc work delivered to a parked
+        // sender (reference routes proc work only to txn-stack-empty
+        // readers). A reply created always pops its outgoing entry at
+        // reply-creation time (the RPOP retain), so a stacked top at
+        // exit proves no reply arrived this read. ams46-gated, budget 60,
+        // one line per 2 s (the userspace poll loop re-fires this).
+        if ams46_on() {
             let top = {
                 let w = world_lock();
                 // SAFETY: read-only peek under WORLD.
@@ -5253,19 +5266,42 @@ fn binder_ioctl_write_read(
                 {
                     static ER_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
-                    if ER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
-                        crate::pr_warn!(
-                            "SYNCSEND-EARLYRET pid={} tid={} rc={} rcons={} txn{} code{:#x} to pid{} enq_j={} pick_j={}",
-                            proc.pid,
-                            thread.tid,
-                            ret,
-                            bwr.read_consumed,
-                            t.id,
-                            t.code,
-                            t.to_proc.pid,
-                            t.enq_j,
-                            unsafe { *t.pick_j.get() }
-                        );
+                    static ER_LAST: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    let nowj = crate::drivers::timer::get_jiffies() as u32;
+                    let last = ER_LAST.load(core::sync::atomic::Ordering::Relaxed);
+                    if n < 60 && nowj.wrapping_sub(last) >= 200 {
+                        if ER_LAST
+                            .compare_exchange(
+                                last,
+                                nowj,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            // First staged command past the leading
+                            // BR_NOOP (read side already copied out).
+                            let c1 = if bwr.read_consumed >= 8 {
+                                get_user_at::<u32>(bwr.read_buffer, 4).unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            crate::pr_warn!(
+                                "SYNCSEND-EARLYRET pid={} tid={} rc={} rcons={} c1={:#x} txn{} code{:#x} to pid{} enq_j={} pick_j={}",
+                                proc.pid,
+                                thread.tid,
+                                ret,
+                                bwr.read_consumed,
+                                c1,
+                                t.id,
+                                t.code,
+                                t.to_proc.pid,
+                                t.enq_j,
+                                unsafe { *t.pick_j.get() }
+                            );
+                        }
                     }
                 }
             }
@@ -5558,7 +5594,9 @@ fn binder_thread_write(
                     // status-7 (ERR_NULL_OBJECT, SA-not-loaded) replies
                     // that would burn any shared budget in seconds —
                     // budget the POISON value (32) separately and cap the
-                    // rest.
+                    // rest. 24th session: poison budget 4000 -> 60 (class
+                    // decoded; see the POISON32-DELIVER twin — print volume
+                    // here was the wedge-window pick-latency amplifier).
                     static SC_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     static SC_POISON: core::sync::atomic::AtomicUsize =
@@ -5577,7 +5615,7 @@ fn binder_thread_write(
                         } else {
                             SC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                         };
-                        if n < (if val == 32 { 4000 } else { 50 }) {
+                        if n < (if val == 32 { 60 } else { 50 }) {
                             crate::pr_warn!(
                                 "STATUSCODE-REPLY pid={} tid={} code={:#x} status={}{}",
                                 proc.pid,
@@ -6505,11 +6543,18 @@ fn binder_transaction(
                     } == 0;
                     if ok && val == 32 {
                         // HOTPATH-PRINT: binder poison-32 delivery hunt;
-                        // budget-gated (P32_N, 4000/boot) — oh-launcher lane
+                        // budget-gated (P32_N) — oh-launcher lane. 24th
+                        // session: 4000 -> 60. The poison-32 proxy-death
+                        // mechanism is DECODED (empty-parcel error replies,
+                        // image-side); the wedge-window rip census showed
+                        // this pair (2187+2208 lines/boot in lb349) burning
+                        // the print path that keeps nested-call picks at
+                        // seconds — the wedge-seed amplifier. Budget keeps a
+                        // presence sample for class ID only.
                         static P32_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         let n = P32_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if n < 4000 {
+                        if n < 60 {
                             let (fproc, ftid) = target_thread_key.as_ref().unwrap();
                             crate::pr_warn!(
                                 "POISON32-DELIVER server={}/{} -> client pid={} tid={} req_code={:#x}",
@@ -7225,24 +7270,39 @@ fn binder_transaction(
                     .trim_end_matches('\0');
                 // sc209: 64 -> 96 bytes so LOAD parcels' SA id survives
                 // past the (longer) samgr interface token.
-                let mut pb = [0u8; 96];
-                let mut pb_ok = false;
-                if tr.data_buffer != 0 {
-                    pb_ok = unsafe {
-                        crate::arch::uaccess::copy_from_user(
-                            pb.as_mut_ptr(),
-                            tr.data_buffer as *const u8,
-                            pb.len(),
-                        ) == 0
-                    };
-                }
-                let hex: alloc::string::String = if pb_ok {
-                        pb.iter()
-                            .map(|b| alloc::format!("{:02x}", b))
-                            .collect()
+                // 24th session print diet: parcel hex only for the first
+                // 40 prints (the token/SI shape is established by then);
+                // later lines keep the 1:1 txn-id pairing for the SLRD
+                // delivery audit without the 192-char dump. Hex built in
+                // one pass (the old per-byte format! collect spent 96
+                // heap Strings per line, 57k allocations across a boot).
+                static SAREG_HEX_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let want_hex = SAREG_HEX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40;
+                let hex: alloc::string::String = if want_hex {
+                    let mut pb = [0u8; 96];
+                    let pb_ok = tr.data_buffer != 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                pb.as_mut_ptr(),
+                                tr.data_buffer as *const u8,
+                                pb.len(),
+                            ) == 0
+                        };
+                    if pb_ok {
+                        const HEXC: &[u8; 16] = b"0123456789abcdef";
+                        let mut s = alloc::string::String::with_capacity(pb.len() * 2);
+                        for &b in pb.iter() {
+                            s.push(HEXC[(b >> 4) as usize] as char);
+                            s.push(HEXC[(b & 0xf) as usize] as char);
+                        }
+                        s
                     } else {
                         alloc::string::String::from("unmapped")
-                    };
+                    }
+                } else {
+                    alloc::string::String::from("-")
+                };
                 crate::pr_warn!(
                     "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
                     if reply { "reply" } else { "send " },
@@ -8860,9 +8920,15 @@ fn binder_thread_read(
                                         {
                                             static SLRD_N: core::sync::atomic::AtomicUsize =
                                                 core::sync::atomic::AtomicUsize::new(0);
+                                            // 24th session: 1500 -> 300 (1291
+                                            // lines in lb349; print-volume
+                                            // diet for the wedge window — the
+                                            // send-side SAREG id pairing
+                                            // still audits early boot, where
+                                            // the interesting deliveries are).
                                             if SLRD_N
                                                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                                < 1500
+                                                < 300
                                             {
                                                 let name = core::str::from_utf8(unsafe { (*cur).comm() })
                                                     .unwrap_or("")
@@ -8954,12 +9020,14 @@ fn binder_thread_read(
                                 // reference-parity why=7 rejection strands
                                 // the outer txn forever. This probe names
                                 // which server was slow to pick and who
-                                // sent. 250 jiffies = 2.5 s bar (the R7
-                                // family shape, not the busy-storm noise),
-                                // rate-capped 40 lines, ams46-gated.
+                                // sent. 24th session: bar 250->100 jiffies —
+                                // the lb349 seed pick was ~1.2 s, UNDER the
+                                // old 2.5 s bar (the exact class this probe
+                                // exists for never printed). Rate-capped 40
+                                // lines, ams46-gated.
                                 if ams46_on()
                                     && t.enq_j != 0
-                                    && nowj.wrapping_sub(t.enq_j) >= 250
+                                    && nowj.wrapping_sub(t.enq_j) >= 100
                                 {
                                     static PL_N: core::sync::atomic::AtomicUsize =
                                         core::sync::atomic::AtomicUsize::new(0);
