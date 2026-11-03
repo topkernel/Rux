@@ -2444,3 +2444,109 @@ main's diverged ext4 structure, and the branch lineage is the fix.
    negstale fix lineage + ext4 htree/memo wave + this parity fix) -
    merging the BRANCH (not cherry-picks) lands everything cleanly;
    run the merge gate's tier-2 check (binder/ is a hot path).
+
+## TWENTY-SEVENTH-SUCCESSOR SESSION (2026-11-03 21:20-.., branch biofix-fieldpoll @ 3a40c3df = merged main be56334a)
+Mission: quiet-window rolls on the pollwake+parity kernel; re-decode the
+readiness gap with 491ebc09 live (never-woken class gone?); track the
+wedge/spiral dice; bank entry points.
+
+### 0. Gate audit (mission item 2, "verify no other gate remains") — verified against the FETCHED 6.6 source
+Reference: /home/william/workspace/oh-robot/kernel/linux/linux-6.6/drivers/
+android/binder.c (read directly this session):
+- binder_available_for_proc_work_ilocked (line 606) = `!transaction_stack
+  && todo empty` — NO looper flags. The 26th's fix matches the reference
+  exactly. The flag-gated variant was pure b85-era local patch.
+- binder_wait_for_work (line 4358): waiting_threads membership =
+  do_proc_work (availability), no flag check. Our fixed membership
+  (binder.rs ~8793) matches.
+- binder_thread_read (line 4467): an unflagged proc-work waiter only
+  gets a binder_user_error WARNING (the wait_event on
+  binder_stop_on_user_error is a no-op at the default 0) — it still
+  parks and consumes. Our drain path is parity.
+- Remaining LOOPER_ENTERED/REGISTERED sites in our binder.rs are NOT
+  availability gates: (a) post_txn_to_child_thread's sc165 routing
+  PREFERENCE (has a proc-todo fallback), (b) BR_SPAWN_LOOPER emission
+  decisions (~4200/9289/9307 — reference has its own looper condition
+  there). The never-woken class is CLOSED; the only kept availability
+  divergence is sc161 work_readable_by tgid routing (deliberate,
+  prevents the sc156 daemon-reader black hole).
+- Stale comments (docs-only, no behavior): binder.rs ~8777-8782 still
+  describes proc_work as "+ entered/registered looper" for the
+  wait_for_work tracepoint words, and the wake_proc_one doc block
+  ~1748-1755 still says the predicate "must match ... ENTERED/REGISTERED
+  looper" from b85 days. Successor may clean up when touching the file.
+
+### 1. lb363 (roll 1, POLLUTED): load 2.95 at launch, rose to 5.5 within
+90 s (two TCG QEMUs from the stress/LTP lanes). Early crawl -> no
+bootanimation.ready by 350 s; NEW PRINT CLASS for the campaign: 175x
+`DEADLOCK: spinlock stuck cpu=0/1 lock=0xffff8880xxxx ra=Task::rlimit`
+(per-task rlimits locks, waiter in tick/IRQ context; kernel/src/sync/
+spinlock.rs fires per 100M spin iterations). NOT a binary regression:
+lb363 used the byte-identical pollwake kernel as the 26th's clean
+lb361/362 rolls, and zero prior boots (lb344-362) show this shape —
+it is the KVM vCPU starvation class (holder descheduled mid-hold by
+host load; watchdog threshold ~100-500 ms per print). Killed my own
+QEMU at 350 s. Successor note: treat sustained rlimits DEADLOCK storms
+as host-pollution signature, re-roll, do not bisect the kernel on them
+unless they recur at load <3.
+
+### 2. lb362 forensic re-decode (26th entry point 2, from the existing
+serial log — no new boot needed)
+- The osaccount error:32 burst (14.3-14.4s) is TRANSIENT and benign in
+  shape: accountmgr proc starts 13.07s, SAREG txn3317 at 14.28s, SA:200
+  "init finished" at 14.34s — the error:32s land INSIDE that
+  registration window, and GetOsAccountProxy failures STOP at 16.8s.
+  The proxy stabilizes. NOT the boot's real loss.
+- The REAL lb362 loss: distributeddata OnStart-SA:1301 NEVER finishes.
+  Healthy lb359: OpenSo 8.6s -> "Start OnStart-SA:1301 finished, spend:
+  27815 ms" -> insert SA:1301 at 36.4s. lb362: OpenSo 10.2s, then NO
+  insert/Publish/init-finished print for the whole 1500s. Consequently
+  zero KV-store service: no insert SA:1301, BMS SetBundleQuota stream
+  stops after 1 bundle (2 lines at 18s vs 84 on a won boot), and
+  lb362 also never registered storage_manager SA:5003 / foundation
+  180/182/3203/3704/403/501/6105/6200 / softbus 4700 / deviceprofile
+  6001 / telecom 4005 — the whole downstream SA cascade of the KV
+  store froze with it.
+- lb362's taskdump at 602s: tgid 581 main thread lastsys=192
+  (semtimedop) with GARBAGE args (frame stale — several threads print
+  nonsensical lastsys; don't trust taskdump lastsys without sane args).
+  Our semtimedop arms a deadline timer (sysv_sem.rs ~1165 add_timer_
+  wakeup) so a timed op cannot forever-park by construction; treat the
+  192 reading as stale, not as a SysV-sem kernel lead.
+
+### 3. lb364 (roll 2, CLEAN quiet-window launch at load 2.6, full probe
+set dfx=ams46,txnhunt,fuxstuck,slowtask + negmemo=1) — WEDGE boot, and
+the readiness gap's mechanism CAUGHT LIVE:
+- distributeddata (pid 560) starts 8.16s, OpenSo 8.49s. Main thread
+  (tid 560) parks on FUTEX_WAIT_PRIVATE at stack uaddr 0x7fffffffd004
+  (FFRT sync wait) from ~9s and NEVER moves: census shows park=55s ->
+  96s+ monotone, anywoken=0 (NO wake ever fired on that uaddr, all
+  boot). OnStart-SA:1301 never completes; no other tgid-560 thread
+  parks >=3s (the DB executor churns sub-3s) — the DB machinery moves,
+  the main thread's FFRT wait simply never resolves.
+- THE WEDGE, this boot's role rotation: SAMGR itself. At 12-18s samgr's
+  serving workers (main 328, OS_IPC_0_338/2_349/5_555/6_556, OS_FFRT_
+  2_5=443) all futex-park with PENDING txns; every TXN-HANG from 18s on
+  targets pid 328 (accountmgr, telephony, bootanimation CompThread,
+  hiview, powermgr, samgr itself; execs 226-340s+ at close). Last SA
+  registration on the whole boot: 17.7s (media_service). Census
+  histogram for tgid 328 at 365s: run=1 futex=24 int=3 — near-closed
+  wait graph (not fully run=0).
+- UNIFICATION: lb362's distributeddata-main park and lb364's samgr
+  collapse are the SAME FFRT private-futex wait-graph family, different
+  role rotation. Whichever of samgr/distributeddata/hdf-power it lands
+  on, the boot loses (total freeze if samgr, readiness loss if
+  distributeddata). Kernel channels instrumented clean on both: futex
+  anywoken=0 everywhere (wake never fires — not lost), SLOW-TXN
+  queue=0ms picks, binder parity audited above. The 25th's
+  userspace-internal adjudication EXTENDS to the readiness gap leg.
+- Census steady-state peripheral family unchanged: bluetooth(384) 171
+  lines, user_auth_host, telephony, sensors, softbus, wifi — all
+  anywoken=0 run=0-class.
+- Pixels: frozen class only (82f0a25f).
+
+### 4. Race tally on the pollwake+parity kernel: 0/2 this session
+(lb363 crawl excluded as host-polluted), 0/4 with the 26th's. The dice:
+wedge (lb361, lb364), distributeddata-hang/no-ladder (lb362). No
+outcome regression from 491ebc09 (SLOW-TXN queue=0ms held on lb364;
+no new panic classes; USEGV stable).
