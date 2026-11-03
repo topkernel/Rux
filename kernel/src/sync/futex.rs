@@ -806,6 +806,9 @@ pub fn futex_stuck_census() {
     for (gi, is_fresh) in chosen {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
+        // HOTPATH-PRINT: fuxstuck census report — gated by
+        // dfx=fuxstuck at futex_stuck_census() entry plus the 5s burst
+        // budget and the 1200-line LINES cap; never fires on a plain boot.
         crate::pr_warn!(
             "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
@@ -830,6 +833,8 @@ pub fn futex_stuck_census() {
         }
     }
     if total > printed && printed == 8 {
+        // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
+        // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
         crate::pr_warn!(
             "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
             total,

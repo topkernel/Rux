@@ -4216,6 +4216,25 @@ pub fn wake_up_enqueue_opt(
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
         //
+        // The sched:sched_waking tracepoint — the reference records it in
+        // try_to_wake_up right after the state match passes, before the
+        // enqueue attempt. This is the matching point in the funnel:
+        // every target that still reaches the enqueue below (a genuinely
+        // sleeping/STOPPED task, or a healed phantom the R46 family just
+        // re-armed) is "about to be woken"; the refused stale shapes
+        // returned above, exactly like the reference's state-mismatch
+        // goto-out before the tracepoint. GRQ is held here; record()
+        // takes no locks (the sched_switch site relies on the same
+        // contract under IRQs-off).
+        if crate::trace::EVENT_SCHED_WAKING.armed() {
+            crate::trace::trace_sched_waking(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
+            );
+        }
+        //
         // WAKE-HEAL (launcher perf wall, 2026-10-31): the OH boots show
         // the same few service tasks (mmi_service, os_ds_service, OS_IPC
         // workers) parking with preempt_count==1 and waking back up with
@@ -4468,7 +4487,10 @@ pub fn wake_up_enqueue_opt(
                 }
             }
         }
-        if enqueue_task_locked(&mut *grq_guard, task) {
+        // The result feeds the sched:sched_wakeup tracepoint below, so
+        // route the two true-arms through one binding first (the else
+        // arm keeps its inline refusal print).
+        let woken = if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
@@ -4496,7 +4518,23 @@ pub fn wake_up_enqueue_opt(
                 putchar(b'\n');
             }
             false
+        };
+        // The sched:sched_wakeup tracepoint — the reference's
+        // ttwu_do_wakeup record: the task left the wait queue and is
+        // enqueued (or was still linked in the R42 race window), state
+        // now RUNNING. Both true-arms land here; a refused wake never
+        // reaches it, which is the wake→pick census discrimination as
+        // event data (a waking with no matching wakeup = refused wake).
+        // GRQ is held; record() takes no locks.
+        if woken && crate::trace::EVENT_SCHED_WAKEUP.armed() {
+            crate::trace::trace_sched_wakeup(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
+            );
         }
+        woken
     }
 }
 
@@ -6798,6 +6836,21 @@ fn task_is_dying(task: *mut Task) -> bool {
             .pending
             .peek_info(crate::signal::Signal::SIGKILL as i32)
             .is_some()
+    }
+}
+
+/// True when the CURRENT task is dying (PF_EXITING or SIGKILL pending).
+/// The reference kernel's fatal_signal_pending(current) checks: reclaim
+/// and allocation-stall loops bail out early for a dying allocator
+/// (mm/page_alloc.c __alloc_pages_slowpath, vmscan's shrink loops) —
+/// a task being killed must not crawl through swap I/O it will never
+/// use, nor keep other tasks waiting on the reclaim gate (SP-5).
+pub fn current_is_dying() -> bool {
+    // SAFETY: sched::current() returns the running task's valid pointer
+    // (same contract as signal_pending's use).
+    match current() {
+        Some(t) => task_is_dying(t as *mut Task),
+        None => false,
     }
 }
 

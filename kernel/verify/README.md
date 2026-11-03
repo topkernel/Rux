@@ -107,6 +107,9 @@ cargo test -p rux-verify --target x86_64-unknown-linux-gnu -- mm::buddy_test
 | Module | Tests | Source | Invariants |
 |--------|-------|--------|------------|
 | `futex_test` | 16 | `sync/futex.rs` | FutexKey private/shared matching, futex_hash distribution, futex_to_flags, bitset intersection |
+| `mutex_model_test` | 10 | `sync/mutex.rs` | Extracted SleepMutex handoff state machine (S-1 pilot): fairness gate, token spend, orphaned-handoff epoch, anti-starve override, recursion/outermost release, do_exit force-drop, INV-M1..M4 table, pid-0 free-state alias regression |
+| `mutex_loom` (feature `loom`) | 8 | `sync/mutex.rs` | loom exhaustive interleaving over the same extraction: 2/3-task contention, ungated spinner + sleepers, recursion + exit-release, anti-starve override; planted-bug scenarios (no-epoch strand, token count leak, re-park recount) must be CAUGHT |
+| `mutex_kani` (cargo kani) | 2 | `sync/mutex.rs` | Kani proofs: every disciplined op sequence (len 6) keeps INV-M1..M5 with no arithmetic panic; the do_exit count leak stays bounded and recoverable |
 
 ### fs/jbd2/ (JBD2 Journaling)
 

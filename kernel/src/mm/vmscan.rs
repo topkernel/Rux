@@ -81,6 +81,14 @@ pub fn balance_pgdat(order: i32) -> usize {
         priority -= 1;
     }
 
+    // SP-5 waiter-side progress witness (page_alloc's gate wait): pages
+    // freed by ANY reclaimer — kswapd here, or the direct-reclaim gate
+    // holder through try_to_free_pages — tell stalled allocations that
+    // the system IS making progress, so they keep retrying instead of
+    // failing (reference should_reclaim_retry semantics).
+    if sc.nr_reclaimed > 0 {
+        super::page_alloc::RECLAIM_PROGRESS.fetch_add(sc.nr_reclaimed as u64, core::sync::atomic::Ordering::Relaxed);
+    }
     sc.nr_reclaimed
 }
 
@@ -93,7 +101,13 @@ pub fn try_to_free_pages(order: i32) -> usize {
     // the schbd heartbeat (dfx=schb). No lock held; note_drct is a
     // counter tick unless the switch is off.
     let j0 = crate::drivers::timer::get_jiffies();
+    super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ROUND);
     let r = balance_pgdat(order);
+    // SP-5 census: round progress + pages freed by the gate holder (the
+    // stamps are no-ops for kswapd — gate_note_phase checks identity).
+    if r > 0 {
+        super::page_alloc::gate_note_round_done(r as u64);
+    }
     crate::dfx::schb::note_drct(j0);
     r
 }
@@ -157,9 +171,11 @@ pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
 
     while freed_total < nr_to_reclaim && passes < MAX_PASSES {
         passes += 1;
+        super::page_alloc::gate_note_deep_pass(0);
         let want = core::cmp::min(CHUNK, nr_to_reclaim - freed_total);
         let freed = cache.shrink_reclaim(want);
         freed_total += freed;
+        super::page_alloc::gate_note_deep_pass(freed as u64);
         if freed < want {
             // Chunk starved: the inactive walk hit the referenced wall
             // (evict_one's LRU rounds exhaust MAX_SCAN graduating pages)
@@ -285,11 +301,13 @@ fn shrink_inactive_list(
         // dirty-frame writeback so abandoned unflushed MAP_SHARED pages
         // become evictable instead of a permanent drain. The mmu_init
         // PT-alloc retry must NOT use this variant (per-mm PteLock held).
+        super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_SHRINK);
         let cache_reclaimed =
             crate::fs::page_cache::get_page_cache().shrink_reclaim(nr_to_scan);
         sc.nr_reclaimed += cache_reclaimed;
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap
+        super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ANON);
         let anon_reclaimed = reclaim_anonymous_pages(nr_to_scan, sc);
         sc.nr_reclaimed += anon_reclaimed;
     }
@@ -419,6 +437,9 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 swap::swap_mark_pending(swap_type, swap_offset);
                 let unmapped = try_to_unmap_with_swap(p, swap_entry);
                 if unmapped > 0 && !p.is_mapped() {
+                    super::page_alloc::gate_note_phase(
+                        super::page_alloc::GATE_PHASE_SWAPW,
+                    );
                     let write_ok = swap::swap_write_page(swap_type, swap_offset, phys).is_ok();
                     swap::swap_clear_pending(swap_type, swap_offset);
 
@@ -470,6 +491,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                 }
             } else {
                 // Multi-mapping page — legacy order: write first, then unmap.
+                super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_SWAPW);
                 if swap::swap_write_page(swap_type, swap_offset, phys).is_err() {
                     // Write failed — free the slot and skip this page
                     swap::swap_free_slot(swap_type, swap_offset);

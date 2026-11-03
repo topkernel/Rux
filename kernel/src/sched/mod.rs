@@ -31,6 +31,7 @@ pub mod stats;
 
 pub use sched::{
     current,
+    current_is_dying,
     get_current_pid,
     get_current_ppid,
     find_task_by_pid,
