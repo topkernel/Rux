@@ -789,16 +789,36 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     } else {
         0o6
     };
-    let idx = match SHM_IDS.find_with_perms(shmid, desired) {
-        Ok(i) => i,
-        Err(e) => return e as i64,
-    };
-
-    // Get segment info
+    // Reference do_shmat uses shm_obtain_object_check: a freed id is
+    // EINVAL, but an IPC_RMID-marked segment that still lives in the ids
+    // table (nattch > 0, deferred destroy) is -EIDRM, NOT EINVAL. The old
+    // find_with_perms path returned EINVAL for both (its !deleted filter
+    // made the EIDRM check unreachable) — LTP shm_test's reader/writer
+    // threads, which straddle a concurrent IPC_RMID, saw "Invalid
+    // argument" where the reference reports "Identifier removed".
+    // Lookup, permission check, deleted check and the size read run under
+    // ONE slots lock: a second lock would open the slot-reuse window (an
+    // RMID + fresh shmget could swap the entry between the two critical
+    // sections, and the seq is not revalidated downstream).
     let segsz;
+    let idx = super::util::ipc_id_to_index(shmid);
     {
+        let ns = super::util::caller_ipc_ns_inum();
+        let expected_seq = super::util::ipc_id_seq(shmid);
+        if idx >= super::util::IPC_IDS_MAX {
+            return -(errno::EINVAL as i64);
+        }
         let slots = SHM_IDS.slots.lock();
         if let Some(ref entry) = slots[idx] {
+            let perm = entry.inner.get_perm();
+            if perm.seq != expected_seq || perm.ns_inum != ns {
+                // Freed and the slot reused by another segment (or a
+                // foreign-namespace id): stale id, reference EINVAL.
+                return -(errno::EINVAL as i64);
+            }
+            if !super::util::ipc_check_permissions(perm, desired) {
+                return -(errno::EACCES as i64);
+            }
             if entry.deleted {
                 return -(errno::EIDRM as i64);
             }
