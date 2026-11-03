@@ -52,6 +52,18 @@ fn bmsscan_watch_open(path: &str, flags: u32) {
     if !bmsscan_on() || !bmsscan_match(path) {
         return;
     }
+    // The /system/app tree open flood gets its own tight budget — the
+    // first lines prove the scan branch fired and name the scanner;
+    // every later hap open is the same story (console volume would
+    // inflate the very boot timings this probe measures).
+    let sysapp = path.contains("/system/app") && !path.contains("bmsdb");
+    if sysapp {
+        static SYS_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if SYS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 100 {
+            return;
+        }
+    }
     static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if n >= 800 {
