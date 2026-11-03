@@ -104,6 +104,20 @@ pub struct KernIpcPerm {
     pub cgid: u32,
     pub mode: u16,
     pub seq: u32,
+    /// Owning IPC namespace identity (IpcNamespace::inum). The reference
+    /// kernel keeps one ipc_ids table PER ipc_namespace (ns->ids[...]);
+    /// Rux keeps a single global slot table, so the namespace must ride
+    /// on the object and every lookup filters by the caller's namespace
+    /// (LTP msg_comm: two CLONE_NEWIPC children msgget the SAME key and
+    /// each must get its OWN queue — a global key match made child1's
+    /// msgrcv see child2's message, "messages leak between namespaces").
+    pub ns_inum: u64,
+}
+
+/// The caller's IPC namespace identity (inum). All SysV IPC lookups and
+/// enumerations are scoped to this (reference: the caller's ns->ids table).
+pub fn caller_ipc_ns_inum() -> u64 {
+    crate::process::ns::current_ipc_ns().inum
 }
 
 impl KernIpcPerm {
@@ -118,6 +132,7 @@ impl KernIpcPerm {
             cgid,
             mode,
             seq: 0,
+            ns_inum: caller_ipc_ns_inum(),
         }
     }
 
@@ -204,13 +219,18 @@ impl<T> IpcIds<T> {
     }
 
     /// Find an IPC object by key. Returns slot index or None.
-    /// Used for IPC_CREAT lookups.
+    /// Used for IPC_CREAT lookups. Scoped to the caller's IPC namespace
+    /// (reference: the key walk runs over the caller's ns->ids table).
     pub fn find_by_key(&self, key: i32) -> Option<usize>
     where T: IpcObject {
+        let ns = caller_ipc_ns_inum();
         let slots = self.slots.lock();
         for i in 0..IPC_IDS_MAX {
             if let Some(ref entry) = slots[i] {
-                if !entry.deleted && entry.inner.get_perm().key == key {
+                if !entry.deleted
+                    && entry.inner.get_perm().key == key
+                    && entry.inner.get_perm().ns_inum == ns
+                {
                     return Some(i);
                 }
             }
@@ -219,18 +239,23 @@ impl<T> IpcIds<T> {
     }
 
     /// Allocate a new IPC object slot. Returns (ipc_id, slot_index) or error.
-    /// If key != IPC_PRIVATE and an object with that key exists, returns its ID.
+    /// If key != IPC_PRIVATE and an object with that key exists IN THE
+    /// CALLER'S IPC NAMESPACE, returns its ID.
     pub fn alloc(&self, mut obj: T, key: i32, flags: i32) -> Result<(i32, usize), i32>
     where T: IpcObject {
         // Hold the lock for the entire operation to prevent TOCTOU races
         // where another thread deletes the slot between key lookup and reuse.
         let mut slots = self.slots.lock();
+        let ns = caller_ipc_ns_inum();
 
         // Check for existing key (unless IPC_PRIVATE)
         if key != 0 {
             for i in 0..IPC_IDS_MAX {
                 if let Some(ref entry) = slots[i] {
-                    if !entry.deleted && entry.inner.get_perm().key == key {
+                    if !entry.deleted
+                        && entry.inner.get_perm().key == key
+                        && entry.inner.get_perm().ns_inum == ns
+                    {
                         if flags & IPC_EXCL != 0 {
                             return Err(-17); // EEXIST
                         }
@@ -309,7 +334,10 @@ impl<T> IpcIds<T> {
         Ok((ipc_build_id(idx, seq), idx))
     }
 
-    /// Look up an IPC object by its ID. Verifies the sequence number matches.
+    /// Look up an IPC object by its ID. Verifies the sequence number matches
+    /// and the object belongs to the caller's IPC namespace (an id that
+    /// leaked across namespaces was never valid in the caller's table —
+    /// reference returns EINVAL from such an id).
     /// Returns None if not found or deleted.
     pub fn find(&self, id: i32) -> Option<usize>
     where T: IpcObject {
@@ -320,9 +348,13 @@ impl<T> IpcIds<T> {
             return None;
         }
 
+        let ns = caller_ipc_ns_inum();
         let slots = self.slots.lock();
         if let Some(ref entry) = slots[idx] {
-            if !entry.deleted && entry.inner.get_perm().seq == expected_seq {
+            if !entry.deleted
+                && entry.inner.get_perm().seq == expected_seq
+                && entry.inner.get_perm().ns_inum == ns
+            {
                 return Some(idx);
             }
         }
@@ -332,6 +364,7 @@ impl<T> IpcIds<T> {
     /// Look up an IPC object by its ID, including objects already marked
     /// deleted. Used by teardown paths that must still reach a
     /// marked-for-destruction object (e.g. SysV shm's last-detach free).
+    /// Scoped to the caller's namespace like find().
     pub fn find_including_deleted(&self, id: i32) -> Option<usize>
     where T: IpcObject {
         let idx = ipc_id_to_index(id);
@@ -341,9 +374,12 @@ impl<T> IpcIds<T> {
             return None;
         }
 
+        let ns = caller_ipc_ns_inum();
         let slots = self.slots.lock();
         if let Some(ref entry) = slots[idx] {
-            if entry.inner.get_perm().seq == expected_seq {
+            if entry.inner.get_perm().seq == expected_seq
+                && entry.inner.get_perm().ns_inum == ns
+            {
                 return Some(idx);
             }
         }
@@ -396,6 +432,22 @@ impl<T> IpcIds<T> {
     /// Get current count of active objects
     pub fn count(&self) -> usize {
         self.count.load(Ordering::Relaxed)
+    }
+
+    /// Count live objects in the CALLER'S IPC namespace (the reference's
+    /// per-namespace ids->in_use: limit checks such as msgmni/semmni/
+    /// shmmni and the IPC_INFO pool fields are namespace-local).
+    pub fn count_in_ns(&self) -> usize
+    where T: IpcObject {
+        let ns = caller_ipc_ns_inum();
+        let slots = self.slots.lock();
+        slots
+            .iter()
+            .filter(|e| match e {
+                Some(entry) => !entry.deleted && entry.inner.get_perm().ns_inum == ns,
+                None => false,
+            })
+            .count()
     }
 }
 
