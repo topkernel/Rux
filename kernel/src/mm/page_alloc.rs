@@ -727,6 +727,9 @@ pub fn oom_forensic_dump(site: &str) {
             max_ns / 1_000_000
         );
     }
+    // SP-7: per-page skip reasons — why anon candidates never reach the
+    // swap write above.
+    crate::println!("OOM-FORENSIC: {}", super::vmscan::vscan_census_line());
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.
     if let Some(node) = unsafe { first_online_node_mut() } {

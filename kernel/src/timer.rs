@@ -685,6 +685,10 @@ pub fn timer_softirq_handler(_nr: usize) {
             // (self-gated: one atomic load when the gate is free; zero
             // serial on standard boots).
             crate::mm::page_alloc::reclaim_gate_census();
+            // stress-port SP-7: per-page swap skip-reason census — one
+            // line per second ONLY while anon reclaim is being exercised
+            // (self-gated on census deltas; zero serial otherwise).
+            crate::mm::vmscan::vscan_heartbeat();
         }
     }
 
