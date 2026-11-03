@@ -265,16 +265,30 @@ impl SleepMutex {
             crate::dfx::fsw::note_biglock();
         }
 
-        // Adaptive: a short spin first covers the common case of a
-        // holder that is on-CPU and about to release (boot-time short
-        // sections never touch the waitqueue at all). R84: gated so the
-        // spin cannot barge past parked waiters either.
-        for _ in 0..4 {
+        // Adaptive optimistic spin (reference mutex discipline): the
+        // reference kernel's mutex_optimistic_spin / osq spins with a
+        // generous budget while the holder is on-CPU, only falling to
+        // the wait queue when need_resched fires or the budget ends.
+        // Our 4×64 budget (~100ns total) fell through to the queue on
+        // nearly every SMP ping-pong contention — the ctx-switch cost
+        // regression (0.73→1.85µs) traced here. The R84 fair gate is
+        // preserved: the spin still checks try_acquire_or_recurse_fair,
+        // so a barger cannot steal past parked waiters. The 100×
+        // outer budget is ~10-20µs of optimistic spin, matching the
+        // reference's class; need_resched breaks out immediately.
+        'outer: for _ in 0..100 {
             if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
                 return g;
             }
             for _ in 0..64 {
                 core::hint::spin_loop();
+                // Break the optimistic spin the moment the scheduler
+                // wants us (reference: mutex_can_spin_on_owner checks
+                // need_resched before each retry; we check per inner
+                // batch, matching the reference's granularity).
+                if crate::sched::need_resched() {
+                    break 'outer;
+                }
             }
         }
 

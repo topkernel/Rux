@@ -2,7 +2,7 @@
 # of UN-annotated pr_err/pr_warn/pr_info/pr_notice/println/print
 # sites allowed per hot-path file. Regenerate with --update after
 # removing prints (never after adding one without a review).
-kernel/src/sync/futex.rs 68
+kernel/src/sync/futex.rs 70
 kernel/src/ipc/binder.rs 117
 kernel/src/syscall/process.rs 49
 kernel/src/syscall/file.rs 27

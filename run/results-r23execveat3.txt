@@ -1,0 +1,3 @@
+# idx|test|class|rc|tail
+0|execveat01|PASS|0|PASS: execveat_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+1|execveat02|PASS|0|expected: EINVAL (22) execveat02.c:63: TPASS: execveat() fails as expected: ELOOP (40) execveat02.c:63: TPASS: execveat() fails as expected: ENOTDIR (20)  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0

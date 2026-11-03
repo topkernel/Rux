@@ -1,87 +1,149 @@
 ===CASE lat_syscall null
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple syscall: 0.0946 microseconds
+Simple syscall: 0.0769 microseconds
 ===CASE lat_syscall read
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple read: 0.2341 microseconds
+Simple read: 0.1527 microseconds
 ===CASE lat_syscall write
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple write: 0.1976 microseconds
+Simple write: 0.1301 microseconds
 ===CASE lat_syscall stat
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple stat: 4.0765 microseconds
+LMBENCH TIMEOUT lat_syscall
 ===CASE lat_syscall fstat
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple fstat: 0.1699 microseconds
+LMBENCH TIMEOUT lat_syscall
 ===CASE lat_syscall open
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple open/close: 5.6850 microseconds
+Simple open/close: 1.2401 microseconds
 ===CASE lat_pagefault /tmp/lmbench.file
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Pagefaults on /tmp/lmbench.file: 0.4488 microseconds
 ===CASE lat_mmap 1m /tmp/lmbench.file
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-1.048576 553
 ===CASE lat_pipe
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Pipe latency: 2.0055 microseconds
+LMBENCH TIMEOUT lat_pipe
 ===CASE lat_unix
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
- 2.6881 microseconds
+LMBENCH TIMEOUT lat_unix
 ===CASE lat_ctx -s 64 2
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-"size=64k ovr=1.17
-2 0.73
+LMBENCH TIMEOUT lat_ctx
 ===CASE lat_ctx -s 64 8
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-"size=64k ovr=1.19
-8 1.05
+"size=64k ovr=1.13
+8 4.85
 ===CASE lat_proc fork
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Process fork+exit: 672.9355 microseconds
+LMBENCH TIMEOUT lat_proc
 ===CASE lat_proc exec
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Process fork+execve: 673.6193 microseconds
+LMBENCH TIMEOUT lat_proc
 ===CASE lat_sem
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
 LMBENCH TIMEOUT lat_sem
 ===CASE lat_fs -s 1k
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-1kreadlink fail(-2) '/tmp/lat_fs_306_XXXXXX_DnIoGh': not-a-symlink=false (pid 306)
+1kreadlink fail(-2) '/tmp/lat_fs_306_XXXXXX_oeOHIk': not-a-symlink=false (pid 306)
 ===CASE lat_mem_rd -s 1048576 -e 1048576 1
-"stride=64
-1.00000 2.283
+[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
+1.00000 2.317
 ===CASE lat_mem_rd -s 268435456 -e 268435456 256
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-256.00000 6.794
+256.00000 6.313
 ===CASE bw_mem 1m bcopy
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-1.05 79818.42
+LMBENCH TIMEOUT bw_mem
 ===CASE bw_mem 4m bzero
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-4.19 65799.40
+4.19 66427.61
 ===CASE bw_pipe
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Pipe bandwidth: 21515.66 MB/sec
+LMBENCH TIMEOUT bw_pipe
 ===CASE bw_unix
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-AF_UNIX sock stream bandwidth: 2637.87 MB/sec
+AF_UNIX sock stream bandwidth: 2402.37 MB/sec
 ===CASE bw_file_rd 1m io_only /tmp/lmbench.file
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-1.05 669.19
+LMBENCH TIMEOUT bw_file_rd
 ===CASE bw_mmap_rd 1m mmap_only /tmp/lmbench.file
-1.05 70917.84
+[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
 ===CASE lat_tcp 127.0.0.1
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-LMBENCH TIMEOUT lat_tcp
+tcp-in[0]: 1.0.0.127:32768 -> 1.0.0.127:31234 flags 0x2
+tcp-in[1]: 1.0.0.127:31234 -> 1.0.0.127:32768 flags 0x14
+tcp-in[2]: 1.0.0.127:32769 -> 1.0.0.127:31234 flags 0x2
+tcp-in[3]: 1.0.0.127:31234 -> 1.0.0.127:32769 flags 0x14
+tcp-in[4]: 1.0.0.127:32770 -> 1.0.0.127:31234 flags 0x2
+tcp-in[5]: 1.0.0.127:31234 -> 1.0.0.127:32770 flags 0x14
+tcp-in[6]: 1.0.0.127:32771 -> 1.0.0.127:31234 flags 0x2
+tcp-in[7]: 1.0.0.127:31234 -> 1.0.0.127:32771 flags 0x14
+tcp-in[8]: 1.0.0.127:32772 -> 1.0.0.127:31234 flags 0x2
+tcp-in[9]: 1.0.0.127:31234 -> 1.0.0.127:32772 flags 0x14
+tcp-in[10]: 1.0.0.127:32773 -> 1.0.0.127:31234 flags 0x2
+tcp-in[11]: 1.0.0.127:31234 -> 1.0.0.127:32773 flags 0x14
+tcp-in[12]: 1.0.0.127:32774 -> 1.0.0.127:31234 flags 0x2
+tcp-in[13]: 1.0.0.127:31234 -> 1.0.0.127:32774 flags 0x14
+tcp-in[14]: 1.0.0.127:32775 -> 1.0.0.127:31234 flags 0x2
+tcp-in[15]: 1.0.0.127:31234 -> 1.0.0.127:32775 flags 0x14
+tcp-in[16]: 1.0.0.127:32776 -> 1.0.0.127:31234 flags 0x2
+tcp-in[17]: 1.0.0.127:31234 -> 1.0.0.127:32776 flags 0x14
+tcp-in[18]: 1.0.0.127:32777 -> 1.0.0.127:31234 flags 0x2
+tcp-in[19]: 1.0.0.127:31234 -> 1.0.0.127:32777 flags 0x14
+tcp-in[20]: 1.0.0.127:32778 -> 1.0.0.127:31234 flags 0x2
+tcp-in[21]: 1.0.0.127:31234 -> 1.0.0.127:32778 flags 0x14
+tcp-in[22]: 1.0.0.127:32779 -> 1.0.0.127:31234 flags 0x2
+tcp-in[23]: 1.0.0.127:31234 -> 1.0.0.127:32779 flags 0x14
+tcp-in[24]: 1.0.0.127:32780 -> 1.0.0.127:31234 flags 0x2
+tcp-in[25]: 1.0.0.127:31234 -> 1.0.0.127:32780 flags 0x14
+tcp-in[26]: 1.0.0.127:32781 -> 1.0.0.127:31234 flags 0x2
+tcp-in[27]: 1.0.0.127:31234 -> 1.0.0.127:32781 flags 0x14
+tcp-in[28]: 1.0.0.127:32782 -> 1.0.0.127:31234 flags 0x2
+tcp-in[29]: 1.0.0.127:31234 -> 1.0.0.127:32782 flags 0x14
+tcp-in[30]: 1.0.0.127:32783 -> 1.0.0.127:31234 flags 0x2
+tcp-in[31]: 1.0.0.127:31234 -> 1.0.0.127:32783 flags 0x14
+tcp-in[32]: 1.0.0.127:32784 -> 1.0.0.127:31234 flags 0x2
+tcp-in[33]: 1.0.0.127:31234 -> 1.0.0.127:32784 flags 0x14
+tcp-in[34]: 1.0.0.127:32785 -> 1.0.0.127:31234 flags 0x2
+tcp-in[35]: 1.0.0.127:31234 -> 1.0.0.127:32785 flags 0x14
+tcp-in[36]: 1.0.0.127:32786 -> 1.0.0.127:31234 flags 0x2
+tcp-in[37]: 1.0.0.127:31234 -> 1.0.0.127:32786 flags 0x14
+tcp-in[38]: 1.0.0.127:32787 -> 1.0.0.127:31234 flags 0x2
+tcp-in[39]: 1.0.0.127:31234 -> 1.0.0.127:32787 flags 0x14
+tcp-in[40]: 1.0.0.127:32788 -> 1.0.0.127:31234 flags 0x2
+tcp-in[41]: 1.0.0.127:31234 -> 1.0.0.127:32788 flags 0x14
+tcp-in[42]: 1.0.0.127:32789 -> 1.0.0.127:31234 flags 0x2
+tcp-in[43]: 1.0.0.127:31234 -> 1.0.0.127:32789 flags 0x14
+TCP latency using 127.0.0.1: 0.1504 microseconds
 ===CASE lat_udp 127.0.0.1
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
+LMBENCH TIMEOUT lat_udp
 ===CASE lat_connect 127.0.0.1
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-LMBENCH TIMEOUT lat_connect
 ===CASE bw_tcp 127.0.0.1
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-LMBENCH TIMEOUT bw_tcp
+tcp-in[0]: 1.0.0.127:32768 -> 1.0.0.127:31236 flags 0x2
+tcp-in[1]: 1.0.0.127:31236 -> 1.0.0.127:32768 flags 0x14
+tcp-in[2]: 1.0.0.127:32769 -> 1.0.0.127:31236 flags 0x2
+tcp-in[3]: 1.0.0.127:31236 -> 1.0.0.127:32769 flags 0x14
+tcp-in[4]: 1.0.0.127:32770 -> 1.0.0.127:31236 flags 0x2
+tcp-in[5]: 1.0.0.127:31236 -> 1.0.0.127:32770 flags 0x14
+tcp-in[6]: 1.0.0.127:32771 -> 1.0.0.127:31236 flags 0x2
+tcp-in[7]: 1.0.0.127:31236 -> 1.0.0.127:32771 flags 0x14
+tcp-in[8]: 1.0.0.127:32772 -> 1.0.0.127:31236 flags 0x2
+tcp-in[9]: 1.0.0.127:31236 -> 1.0.0.127:32772 flags 0x14
+tcp-in[10]: 1.0.0.127:32773 -> 1.0.0.127:31236 flags 0x2
+tcp-in[11]: 1.0.0.127:31236 -> 1.0.0.127:32773 flags 0x14
+tcp-in[12]: 1.0.0.127:32774 -> 1.0.0.127:31236 flags 0x2
+tcp-in[13]: 1.0.0.127:31236 -> 1.0.0.127:32774 flags 0x14
+tcp-in[14]: 1.0.0.127:32775 -> 1.0.0.127:31236 flags 0x2
+tcp-in[15]: 1.0.0.127:31236 -> 1.0.0.127:32775 flags 0x14
+tcp-in[16]: 1.0.0.127:32776 -> 1.0.0.127:31236 flags 0x2
+tcp-in[17]: 1.0.0.127:31236 -> 1.0.0.127:32776 flags 0x14
+tcp-in[18]: 1.0.0.127:32777 -> 1.0.0.127:31236 flags 0x2
+tcp-in[19]: 1.0.0.127:31236 -> 1.0.0.127:32777 flags 0x14
+tcp-in[20]: 1.0.0.127:32778 -> 1.0.0.127:31236 flags 0x2
+tcp-in[21]: 1.0.0.127:31236 -> 1.0.0.127:32778 flags 0x14
 ===CASE lat_usleep 1000
 [0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-usleep 1000 microseconds: 5013.9276 microseconds
+LMBENCH TIMEOUT lat_usleep

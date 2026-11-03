@@ -744,13 +744,13 @@ pub fn sys_semctl(args: [u64; 6]) -> i64 {
             }
             let info = SemInfoUapi {
                 semmap: 0,
-                semmni: SEM_IDS.count() as i32,
+                semmni: SEM_IDS.count_in_ns() as i32,
                 semmns: total_sems as i32,
                 semmnu: 0,
                 semmsl: 256,
                 semopm: 500,
                 semume: 0,
-                semusz: SEM_IDS.count() as i32,
+                semusz: SEM_IDS.count_in_ns() as i32,
                 semvmx: 32767,
                 semaem: total_sems as i32,
             };
@@ -778,10 +778,11 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
         out,
         "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime"
     );
+    let ns = super::util::caller_ipc_ns_inum();
     let slots = SEM_IDS.slots.lock();
     for (i, slot) in slots.iter().enumerate() {
         if let Some(ref entry) = slot {
-            if entry.deleted {
+            if entry.deleted || entry.inner.get_perm().ns_inum != ns {
                 continue;
             }
             let set = &entry.inner;
