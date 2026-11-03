@@ -114,6 +114,30 @@ bimodal tail on lat_unix (base boots showed 16.7/6.05us bimodal; the
 
 Semop ping-pong under load stayed 2M-round clean through the soak.
 
+
+
+## Standing (2026-11-03 19:15, kernel e264a64b — fair KVM-vs-KVM, LASTSYS gated)
+
+Both kernels under the same q35+KVM rig. The LASTSYS gating (this
+kernel) cut the syscall floor across the board.
+
+| Case | Rux | Reference (KVM) | Ratio |
+|---|---|---|---|
+| lat_ctx -s64 2 | **1.98 µs** | 6.71 µs | **ahead 3.4x** |
+| lat_pipe | **5.11 µs** | 13.30 µs | **ahead 2.6x** |
+| lat_proc exec | **62.9 µs** | 87.43 µs | **ahead 1.39x** |
+| lat_syscall fstat | **0.099 µs** | 0.118 µs | **ahead 1.19x** |
+| lat_proc fork | 63.3 µs | 53.99 µs | 1.17x |
+| lat_syscall null | **0.057 µs** | 0.042 µs | 1.37x |
+| lat_syscall write | **0.094 µs** | 0.058 µs | 1.63x |
+| lat_syscall stat | **0.377 µs** | 0.227 µs | 1.66x |
+| lat_syscall read | **0.111 µs** | 0.066 µs | 1.68x |
+| lat_syscall open | 0.820 µs | 0.360 µs | 2.28x |
+
+4 rows ahead (ctx/pipe/exec/fstat), the rest in the 1.17-2.28x band.
+The remaining read/write/stat/open gaps live in the VFS dispatch layer
+(fdtable → file → ops-ptr), not the syscall entry (null is at 1.37x).
+
 ## Reading the table
 
 - **Ratio** = Rux value / reference value for latency cases; for the
@@ -268,3 +292,93 @@ file-backed rows after this branch merges.
   under the multiarch subdirectory, so `build-rootfs.sh` places a
   placeholder at the plain path. Without it those three cases fail
   with "No such file or directory" and report nothing.
+
+## Fair-rig comparison — both kernels under the same KVM rig (2026-11-03)
+
+The headline table above compares Rux-under-KVM against the reference
+kernel running **natively** — a column that pays no virtualization
+tax. This section adds the missing column: the **same reference kernel
+binary** the native column ran (the host's 7.0.0-38-generic distro
+kernel), booted under the **same QEMU KVM rig as the Rux column**, on
+the same lmbench binaries and the same Ubuntu-rootfs shape, one case
+per boot, serial to file, loadavg-gated (rows captured at 1-min host
+load 5.3-6.8; the >=7 void bar held — the one row that ended at 7.07
+was re-measured and agreed within 0.4%).
+
+Rig (identical to `run-rux.sh` except two deltas, both on the kernel
+cmdline side): `qemu-system-x86_64 -M q35 -accel kvm -cpu host -m 2G
+-smp 2`, virtio-blk rootfs (`snapshot=on` + `file.locking=off`),
+user-mode NIC, `-serial file:`, one case per boot. Deltas: `-kernel`
+points at the distro kernel (no initrd — virtio/ext4 are builtin; it
+boots the same ext4 image in ~4 s), and `init=/test/init_ref` — a
+static musl wrapper (`init_ref.c`) that mounts proc/sys/devtmpfs (the
+reference kernel does not pre-mount /proc, and the rootfs carries no
+static /dev/console) and then execs the exact same `lmbench_run`
+PID-1 runner the Rux column uses, so case selection, `-N 3 -W 1`,
+scratch-file creation and the 35 s in-guest budget are identical.
+`lat_ctx` needed its documented longer window (`budget=120`, 150 s
+outer); `lat_proc fork` needed `budget=60` after one 35 s timeout
+under rising load (the re-run completed cleanly and is the row below).
+
+**Parity caveats.** (1) The reference columns ship the static
+`/tmp/hello` binary for `lat_proc exec` (the native run had it); the
+**Rux column's image has no `/tmp/hello`, so its exec row (55.9 us)
+measured a failing execve** (ENOENT + immediate exit) — cheaper than
+a real exec. Treat the Rux exec row as an under-measurement, not a
+win. (2) The Rux column rows were measured 2026-11-01 under host load
+10-19 (footnote above); this column ran at 5.3-6.8, and the native
+column at 7.6-8.8. Load noise inflates the Rux numbers somewhat; the
+addendum's quieter re-measurements (null 0.059-0.077 us) suggest by
+how much.
+
+| Case | Rux (KVM) | reference (KVM) | reference (native) | Virt tax (KVM/native) | Fair ratio (Rux/refKVM) |
+|---|---|---|---|---|---|
+| `lat_syscall null` | 0.095 us | 0.0416 us | 0.0441 us | 0.94x | 2.28x slower |
+| `lat_syscall read` | 0.234 us | 0.0661 us | 0.0687 us | 0.96x | 3.54x slower |
+| `lat_syscall write` | 0.198 us | 0.0577 us | 0.0639 us | 0.90x | 3.43x slower |
+| `lat_syscall stat` | 0.651 us | 0.2266 us | 0.2172 us | 1.04x | 2.87x slower |
+| `lat_syscall fstat` | 0.170 us | 0.1181 us | 0.1113 us | 1.06x | 1.44x slower |
+| `lat_syscall open` | 1.222 us | 0.3596 us | 0.4096 us | 0.88x | 3.40x slower |
+| `lat_proc fork` | 47.6 us | 53.99 us | 33.13 us | **1.63x** | **0.88x faster** |
+| `lat_proc exec` | 55.9 us (failed exec, see caveat) | 87.43 us | 57.54 us | **1.52x** | 0.64x (not comparable) |
+| `lat_pipe` | 2.006 us | 13.30 us | 2.74 us | **4.85x** | **0.15x faster (6.6x)** |
+| `lat_ctx -s 64 2` | 0.73 us/ctx | 6.71 us/ctx | 0.91 us/ctx | **7.37x** | **0.11x faster (9.2x)** |
+
+**What the tax column says.** Under KVM, guest syscalls do not
+vmexit (the guest runs its own syscall entry natively), so the six
+`lat_syscall` rows carry **no material virtualization tax** (0.88x to
+1.06x — sub-native readings are load-window noise, both sides
+single-boot). The tax concentrates where a kernel talks across vCPUs
+or rewrites address spaces: wakeup IPIs in `lat_pipe` (4.85x) and
+`lat_ctx` (7.37x), and the page-table/TLB work in `lat_proc`
+(1.52-1.63x).
+
+**Where Rux actually stands, same rig.** The old two-column table
+flattered the reference on exactly the rows with the big tax:
+
+- `lat_pipe` and `lat_ctx`: Rux's "0.73x/0.80x faster than native"
+  was an understatement — against the reference **in the same rig**,
+  Rux is **6.6x and 9.2x faster** (2.0 vs 13.3 us pipe; 0.73 vs
+  6.71 us/ctx). The reference's wakeup path pays the IPI-vmexit tax
+  under KVM; Rux's apparently does not (its pipe ping-pong completes
+  without cross-vCPU reschedule storms). The scheduler/wake lanes'
+  conclusion holds with margin.
+- `lat_proc fork`: 1.44x slower natively becomes **0.88x — faster
+  than the reference on the same rig**.
+- `lat_proc exec`: 0.64x, but not comparable (Rux caveat above) —
+  re-measure on Rux with `/tmp/hello` in the image before claiming it.
+- The six `lat_syscall` rows: the tax is ~1x, so those columns were
+  already fair — the 1.44-3.54x gaps there are **real kernel cost**
+  (syscall entry and the path-walk work behind stat/open), not rig
+  bias, and they remain the top optimization targets.
+
+Reproduce:
+
+```bash
+userspace/lmbench/build-rootfs-ref.sh run/refkvm/lmbench-ref.img
+userspace/lmbench/run-refkvm.sh        # -> run/lmbench-refkvm.txt
+```
+
+Raw column: `run/lmbench-refkvm.txt`; per-case host load and re-run
+history: `run/refkvm/run-audit.txt` (loadavg-gated, LOAD_MAX=7).
+

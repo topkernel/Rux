@@ -1,0 +1,8 @@
+# idx|test|class|rc|tail
+0|execveat01|PASS|0|PASS: execveat_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected execveat_child.c:17: TPASS: execveat_child run as expected  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+1|execveat02|PASS|0|expected: EINVAL (22) execveat02.c:63: TPASS: execveat() fails as expected: ELOOP (40) execveat02.c:63: TPASS: execveat() fails as expected: ENOTDIR (20)  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+2|execve01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve01_child.c:34: TPASS: execve01_child executed  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+3|execve02|PASS|0|t.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve02.c:54: TPASS: execve() failed expectedly: EACCES (13)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+4|execve06|PASS|0|est.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execve06_child.c:24: TPASS: argv[0] was filled in by kernel  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|execl01|PASS|0|1615 tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execl01_child.c:20: TPASS: execl01_child executed  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+6|execvp01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s execvp01_child.c:20: TPASS: execvp01_child executed  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

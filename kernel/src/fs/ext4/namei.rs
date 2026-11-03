@@ -523,6 +523,10 @@ fn ext4_add_entry_locked(
     new_ino: u32,
     file_type: u8,
 ) -> Result<(), i32> {
+    // Dir-blocks memo soundness (23rd): this mutation can change the
+    // parent's block list or size — purge first so no reader can be
+    // served the pre-mutation list.
+    fs.dir_blocks_purge(dir_ino);
     // Read directory inode
     let dir = super::inode::read_inode(fs, dir_ino)?;
 
@@ -1781,6 +1785,9 @@ fn ext4_delete_entry_locked(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<u32, i32> {
+    // Dir-blocks memo soundness (23rd): see the twin in
+    // ext4_add_entry_locked.
+    fs.dir_blocks_purge(dir_ino);
     // Read parent directory inode
     let dir_inode = super::inode::read_inode(fs, dir_ino)?;
 
@@ -2334,6 +2341,9 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     //   file's blocks (reproduced via `ln -s x; rm x` + file readback).
     crate::fs::page_cache::get_page_cache().invalidate_inode(fs as *const Ext4FileSystem as u64, ino as u64);
     crate::fs::inode::icache_remove(ino as u64, fs as *const Ext4FileSystem as u64);
+    // Dir-blocks memo (23rd): same reuse class — a reallocated dir ino
+    // must never be served the old directory's block list.
+    fs.dir_blocks_purge(ino);
 
     let inodes_per_group = fs.inodes_per_group;
     let group = (ino - 1) / inodes_per_group;

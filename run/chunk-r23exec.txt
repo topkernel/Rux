@@ -1,0 +1,7 @@
+execveat01
+execveat02
+execve01
+execve02
+execve06
+execl01
+execvp01

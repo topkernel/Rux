@@ -483,6 +483,15 @@ trap_exit_syscall:
     movq PT_RFLAGS(%rbp), %rax
     cmpq %rax, PT_R11(%rbp)
     jne 2f
+    /* Reference parity (entry_64.S syscall_return_via_sysret): fall
+     * back to the iret tail when the user rflags carries TF or RF.
+     * SYSRET cannot restore RF properly, and returning with TF set
+     * single-steps the first user instruction immediately after the
+     * sysret — the shape the reference avoids so a #DB can never land
+     * in the sysret window (e.g. single-stepping code that points RCX
+     * at itself loops). */
+    testq $(0x100 | 0x10000), PT_RFLAGS(%rbp) /* TF | RF */
+    jnz 2f
     movq PT_RIP(%rbp), %rax
     sarq $47, %rax
     incq %rax

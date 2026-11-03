@@ -148,7 +148,8 @@ pub fn set_msgmni(v: i32) -> bool {
 
 /// /proc/sysvipc/msg contents — one line per queue, Linux ipc/util.c
 /// formatting. LTP's GET_USED_QUEUES() (msgget03, msgstress01) counts lines
-/// to learn how many queues exist.
+/// to learn how many queues exist. Scoped to the READER's IPC namespace
+/// (reference: proc_ops iterates the reader's ns->ids table).
 pub fn proc_show() -> alloc::vec::Vec<u8> {
     use alloc::fmt::Write;
     let mut out = alloc::string::String::new();
@@ -156,10 +157,11 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
         out,
         "       key      msqid perms      uid      gid  cuid   cgid  stime  rtime  ctime       cbytes       qnum qbytes lspid lrpid"
     );
+    let ns = super::util::caller_ipc_ns_inum();
     let slots = MSG_IDS.slots.lock();
     for (i, slot) in slots.iter().enumerate() {
         if let Some(ref entry) = slot {
-            if entry.deleted {
+            if entry.deleted || entry.inner.perm.ns_inum != ns {
                 continue;
             }
             let q = &entry.inner;
@@ -193,10 +195,13 @@ pub fn proc_show() -> alloc::vec::Vec<u8> {
 /// straight into MSG_STAT (raw index), so the +1 the old code added made
 /// every subsequent MSG_STAT hit an empty slot (EINVAL).
 fn msg_max_idx() -> i32 {
+    let ns = super::util::caller_ipc_ns_inum();
     let slots = MSG_IDS.slots.lock();
     for i in (0..IPC_IDS_MAX).rev() {
-        if slots[i].is_some() {
-            return i as i32;
+        if let Some(ref entry) = slots[i] {
+            if !entry.deleted && entry.inner.perm.ns_inum == ns {
+                return i as i32;
+            }
         }
     }
     -1
@@ -215,8 +220,9 @@ pub fn sys_msgget(args: [u64; 6]) -> i64 {
     // ns->msg_ctlmni inside newque — i.e. only on the create path). An
     // existing key still resolves, and a bare lookup on a nonexistent key
     // is ENOENT (alloc answers that under the table lock); only a queue
-    // that would actually be created hits the limit.
-    if MSG_IDS.count() >= msgmni() as usize {
+    // that would actually be created hits the limit. in_use is the
+    // CALLER'S namespace's count (reference: ns->ids is a per-ns table).
+    if MSG_IDS.count_in_ns() >= msgmni() as usize {
         let existing = if key != 0 { MSG_IDS.find_by_key(key) } else { None };
         let would_create = existing.is_none() && (key == 0 || (msgflg & IPC_CREAT) != 0);
         if would_create {
@@ -461,7 +467,7 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
                 }
             }
             let info = MsgInfoUapi {
-                msgpool: MSG_IDS.count() as i32,
+                msgpool: MSG_IDS.count_in_ns() as i32,
                 msgmap: total_msgs as i32,
                 msgmax: 8192,
                 msgmnb: 16384,
@@ -517,7 +523,10 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[raw_idx] {
-                    if entry.deleted {
+                    // Namespace scoping (reference: MSG_STAT indexes the
+                    // caller's ns->ids table; a foreign-ns slot was never
+                    // an id in this namespace).
+                    if entry.deleted || entry.inner.perm.ns_inum != super::util::caller_ipc_ns_inum() {
                         return -(errno::EINVAL as i64);
                     }
                     // MSG_STAT_ANY skips the permission check entirely.
@@ -576,7 +585,10 @@ pub fn sys_msgctl(args: [u64; 6]) -> i64 {
             {
                 let slots = MSG_IDS.slots.lock();
                 if let Some(ref entry) = slots[raw_idx] {
-                    if entry.deleted {
+                    // Namespace scoping (reference: MSG_STAT indexes the
+                    // caller's ns->ids table; a foreign-ns slot was never
+                    // an id in this namespace).
+                    if entry.deleted || entry.inner.perm.ns_inum != super::util::caller_ipc_ns_inum() {
                         return -(errno::EINVAL as i64);
                     }
                     if !ipc_check_permissions(entry.inner.get_perm(), 0o4) {

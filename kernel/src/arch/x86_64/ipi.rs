@@ -18,7 +18,7 @@
 use crate::list::ListHead;
 use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::config::MAX_CPUS;
 
@@ -142,9 +142,62 @@ pub fn handle_ipi_vector(vector: u64) {
             // contract holds by construction here.
             crate::arch::cpu::wfi();
         },
-        VECTOR_IRQ_WORK => {}
+        VECTOR_IRQ_WORK => snapshot_self(),
         _ => {}
     }
+}
+
+// ============================================================================
+// SP-5 round 5: peer LAPIC-timer snapshot probe (frozen-tick trap)
+// ============================================================================
+//
+// The OOM-FORENSIC trap needs the OTHER CPU's live LAPIC state, but x2APIC
+// registers are per-CPU MSRs readable only in person. This IRQ_WORK
+// handler captures this CPU's snapshot into shared slots and publishes a
+// sequence number; the requester polls `SNAP_DONE == its request` with a
+// timebase-bounded wait (the tick may be dead on either side, so jiffies
+// must not be used). A timeout is itself evidence: that CPU is not
+// servicing interrupts at all.
+
+/// Per-CPU snapshot request counter (requester bumps; handler echoes).
+pub static SNAP_REQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Last request sequence serviced by that CPU (0 = none yet).
+pub static SNAP_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Captured live state (valid once SNAP_DONE echoes the request).
+pub static SNAP_LVT: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_TMICT: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_TMCCT: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_SVR: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_TPR: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_IRR7: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+pub static SNAP_ISR7: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+/// Arm-trail seq observed by the target at snapshot time.
+pub static SNAP_ARMSEQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Timebase value at the snapshot (age reference for the requester).
+pub static SNAP_TB: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// IRQ_WORK handler body: capture THIS CPU's LAPIC timer state.
+fn snapshot_self() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let req = SNAP_REQ[cpu].load(Ordering::Acquire);
+    if let Some(s) = crate::drivers::intc::apic::lapic_timer_snapshot() {
+        SNAP_LVT[cpu].store(s.lvt, Ordering::Relaxed);
+        SNAP_TMICT[cpu].store(s.tmict, Ordering::Relaxed);
+        SNAP_TMCCT[cpu].store(s.tmcct, Ordering::Relaxed);
+        SNAP_SVR[cpu].store(s.svr, Ordering::Relaxed);
+        SNAP_TPR[cpu].store(s.tpr, Ordering::Relaxed);
+        SNAP_IRR7[cpu].store(s.irr7, Ordering::Relaxed);
+        SNAP_ISR7[cpu].store(s.isr7, Ordering::Relaxed);
+        SNAP_ARMSEQ[cpu].store(
+            crate::drivers::intc::apic::TIMER_ARM_SEQ[cpu].load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        SNAP_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
+    }
+    SNAP_DONE[cpu].store(req, Ordering::Release);
 }
 
 // ============================================================================

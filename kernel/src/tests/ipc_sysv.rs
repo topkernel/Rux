@@ -91,6 +91,7 @@ fn test_ipc_perm_operations() {
         cgid: 0,
         mode: 0o777,
         seq: 0,
+        ns_inum: 0,
     };
 
     // update_from_set replaces the lower 9 permission bits
@@ -115,6 +116,7 @@ fn test_ipc_perm_operations() {
         cgid: 200,
         mode: 0o644,
         seq: 5,
+        ns_inum: 0,
     };
     let uapi = perm.to_uapi();
     test_assert_eq!(uapi.key, 12345, "to_uapi key");

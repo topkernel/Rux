@@ -39,6 +39,7 @@ rm -f "$INJ"
 
 # ---- cmds.txt: single invocation from "$*", or a file of lines via -f ----
 ARGS=""
+CLASS=""
 CMD=$(mktemp /tmp/cmds-XXXX)
 if [ "${1:-}" = "-f" ]; then
     cp "$2" "$CMD"

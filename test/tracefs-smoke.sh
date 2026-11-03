@@ -17,9 +17,13 @@
 #      sched_wakeup_new/sched_process_fork/sched_process_exit and
 #      exceptions:page_fault_user/page_fault_kernel — format files,
 #      set_event arming, recorded lines (page faults render %ps
-#      symbolically through the kernel symbol table)
+#      symbolically through the kernel symbol table); sched_waking and
+#      sched_wakeup RECORD (round 2: the wake_up_enqueue_opt sites)
 #  10. trace_marker (mode 0220, read refused, tracing_mark_write
 #      lines) and the per_cpu/cpuN views (trace/stats shapes)
+#  11. snapshot: the saved-away buffer (write 1 saves + restarts the
+#      live buffer, read shows the saved records with the trace
+#      header, write 0 clears)
 #
 # Usage: test/tracefs-smoke.sh [kernel] [logfile]
 # Env:   BOOT_DELAY (default 30), TIMEOUT (default 300)
@@ -145,6 +149,10 @@ rm -f "$LOG"
     sleep 0.3
     echo 'grep sched_wakeup: /sys/kernel/debug/tracing/trace | head -4'
     sleep 0.5
+    echo 'echo ===EVENTS: sched_waking lines (round-2 site) ==='
+    sleep 0.3
+    echo 'grep sched_waking: /sys/kernel/debug/tracing/trace | head -3'
+    sleep 0.5
     echo 'echo ===EVENTS: fork and exit lines ==='
     sleep 0.3
     echo 'grep sched_process_fork: /sys/kernel/debug/tracing/trace | head -2; grep sched_process_exit: /sys/kernel/debug/tracing/trace | head -2'
@@ -178,6 +186,41 @@ rm -f "$LOG"
     echo 'head -5 /sys/kernel/debug/tracing/per_cpu/cpu0/trace'
     sleep 0.5
     echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.5
+    echo 'echo ===SNAP: file present, initially empty ==='
+    sleep 0.3
+    echo 'ls -l /sys/kernel/debug/tracing/snapshot'
+    sleep 0.3
+    echo 'wc -l < /sys/kernel/debug/tracing/snapshot'
+    sleep 0.5
+    echo 'echo ===SNAP: save (write 1) ==='
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/events/sched/enable'
+    sleep 0.3
+    echo 'ls / >/dev/null; ls /proc >/dev/null'
+    sleep 1
+    echo 'echo 1 > /sys/kernel/debug/tracing/snapshot'
+    sleep 0.5
+    echo 'echo 0 > /sys/kernel/debug/tracing/events/sched/enable'
+    echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.5
+    echo 'echo ===SNAP: saved content (header + records) ==='
+    sleep 0.3
+    echo 'head -3 /sys/kernel/debug/tracing/snapshot'
+    sleep 0.3
+    echo 'grep -c sched_ /sys/kernel/debug/tracing/snapshot'
+    sleep 0.5
+    echo 'echo ===SNAP: live buffer restarted empty ==='
+    sleep 0.3
+    echo 'wc -l < /sys/kernel/debug/tracing/trace'
+    sleep 0.5
+    echo 'echo ===SNAP: clear (write 0) ==='
+    sleep 0.3
+    echo 'echo 0 > /sys/kernel/debug/tracing/snapshot'
+    sleep 0.3
+    echo 'wc -l < /sys/kernel/debug/tracing/snapshot'
     sleep 0.5
     echo 'echo ===TRACE: timer_list shape ==='
     sleep 0.3

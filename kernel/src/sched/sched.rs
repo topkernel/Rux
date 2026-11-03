@@ -931,6 +931,29 @@ pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
     core::sync::atomic::AtomicU32::new(0),
 ];
 
+/// SP-5 r5 frozen-tick trap: per-CPU schedule() milestone inside the
+/// IF=0 window that opens at the GRQ acquire (sched.rs "lock the global
+/// RQ"). Both CPUs' 300 ms tick-death windows open there (TICKTRAP
+/// cli_open + syscost max segments); these stamps decompose the window
+/// cross-CPU: 0 = not inside schedule()'s GRQ window; 1 = about to
+/// acquire (or spinning on it); 2 = acquired, inside the CS (dequeue/
+/// enqueue/pick); 3 = lock released IRQ-retained, context-switch tail
+/// (incl. the deferred-exit notify in the incoming frame); 4 = past
+/// restore (immediately cleared to 0). One relaxed store per milestone.
+pub static SCHED_CS_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+];
+
+#[inline]
+fn sched_cs_stamp(cpu: usize, phase: u32) {
+    if cpu < MAX_CPUS {
+        SCHED_CS_PHASE[cpu].store(phase, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // Wakewatch (s15): per-CPU count of timer-tick-entry samples where the
 // hardware tp register disagreed with cpu_state.current (the lying-slot
 // shape the R56 steal / abort-republish slot rewrites can produce).
@@ -2025,7 +2048,32 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 }
 
 #[inline(never)]
+#[track_caller]
 pub fn schedule() {
+    // SP-5 r5 frozen-tick trap: schedule() entered with IF=0. The tail's
+    // per-caller restore_irq(flags) then returns with IF STILL 0, and the
+    // caller keeps running with IRQs off until some other sti — the
+    // observed 300 ms both-CPU tick-death windows open exactly at the GRQ
+    // acquire inside this call (TICKTRAP cli_open + syscost max segments).
+    // The reference's only legitimate IF=0 caller is the IRQ-exit
+    // preemption path (preempt_schedule_irq shape); anything else is a
+    // sleeping-with-IRQs-off bug. Rate-limited one-liner naming the caller.
+    if !crate::arch::cpu::get_interrupts_state() {
+        static IRQOFF_N: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+            let loc = core::panic::Location::caller();
+            crate::pr_warn!(
+                "SCHED-IRQOFF caller={}:{} pid={} pc={:#x}",
+                loc.file(),
+                loc.line(),
+                crate::process::current_pid(),
+                crate::sched::current()
+                    .map(|t| t.preempt_count())
+                    .unwrap_or(0)
+            );
+        }
+    }
     // Recursion guard (kernel-preemption round 2, 2026-10-20). While a
     // schedule() call is in progress on this task, the IRQ-exit preemption
     // hook must not re-enter it: __schedule's tail restores the incoming
@@ -2589,7 +2637,9 @@ unsafe fn __schedule() {
     // Lock the global RQ
     let cc_t1 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PRE_NS, cc_t0);
+    sched_cs_stamp(cpu_id, 1);
     let mut grq_guard = grq().lock_irqsave();
+    sched_cs_stamp(cpu_id, 2);
     let cc_t2 = crate::dfx::cctx::now();
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
 
@@ -2729,6 +2779,7 @@ unsafe fn __schedule() {
 
     // Release lock but keep IRQs disabled for context_switch
     let flags = grq_guard.unlock_irqretain();
+    sched_cs_stamp(cpu_id, 3);
     crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PUB_NS, cc_t4);
 
     if next == prev {
@@ -2751,7 +2802,11 @@ unsafe fn __schedule() {
                 }
             }
         }
-        crate::arch::cpu::restore_irq(flags);
+        // Same-task repick: still return with IRQs ON (the
+        // preempt_schedule_irq local_irq_enable() discipline — see the
+        // SP-5 note at the post-context_switch enable above).
+        sched_cs_stamp(cpu_id, 0);
+        crate::arch::cpu::enable_irq();
         return;
     }
 
@@ -2817,29 +2872,43 @@ unsafe fn __schedule() {
         SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
     }
 
+    // SP-5 round 5 (2026-11-03): re-enable interrupts IMMEDIATELY after the
+    // context switch — the finish_task_switch() discipline (the reference
+    // kernel's finish_lock_switch is spin_unlock_irq(&rq->lock): IRQs go
+    // back ON the moment the switch completes, and ALL post-switch work —
+    // mmdrop, put_task_struct, our deferred-exit notify below — runs at
+    // IF=1). The old per-caller tail restore (R54) kept IRQs off through
+    // this whole tail AND restored the INCOMING task's own saved flags —
+    // which are 0 for every task that was switched out through the
+    // trap-exit asm_schedule path (IRQ handlers run cli'd to their exit,
+    // so the exit loop's resched schedule entered at IF=0). Resuming such
+    // a task with flags=0 handed it back to its KERNEL continuation at
+    // IF=0 — and under the SP-5 exhaustion ramp that continuation is a
+    // direct-reclaim round: both CPUs ran hundreds of milliseconds with
+    // IRQs off, the LAPIC timer IRQs piled up undelivered in IRR
+    // (TICKTRAP: IF=false + irr7=0x29 + tmcct=0 on BOTH cpus, ticks
+    // frozen at ~50, tb advancing), jiffies/watchdog/kill-windows died —
+    // the whole SP-5 "dead clock" family. The reference's
+    // preempt_schedule_irq() likewise returns from __schedule with
+    // local_irq_enable() — schedule() NEVER hands a caller back at IF=0.
+    // The x86 trap-exit tails are safe with schedule() returning IF=1:
+    // both tails do their own unconditional `cli` immediately before the
+    // register pops, and iretq/sysretq restore the frame's IF.
+    crate::arch::cpu::enable_irq();
+
     // After context_switch, the NEW task is running.  The exiting task
     // (prev) is no longer on any CPU, so it is now safe to notify its
     // parent (SIGCHLD + wake_up).  The deferred notification was stored
     // in a per-CPU slot by do_exit → defer_exit_notify() on THIS CPU.
     process_deferred_exit_notify_cpu(crate::arch::cpu_id() as usize);
 
-    // R54: restore the SIE state THIS task had when it entered its own
-    // __schedule — after context_switch the executing frame belongs to
-    // the switched-IN task, and `flags` in that frame is the state ITS
-    // caller came in with (the coroutine-switch semantics give every
-    // task its own complete frame). This is the Linux discipline:
-    // schedule() returns to each caller with that caller's irq state.
-    //
-    // The old unconditional restore_irq(true) was the LAST exposure of
-    // the R53 mechanism: it re-enabled SIE in the middle of the trap
-    // return loop's asm_schedule->ret->csrci tail (kernel path) and
-    // forced every waiter back into the loop with SIE=1 (user path,
-    // pre-R53). With per-caller restoration, the whole trap-return
-    // loop runs at SIE=0; user SIE is re-armed solely by sret/SPIE,
-    // and wait-path callers (wait_event/nanosleep/futex...) re-enable
-    // explicitly before their own schedule() — their flags are 1.
-    // The idle loop re-arms before each iteration (sched.rs idle).
-    crate::arch::cpu::restore_irq(flags);
+    // Tail return: IRQs ON unconditionally (see the SP-5 note above — the
+    // preempt_schedule_irq local_irq_enable() discipline; per-caller
+    // flag restoration is what exported the poison). `flags` stays bound
+    // for the repick path's documentation trail.
+    let _saved_flags = flags;
+    sched_cs_stamp(crate::arch::cpu_id() as usize, 0);
+    crate::arch::cpu::enable_irq();
 }
 
 /// Pick the next task to run on this CPU.
@@ -4216,6 +4285,25 @@ pub fn wake_up_enqueue_opt(
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
         //
+        // The sched:sched_waking tracepoint — the reference records it in
+        // try_to_wake_up right after the state match passes, before the
+        // enqueue attempt. This is the matching point in the funnel:
+        // every target that still reaches the enqueue below (a genuinely
+        // sleeping/STOPPED task, or a healed phantom the R46 family just
+        // re-armed) is "about to be woken"; the refused stale shapes
+        // returned above, exactly like the reference's state-mismatch
+        // goto-out before the tracepoint. GRQ is held here; record()
+        // takes no locks (the sched_switch site relies on the same
+        // contract under IRQs-off).
+        if crate::trace::EVENT_SCHED_WAKING.armed() {
+            crate::trace::trace_sched_waking(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
+            );
+        }
+        //
         // WAKE-HEAL (launcher perf wall, 2026-10-31): the OH boots show
         // the same few service tasks (mmi_service, os_ds_service, OS_IPC
         // workers) parking with preempt_count==1 and waking back up with
@@ -4468,7 +4556,10 @@ pub fn wake_up_enqueue_opt(
                 }
             }
         }
-        if enqueue_task_locked(&mut *grq_guard, task) {
+        // The result feeds the sched:sched_wakeup tracepoint below, so
+        // route the two true-arms through one binding first (the else
+        // arm keeps its inline refusal print).
+        let woken = if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
@@ -4496,7 +4587,23 @@ pub fn wake_up_enqueue_opt(
                 putchar(b'\n');
             }
             false
+        };
+        // The sched:sched_wakeup tracepoint — the reference's
+        // ttwu_do_wakeup record: the task left the wait queue and is
+        // enqueued (or was still linked in the R42 race window), state
+        // now RUNNING. Both true-arms land here; a refused wake never
+        // reaches it, which is the wake→pick census discrimination as
+        // event data (a waking with no matching wakeup = refused wake).
+        // GRQ is held; record() takes no locks.
+        if woken && crate::trace::EVENT_SCHED_WAKEUP.armed() {
+            crate::trace::trace_sched_wakeup(
+                (*task).comm(),
+                (*task).pid(),
+                (*task).prio(),
+                (*task).ti_cpu(),
+            );
         }
+        woken
     }
 }
 
@@ -6801,6 +6908,21 @@ fn task_is_dying(task: *mut Task) -> bool {
     }
 }
 
+/// True when the CURRENT task is dying (PF_EXITING or SIGKILL pending).
+/// The reference kernel's fatal_signal_pending(current) checks: reclaim
+/// and allocation-stall loops bail out early for a dying allocator
+/// (mm/page_alloc.c __alloc_pages_slowpath, vmscan's shrink loops) —
+/// a task being killed must not crawl through swap I/O it will never
+/// use, nor keep other tasks waiting on the reclaim gate (SP-5).
+pub fn current_is_dying() -> bool {
+    // SAFETY: sched::current() returns the running task's valid pointer
+    // (same contract as signal_pending's use).
+    match current() {
+        Some(t) => task_is_dying(t as *mut Task),
+        None => false,
+    }
+}
+
 /// Returns true when something was healed.
 pub fn harvest_relink(task: *mut Task) -> bool {
     if task.is_null() {
@@ -7578,7 +7700,15 @@ pub fn cpu_idle_loop() -> ! {
             // reference's polling-idle / need_resched-before-halt.
             POLLING_IDLE[cpu_id].store(true, core::sync::atomic::Ordering::Release);
             let poll_t0 = crate::drivers::timer::monotonic_ns_since_boot();
-            const IDLE_POLL_WINDOW_NS: u64 = 30_000; // 30 us
+            // battery2 (perf-r3, 2026-11-03): the 30 us window already
+            // absorbs most ping-pong handoffs, but the unix r/w roundtrip
+            // anatomy showed IPIs still firing (815/1915 wakes) at a mean
+            // 995 ns — handoffs landing just past the window. Widening to
+            // 120 us keeps the idler spinning through the remaining
+            // near-idle handoffs (each saves the ~1 us IPI+halt-exit
+            // exit latency); the window still closes well before a 250 Hz
+            // tick. Pure-spin, no allocations.
+            const IDLE_POLL_WINDOW_NS: u64 = 120_000; // 120 us
             while crate::drivers::timer::monotonic_ns_since_boot()
                 .saturating_sub(poll_t0)
                 < IDLE_POLL_WINDOW_NS

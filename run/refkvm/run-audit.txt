@@ -1,0 +1,24 @@
+refkvm: [lat_syscall] load1=6.47 08:50:10
+refkvm: [lat_syscall] qemu rc=0 load1_end=6.43 1 done-marker(s)
+refkvm: [lat_syscall] load1=6.43 08:50:15
+refkvm: [lat_syscall] qemu rc=0 load1_end=6.44 1 done-marker(s)
+refkvm: [lat_syscall] load1=6.44 08:50:24
+refkvm: [lat_syscall] qemu rc=0 load1_end=6.81 1 done-marker(s)
+refkvm: [lat_syscall] load1=6.81 08:50:38
+refkvm: [lat_syscall] qemu rc=0 load1_end=6.81 1 done-marker(s)
+refkvm: [lat_syscall] load1=6.81 08:50:42
+refkvm: [lat_syscall] qemu rc=0 load1_end=7.07 1 done-marker(s)
+refkvm: [lat_syscall] load1=6.59 08:51:47
+refkvm: [lat_syscall] qemu rc=0 load1_end=6.47 1 done-marker(s)
+refkvm: [lat_proc] load1=6.47 08:51:51
+refkvm: [lat_proc] qemu rc=0 load1_end=7.47 1 done-marker(s)
+refkvm: [lat_proc] load1=6.46 09:02:27
+refkvm: [lat_proc] qemu rc=0 load1_end=6.26 1 done-marker(s)
+refkvm: [lat_pipe] load1=6.26 09:02:31
+refkvm: [lat_pipe] qemu rc=0 load1_end=6.15 1 done-marker(s)
+refkvm: [lat_ctx] load1=6.15 09:02:39
+refkvm: [lat_ctx] qemu rc=0 load1_end=5.97 1 done-marker(s)
+run-refkvm: results -> /home/william/rux-agents/backlog-refkvm/run/lmbench-refkvm.txt
+refkvm: manual re-runs (outside the battery, same rig flags):
+refkvm: [lat_proc fork] budget=60 OUTER=90, load_end=6.50 -> Process fork+exit: 53.9880 us (replaces the 35 s TIMEOUT row; the battery row ended at load 7.47)
+refkvm: [lat_syscall open] confirmation boot, load_end=7.13 -> Simple open/close: 0.3611 us (battery row 0.3596 kept; agreement 0.4%)

@@ -73,6 +73,36 @@ pre-6fdada6b wake-path class, superseded on main). Strong-class gate
 runs judge p2_ctxsw against 1.38 µs ±20% (quiet window) or 2.0 µs
 (loaded window), never against the 15.4 debug cell.
 
+## SP-7 whole-column re-bank: Tier-2 pbench anchor moves to the KVM debug class (2026-11-03, stress-port round 7)
+
+The pb1 TCG debug column had drifted ~30% stale on p2 (r4sp5 11.245,
+r6 10.687/10.091 vs the 15.409 cell) and the r7 re-measure showed WHY
+that class cannot anchor a gate row: TCG `thread=multi` p2 readings are
+load-hostage — the SAME round-7 kernel read **28.151 µs at host load
+5-6** where r6's quieter windows read 10.1-10.7. KVM is 10x tighter:
+three full boards on the round-7 kernel (main 91de1d04 + the SP-7 mm
+fix; debug bzImage, q35 smp2 2G, quiet windows, foreign_qemus<=2,
+every rep `PBENCH DONE rc=0`) agree within ±1% on p2:
+
+| rep | p2_ctxsw med (µs) |
+|-----|-------------------|
+| sp7pb-kvm1 | 1.237 |
+| sp7pb-kvm2 | 1.262 |
+| sp7pb-kvm3 | 1.242 |
+
+**Re-banked Tier-2 anchor (run/perf-gate.sh ANCHOR, KVM debug class,
+median of 3 boards):** p1_null 0.300, p1_clock 0.371, **p2_ctxsw
+1.242**, p3b_cow 8.075, p6_write_fsync 8442.6 (worst spread +11%),
+p6_mkdrmdir 216.7, p6_unlink 54.6, p6_append 5.19 µs. The Tier-2
+invocation now boots pbench with `--accel kvm` (PB_ACCEL env
+override retains the TCG escape hatch). The retired TCG columns stay
+in this file's history for provenance; a TCG tier-2 run must NOT be
+judged against these cells (cross-class comparison is meaningless —
+same rule as debug-vs-strong). The debug-KVM p2 class (1.24) now sits
+closest to the release-strong TCG-era class (1.37-1.39): expect the
+strong-class KVM column to re-bank lower still when the perf lane
+next measures it.
+
 ## Whole-table refresh (2026-10-29, leg 52/53 — the 2d3df4a7 merge passed its own tier via the pa91 chain)
 
 ### Tier-2 debug-class board + append re-bank (2026-10-30, the aarch64 merge b238ebd1)

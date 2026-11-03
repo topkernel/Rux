@@ -24,6 +24,7 @@ pub mod extent;
 pub mod namei;
 pub mod journal;
 pub mod csum;
+pub mod htree;
 
 use crate::sync::spinlock::Spinlock;
 use alloc::boxed::Box;
@@ -148,6 +149,19 @@ pub struct Ext4FileSystem {
     pub metadata_csum: bool,
     /// crc32c seed (crc32c(~0, s_uuid), or s_checksum_seed when present).
     pub csum_seed: u32,
+    /// HTREE name-hash seed (s_hash_seed, sb offset 0xEC): dx_probe feeds
+    /// it to the half-md4/TEA name hash. Populated at mount.
+    pub hash_seed: [u32; 4],
+    /// s_flags unsigned-hash flag (0x0002): dx_probe bumps the SIGNED
+    /// hash base version by +3 when set.
+    pub hash_unsigned: bool,
+    /// Directory data-block-list memo (22nd, miss-path lever): keyed
+    /// (ino, i_size). A directory's block LIST only changes when its size
+    /// crosses a block boundary (entry insert into existing slack patches
+    /// rec_len in place — the list is unchanged), so (ino, size) is a
+    /// sound validity key. Serves lookup()/list_dir() without the
+    /// per-block extent walk train. Bounded, replace-oldest.
+    pub dir_blocks_memo: Spinlock<alloc::vec::Vec<(u32, u64, Vec<u64>)>>,
     /// Mount is read-only. metadata_csum images only mount read-only —
     /// the write path does not maintain checksums yet.
     pub read_only: bool,
@@ -181,6 +195,9 @@ impl Ext4FileSystem {
             prealloc: Spinlock::new(None),
             metadata_csum: false,
             csum_seed: 0,
+            hash_seed: [0; 4],
+            hash_unsigned: false,
+            dir_blocks_memo: Spinlock::new(Vec::new()),
             read_only: false,
         }
     }
@@ -471,6 +488,10 @@ impl Ext4FileSystem {
             self.total_blocks = total_blocks as u64;
             self.total_inodes = total_inodes;
             self.journal_ino = ext4_sb.s_journal_inum;
+            // HTREE hash parameters (dx_probe's inputs): s_hash_seed at
+            // sb offset 0xEC and the s_flags unsigned-hash bit 0x0002.
+            self.hash_seed = ext4_sb.s_hash_seed;
+            self.hash_unsigned = ext4_sb.s_flags & 0x0002 != 0;
             *self.group_descs.lock() = group_descs;
 
             Ok(())
@@ -580,12 +601,73 @@ impl Ext4FileSystem {
     }
 
     /// Lookup directory entry
+    /// Directory data-block-list memo helpers (22nd). Key (ino, size);
+    /// bounded (32 entries, replace-oldest).
+    fn dir_blocks_cached(&self, dir: &inode::Ext4Inode) -> Option<Vec<u64>> {
+        let memo = self.dir_blocks_memo.lock();
+        for (ino, size, blocks) in memo.iter() {
+            if *ino == dir.ino && *size == dir.size {
+                return Some(blocks.clone());
+            }
+        }
+        None
+    }
+
+    fn dir_blocks_store(&self, dir: &inode::Ext4Inode, blocks: Vec<u64>) {
+        const DIR_BLOCKS_MEMO_CAP: usize = 32;
+        let mut memo = self.dir_blocks_memo.lock();
+        for (ino, size, stored) in memo.iter_mut() {
+            if *ino == dir.ino && *size == dir.size {
+                *stored = blocks;
+                return;
+            }
+        }
+        if memo.len() >= DIR_BLOCKS_MEMO_CAP {
+            memo.remove(0);
+        }
+        memo.push((dir.ino, dir.size, blocks));
+    }
+
+    /// Drop every memo entry for an inode (23rd soundness fix). The
+    /// (ino, size) key alone does not protect against inode REUSE: a
+    /// deleted directory's ino reallocated to a new directory of equal
+    /// size would be served the old block list. Every ext4 entry
+    /// mutation purges the parent here (add/delete entry sites in
+    /// namei.rs, under ENTRY_MUTEX) and namei's free_inode purges the
+    /// freed inode itself, so a stale list can never be served.
+    pub fn dir_blocks_purge(&self, ino: u32) {
+        let mut memo = self.dir_blocks_memo.lock();
+        memo.retain(|(i, _, _)| *i != ino);
+    }
+
     pub fn lookup(&self, dir: &inode::Ext4Inode, name: &str) -> Result<dir::Ext4DirEntry, i32> {
+        // HTREE fast path (22nd, miss-path lever): indexed directories
+        // resolve through the dx tree in 2-3 block reads instead of the
+        // full linear scan. The port (htree.rs) follows the reference's
+        // dx_probe/ext4_dx_find_entry bit-for-bit and returns None on any
+        // anomaly (not indexed / corrupt index / unsupported hash), in
+        // which case the linear scan below runs — the reference's
+        // ERR_BAD_DX_DIR fallback contract. Our writer refuses indexed
+        // dirs, so the index can never go stale through us.
+        match htree::dx_find_entry(self, dir, name) {
+            Some(r) => return r,
+            None => {}
+        }
         // SAFETY: self.device is a valid GenDisk pointer; dir.get_data_blocks returns
         // valid block numbers; bio::bread returns a valid BufferHead for each block.
         unsafe {
-            // Traverse directory's data blocks
-            let blocks = dir.get_data_blocks(self)?;
+            // Traverse directory's data blocks — through the block-list
+            // memo when warm (22nd): the per-block extent walk train
+            // (Vec + one extent lookup per block) ran on EVERY lookup;
+            // big dirs paid it per miss.
+            let blocks = match self.dir_blocks_cached(dir) {
+                Some(b) => b,
+                None => {
+                    let b = dir.get_data_blocks(self)?;
+                    self.dir_blocks_store(dir, b.clone());
+                    b
+                }
+            };
             crate::dfx::fsw::note_dir_lookup(blocks.len());
 
             // Pathology probe (oh-svc cook1/cook2 wedge): a directory scan
@@ -673,8 +755,16 @@ impl Ext4FileSystem {
         unsafe {
             let mut entries = Vec::new();
 
-            // Traverse directory's data blocks
-            let blocks = dir.get_data_blocks(self)?;
+            // Traverse directory's data blocks (block-list memo, 22nd —
+            // see lookup()).
+            let blocks = match self.dir_blocks_cached(dir) {
+                Some(b) => b,
+                None => {
+                    let b = dir.get_data_blocks(self)?;
+                    self.dir_blocks_store(dir, b.clone());
+                    b
+                }
+            };
             crate::dfx::fsw::note_list_dir();
             // Pathology probe — see the twin in lookup().
             if blocks.len() > 1024 {

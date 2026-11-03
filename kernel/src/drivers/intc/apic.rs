@@ -56,6 +56,9 @@ const XAPIC_TIMER_DIV: u32 = 0x3E0;
 const XAPIC_LVT_LINT0: u32 = 0x350;
 const XAPIC_LVT_LINT1: u32 = 0x356;
 const XAPIC_TPR: u32 = 0x080;
+// xAPIC ISR/IRR bits 255:224 (SP-5 r5 trap: vector 0xE0 lives there)
+const XAPIC_ISR7: u32 = 0x170;
+const XAPIC_IRR7: u32 = 0x270;
 
 // x2APIC MSR indices
 const X2APIC_ID: u32 = 0x802;
@@ -69,6 +72,9 @@ const X2APIC_TIMER_CURR: u32 = 0x839;
 const X2APIC_TIMER_DIV: u32 = 0x83E;
 const X2APIC_LVT_LINT0: u32 = 0x835;
 const X2APIC_LVT_LINT1: u32 = 0x836;
+// x2APIC ISR/IRR bits 255:224 (SP-5 r5 trap: vector 0xE0 lives there)
+const X2APIC_ISR7: u32 = 0x817;
+const X2APIC_IRR7: u32 = 0x827;
 
 /// Spurious-interrupt vector (SVR): must match the IDT catch-all.
 const SPURIOUS_VECTOR: u32 = 0xFF;
@@ -267,6 +273,7 @@ pub fn timer_start() -> bool {
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, ticks as u32);
     let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC;
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
+    timer_arm_trail(crate::arch::cpu_id() as usize, TIMER_OP_PERIODIC);
     true
 }
 
@@ -275,6 +282,7 @@ pub fn timer_mask() {
     if READY.load(Ordering::Acquire) {
         let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC | LVT_MASKED;
         reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
+        timer_arm_trail(crate::arch::cpu_id() as usize, TIMER_OP_MASK);
     }
 }
 
@@ -319,7 +327,159 @@ pub fn timer_arm_oneshot(deadline_nominal: u64) -> bool {
     let lvt = LOCAL_TIMER_VECTOR as u32; // mode bits [18:17] = 0: one-shot
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, counts);
+    // SP-5 r5 arm trail: who programmed this CPU's timer last, with what.
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed);
+        TIMER_ARM_OP[cpu].store(TIMER_OP_ONESHOT, Ordering::Relaxed);
+        TIMER_ARM_DEADLINE[cpu].store(deadline_nominal, Ordering::Relaxed);
+        TIMER_ARM_COUNTS[cpu].store(counts, Ordering::Relaxed);
+        TIMER_ARM_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
+    }
     true
+}
+
+// ---------------------------------------------------------------------------
+// SP-5 round 5: frozen-tick trap (timers/interrupts guarded domain)
+// ---------------------------------------------------------------------------
+//
+// During the memory-exhaustion ramp the per-CPU timer-IRQ counters freeze on
+// BOTH CPUs while the timebase keeps advancing (round-4 clock boot: tb
+// 6.17M -> 7.05M, irq0/irq1 stuck at 46/50). The four candidate causes:
+//   (a) LAPIC timer programmed off / one-shot exhausted with nobody re-arming
+//   (b) IF=0 stuck on the CPU (interrupts enabled flag never restored)
+//   (c) IRR bit stuck (APIC accepted the IRQ but delivery is blocked:
+//       TPR/SVR priority gate or a pending higher-priority ISR bit)
+//   (d) halt wakeup lost (CPU halted, one-shot exhausted, nothing re-armed)
+// The live register snapshot discriminates all four in one read.
+
+/// Timer-programming op tags for the arm trail.
+pub const TIMER_OP_ONESHOT: u32 = 1;
+pub const TIMER_OP_MASK: u32 = 2;
+pub const TIMER_OP_PERIODIC: u32 = 3;
+
+/// Per-CPU count of LAPIC timer programming events (arm/mask/start).
+pub static TIMER_ARM_SEQ: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+/// Last op kind (TIMER_OP_*).
+pub static TIMER_ARM_OP: [AtomicU32; crate::config::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; crate::config::MAX_CPUS];
+/// Last one-shot deadline (nominal ticks) programmed.
+pub static TIMER_ARM_DEADLINE: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+/// Last initial count written to TMICT.
+pub static TIMER_ARM_COUNTS: [AtomicU32; crate::config::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; crate::config::MAX_CPUS];
+/// Timebase value at the last programming event.
+pub static TIMER_ARM_TB: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+fn timer_arm_trail(cpu: usize, op: u32) {
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    TIMER_ARM_SEQ[cpu].fetch_add(1, Ordering::Relaxed);
+    TIMER_ARM_OP[cpu].store(op, Ordering::Relaxed);
+    TIMER_ARM_TB[cpu].store(crate::drivers::timer::read_time(), Ordering::Relaxed);
+}
+
+/// Live LAPIC timer + delivery state of THIS CPU, for the frozen-tick trap.
+#[derive(Clone, Copy, Debug)]
+pub struct LapicTimerSnapshot {
+    /// Timer LVT entry (vector | mode<<17 | mask<<16).
+    pub lvt: u32,
+    /// Timer initial count register (reads back the last TMICT write).
+    pub tmict: u32,
+    /// Timer CURRENT count register (live; 0 = counter exhausted).
+    pub tmcct: u32,
+    /// Timer divide configuration.
+    pub tdcr: u32,
+    /// Spurious-vector register (bit 8 = APIC software enable).
+    pub svr: u32,
+    /// Task-priority register (blocks vectors below its class).
+    pub tpr: u32,
+    /// IRR bits 255:224 (vector 0xE0 = bit 0): IRQ accepted, not serviced.
+    pub irr7: u32,
+    /// ISR bits 255:224: IRQ in service.
+    pub isr7: u32,
+}
+
+impl LapicTimerSnapshot {
+    /// IRR pending for the local-timer vector.
+    #[inline]
+    pub fn irr_timer(&self) -> bool {
+        self.irr7 & (1 << (LOCAL_TIMER_VECTOR & 31)) != 0
+    }
+    /// In-service for the local-timer vector.
+    #[inline]
+    pub fn isr_timer(&self) -> bool {
+        self.isr7 & (1 << (LOCAL_TIMER_VECTOR & 31)) != 0
+    }
+    /// LVT mask bit.
+    #[inline]
+    pub fn lvt_masked(&self) -> bool {
+        self.lvt & LVT_MASKED != 0
+    }
+    /// LVT mode bits [18:17]: 0 = one-shot, 1 = periodic.
+    #[inline]
+    pub fn lvt_periodic(&self) -> bool {
+        self.lvt & LVT_TIMER_PERIODIC != 0
+    }
+}
+
+/// Read THIS CPU's live LAPIC timer state. `None` when the APIC driver is
+/// not up (pre-init context — no trap to arm there).
+pub fn lapic_timer_snapshot() -> Option<LapicTimerSnapshot> {
+    if !READY.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(LapicTimerSnapshot {
+        lvt: reg_read(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT),
+        tmict: reg_read(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT),
+        tmcct: reg_read(XAPIC_TIMER_CURR, X2APIC_TIMER_CURR),
+        tdcr: reg_read(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV),
+        svr: reg_read(XAPIC_SVR, X2APIC_SVR),
+        tpr: reg_read(XAPIC_TPR, X2APIC_TPR),
+        irr7: reg_read(XAPIC_IRR7, X2APIC_IRR7),
+        isr7: reg_read(XAPIC_ISR7, X2APIC_ISR7),
+    })
+}
+
+/// Adjudicate a snapshot into the four-way discrimination. Returns a short
+/// reason string for the trap line (used by the regression test tooling).
+pub fn tick_trap_adjudicate(s: &LapicTimerSnapshot) -> &'static str {
+    if s.lvt_masked() {
+        return "lvt-masked";
+    }
+    if s.svr & 0x100 == 0 {
+        return "apic-disabled";
+    }
+    // TPR blocks the vector when its class exceeds the timer's class
+    // (vector 0xE0 = class 0xE).
+    if (s.tpr >> 4) > ((LOCAL_TIMER_VECTOR >> 4) as u32) {
+        return "tpr-blocked";
+    }
+    if s.isr_timer() {
+        return "in-service";
+    }
+    if s.irr_timer() {
+        // Accepted but never dispatched: delivery blocked while the CPU
+        // runs (IF=0 stuck is the leading producer — the peer IPI probe
+        // in the same trap separates CPU-stuck from APIC-side).
+        return "irr-stuck";
+    }
+    if s.tmcct == 0 && s.tmict != 0 {
+        // Counter exhausted and no IRR bit: the one-shot fired (or was
+        // never re-armed) and the interrupt is GONE — re-arm path dead
+        // or the count was consumed by another LVT mode flip.
+        return "oneshot-exhausted";
+    }
+    if s.tmcct != 0 {
+        // Armed and counting: when it reaches zero the IRQ should fire —
+        // a stale far-future count means the arm math was wrong.
+        return "counting";
+    }
+    "unknown"
 }
 
 // ---------------------------------------------------------------------------

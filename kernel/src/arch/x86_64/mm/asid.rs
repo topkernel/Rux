@@ -59,33 +59,48 @@ const CR4_PCIDE: u64 = 1 << 17;
 /// Architectural precondition: CR0.PG=1 and CR3[11:0]=0 (a #GP would
 /// fault otherwise) — both callers load the static kernel root (clean
 /// low bits) immediately before.
+///
+/// PER-CPU DISCIPLINE (same as enable_fsgsbase in cpu.rs): CR4.PCIDE
+/// is a per-CPU bit, and every CPU that will EXECUTE a tagged CR3
+/// write must arm its own copy. The early return on the global PCID_ON
+/// that used to open this function skipped the CR4 arming on every AP
+/// (the BSP arms during mmu_init::init, long before start_secondaries)
+/// while build_satp kept producing PCID|NOFLUSH-tagged values — on any
+/// PCID-exposing vCPU (Intel hosts; this dev rig's AMD host and QEMU's
+/// TCG models expose neither CPUID bit, which is why the layer never
+/// engaged there) the first user-mm context switch on an AP wrote a
+/// bit-63 CR3 with CR4.PCIDE=0, which is architecturally #GP(0).
 pub fn enable_pcid() -> bool {
-    if pcid_enabled() {
-        return true;
-    }
     // CPUID.1:ECX[17] = PCID; CPUID.7.0:EBX[10] = INVPCID. INVPCID is
     // required: without it a full flush cannot reach entries cached
     // under other PCIDs, and the layer must stay off.
     let (_, _, ecx1, _) = crate::arch::x86_64::cpu::cpuid(1, 0);
     let (_, ebx7, _, _) = crate::arch::x86_64::cpu::cpuid(7, 0);
     if ecx1 & (1 << 17) == 0 || ebx7 & (1 << 10) == 0 {
-        crate::println!("mm: PCID off (no CPUID PCID/INVPCID)");
+        if !pcid_enabled() {
+            crate::println!("mm: PCID off (no CPUID PCID/INVPCID)");
+        }
         return false;
     }
     let cr3 = read_cr3();
     if cr3 & 0xfff != 0 {
         // Precondition violated (should never happen from the two call
         // sites): stay PCID-less rather than fault.
-        crate::println!("mm: PCID off (CR3 low bits set at enable)");
+        if !pcid_enabled() {
+            crate::println!("mm: PCID off (CR3 low bits set at enable)");
+        }
         return false;
     }
+    let first = !pcid_enabled();
     // SAFETY: single-bit RMW; PG is on and CR3[11:0]=0 checked above.
     unsafe {
         let cr4 = crate::arch::x86_64::cpu::read_cr4();
         crate::arch::x86_64::cpu::write_cr4(cr4 | CR4_PCIDE);
     }
     PCID_ON.store(true, Ordering::Release);
-    crate::println!("mm: CR4.PCIDE enabled (12-bit PCIDs, INVPCID flushes)");
+    if first {
+        crate::println!("mm: CR4.PCIDE enabled (12-bit PCIDs, INVPCID flushes)");
+    }
     true
 }
 

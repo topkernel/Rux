@@ -1598,6 +1598,21 @@ pub fn ext4_file_read_vfs(file: &File, buf: &mut [u8]) -> isize {    // SAFETY: 
         // so only the read path needs the branch. Simplification vs Linux:
         // offset/length block alignment is not enforced.
         if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT != 0 {
+            // Reference parity (generic_file_read_iter's DIO leg):
+            // filemap_write_and_wait_range BEFORE the direct read — a
+            // buffered writer's dirty page-cache frames must reach the
+            // disk this read serves from. Since the delayed-allocation
+            // change, buffered write(2) leaves data ONLY in dirty frames
+            // (see sys_sync), so without this flush a direct read of a
+            // just-buffered-written range served stale blocks (LTP
+            // diotest2/5 testblock 1: buffered write + O_DIRECT read,
+            // read/write comparison failed).
+            if !buf.is_empty() {
+                let ps = crate::mm::PAGE_SIZE as u64;
+                let first_index = offset / ps;
+                let last_index = (offset + buf.len() as u64 - 1) / ps;
+                super::file::ext4_flush_dirty_inode(inode, first_index, last_index);
+            }
             match ext4_file_read(fs, ext4_inode, offset, buf) {
                 Ok(read_bytes) => {
                     file.set_pos(offset + read_bytes as u64);
