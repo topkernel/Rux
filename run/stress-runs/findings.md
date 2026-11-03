@@ -997,3 +997,17 @@ mechanism in this round's changes touches that path (rmap filter is
 reclaim-only, the sched change is one store inside the GRQ hold);
 this board doubles as the Tier-2 row for the round-8 sched change —
 all rows inside +/-20%.
+
+## Round 8 — Mission 4: ltplong long-horizon PASS (the round-5 leftover
+## re-run on the r8 kernel)
+
+ltplong5 (single pass, 8 entries, budgets 600-900): mmapstress01 /
+mmap-corruption01 / mmapstress09 -p 40 -t 0.4 / mmapstress07 /
+mmapstress10 -p 40 -t 0.4 / fork_procs -n 500 / growfiles ALL rc=0;
+msgstress01 rc=2 (msgsnd EINVAL — the r2/r3-adjudicated intermittent
+family, known-flake list; not re-adjudicated here). ltplong6 (mm trio +
+fork_procs x3 consecutive loops in ONE boot): 12/12 rc=0, RS-ALL-DONE,
+zero panics/wedges, leakhunt+allocwatch armed throughout (0 wildwrite,
+0 parked-leak, alloc sections max 0x43e cycles, over10ms=0). The
+rc=254 silent-child-death family: no recurrence (20 execs of
+glibc-static LTP binaries all reported results).

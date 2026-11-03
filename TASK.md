@@ -2205,3 +2205,71 @@ origin/stress-port.
   era (1.37-1.39); expect it to re-bank lower on KVM.
 - ltplong long-horizon loops remain un-run since r6 compaction —
   re-run on an SP-7 kernel next round.
+
+## Round 8 (2026-11-03) — ACQUIRE-PAIR-SPLIT root-caused (benign, both
+## faces); unmap0 was a REAL missed rmap walk (fixed); KVM p2 anchor
+## verified strong; ltplong re-run
+
+Sync: abe5df57 = merge origin/main d829751f (round-7 close; no code
+delta beyond it). Commits: d1184d2d (kernel), 18aa1363 (docs).
+
+1. MISSION 1 (ACQUIRE-PAIR-SPLIT / PARKED-WILDWRITE — the "lying-slot"
+   family's sharpest datum): ROOT-CAUSED, both faces benign, no
+   cross-task preempt-count write exists on this tree.
+   - PARKED-WILDWRITE/PARKED-LEAK = the parkwalk census sampling a
+     voluntary-parking task inside its OWN __schedule, in the window
+     [slot publish -> SWITCHING_OUT store]: the marker sat AFTER the
+     schedstat block while the slot flips first; the parking task
+     legitimately holds its OWN GRQ guard (site sched.rs:2641 = its
+     own acquire; hsite=1113 its last tick stamp; count returns to 0
+     at unlock_irqretain us later — "self-resolved, ages 0"). FIX:
+     store SWITCHING_OUT BEFORE the slot publish (strictly widens R63;
+     closer to the reference's prev->on_cpu covering the whole switch).
+   - ACQUIRE-PAIR-SPLIT (40/boot, all osite=2641, swapped pairs across
+     cpu0/cpu1) = leakorigin slot cross-talk: two live tasks sharing
+     one 2048-slot Fibonacci hash under churn, both paying the GRQ
+     outermost pair (~5-6us armed window), interleaving across CPUs. A
+     genuine cross-task release is impossible: booking resolves via
+     the arch tp register, invariant across the acquire->release
+     window (IF=0; asm switch runs after the release). FIX: split
+     print now carries rpid/rpc/rown (recorded task's pid, base count,
+     ownership) — cross-talk self-identifies (rpc=0 or a 0xdeadbeef
+     freed descriptor); census prints tpexec= (tp-named at SAMPLE
+     time); PARKED-HEAL never fires on a tp-named task.
+   - VERIFIED: forker boot fork 492,292 + exec 178,724 ops rc=0,
+     RS-ALL-DONE, PARKED-WILDWRITE 0 / PARKED-LEAK 0 (r7: 1 each),
+     heals/strands/underflows 0; 20 split lines all rpc=0-or-freed.
+2. MISSION 2 (rmap residuals): ADJUDICATED WITH DATA + one real fix.
+   - unmap0 (r7: 119-161/boot) WAS a real missed-rmap-walk divergence:
+     private file VMAs host anon COW pages (fault path flags them
+     Anonymous+SwapBacked on the anon LRU — do_cow_fault parity; the
+     reference swaps them), but try_to_unmap_inner only admitted
+     VmaType::Anonymous VMAs — every private-COW page (exec'd
+     binaries' written .data/.bss) was permanently unswappable dead
+     weight (passed all filters, no admissible VMA, unmap0, re-skipped
+     every scan). FIX: admit FileBacked VMAs in the walk filter (PTE
+     ppn==target stays the authority; swap-in path re-flags the page
+     correctly — handle_swap_fault is address-driven). AFTER: unmap0
+     5/boot (-96%), u0(live/dead/ovf)=0/5/0 — residue is 100% the
+     dead face (teardown raced filter->walk; benign). Census gains the
+     u0 split counters.
+   - unmapped (226 vs r7's 104-111) and notanon (91 vs 83) = correct
+     in-flight teardown sampling: exit-path last-unmap window + the
+     swap-out path keeping the page LRU-linked THROUGH the device
+     write (the no-swap-cache shape, review 4.12). The unmapped rise
+     is the enlarged successful-swap traffic (wok 2546). No fix
+     needed (a swap-cache refactor is architectural, out of scope).
+   - Battery: memory2 class, freed/examined 88.8% (r7 band 82-89%),
+     rotref=0, zero panics, class verdicts identical to r7.
+3. MISSION 3 (strong-class KVM p2): VERIFIED. Full board on the r8
+   kernel booted UNDER load 4.3-4.7 + 2 foreign QEMUs, aff=1:
+   p2 1.267us = +2.0% of the quiet anchor (TCG at load: 28.151).
+   Whole board within +/-20% (fsync +14.4% = the I/O row's load
+   face, quiet spread was already +/-11%); doubles as the Tier-2 row
+   for this round's sched change. Strong-class p2 column re-banked
+   1.267 loaded / 1.242 quiet (perf-gate-baseline.md).
+4. MISSION 4 (ltplong): ltplong5 pass — mmapstress01 / mmap-
+   corruption01 / mmapstress09 -p 40 / mmapstress07 / mmapstress10
+   -p 40 / fork_procs -n 500 / growfiles ALL rc=0; msgstress01 rc=2
+   (msgsnd EINVAL — the r2/r3-adjudicated flaky family). ltplong6
+   (mm trio x3 loops) running at close.
