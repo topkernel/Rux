@@ -843,7 +843,11 @@ syscalls × bad pointer → EFAULT) in the packed probe set.
 
 ---
 
-## D-19: jbd2 write-through commits without journal-area records
+## D-20: jbd2 write-through commits without journal-area records
+
+(Renumbered from a duplicated "D-19" — that number belongs to the typed
+timer wheel above and in both companion ledgers; entry content unchanged
+except the evidence line below.)
 
 **Design.** The jbd2 commit's fast path (no revoke records) syncs each
 registered metadata buffer DIRECTLY to its final on-disk location and
@@ -869,6 +873,13 @@ e2fsck-clean and identical to the reference kernel's outcome on the
 same sequence; midloop kills 1.0/2.5/4.0s rc=0; make test ALL PASSED;
 x3 builds rc=0. The reference replays 6.5s-class midloop kills clean
 where ours leaves one fixable class (single bitmap bit + orphan inode).
+2026-11-04 extent-predicate fix (ee_len==0x8000 maximal written extents
+read correctly): the rig gained a 128MB-journal golden (cc-test-max.img,
+journal inode = one (0-32767) extent, the OH /data shape) — postfsync
+kill rc=0 30/30 markers, midloop 2.5s/6.5s rc=0 44/111 markers; the
+pre-fix kernel on the same golden prints "journal inode empty" and
+crashes rc=4 (bitmap checksum class). OH /data boots confirm in situ:
+journal-empty line 1/boot before, 0 after.
 
 **Known cost.** A kill landing inside a forced commit's write-through
 sequence leaves the in-flight transaction partially on disk (the
