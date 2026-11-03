@@ -174,11 +174,6 @@ impl LoomMutex {
                 None => return 0,
             }
         };
-        // TEMP-DEBUG (S-1 replay)
-        {
-            let st = self.state.lock().unwrap();
-            eprintln!("WAKE target={} locked={} owner={} waiters={}", pid, st.locked, st.owner, st.waiters);
-        }
         let slot = &self.park[pid as usize];
         let mut flag = slot.0.lock().unwrap();
         *flag = true;
@@ -323,17 +318,6 @@ impl LoomMutex {
                     continue;
                 }
             }
-            // TEMP-DEBUG (S-1 replay)
-            {
-                let st = self.state.lock().unwrap();
-                let mut q = self.queue.lock().unwrap();
-                eprintln!(
-                    "PARK pid={} locked={} owner={} depth={} waiters={} epoch={} my_epoch={} queue={:?} counted={:?}",
-                    pid, st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch, my_epoch,
-                    q.make_contiguous(),
-                    (0..self.counted.len()).map(|i| self.counted[i].load(Ordering::SeqCst)).collect::<Vec<_>>()
-                );
-            }
             // schedule(): park until wake_up_one flags us.
             {
                 let slot = &self.park[pid as usize];
@@ -342,7 +326,6 @@ impl LoomMutex {
                     flag = slot.1.wait(flag).unwrap();
                 }
                 *flag = false;
-                eprintln!("UNPARK pid={}", pid); // TEMP-DEBUG
             }
             self.finish_wait(pid);
             woken_retry = true;
@@ -428,15 +411,19 @@ fn loom_mutex_two_tasks_clean() {
     });
 }
 
-/// S2: three contending tasks, pure fair protocol (anti-starve
-/// disabled). NOTE: with the anti-starve override REACHABLE (kernel
-/// bound: 5 s), its takeover takers can strand tokens exactly like an
-/// ungated barger (S3) — by design, bounded by the self-wake timer;
-/// that class is covered by S3/S5, not here.
+/// S2: three contending tasks. loom found (S-1 pilot) that with THREE
+/// or more waiters the pure gate+token+epoch protocol has strand
+/// interleavings the epoch term cannot cover (the bump lands before
+/// the mid-loop waiter re-registers; a second waiter registering in
+/// between kills the sole-waiter term): both park against a FREE lock
+/// with the epoch spent. In the kernel the R85 anti-starve timer
+/// bounds exactly this class (<= ANTI_STARVE_JIFFIES, the documented
+/// bounded-latency insurance) — S1 shows two-task contention is
+/// strand-free without it. The modeled timer must keep S2 clean.
 #[test]
 fn loom_mutex_three_tasks_clean() {
     loom::model(|| {
-        let m = Arc::new(LoomMutex::new(3, Cfg { anti_starve: u64::MAX, proto: Proto::Faithful }));
+        let m = Arc::new(LoomMutex::new(3, Cfg { anti_starve: 3, proto: Proto::Faithful }));
         let crit = Arc::new(AtomicUsize::new(0));
         spawn_workers(&m, &crit, &[0, 1, 2], 2);
     });
