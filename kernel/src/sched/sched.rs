@@ -4487,7 +4487,10 @@ pub fn wake_up_enqueue_opt(
                 }
             }
         }
-        if enqueue_task_locked(&mut *grq_guard, task) {
+        // The result feeds the sched:sched_wakeup tracepoint below, so
+        // route the two true-arms through one binding first (the else
+        // arm keeps its inline refusal print).
+        let woken = if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
@@ -4515,7 +4518,6 @@ pub fn wake_up_enqueue_opt(
                 putchar(b'\n');
             }
             false
-        }
         };
         // The sched:sched_wakeup tracepoint — the reference's
         // ttwu_do_wakeup record: the task left the wait queue and is
