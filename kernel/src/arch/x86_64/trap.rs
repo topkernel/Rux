@@ -1894,8 +1894,8 @@ fn handle_device_not_available() {
 fn handle_debug(regs: &mut PtRegs) {
     const TF: u64 = 1 << 8;
     if regs.user_mode() {
-        // Stop stepping before delivering anything, or iretq would
-        // re-trap on the first handler/user instruction.
+        // Stop stepping before delivering anything, or iretq/sysret
+        // would re-trap on the first handler/user instruction.
         regs.rflags &= !TF;
         if let Some(task) = crate::sched::current() {
             if (*task).tracer_pid() != 0 {
@@ -1915,12 +1915,44 @@ fn handle_debug(regs: &mut PtRegs) {
                 return;
             }
         }
-        crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+        // Linux do_debug: a user #DB without a tracer is a CATCHABLE
+        // SIGTRAP (force_sig_fault semantics). The old unconditional
+        // do_exit killed every task that set TF with a handler
+        // installed (gdb-less tracers, coverage tools, the tfprobe
+        // A/B) — the reference only kills on the default disposition.
+        // Handler-first routing like the #UD/#GP arms; a blocked
+        // SIGTRAP (trap inside its own handler) is forced to the
+        // default action, mirroring the SIGSEGV discipline.
+        let pid = crate::process::current_pid();
+        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGTRAP as i32);
+        if !sigtrap_has_handler() || sigtrap_blocked_current() {
+            crate::process::exit::do_exit(-(crate::signal::Signal::SIGTRAP as i32));
+        } else {
+            crate::signal::force_unblock_current(crate::signal::Signal::SIGTRAP as i32);
+        }
     } else {
         // Kernel-mode #DB with TF set: clear TF in the saved frame and
         // resume (Linux do_debug discipline for kernel steps).
         regs.rflags &= !TF;
     }
+}
+
+/// SIGTRAP (5) disposition check for the #DB path (step tracers and
+/// coverage tools install one; the default disposition kills).
+fn sigtrap_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(5)))
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
+}
+
+/// True when the CURRENT task blocks SIGTRAP (bit 3) — the thread is
+/// inside a SIGTRAP handler without SA_NODEFER (a trap-in-handler
+/// loop would otherwise refault forever).
+fn sigtrap_blocked_current() -> bool {
+    crate::sched::current()
+        .map(|t| t.sigmask & (1u64 << 3) != 0)
+        .unwrap_or(false)
 }
 
 /// int3 (#BP) — port of the twin's handle_breakpoint for the int3
