@@ -50,9 +50,12 @@ pub fn test_config() {
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     // kernel_stack_size is arch-gated since leg-17: 128KB base for
     // riscv64/unmeasured arches (fee7774f: the 80KB slot overflowed on
-    // the riscv64 test kernel), 80KB packed-slab slots on x86_64.
+    // the riscv64 test kernel). x86_64 also runs 128KB: the 80KB packed
+    // slot was walked back twice (c05f13ad LTP depth, e336143a symlink
+    // chains) but this assertion kept expecting the 80KB value, failing
+    // every x86_64 suite run since (1095/1096 with only this line red).
     #[cfg(target_arch = "x86_64")]
-    test_assert_eq!(KERNEL_STACK_SIZE, 81920, "KERNEL_STACK_SIZE == 80KB (x86_64 packed slab)");
+    test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB (x86_64)");
     #[cfg(not(target_arch = "x86_64"))]
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
 
