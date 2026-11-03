@@ -2145,3 +2145,183 @@ refused-wake shapes out of scope).
    (c) runtime — fast suite 0.1 s, kani 2.2 s, loom minutes (fits
    nightly, not make-test adjacency); (d) the written rule — item 3
    here plus the sync-check CI wiring.
+
+## TWENTY-FIFTH-SUCCESSOR SESSION (2026-11-03 19:00-.., branch biofix-fieldpoll @ d463189b+)
+Mission: re-roll the race on the post-IRQ-fix kernel (origin/main e264a64b
+merged as d463189b; TASK.md ours-by-intent, dtb_blob.S repointed to this
+worktree), verify whether the dead-tick poison fix (d3700224) took the
+wedge family's teeth, chase the 23rd's seed if it persists. Pair 1 of the
+staggered relaunch (pair 2 waits on this closure).
+
+### KERNEL BUG FOUND+FIXED FIRST: 3f377d13 negstale NULL-deref panic (ON MAIN)
+- lb357 (cg26 = merge tip, negmemo=1): KERNPANIC pfault badaddr=0x98 rip=
+  path_lookup+0x1c5c at 3.3 s, sys_mkdirat -> vfs_mkdir -> path_lookup,
+  pid 1. Instruction: movzbl 0x98(%r12) with r12=0 = the dcache-hit arm's
+  `unsafe { &*child_raw }; c.is_negative()` after the stale-memo arm
+  returned core::ptr::null().
+- Root cause: the lock-free dentry-walk refactor 3f377d13 (perf-path lane,
+  on main) converted the stale-memo normalization's Option-return into a
+  raw null, which falls past the match into the dcache-hit deref — the
+  pre-refactor code returned None and took the fs-lookup arm. ANY
+  negmemo=1 boot panics on its first negstale. lb347's "negstale=90 stable"
+  predates 3f377d13.
+- FIX (52067191): pre-step rewrites `found` to None on stale; the match
+  keeps a single Some arm. x3 builds rc=0, make test green. Coordinator:
+  cherry-pick to main — the 21st's negmemo lever is unusable on main
+  until this lands.
+
+### MISSION-1 VERDICT: the wedge family did NOT lose its teeth
+- lb358 (cg26b = fix in): early-death spiral (storage_manager kill wave
+  5.6 s -> init sysrq-c 42.8 s) — the pre-existing ~40-50% dice, unrelated.
+- lb359 (cg26b, fresh2, dfx=ams46,txnhunt,negmemo=syscost=1, load ~4-5):
+  HEALTHY through the cascade — SA storm 67+, CreateNewUser start 69.95,
+  bundles.ready SET 101.36, CreateNewUser end 101.37, startUser 101.6,
+  SwitchToUser 101.6 — and the clock is ALIVE: syscost ticks advance at
+  full rate through the load window (c0 2711/14000/273 @60s ->
+  7468/33614/389 @180s — ~233 ticks/s/cpu sustained; the d3700224 fix
+  works under OH load; every historical census-silence reading is
+  confirmed poison-suspect).
+- BUT the race lost again (empty-set: zero "bundle size" prints, 451
+  waiting-query ladder lines; no SetBundleQuota stream) AND the wedge
+  seeded at ~8 s: txn pairs exec 998s-class by 1140s. Race tally 0/2
+  (lb358 spiral, lb359 wedge). Pixels: all 7 shots md5 82f0a25f
+  (frozen-logo class, no change).
+
+### MISSION-2 DECODE: the lb359 wedge, step by step (the cleanest yet)
+Victims: hdf_devmgr (pid 337) OS_IPC workers <-> power_host (611) /
+composer_host (623) main threads. FOUR txns, all code 1, all seeded ~8.0 s:
+- txn1240: power 611.611 -> hdf 337.555 (picked by 555; 555's inline
+  handler parks in PRIVATE futex 0x7ff000a19af4 a1=0x80 — FFRT arena).
+- txn1287: hdf 555 -> power 611 (611 received it while owing 1240's
+  reply; parked in BWR).
+- txn1386/txn1388: same shape one hop over (composer 623 <-> hdf 633).
+- Stack evidence (TXN-HANG-OWE): BOTH sides hold BOTH txns — 611's stack
+  = [1240(sent), 1287(received)], 555's = [1240(received), 1287(sent)].
+- Cycle: 555 handles 1240 inline -> futex-waits on an hdf-internal
+  condvar; 611 parked awaiting 1240's reply; 555's own outgoing 1287
+  needs 611 (parked). 633/623 mirror it with an async dispatch (633 back
+  in read while 1386 still stacked). By 601 s EVERY pid-337 thread is
+  INTERRUPTIBLE(sleep) (task dump) — the proc is a closed wait graph.
+
+### The kernel-side exoneration (source-verified against fetched 6.6 binder.c)
+1. The delivery mechanism IS reference-parity: composer 623's nested
+   1386 was delivered to parked originator 633 by the from-walk — 6.6
+   binder_transaction() lines ~3099-3132 keep `while (tmp) { if
+   (tmp->from && tmp->from->proc == target_proc) { target_thread =
+   tmp->from; break; } tmp = tmp->from_parent; }` — first-match-break,
+   same as our .rev()+break (binder.rs ~8032). The wake is
+   binder_enqueue_thread_work_ilocked = push to thread todo +
+   process_todo=true — our 8052-8055 matches; the reference read loop's
+   `wait_for_proc_work=false` thread consumes its own todo identically
+   to our from_thread branch (8712-8718).
+2. has_work/available predicates match 6.6 (process_todo || need_return
+   || eligible-proc-todo; available = empty stack+todo+looper flags).
+3. The one SYNCSEND-EARLYRET hit (6.379 s, pid 501.509, txn552 code12 to
+   samgr, enq_j=585 pick_j=0, c1=BR_CLEAR_DEATH_NOTIFICATION_DONE) is
+   the multi-command-write shape: BC_CLEAR pushes ClearDeathDone to the
+   CALLER's own todo with process_todo (parity: binder_enqueue_thread_
+   work_ilocked on the write path) — the read returns with the done
+   notice while the sync txn sits unanswered. The reference returns the
+   same way (has_work(thread,false)=process_todo). OH re-enters the
+   ioctl and parks. NOT a divergence; the probe's c1 table should treat
+   ClearDeathDone like BR_TRANSACTION_COMPLETE (benign).
+4. The R7 rejection (11.735 s accountmgr 825.840 depth=2) is parity
+   (23rd already established) and did NOT grow into a stranded family on
+   this boot.
+=> The wedge is NOT a binder-delivery divergence. The from-walk delivered
+the nested call correctly; the RECEIVER'S HANDLER (hdf_devmgr userspace,
+inline on 555 / dispatched for 633) parks on an FFRT-arena PRIVATE futex
+and never completes, closing a cross-process wait cycle the reference
+completes in milliseconds (same image, refu8/9: whole boot 12 s).
+
+### Open fork for the successor (lb360 adjudicates): (a) vs (b)
+- (a) hdf's handler waits on a condvar whose signaler depends on the
+  outer call's completion = logical OH deadlock (no kernel lever; needs
+  the reference's speed to never enter it — per-op perf lane).
+- (b) the signaler exists but is stuck in a KERNEL object (lost futex
+  wake / unfinishable syscall) = kernel bug, fuxstuck's anywoken field
+  decides it (a never-woken uaddr with runnable producers).
+lb360 RAN (cg26b + dfx=ams46,txnhunt,syncguard,fuxstuck,slowtask +
+negmemo=1). Verdict:
+
+### lb360 — the (a)-vs-(b) fork, adjudicated partial: the family ROTATES
+- Race lost again (CreateNewUser 60.3 / ready 91.0 / startUser 91.4 —
+  the compressed structural loss; no ladder spin this boot). Pixels:
+  both shots md5 06b933b4 (frozen logo, no change).
+- THE WEDGE PAIR REPRODUCED AND RESOLVED: power 597.597 <->
+  hdf 334.554 txn1121/1180 seeded ~7.2 s (identical four-stack shape),
+  audited at 4.3 s exec (554 in BWR with deferred tcomplete; 597's
+  handler alternating nanosleep/BWR = retry-ladder posture), and
+  COMPLETED between 11.5-16.5 s (audit stops; pair gone). lb359's
+  same-shape pair persisted 700 s+. So the cycle is NOT a hard logical
+  deadlock — a throughput-bound stall; boot variance decides whether a
+  given pair completes. Later strand at kill (346 s): txn16151 power
+  OS_IPC -> powermgr 686 exec 96 s+ server-parked (same family).
+- Census: ZERO futex parks >3 s in tgid 334 (hdf) all boot — this
+  boot's role rotation put no inline-handler futex park in hdf. The
+  standing anchors: tgid 385 x2 parked 278 s anywoken=0 with tgidthr
+  run=3/futex=13 (churning pool, not lost-wake); run=0 pools =
+  userspace-deadlocked peripherals; EVERY printed uaddr anywoken=0 —
+  the futex wake side stays clean (losthunt verdict re-confirmed).
+- SYNCSEND-EARLYRET: the SAME deterministic hit every boot (pid 50x,
+  txn552 code0xc to samgr 328, c1=BR_CLEAR_DEATH_NOTIFICATION_DONE,
+  enq_j~555) — benign per the 6.6 parity read (multi-command write
+  buffer; reference returns the same way; userspace re-parks). The
+  probe's c1 table should classify ClearDeathDone WITH
+  BR_TRANSACTION_COMPLETE (own-todo notice), not a park hole. R7: 1
+  parity hit (accountmgr class).
+
+### NET for the campaign (25th successor's whole-lane read)
+1. The store-load chain is compressed and stable (ready ~91-101 s,
+   creation tracks it, startUser lands). Remaining race losses: the
+   BMS per-user query returning empty on fresh userdata (17th's
+   structural decode stands) + the early-death spiral dice (~30-50%).
+2. The wedge family is CLOCK-INDEPENDENT (full-rate ticks through a
+   wedged window) and BINDER-PARITY (every hop source-checked against
+   fetched 6.6: from-walk first-match-break, process_todo wake,
+   has_work/available predicates, ClearDeathDone earlyret). The strand
+   pairs are userspace-internal waits (FFRT futex parks, usleep retry
+   ladders), throughput-bound. Kernel lever = the per-op wall (perf
+   lane: open 33 us, mkdir 3.6 ms); an hdf-side OH fix is out of scope.
+3. The 23rd's seed is ADJUDICATED: no kernel park hole found in two
+   probe boots; the observable earlyret shapes are reference-legal.
+
+### Housekeeping this session
+- Orphan cleanup: killed the 24th's leftover lb355 QEMU (335042,
+  reparented to systemd, cwd this worktree); stress-port lane's QEMU
+  (370172, live timeout wrapper) left alone. My own lb357/358/359/360
+  QEMUs killed by exact pid.
+- Kernels: run/bzImage-ladder-cg26 (pre-fix, panics on negstale),
+  run/bzImage-ladder-cg26b (WITH fix — the roll kernel).
+- Gates on the final tree (d463189b + 52067191): x3 debug builds rc=0
+  (re-run AFTER the vfs fix), make test green (riscv64, "All tests
+  passed", suite verdict line checked), x86_64 two-pass release
+  (bzImage-ladder-cg26b).
+
+### Successor entry points (25th, in order)
+1. COORDINATOR ITEMS: (a) cherry-pick 52067191 (negstale NULL-deref)
+   to main — every negmemo=1 boot on main panics at its first stale
+   memo until then; (b) the perf handoff stands (per-op wall is the
+   wedge family's only kernel lever; syscost/pbench rows for the fs
+   fixes already banked by the 21st/22nd need re-verification on a
+   quiet host if the coordinator wants fresh numbers).
+2. THE RACE (unchanged recipe, cg26b-class kernel + the fix):
+   system-lb5 + USERDATA=run/userdata-fresh2.img + SMP=2 LOGLEVEL=6 +
+   " dfx=ams46,txnhunt negmemo=1" (+syscost=1 when measuring). The
+   account side wins every healthy boot; pixels need (i) no early
+   spiral, (ii) the BMS KVS query to hit a serving store — the 17th's
+   29201-family readiness gap. Watch "create user:100 bundle size:34"
+   then SetBundleQuota -> appspawn com.ohos.launcher; screenshot
+   md5 leaving {5f8b704d, 06b933b4, 82f0a25f, 23312e5b} = PIXELS:
+   convert (PPM->PNG pure python) + report IMMEDIATELY.
+3. THE WEDGE, if chased further: it is userspace-internal and
+   throughput-bound (this session's adjudication). The un-tried kernel
+   angle: WHY does hdf's inline handler futex-park 700 s on some boots
+   (lb359 555) while the same pair resolves in 9 s on others (lb360)?
+   A boot with BOTH fuxstuck AND periodic taskdump through the wedge
+   window would name the futex's owner histogram at park time (the
+   census prints only park-time state, not the signaler's identity).
+4. The early-death spiral (storage_manager/hdf_devmgr kill waves ->
+   init sysrq-c, ~30-50%): unresolved for many sessions; a forensic
+   boot with dfx=taskdump from t=0 + hilog keys for the FIRST crash
+   (not the cascade) would name the origin service crash.
