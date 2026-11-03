@@ -82,3 +82,26 @@ ppoll01          FAIL 2 arms    REAL, FIXED (r25, commit a6f7a562): ppoll
                                 because the caller-blocked SIGINT stayed
                                 blocked through the wait. Verified
                                 PASS 20/0/0 with no family regressions.
+
+--- mmapstress family (r25: ALL 8 members adjudicated, none real) ---
+
+mmapstress02/03/ NOT-OURS (host runs 2026-11-04, musl binary: all four
+05/08           fail IDENTICALLY — same "errno = 12; couldn't round up
+                brk" + same TFAIL line, rc=1. The sbrk-rounding helper
+                refuses on the reference kernel too.)
+
+mmapstress06/07/ INVOCATION ARTIFACTS: our 1869 list invokes them BARE;
+09/10           LTP's runtest/mm passes args (06 "20", 09/10
+                "-p 20 -t 0.2", 07 needs a tmpfile path). Bare host
+                runs fail identically (rc 1/5/1/1, same TFAIL lines).
+                Recoverable only by teaching ltpscan argument passing
+                (it currently execs bare names only).
+
+sysfs01..05     REAL, FIXED (r25): x86_64-native syscall 139 (sysfs)
+                was missing from the x86_64->generic translate table,
+                so it dispatched to the generic table's
+                rt_sigreturn(139) — popped a garbage signal frame and
+                resumed at a stack address (NX fault): all five died
+                "Test killed by SIGSEGV" in setup. sysfs(2) implemented
+                over the shared FS_TABLE; all five now PASS (host
+                parity was confirmed first).
