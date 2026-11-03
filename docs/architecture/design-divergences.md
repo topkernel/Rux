@@ -280,11 +280,6 @@ boot clean.
 
 ---
 
-<!-- Pending entries (register when they land on main):
-     - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
-       vs plain buddy order-power allocation) — on the launcher lane branch,
-       arch-gated, register at merge with its sc228-class evidence. -->
-
 ## D-3: Build-time kernel symbol table in .rodata (two-pass convergence)
 
 **Design.** The runtime symbol table (the backing store for
@@ -778,6 +773,50 @@ window needs an explicit ioremap call at probe time.
 
 **Guard.** PF-NOCTX beacon silent across the suite; SMAP-VIOL beacon
 silent.
+
+## D-19: Typed timer wheel — timer classes enforced by the type system
+
+**Design.** The internal timer subsystem enforces timer classes by
+type (kernel/src/timer/, landed through 060ad4c2/09664c48/0b396384):
+clock-typed deadlines and now-readings (`Deadline<C>`/`Time<C>` — a
+jiffy-domain value and an hres-domain value cannot be compared), split
+one-shot/periodic arming constructors (`arm_oneshot_jiffy/hres` takes
+no interval parameter; `arm_periodic_*` requires `NonZeroU64` and has
+no `PeriodicAction::Wake`), and caller-side scoped wake guards
+(`WakeArmed`/`WakeSpent` in oneshot.rs — the guard owns the timer id,
+is not Copy/Clone, `cancel` and `rearm_if_spent` consume it, Drop
+cancels on early return). Stored-id families (itimer/POSIX/timerfd)
+deliberately keep the raw-id facade API. External ABI unchanged.
+
+**Advantage.** Three historical timer bug families — the hres/jiffy
+mixed-clock compare (lost-wakeup early fire), one-shot
+leak/mis-re-arm, and double-del/stale-id-del — are now compile errors.
+Measured, same-rig A/B (s5-boot, OH image, KVM q35 smp2/4G, syscost=1,
+780 s; A = old flat-table kernel, B = typed wheel): timer arm lock
+hold 924→697 ns, pending 1288→868 ns, del 1291→862 ns per op at
+matched volumes (n within 0.1%); nanosleep avg 772.6→662.7 ms;
+pbench p2_ctxsw 12.198 µs vs the 15.400 µs anchor (improvement side,
+in gate). Six rustc type-catch classes recorded on the real tree
+(lane artifact arch-s5/run/arch-s5-s2/type-catches.txt: E0308
+clock-domain mismatch, E0599 no periodic-Wake, E0308 NonZeroU64,
+E0061 one-shot+interval has no signature, E0308 spent-vs-armed guard,
+E0382 use-after-move on double cancel).
+
+**Compatibility evidence.** make test 1306/1306; riscv64 scripted
+regression boot green (0 panics); OH boot 0 panics/OOM; census in
+class; clock_gettime same class (3 µs) with an 18x deeper boot;
+caller migrations landed (futex backoff/wait_timeout, nanosleep) with
+~27 further raw-facade files sharing the scoped shape.
+
+**Known cost.** Slot 56→64 B (pool 66 KB .bss); the guard's Drop adds
+one no-op find on fired exits (same cost as the old explicit del);
+stored-id families keep the untyped facade by design.
+
+**Guard.** Tier-1 quiet-boot census + clock_gettime/nanosleep rows;
+pbench P2 (scheduling domain); the timer-wheel shape-test group in the
+unit suite.
+
+---
 
 ## D-18: SMAP enablement with EFLAGS.AC pushfq sequences
 
