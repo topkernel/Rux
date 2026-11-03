@@ -25,6 +25,10 @@ RUX = sys.argv[1] if len(sys.argv) > 1 else "run/lmbench-rux.txt"
 LIN = sys.argv[2] if len(sys.argv) > 2 else "run/lmbench-linux.txt"
 
 BANNER = re.compile(r"POSIX Compatible|v0\.1\.0")
+# Kernel serial-log lines ("[    3.935471] reboot: Power down") carry a
+# float timestamp and would otherwise displace the real measurement as
+# the LAST line of a case block (seen: reference column turned n/a).
+KLOG = re.compile(r"^\[\s*\d+\.\d+\]")
 NUM = re.compile(r"[0-9]+\.[0-9]+")
 CTX_LINE = re.compile(r"^\s*\d+\s+\d+\.\d+\s*$")
 FS_LINE = re.compile(r"^\s*\d+k\s")
@@ -42,7 +46,7 @@ def parse(path):
             continue
         if case is None or not line.strip():
             continue
-        if BANNER.search(line):
+        if BANNER.search(line) or KLOG.match(line):
             continue
         if "LMBENCH TIMEOUT" in line or "LMBENCH EXEC-FAIL" in line:
             out[case].append(line.strip())
