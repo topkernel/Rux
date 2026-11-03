@@ -2070,14 +2070,24 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // no lock pair, no Arc traffic; miss falls to the locked map
         // lookup and refills the memo for the next walk.
         let pc_b = crate::dfx::fsw::pc_now();
-        let found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
+        let mut found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
         // (21st successor) STALE negative memo normalization: the parent
         // mutated since the memo was inserted (its mut_gen moved past the
         // child's stamp). Detach and re-resolve from the filesystem — the
         // reference kernel drops negative dentries on every parent
         // mutation; ours refreshes lazily on the next walk.
-        let child_raw: *const Dentry = match found {
-            Some(p) if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() => {
+        // (stress-port r6) The stale case must resolve as a MISS (found =
+        // None -> the fs re-lookup arm below). The gap-fs translation
+        // (3f377d13) returned a null child_raw as the match VALUE and the
+        // dcache-hit deref ("let c = &*child_raw") faulted on it —
+        // KERNPANIC pfault badaddr=0x98 in path_lookup -> is_negative,
+        // deterministic under the negstorm oracle (negmemo=1): the first
+        // stale hit crashed the boot (r6 negstorm boot 1 + repro). The
+        // pre-gap-fs code fell through to the fs lookup (`None` as the
+        // Option arm value); this restores exactly that.
+        if let Some(p) = found {
+            // SAFETY: p is protected by the claim (memo/map-held).
+            if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
@@ -2089,7 +2099,6 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         None => 0,
                     }
                 };
-                // SAFETY: p is protected by the claim (memo/map-held).
                 if (unsafe { &*p }).neg_gen_load() != parent_gen {
                     // STALE memo: the parent mutated since the memo was
                     // inserted (through this dentry OR any bind alias).
@@ -2098,11 +2107,11 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // parent mutation; ours refreshes lazily here.
                     crate::dfx::fsw::note_negstale();
                     cur_d.remove_child(component);
-                    core::ptr::null()
-                } else {
-                    p
+                    found = None;
                 }
             }
+        }
+        let child_raw: *const Dentry = match found {
             Some(p) => p,
             None => {
                 // Not in dentry cache — ask the filesystem to look it up.
