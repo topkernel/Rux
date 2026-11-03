@@ -96,6 +96,110 @@ sustained load — then kernel-side fixes.
   userspace/tests/probes.tar.gz (extract.sh restores to test/);
   host-side drivers stay in test/ or run/.
 
+## SESSION 4 CLOSE (2026-11-03 ~23:30, branch ltp-r21 @ 44fca140+) — r24 census 1060/1869 WITH negmemo=1
+
+Base: merged origin/main twice (02d9cbde, then the stress-r6 tip 91de1d04 —
+ticktrap DFX, tick-regression driver, SP-6). r23's queue was stale: the
+timers fix had already recovered waitid08/diotest/dirtyc0w/inotify01/
+setpgid03; the census confirms they stayed green.
+
+### Mission 1 — signal-class verdicts (all CLOSED by host reference parity)
+The rig's LTP is MUSL-built; running the same binaries on the host
+reference kernel gives IDENTICAL verdicts for five of the six "open"
+families — they are musl artifacts, not Rux bugs (the r21 PASSes rode
+the removed in-frame executable signal trampoline crutch; stack-NX made
+our kernel die exactly like the reference):
+- rt_sigprocmask01: host rc=139 SIGSEGV at rip=0 (LTP sig_initial
+  harvests oact.sa_restorer; musl never fills it back -> SA_RESTORER|0
+  -> handler returns to NULL). Rux CRASH 139 = parity.
+- rt_sigsuspend01: host rc=2 TBROK "Test killed by SIGSEGV" = parity.
+- sigrelse01: host rc=2, same "signal() failed for signal 34 EINVAL".
+- sigtimedwait01 / sigwaitinfo01: host rc=2 TBROK timeout = parity.
+- kill10: host rc=0 in 1.0s -> REAL divergence. See below.
+
+### Mission 1b — kill10 decoded to a scheduler wake-refusal family (+1 fix)
+Two faces, one test:
+1. PARK face (the census symptom: no progress in 30s, machine alive):
+   children parked mid-storm; WAKE-HEAL-SKIP why=c floods (a BUSY slot
+   names the parked task; its wakes are refused by the curr_on scan).
+   On x86_64 NOTHING heals this shape (pid-hash orphan harvester is
+   riscv64-gated since the x86-scribble4 steal crash; R56c only heals
+   idle-marked slots). FIX LANDED (a5dfbe33): idle_heal_own_slot — the
+   executing idle task is the sole authority on what its CPU runs; when
+   its own slot names a real task after schedule() returned, rewrite it
+   to the idle task under the GRQ and requeue the un-named victim
+   (SLOT_W_IDLE_HEAL=6, SLOT-LIE-HEALED census line, budget 32). The
+   WAKE-REFUSED-SLEEPING (W2) report also gained the refusing guard's
+   discriminators (linked/on_rq/busy/idle slot/exec clock/quantum) via
+   sched::w2_refusal_census.
+2. FREEZE face (rarer, both KVM+TCG): ~1-2s after both managers ack,
+   ALL interrupts stop arriving on both CPUs (UART RX magic dead, timer
+   dead); gdb: both vCPUs in wfi, IF=1; TCG -d int trace ENDS at
+   "Servicing INT 0xe0" (ticks were being delivered into wfi, then the
+   timer stops firing entirely); the frozen-tick trap's last in-guest
+   snapshots (hooked at W2 + idle-prehalt during the hunt) read
+   verdict=counting (LAPIC armed, arms advancing) — the one-shot
+   re-arm chain breaks at the freeze and NOTHING executes afterward to
+   observe why. Evidence pack in run/k10-rux-* logs + the irr-stuck
+   capture at the W2 moment (peer cpu0 irr7=0x1 tmcct=0
+   pending-never-serviced, minutes before the freeze). HANDOFF: this is
+   timers/interrupts guarded-domain (stress lane owns SP-5/ticktrap;
+   next lever: arm-trail dump on the last pre-freeze tick, or an NMI-
+   armed snapshot via QEMU monitor — NMI wakes halted vCPUs).
+   Census impact: kill10 still FAILs (30s SIGTERM TBROK) — the park
+   face has a second subset (lost timer wake in the usleep(100) storm,
+   no refusal prints) that my heal does not cover; sched-domain.
+
+### Mission 2 — r23 losses adjudicated (all CLOSED)
+- getpriority01, pidns20: RECOVERED, isolation PASS 2/2 each (r23
+  losses were transient — merged main's timers/ns work).
+- creat07: RECOVERED PASS 2/2 — the r23-close writecount/ETXTBSY fix
+  (33a4936a) working as designed ("creat() received ETXTBSY").
+- mmap3: budget artifact — the HOST itself needs 60s wall (21min sys
+  CPU) for this test; the 30s harness budget kills it there too.
+- shm_test: budget artifact — host hits my 180s wall still churning.
+
+### Mission 3 — r24 census WITH negmemo=1: 1060/1869 (+1 vs r23)
+First census with negmemo=1 (cmdline gate; scan driver grew --append).
+negmemo is LTP-neutral at census scale: no new fs-family failures
+attributable to it (the one real loss is negmemo-independent, below).
+- Gains: creat07, getpriority01, pidns20, cve-2017-17052 + kill02
+  (r23 POISONS — scan artifacts — now real PASSes).
+- Flakes (PASS 2/2 isolation): creat06, epoll_pwait03, getrusage04.
+- REAL LOSS: ftest03 FAIL 2/2 — BISECTED to a single file swap:
+  kernel/src/sync/mutex.rs. Tip tree FAIL 2x2; tip with ONLY mutex.rs
+  swapped to 1bde7490's version PASS 2x2 (and e264a64b+good-spin-only
+  PASS 2x2). Producer = the recursion-arm gates from da166982/011a71c5
+  ("require locked on the acquire recursion arms — pid-0 free-state
+  alias", loom-motivated). The claimed invariant (owner==pid implies
+  locked for real pids) holds per code reading, so the failure is a
+  TIMING REVEALER: the gates shift SleepMutex handoff timing (the fs
+  biglock convoy under 6-child contention), exposing a deeper fs/
+  biglock race — children fail DATA checks (nonzero exits), not
+  timeouts; WAKE-HEAL-SKIP floods + one virtio-blk "out-of-order
+  completion" witness. HANDOFF: sync lane (their primitive + loom
+  model) + fs lane (the exposed race). Deterministic A/B recipe:
+  ftest03 isolation, 2 boots each. Do NOT revert the gates blindly —
+  they close a real mutual-exclusion hole (pid-0 bogus guard can free
+  a held lock).
+- oom01 parked POISON (chunk@1300 stall, in-flight at wedge); oom02-04
+  recovered on retry. Same class as r23's oom shape.
+
+### Gates on final tree (ltp-r21 @ 44fca140)
+x3 builds rc=0 (x86_64 final rebuild + riscv64 + aarch64, dtb_blob.S
+restored); make test GREEN (maketest-r24-1.log, MT_GREEN attempt=1 of
+the write-lock retry loop).
+
+### Successor queue (r25)
+1. ppoll01 (2 FAIL cases, host PASS — real divergence; the r23 poll
+   fixes left 2 arms failing) + msgstress01 (msgsnd EINVAL, host PASS,
+   flaky — check the ipc-ns ids tables under churn).
+2. shmat1/shm_test CRASH 255 family (shm_test budget-artifact too, but
+   the CRASH 255 variant may be a real bug — needs one isolation boot
+   with the 255 shape captured).
+3. ftest03 handoff follow-up with the sync lane (recipe above).
+4. The kill10 freeze face with the timers owner (evidence pack).
+
 ## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
 
 ### Kernel fixes this session (3 commits, on top of the fs-lane negmemo/chroot base)
