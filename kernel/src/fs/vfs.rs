@@ -2070,14 +2070,20 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // no lock pair, no Arc traffic; miss falls to the locked map
         // lookup and refills the memo for the next walk.
         let pc_b = crate::dfx::fsw::pc_now();
-        let found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
+        let mut found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
         // (21st successor) STALE negative memo normalization: the parent
         // mutated since the memo was inserted (its mut_gen moved past the
         // child's stamp). Detach and re-resolve from the filesystem — the
         // reference kernel drops negative dentries on every parent
         // mutation; ours refreshes lazily on the next walk.
-        let child_raw: *const Dentry = match found {
-            Some(p) if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() => {
+        // (25th successor) the stale case must reach the MISS arm below,
+        // exactly like the pre-3f377d13 `None` it replaced: returning a
+        // null pointer from this match fell straight into the dcache-hit
+        // deref (`&*child_raw` + is_negative()) and panicked at NULL+0x98
+        // (lb357, first negstale of the boot). Rewriting `found` to None
+        // keeps the routing the old Option-based code had.
+        if let Some(p) = found {
+            if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
@@ -2098,11 +2104,11 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // parent mutation; ours refreshes lazily here.
                     crate::dfx::fsw::note_negstale();
                     cur_d.remove_child(component);
-                    core::ptr::null()
-                } else {
-                    p
+                    found = None;
                 }
             }
+        }
+        let child_raw: *const Dentry = match found {
             Some(p) => p,
             None => {
                 // Not in dentry cache — ask the filesystem to look it up.
