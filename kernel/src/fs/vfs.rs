@@ -2076,15 +2076,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // child's stamp). Detach and re-resolve from the filesystem — the
         // reference kernel drops negative dentries on every parent
         // mutation; ours refreshes lazily on the next walk.
-        // (stress-port r6) The stale case must resolve as a MISS (found =
-        // None -> the fs re-lookup arm below). The gap-fs translation
-        // (3f377d13) returned a null child_raw as the match VALUE and the
-        // dcache-hit deref ("let c = &*child_raw") faulted on it —
-        // KERNPANIC pfault badaddr=0x98 in path_lookup -> is_negative,
-        // deterministic under the negstorm oracle (negmemo=1): the first
-        // stale hit crashed the boot (r6 negstorm boot 1 + repro). The
-        // pre-gap-fs code fell through to the fs lookup (`None` as the
-        // Option arm value); this restores exactly that.
+        // (25th successor) the stale case must reach the MISS arm below,
+        // exactly like the pre-3f377d13 `None` it replaced: returning a
+        // null pointer from this match fell straight into the dcache-hit
+        // deref (`&*child_raw` + is_negative()) and panicked at NULL+0x98
+        // (lb357, first negstale of the boot). Rewriting `found` to None
+        // keeps the routing the old Option-based code had.
+        // (stress-port r6 validation: the same fix landed independently
+        // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
             if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
