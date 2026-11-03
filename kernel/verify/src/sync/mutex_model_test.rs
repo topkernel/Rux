@@ -195,3 +195,48 @@ fn lost_token_race_keeps_exactly_one_count_unit() {
     assert!(!st.register_and_recheck(3, 7, &mut counted, 0, &mut first_park, 100));
     assert_eq!(st.waiters, 1, "re-park must not re-count");
 }
+
+/// REAL FINDING (S-1 pilot, loom, first run): a pid-0 caller (the
+/// no-task context — get_current_pid() returns 0 with no current task)
+/// that takes the FAIR acquire path while the lock is momentarily FREE
+/// behind a counted waiter (the handoff window) used to fall into the
+/// `owner == pid` recursion arm — 0 == 0 against the free state's
+/// owner == 0 — and "recurse into" a FREE lock: depth=1, locked=false
+/// (INV-M3 broken), with a follow-on chain where the bogus guard's
+/// release can free a lock another task genuinely holds (mutual
+/// exclusion broken). Kernel reachability: lock() runs its adaptive
+/// fair-try BEFORE the can_sleep check, so early-boot / secondary-hart
+/// callers (the exact contexts the degrade path serves) hit this arm
+/// whenever a real task is parked on the mutex at that moment.
+/// The fix: the recursion arms require `locked` (owner == pid implies
+/// locked for every real pid; only pid 0 aliased the free state).
+#[test]
+fn pid0_caller_must_not_recurse_into_a_free_lock() {
+    let mut st = MutexState::new();
+    // A real holder and a counted waiter create the window.
+    assert!(st.try_acquire_or_recurse(0, 7));
+    st.waiters = 1;
+    st.release_outermost(); // free behind one counted waiter (gate shut)
+    // The pid-0 no-task caller's fair try (lock()'s adaptive spin):
+    // must be REFUSED by the gate, not "recursed" into the free lock.
+    assert!(
+        !st.try_acquire_or_recurse_fair(1, 0),
+        "pid-0 caller must not recurse into a free lock (owner==0 alias)"
+    );
+    assert_eq!(st.depth, 0, "free lock must have no recursion levels");
+    assert_eq!(st.invariant_violation(), None);
+    // The wake-token arm on the free lock is a FRESH take by design
+    // (a token holder spends its handoff): locked=true, waiters spent,
+    // never a free-state recursion.
+    assert!(st.try_acquire_wake_token(2, 0));
+    assert!(st.locked && st.depth == 1 && st.owner == 0);
+    assert_eq!(st.waiters, 0);
+    assert_eq!(st.invariant_violation(), None);
+    st.release_outermost();
+    // The recursion arms still work for a caller that actually owns
+    // the lock, and a genuinely free lock still goes to pid 0 through
+    // the ungated degrade path when no waiter is counted.
+    assert!(st.try_acquire_or_recurse(3, 0), "free lock goes to the spinner");
+    assert!(st.try_acquire_or_recurse(3, 0), "real recursion still honored");
+    assert_eq!(st.depth, 2);
+}
