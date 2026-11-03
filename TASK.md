@@ -6426,3 +6426,87 @@ negmemo=1). Verdict:
   ~10-11 µs on main-derived kernels, not 15.4).
 - Next stress round: ltplong long-horizon loops were NOT re-run this
   round (compaction priority); re-run on the SP-6 kernel next.
+
+## Round 9 (2026-11-04) — rmap-fix echo verified (no new class, load-
+## shape adjudicated); kill10 face-1 DECODED (first-run-deterministic
+## signal loss, timer exonerated); freeze-ring + overdue instruments
+## landed; OH wedge-rate A/B run jointly
+
+Sync: 54be3925 = merge origin/main 91fed16d (r8 content landed as the
+42d201c7 family); a79fc405 = merge d08f8cd7 (LTP r24: kill10
+idle_heal_own_slot + negmemo census) after the coordinator handoff.
+Kernel commits this round: ec141f0c (TICK_ARM_RING), 469a7be8
+(HRES-OVERDUE + k10loop). Guest sources → probes.tar.gz.
+
+1. MISSION 1+2 (the r8 rmap fix's stress echo): VERIFIED, no new
+   error class; the unmap0 "<=5/boot" figure re-based. Three kernels,
+   identical recipe (memory2: malloc/mmap/bigheap 100s budgets,
+   dfx=allocwatch,taskdump,watchdog + syscost=1) and identical host
+   load (A/B QEMU co-running):
+   - abe5df57 (r7 close, PRE-fix): unmap0 107-143, 2 OOM kills.
+   - d1184d2d (r8 kernel): unmap0 68-72 (u0 2/70/0).
+   - 54be3925 (r9 tree): unmap0 51/85 (u0live 1/4 at kill waves, dead
+     face 50-81), werr=0 partial=0 putnz=0 rotref=0 everywhere.
+   Final tree (469a7be8): unmap0 82, u0 0/82/0 (pure dead face), 1
+   OOM kill, HRES-OVERDUE silent (no false positives under reclaim
+   load). CONCLUSIONS: (a) the fix halves unmap0 at matched kill
+   volume; (b) the residue scales with kill-teardown volume, stays
+   dead-face dominated + a 1-4-event live face CLUSTERED at kill waves
+   (no monotone growth — transient stale slots, not dead weight);
+   (c) malloc rc=1 (worker SIGKILL at class end) reproduces on ALL
+   THREE kernels including pre-fix = today's-load shape (true-
+   exhaustion OOM kills + swapout-slow teardown), NOT a regression;
+   OOM discipline held every boot (kills only at free_cnt=0). r8's
+   "5/boot" was a no-kill-boot figure.
+2. COORDINATOR HANDOFF (kill10 residual faces, LTP r24):
+   - FACE 2 (both-CPU interrupt-freeze): instrument LANDED (ec141f0c)
+     — TICK_ARM_RING, 16 events/CPU (arm + LOCAL_TIMER service
+     entries, seq/tb/ra/deadline/counts), phys published at boot,
+     monitor-xp readable post-freeze. VERIFIED live end-to-end (ring
+     decodes; ra → timer_arm_oneshot/trap_handler). NMI non-resumption
+     repeated (LTP nmi1 shape).
+   - FACE 1 (park subset): DECODED to signal-delivery loss. The hang
+     is FIRST-RUN-AFTER-BOOT DETERMINISTIC (5/5 boots: loop 1 hangs,
+     loops 2-8 all rc=0) — this explains the LTP census-FAIL vs
+     isolation-PASS divergence (their reruns are 2nd+ runs). At the
+     hang (d8 console-direct trace): manager 310 completes the full
+     round; manager 311's TEN children NEVER receive the round's
+     group USR1 (master printed BOTH group kills); master waits 1/2
+     forever. Ticks alive (ring heartbeat advancing), wheel CLEAN
+     (HRES-OVERDUE silent on every hunt boot — timer-loss at the
+     wheel level DISPROVEN), group-kill primitive clean in steady
+     state (k10pgid: 150 rounds x 10 children, 0 dropped), all 23
+     tasks parked S (census via /proc stat). Remaining suspect:
+     signal delivery into ONE process group around fork boundaries
+     (311's family; its fork_pgrps ALRM also landed suspiciously —
+     recovered via the alarm(1) failsafe). NEXT HOP for the successor:
+     a signal send/pend/deliver tracepoint (unified framework, pid-
+     filterable) + a k10pgid variant firing the group kill DURING
+     child forking. KILLTRACE covers KILL/TERM/SEGV/HUP only.
+   - fdreapd (main 8d81c5da) trips the hung-task detector once per
+     quiet boot (ppid=0 kernel thread parked in its reaper wait) —
+     cosmetic; flag to the fs owner.
+   - UART-RX delivery loss observed twice (input dies ~15s in, ticks
+     alive) — logged for the interrupts domain; hunt rig is now fully
+     guest-side (k10loop init binary) with no serial-input dependency.
+3. rc=254 family (mission 3): execaudit 5/5 rc=0 (brkchurn/growfiles/
+   fork_procs/msgstress01 targets) — no recurrence (cumulative with
+   r8: 25 clean exec sets). PARKED.
+4. OH WEDGE-RATE A/B (joint run through our rig, their entry point 2):
+   driver test/stressng/oh-wedge-ab-x86.sh (5x cg26b vs 5x pollwake,
+   interleaved, identical recipe, 1500s rolls; verdict helper
+   oh-wedge-verdict.sh). Rolls at close: cg-1 WEDGE (761 DEADLOCK
+   prints, no ladder), cg-2 HEALTHY-class (OnStart 27.9s, CreateNewUser
+   60.4s — ladder reached; loss in the post-creation KVS pipeline),
+   pw-1 WEDGE (samgr-futex pool park: TXN-HANG sys=202 a1=0x80), pw-2
+   WEDGE (early total-freeze, ba_ready never). TALLY AT CLOSE: cg 1/2
+   wedge, pw 2/2 wedge — table appended below at completion.
+5. Rig/bug-ledger addenda: 16550 RX FIFO drops long serial-fed lines
+   (dribble writes); shared-outfile d8 traces are stale-buffer garbage
+   (console-direct is the readable channel); init= shebang scripts are
+   not executable on the init path (InvalidHeader) — use static
+   binaries.
+
+Gates: x3 builds rc=0 (x86 469a7be8 tree + riscv64 + aarch64 with
+dtb_blob.S restored), make test GREEN (run/maketest-r9.log), final-tree
+memory echo clean (see mission 1). Pushed origin/stress-port.
