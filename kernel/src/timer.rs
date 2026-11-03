@@ -600,6 +600,16 @@ pub fn timer_softirq_handler(_nr: usize) {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
 
+    // lmbench-fix lane: sweep the unlinked-RUNNING phantom (the
+    // lat_sem/lat_connect/bw_tcp wedge family — a task frozen
+    // RUNNING+unqueued+slotless is reached by no pick and no wake).
+    // 1 Hz, unconditional: the scan is a pid-hash walk with an early
+    // state filter; the GRQ is taken only when a candidate exists.
+    if current.saturating_sub(LAST_PHANTOM_RELINK.load(Ordering::Relaxed)) >= 100 {
+        LAST_PHANTOM_RELINK.store(current, Ordering::Relaxed);
+        crate::sched::sched::relink_unlinked_running_phantoms();
+    }
+
     // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
@@ -729,6 +739,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Jiffies of the last wildwatch canary verify (dfx=wildwatch).
 static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
