@@ -840,3 +840,41 @@ STAC/CLAC on hardware; measured invisible under the benchmark rigs.
 
 **Guard.** SMAP-VIOL beacon on every boot; the uafault guest probe (11
 syscalls × bad pointer → EFAULT) in the packed probe set.
+
+---
+
+## D-19: jbd2 write-through commits without journal-area records
+
+**Design.** The jbd2 commit's fast path (no revoke records) syncs each
+registered metadata buffer DIRECTLY to its final on-disk location and
+writes no descriptor/data/commit blocks into the journal area; the slow
+path writes format-compatible journal-area records but ALSO
+write-throughs first. The journal superblock's s_start therefore stays
+0 on pure-create workloads: a crashed mount finds a "clean" journal
+with nothing to replay, and consistency is whatever per-block state the
+write-through had reached. Removed divergences this campaign (2026-11-04,
+cc917a4b6): the loop-instance mount no longer drops the journal after
+replay (all mounts journal live, reference parity); allocation metadata
+(bitmaps, group descriptors, superblock counters) registers with the
+running transaction so the fsync forced commit persists it; fresh
+inodes carry i_extra_isize; bg_itable_unused is maintained on claim.
+
+**Advantage.** One synchronous write per dirty buffer per commit
+instead of four-plus journal-area I/Os; lazy batching keeps small-write
+throughput (the LTP 30s-wall history); fsync durability is real (the
+cc rig: post-fsync kill rc=0 30/30 markers, clean-unmount kill rc=0).
+
+**Compatibility evidence.** cc rig (run/ccrust): postfsync/clean kills
+e2fsck-clean and identical to the reference kernel's outcome on the
+same sequence; midloop kills 1.0/2.5/4.0s rc=0; make test ALL PASSED;
+x3 builds rc=0. The reference replays 6.5s-class midloop kills clean
+where ours leaves one fixable class (single bitmap bit + orphan inode).
+
+**Known cost.** A kill landing inside a forced commit's write-through
+sequence leaves the in-flight transaction partially on disk (the
+reference recovers via replay). Full atomicity would need journal-area
+records + commit-block ordering + mount replay — the WAL follow-up.
+
+**Guard.** The cc rig (ccrun.py/ccanalyze.sh + ccprobe.c in the probes
+tarball): fresh ext4 image, fsync'd markers, kill -9, e2fsck -fn must
+land rc=0 with all returned-fsync markers present.
