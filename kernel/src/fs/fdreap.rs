@@ -20,12 +20,21 @@
 //! reader is open. The park (under the retire spinlock) and the
 //! semaphore handoff give the slot-null store → grace-start ordering.
 //!
-//! Timing note: the close op (posix record-lock release, ops.close —
-//! pipe reader-count drop, epoll purge) now runs in the reaper kthread
-//! instead of inline at close(2) return. It may lag by a grace period
-//! (microseconds on a standard boot); blocked peers are woken by the
-//! close op itself, so a writer parked on a pipe whose reader closed
-//! wakes when the reaper runs that release.
+//! Timing note — REFERENCE PARITY (r26 fix): the reference kernel runs
+//! the final fput (`__fput`: record-lock release, fsnotify_close, pipe
+//! reader-count drop) in TASK WORK at the return-to-userspace boundary,
+//! so userspace never observes a closed fd whose side effects have not
+//! run: write-to-closed-pipe sees EPIPE immediately, a lock region is
+//! free right after close(2) returns, and an inotify read sees
+//! IN_CLOSE_WRITE/NOWRITE. The async-only reaper broke all of those
+//! (LTP pipe02/pipe08/write05/writev01, fcntl14/15/33, inotify01/02/05,
+//! execve03 — the r25-census regression family; producer 8d81c5da).
+//! `retire_complete` is therefore the form syscall-context displacement
+//! uses: park like before, then COMPLETE the close decisions for
+//! everything parked up to and including ours — draining the queue in
+//! the closer's own context when the reaper does not win the race —
+//! before returning. The reaper remains as the parallel processor (and
+//! the monopolist-timeout retry path).
 
 use crate::fs::file::{FdTable, File};
 use alloc::sync::Arc;
@@ -57,6 +66,15 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 pub static RETIRED_DEPTH: AtomicUsize = AtomicUsize::new(0);
 pub static GRACE_STALLS: AtomicUsize = AtomicUsize::new(0);
 
+/// Monotonic retire accounting. PUSHED_SEQ is the ordinal assigned to
+/// each park (1-indexed); PROCESSED_SEQ is the ordinal of the last file
+/// whose close decision COMPLETED. The queue is FIFO and every drain
+/// takes a whole prefix of it, so "PROCESSED_SEQ >= my ordinal" proves
+/// my file's close decision ran — regardless of whether the reaper or
+/// my own task drained the batch. retire_complete waits on exactly that.
+static PUSHED_SEQ: AtomicUsize = AtomicUsize::new(0);
+static PROCESSED_SEQ: AtomicUsize = AtomicUsize::new(0);
+
 /// Grace budget per reaping cycle. Generous against ordinary load
 /// spikes; a monopolist window exceeds it and the batch is requeued.
 ///
@@ -73,12 +91,23 @@ const GP_BUDGET_MS: u64 = 2500;
 #[cfg(not(any(feature = "riscv64", feature = "aarch64")))]
 const GP_BUDGET_MS: u64 = 50;
 
-/// Park a removed slot occupant for the post-grace drop. Writers call
-/// this AFTER releasing their entry lock (R14-5: no close op under it).
-pub fn retire(file: Arc<File>) {
-    if !LIVE.load(Ordering::Acquire) {
-        // Inline fallback: wait the grace for this one file here.
-        // close(2) latency only — never correctness.
+/// Park a removed slot occupant and COMPLETE its close decision before
+/// returning — the reference task_work parity form for syscall-context
+/// displacement (close(2), dup2(2)/dup3 displacement). Writers call this
+/// AFTER releasing their entry lock (R14-5: no close op under it).
+///
+/// Linux runs the final fput in task work at the return-to-userspace
+/// boundary, so a userspace observer never sees a closed fd whose side
+/// effects have not run. This function restores that: the close
+/// decisions (record-lock release, ops.close — pipe reader drop,
+/// epoll purge — and the final Arc drop's IN_CLOSE_* fsnotify) complete
+/// in the closer's own context (or the racing reaper's, which this wait
+/// observes) before the syscall returns.
+pub fn retire_complete(file: Arc<File>) {
+    if !LIVE.load(Ordering::Acquire) || crate::sched::current().is_none() {
+        // Reaper down (spawn failed / pre-init) or no task context:
+        // inline bounded grace for this one file here. close(2) latency
+        // only — never correctness.
         if crate::sync::rcu::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
             FdTable::displaced_close_decision(&file);
             return;
@@ -87,12 +116,66 @@ pub fn retire(file: Arc<File>) {
         // reaper is up it retries, and if it never comes up the final
         // table Drop re-runs the decision.
     }
-    {
+    let my_ord = {
         let mut q = RETIRED.lock_irqsave();
         q.push(file);
-    }
+        PUSHED_SEQ.fetch_add(1, Ordering::AcqRel) + 1
+    };
     RETIRED_DEPTH.fetch_add(1, Ordering::Relaxed);
     TICKET.up();
+    // Completion loop: wait until the close decisions for everything
+    // parked up to and including ours have run. Usually we win the race
+    // ourselves and drain the batch here (one grace covers the batch).
+    let mut stalls = 0usize;
+    while PROCESSED_SEQ.load(Ordering::Acquire) < my_ord {
+        let batch = {
+            let mut q = RETIRED.lock_irqsave();
+            core::mem::take(&mut *q)
+        };
+        if batch.is_empty() {
+            // Ours is inside the reaper's in-flight batch (between its
+            // take and its decisions). Yield: the context switch both
+            // lets the reaper run and reports our CPU's quiescent
+            // state, which is what its grace wait needs to finish.
+            crate::sched::schedule();
+            continue;
+        }
+        let n = batch.len();
+        RETIRED_DEPTH.fetch_sub(n, Ordering::Relaxed);
+        if crate::sync::rcu::synchronize_rcu_forced_polled(GP_BUDGET_MS, "fdreap-close") {
+            for f in &batch {
+                // Sleepable syscall context: record-lock release and
+                // ops.close may take mutexes, wake peers, or queue work
+                // (the same discipline close_fd ran before the retire
+                // reaper existed).
+                FdTable::displaced_close_decision(f);
+            }
+            // Drop the batch Arcs HERE, in the closer's context: the
+            // last-reference drops fire IN_CLOSE_* fsnotify, flock/OFD
+            // release and lease bookkeeping synchronously — the
+            // userspace-observable close semantics.
+            drop(batch);
+            PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
+        } else {
+            // Grace did not pass (monopolist window): requeue — ours and
+            // the batch's — and retry. Correctness requires completion
+            // before return; the reaper retries in parallel.
+            GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
+            stalls += 1;
+            if stalls == 8 || stalls % 64 == 0 {
+                crate::pr_warn!(
+                    "fs: fdreap close completion stalled (grace budget exceeded {}x)",
+                    stalls
+                );
+            }
+            RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
+            {
+                let mut q = RETIRED.lock_irqsave();
+                q.extend(batch);
+            }
+            TICKET.up();
+        }
+    }
 }
 
 /// Spawn fdreapd. Late-boot slot (after secondaries online — its sleeps
@@ -147,12 +230,18 @@ extern "C" fn fdreapd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             TICKET.up();
             continue;
         }
+        let n = batch.len();
         for file in &batch {
             // Sleepable context: record-lock release and ops.close may
             // take mutexes, wake peers, or queue work (the discipline
             // close_fd ran at its drain point, moved here).
             FdTable::displaced_close_decision(file);
         }
+        // Drop the batch Arcs (final-reference IN_CLOSE_* fsnotify and
+        // lock/lease release run at the drops), then publish completion
+        // to any retire_complete waiter.
+        drop(batch);
+        PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
     }
     0
 }
