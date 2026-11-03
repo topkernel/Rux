@@ -57,8 +57,15 @@ pub const O_EXCL_MQ: i32 = 0o200;
 pub const O_NONBLOCK_MQ: i32 = 0o4000; // Linux O_NONBLOCK (was 0o400 = O_NOCTTY — never matched the userspace flag)
 pub const O_CLOEXEC_MQ: i32 = 0o2000000;
 
-// Maximum number of IPC objects per type
-pub const IPC_IDS_MAX: usize = 256;
+// Maximum number of IPC objects per type — reference IPCMNI (32768).
+// The id encoding is (index << 16) | seq, so index <= 32767 keeps every
+// id a positive i32; the slots arrays cost 8 bytes per entry (Option<Box>
+// niche) = 256 KiB per type, zeroed .bss. The old 256-entry table capped
+// msgmni below the reference default (32000): LTP msgstress01 creates
+// 1000 queues by default (its -n clamp never applies without the option)
+// and the parent's msgget hit ENOSPC at 257; the cleanup RMID cascade
+// then turned every child's msgsnd/msgrcv into EINVAL.
+pub const IPC_IDS_MAX: usize = 32768;
 
 // ============================================================================
 // UAPI Structures (ABI-compatible, #[repr(C)])

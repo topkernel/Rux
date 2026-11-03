@@ -164,10 +164,12 @@ static SHM_IDS: IpcIds<ShmSegment> = IpcIds::new();
 /// shmget sizes above it to fail EINVAL); shmctl(IPC_INFO) reports the
 /// same value (shmctl03 asserts equality with the sysctl file).
 pub static SHM_CTLMAX: AtomicU64 = AtomicU64::new(1 << 30);
-/// SHMMNI — max segments system-wide. Capped in practice by the fixed
-/// IPC_IDS_MAX slot table; /proc/sys/kernel/shmmni reports this value
-/// (shmget03 creates exactly this many segments and expects ENOSPC after).
-pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(IPC_IDS_MAX as u64);
+/// SHMMNI — max segments system-wide. The reference default is 4096;
+/// /proc/sys/kernel/shmmni reports this value (shmget03 creates exactly
+/// this many segments and expects ENOSPC after). Pinned explicitly now
+/// that IPC_IDS_MAX is 32768 — deriving it from the table size would
+/// report 32768 and make shmget03 fill the whole table.
+pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(4096);
 /// SHMALL — max total shm pages system-wide (shmget returns ENOSPC past
 /// it). 1 GiB worth of pages: generous for the LTP workloads while still
 /// bounding runaway allocation.
