@@ -1225,6 +1225,14 @@ pub fn do_exit(exit_code: i32) -> ! {
         // Dequeue from global run queue
         crate::sched::dequeue_task(&*current);
 
+        // pidfd exit notification: every pidfd poller targeting this
+        // thread group must observe EPOLLIN now (the reference wakes the
+        // pid's waitqueue here). The woken tasks re-check their own
+        // target's state, so the global queue's spurious wakes are
+        // harmless; this CPU holds preempt_count, so they run after the
+        // terminal schedule below.
+        crate::fs::pidfd::exit_notify_all_waiters();
+
         // ===== exit_notify: Defer parent notification =====
         // CRITICAL: Do NOT wake the parent here.  If the parent runs on
         // another CPU it can reap (free_task_slot) this task before

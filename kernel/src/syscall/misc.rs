@@ -972,6 +972,16 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     if is(&TIMERFD_OPS) {
         return Some((timerfd_poll_wait, timerfd_poll_unwait));
     }
+    // pidfds (pidfd_open files and /proc/<pid> dir fds): exit readiness
+    // wakes through the global pidfd queue (do_exit notifies).
+    if is(&crate::fs::pidfd::PIDFD_OPS)
+        || is(&crate::fs::procfs::PROC_PIDDIR_OPS)
+    {
+        return Some((
+            crate::fs::pidfd::pidfd_poll_wait,
+            crate::fs::pidfd::pidfd_poll_unwait,
+        ));
+    }
     if is(&SIGNALFD_OPS) {
         return Some((signalfd_poll_wait, signalfd_poll_unwait));
     }

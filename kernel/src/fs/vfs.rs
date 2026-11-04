@@ -5846,6 +5846,21 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
             if let Some(get_file_ops_fn) = ops.get_file_ops {
                 if let Some(dir_ops) = get_file_ops_fn(&*inode) {
                     file.set_ops(dir_ops);
+                    // /proc/<pid> directories: attach the pinned pidfd
+                    // identity at open (these fds are pidfds for
+                    // pidfd_send_signal / pidfd_getfd / poll-exit, the
+                    // reference's pre-pidfd_open mechanism). file_opendir
+                    // has no inode open hook, so the attach lives here.
+                    if core::ptr::eq(
+                        dir_ops as *const _,
+                        &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
+                    ) {
+                        if let Some(data) =
+                            crate::fs::pidfd::make_pidfd_data(inode.ino as u32)
+                        {
+                            crate::fs::pidfd::attach(&file, data);
+                        }
+                    }
                 }
             }
         }
