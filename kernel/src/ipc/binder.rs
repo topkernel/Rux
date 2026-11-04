@@ -3733,7 +3733,13 @@ pub fn txn_hang_audit() {
                 core::sync::atomic::AtomicU64::new(0);
             let now_j = crate::drivers::timer::get_jiffies();
             let last = HANG_DUMP_AT.load(core::sync::atomic::Ordering::Acquire);
-            if now_j.wrapping_sub(last) >= 60_000
+            // cg35: 0 doubles as "never fired" — with HZ=100 the bare
+            // wrapping_sub(0) >= 60_000 gate suppressed the FIRST dump
+            // until 600 s of uptime, so every wedge boot killed at
+            // 240-450 s (the whole lb4xx wedge era) produced no dump and
+            // the lock-holder thread stayed unnamed. First fire is now
+            // always eligible.
+            if last == 0 || now_j.wrapping_sub(last) >= 60_000
                 && HANG_DUMP_AT
                     .compare_exchange(
                         last,
