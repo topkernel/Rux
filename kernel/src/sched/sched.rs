@@ -1018,6 +1018,108 @@ fn slot_tag_write(cpu: usize, tag: u32, task: *mut Task) {
     }
 }
 
+// r11 (R49 pick-published-never-switched cascade — the lying-slot producer
+// hunt): per-CPU pick-generation ledger. Every publish of a task into a
+// PER_CPU current slot (the tag-1 pick publish is the principal one) bumps
+// that CPU's generation and records {task, pid, jiffies}; the
+// materialization of the generation — the picked context actually resuming
+// on that CPU (the post-context_switch point, the repick fast path, the
+// newborn's schedule_tail, or the abort republish whose prev keeps
+// running) — retires the CURRENT generation. A generation left unretired
+// while its slot still names its task and its CPU keeps advancing is the
+// losing switch: the pick published the slot but no context switch ever
+// materialized into the picked task — the exact shape the round-10 strand
+// fingerprinted (LP-WAKE-SKIP-EMPTY pid=<udp-server> naming_cpu=0 slotw=1
+// idlebit=0, naming CPU busy elsewhere). All Relaxed, same-CPU ordered by
+// construction (publish holds the GRQ; retire runs on the publishing CPU
+// with IRQs off); readers are diagnostic prints that pin coherence by
+// requiring PICK_GEN_TASK == the slot's task.
+pub static PICK_GEN: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+pub static PICK_GEN_DONE: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+pub static PICK_GEN_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+pub static PICK_GEN_PID: [core::sync::atomic::AtomicU32; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
+pub static PICK_GEN_JIF: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+/// Census: generations convicted unretired at a lying-slot observation
+/// (slot still names the published task, tag-1 writer, age past the
+/// in-flight floor). Zero on healthy boots.
+pub static PICKGEN_LOST: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+#[inline]
+fn pick_gen_publish(cpu: usize, task: *mut Task) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let g = PICK_GEN[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    PICK_GEN_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
+    PICK_GEN_PID[cpu].store(
+        if task.is_null() { 0 } else { unsafe { (*task).pid() } },
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    PICK_GEN_JIF[cpu].store(
+        crate::drivers::timer::get_jiffies(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    // PICK_GEN_DONE stays below `g`: this generation is in flight.
+    let _ = g;
+}
+
+#[inline]
+fn pick_gen_retire(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+    let g = PICK_GEN[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    PICK_GEN_DONE[cpu].store(g, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// r11: is `cpu`'s current pick generation a LOSING switch — published,
+/// unretired, its slot still naming the published task, past the in-flight
+/// floor (2 jiffies; a healthy pick→switch-in retires within the same
+/// jiffy)? `task` must be what the slot names (the caller verified
+/// cpu_state(cpu).current == task). tag-1 writer required: the heal-side
+/// slot rewrites publish+retire in one breath, so an unretired generation
+/// under any other writer tag means the ledger was superseded, not lost.
+#[inline]
+fn pick_gen_is_lost(cpu: usize, task: *mut Task, now_jiffies: u64) -> bool {
+    if cpu >= MAX_CPUS {
+        return false;
+    }
+    let tag = SLOT_WRITER[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    if tag != SLOT_W_SCHED_PICK {
+        return false;
+    }
+    if PICK_GEN_TASK[cpu].load(core::sync::atomic::Ordering::Relaxed) != task as u64 {
+        return false;
+    }
+    let gen = PICK_GEN[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    let done = PICK_GEN_DONE[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    if done >= gen {
+        return false;
+    }
+    let published = PICK_GEN_JIF[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    now_jiffies.wrapping_sub(published) >= 2
+}
+
+/// r11: heal-side slot rewrite (R56c/R56d/steal/abort-repub/idle-heal/
+/// the R65 garbage-next guard): whatever generation was in flight is
+/// superseded — the pick it described will never materialize (or its
+/// outcome is irrelevant: the slot now names something else). Publish
+/// and retire the new slot content in one breath so the ledger keeps
+/// describing the slot. All callers hold the GRQ (or run on the slot's
+/// own CPU with IRQs off — the abort-repub), so the ledger stays
+/// serialized against the tag-1 publisher.
+#[inline]
+fn pick_gen_supersede(cpu: usize, task: *mut Task) {
+    pick_gen_publish(cpu, task);
+    pick_gen_retire(cpu);
+}
+
 // ==================== Deferred Exit Notification ====================
 //
 // When a task exits (do_exit), it must notify its parent (SIGCHLD +
@@ -2453,6 +2555,9 @@ unsafe fn __schedule() {
             this_cpu_mut().current = tp;
             prev = tp;
             slot_tag_write(cpu_id, SLOT_W_R56D, tp);
+            // r11: the lying name's generation (if any was in flight) is
+            // superseded by this resync.
+            pick_gen_supersede(cpu_id, tp);
             const MSG: &[u8] = b"R56-SLOT-SELF-HEALED\n";
             for &b in MSG {
                 crate::console::putchar_no_lock(b);
@@ -2786,6 +2891,10 @@ unsafe fn __schedule() {
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
     slot_tag_write(cpu_id, SLOT_W_SCHED_PICK, next);
+    // r11: open this CPU's pick generation — retired when the picked
+    // context actually resumes (post-context_switch / schedule_tail /
+    // the repick fast path below).
+    pick_gen_publish(cpu_id, next);
 
     // Clear idle bit since we're about to run something
     grq().clear_idle(cpu_id);
@@ -2859,6 +2968,9 @@ unsafe fn __schedule() {
         // Same-task repick: still return with IRQs ON (the
         // preempt_schedule_irq local_irq_enable() discipline — see the
         // SP-5 note at the post-context_switch enable above).
+        // r11: the repick's generation is trivially materialized — prev
+        // never stopped running.
+        pick_gen_retire(cpu_id);
         sched_cs_stamp(cpu_id, 0);
         crate::arch::cpu::enable_irq();
         return;
@@ -2925,6 +3037,13 @@ unsafe fn __schedule() {
     if switching {
         SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
     }
+    // r11: the pick generation materialized — the picked context is
+    // resuming right here (this frame's own switch-in). Retire the
+    // CURRENT generation of this CPU; between the publish and this point
+    // IRQs were off, so no other publish can have intervened (and the
+    // unconditional current-gen store is monotonic-safe against a
+    // concurrent heal-side supersede anyway).
+    pick_gen_retire(crate::arch::cpu_id() as usize);
 
     // SP-5 round 5 (2026-11-03): re-enable interrupts IMMEDIATELY after the
     // context switch — the finish_task_switch() discipline (the reference
@@ -3959,6 +4078,9 @@ pub fn wake_up_enqueue_opt(
                         if !idle_task.is_null() && idle_task != task {
                             cpu_state_mut(c).current = idle_task;
                             slot_tag_write(c, SLOT_W_R56C, idle_task);
+                            // r11: the healed-away pick never reached its
+                            // switch — supersede its generation.
+                            pick_gen_supersede(c, idle_task);
                         }
                     }
                 }
@@ -4694,6 +4816,55 @@ pub fn wake_up_enqueue_opt(
                                             putchar(b);
                                         }
                                         pdec2(bit as u64);
+                                        // r11: the pick-generation verdict on
+                                        // this lying slot. LOST convicts the
+                                        // R49 losing switch — the tag-1
+                                        // publish never materialized into a
+                                        // context switch-in (gen/done/
+                                        // pub_jif/age name it); "retired"
+                                        // means the ledger closed the
+                                        // generation and the lie has
+                                        // another producer.
+                                        let nowj = crate::drivers::timer::get_jiffies();
+                                        if pick_gen_is_lost(c, task, nowj) {
+                                            PICKGEN_LOST[c].fetch_add(
+                                                1,
+                                                core::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            const PL: &[u8] = b" pickgen=LOST gen=";
+                                            for &b in PL {
+                                                putchar(b);
+                                            }
+                                            pdec2(
+                                                PICK_GEN[c]
+                                                    .load(core::sync::atomic::Ordering::Relaxed),
+                                            );
+                                            const PDD: &[u8] = b" done=";
+                                            for &b in PDD {
+                                                putchar(b);
+                                            }
+                                            pdec2(
+                                                PICK_GEN_DONE[c]
+                                                    .load(core::sync::atomic::Ordering::Relaxed),
+                                            );
+                                            const PJ: &[u8] = b" pub_jif=";
+                                            for &b in PJ {
+                                                putchar(b);
+                                            }
+                                            let pj = PICK_GEN_JIF[c]
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            pdec2(pj);
+                                            const PA: &[u8] = b" age=";
+                                            for &b in PA {
+                                                putchar(b);
+                                            }
+                                            pdec2(nowj.wrapping_sub(pj));
+                                        } else {
+                                            const PO: &[u8] = b" pickgen=retired";
+                                            for &b in PO {
+                                                putchar(b);
+                                            }
+                                        }
                                         break;
                                     }
                                 }
@@ -6535,6 +6706,9 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                 // resumes (__schedule already published the garbage next
                 // into the sched slot before calling us).
                 this_cpu_mut().current = idle;
+                // r11: supersede the garbage pick's generation (probe
+                // path; the slot tag stays as the probe left it).
+                pick_gen_supersede(cpu_id, idle);
                 &mut *idle
             } else {
                 // No idle pointer (early boot): freeze for gdb.
@@ -6584,6 +6758,11 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // linger until this CPU's next context switch and keep the phantom
     // heal conservative for a task that is already fully switched out.
     SWITCHING_OUT[crate::arch::cpu_id() as usize].store(0, core::sync::atomic::Ordering::Release);
+    // r11: and retire the pick generation that switched us in — the
+    // newborn is the materialization of this CPU's current generation
+    // (the fourth retire site; without it every fork child leaves its
+    // publisher's generation unretired).
+    pick_gen_retire(crate::arch::cpu_id() as usize);
 }
 
 // ==================== Utility Functions ====================
@@ -7292,6 +7471,10 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         if !idle_task.is_null() && idle_task != task {
                             cpu_state_mut(c).current = idle_task;
                             slot_tag_write(c, SLOT_W_STEAL, idle_task);
+                            // r11: the revoked pick's generation is
+                            // superseded (the aborted switch-in's
+                            // republish would supersede again — harmless).
+                            pick_gen_supersede(c, idle_task);
                             r56_print_pid(
                                 b"R56-SLOT-CAPTURE-HEALED cpu=",
                                 c as u32,
@@ -7351,6 +7534,11 @@ pub fn republish_current_after_abort(cpu: usize, prev: *mut Task) {
         if cpu_state(cpu).current != prev {
             cpu_state_mut(cpu).current = prev;
             slot_tag_write(cpu, SLOT_W_ABORT_REPUB, prev);
+            // r11: the aborted switch-in's generation — the pick whose
+            // claim was revoked mid-flight — never materialized and never
+            // will; supersede it (prev, which keeps running, is the new
+            // ledger content).
+            pick_gen_supersede(cpu, prev);
         }
         if (*prev).pid() == 0 {
             // Continuing the idle task: restore the idle bit our pick
@@ -7733,10 +7921,13 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
         if !unsafe { crate::process::task::Task::try_pin(curr) } {
             cpu_state_mut(cpu).current = idle_task;
             slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
+            // r11: the provably-stale name's generation is superseded.
+            pick_gen_supersede(cpu, idle_task);
             return core::ptr::null_mut();
         }
         cpu_state_mut(cpu).current = idle_task;
         slot_tag_write(cpu, SLOT_W_IDLE_HEAL, idle_task);
+        pick_gen_supersede(cpu, idle_task);
         victim = curr;
     }
     // Census (rate-limited): the healed pid + the tag of the writer that
