@@ -4238,3 +4238,23 @@ Kernel: run/r41/bzImage-current = x86_64 debug @ 02e3c900.
   b1c7fc4c). Roller restarted on run/r41/bzImage-b1c7fc4c (branch sha
   061e1519, kernel content == main b1c7fc4c). dfx=txnhunt was already
   armed all session; TXN-HANG-BWR H1/H2/H3 decode lands from r41v3 on.
+- r41v3 (main b1c7fc4c: ltp-r27 fixes + 24MB window + bwr_park_audit,
+  branch sha 061e1519): SA 58/57@35.5s (ties boot-1 best) | ladder NONE
+  (14/13... corrected ledger: 14 boots wedge-class incl. 2 killed
+  partials not counted; count = 14 total attempted, 14 wedged) |
+  traffic FLOWED whole boot (RM 8.0M by t=540; RF peek outer DROPPED
+  230us -> 47us as the storm sped up) | RM direct-recv steady:
+  outer=2283ns recv=1288ns alloc=0 cout=0 | FUX 110L/12tids
+  max_stuck_total=65 | TXN 826 {6:819} max 516s | pixels 82f0a25f.
+  FIRST TXN-HANG-BWR DATA (sign-ext decode bug active, H1/H2 via
+  approximation): rows 4095, mix H1-approx(ioctl+SYNC-OUT stack)
+  2272 vs H3(futex-parked owing replies) 1711 vs H2 0 (H2 detection
+  dead under the bug). Final census: procs=67 threads=277
+  stack-holders=32 futex-parked-stack=10 futex-waiters=58 idle=187.
+  READ: the holder mass is parked IN BWR ioctls WITH a SYNC-OUT stack
+  top — holders waiting for the REPLY of their own nested sync call
+  (H1 shape), not write-only BWR (H2). Fix for the decode bug
+  (a941c0ad) is merged; r41v4+ boots carry real rsz/wcmd rows.
+- KERNEL SWITCH at boot 4 (05:18): branch b0624458 = main a941c0ad
+  (sign-ext fix) + b35947da (KERNEL_STACK_SIZE test pin). x86_64
+  rebuild rc=0. Roller restarted at boot 4 on run/r41/bzImage-a941fix.

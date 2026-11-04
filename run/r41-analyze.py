@@ -23,10 +23,14 @@ txn_comms = collections.Counter()
 bwr_n, bwr_tids = 0, set()
 unixrd_first, unixrd_165, unixrd_last = {}, {}, {}
 syscost_ticks = []
+bwr_census_last = None
+bwr_h_counts = collections.Counter()
+bwr_rows = 0
 
-for line in open(LOG, errors="replace"):
-    m = stamp_re.match(line)
+for raw in open(LOG, errors="replace"):
+    m = stamp_re.match(raw)
     t = float(m.group(1)) if m else -1
+    line = raw[raw.find("] ") + 2:] if "] " in raw[:32] else raw
     if "insert SA:" in line:
         s = sa_re.search(line)
         if s:
@@ -64,6 +68,32 @@ for line in open(LOG, errors="replace"):
         mb = re.search(r"tid=(\d+)", line)
         if mb:
             bwr_tids.add(mb.group(1))
+    if line.startswith("TXN-HANG-BWR-CENSUS"):
+        bwr_census_last = line.strip()
+    elif line.startswith("TXN-HANG-BWR pid="):
+        bwr_rows += 1
+        park = re.search(r"park=(\S+)", line)
+        sysv = re.search(r"sys=(\d+)", line)
+        stk = re.search(r"stack=(\d+)", line)
+        sync_out = "SYNC-OUT" in line
+        p = park.group(1) if park else "?"
+        sv = sysv.group(1) if sysv else "?"
+        sn = int(stk.group(1)) if stk else 0
+        if p == "FUTEX" and sn > 0:
+            bwr_h_counts["H3-futex-stack"] += 1
+        elif p == "IOCTL-BWR":
+            if "rsz=0" in line and re.search(r"bwr\[\w+/\1 ", line):
+                bwr_h_counts["H2-write-only"] += 1
+            elif sync_out:
+                bwr_h_counts["H1-sync-out"] += 1
+            else:
+                bwr_h_counts["IOCTL-BWR-other"] += 1
+        elif p == "OTHER" and sv == "16" and sync_out:
+            # x86_64 decode bug (b1c7fc4c: sign-extended a1) parks BWR
+            # rows as OTHER; SYNC-OUT stack + ioctl(16) = H1-approx.
+            bwr_h_counts["H1-approx(signext-bug)"] += 1
+        elif p == "OTHER" and sv == "16" and sn > 0:
+            bwr_h_counts["IOCTL-stack-other"] += 1
     for fam in ("RM", "RF", "WV"):
         if line.startswith(f"UNIXRD-{fam} "):
             mt = re.search(r"t=(\d+)s", line)
@@ -88,5 +118,8 @@ print(f"FUX-STUCK: lines={fux_lines} distinct_tids={len(fux_tids)} max_stuck_tot
 print(f"FUX-STUCK: tids={sorted(fux_tids)} ffrt_parked={sorted(t for t in fux_tids if tid_comm.get(t, '').startswith('OS_FFRT'))}")
 print(f"TXN-HANG: n={sum(txn_codes.values())} codes={dict(txn_codes)} max_exec={txn_max_exec}ms comms={dict(txn_comms)}")
 print(f"BWR-SNAP: lines={bwr_n} distinct_tids={len(bwr_tids)} (probe bwr_snap not on main; 0 expected)")
+print(f"BWR-PARK: rows={bwr_rows} mix={dict(bwr_h_counts)}")
+if bwr_census_last:
+    print(f"BWR-PARK: {bwr_census_last}")
 if syscost_ticks:
     print(f"ticks: {syscost_ticks[-1]}")
