@@ -86,6 +86,11 @@ pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
 /// see dfx/fsw.rs.
 pub mod fsw;
+/// AF_UNIX hot-path per-op phase anatomy (39th lane, cmdline `unixrd=1`):
+/// monotonic-ns phase brackets around the recvmsg/recvfrom/writev unix
+/// branches — names where the hilogd storm's 28-58 us per-op wall goes;
+/// see dfx/unixrd.rs.
+pub mod unixrd;
 /// Leak-origin probe (cmdline `dfx=leakhunt`): records the call site of
 /// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
 /// moment a task returns to userspace (or is seen parked) with a nonzero
