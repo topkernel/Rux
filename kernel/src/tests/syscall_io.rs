@@ -31,6 +31,65 @@ pub fn test_syscall_io() {
 
     // Test 6: Syscall number verification
     test_syscall_numbers();
+
+    // Test 7: iovec entry semantics (round-15 writev decode)
+    test_iov_entry_semantics();
+}
+
+/// Round-15 writev decode row: the per-entry verdicts that make the
+/// vector syscalls reference-exact (wvefault probe, host 7.0.0 vs the
+/// pre-fix kernel):
+///   - total-0 shapes ({buf,0}, {NULL,0}) are harmless — a total-0
+///     readv/writev returns 0, never EFAULT (musl 1.2.5's vfprintf
+///     final-flush writev([{staged,0},{NULL,0}],2) was the EFAULTTRAC
+///     nr=66 print on every lmbench usage()-style error path);
+///   - {NULL, len>0} and any kernel-range base (even len 0) fail the
+///     WHOLE call upfront — no partial transfer precedes the error;
+///   - negative length stays EINVAL (LTP writev01/readv02 shape).
+fn test_iov_entry_semantics() {
+    use crate::syscall::io::iov_entry_error;
+
+    const EFAULT: i64 = -14;
+    const EINVAL: i64 = -22;
+
+    // Harmless shapes -> None (contribute nothing, no error)
+    let cases_ok: [(usize, usize); 4] = [
+        (0x1000_0000, 0),  // {user_addr, 0} (below every arch USER_END)
+        (0, 0),                 // {NULL, 0}
+        (1, 0),                 // low non-NULL user address, len 0
+        (0x1000_0000, 64), // plain valid entry
+    ];
+    for (base, len) in cases_ok {
+        match iov_entry_error(base, len) {
+            None => test_pass("iov entry harmless shape"),
+            Some(e) => test_fail(
+                "iov entry harmless shape",
+                &alloc::format!("base={:#x} len={:#x} -> {} (want None)", base, len, e),
+            ),
+        }
+    }
+
+    // Whole-call failures -> Some(errno)
+    let cases_err: [(usize, usize, i64); 5] = [
+        (0, 5, EFAULT),                          // {NULL, 5}
+        (0xffff_8000_0000_0000, 0, EFAULT),      // {kernel-range, 0}
+        (0xffff_8000_0000_0000, 5, EFAULT),      // {kernel-range, 5}
+        (0x1000_0000, usize::MAX, EINVAL),  // negative signed length
+        (0x1000_0000, 0x8000_0000_0000_0000, EINVAL), // -2^63
+    ];
+    for (base, len, want) in cases_err {
+        match iov_entry_error(base, len) {
+            Some(e) if e == want => test_pass("iov entry rejected shape"),
+            Some(e) => test_fail(
+                "iov entry rejected shape",
+                &alloc::format!("base={:#x} len={:#x} -> {} (want {})", base, len, e, want),
+            ),
+            None => test_fail(
+                "iov entry rejected shape",
+                &alloc::format!("base={:#x} len={:#x} -> None (want {})", base, len, want),
+            ),
+        }
+    }
 }
 
 fn test_sys_read_write() {
