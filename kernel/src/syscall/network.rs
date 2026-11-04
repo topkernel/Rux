@@ -3440,17 +3440,14 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         return 0;
     }
 
-    // Allocate receive buffer
-    // unixrd probe: the kernel bounce buffer is a per-call heap
-    // allocation the reference never pays (skb_copy_datagram_* copies
-    // skb->user directly) — bracket it + count the byte request.
-    let ur_t_alloc = crate::dfx::unixrd::now();
-    let mut buf = alloc::vec![0u8; total_buf_len];
-    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_ALLOC_NS, ur_t_alloc);
-    crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
-
     // P0-1: AF_UNIX recvmsg — one receive with SCM_RIGHTS delivery and a
-    // sockaddr_un source address.
+    // sockaddr_un source address. Dispatched BEFORE the kernel bounce
+    // buffer allocation: the reference never stages a recvmsg through a
+    // kernel buffer (skb_copy_datagram_msg copies skb -> user iovecs
+    // directly), so the non-peek receive takes the DIRECT path
+    // (unix_recvmsg_user_ctl — one copy per byte, zero staging). MSG_PEEK
+    // keeps the staged path (a small copy; the probe shows the peek wall
+    // is sleep-to-arrival, not copy-dominated).
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         // unixrd probe: outer bracket + call-outcome counts (the hilogd
         // storm's per-op wall decomposition lives here).
@@ -3463,8 +3460,57 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_PEEK_N);
         }
         let ur_t_recv = crate::dfx::unixrd::now();
-        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek) {
-            Ok(r) => r,
+        let r = if peek {
+            // MSG_PEEK: staged receive (bounce + scatter — see below).
+            let mut buf = alloc::vec![0u8; total_buf_len];
+            crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
+            let rr = crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek);
+            match rr {
+                Ok(rr) => {
+                    // Scatter the peeked data to the iovecs.
+                    let ur_t_cout = crate::dfx::unixrd::now();
+                    let mut offset = 0usize;
+                    for &(iov_base, iov_len) in &iovs {
+                        if offset >= rr.len {
+                            break;
+                        }
+                        let copy_len = core::cmp::min(iov_len, rr.len - offset);
+                        if copy_len > 0 {
+                            // SAFETY: iov_base validated with access_ok at
+                            // snapshot time.
+                            let uncopied = unsafe {
+                                crate::arch::uaccess::copy_to_user(
+                                    iov_base as *mut u8,
+                                    buf.as_ptr().add(offset),
+                                    copy_len,
+                                )
+                            };
+                            if uncopied > 0 {
+                                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
+                                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
+                                return if offset > 0 {
+                                    offset as i64
+                                } else {
+                                    -(errno::EFAULT as i64)
+                                };
+                            }
+                            offset += copy_len;
+                        }
+                    }
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
+                    Ok(rr)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // DIRECT receive: the record payload copies straight from the
+            // queue segments into the caller's iovecs (inside the receive
+            // phase — the reference's recv_actor shape). No bounce buffer,
+            // no second copy.
+            crate::net::unix::unix_recvmsg_user_ctl(&usock, &iovs, nonblock, deadline)
+        };
+        let r = match r {
+            Ok(rr) => rr,
             Err(e) => {
                 crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_RECV_NS, ur_t_recv);
                 if e == -11 {
@@ -3478,39 +3524,12 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         };
         crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_RECV_NS, ur_t_recv);
         crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_OK_N);
-        // Scatter data back to iovecs (the sec-r1 kernel snapshot — the
-        // addresses below are the validated ones, not a re-fetch).
-        let ur_t_cout = crate::dfx::unixrd::now();
-        let mut offset = 0usize;
-        for &(iov_base, iov_len) in &iovs {
-            if offset >= r.len {
-                break;
-            }
-            let copy_len = core::cmp::min(iov_len, r.len - offset);
-            if copy_len > 0 {
-                // SAFETY: iov_base validated with access_ok at snapshot time.
-                let uncopied = unsafe {
-                    crate::arch::uaccess::copy_to_user(
-                        iov_base as *mut u8,
-                        buf.as_ptr().add(offset),
-                        copy_len,
-                    )
-                };
-                if uncopied > 0 {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
-                    return if offset > 0 { offset as i64 } else { -(errno::EFAULT as i64) };
-                }
-                offset += copy_len;
-            }
-        }
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
         // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
         // write the cmsg chain. Credentials are emitted only when the
-        // RECEIVING socket has SO_PASSCRED — Linux unix_{dgram,stream}
-        // gate the whole cred emission on the receiver's flag (the
-        // sender-side snapshot is unconditional; see the enqueue site in
-        // net::unix). hilogd's stats-query path requires it.
+        // RECEIVING socket has SO_PASSCRED — the reference gates the whole
+        // cred emission on the receiver's flag (the sender-side snapshot is
+        // unconditional; see the enqueue site in net::unix). hilogd's
+        // stats-query path requires it.
         let ur_t_cmsg = crate::dfx::unixrd::now();
         let emit_cred = if usock.options.lock().passcred {
             r.cred
@@ -3576,6 +3595,17 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
         return r.len as i64;
     }
+
+    // Allocate receive buffer
+    // unixrd probe: the kernel bounce buffer is a per-call heap
+    // allocation the reference never pays (skb_copy_datagram_* copies
+    // skb->user directly) — bracket it + count the byte request. Only the
+    // non-unix families reach here now (the unix non-peek receive copies
+    // direct-to-user; the unix peek allocates its own bounce above).
+    let ur_t_alloc = crate::dfx::unixrd::now();
+    let mut buf = alloc::vec![0u8; total_buf_len];
+    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_ALLOC_NS, ur_t_alloc);
+    crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
 
     // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
     // source address = kernel sockaddr_nl.

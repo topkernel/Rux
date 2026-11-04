@@ -900,6 +900,258 @@ fn sock_recv_ready(sock: &UnixSocket) -> bool {
 }
 
 // ============================================================================
+// recvmsg direct-to-user receive (reference skb_copy_datagram_msg shape)
+// ============================================================================
+
+/// Cursor over the caller's user iovec list (the syscall layer's
+/// access_ok-validated snapshot — sec-r1): writes kernel slices into the
+/// iovecs in order, across iov boundaries.
+struct UserIovCursor<'a> {
+    iovs: &'a [(usize, usize)],
+    idx: usize,
+    off: usize,
+}
+
+impl<'a> UserIovCursor<'a> {
+    fn new(iovs: &'a [(usize, usize)]) -> Self {
+        Self { iovs, idx: 0, off: 0 }
+    }
+
+    /// Copy `src` into the iovec list from the current cursor. Returns the
+    /// bytes landed and whether a user-page fault truncated the copy. A
+    /// faulting tail is reported, never unwound — the caller decides the
+    /// consume/keep split (same contract as the reference's
+    /// skb_copy_datagram_msg: it reports the error, the skb bookkeeping
+    /// happens at the call site).
+    fn write(&mut self, mut src: &[u8]) -> (usize, bool) {
+        use crate::arch::uaccess::copy_to_user;
+        let mut good = 0usize;
+        while !src.is_empty() {
+            // Skip empty / exhausted iovecs.
+            while self.idx < self.iovs.len() && self.off >= self.iovs[self.idx].1 {
+                self.idx += 1;
+                self.off = 0;
+            }
+            if self.idx >= self.iovs.len() {
+                break; // iovec list exhausted — caller handles the tail
+            }
+            let (base, len) = self.iovs[self.idx];
+            let n = (len - self.off).min(src.len());
+            // SAFETY: base was access_ok-validated for `len` bytes at
+            // snapshot time; we write at most len bytes from base+off.
+            let uncopied =
+                unsafe { copy_to_user((base + self.off) as *mut u8, src.as_ptr(), n) };
+            let landed = n - uncopied;
+            good += landed;
+            self.off += landed;
+            src = &src[landed..];
+            if uncopied > 0 {
+                return (good, true);
+            }
+        }
+        (good, false)
+    }
+}
+
+/// One direct-to-user receive attempt (no bounce buffer, no blocking):
+/// DGRAM/SEQPACKET pop the record, drop the queue lock, then copy
+/// seg -> user (reference __unix_dgram_recvmsg: __skb_try_recv_datagram
+/// dequeues BEFORE the copy; a copy fault drops the record and reports
+/// EFAULT). STREAM drains segment by segment, copying each with the queue
+/// lock RELEASED (a user-page fault must never resolve under the
+/// recv_queue spinlock — the reference runs its copy under the sleepable
+/// u->iolock, never under the queue lock), keeping a partially-consumed
+/// tail queued for the retry (reference unix_stream_read_generic:
+/// UNIXCB(skb).consumed advances, the skb stays until fully drained).
+/// Ancillary data rides first-touch exactly like unix_recv.
+fn unix_recvmsg_user(
+    sock: &Arc<UnixSocket>,
+    iovs: &[(usize, usize)],
+    total: usize,
+) -> Result<UnixRecvResult, i32> {
+    match sock.kind {
+        UnixKind::Dgram | UnixKind::Seqpacket => {
+            let popped = {
+                let mut q = sock.recv_queue.lock();
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            };
+            let Some(seg) = popped else {
+                return unix_recvmsg_empty_tail(sock);
+            };
+            // Copy OUTSIDE the queue lock (fault discipline above).
+            let orig_len = seg.data.len();
+            let take = orig_len.min(total);
+            let mut cur = UserIovCursor::new(iovs);
+            let (good, faulted) = cur.write(&seg.data[..take]);
+            if faulted {
+                // Reference __unix_dgram_recvmsg: skb_copy_datagram_msg
+                // error -> out_free — the record is consumed, the data is
+                // lost, EFAULT is reported.
+                return Err(-14);
+            }
+            // Record consumed: reference wakes the receive queue's
+            // peer_wait ONCE per freed record (wq_has_sleeper-guarded).
+            sock.peer_wait.wake_up_one();
+            // Peer writability rose (EPOLLOUT edge — see unix_recv).
+            if let Some(peer) = sock.peer_arc() {
+                let fid = peer.file_id.load(Ordering::Acquire);
+                if fid != 0 {
+                    crate::syscall::misc::epoll_notify_file(fid);
+                }
+            }
+            Ok(UnixRecvResult {
+                len: take,
+                orig_len,
+                src: seg.src,
+                files: seg.files,
+                cred: seg.cred,
+                truncated: take < orig_len,
+            })
+        }
+        UnixKind::Stream => {
+            let mut cur = UserIovCursor::new(iovs);
+            let mut written = 0usize;
+            let mut files: Vec<Arc<File>> = Vec::new();
+            let mut cred: Option<UnixCred> = None;
+            let mut src: Option<Arc<str>> = None;
+            let mut drained_any = false;
+            let mut fault_tail = false;
+            loop {
+                let popped = {
+                    let mut q = sock.recv_queue.lock();
+                    let seg = q.segs.pop_front();
+                    if let Some(sg) = seg.as_ref() {
+                        q.charge -= sg.charge;
+                    }
+                    seg
+                };
+                let Some(mut seg) = popped else {
+                    break;
+                };
+                drained_any = true;
+                // Charge just dropped: reference consume_skb -> sock_wfree
+                // -> unix_write_space per consumed skb (nr_exclusive = 1) —
+                // ONE parked sender per freed segment off our peer_wait.
+                sock.peer_wait.wake_up_one();
+                // First-touch ancillary pickup (see unix_recv).
+                files.extend(seg.files.drain(..));
+                if cred.is_none() {
+                    cred = seg.cred.take();
+                } else {
+                    seg.cred = None;
+                }
+                if src.is_none() {
+                    src = seg.src.take();
+                } else {
+                    seg.src = None;
+                }
+                let want = total - written;
+                let take = seg.data.len().min(want);
+                let (good, faulted) = cur.write(&seg.data[..take]);
+                written += good;
+                if faulted {
+                    // Stream fault: keep the unconsumed tail queued for the
+                    // retry (same contract as the read(2) direct drain);
+                    // the landed prefix stays consumed.
+                    push_back_remainder(sock, seg.data, good, None);
+                    fault_tail = true;
+                    break;
+                }
+                if take < seg.data.len() {
+                    // Buffer filled mid-segment: remainder stays queued
+                    // (fds already delivered — first-touch semantics).
+                    push_back_remainder(sock, seg.data, take, None);
+                    break;
+                }
+                if written >= total {
+                    break;
+                }
+            }
+            if drained_any {
+                // Sender-side readiness: the reference's write_space fires
+                // on the SENDER's sk_sleep (its parked pollers/readers).
+                if let Some(peer) = sock.peer_arc() {
+                    peer.wait_queue.wake_up_one();
+                    let fid = peer.file_id.load(Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
+                }
+            }
+            if written == 0 {
+                if fault_tail {
+                    return Err(-14); // EFAULT — nothing landed
+                }
+                return unix_recvmsg_empty_tail(sock);
+            }
+            if fault_tail {
+                // Partial success with a faulting tail: report what landed
+                // (reference unix_stream_read_generic: `copied` so far).
+            }
+            Ok(UnixRecvResult {
+                len: written,
+                orig_len: written,
+                src,
+                files,
+                cred,
+                truncated: false,
+            })
+        }
+    }
+}
+
+/// Empty-queue tail shared by the direct path's kinds (mirror of
+/// unix_recv's tail): EOF, ENOTCONN, or EAGAIN.
+fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32> {
+    if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
+        return Ok(unix_recv_eof());
+    }
+    match sock.kind {
+        UnixKind::Stream | UnixKind::Seqpacket => {
+            let state = *sock.state.lock();
+            if state == UnixState::Unconnected || state == UnixState::Listening {
+                return Err(-107); // ENOTCONN
+            }
+        }
+        UnixKind::Dgram => {}
+    }
+    Err(-11) // EAGAIN
+}
+
+/// Blocking direct-to-user recvmsg engine (the recvmsg twin of
+/// unix_recv_ctl): try unix_recvmsg_user, on EAGAIN wait on the socket's
+/// data-arrival queue with the kind's reference exclusivity and retry.
+/// The caller passes its validated iovec snapshot; no bounce buffer is
+/// ever allocated.
+pub fn unix_recvmsg_user_ctl(
+    sock: &Arc<UnixSocket>,
+    iovs: &[(usize, usize)],
+    nonblock: bool,
+    deadline: Option<u64>,
+) -> Result<UnixRecvResult, i32> {
+    let total: usize = iovs.iter().map(|&(_, l)| l).sum();
+    loop {
+        match unix_recvmsg_user(sock, iovs, total) {
+            Ok(r) => return Ok(r),
+            Err(e) if e != -11 => return Err(e),
+            Err(_) => {}
+        }
+        if nonblock {
+            return Err(-11);
+        }
+        let s = sock.clone();
+        // Same wait shape as unix_recv_ctl (DGRAM/SEQPACKET readers
+        // EXCLUSIVE, STREAM readers non-exclusive — reference parity).
+        let exclusive = !matches!(s.kind, UnixKind::Stream);
+        unix_wait_round(&s.wait_queue, exclusive, &|| sock_recv_ready(&s), deadline)?;
+    }
+}
+
+// ============================================================================
 // Socket operations
 // ============================================================================
 
