@@ -2203,7 +2203,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     if epfd < 0 {
         return -(errno::EBADF as i64);
     }
-    if events_ptr.is_null() || maxevents <= 0 || maxevents > 1024 {
+    if events_ptr.is_null() || maxevents <= 0 {
         return -(errno::EINVAL as i64);
     }
 
@@ -2242,10 +2242,14 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
 
         // Allocation discipline (s2-a review finding P2): these scratch
         // buffers were allocated UNDER the entries lock on every wake
-        // round; hoisted out and reused. maxevents is validated (1..=
-        // EPOLL_MAX_EVENTS) so the capacity is bounded.
+        // round; hoisted out and reused. The reference has NO small
+        // maxevents cap (EP_MAX_EVENTS = INT_MAX/sizeof); readiness is
+        // bounded by the INTEREST COUNT, not maxevents, so the capacity
+        // is clamped for allocation safety and the Vec grows if a huge
+        // interest set ever exceeds it.
+        let alloc_cap = (maxevents as usize).min(4096);
         let mut ready_events: alloc::vec::Vec<EPollEvent> =
-            alloc::vec::Vec::with_capacity(maxevents as usize);
+            alloc::vec::Vec::with_capacity(alloc_cap);
         let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> = alloc::vec::Vec::new();
         let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
         loop {
