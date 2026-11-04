@@ -2578,6 +2578,22 @@ unsafe fn __schedule() {
             let voluntary_sleep = prev_state.is_sleeping()
                 || prev_state.contains(TaskState::STOPPED);
             if !voluntary_sleep || holdout != 0 {
+                // r10 (lmbench strand handoff): a VOLUNTARY sleeper with
+                // a real preempt-class holdout is the definitive leak
+                // moment — its wait loop now degenerates into an
+                // unpreemptible poll, its slot keeps naming it (curr_on)
+                // and every later wake is refused (why=c). Name the
+                // outermost acquire site of that holdout directly
+                // (dfx=leakhunt-gated; IRQs are off but the report is
+                // direct-console, GRQ NOT held here — printk would also
+                // work, keep it raw for the IRQ-off window).
+                if voluntary_sleep && holdout != 0 {
+                    crate::dfx::leakorigin::report_outermost(
+                        b"PARK-REFUSED-ORIGIN",
+                        prev,
+                    );
+                }
+                crate::arch::cpu::restore_irq(flags);
                 (*prev).set_state(TaskState::new(TaskState::RUNNING));
                 crate::sched::dequeue_if_enqueued(&*prev);
                 return;
@@ -4577,14 +4593,33 @@ pub fn wake_up_enqueue_opt(
                         if curr_on {
                             putchar(b'c');
                         }
+                        putchar(b'\n');
+                        // r10 (lmbench lat_udp/bw_tcp strand handoff): the
+                        // why=c refusal is exactly the shape the heal's
+                        // origin report exists for — a task still carrying
+                        // a nonzero count whose release never ran — but
+                        // the heal branch above (which prints ORIGIN) is
+                        // SKIPPED for curr_on victims, so the producer was
+                        // invisible precisely on the permanent-strand
+                        // family. Report the outermost acquire site here
+                        // too (dfx=leakhunt-gated, own 200-line budget,
+                        // still direct-console: GRQ held).
+                        if curr_on {
+                            crate::dfx::leakorigin::report_outermost(
+                                b"WAKE-SKIP-ORIGIN",
+                                task,
+                            );
+                        }
                         // Lost-park census tail (dfx=lostpark): when the
-                        // refusal is curr_on AND nothing is runnable
-                        // anywhere, name the lying slot's CPU + writer tag
-                        // and the victim's full ownership word — the
-                        // wedged-park signature (a satisfiable sleeper no
-                        // wake can reach).
+                        // refusal is curr_on, name the lying slot's CPU +
+                        // writer tag and the victim's full ownership word —
+                        // the wedged-park signature (a satisfiable sleeper
+                        // no wake can reach). r10: the rq_load()==0 gate is
+                        // dropped — the lmbench lat_udp/bw_tcp strand keeps
+                        // its peer looping (rq_load>0) while the UDP server
+                        // is refused forever, so the empty-queue-only form
+                        // never fired on exactly the family it hunts.
                         if curr_on
-                            && grq_guard.rq_load() == 0
                             && crate::dfx::switches::enabled(
                                 crate::dfx::switches::DfxSwitch::LostParkTrace,
                             )
