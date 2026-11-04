@@ -1109,3 +1109,69 @@ Rig notes: 16550 RX FIFO drops long serial-fed lines (dribble fixed);
 serial RX itself can die mid-delivery with ticks alive (logged for the
 interrupts domain); kill10 d8 output to a shared file is stale-buffer
 garbage — console-direct (line-buffered) is the readable channel.
+
+## Round 10 (2026-11-04) — ftest03 decoded (budget-blown convoy, NOT a
+## data race; mutex optimistic-spin producer); rlimits irqsave fix (tick
+## self-deadlock = a real both-CPU freeze class); OH wedge-rate A/B table
+
+1. ftest03 (LTP r24 handoff, adjudicated REAL but re-classified):
+   - A/B reproduced 4/4 deterministic (tip FAIL 2/2, 1bde7490-mutex
+     PASS 2/2, ltpscan 30s-budget isolation, private stress rootfs).
+   - The children do NOT fail data checks: ZERO "bad verify" lines on
+     any failing boot. The failure chain is 30s-budget TERM ->
+     ftest03 parent term() fan-out -> still-running children take the
+     TBROK-unlink exit (nonzero) -> "Test{N} failed, expected 0 exit".
+     With a 120s budget the REAL binary PASSES on the tip kernel.
+   - Producer RE-ATTRIBUTED: 1bde7490's mutex.rs ALREADY carries the
+     da166982 recursion-arm gates; the swap reverted the optimistic-
+     spin rework (4x64 -> 100x64 + need_resched, merged e264a64b from
+     code-review-perf). That rework dropped the reference's
+     holder-on-CPU guard (mutex_spin_on_owner / owner->on_cpu): under
+     the fs biglock convoy (5-6 tasks, SMP2, ms sections through
+     jbd2) spinners burned full budgets against descheduled holders,
+     starving the holder. ft03probe (clone with HEART timestamps):
+     14s (old spin) -> 95s (rework) -> 13s (rework + holder-on-CPU
+     guard, committed 1784be54). Real ftest03 under budget: PASS 2/2.
+   - WAKE-HEAL-SKIP floods and the virtio "out-of-order completion"
+     witness fire on PASSING boots too — concomitant, not causal.
+   - pbench gate class (KVM smp2 2G, vs SP-7 anchor): p2_ctxsw 1.292
+     (anchor 1.242, +4.0%), p1_null 0.300 (0%), p3b 8.055 (-0.2%),
+     p6_append 5.44 (+4.8%), p6_unlink 48.9 (-10.5%); A-vs-C same-rig
+     p2 delta +1.2% — ctx-switch win preserved, all rows in band.
+2. rlimits tick self-deadlock (committed 3b352cf6): scheduler_tick
+   reads current's RLIMIT_CPU via lock_irqsave; sys_poll's NOFILE
+   bound and __send_signal's SIGPENDING check took the same per-task
+   spinlock PLAIN — a self-targeted holder interrupted by its own
+   tick spins forever at IF=0. Evidence: the OH A/B joint-run
+   DEADLOCK-spin class — pw-5 (byte-identical rebuild): cpu1 >1400s
+   at Task::rlimit+0x89 on two per-task locks (0x...ab2f4b8 /
+   0x...a3db4b8), cpu0 joining at the end; cg-1's 761-print storm is
+   the same lock-offset class. This is a REAL both-CPU interrupt
+   freeze family (NMI-only survivors) — kill10 face-2's shape, though
+   the k10 workload itself never printed DEADLOCK (its signals are
+   non-RT, no poll), so face-2 proper remains open with the ring.
+3. OH wedge-rate A/B (5v5 interleaved, same recipe/host):
+   - cg26b: 4/5 full ladder (bundles.ready 91-94s, create 60-63s,
+     startUser 91-94s); 1/5 wedge (cg-1 DEADLOCK-spin storm from 41s).
+     All 5 carry >=1 full-roll TXN strand (maxexec 1462-1486s) — the
+     pre-existing wedge family persists but does not block the ladder.
+   - pollwake (491ebc09): 0/5 ladder; 3/5 frozen pre-bootanimation
+     (pw-2/4: single FFRT park at ~5-6s anywoken=0 run=0; pw-5: that
+     park PLUS the terminal both-CPU rlimit spin); pw-1/3 reached
+     ba_ready ~11s but no bundles.
+   - VERDICT: pollwake does NOT reduce the wedge rate — it is
+     categorically worse under this recipe (0/5 vs 4/5 ladder; 3/5 vs
+     0/5 pre-ba freeze). The FFRT/samgr park family is unchanged
+     between kernels; do not merge pollwake on wedge-reduction
+     grounds. (Note: the pw-5 freeze mechanism (rlimit) is fixed on
+     our branch; the OH-side kernel predates the fix.)
+4. kill10 r10a re-hunt (post both fixes): first-run hang (face 1,
+   r9-decoded signal-loss) still present; loops 2-7 rc=0; ZERO freeze
+   dumps, ZERO DEADLOCK prints — no new class from today's changes.
+5. r9 freeze-capture re-adjudication: ALL r9 "FREEZE-WATCH" stalls
+   (r9a-e) were face-1 PARKS, not interrupt freezes — the TICKARM-RING
+   seq advanced ~200 events/s across every stall window (ticks alive
+   on both CPUs) and the dumped CPU sat HALT=1 (idle) with IF=1 at a
+   stable idle-halt RIP. True face-2 (both-CPU interrupt freeze) did
+   not occur in any of the 11 r9 hunt boots; the ring + HRES-OVERDUE
+   instruments remain armed for the next recurrence.
