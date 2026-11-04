@@ -115,8 +115,42 @@ while true; do
 done
 '''
 
+# cg35: thread-syscall census over the wedge-critical comms (1s sweeps).
+# Emits "T uptime comm tgid tid nr arg0 arg1 wchan" for EVERY thread of
+# the watched comms — the positive-space B-side for our task dumps.
+TSCEN_SH = r'''
+(while true; do
+  for p in /proc/[0-9]*; do
+    C=$(cat $p/comm 2>/dev/null) || continue
+    case "$C" in
+      samgr|foundation|memmgrservice|bluetooth_servi|telephony|\
+mmi_uinput_serv|installs|hilogd|el5_filekey_man|time_service|\
+huks_service|render_service|inputmethod_ser|resource_schedu|\
+storage_daemon|storage_manager|audio_server|media_service) echo $p ;;
+    esac
+  done > /data/local/tmp/fxpids2
+  sleep 5
+done) &
+while true; do
+  T=$(cut -d. -f1 /proc/uptime)
+  for p in $(cat /data/local/tmp/fxpids2 2>/dev/null); do
+    C=$(cat $p/comm 2>/dev/null) || continue
+    for t in $p/task/[0-9]*; do
+      R=$(cat $t/syscall 2>/dev/null) || continue
+      TC=$(cat $t/comm 2>/dev/null)
+      W=$(cat $t/wchan 2>/dev/null)
+      set -- $R
+      nr=${R%% *}
+      if [ "$nr" = "running" ]; then echo "T $T $C ${p##*/} ${t##*/} $TC run - $W"; else echo "T $T $C ${p##*/} ${t##*/} $TC $nr $2 $3 $W"; fi
+    done
+  done
+  sleep 1
+done
+'''
+
 poller = None
 fast = None
+tscen = None
 ftrace = None
 connected = None
 maps_snap = 0
@@ -153,6 +187,18 @@ while True:
                 [HDC, "-t", f"127.0.0.1:{HDCPORT}", "shell", FAST_SH],
                 stdout=open(f"{OUTDIR}/fast.tsv", "w"), stderr=subprocess.DEVNULL)
             print("[fuxref] fast poller started", flush=True)
+        # cg35 thread-syscall census (mission-2 B-side): 1s sweeps over
+        # the wedge-critical comms recording EVERY thread's current
+        # syscall nr + first args + wchan — the mirror of our kernel's
+        # txn-hang-20s task dump. Shows what the reference's samgr/
+        # foundation OS_IPC+FFRT threads sit in across the boot (idle
+        # binder read vs epoll vs futex), so the OURS-ONLY park family
+        # has a positive-space comparison, not just absence.
+        if tscen is None and os.environ.get("THCENSUS", "1") == "1":
+            tscen = subprocess.Popen(
+                [HDC, "-t", f"127.0.0.1:{HDCPORT}", "shell", TSCEN_SH],
+                stdout=open(f"{OUTDIR}/tscen.tsv", "w"), stderr=subprocess.DEVNULL)
+            print("[fuxref] thread-syscall census started", flush=True)
         if ftrace is None:
             # tracefs route: enumerate the ACTUAL futex events (the fx2
             # lesson: "futex" in the ls ERROR text false-positived and
@@ -210,7 +256,7 @@ if ftrace:
     except Exception as e:
         print(f"[fuxref] ftrace pull failed: {e}", flush=True)
 if poller or fast:
-    for pp in (poller, fast):
+    for pp in (poller, fast, tscen):
         if pp: pp.kill()
 try:
     proc.terminate()
