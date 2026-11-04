@@ -658,7 +658,15 @@ pub fn futex_stuck_census() {
             };
             if let Some((task, uaddr, mm, age, woken)) = entry {
                 total += 1;
-                if stuck.len() < 32 {
+                // u2v1 blind-spot fix: the old 32-sample cap filled with
+                // whichever buckets hashed FIRST (the benign-cycle waiters)
+                // — a wedged samgr's parks (the whole point of the census)
+                // sat in later buckets, below the cap, invisible to the
+                // wedge-full burst (u2v1: 357 FUX-STUCK-FULL rows for
+                // sharing_service, ZERO rows for samgr tgid=329). 64
+                // samples + a 192-walk cap still bound the 1 Hz cost while
+                // covering the wedge window's park map.
+                if stuck.len() < 64 {
                     stuck.push(Stuck {
                         task,
                         uaddr,
@@ -699,8 +707,8 @@ pub fn futex_stuck_census() {
                         u2v3_off: 0,
                         u2v3_cls: b'-',
                     });
-                } else if total > 64 {
-                    // Sample cap reached with clear headroom — stop the
+                } else if total > 192 {
+                    // Walk cap reached with clear headroom — stop the
                     // walk (the SUM line carries the truncation).
                     drop(h);
                     break 'buckets;
@@ -1245,11 +1253,17 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
-        // 37th: caller-chain anchors (offset-only — the host has the
-        // identical image and symbolizes base+off per library).
+        // 37th: caller-chain anchors — uret[2]/uret[3] decoded through the
+        // same VMA machinery (offset-only; the host has the identical
+        // .so). printk_ln truncates at RECORD_TEXT_SIZE (256) and the main
+        // row is already at the ceiling, so the new payload rides a
+        // CONTINUATION row (the TXN-HANG-STK pattern) instead of the main
+        // line. Emitted only when a caller frame actually decoded — the
+        // benign park classes (stack-top waits, no u2v) print nothing.
+        let mut u2v_cont = alloc::string::String::new();
         if g.rep_u2v2_ok {
             let _ = write!(
-                u2v_s,
+                u2v_cont,
                 " u2v2={:#x}+{:#x}{}",
                 g.rep_u2v2_start,
                 g.rep_u2v2_off,
@@ -1258,11 +1272,28 @@ pub fn futex_stuck_census() {
         }
         if g.rep_u2v3_ok {
             let _ = write!(
-                u2v_s,
+                u2v_cont,
                 " u2v3={:#x}+{:#x}{}",
                 g.rep_u2v3_start,
                 g.rep_u2v3_off,
                 g.rep_u2v3_cls as char
+            );
+        }
+        if !u2v_cont.is_empty() || (g.rep_uret_n > 0 && g.rep_u2v_ok) {
+            // Same parser discipline as the main row: (tgid, tid, uaddr)
+            // key so host-side extractors can join the two records.
+            crate::pr_warn!(
+                "FUX-STUCK-U2V tgid={} tid={} uaddr={:#x}{}{}uret={} thr[run={} futex={} int={} unint={}]",
+                g.tgid,
+                g.rep_tid,
+                g.uaddr,
+                u2v_s,
+                u2v_cont,
+                uret_s,
+                h.map(|h| h.run).unwrap_or(0),
+                h.map(|h| h.futex).unwrap_or(0),
+                h.map(|h| h.int_other).unwrap_or(0),
+                h.map(|h| h.unint).unwrap_or(0),
             );
         }
         // comm_str discipline (task.rs): arbitrary bytes, lossy-decode —
@@ -1273,8 +1304,12 @@ pub fn futex_stuck_census() {
             .position(|&c| c == 0)
             .unwrap_or(g.rep_comm.len());
         let comm_s = alloc::string::String::from_utf8_lossy(&g.rep_comm[..comm_len]);
+        // Main row: parser contract fields only (u2vbank.py reads through
+        // "u2v= u2v=<value>"); the raw uret words + tgidthr counters ride
+        // the FUX-STUCK-U2V continuation above (the 256-byte printk record
+        // cannot hold the old tail plus the caller-chain anchors).
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={}",
             match marker {
                 1 => "-FRESH",
                 2 => "-FULL",
@@ -1301,11 +1336,6 @@ pub fn futex_stuck_census() {
             g.rep_uvma_off,
             vmx,
             u2v_s,
-            uret_s,
-            h.map(|h| h.run).unwrap_or(0),
-            h.map(|h| h.futex).unwrap_or(0),
-            h.map(|h| h.int_other).unwrap_or(0),
-            h.map(|h| h.unint).unwrap_or(0),
         );
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
@@ -1320,7 +1350,7 @@ pub fn futex_stuck_census() {
             "FUX-STUCK-SUM stuck_total={} printed={} (sampled {})",
             total,
             printed,
-            32
+            64
         );
     }
 }
