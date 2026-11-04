@@ -59,15 +59,21 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         stats.tx_bytes += skb.len as u64;
     }
 
+    let len = skb.len as u32;
     let mut backlog = LO_BACKLOG.lock_irqsave();
     if backlog.len() >= LO_BACKLOG_MAX {
         drop(backlog);
         let mut stats = LO_STATS.write();
         stats.tx_dropped += 1;
+        // net:lo_xmit (r13 lat_udp strand hunt): the backlog-cap drop
+        // produces no other trace event anywhere — this record is the
+        // only witness that the datagram left the sender at all.
+        crate::trace::trace_net_lo_xmit(len, LO_BACKLOG_MAX as u32, -105);
         // skb's Drop impl releases the buffer.
         return -105; // ENOBUFS
     }
     backlog.push_back(skb);
+    let depth = backlog.len() as u32;
     drop(backlog);
     // Loopback has no IRQ line: raise the NetRx softirq so the next
     // irq_exit (e.g. the timer tick at HZ=100) or ksoftirqd drains the
@@ -75,6 +81,7 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
     crate::interrupt::softirq::raise_softirq(
         crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
     );
+    crate::trace::trace_net_lo_xmit(len, depth, 0);
     0
 }
 

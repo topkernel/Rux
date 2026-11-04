@@ -963,6 +963,126 @@ tracepoints! {
             args[8] as i64, args[9] as i32
         )
     };
+
+    /// net:udp_deliver — one record per datagram entering the UDP
+    /// delivery scan (udp_rcv), with the OUTCOME: the protocol slot the
+    /// datagram was queued to (-1 = no matching socket, -2 = receive
+    /// budget exhausted — dropped), the addressing that drove the match,
+    /// and the queue length after. The r13 lat_udp strand hunt's hop 1:
+    /// the last visible kernel evidence on stranding boots was the
+    /// delivery of the echo to the parked ping child's socket; this
+    /// event makes every delivery visible without a print budget.
+    EVENT_NET_UDP_DELIVER / net_udp_deliver_fmt / trace_net_udp_deliver :
+        "net", "udp_deliver", 32,
+    print: "\"fd=%d dport=%u sport=%u qlen=%u\", REC->fd, REC->dport, REC->sport, REC->qlen",
+    fields: "\tfield:int fd;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned short dport;\toffset:12;\tsize:2;\tsigned:0;\n\
+             \tfield:unsigned short sport;\toffset:14;\tsize:2;\tsigned:0;\n\
+             \tfield:unsigned int qlen;\toffset:16;\tsize:4;\tsigned:0;\n",
+    call (fd: i32, dport: u16, sport: u16, qlen: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "fd={} dport={} sport={} qlen={}",
+            args[0] as i32, args[1] as u16, args[2] as u16, args[3] as u32
+        )
+    };
+
+    /// net:udp_wake — one record per VFS socket woken by a UDP delivery
+    /// (wake_udp_socket → wake_udp_matches): the protocol slot, how many
+    /// VFS sockets matched it, whether the socket's wait queue had
+    /// sleepers (the lock-free waiters counter — 0 means the wake call
+    /// returned on the empty fast path without touching a queue), and
+    /// how many tasks wake_up_all reports as actually woken. The r13
+    /// hunt's hop 2: distinguishes "wake never addressed" (matched=0 /
+    /// sleepers=0) from "wake addressed but accomplished nothing"
+    /// (sleepers>0, woken=0 — the silently dropped class).
+    EVENT_NET_UDP_WAKE / net_udp_wake_fmt / trace_net_udp_wake :
+        "net", "udp_wake", 33,
+    print: "\"fd=%d matched=%u sleepers=%u woken=%u\", REC->fd, REC->matched, REC->sleepers, REC->woken",
+    fields: "\tfield:int fd;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int matched;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int sleepers;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int woken;\toffset:20;\tsize:4;\tsigned:0;\n",
+    call (fd: i32, matched: u32, sleepers: u32, woken: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "fd={} matched={} sleepers={} woken={}",
+            args[0] as i32, args[1] as u32, args[2] as u32, args[3] as u32
+        )
+    };
+
+    /// net:lo_xmit — one record per loopback transmit: payload length,
+    /// backlog depth after the push (or at the drop), and the return
+    /// code (0 queued, -105 ENOBUFS backlog full). The r13 hunt's hop 0:
+    /// the echo's entire wire journey is the loopback backlog → NetRx
+    /// softirq → udp_rcv chain; a datagram dropped at the backlog cap
+    /// produces no other event anywhere.
+    EVENT_NET_LO_XMIT / net_lo_xmit_fmt / trace_net_lo_xmit :
+        "net", "lo_xmit", 34,
+    print: "\"len=%u backlog=%u rc=%d\", REC->len, REC->backlog, REC->rc",
+    fields: "\tfield:unsigned int len;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int backlog;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (len: u32, backlog: u32, rc: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "len={} backlog={} rc={}",
+            args[0] as u32, args[1] as u32, args[2] as i32
+        )
+    };
+
+    /// net:sock_wait — the blocking-socket wait engine's rounds
+    /// (socket_wait_round): pid, the protocol slot waited on, the wait
+    /// kind (0 recv, 1 send, 2 accept, 3 connect), the stage (0 = the
+    /// condition re-check AFTER prepare_to_wait, with its ready result;
+    /// 1 = return from schedule()), and for stage 0 the re-check verdict
+    /// (1 = condition met, slept never happened). The r13 hunt's parker
+    /// side: on a strand boot the victim's LAST record must be
+    /// stage=0 ready=0 — parked with the wait entry published — and
+    /// every later udp_wake for its slot with sleepers=0 woken=0
+    /// convicts the queue side; sleepers>0 woken=0 convicts the wake
+    /// drop; sleepers>0 woken=1 with no stage=1 record convicts the
+    /// enqueue-but-never-picked leg.
+    EVENT_NET_SOCK_WAIT / net_sock_wait_fmt / trace_net_sock_wait :
+        "net", "sock_wait", 35,
+    print: "\"pid=%d fd=%d kind=%u stage=%u ready=%u\", REC->pid, REC->fd, REC->kind, REC->stage, REC->ready",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int fd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned char kind;\toffset:16;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned char stage;\toffset:17;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned char ready;\toffset:18;\tsize:1;\tsigned:0;\n",
+    call (pid: i32, fd: i32, kind: u8, stage: u8, ready: u8),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} fd={} kind={} stage={} ready={}",
+            args[0] as i32, args[1] as i32, args[2] as u8, args[3] as u8, args[4] as u8
+        )
+    };
+
+    /// timer:itimer_arm — every ITIMER_REAL arm/disarm (setitimer(2) /
+    /// alarm(2) both land here): pid, the absolute jiffies deadline (0 =
+    /// disarm), the re-arm interval, and whether the kernel timer wheel
+    /// actually accepted the entry (arm_ok=0 is the pool-exhausted
+    /// silent failure — a watchdog that will never fire). The r13 hunt's
+    /// second channel: the lat_udp ping child's alarm(15) SIGALRM
+    /// watchdog never fired on stranding boots; this event separates
+    /// "never armed" / "armed but the wheel lost it" (no SIGALRM in
+    /// signal:signal_generate despite arm_ok=1 and the deadline passing)
+    /// from "fired but the wake was lost".
+    EVENT_TIMER_ITIMER_ARM / timer_itimer_arm_fmt / trace_timer_itimer_arm :
+        "timer", "itimer_arm", 36,
+    print: "\"pid=%d expires=%llu interval=%llu arm_ok=%u\", REC->pid, REC->expires, REC->interval, REC->arm_ok",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned long long expires;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long long interval;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int arm_ok;\toffset:32;\tsize:4;\tsigned:0;\n",
+    call (pid: i32, expires: u64, interval: u64, arm_ok: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} expires={} interval={} arm_ok={}",
+            args[0] as i32, args[1], args[2], args[3] as u32
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker

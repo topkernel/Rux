@@ -897,6 +897,7 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
     if total_usec <= 0 {
         task.itimer_real[0].store(0, core::sync::atomic::Ordering::Release);
         task.itimer_real[1].store(0, core::sync::atomic::Ordering::Release);
+        crate::trace::trace_timer_itimer_arm(pid as i32, 0, 0, 1);
         return;
     }
 
@@ -920,6 +921,17 @@ fn set_itimer_real(interval_sec: i64, interval_usec: i64, value_sec: i64, value_
         crate::signal::Signal::SIGALRM as i32,
         interval_jiffies,
         0,
+    );
+
+    // timer:itimer_arm (r13 lat_udp strand hunt): every ITIMER_REAL arm,
+    // with whether the timer wheel accepted it (arm_ok=0 is the silent
+    // pool-full failure — the watchdog will never fire and nothing else
+    // records why). Fire delivery shows up in signal:signal_generate.
+    crate::trace::trace_timer_itimer_arm(
+        pid as i32,
+        expires,
+        interval_jiffies,
+        (new_timer_id != 0) as u32,
     );
 
     task.itimer_ids[0].store(new_timer_id, core::sync::atomic::Ordering::Release);

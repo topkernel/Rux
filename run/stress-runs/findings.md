@@ -1175,3 +1175,67 @@ garbage — console-direct (line-buffered) is the readable channel.
    stable idle-halt RIP. True face-2 (both-CPU interrupt freeze) did
    not occur in any of the 11 r9 hunt boots; the ring + HRES-OVERDUE
    instruments remain armed for the next recurrence.
+
+## Round 12 (2026-11-04) — pick-gen ledger complete; R49 pick hypothesis
+## REFUTED for lat_udp (pickgen=retired 6/6, LP-OUTCOME woken=1); strand
+## re-pointed: silent wake (recv + alarm) + malloc-corruption marker
+
+Kernel: c6d74e01 (ledger wiring) + f5a78f93 (origin/main r26 merge) +
+6ebf6859 (LP-OUTCOME). Gates: x3 builds rc=0, make test 1306/1306 2x
+(r12-maketest{,2}.log — the 3df3fe17 "wake_up running task (false)"
+row PASS), renameco 300-iter clean (plain=0 chmod=0 rename=0 renchmod=0
+link=0 symlink=0, zero panics; post-run parked-rs HUNG-CTX lines are
+the known cosmetic). Pushed 74f2a977..6ebf6859.
+
+1. PICK-GEN LEDGER (r11 completion, mission 1): publish at the tag-1
+   slot write; retire at every materialization arm (post-context_switch,
+   schedule_tail newborn, repick fast path) + supersede (publish+retire
+   in one breath) at all six heal-side rewrites (R56c/d, steal, abort-
+   republish, idle-heal, R65 guard). Conviction hook at the LP
+   observation: pickgen=LOST needs tag-1 + TASK==slot + unretired >=2
+   jiffies. PICKGEN_LOST census static per CPU.
+2. LIVE VERDICT on the 4/4-class lmbench lat_udp strand (release-opt
+   KVM smp2, run/lmb-rig, r12b/r12c/r12d boots; strand reproduced 2/3):
+   - EVERY lying-slot observation shows pickgen=retired (6/6: r12b
+     pid310 cpu0; r12c pid308 cpu1+cpu0 x2, pid310 cpu1; r12d pid310
+     cpu1). ZERO convictions. The R49 "pick published but never
+     switched in" cascade is REFUTED as this family's producer on the
+     current tree; the r10 "SLOT LIE is the stuck invariant" reading is
+     corrected — the slot names a task whose pick genuinely ran.
+   - LP-WAKE-OUTCOME (6ebf6859): the wake that prints why=c/LP
+     SUCCEEDS — enqueue landed, woken=1 (r12d live capture; that boot
+     completed the benchmark cleanly despite the LP observation). The
+     why=c/why=s refusals are mid-park protocol diagnostics
+     (WAKE-SKIP-ORIGIN osite=sched.rs GRQ-acquire / wait.rs prepare,
+     oage_jif=0), NOT dropped wakes. W2-ENQUEUE-HEAL-REFUSED never
+     fired on any strand boot.
+3. THE STRAND, re-anatomized (both stranding boots agree):
+   - lat_udp ping child (benchmp child of the client, pid 310) parks in
+     recv AFTER a datagram was delivered to its socket ("udp-in ->
+     delivered fd=1" is the LAST packet event) and never wakes; its own
+     alarm(15) SIGALRM watchdog (lat_udp.c doit) NEVER fires — two
+     independent wake channels (socket data + timer) lost with ZERO
+     scheduler-side evidence. Note the whole WHS/LP instrument family
+     gates on pc!=0: the stranding victim's wake is SILENT by
+     construction. Next-round leads: (a) delivery-side wake to an
+     empty/stale wait-queue entry, (b) the unlocked not-sleeping drop
+     at Task::wake_up_impl (task.rs ~3250 — prints nothing), (c)
+     socket_recv_ready's view missing the queued datagram (the
+     connected-UDP filter path — udp-in prints "connected_filters_on").
+   - The ping child dies at TERM in musl malloc get_meta (#GP,
+     rip=0x417e8b in lat_udp, non-canonical chunk-meta pointer, 2/2
+     stranding boots) — a userspace heap-corruption marker (kernel
+     over-write suspect near user buffers in the udp/alloc paths).
+     Separate family; needs its own hunt.
+   - The +0x100 SOFTIRQ pc orphan (SeqLock::write, seqlock.rs:137, the
+     R21-N5 loopback-stats bracket) rides the victims (BIT-ORPHAN
+     prints, sage 1) — known healable class, unchanged this round.
+4. A/B re-run coordination (mission 3): OH 32's post-rlimits-fix rolls
+   double as the cg26b leg (their TASK.md lb386+ series; verdict was
+   0/5-vs-4/5 pre-fix). The pollwake leg is skipped this round: r10
+   adjudicated the FFRT/samgr park family UNCHANGED between kernels
+   (not rlimit-caused), so a single pollwake roll adds no decision
+   power; re-visit if OH's post-fix rolls show the park family gone.
+5. Sweep cadence: renameco 300-iteration clean on the final tree (gates
+   paragraph above); ltplong long-horizon loops remain pending from r10
+   (compaction priority — carry to r13).
