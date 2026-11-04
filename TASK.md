@@ -3752,3 +3752,80 @@ libffrt LOAD 0x66000, libhicollie 0x12000+0x91b7).
    usage if it recurs.
 4. accountmgr rcu-gp-frozen-cpu face fired once (32.6s, pid 908) — keep
    the ea7e4218 dump armed; it self-cleared by 60s.
+
+### 7. Addendum (01:xx-02:0x) — the ABI decode + the named spinners
+
+**Syscall-nr ABI decode (critical for reading every serial line):** the OH
+x86_64 image calls NATIVE x86_64 numbers; x86_compat::translate maps them
+onto the generic table (futex 202->98, recvmsg 47->212, recvfrom 45->207,
+clock_gettime 228->113, epoll_pwait 281->22, timerfd_settime 88->86,
+writev 20->66). Consequences: TXN-HANG "sys=202" = native futex (the
+lastsys latch sits BEFORE translation — the lb59 "futex retry loop"
+reading stands); the syscost per-nr + FLOOD tables record NATIVE nrs
+(their FLOOD_NRS list is native); the SYSCOST-RING / HUNG-SYSRING rows
+record the POST-TRANSLATE generic nr. The sysring has TWO record sites:
+entry (ret=u64::MAX = the -1 rows — an in-flight marker, NOT a failure)
+and exit (real result) — every "ret=-1" row pairs with the next row of
+the same (pid, nr, a0). The u2v4 clock_gettime "50% failures" were just
+entry rows; all exits were ret=0.
+
+**HUNG-SYSRING (u2v4 @181s, first-hung latch):** fired too early (boot
+storm, pre-wedge) — the one-shot latch spent itself; fixed by moving the
+replay into the syscost periodic dump (de217e70, SYSCOST-RING at every
+60s dump). u2v4's tail still named the FFRT timer machinery: pids
+693/694 loop [epoll_pwait(epfd4) + timerfd_settime(fd11) + futex(FPRT
+word)] — THE TIMERFD-STORM CALLER the 4th successor left unnamed
+(entry point 3). u2v5's wedge-phase rings (285/345s): pid 588 = the same
+timer loop with epoll_pwait ret=1 (INSTANTLY readable — the timerfd
+rearm churn), pid 934 = writev/prctl-class traffic. Exits all 0/1 — the
+loop WORKS, it is churning at loop rate (~100-300/s in the ring window),
+not failing.
+
+**The hilogd.server flood is BOOT-VARIANCE, not a constant:** u2v2
+reached 6.25M recvmsg+recvfrom (28k/s each, steady across 105->285s,
+kernel ticks 93%, softirq busy 10s/105s); u2v5 (same kernel family,
+dfx=sysforensic added) ramped to only 78,864 and STOPPED (the reader
+drained the backlog and the producers stopped). The flood = a PRODUCER
+storm (writev 2.3-2.6M/60s on u2v2) consumed by the reader — consume
+rate (28k/s) ~= produce rate (25k/s). The flood table's 16 comm slots
+fill FIRST-SEEN, so the writev producer comms are NOT visible in it
+(u2v2's visible writev slots sum to ~4k vs the 7.1M real calls) — the
+producer identity needs either a bigger flood table or the ring at the
+flood phase (u2v2's flood predates the ring instrument; u2v5's flood
+never ramped). The reference contrast stands: fx8 hilogd.server posture
+= __skb_wait_for_more_packets 72/72 (BLOCKED reader), ours = 28k/s
+EAGAIN-spin when the storm branch is taken.
+
+**Working model (all measurements in this session):** the wedge face =
+FFRT-mutex wait cascade (handlers parked in ffrt::mutexPrivate::wait,
+holders parked mid-critical-section or unreachable); DOWNSTREAM of a
+kernel-capacity face: when the boot takes the log-storm branch, ~90k/s
+kernel-bound socket ops (per-op 9-85us — the 17-72x per-op wall family)
+eat >100% of kernel capacity, starving the cooperative userspace into
+the park cascade. The parked handlers themselves are clean (no retry).
+
+### 8. Next-agent entry points (38th, revised)
+1. **Name the writev flood producers** (the log-storm branch): raise the
+   FLOOD table slots (16 -> 64, cost = one atomic store per tracked nr)
+   or dump the per-task last_syscall counters in the periodic task dump
+   (the task struct already carries last_calls[96]). The flood phase
+   needs catching mid-ramp (u2v2-style boot: early wedge, SA<30).
+2. **The timerfd rearm-churn**: verify our timerfd_settime CLEARS the
+   POLLIN readiness on rearm (Linux does: the expiry is armed fresh; a
+   timerfd only reports when the CURRENT armed deadline expired). Our
+   pid-588/693/694 loop with epoll_pwait ret=1 every iteration is
+   consistent with a stale-readable timerfd. LTP timerfd family is
+   green, so check the REARM path specifically (settime while the old
+   expiry is still pending).
+3. The FFRT-mutex holders: samgr's 7 parkers + 15 stack=1 binder threads
+   (binder-dfx at every uart DUMP!). Extend TXN-HANG to print EVERY
+   stack=1 thread's current sys (not only >=20s txns) so the
+   BWR-parked holders (the futex-census blind spot) surface.
+4. Candidate kernel levers for the per-op wall (the machine-capacity
+   face): the fs/socket op families the perf lane named (open 85us,
+   recvfrom 9us spin cost) — any fix there shrinks the storm's kernel
+   share and deflates the cascade.
+Assets: run/u2v-boot.py (DUMP! driver), run/bzImage-u2v{1,2,3,5}-dbg,
+run/oh-u2v{1..5}-serial.log; kernels: 555ec7d3 (u2v1),
+225d24f5 (u2v2), c77280f6 (u2v3/4), aaabf556 (u2v5). Gates: x3 rc=0 +
+make test ALL PASSED x3 this round; pushed through de217e70.
