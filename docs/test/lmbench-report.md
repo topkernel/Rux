@@ -214,6 +214,33 @@ clean on both. The 150s window is a sharper probe than the standard
 soak and should be adopted by the stress lane with signature
 comparison before any scheduler-structure merge.
 
+## Slow-metric inventory + open/close decomposition (2026-11-04, syscost)
+
+Still-behind rows (fair KVM where available): open/close 1.95x (0.70
+vs 0.36 us), stat 1.68x, read 1.67x, write 1.62x, unix 1.52x, sem
+1.80x (first landing), fork 1.11x, null 1.31x, pagefault 6.45x (11-01
+stale value — not re-landed since; re-measure before believing).
+
+open/close anatomy (syscost rest-sites, 3.44M iterations): the
+allocator is ~106 ns/iteration — CpuLocal::with cli/sti+cpu_id at 27
+ns per access x2 (54 ns) + magazine refill/flush amortization ~32 ns
+(241+265 ns per section at depth 16) + magazine push/pop; close-side
+machinery (fdtable removal + retire park) ~88 ns measured cheap;
+syscall entries 2x55 ns. The lock-free path walk is invisible to
+rest-sites (no cli window) — bounded by subtraction at ~200-250 ns.
+
+MAG_DEPTH 16->32 was measured at -18 ns on open/close (consistent,
+interleaved) but REVERTED: riscv soaks hit intermittent
+allocator-corruption panics 3/4 runs (vs 0/1 base same window) — the
+magazine transient paths (len>MAG_DEPTH handling, two-CPU r8final
+entry) are tuned for 16. Deepening needs a magazine redesign first;
+the comment at the const carries the finding.
+
+Allocation-domain queue (from this data): (a) %gs-based per-cpu
+access to replace CpuLocal::with's cli/sti+cpu_id (54 ns/iter on
+open/close, ~2 ns with a kernel-GS per-cpu base) — the bigger lever;
+(b) magazine depth after the transient-path redesign.
+
 ## Context-switch first-principles audit (2026-11-04, cctx decomposition)
 
 One lat_ctx handoff (1.39-1.42 us at load ~4.5, main kernel, cctx=1
