@@ -972,6 +972,9 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     if is(&TIMERFD_OPS) {
         return Some((timerfd_poll_wait, timerfd_poll_unwait));
     }
+    if is(&super::EVENTFD_OPS) {
+        return Some((eventfd_poll_wait, eventfd_poll_unwait));
+    }
     if is(&SIGNALFD_OPS) {
         return Some((signalfd_poll_wait, signalfd_poll_unwait));
     }
@@ -3201,6 +3204,38 @@ fn timerfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::
     if let Some(ptr) = unsafe { *file.private_data.get() } {
         let tfd = unsafe { &*(ptr as *const TimerFd) };
         tfd.wait_queue.remove(task);
+    }
+}
+
+/// Register `task` on the eventfd's wait queue; eventfd_write (counter
+/// nonzero) and eventfd_read (space freed) both wake_up_all on this same
+/// queue — reference parity for wake_up_poll on the eventfd wqh.
+/// Comprehensive-fix audit 2026-11-04: eventfd was the one fd class OH
+/// polls (FFRT worker signaling rides eventfd+epoll) that was missing
+/// from poll_wait_impls — every poll()/epoll_wait() over an eventfd fell
+/// back to the 10 ms re-check slice (latency plus a full fd-set rescan
+/// per slice per waiter, the same tax the 26th removed for binder).
+fn eventfd_poll_wait(file: &crate::fs::File, task: *mut crate::process::task::Task) -> bool {
+    // SAFETY: the dispatcher identity-checked the File against EVENTFD_OPS;
+    // private_data was installed by sys_eventfd2 as Box::into_raw and stays
+    // valid while the File exists.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return false,
+    };
+    // SAFETY: ptr came from Box::into_raw(EventFd).
+    let efd = unsafe { &*(ptr as *const EventFd) };
+    efd.wait_queue
+        .add(crate::process::wait::WaitQueueEntry::new(task, false));
+    true
+}
+
+/// Remove a registration added by eventfd_poll_wait.
+fn eventfd_poll_unwait(file: &crate::fs::File, task: *mut crate::process::task::Task) {
+    // SAFETY: same contract as eventfd_poll_wait.
+    if let Some(ptr) = unsafe { *file.private_data.get() } {
+        let efd = unsafe { &*(ptr as *const EventFd) };
+        efd.wait_queue.remove(task);
     }
 }
 
