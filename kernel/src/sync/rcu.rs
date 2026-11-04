@@ -149,6 +149,11 @@ pub unsafe fn call_rcu(head: *mut RcuHead) {
 /// user-return path at that single load (perf gate: p1/p2 must not move).
 static RCU_WAITERS: AtomicU32 = AtomicU32::new(0);
 
+/// Consecutive failed grace rounds (reset by any passing round) and the
+/// one-shot latch for the frozen-CPU task dump — see wait_qs_sleepy.
+static GP_CONSEC_FAIL: AtomicU32 = AtomicU32::new(0);
+static GP_DUMPED: AtomicBool = AtomicBool::new(false);
+
 // ============================================================================
 // Public API: quiescent-state reporting
 // ============================================================================
@@ -350,6 +355,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     loop {
         if all_online_cpus_reported(gen) {
             RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            GP_CONSEC_FAIL.store(0, Ordering::Relaxed);
             return true;
         }
         if crate::drivers::timer::get_jiffies() >= deadline {
@@ -382,6 +388,21 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     crate::sched::sched::cpu_online(2),
                     crate::sched::sched::cpu_online(3)
                 );
+            }
+            // Comprehensive-fix residual hunt (2026-11-04, cgf1): a CPU
+            // frozen non-quiescent across MANY consecutive grace budgets
+            // is the wedge-family monopolist (IF=0/preempt-off holder —
+            // its own tick cannot fire, so every tick-side instrument is
+            // blind to it; the 13th/25th cross-CPU-dump prescription).
+            // This waiter runs on ANOTHER CPU in task (syscall) context,
+            // so it can walk the frozen CPU's tasks. One-shot per boot;
+            // fires only after 32 consecutive failed rounds (~1.6s+ of a
+            // frozen CPU at the 50ms fdreap budget) — never on a healthy
+            // boot (a passing grace resets the counter above).
+            if GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1 == 32
+                && !GP_DUMPED.swap(true, Ordering::AcqRel)
+            {
+                crate::dfx::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
             }
             return false;
         }
