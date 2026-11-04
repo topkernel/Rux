@@ -175,12 +175,15 @@ impl UdpSocket {
     /// R24 (MED-9): drop the datagram once the queued byte budget
     /// (UDP_RCVBUF_BUDGET) is exhausted — an unbounded queue let a remote
     /// flooder OOM the kernel heap. Mirrors Linux's sk_rcvbuf drop behavior.
-    pub fn enqueue_packet(&mut self, packet: UdpPacket) {
+    /// Returns whether the datagram was actually queued (false = budget
+    /// drop — net:udp_deliver records fd=-2 for this outcome).
+    pub fn enqueue_packet(&mut self, packet: UdpPacket) -> bool {
         if self.recv_bytes + packet.data.len() > UDP_RCVBUF_BUDGET {
-            return; // receive buffer full — drop
+            return false; // receive buffer full — drop
         }
         self.recv_bytes += packet.data.len();
         self.recv_buffer.push_back(packet);
+        true
     }
 
     /// Dequeue packet from receive buffer
@@ -859,6 +862,8 @@ pub fn udp_rcv6(
     let dest_port = UdpPort::from_be(udp_hdr.dest);
 
     let mut delivered_fd: Option<i32> = None;
+    let mut trace_fd: i32 = -1;
+    let mut trace_qlen: u32 = 0;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
@@ -880,14 +885,19 @@ pub fn udp_rcv6(
                             src_port: src_port,
                             src_addr6: *src6,
                         };
-                        socket.enqueue_packet(packet);
-                        delivered_fd = Some(i as i32);
+                        let queued = socket.enqueue_packet(packet);
+                        trace_fd = if queued { i as i32 } else { -2 };
+                        trace_qlen = socket.recv_buffer.len() as u32;
+                        if queued {
+                            delivered_fd = Some(i as i32);
+                        }
                         break;
                     }
                 }
             }
         }
     }
+    crate::trace::trace_net_udp_deliver(trace_fd, dest_port, src_port, trace_qlen);
 
     if let Some(fd) = delivered_fd {
         crate::net::socket::wake_udp_socket(fd);
@@ -1462,6 +1472,10 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         );
     }
     let mut delivered_fd: Option<i32> = None;
+    // net:udp_deliver outcome fields (captured under the table lock —
+    // the queue length read races the consumer otherwise).
+    let mut trace_fd: i32 = -1;
+    let mut trace_qlen: u32 = 0;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
         // SAFETY: UDP_SOCKET_TABLE is a global accessed under UDP_TABLE_LOCK.
@@ -1489,14 +1503,19 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                             src_port: src_port,
                             src_addr6: crate::net::ipv6::IPV6_ADDR_UNSPECIFIED,
                         };
-                        socket.enqueue_packet(packet);
-                        delivered_fd = Some(i as i32);
+                        let queued = socket.enqueue_packet(packet);
+                        trace_fd = if queued { i as i32 } else { -2 };
+                        trace_qlen = socket.recv_buffer.len() as u32;
+                        if queued {
+                            delivered_fd = Some(i as i32);
+                        }
                         break;
                     }
                 }
             }
         }
     }
+    crate::trace::trace_net_udp_deliver(trace_fd, dest_port, src_port, trace_qlen);
 
     if let Some(fd) = delivered_fd {
         // W3: wake blocking recv waiters on this socket (after the lock).
