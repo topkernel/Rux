@@ -135,7 +135,14 @@ enable_network = true
 # Ethernet MTU
 eth_mtu = 1500
 # TCP socket table size
-tcp_socket_table_size = 64
+# 512 (was 64): the table must hold every concurrent connection (client
+# slots, spawned children, plus the reclamation-eligible dead ends the
+# timer sweep and the under-pressure eviction recycle). lmbench
+# lat_connect's benchmp warmup holds 60+ ESTABLISHED loopback connections
+# at once; a 64-slot table made socket() fail EMFILE and the SYN spawn
+# drop the SYN (the connect then hung until the 1 s retransmit).
+# ~384 B/slot -> ~197 KB.
+tcp_socket_table_size = 512
 # UDP socket table size
 udp_socket_table_size = 64
 # ARP cache size
