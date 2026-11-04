@@ -9183,7 +9183,27 @@ fn binder_thread_read(
                 }
             }
             if r != 0 {
-                return -(EINTR as i64);
+                // Reference parity (binder_thread_read's
+                // wait_event_interruptibleExclusive): propagate the raw
+                // -ERESTARTSYS sentinel — the trap-exit machinery
+                // (signal.rs restart_syscall_no_handler / setup_frame)
+                // either RESTARTS the ioctl transparently (no handler:
+                // rewind rip, restore orig_rax — the parked reader never
+                // observes anything) or converts to EINTR only when a
+                // handler frame is actually built. The old eager -EINTR
+                // conversion was visible to userspace for EVERY signal
+                // touch, and OH's BinderInvoker::StartWorkLoop ABORTS
+                // its work loop on any TransactWithDriver error that is
+                // not ECONNREFUSED/EBADF ("returned unexpected error:-4,
+                // aborting") — each signaled reader thread EXITED, and
+                // the pool drained thread by thread (the 36th's bwr_snap
+                // puzzle: 196 idle samgr readers at the 20s latch, pool
+                // exhausted later with a single handler — the readers
+                // were signal-aborted out of their loops). The reference
+                // kernel's workers persist through signal touches
+                // (fuxref census: samgr 23-24 threads stable across
+                // every 1s sweep, 31s-275s); ours must too.
+                return -512; // -ERESTARTSYS, converted/restarted at exit
             }
         }
 
