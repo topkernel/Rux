@@ -822,6 +822,18 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
 /// Force a switch on/off programmatically (used by tests and the sysrq hook).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
+    // The ported-wave alias (round 2, restored round 3 after the main
+    // merge dropped it): arming a switch with an alias also arms its
+    // reference events and the tracing master, so `dfx=` hunt boots
+    // gain the event timeline without touching their scripts.
+    if on {
+        if let Some(events) = trace_alias(switch) {
+            for e in events.iter() {
+                e.enabled.store(true, Ordering::Relaxed);
+            }
+            crate::trace::set_tracing_on(true);
+        }
+    }
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
     }
