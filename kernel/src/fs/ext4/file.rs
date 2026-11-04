@@ -1381,6 +1381,36 @@ pub fn ext4_file_lseek(
 pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
+    datasync: i32,
+) -> Result<(), i32> {
+    // ext4:ext4_sync_file_enter/exit — the durability point bracket.
+    // Divergence (see the event doc): parent reports 0 (no dentry parent
+    // at hand here); datasync is the VFS entry's flag (fdatasync=1).
+    if crate::trace::EVENT_EXT4_SYNC_FILE_ENTER.armed() {
+        crate::trace::trace_ext4_sync_file_enter(
+            super::dev_id(fs),
+            inode.ino as u64,
+            0,
+            datasync,
+        );
+    }
+    let ret = ext4_sync_file_inner(fs, inode);
+    if crate::trace::EVENT_EXT4_SYNC_FILE_EXIT.armed() {
+        crate::trace::trace_ext4_sync_file_exit(
+            super::dev_id(fs),
+            inode.ino as u64,
+            match ret {
+                Ok(()) => 0,
+                Err(e) => e,
+            },
+        );
+    }
+    ret
+}
+
+fn ext4_sync_file_inner(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
     // Durability point for THIS task's own publications only (per-cookie
     // scoped flush). fsync(F) must persist F's data and the metadata
@@ -2074,6 +2104,20 @@ unsafe fn ext4_buffered_write(
         }
     }
 
+    // ext4:ext4_da_write_begin — fired after the offset resolution (an
+    // O_APPEND write resolves its position here), with the final pos the
+    // reference's write_begin reports. This path defers block allocation
+    // + journaling to the writeback points, so the da_ names are the
+    // honest ones.
+    if crate::trace::EVENT_EXT4_DA_WRITE_BEGIN.armed() {
+        crate::trace::trace_ext4_da_write_begin(
+            super::dev_id(fs),
+            ino,
+            offset as i64,
+            buf.len() as u32,
+        );
+    }
+
     // Pre-write published size: pages starting below it may carry disk
     // content (partial-page fills read them); above it the base is zeros.
     let base_size = sbi.get_size();
@@ -2180,6 +2224,19 @@ unsafe fn ext4_buffered_write(
                 ext4_write_at_core(fs, inode.ino as u32, Some(inode), file_off, true, src, 0)
             };
             if r < 0 {
+                if copied > 0 && crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
+                    // ext4:ext4_da_write_end — partial success (a later
+                    // page's write-through failed after earlier pages
+                    // copied): the reference fires write_end with the
+                    // partial copied count, and so does this arm.
+                    crate::trace::trace_ext4_da_write_end(
+                        super::dev_id(fs),
+                        ino,
+                        offset as i64,
+                        buf.len() as u32,
+                        copied as u32,
+                    );
+                }
                 return if copied > 0 { copied as isize } else { r };
             }
             copied = buf_start + r as usize; // r == want on success
@@ -2209,6 +2266,16 @@ unsafe fn ext4_buffered_write(
         cache.note_dirty_eof(fs_id, ino, published_end);
     }
 
+    // ext4:ext4_da_write_end — the full-copy success return.
+    if crate::trace::EVENT_EXT4_DA_WRITE_END.armed() {
+        crate::trace::trace_ext4_da_write_end(
+            super::dev_id(fs),
+            ino,
+            offset as i64,
+            buf.len() as u32,
+            copied as u32,
+        );
+    }
     copied as isize
 }
 

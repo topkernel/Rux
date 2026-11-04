@@ -21,6 +21,25 @@ main lands, do not cherry-pick rows.
 > `run/evidence/2026-10-30-pa110-tier1-lineage.txt`. Tier-1 was re-banked
 > from this lineage on main@82059759 (pa112tok/pa113tok below); the
 > 2026-10-30 vehicle exception for the aarch64 merge is closed.
+>
+> **Vehicle superseded (2026-11-04, oh-src lane — Tier-1 re-bank on the
+> SEED)**: the tok109 asset was lost in a second host cleanup; the tok
+> lineage is confirmed gone everywhere. Tier-1 now boots the SEED bytes
+> directly (provenance and per-row verdicts in the 2026-11-04 refresh
+> section below). Three findings replace the 2026-10-31 vehicle story:
+> (1) the historical ~49 s storage_manager 4-strike death did NOT
+> reproduce on main@12c5e326 — three of four seed boots ran the full
+> 780 s window with 0 panics; (2) the seed's userdata partition carries
+> a dirty ext4 journal and our ext4 mount returns EIO on it, so /data
+> never provisions from the raw seed — the boot either parks (1.5M
+> syscalls) or churns deep (18–174M) run-to-run on identical bytes; (3)
+> a fresh-cooked userdata (mkfs blank ext4 at the seed size, features
+> `^metadata_csum_seed,^orphan_file` — the 1.47.2 mkfs defaults set
+> incompat 0x2000 which our ext4 driver refuses) boots deterministically
+> deep. The workload-depth rows (volume, nanosleep avg population, IF=0
+> aggregate) are lineage/workload-bound and are reported with their
+> vehicle in the refresh section; census/ticks/per-op-cost rows are
+> lineage-robust and re-banked unchanged.
 
 ## Tier 1 — quiet syscost boot (KVM, q35, smp2/4G, syscost=1, 780s window)
 
@@ -28,12 +47,12 @@ main lands, do not cherry-pick rows.
 |---|---|---|
 | TERM-DESCHED census | 8 | 6–10 |
 | WAKE-REFUSED census | 32 | 28–36 |
-| WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s | no 1001ms-grid class |
-| tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
+| WAKE-STRANDED | 23–31 organic, 1–2 s family (pa109dbg/pa112tok/pa113tok), max 32–107 s; seed-vehicle reads 0–65 organic, max 297 s (pa-116 series, 2026-11-04) with the same no-grid verdict | no 1001ms-grid class |
+| tick rate per CPU | 99.74–99.98 /s (pre-2026-11-01 semantics); 104–124+/s class on the current arc (hooks fire beyond jiffies — pa116 series reads 104–107/s) | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | 126.0M (pa115debt1, 2026-11-01, main@afc41b8b) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — re-banked 2026-11-01: 6394e8ee un-quantizes ms-class sleeps and the boot goes ~36% deeper in the same wall (pa113 92.4M → 126.0M, same-depth pace corroborated by debt3 8.0M@60s→18.1M@120s). Enforce only in a load-gated window (load1 ≤9, qemus ≤8); the superseded 107.5M/85–107M families and their load-coupling history are documented in the refresh sections below |
+| total syscall volume (780s boot) | 126.0M (pa115debt1, 2026-11-01, main@afc41b8b, tok lineage) | ±10% IN A COMPARABLE HOST-LOAD WINDOW AND THE SAME LINEAGE CLASS — re-banked 2026-11-01: 6394e8ee un-quantizes ms-class sleeps and the boot goes ~36% deeper in the same wall (pa113 92.4M → 126.0M, same-depth pace corroborated by debt3 8.0M@60s→18.1M@120s). Enforce only in a load-gated window (load1 ≤9, qemus ≤8); the superseded 107.5M/85–107M families and their load-coupling history are documented in the refresh sections below. 2026-11-04: the SEED vehicle is workload-unstable without a cooked /data (1.5M parked ↔ 18.5M/173.9M deep on identical bytes) — volume enforcement stays tok-anchored until a cooked-lineage board re-banks it (see the 2026-11-04 refresh) |
 | clock_gettime avg | 3–4 µs | ±20% or better |
-| nanosleep avg | 203 ms (pa50main, n=26,945); family 158–222 ms through 2026-11-01 (pa115debt1 read 158.4 ms, n=29.5k) | ≤244 ms (one-sided; 203 ms +20% top) |
+| nanosleep avg | 203 ms (pa50main, n=26,945); family 158–222 ms through 2026-11-01 (pa115debt1 read 158.4 ms, n=29.5k) | ≤244 ms (one-sided; 203 ms +20% top). 2026-11-04: SEED-vehicle populations (n=3.0–5.2k, long-sleep dominated) read 529–927 ms — population artifact, not sleep cost: the p7_sleep1ms overshoot probe reads 15.8 µs on the same kernel (TCG family 54.4 µs); enforce the avg row only on tok-class populations |
 
 ## Tier 2 — pbench P1-P7 medians (main-class kernel, usbless image)
 
@@ -243,6 +262,146 @@ merge-quiet family with the same kernel; the merge-class 12.2-12.4 ms
 family is reachable only near foreign_qemus≈1, which did not occur on
 this host day until the tail of the battery. All boards: PBENCH DONE
 rc=0, zero panics.
+
+## Whole-table refresh (2026-11-04, main@12c5e326 — Tier-1 re-bank on the SEED lineage after the second tok-asset loss)
+
+The tok109 userdata asset was lost in a second host cleanup (lineage
+searched and confirmed gone). Vehicle: pa-boot.sh 780 s KVM q35 smp2/4G,
+`syscost=1 dfx=wwcensus`, kernel = main@12c5e326 x86_64 debug bzImage
+(md5 696e6c4131ecb7f4c52a38a91dfb61ee), userdata = the SEED bytes
+(central-store image md5 ae9cde56be0b683fe5a6b32ca6aa97f6), reflinked
+privately per tag, boot writable. Four boots, each with its recorded
+load window (run/116seed2-window.log, 116cook1/116cook2-window.log).
+
+### Lineage verdict: SEED, with a known mount blocker; the tok lineage is not re-cookable from the raw seed
+
+1. **The ~49 s storage_manager death is GONE on this main.** Three of
+   four seed boots ran the full 780 s (rc=124 horizon) with 0 panics,
+   0 OOM, no ExecReboot; storage_manager started, registered with
+   samgr, and kept running. The r22–r26 fixes (notably f747cf8f fd
+   close task_work parity) plausibly closed the service-crash loop the
+   2026-10-31 note recorded.
+2. **The seed userdata never mounts: dirty ext4 journal.** The store
+   image is ext4 "needs journal recovery" (dumped mid-mount); our ext4
+   driver returns EIO (`Mount device /dev/block/vdf to /data failed,
+   err = 5` → Ignore failure). Consequently /data never provisions:
+   e2fsck/tune2fs on the host cannot repair a private copy either
+   (journal inode truncated past EOF — e2fsck rc=9). Every boot in this
+   battery ran with an absent /data, and the seed-bytes disk was NEVER
+   written (md5 identical to the store original after two 780 s boots).
+3. **Without /data the seed workload is bimodal run-to-run on identical
+   bytes**: pa-116seed2 parked (kickdog heartbeats, 1.5M syscalls,
+   ~280/s tail), pa-116cook1/cook2 churned deep (18.5M / 173.9M). The
+   tok-era depth rows are therefore not reachable from the raw seed.
+4. **The re-cook recipe is a blank ext4, not a repaired seed.** A
+   private seed-sized copy mkfs'd blank boots deterministically deep
+   (StorageDaemon reaches its radar thread; 0 vdf failures) and WRITES
+   /data — proven by md5 divergence of the boot disk from its mkfs'd
+   source after one 780 s boot (e487a79b… → 2b6c23df…), the first
+   confirmed userdata write on this rig since the tok era. CAUTION:
+   e2fsprogs 1.47.2 mkfs defaults set incompat 0x2000
+   (metadata_csum_seed) + orphan_file, which our ext4 mount REFUSES
+   (`ext4: unsupported incompat features 0x2000 ... refusing mount`) —
+   cook with `mkfs.ext4 -O ^metadata_csum_seed,^orphan_file`. This
+   matches the launcher lane's cooked assets (UUID bcf6fd7a disks,
+   feature set without csum_seed, which mount fine on our kernel).
+5. **The provisioning boot wedged at t=360 s in the pa115debt3 class**
+   (softirq-field phantom held 34.7k jiffies unhealed, syscost dumps
+   stalled, jiffies advancing, 0 panics) at only load1 4–8 with 10–15
+   foreign QEMUs — the wedge is not purely foreign-load-triggered: the
+   provisioning workload itself saturates both vCPUs at ~94 % kernel
+   (idle 1.3/48.7k ticks) and starves the softirq-scheduled dumps.
+   Pre-wedge rows were all in band (census 8/32 EXACT — the fourth
+   consecutive vehicle variant to read exact; clock 3 µs n=35.7M at
+   t=360; IF=0 23.8 % symmetric; GRQ 3208 ns). Evidence:
+   run/blankcook2-gate-parse.txt. Filed for the wedge-owning lane:
+   the debt3 round-3 heal (8387c00b) still does not clear a
+   wfi-resident softirq phantom under kernel saturation.
+
+### Tier-1 board (three surviving seed boots; load windows recorded per boot)
+
+| metric | anchor (pa115debt1, tok) | pa-116seed2 (load1 5.2–8.7, 6–14 qemus) | pa-116cook1 (load1 2.5–8.0, 5–15 qemus) | pa-116cook2 (load1 2.4–6.4, 5–13 qemus) | verdict |
+|---|---|---|---|---|---|
+| TERM / REFUSED census | 8 / 32 | 8 / 32 | 8 / 32 | 8 / 32 | EXACT on all three boots — census is lineage- and workload-robust; bands 8±2 / 32±4 unchanged |
+| WAKE-STRANDED | 5–31 organic, max 32–107 s | 0 organic | 65 organic, 1–2 s family, max 297 s | 6 organic | no 1001 ms-grid class on any boot; max 297 s is a /data-less first-boot service wait, recorded as the seed-vehicle class |
+| tick rate per CPU | ≥99.5 | 104.1 / 103.8 | 106.6 / 107.5 | 106.4 / 106.0 | in band (hooks-beyond-jiffies semantics, same class as 2026-11-01) |
+| panics / new OOM | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | clean |
+| syscall volume (t=720 s) | 126.0M | 1.5M (parked) | 18.5M | 173.9M | **unenforceable on the seed vehicle** — the /data-less workload is bimodal (1.5M ↔ 174M on identical bytes). cook2's +38% over the tok anchor is depth, not cost: clock_gettime n +44% (77.8M vs 54.0M) at flat 3 µs avg. Anchor stays 126M ±10% for tok-class lineages |
+| clock_gettime avg | 3 µs (n=54.0M) | 3 µs (n=130k) | 3 µs (n=8.7M) | 3 µs (n=77.8M) | same class at every depth — cost row robust |
+| nanosleep avg | 158–203 ms (n=24–29k) | 927 ms (n=3.0k) | 529 ms (n=5.2k) | 666 ms (n=4.3k) | population artifact of the /data-less vehicle (n 3–5k, long-sleep dominated, max 295 s); NOT sleep cost — p7_sleep1ms reads 15.8 µs on the same kernel (see Tier-2). Enforce only on tok-class populations |
+| GRQ avg hold (sched.rs:2782) | 2786 ns (n=6.3M) | 3360 ns (n=3.0M) | 4416 ns (n=3.9M) | 2904 ns (n=6.0M) | in the 1200–7320 ns band on every boot; quietest window (cook2) reads lowest — the load-coupled class as documented |
+| small_alloc REST share | 0.4% | 0.1% (0.9 s) | 0.1% (1.3 s) | 0.7% (11.0 s) | ≤10% band, improvement side |
+| get_file REST site | file.rs:1110: 124.8M / 34.8 s / 278 ns | (shallow boot) | file.rs:1123: 17.7M / 6.0 s / 342 ns | file.rs:1123: 156.8M / 46.0 s / 293 ns | avg flat (293 vs 278 ns, +5%); n tracks boot depth (deeper boot → more get_file); the fdtable row is healthy |
+
+Row provenance: run/116seed2-gate-parse.txt, run/perf-gate-116cook1-parse.txt,
+run/perf-gate-116cook2-parse.txt, run/116cook2-gate-parse.txt; windows in
+run/116seed2-window.log / 116cook1-window.log / 116cook2-window.log. A
+fourth boot (pa-116seed1) wedged at t=180 s in the documented pa115debt3
+load-wedge class (PREEMPT-LEAK storm, syscost stalls, window spiked to
+load1 11.8 with 11 foreign QEMUs) — rerun in-window survived; excerpt:
+run/pa-116seed1-wedge-excerpt.txt. The wedge is load-triggered, not
+lineage-specific.
+
+### Tier-3 / IRQ rows (same boots; rerun evidence for the out-of-band read)
+
+| metric | band | pa-116cook1 | pa-116cook2 (rerun) | verdict |
+|---|---|---|---|---|
+| IF=0 share of machine | 20.4 ±3pp | 25.5% (c0 41.4 / c1 9.6) | **23.0% (23.7 / 22.3)** | in band on the rerun. The cook1 read is attributed: c0 carried a hilogd slow-ring flood (2.1M entries) driving 874M percpu.rs:126 + 472M slab.rs:640 micro-sections — a transient boot phase, not reproduced by cook2 (same bytes, quieter window). heal miss=0 on both |
+| max closed cli, REST zone | ≤10 ms | 224 ms (slab.rs:640, flood boot) | **3 ms / 2 ms** | in band on the rerun; the 224 ms one-shot lived in the flood boot's slab site — WATCH row for the mm lane, not a band change |
+| max closed cli, uart zone | (watch) | 1489 ms | 368 / 243 ms | the PREEMPT-LEAK print-burst class (2–3k leak prints/boot on this vehicle); watch row, no band |
+| SOFTIRQ share of IF=0 | 3.1 ±2pp | (flood boot, skewed) | 1.7–3.0% avg class | in band |
+
+vs the 2026-10-25 pa50main anchor and the 2026-10-31/11-01 accepted
+boards, stated plainly: no enforced Tier-1 cost row regressed on
+main@12c5e326. Census is exact (8/32, four consecutive boots including
+the parked one). clock_gettime holds 3 µs from 130k to 77.8M calls.
+GRQ, REST share, and ticks are in their bands. The two rows that read
+outside their bands (volume, nanosleep avg) do so because of the
+VEHICLE, not the kernel: the seed cannot mount its /data, its workload
+is bimodal, and both rows are explicitly population/depth-bound with
+cross-checks (clock n, p7 probe) proving cost flat. The r22–r26
+changes legitimately moved depth (+38% volume at flat per-op cost on
+the deepest seed boot).
+
+### Cooked-vehicle first measurement pair (blankcook3/blankcook4, 2026-11-04 late)
+
+The working recipe from verdict (4) above gives a TRUE steady-state
+vehicle (userdata mounts, /data provisions, writes persist). First
+measurement pair on it, same kernel/rig:
+
+| metric | pa-116cook2 (seed bytes) | blankcook3 (cooked, load1 6.6–12.1) | blankcook4 rerun (load1 6.6–12.2, wedged t>300) | verdict |
+|---|---|---|---|---|
+| TERM / REFUSED | 8 / 32 | 8 / **14** | 8 / **32** | REFUSED 14 did not reproduce (exact 32 on the rerun); census 8 on every boot today regardless of vehicle/window |
+| syscall volume (t=720) | 173.9M | 68.1M | 47.3M @ t=300 (pace ~114M) | lineage-depth-bound (young 2–3-boot state vs tok's 109); stays tok-anchored, enforcement needs a lineage-age note |
+| clock_gettime | 3 µs (n=77.8M) | 3 µs (n=29.9M) | 3 µs (n=15.7M@240) | same class at every depth |
+| nanosleep avg | 666 ms (n=4.3k, parked population) | **12.0 ms (n=152k)** | 139 ms (n=16.2k) | the cooked steady-state population reads 12–139 ms — inside the ≤244 ms band and the tok family; settles that the seed-vehicle 529–927 ms reads were population, not cost |
+| GRQ / REST share | 2904 ns / 0.7% | 3176 ns / 0.0% | 2959 ns / 0.2% | in band throughout |
+| IF=0 share | 23.0% in band | **53.1%** (53.1/53.1) | **23.2%** in band | the 53.1% boot is attributed: binder.rs:1598 REST sections n=64.4M, tot=592 s (41% of machine), avg 9.2 µs, max 73 ms — the /data-mounted service mesh at ~89k txns/s. Did NOT reproduce on the rerun (binder share gone at the same window class); SLOW-TXN domain PASS n=0 on the 53% boot. WATCH row for the IPC lane: a single binder txn can hold IF=0 for 73 ms |
+| panics / wedge | clean 780 s | clean 780 s | wedged after t=300 s (softirq-dump stall) | the debt3-class wedge: 3 of 7 boots today wedged, always under kernel saturation (88–95% kernel) ± foreign load; 0 panics everywhere. Already filed for the wedge-owning lane |
+
+
+
+### Tier-2 debug-KVM board (116pb1, same bzImage, q35 smp2 2G, foreign_qemus=6, DONE rc=0)
+
+Compared against the SP-7 KVM debug anchor (median-of-3, stress-port
+round 7). All anchor cells in ±20%: p1_null 0.301 (anchor 0.300),
+p1_clock 0.371 (0.371, exact), p2_ctxsw 1.307 (1.242, +5.2%),
+p3b_cow 8.075 (8.075, exact), p6_write_fsync 8486 (8443, +0.5%),
+p6_mkdrmdir 227.4 (216.7, +4.9%), p6_unlink 47.6 (54.6, −12.8%
+improved), p6_append 5.159 (5.19, −0.6%). New KVM-debug-column cells
+(no anchor yet, banked as first readings): p6_stat 2.725, p6_openclose
+7.414, p6_read_cached 9.418, p6_getdents 553.0 µs; p5a_pipe 1.493,
+p5b_dgram 1.723/3.316, p5c stream family 1.6–1.8, p5d 2.8/3.3,
+p5e_stream_send 1.583 µs (cross-class vs the TCG families — the TCG
+2026-11-01 cells stay historical); **p7_sleep1ms 15.8 µs** — better
+than the 54.4 µs TCG family and the load-bearing cross-check that
+sleep cost did NOT regress (settles the nanosleep-avg row above);
+p4_fork_exit 578.0 / p4_fork_exec 771.7 µs — the KVM class of the p4
+family; the TCG open regression (13.2/46.4 ms vs the 9.4–10.0/13.9–14.6
+ms family) remains a TCG-class finding for its owning lane, but on KVM
+the whole p4 family sits at sub-millisecond — re-adjudicate the open
+regression against a KVM p4 anchor before spending more on it.
+Board log: run/116pb1-boot.log, serial work/pbench-116pb1-serial.log.
 
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 

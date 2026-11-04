@@ -906,6 +906,47 @@ pub fn inode_write_open_count(inode: &Inode) -> u32 {
     INODE_OPENS.lock().get(&key).map(|e| e.1).unwrap_or(0)
 }
 
+/// Live exec text holds per inode key — the NEGATIVE half of the
+/// reference i_writecount. deny_write_access() at exec commit takes one
+/// hold for the image; allow_write_access() drops it when the last mm of
+/// that exec lineage dies (our MmStruct::drop stand-in for the
+/// mm->exe_file fput). While any hold is live, a write-mode (or
+/// O_TRUNC) open of the file fails ETXTBSY (reference may_open ->
+/// get_write_access; LTP creat07).
+static TEXT_HOLDS: Spinlock<alloc::collections::BTreeMap<(u64, u64), u32>> =
+    Spinlock::new(alloc::collections::BTreeMap::new());
+
+/// Text-hold key of `inode` (same identity as the lease/open tables).
+pub fn inode_text_hold_key(inode: &Inode) -> (u64, u64) {
+    inode_lock_key(inode)
+}
+
+/// Take one text hold on `key` (exec commit / fork's exe_file dup).
+pub fn inode_text_hold_acquire_key(key: (u64, u64)) {
+    let mut m = TEXT_HOLDS.lock();
+    let c = m.entry(key).or_insert(0);
+    *c = c.saturating_add(1);
+}
+
+/// Drop one text hold on `key` (last-mm death).
+pub fn inode_text_hold_release(key: (u64, u64)) {
+    let mut m = TEXT_HOLDS.lock();
+    if let Some(c) = m.get_mut(&key) {
+        *c = c.saturating_sub(1);
+        if *c == 0 {
+            m.remove(&key);
+        }
+    }
+}
+
+/// Number of live exec text holds on `inode`. may_open's write leg
+/// reads this and fails ETXTBSY while any process still executes the
+/// file.
+pub fn inode_text_hold_count(inode: &Inode) -> u32 {
+    let key = inode_lock_key(inode);
+    TEXT_HOLDS.lock().get(&key).copied().unwrap_or(0)
+}
+
 /// F_SETLEASE core. `lease_type` is the user's flock l_type value:
 /// F_RDLCK(0) / F_WRLCK(1) / F_UNLCK(2). Typed `Errno` on failure
 /// (mapped to the ABI at the boundary).

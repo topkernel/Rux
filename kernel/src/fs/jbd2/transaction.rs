@@ -296,10 +296,37 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
 
     // Commit the transaction
     if err == 0 {
+        // jbd2:jbd2_start_commit / jbd2_end_commit — fired at Rux's
+        // single commit funnel (every commit passes through this stop
+        // site). Divergences (see the event docs): sync_commit carries
+        // the stopping handle's h_sync (no t_synchronous_commit field on
+        // Rux's Transaction), and dev is the journal's backing device.
+        let jbd2_dev = if crate::trace::EVENT_JBD2_START_COMMIT.armed()
+            || crate::trace::EVENT_JBD2_END_COMMIT.armed()
+        {
+            // SAFETY: j_bio_device is the installed GenDisk pointer,
+            // valid for the journal's lifetime.
+            Some(unsafe {
+                ((*journal.j_bio_device).major << 20) | (*journal.j_bio_device).first_minor
+            })
+        } else {
+            None
+        };
+        if let Some(dev) = jbd2_dev {
+            crate::trace::trace_jbd2_start_commit(dev, txn.t_tid, handle.h_sync as i8);
+        }
         err = match super::commit::jbd2_journal_commit_transaction(&journal, &txn) {
             Ok(()) => 0,
             Err(e) => e,
         };
+        if let Some(dev) = jbd2_dev {
+            crate::trace::trace_jbd2_end_commit(
+                dev,
+                txn.t_tid,
+                handle.h_sync as i8,
+                journal.j_tail_sequence.load(Ordering::SeqCst),
+            );
+        }
     }
 
     // Clear running transaction

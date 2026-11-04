@@ -2082,7 +2082,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // deref (`&*child_raw` + is_negative()) and panicked at NULL+0x98
         // (lb357, first negstale of the boot). Rewriting `found` to None
         // keeps the routing the old Option-based code had.
+        // (stress-port r6 validation: the same fix landed independently
+        // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
+            // SAFETY: p is protected by the claim (memo/map-held).
             if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
@@ -2095,7 +2098,6 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         None => 0,
                     }
                 };
-                // SAFETY: p is protected by the claim (memo/map-held).
                 if (unsafe { &*p }).neg_gen_load() != parent_gen {
                     // STALE memo: the parent mutated since the memo was
                     // inserted (through this dentry OR any bind alias).
@@ -4658,6 +4660,17 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             if mask != 0 && !inode_permission(&inode, mask) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+            // ETXTBSY (reference may_open -> get_write_access vs negative
+            // i_writecount): a write-mode (or O_TRUNC) open of a regular
+            // file some live process still EXECUTES fails with ETXTBSY —
+            // the exec side registered its text hold (deny_write_access
+            // analogue; LTP creat07's creat of a running child image).
+            if mask & MAY_WRITE != 0
+                && inode.mode.is_regular_file()
+                && crate::fs::locks::inode_text_hold_count(&inode) > 0
+            {
+                return Err(errno::Errno::TextFileBusy.as_neg_i32());
             }
         }
 

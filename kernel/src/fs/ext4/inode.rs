@@ -222,7 +222,7 @@ impl Ext4Inode {
         if self.has_extent() {
             // Search using extent tree
             for i in 0..remaining_blocks {
-                match super::extent::ext4_ext_get_block_ex(fs, &self.block, i) {
+                match super::extent::ext4_ext_get_block_ex(fs, self.ino, &self.block, i) {
                     Ok((block_num, unwritten)) => {
                         // Unwritten (fallocate-preallocated) blocks read as
                         // zeros — the disk contents were never materialized.
@@ -264,7 +264,7 @@ impl Ext4Inode {
     /// Writers use ext4_ext_materialize_block for the real mapping.
     pub fn get_data_block(&self, fs: &super::super::ext4::Ext4FileSystem, block_index: u64) -> Result<u64, i32> {
         if self.has_extent() {
-            match super::extent::ext4_ext_get_block_ex(fs, &self.block, block_index)? {
+            match super::extent::ext4_ext_get_block_ex(fs, self.ino, &self.block, block_index)? {
                 (b, false) => Ok(b),
                 (.., true) => Ok(0),
             }

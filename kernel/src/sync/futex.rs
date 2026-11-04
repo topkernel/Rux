@@ -168,30 +168,68 @@ pub struct FutexKey {
 
 /// Resolve the physical word identity of `uaddr` in the CURRENT task's
 /// page tables: (frame << 12) | (uaddr & 0xfff). Returns 0 when the walk
-/// finds no present user leaf (callers fall back to uaddr keying — the
-/// pre-fix behavior, never worse).
+/// finds no present user leaf AND a read fault cannot materialize one
+/// (callers fall back to uaddr keying — the pre-fix behavior, never
+/// worse).
+///
+/// Fault-in parity with the reference get_futex_key: its
+/// get_user_pages_fast FAULTS THE PAGE IN when the PTE is absent. That
+/// matters on the WAKE side: FUTEX_WAKE never touches the word in
+/// userspace, so a lazy mapping (e.g. the exec'd tst_reinit child that
+/// only WAKEs — LTP setpgid03) has NO PTE at syscall entry. Without the
+/// fault-in the waker resolves phys=0, hashes the uaddr bucket, and
+/// never sees the phys-bucketed waiter (FXK hunt r23: parent
+/// phys=0x7ffaa01c vs child phys=0, 10s of 1ms retry wakes, all lost).
 fn resolve_futex_phys(uaddr: usize) -> usize {
     let Some(task) = crate::sched::current() else {
         return 0;
     };
-    // SAFETY: read-only AddressSpace accessor on the current task.
-    let root = match unsafe { (*task).address_space() } {
-        Some(mm) => mm.root_ppn(),
-        None => return 0,
-    };
-    // SAFETY: read-only page-table walk of the current address space.
-    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, uaddr as u64) } {
-        Some((ppn, bits)) => {
-            // Present + user leaf only (device-window leaves and kernel
-            // mappings are not futex words).
-            if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
-                ((ppn as usize) << 12) | (uaddr & 0xfff)
-            } else {
-                0
+
+    let walk = |u: usize| -> usize {
+        // SAFETY: read-only AddressSpace accessor on the current task.
+        let root = match unsafe { (*task).address_space() } {
+            Some(mm) => mm.root_ppn(),
+            None => return 0,
+        };
+        // SAFETY: read-only page-table walk of the current address space.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, u as u64) } {
+            Some((ppn, bits)) => {
+                // Present + user leaf only (device-window leaves and kernel
+                // mappings are not futex words).
+                if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                    ((ppn as usize) << 12) | (u & 0xfff)
+                } else {
+                    0
+                }
             }
+            None => 0,
         }
-        None => 0,
+    };
+
+    let phys = walk(uaddr);
+    if phys != 0 {
+        return phys;
     }
+
+    // No present user leaf: fault the page in (read access) like the
+    // reference's get_user_pages_fast, then re-walk. resolve_futex_phys
+    // runs at do_futex entry — BEFORE any futex bucket lock is held and
+    // in the caller's own syscall context, so a sleeping fault (file I/O)
+    // is legal here. Any fault outcome is fine: the re-walk decides
+    // (a still-absent leaf just falls back to uaddr keying).
+    // SAFETY: AddressSpace accessor; handle_mm_fault operates on the
+    // current task's address space, same as the trap path.
+    unsafe {
+        if let Some(mm) = (*task).address_space() {
+            let page = uaddr & !0xfff;
+            let _ = crate::arch::mm::handle_mm_fault(
+                &mm,
+                crate::arch::mm::VirtAddr::new(page as u64),
+                crate::arch::mm::FaultFlags::READ,
+            );
+        }
+    }
+    walk(uaddr)
 }
 
 impl FutexKey {
@@ -202,7 +240,37 @@ impl FutexKey {
     /// Production constructor: resolves the physical word identity from
     /// the current page tables (see `phys`).
     pub fn new_user(uaddr: usize, mm: usize, flags: u32) -> Self {
-        Self { uaddr, mm, flags, phys: resolve_futex_phys(uaddr) }
+        let k = Self { uaddr, mm, flags, phys: resolve_futex_phys(uaddr) };
+        // FXK (r23 setpgid03 hunt): name every futex key construction —
+        // uaddr AND the resolved physical identity — so a lost cross-
+        // process wake (parent WAIT vs exec'd child WAKE on a MAP_SHARED
+        // page) shows which side resolved which frame. Gated behind
+        // dfx=futextrace (console-cost discipline; see FXDV2 note).
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace) {
+            static FXK_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = FXK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 400 {
+                let pid = crate::sched::current()
+                    .map(|t| unsafe { (*t).pid() })
+                    .unwrap_or(0);
+                let comm = crate::sched::current()
+                    .map(|t| unsafe {
+                        alloc::string::String::from((*t).comm_str())
+                    })
+                    .unwrap_or_else(|| alloc::string::String::from("?"));
+                crate::pr_warn!(
+                    "FXK #{} pid={}({}) uaddr={:#x} phys={:#x} shared={}",
+                    n,
+                    pid,
+                    comm,
+                    uaddr,
+                    k.phys,
+                    k.flags & FLAGS_SHARED != 0
+                );
+            }
+        }
+        k
     }
 
     /// Check if two keys match

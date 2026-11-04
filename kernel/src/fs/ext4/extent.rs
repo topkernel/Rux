@@ -113,6 +113,55 @@ pub const EXT4_EXT_UNWRITTEN: u16 = 0x8000;
 /// garbage from a never-materialized disk block.
 pub fn ext4_ext_get_block_ex(
     fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    i_block: &[u32; 15],
+    logical_block: u64,
+) -> Result<(u64, bool), i32> {
+    let header = get_extent_header(i_block);
+
+    // ext4:ext4_ext_map_blocks_enter — the extent-mapping funnel's
+    // request (one block per call at this funnel; flags 0: Rux passes
+    // no EXT4_GET_BLOCKS_* mask).
+    if crate::trace::EVENT_EXT4_EXT_MAP_BLOCKS_ENTER.armed() {
+        crate::trace::trace_ext4_ext_map_blocks_enter(
+            super::dev_id(fs),
+            ino as u64,
+            logical_block as u32,
+            1,
+            0,
+        );
+    }
+    let r = ext4_ext_get_block_ex_inner(fs, i_block, logical_block);
+    // ext4:ext4_ext_map_blocks_exit — the verdict: pblk/mflags/ret in
+    // the reference's ext4_map_blocks return shape (1 mapped / 0 hole /
+    // negative errno; unwritten extents map M|U with the real pblk).
+    if crate::trace::EVENT_EXT4_EXT_MAP_BLOCKS_EXIT.armed() {
+        let (pblk, len, mflags, ret) = match &r {
+            Ok((b, unwritten)) => {
+                if *b != 0 {
+                    (*b, 1u32, if *unwritten { 0x810 } else { 0x10 }, 1i32)
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }
+            Err(e) => (0, 0, 0, *e),
+        };
+        crate::trace::trace_ext4_ext_map_blocks_exit(
+            super::dev_id(fs),
+            ino as u64,
+            pblk,
+            logical_block as u32,
+            len,
+            mflags,
+            0,
+            ret,
+        );
+    }
+    r
+}
+
+fn ext4_ext_get_block_ex_inner(
+    fs: &crate::fs::ext4::Ext4FileSystem,
     i_block: &[u32; 15],
     logical_block: u64,
 ) -> Result<(u64, bool), i32> {

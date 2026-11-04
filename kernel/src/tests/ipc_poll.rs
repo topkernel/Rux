@@ -119,11 +119,11 @@ fn test_poll_syscall() {
 fn test_ppoll_syscall() {
     // Test ppoll with null timeout (infinite wait) and 0 fds → should error or timeout
     // Use a very short timeout to avoid blocking
-    // ppoll args: [fds_ptr, nfds, timeout_ptr, sigmask, 0, 0]
+    // ppoll args: [fds_ptr, nfds, timeout_ptr, sigmask, sigsetsize, 0]
     // timeout_ptr points to {tv_sec, tv_nsec} as two u64 values
     let timeout: [u64; 2] = [0, 0]; // 0 seconds, 0 nanoseconds = immediate return
 
-    let result = sys_ppoll([0, 0, &timeout as *const u64 as u64, 0, 0, 0]);
+    let result = sys_ppoll([0, 0, &timeout as *const u64 as u64, 0, 8, 0]);
     if result == 0 {
         test_pass("sys_ppoll zero timeout returns 0");
     } else if result < 0 {
@@ -138,7 +138,7 @@ fn test_ppoll_syscall() {
         events: poll_events::POLLIN,
         revents: 0,
     };
-    let result = sys_ppoll([&mut pfd as *mut PollFd as u64, 1, &timeout as *const u64 as u64, 0, 0, 0]);
+    let result = sys_ppoll([&mut pfd as *mut PollFd as u64, 1, &timeout as *const u64 as u64, 0, 8, 0]);
     if result >= 0 {
         test_pass("sys_ppoll stdin with timeout");
     } else {

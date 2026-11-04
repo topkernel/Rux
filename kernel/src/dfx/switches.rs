@@ -748,6 +748,30 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         &trace::EVENT_BLOCK_RQ_ISSUE,
         &trace::EVENT_BLOCK_RQ_COMPLETE,
     ];
+    // The round-3 ext4/jbd2 wave (the ledger's sfddbg/exthunt/filerd
+    // row): the fs write/sync/map/free funnels plus the journal commit
+    // bracket.
+    static EXT4_JBD2: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EXT4_SYNC_FILE_ENTER,
+        &trace::EVENT_EXT4_SYNC_FILE_EXIT,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_ENTER,
+        &trace::EVENT_EXT4_EXT_MAP_BLOCKS_EXIT,
+        &trace::EVENT_EXT4_DA_WRITE_BEGIN,
+        &trace::EVENT_EXT4_DA_WRITE_END,
+        &trace::EVENT_EXT4_FREE_BLOCKS,
+        &trace::EVENT_JBD2_START_COMMIT,
+        &trace::EVENT_JBD2_END_COMMIT,
+    ];
+    // The round-3 rux:epoll wave (the ledger's epollscan/epolltrace row):
+    // the reference kernel carries no epoll trace events, so these are
+    // the documented-divergence rux: group events.
+    static EPOLL: &[&trace::TraceEvent] = &[
+        &trace::EVENT_EPOLL_CTL_INSERT,
+        &trace::EVENT_EPOLL_CTL_REMOVE,
+        &trace::EVENT_EPOLL_WAIT_SCAN,
+        &trace::EVENT_EPOLL_WAIT_EXIT,
+        &trace::EVENT_EPOLL_DELIVERY,
+    ];
     match switch {
         // The ledger's ready-to-port wave. (WwCensus is deliberately
         // ABSENT: the ledger keeps the wild-write tripwires frozen —
@@ -783,6 +807,14 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
         // The ledger's writetrace row (partial): the kernel-fault and
         // block-request views of the write path.
         DfxSwitch::WriteTrace => Some(WRITE_TRACE),
+        // The round-3 ext4/jbd2 wave: the ledger's sfddbg/exthunt/filerd
+        // row now arms the reference ext4:/jbd2: family (the hunts'
+        // serial probes keep working alongside, per the ledger's
+        // do-not-delete rule).
+        DfxSwitch::SfdDbg | DfxSwitch::ExtHunt | DfxSwitch::FilerdProbe => Some(EXT4_JBD2),
+        // The round-3 epoll wave: epollscan/epolltrace arm the rux:
+        // epoll family.
+        DfxSwitch::EpollScan | DfxSwitch::EpollTrace => Some(EPOLL),
         _ => None,
     }
 }
@@ -790,6 +822,18 @@ pub fn trace_alias(switch: DfxSwitch) -> Option<&'static [&'static crate::trace:
 /// Force a switch on/off programmatically (used by tests and the sysrq hook).
 pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
+    // The ported-wave alias (round 2, restored round 3 after the main
+    // merge dropped it): arming a switch with an alias also arms its
+    // reference events and the tracing master, so `dfx=` hunt boots
+    // gain the event timeline without touching their scripts.
+    if on {
+        if let Some(events) = trace_alias(switch) {
+            for e in events.iter() {
+                e.enabled.store(true, Ordering::Relaxed);
+            }
+            crate::trace::set_tracing_on(true);
+        }
+    }
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
     }

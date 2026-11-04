@@ -1819,7 +1819,7 @@ pub(crate) fn ext4_reap_unlinked(
         // inode FIRST (dtime set), then free blocks, then the inode number.
         inode.i_dtime = 1;
         super::inode::write_inode_disk(fs, ino, &inode)?;
-        free_inode_blocks(fs, &inode)?;
+        free_inode_blocks(fs, ino, &inode)?;
         free_inode(fs, ino)
     })();
     // SAFETY: clear_current_handle resets the thread-local journal handle
@@ -2328,7 +2328,7 @@ fn ext4_rmdir_inner(
     let p4 = crate::drivers::timer::monotonic_ns_since_boot();
 
     // Free data blocks
-    free_inode_blocks(fs, &target)?;
+    free_inode_blocks(fs, target_ino, &target)?;
     let p5 = crate::drivers::timer::monotonic_ns_since_boot();
 
     crate::dfx::fsw::note_rmdir_phases(
@@ -2468,16 +2468,38 @@ pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     Ok(())
 }
 
+/// ext4:ext4_free_blocks — the free funnel's event site. One record per
+/// allocator free call (count = the run length; flags 0 — Rux passes no
+/// EXT4_FREE_BLOCKS_* mask; mode from the dying inode). The armed check
+/// is the only disabled-path cost.
+#[inline]
+fn trace_free_blocks(fs: &Ext4FileSystem, ino: u32, mode: u16, block: u64, count: u64) {
+    if crate::trace::EVENT_EXT4_FREE_BLOCKS.armed() {
+        crate::trace::trace_ext4_free_blocks(
+            super::dev_id(fs),
+            ino as u64,
+            block,
+            count,
+            0,
+            mode,
+        );
+    }
+}
+
 /// Free an indirect block and all data blocks it references (recursive for multi-level)
 ///
 /// # Arguments
 /// * `fs` - Filesystem
 /// * `allocator` - Block allocator
+/// * `ino` - Inode number (the ext4:ext4_free_blocks tracepoint's field)
+/// * `mode` - Inode mode (same)
 /// * `blocknr` - Block number of the indirect block
 /// * `depth` - Indirection depth (1=single, 2=double, 3=triple)
 pub(crate) fn free_indirect_block(
     fs: &Ext4FileSystem,
     allocator: &BlockAllocator,
+    ino: u32,
+    mode: u16,
     blocknr: u32,
     depth: u32,
 ) -> Result<(), i32> {
@@ -2496,14 +2518,16 @@ pub(crate) fn free_indirect_block(
     for &ptr in pointers {
         if ptr == 0 { continue; }
         if depth > 1 {
-            free_indirect_block(fs, allocator, ptr, depth - 1)?;
+            free_indirect_block(fs, allocator, ino, mode, ptr, depth - 1)?;
         } else {
             revoke_freed_block(fs, ptr as u64);
+            trace_free_blocks(fs, ino, mode, ptr as u64, 1);
             allocator.free_block(ptr as u64)?;
         }
     }
 
     // Free the indirect block itself
+    trace_free_blocks(fs, ino, mode, blocknr as u64, 1);
     allocator.free_block(blocknr as u64)?;
     Ok(())
 }
@@ -2532,7 +2556,11 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
 }
 
 /// Free all blocks associated with an inode
-pub(crate) fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
+pub(crate) fn free_inode_blocks(
+    fs: &Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4InodeOnDisk,
+) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
 
     // Fast symlinks store the target STRING inside i_block — there are no
@@ -2563,6 +2591,7 @@ pub(crate) fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) ->
                 // device image timed out and leaked the space, driving
                 // the whole filesystem into ENOSPC).
                 revoke_freed_block(fs, e.phys);
+                trace_free_blocks(fs, ino, inode.i_mode, e.phys, e.len as u64);
                 allocator.free_block_run(e.phys, e.len as u64)?;
             }
             let mut freed_meta: u64 = 0;
@@ -2575,21 +2604,22 @@ pub(crate) fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) ->
     for i in 0..12 {
         if inode.i_block[i] != 0 {
             revoke_freed_block(fs, inode.i_block[i] as u64);
+            trace_free_blocks(fs, ino, inode.i_mode, inode.i_block[i] as u64, 1);
             allocator.free_block(inode.i_block[i] as u64)?;
         }
     }
 
     // Free single indirect block
     if inode.i_block[12] != 0 {
-        free_indirect_block(fs, &allocator, inode.i_block[12], 1)?;
+        free_indirect_block(fs, &allocator, ino, inode.i_mode, inode.i_block[12], 1)?;
     }
     // Free double indirect block
     if inode.i_block[13] != 0 {
-        free_indirect_block(fs, &allocator, inode.i_block[13], 2)?;
+        free_indirect_block(fs, &allocator, ino, inode.i_mode, inode.i_block[13], 2)?;
     }
     // Free triple indirect block
     if inode.i_block[14] != 0 {
-        free_indirect_block(fs, &allocator, inode.i_block[14], 3)?;
+        free_indirect_block(fs, &allocator, ino, inode.i_mode, inode.i_block[14], 3)?;
     }
 
     Ok(())
@@ -2733,7 +2763,7 @@ fn ext4_rename_inner(
             target_mut.i_dtime = 1;
             super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             free_inode(fs, target_ino)?;
-            free_inode_blocks(fs, &target_mut)?;
+            free_inode_blocks(fs, target_ino, &target_mut)?;
         } else {
             // Decrement link count of replaced file
             if target_mut.i_links_count > 0 {
@@ -2748,7 +2778,7 @@ fn ext4_rename_inner(
             }
             super::inode::write_inode_disk(fs, target_ino, &target_mut)?;
             if target_mut.i_links_count == 0 {
-                free_inode_blocks(fs, &target_mut)?;
+                free_inode_blocks(fs, target_ino, &target_mut)?;
                 free_inode(fs, target_ino)?;
             }
         }
