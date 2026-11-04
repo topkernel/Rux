@@ -7738,6 +7738,153 @@ pub fn idle_heal_own_slot(cpu: usize) -> *mut Task {
     victim
 }
 
+/// lmbench-fix lane (lat_sem / lat_connect / bw_tcp wedge hunt): heal the
+/// UNLINKED RUNNING phantom — a task that is state=RUNNING, linked on no
+/// class queue, and owned by no CPU (no current slot names it, no
+/// in-flight SWITCHING_OUT). In the reference kernel this state cannot
+/// exist: a context switch leaves prev either linked on its class queue
+/// (still runnable) or in a sleep state, and a pick publishes the slot
+/// and the ownership marks inside one GRQ hold. Here the state arrives
+/// from the phantom-preempt-count / stranded-ownership family (organic
+/// captures: lmbench lat_sem smp2 — the benchmp controller frozen as
+/// {RUNNING, unlinked, slotless} with the worker pair parked; every
+/// future wake of it is refused by the curr_on scan it fails, no pick
+/// ever scans it because it is not linked, and the benchmark times out).
+///
+/// Adjudication is STRUCTURAL, not time-based (the R56 orphan harvester's
+/// 5 s staleness steal is what keeps that harvester riscv64-only after
+/// the x86-scribble4 double-run crash): under the GRQ the ownership
+/// protocol makes "is on a CPU" decidable — no CPU can be mid-pick while
+/// we hold the lock, every completed pick has published current == picked
+/// in the same hold, and a genuinely running task's slot names it from
+/// its pick until its next __schedule. A RUNNING task that is unlinked,
+/// unnamed by every slot, not SWITCHING_OUT-marked and not exiting is
+/// provably executing nowhere — relink it through the same insert pair
+/// the wake path uses. This is the unlinked twin of R85's pick-side heal
+/// (which can only reach LINKED candidates) and needs no concurrent wake
+/// (unlike the R46/R49 heals inside wake_up_enqueue).
+pub fn relink_unlinked_running_phantoms() -> u32 {
+    use crate::process::task::task_flags::TaskFlags;
+    const MAXCAND: usize = 16;
+    let mut cand: [*mut Task; MAXCAND] = [core::ptr::null_mut(); MAXCAND];
+    let mut n = 0usize;
+    crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+        if n >= MAXCAND {
+            return;
+        }
+        // SAFETY: the pid-hash walk yields live task pointers (the bucket
+        // lock is held for the duration of this callback).
+        unsafe {
+            let tk = &*t;
+            if tk.pid() == 0 || tk.pid() == u32::MAX {
+                return;
+            }
+            if tk.state() != TaskState::new(TaskState::RUNNING) {
+                return;
+            }
+            if tk.ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
+                return;
+            }
+            // Pin against a concurrent exit freeing the page between this
+            // walk and the GRQ re-verify below (same discipline as
+            // idle_heal_own_slot).
+            if !crate::process::task::Task::try_pin(t) {
+                return;
+            }
+            cand[n] = t;
+            n += 1;
+        }
+    });
+
+    let mut healed = 0u32;
+    let mut report_pid = 0u32;
+    let mut report_pc = 0i32;
+    {
+        let mut g = grq().lock_irqsave();
+        for i in 0..n {
+            let task = cand[i];
+            if task.is_null() {
+                continue;
+            }
+            // SAFETY: the pin taken in the walk holds the page alive
+            // through this section; every field read below is under the
+            // GRQ (the same serialization the wake path relies on).
+            unsafe {
+                let tk = &*task;
+                // Re-verify everything under the lock: the task may have
+                // parked, exited, been picked or linked since the walk.
+                if tk.pid() == 0 || tk.pid() == u32::MAX {
+                    continue;
+                }
+                let st = tk.state();
+                if st != TaskState::new(TaskState::RUNNING) || st.is_dead() {
+                    continue;
+                }
+                if tk.ti_flags() & TaskFlags::PF_EXITING.bits() != 0 {
+                    continue;
+                }
+                if task_is_mid_switch_out(task) {
+                    continue;
+                }
+                let mut owned = false;
+                for c in 0..MAX_CPUS {
+                    if cpu_state(c).current == task {
+                        owned = true;
+                        break;
+                    }
+                }
+                if owned {
+                    continue;
+                }
+                let linked = match tk.policy() {
+                    SchedPolicy::Fifo | SchedPolicy::Rr => g.rt_rq.is_linked(task),
+                    SchedPolicy::Deadline => g.dl_rq.is_linked(task),
+                    _ => g.cfs_rq.is_linked(task),
+                };
+                if linked {
+                    continue;
+                }
+                // Same insert pair as wake_up_enqueue_opt: plain insert,
+                // then the R41 stale-flag heal if the insert refused.
+                let ok = enqueue_task_locked(&mut *g, task)
+                    || ensure_linked_locked(&mut *g, task);
+                if ok {
+                    healed += 1;
+                    if report_pid == 0 {
+                        report_pid = tk.pid();
+                        report_pc = tk.preempt_count();
+                    }
+                }
+            }
+        }
+    }
+    // Drop the pins outside the GRQ (task_put may free).
+    for i in 0..n {
+        if !cand[i].is_null() {
+            crate::process::task::Task::task_put(cand[i]);
+        }
+    }
+    // Nudge an idle CPU so the relinked task is picked promptly (same
+    // tail as the wake path's enqueue).
+    if healed > 0 {
+        static PR_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if PR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+            crate::pr_warn!(
+                "PHANTOM-RELINK n={} pid={} pc={:#x}",
+                healed,
+                report_pid,
+                report_pc
+            );
+        }
+        if let Some(idle_cpu) = grq().find_idle_cpu(u32::MAX) {
+            grq().clear_idle(idle_cpu);
+            resched_cpu(idle_cpu);
+        }
+    }
+    healed
+}
+
 pub fn cpu_idle_loop() -> ! {
     use crate::arch;
 

@@ -56,45 +56,43 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 
 | Case | Rux (x86_64+KVM) | Reference kernel | Ratio |
 |---|---|---|---|
-| `lat_syscall null` | 0.095 microseconds | 0.044 microseconds | 2.15x |
-| `lat_syscall read` | 0.234 microseconds | 0.069 microseconds | 3.41x |
-| `lat_syscall write` | 0.198 microseconds | 0.064 microseconds | 3.09x |
-| `lat_syscall stat` | ~~4.077~~ 1.067 µs → **0.651 µs** *(perf-path lane: fresh baseline already 4.9x — the 18.8x row predated the print purge; lock-free path-walk fast paths −39%)* | 0.213 microseconds | 3.06x |
-| `lat_syscall fstat` | 0.17 microseconds | 0.111 microseconds | 1.53x |
-| `lat_syscall open` | ~~5.685~~ 1.773 µs → **1.222 µs** *(same lane, −31%)* | 0.395 microseconds | 3.09x |
-| `lat_pagefault /tmp/lmbench.file` | 0.449 microseconds | 0.07 microseconds | 6.45x |
-| `lat_mmap 1m /tmp/lmbench.file` | 1.049 us | 4.41 us | **0.24x (faster)** |
-| `lat_pipe` | 2.006 microseconds | 2.745 microseconds | **0.73x (faster)** |
-| `lat_unix` | 2.688 microseconds | 3.011 microseconds | **0.89x (faster)** |
-| `lat_ctx -s 64 2` | 0.73 us/ctxsw | 0.91 us/ctxsw | **0.80x (faster)** |
-| `lat_ctx -s 64 8` | 1.05 us/ctxsw | 1.3 us/ctxsw | **0.81x (faster)** |
-| `lat_proc fork` | ~~672.936~~ 47.6 µs *(perf-fork lane: the 673 µs was one EXITGRP pr_err serial line, ~650 µs through the polled UART)* | 33.133 microseconds | 1.44x |
-| `lat_proc exec` | ~~673.619~~ 55.9 µs *(same print)* | 57.54 microseconds | **0.95x (at reference)** |
-| `lat_sem` | **TIMEOUT** | 0.444 microseconds | - |
-| `lat_fs -s 1k` | n/a | 438368 files/s | - |
-| `lat_mem_rd -s 1048576 -e 1048576 1` | 2.283 ns/load | 2.437 ns/load | **0.94x (faster)** |
-| `lat_mem_rd -s 268435456 -e 268435456 256` | 6.794 ns/load | 6.753 ns/load | 1.01x |
-| `bw_mem 1m bcopy` | 79818.42 MB/s | 72596.57 MB/s | **1.10x (faster)** |
-| `bw_mem 4m bzero` | 65799.4 MB/s | 60682.25 MB/s | **1.08x (faster)** |
-| `bw_pipe` | 21515.66 MB/s | 10442.95 MB/s | **2.06x (faster)** |
-| `bw_unix` | 2637.87 MB/s | 22782.66 MB/s | 8.64x slower |
-| `bw_file_rd 1m io_only /tmp/lmbench.file` | ~~669.19 MB/s~~ 32,900 MB/s *(re-measured; see Corrections §1)* | 33600.68 MB/s | 1.02x slower |
-| `bw_mmap_rd 1m mmap_only /tmp/lmbench.file` | 70917.84 MB/s | 74316 MB/s | 1.05x slower |
-| `lat_tcp 127.0.0.1` | **TIMEOUT** | 4.446 microseconds | - |
-| `lat_udp 127.0.0.1` | n/a | 4.37 microseconds | - |
-| `lat_connect 127.0.0.1` | **TIMEOUT** | 86.887 microseconds | - |
-| `bw_tcp 127.0.0.1` | **TIMEOUT** | 15195.35 MB/s | - |
-| `lat_usleep 1000` | 5013.928 microseconds | 1052.529 microseconds | 4.76x |
+| `lat_syscall null` | ~~0.095~~ **0.055 µs** | 0.044 microseconds | 1.25x |
+| `lat_syscall read` | ~~0.234~~ **0.110 µs** *(11-03/04: per-call alloc purge + dispatch consolidation + RCU fd lookup)* | 0.069 microseconds | 1.59x |
+| `lat_syscall write` | ~~0.198~~ **0.094 µs** *(same set)* | 0.064 microseconds | 1.47x |
+| `lat_syscall stat` | ~~4.077~~ 1.067 → 0.651 → **0.382 µs** *(path-walk fast paths, then the 11-03 rounds)* | 0.213 microseconds | 1.79x |
+| `lat_syscall fstat` | ~~0.17~~ **0.086 µs** *(RCU fd lookup — ahead of native reference)* | 0.111 microseconds | **0.77x (faster)** |
+| `lat_syscall open` | ~~5.685~~ 1.773 → 1.222 → **0.70 µs** *(epoll-purge off the close path + RCU fd lookup)* | 0.395 microseconds | 1.77x |
+| `lat_pagefault /tmp/lmbench.file` | 0.449 microseconds *(11-01 value; not re-landed in the 11-04 load window)* | 0.07 microseconds | 6.45x |
+| `lat_mmap 1m /tmp/lmbench.file` | 1.049 us *(11-01 value; not re-landed in the 11-04 load window)* | 4.41 us | **0.24x (faster)** |
+| `lat_pipe` | **4.00 µs** *(rig-divergent row: native ref 2.745 vs KVM ref 13.296 — the KVM pair is authoritative, see fair-rig section)* | 2.745 microseconds | KVM pair: **ahead 3.3x** |
+| `lat_unix` | ~~2.688 (quiet window)~~ **4.56 µs** *(load-6 window)* | 3.011 microseconds | 1.52x |
+| `lat_ctx -s 64 2` | **2.13 us/ctxsw** *(rig-divergent: KVM pair authoritative)* | 0.91 us/ctxsw | KVM pair: **ahead 3.2x** |
+| `lat_ctx -s 64 8` | 1.05 (quiet) / **1.94 us/ctxsw** (load-6) | 1.3 us/ctxsw | 1.49x (load window) |
+| `lat_proc fork` | ~~672.9~~ 47.6 (quiet) / **59.9 µs** (load-6, 180 s window) | 33.133 microseconds | KVM pair: 1.11x |
+| `lat_proc exec` | ~~673.6~~ 55.9 → **66.2 µs** (load-6) | 57.54 microseconds | KVM pair: **ahead 1.3x** |
+| `lat_sem` | **0.800 µs** *(first landing — was TIMEOUT on 11-01)* | 0.444 microseconds | 1.80x |
+| `lat_fs -s 1k` | n/a *(not re-landed in the load window)* | 438368 files/s | - |
+| `lat_mem_rd -s 1048576 -e 1048576 1` | 2.321 ns/load | 2.437 ns/load | **0.95x (faster)** |
+| `lat_mem_rd -s 268435456 -e 268435456 256` | 6.967 ns/load | 6.753 ns/load | 1.03x |
+| `bw_mem 1m bcopy` | 77770.49 MB/s | 72596.57 MB/s | **1.07x (faster)** |
+| `bw_mem 4m bzero` | 66837.16 MB/s | 60682.25 MB/s | **1.10x (faster)** |
+| `bw_pipe` | **28030.46 MB/s** | 10442.95 MB/s | **2.68x (faster)** |
+| `bw_unix` | ~~2637.87~~ **42885.03 MB/s** *(unix staging elimination; landed 1/3 passes in the load window — quiet-window confirm pending)* | 22782.66 MB/s | **1.88x (faster)** |
+| `bw_file_rd 1m io_only /tmp/lmbench.file` | "inf" *(timer floor — per-iteration cost below clock granularity; ≥32 GB/s class)* | 33600.68 MB/s | at/above reference |
+| `bw_mmap_rd 1m mmap_only /tmp/lmbench.file` | 70917.84 MB/s *(11-01 value; not re-landed)* | 74316 MB/s | 1.05x slower |
+| `lat_tcp 127.0.0.1` | **7.75–8.03 µs** *(11-04 lane fix: AF_PACKET locks irqsave'd + TCP-table exhaustion fixed; 3/3 release boots — the earlier "debug-print chokes" attribution was wrong, the case was wedging)* | 4.446 microseconds | 1.78x |
+| `lat_udp 127.0.0.1` | 94–96 µs on the debug kernel *(source-address fix landed)*; **release kernel: 0/8** — the scheduler stale-claim strands the UDP server within ~20 roundtrips (see queue) | 4.37 microseconds | blocked (sched) |
+| `lat_connect 127.0.0.1` | **14.3–16.1 ms measured, 3/4 boots** *(was TIMEOUT: TCP-table exhaustion — the SYN spawn dropped every SYN once the 64-slot table filled with TIME_WAIT/CLOSE_WAIT corpses; eviction + 512 slots landed)*; remaining cost + 1-in-4 wedge = the same scheduler stale-claim refusing the accept server's wakes | 86.887 microseconds | 165x (sched-blocked) |
+| `bw_tcp 127.0.0.1` | **TIMEOUT** *(scheduler stale-claim refuses the benchmark worker's wakes — `WAKE-HEAL-SKIP pid=<worker> why=c` ×39 to the kill; connect/data path itself works)* | 15195.35 MB/s | - |
+| `lat_usleep 1000` | ~~5013.9~~ **1037.1 µs** *(LAPIC single-shot timer; consistent across all 3 passes)* | 1052.529 microseconds | **0.99x (at reference)** |
 
 
-*Measured 2026-11-01, 9950X host. Rux column under host loadavg
-10–19 (32-core box shared with other agents' QEMU VMs), reference
-column under 7.6–8.8 — both run strictly one case at a time. The
-`lat_ctx -s 64 8`, `lat_fs -s 1k`, `bw_pipe`, `lat_connect` reference
-rows and the `lat_mem_rd 1m`, `bw_mmap_rd` Rux rows were re-measured
-single-case with a longer window (90–150 s) when the standard window
-proved shorter than the benchmark's auto-calibration; identical
-kernel, image and arguments.*
+*Refreshed 2026-11-04 (kernel main=8d81c5da — RCU fd lookup + retire
+reaper), 9950X host, loadavg 4.4–6.2 window, median of 3 standing
+passes + serial retries at longer windows (fork 180 s) for starved
+rows. Rows marked "not re-landed" keep their 2026-11-01 value (the
+load window starved their auto-calibration). The original 2026-11-01
+sweep ran under loadavg 10–19; strikethrough values show the lineage.*
 
 
 
@@ -115,6 +113,75 @@ bimodal tail on lat_unix (base boots showed 16.7/6.05us bimodal; the
 Semop ping-pong under load stayed 2M-round clean through the soak.
 
 
+
+## Negative result (2026-11-04): adaptive idle-poll window — rejected with evidence
+
+The reference kernel's guest halt-polling discipline (adaptive
+`guest_halt_poll_ns` instead of a fixed window) was implemented in
+three variants and measured against the static 120 us window. None
+beat the static window on the primary perf platform (KVM lmbench);
+the change was reverted. Recorded here because the mechanisms are
+reusable knowledge:
+
+| variant | KVM lmbench (vs base, same-window interleave) | TCG pbench |
+|---|---|---|
+| v1 collapse-on-halt, ceiling 500 us | ctx +18%, pipe +8-12% | - |
+| v2 grow-on-fast-halt (ns clock), ceiling 500 us | ctx +13%, exec -14%, fork -6% | p4_fork_exit **+56%** |
+| v2 + ceiling 120 us | (not run) | p4_fork_exit +47% |
+| v2 + 5 ms decay hysteresis | (not run) | p4_fork_exit +55% |
+| X1 jiffy-clock verdict, ceiling 120 us | ctx +6%, pipe +8%, exec +43% (single pair), fork +4%, null flat | p4 flat, p2 -11%, p5a -13% |
+
+Mechanisms established by bisection (constant-window build isolated
+the code path from the window values):
+
+1. **Grow-only-on-catch is chicken-and-egg**: a window below every
+   wake gap can never grow (the wake always lands after the window),
+   so the 10-120 us gap class paid an IPI on every handoff (v1).
+2. **Measuring the halt with `monotonic_ns_since_boot` costs +50% on
+   translation rigs**: the call walks the HPET device model and its
+   lock twice per halt, serializing both vCPUs' timer traffic during
+   fork storms. Jiffy-granular verdicts (two atomic loads) fixed the
+   TCG p4 regression entirely — the idle/halt path must only use
+   cheap clocks.
+3. **Why adaptivity does not pay on this rig**: the host's KVM
+   `halt_poll_ns=200000` already keeps the vCPU THREAD from sleeping
+   through sub-200 us wakes — the guest-side window only saves the
+   guest IPI (waker-side VM-exit), and the static 120 us already
+   covers the ping-pong gap class. The adaptive variants only added
+   regrow transients at benchmark phase boundaries.
+
+Tool: `run/ab-haltpoll.sh` (interleaved same-window A/B boots — the
+interleaving is what separates real deltas from load drift; see the
+ctx rows: base read 1.85-1.88 at load 1.3 vs 1.96-2.17 at load 5).
+
+## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
+
+Both kernels under the same q35+KVM rig (reference column frozen from
+its own window). The 8d81c5da round landed the RCU fd lookup + retire
+reaper (get_file: banks → one Acquire load + refcount inc) and the
+read/write dispatch consolidation. fstat — the purest fdtable-lookup
+row — moved from 1.19x ahead to **1.37x ahead** measured at a HIGHER
+host load (6 vs 4), the clearest single signal of the round.
+
+| Case | Rux | Reference (KVM) | Ratio | vs 11-03 19:15 |
+|---|---|---|---|---|
+| lat_ctx -s64 2 | **2.13 µs** | 6.71 µs | **ahead 3.15x** | 3.4x (load window) |
+| lat_pipe | **4.00 µs** | 13.30 µs | **ahead 3.33x** | 2.6x → improved |
+| lat_proc exec | **66.2 µs** | 87.43 µs | **ahead 1.32x** | 1.39x (load window) |
+| lat_syscall fstat | **0.086 µs** | 0.118 µs | **ahead 1.37x** | 1.19x → improved |
+| lat_proc fork | 59.9 µs | 53.99 µs | 1.11x | 1.17x → improved |
+| lat_syscall null | **0.055 µs** | 0.042 µs | 1.31x | 1.37x → improved |
+| lat_syscall open | 0.70 µs | 0.360 µs | 1.95x | 2.28x → improved |
+| lat_syscall write | **0.094 µs** | 0.058 µs | 1.62x | flat |
+| lat_syscall read | **0.110 µs** | 0.066 µs | 1.67x | flat |
+| lat_syscall stat | **0.382 µs** | 0.227 µs | 1.68x | flat |
+
+5 rows ahead (ctx/pipe/exec/fstat + unix-bandwidth family), the rest in
+the 1.11–1.95x band — the read/write/stat band is unchanged at this
+load window (the earlier isolated boots at load 3.7 read 0.106 µs; the
+standing window reads 0.110). Remaining read/write gap lives in the
+fill/copy tail (SMAP AC brackets) and the syscall-entry floor (null
+1.31x), not fd lookup anymore.
 
 ## Standing (2026-11-03 19:15, kernel e264a64b — fair KVM-vs-KVM, LASTSYS gated)
 
@@ -168,23 +235,57 @@ the per-case optimization work):
 1. **Functional gaps (TIMEOUT / n-a rows) — each is a missing or
    wrong semantic, not a slow path.** Fixing one turns a dead row
    into a number:
-   - **lat_sem** — the writer's blocking 2-op `semop` (sem_flg=0)
-     returns `EAGAIN`, which the reference kernel never does for a
-     non-IPC_NOWAIT wait. Reproduced with serial evidence
-     (`run/repro-lat_sem.log` in the lane worktree: `(w) error on
-     semaphore: Resource temporarily unavailable`, plus
-     `WAKE-HEAL-SKIP` traces). Suspect: `kernel/src/ipc/sysv_sem.rs`
-     around the `blocking_idx` match — when
-     `find_blocking_op()` returns `None` after
-     `try_apply_semops()` reported NEED_BLOCK (a concurrent post
-     raced the scan), the code returns `-EAGAIN` where it must
-     `continue` the retry loop.
-   - **lat_tcp / lat_connect / bw_tcp** — loopback TCP: the in-guest
-     server reaches `tcp-listen`, the client's `connect(127.0.0.1)`
-     never completes (hangs to the kill; no error printed).
-   - **lat_udp** — loopback UDP: the client's handshake datagram gets
-     no reply within its own deadline (`Recv timed out` from
-     lat_udp.c), so the case exits instead of hanging.
+   - **lat_sem — RESOLVED** (main's R40 semop retry + the sched
+     fixes): 0.800 µs standing (perf-lmbench lane), re-confirmed
+     0.730 µs (debug) / 0.847 µs (release) on the 11-04
+     lmbench-fix tree. The EAGAIN blocking_idx suspect is fixed in
+     `kernel/src/ipc/sysv_sem.rs` (the `None => continue 'outer`
+     arm is on main).
+   - **lat_tcp — RESOLVED 11-04 (lmbench-fix lane), 7.75–8.03 µs,
+     3/3 release boots.** Two stacked causes: (a) the AF_PACKET
+     registry/per-socket locks were softirq-contended — a timer IRQ
+     landing on a CPU whose task context held PACKET_SOCKETS made
+     the RX fanout spin on its own holder (one-CPU self-deadlock,
+     system-wide at smp2); irqsave'd (predecessor commit 7f9c5e7b).
+     (b) TCP socket-table exhaustion: the SYN spawn path had no
+     reclamation and the 64-slot table cannot hold the workload's
+     60+ concurrent ESTABLISHED connections plus its TIME_WAIT /
+     orphaned CLOSE_WAIT corpses — the SYN was dropped silently and
+     every connect waited for the 1 s SYN retransmit (eviction +
+     512-slot table, commit c489347c).
+   - **lat_connect — TABLE EXHAUSTION FIXED (14.3–16.1 ms, 3/4
+     boots; was TIMEOUT).** Same table fixes; the residual 165x cost
+     and the 1-in-4 wedge are the scheduler stale-claim family (see
+     the queue's sched entry). With a healthy accept server the
+     handshake completes in the synchronous loopback drain.
+   - **lat_udp — NET SIDE RESOLVED** (unbound UDP socket to
+     127.0.0.1 stamped the eth0 address as source; the peer's echo
+     then routed out eth0 — commit d0452aaf): 94–96 µs, 5/5 on the
+     debug kernel. **The release kernel still fails 0/8**: within
+     ~20 ping-pong roundtrips the UDP server's wake is refused by
+     the scheduler stale-claim (`WAKE-HEAL-SKIP pid=<server> why=c`)
+     and the pong never comes — the same single producer as below.
+   - **bw_tcp — connect/data path works; the case is wedged by the
+     scheduler stale-claim** refusing the benchmark worker's wakes
+     (39 `WAKE-HEAL-SKIP why=c` to the kill, one `WAKE-HEAL was=1`
+     firing but not un-stranding). No net-side defect found on the
+     11-04 tree.
+   - **SCHEDULER STALE-CLAIM (the one remaining producer, blocks
+     lat_udp@release + bw_tcp + the lat_connect tail).** A task
+     parked in a socket wait is left {state=RUNNING, linked=0,
+     on_rq=0, on_cpu=1, pk=1, claim=<cpu>} — a leaked preempt
+     count on a sleeping task with the pick ownership never
+     released. Every wake of it is refused by the curr_on scan
+     (`WAKE-HEAL-SKIP why=c`), `STALE-CLAIM-RESET` fires on the
+     OTHER victims but never heals these, the 1 Hz phantom relink
+     (177eec0b) does not match (they are claim-named, not slotless),
+     and the r24 idle-slot heal only runs when the claiming CPU
+     idles. Faster (release) kernels hit the window within seconds;
+     debug timing mostly hides it. Fresh evidence this session:
+     lat_udp release 0/8 (server 308 refused mid-ping-pong),
+     bw_tcp wedges with the worker refused, lat_connect 1-in-4
+     wedge + 15 ms tail, all with the census shape above in the
+     serial. This is sched-lane territory (kill10/R63–R85 lineage).
    - **lat_fs** — no functional error, but the mk/rm calibration
      does not finish even in a 300 s single-case window: it creates
      thousands of 1k files, and at the measured 14–19x per-call file

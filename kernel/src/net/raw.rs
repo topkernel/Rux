@@ -139,11 +139,11 @@ impl RawSocket {
     }
 
     fn recv_ready(&self) -> bool {
-        !self.recv_queue.lock().is_empty() || *self.closed.lock()
+        !self.recv_queue.lock_irqsave().is_empty() || *self.closed.lock_irqsave()
     }
 
     fn push_msg(&self, msg: RawMsg) {
-        self.recv_queue.lock().push_back(msg);
+        self.recv_queue.lock_irqsave().push_back(msg);
         self.wait_queue.wake_up_all();
     }
 
@@ -151,7 +151,7 @@ impl RawSocket {
     fn deliver(&self, data: &[u8], src_addr: [u8; SOCKADDR_LL_LEN], src_len: u8) {
         // Bound the queue so a socket nobody reads cannot exhaust memory.
         {
-            let q = self.recv_queue.lock();
+            let q = self.recv_queue.lock_irqsave();
             if q.len() >= 64 {
                 return;
             }
@@ -235,7 +235,7 @@ pub fn icmp_input(skb: &SkBuff, src_ip: u32) {
     let mut src = [0u8; SOCKADDR_LL_LEN];
     src[0..2].copy_from_slice(&(2u16).to_le_bytes()); // AF_INET
     src[4..8].copy_from_slice(&src_ip.to_be_bytes());
-    let mut listeners = RAW_SOCKETS.lock();
+    let mut listeners = RAW_SOCKETS.lock_irqsave();
     gc_listeners(&mut listeners);
     for w in listeners.iter() {
         if let Some(sock) = w.0.upgrade() {
@@ -284,7 +284,7 @@ pub fn packet_input(ifindex: u32, skb: &SkBuff) {
     src[11] = crate::net::ethernet::ETH_ALEN as u8;
     src[12..18].copy_from_slice(&hdr.h_source);
 
-    let mut listeners = PACKET_SOCKETS.lock();
+    let mut listeners = PACKET_SOCKETS.lock_irqsave();
     gc_listeners(&mut listeners);
     for w in listeners.iter() {
         if let Some(sock) = w.0.upgrade() {
@@ -405,13 +405,13 @@ pub fn raw_recv(
     deadline: Option<u64>,
 ) -> Result<(usize, Option<([u8; SOCKADDR_LL_LEN], u8)>), i32> {
     loop {
-        if let Some(msg) = sock.recv_queue.lock().pop_front() {
+        if let Some(msg) = sock.recv_queue.lock_irqsave().pop_front() {
             let n = msg.data.len().min(buf.len());
             buf[..n].copy_from_slice(&msg.data[..n]);
             let src = Some((msg.src_addr, msg.src_len));
             return Ok((n, src));
         }
-        if *sock.closed.lock() {
+        if *sock.closed.lock_irqsave() {
             return Ok((0, None)); // EOF
         }
         if nonblock {
@@ -423,7 +423,7 @@ pub fn raw_recv(
 
 /// close(): mark EOF and wake blocked receivers.
 pub fn raw_close(sock: &Arc<RawSocket>) {
-    *sock.closed.lock() = true;
+    *sock.closed.lock_irqsave() = true;
     sock.wait_queue.wake_up_all();
 }
 
@@ -592,7 +592,7 @@ pub fn packet_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
     };
     let socket = Arc::new(RawSocket::new(RawKind::Packet, host_proto));
     let fd = raw_socket_install(&socket, nonblock, cloexec)?;
-    PACKET_SOCKETS.lock().push(WeakArc(Arc::downgrade(&socket)));
+    PACKET_SOCKETS.lock_irqsave().push(WeakArc(Arc::downgrade(&socket)));
     Ok(fd)
 }
 
@@ -625,7 +625,7 @@ pub fn raw_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
     let cloexec = (type_ & SOCK_CLOEXEC_FLAG) != 0;
     let socket = Arc::new(RawSocket::new(RawKind::Inet, protocol));
     let fd = raw_socket_install(&socket, nonblock, cloexec)?;
-    RAW_SOCKETS.lock().push(WeakArc(Arc::downgrade(&socket)));
+    RAW_SOCKETS.lock_irqsave().push(WeakArc(Arc::downgrade(&socket)));
     Ok(fd)
 }
 
