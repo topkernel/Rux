@@ -225,6 +225,14 @@ pub struct UnixSocket {
     dead: Spinlock<bool>,
     /// Our write half was shut (shutdown(SHUT_WR) / SHUT_RDWR)
     shut_wr: Spinlock<bool>,
+    /// Pending socket error (the reference's sk_err). Set on the
+    /// SURVIVING peer when the closing side of a SOCK_STREAM/SOCK_
+    /// SEQPACKET connection closed with UNREAD data still queued
+    /// (reference unix_release_sock: `if (skb || embrion)
+    /// WRITE_ONCE(skpair->sk_err, ECONNRESET)`). A reader drains the
+    /// queued data first, then the NEXT recv reports -ECONNRESET
+    /// instead of a clean EOF — the peer lost data it never read.
+    err: Spinlock<i32>,
     /// W3-style wait queue for blocking recv/accept — the data-arrival
     /// queue. Reference shape: sk_sleep(sk) / sk_receive_queue.wq. Waiters:
     /// blocking recv callers (DGRAM/SEQPACKET register EXCLUSIVE —
@@ -289,6 +297,7 @@ impl UnixSocket {
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
+            err: Spinlock::new(0),
             wait_queue: WaitQueueHead::new(),
             peer_wait: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
@@ -388,6 +397,11 @@ impl UnixSocket {
     /// Would recv() return data / EOF (anything but EAGAIN)?
     fn recv_ready(&self) -> bool {
         if !self.recv_queue.lock().segs.is_empty() {
+            return true;
+        }
+        // A pending socket error is a readable condition (the reference
+        // surfaces it from the wait loop's sock_error check).
+        if *self.err.lock() != 0 {
             return true;
         }
         // EOF (peer closed) is a readable condition — read returns 0.
@@ -1107,6 +1121,18 @@ fn unix_recvmsg_user(
 /// Empty-queue tail shared by the direct path's kinds (mirror of
 /// unix_recv's tail): EOF, ENOTCONN, or EAGAIN.
 fn unix_recvmsg_empty_tail(sock: &Arc<UnixSocket>) -> Result<UnixRecvResult, i32> {
+    // Pending socket error first (reference __skb_wait_for_more_packets
+    // checks sock_error before the shutdown/EOF legs): ECONNRESET beats
+    // a clean EOF when the peer closed with unread data. sock_error()
+    // CLEARS on read — one delivery, then the next recv reports EOF.
+    {
+        let mut e = sock.err.lock();
+        if *e != 0 {
+            let v = *e;
+            *e = 0;
+            return Err(v);
+        }
+    }
     if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
         return Ok(unix_recv_eof());
     }
@@ -2572,7 +2598,17 @@ pub fn unix_recv(
     }
     drop(q);
 
-    // Empty queue: EOF or error or block.
+    // Empty queue: EOF or error or block. Pending socket error first,
+    // read-and-clear (reference sock_error semantics — one delivery,
+    // then EOF).
+    {
+        let mut e = sock.err.lock();
+        if *e != 0 {
+            let v = *e;
+            *e = 0;
+            return Err(v);
+        }
+    }
     if *sock.eof.lock() || *sock.state.lock() == UnixState::Closed {
         return Ok(unix_recv_eof());
     }
@@ -2650,6 +2686,17 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Peer gets drain-then-EOF semantics.
     if let Some(peer) = sock.peer_arc() {
         *peer.eof.lock() = true;
+        // Reference unix_release_sock: when a SOCK_STREAM/SOCK_SEQPACKET
+        // socket closes with UNREAD data still in its receive queue, the
+        // surviving peer gets sk_err = ECONNRESET — its next recv (after
+        // draining what was already delivered to it) reports the reset,
+        // not a clean EOF. The closing side's own queued data is about to
+        // be discarded below.
+        if matches!(sock.kind, UnixKind::Stream | UnixKind::Seqpacket)
+            && !sock.recv_queue.lock().segs.is_empty()
+        {
+            *peer.err.lock() = -104; // ECONNRESET
+        }
         // skpair->sk_state_change(skpair) (sock_def_wakeup = wake_all on
         // the PEER's sk_sleep): the peer's readers/acceptors/pollers see
         // EOF/POLLHUP.
@@ -3223,6 +3270,11 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
             ready |= POLLOUT | POLLWRNORM;
         }
     }
+    // Pending socket error (peer closed with unread data — the reference
+    // sk_err): POLLERR is reported regardless of the requested mask.
+    if *socket.err.lock() != 0 {
+        ready |= POLLERR;
+    }
     // Peer of a connection-mode socket fully CLOSED (or its fd dropped):
     // POLLHUP — unconditionally, while queued data stays readable through
     // POLLIN (Linux sets SHUTDOWN_MASK at peer release time, not after the
@@ -3600,7 +3652,19 @@ pub fn unix_getsockopt(sock: &Arc<UnixSocket>, level: i32, optname: i32) -> Resu
             UnixKind::Seqpacket => SOCK_SEQPACKET,
             UnixKind::Dgram => SOCK_DGRAM,
         }),
-        SO_ERROR => Ok(sock.options.lock().error),
+        SO_ERROR => {
+            // The pending socket error, read-and-clear (reference
+            // sock_error semantics): the ECONNRESET a stream peer sees
+            // after the other end closed with unread data, or the
+            // options-level error slot.
+            let mut e = sock.err.lock();
+            if *e != 0 {
+                let v = *e;
+                *e = 0;
+                return Ok(v);
+            }
+            Ok(sock.options.lock().error)
+        }
         SO_REUSEADDR => Ok(sock.options.lock().reuseaddr as i32),
         SO_SNDBUF => Ok(sock.options.lock().sndbuf as i32),
         SO_RCVBUF => Ok(sock.options.lock().rcvbuf as i32),
