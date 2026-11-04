@@ -1,5 +1,21 @@
 # qa-suites lane — verdict ledger (run/qa-suites-findings.md)
 
+## Charter (user directive 2026-11-04, preserved from the round-1 branch tip f4e1e4f2)
+"业界还有比较流行的测试用例——靠更多测试用例把内核质量搞上去。"
+Onboard the industry suites we do not yet run, ranked by bug-finding
+yield on OUR weak families (timers/wakeups/IPC/net-loopback/fs/IO)
+and portability (static musl x86_64, serial console, KVM). TIMEOUT/
+HANG/n-a results are P0 (house rule) — they outrank every ratio row.
+Onboarding order v1: 1 rt-tests, 2 kselftest portable subset,
+3 fio (IO engines), 4 netperf/iperf3/sockperf (loopback first),
+5 Trinity (bounded), 6 syzkaller repro corpus (curated ~50),
+7 bonnie++/postmark/dbench, 8 UnixBench. Rules: static musl builds via
+the house pattern (tarball + build script under userspace/tests/),
+one-class-per-boot on x86_64+KVM, verdicts in this file, kernel fixes
+through lane discipline, cross-domain hunts hand off via the
+coordinator, sources ONLY as tarball, NEVER "the L-word" in commits
+(use "the reference kernel").
+
 Per-suite, per-class verdicts per the charter: PASS / FAIL(named bug
 + minimal repro) / TIMEOUT (= P0, immediate). Kernel: origin/main
 f4e1e4f2-era worktree, x86_64 bzImage, QEMU q35 + KVM, -smp 2 -m 2G,
