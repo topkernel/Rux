@@ -3282,3 +3282,15 @@ run/oh-lb416-serial.log):
   reads; every frozen txn is thread-targeted (never touches proc
   todo), so the idle pool cannot drain it — matches the src lane's
   census-blind-spot prediction verbatim.
+- VERIFIED (torvalds/linux v6.6 binder.c ~3100-3130, fetched 22:2x):
+  the reference from-walk ALSO breaks at the FIRST (innermost/newest)
+  match — our first-match break is parity, NOT the divergence. The
+  more interesting reference guard sits directly above the walk:
+  `tmp = thread->transaction_stack; if (tmp->to_thread != thread)
+  { binder_user_error("got new transaction with bad transaction
+  stack"); return_error = BR_FAILED_REPLY; }` — a thread whose stack
+  TOP is an OUTGOING (awaiting-reply) frame gets its new sync send
+  REJECTED with BR_FAILED_REPLY. Worth auditing whether our sync-send
+  path enforces exactly this (the 26th-session comment mentions a
+  rejection guard; verify it fires on the same predicate and returns
+  the same error).
