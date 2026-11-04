@@ -71,6 +71,31 @@ for i in $(seq 0 $((MAX-1))); do
     SA=$(grep -a -c 'insert SA:' "$SER" 2>/dev/null)
     if [ "$SA" -gt "$SAPREV" ]; then SAPREV=$SA; SAT=$EL; fi
     if [ "$SA" -eq 0 ] && [ $EL -gt 400 ]; then VERDICT=dark; break; fi
+    # cg36: signature-early verdict — the comm-inline FUX-STUCK rows name
+    # the wedge park's owner thread directly, but the owner PROCESS comes
+    # from tgid: samgr's wedge park sits on OS_IPC/FFRT-named threads,
+    # not a comm=samgr thread, so resolve samgr's pid from its
+    # ServiceStart print and match the row by tgid. Once samgr's
+    # +0x800194 park has survived >=90s (one 60s timeout cycle + margin)
+    # its u2v caller decode is banked; no need to sit the full 240s
+    # wedge window. Records concatenate without newlines on the serial,
+    # so the park age must be matched record-bounded (no FUX-STUCK token
+    # between the tgid=, park= and +0x800194 anchors) — python re.
+    SAMPID=$(grep -ao "ServiceStart started info samgr(pid [0-9]*" "$SER" 2>/dev/null | head -1 | grep -o "[0-9]*$")
+    if [ -n "$SAMPID" ] && [ "${SIGKILL:-1}" = "1" ]; then
+      SIGAGE=$(python3 -c '
+import re,sys
+pat=re.compile((r"tgid=%s(?:(?!FUX-STUCK).)*?park=(\d+)s(?:(?!FUX-STUCK).)*?A\+0x800194" % sys.argv[2]).encode(),re.S)
+best=0
+try:
+    with open(sys.argv[1],"rb") as f:
+        for m in pat.finditer(f.read()):
+            best=max(best,int(m.group(1)))
+except OSError: pass
+print(best)' "$SER" "$SAMPID" 2>/dev/null)
+      [ -z "$SIGAGE" ] && SIGAGE=0
+      if [ "$SIGAGE" -ge 90 ]; then VERDICT=samgr-sig; break; fi
+    fi
     if [ $((EL - SAT)) -gt 240 ] && grep -aq 'TXN-HANG' "$SER" 2>/dev/null; then VERDICT=wedge; break; fi
     M=$(stat -c %Y "$SER" 2>/dev/null || echo "$(date +%s)")
     if [ $(( $(date +%s) - M )) -gt 240 ]; then VERDICT=quiet-stall; break; fi
