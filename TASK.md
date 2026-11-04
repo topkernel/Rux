@@ -4030,115 +4030,195 @@ hold chain broken. Both are queued below.
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
 
----
+## 40TH SESSION (2026-11-05 03:4x-04:1x, branch biofix-fieldpoll @ 453914a5, unwritten until now)
 
-# oh-binder lane: BINDER+FUTEX+SCHED reference-diff audit (2026-11-05)
+The 40th died on quota after pushing three net/unix reference-parity
+fixes, without a TASK section or verification boots. The commits (all on
+the branch, merged to main by the coordinator as 02e3c900):
+1. d8a0d979 fix(sync): wake budget consumed only by exclusive entries —
+   reference __wake_up_common parity (ConditionVariable waiters now
+   register EXCLUSIVE).
+2. d3ebcc59 fix(net): AF_UNIX reader/writer wait-queue split —
+   sk_receive_queue.wq vs peer_wait shape (UnixSocket gains peer_wait;
+   per-site exclusivity per datagram.c/stream sites; drain wakes one
+   parked sender per freed record).
+3. 453914a5 perf(net): AF_UNIX recvmsg copies direct-to-user — bounce
+   buffer removal (unix_recvmsg_user_ctl; DGRAM pops then copies outside
+   the queue lock; STREAM per-segment with released lock + requeued
+   tails; MSG_PEEK keeps the staged path).
 
-Branch oh-binder from main 02e3c900. Mission: systematic side-by-side
-diff of binder transaction lifecycle, the full futex op set, and the
-scheduler wake/PI path against the reference kernel source
-(/home/william/workspace/oh-robot/kernel/linux/linux-6.6/), fixing every
-divergence the 22 earlier parity fixes did not already cover.
+## 41ST SESSION (2026-11-05 04:1x-.., branch biofix-fieldpoll @ 6cf83b15+)
 
-## Binder (drivers/android/binder.c vs kernel/src/ipc/binder.rs) — 5 fixed
+Mission: (A) verify the 40th's three fixes on OH boots, (B) systematic
+reference-diff audit of the census's top syscall classes.
 
-- **B1 (critical) failed-reply error routing**: reference binder.c
-  3806-3812 + binder_send_failed_reply (1640-1696) — once in_reply_to is
-  validated, a failed BC_REPLY NEVER gives the error to the replier: the
-  replier gets BR_TRANSACTION_COMPLETE, the ORIGINATOR gets the error
-  (BR_FAILED_REPLY/BR_DEAD_REPLY), its txn-stack entry popped, woken.
-  Ours queued ReturnError on the replier in every case → the parked
-  client waited forever. Fixed at requester-dead, alloc-none,
-  buffer-alloc-fail, target-died-before-copy, data/offsets copy fault,
-  translate failure, originator-thread-gone. New helper
-  send_failed_reply() also drops the originating txn's node pin (the
-  old requester-dead path leaked it).
-- **B2** BC_INCREFS_DONE/ACQUIRE_DONE cookie mismatch now ignored
-  (reference 3986-3995); we processed the command regardless.
-- **B3** strong-ref requirement on handle use (reference 3062/2238,
-  "tried to use weak ref as strong ref"): transaction target resolution
-  and BINDER_TYPE_HANDLE translation now require strong != 0.
-- **B4** unknown BC command fails the write with -EINVAL (reference
-  4306-4309); we logged and returned 0.
-- **B5** post-read proc-todo re-kick (reference 5181-5184),
-  eligibility-gated for the sc161 child-routing model.
+### PART A — verification (substrate: system-lb5 + fresh2 reflinks, SMP2
+### KVM, LOGLEVEL6, dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1)
 
-Audited and found already at parity (no change): BC_FREE_BUFFER
-protocol incl. async-slot handoff, death-notification lifecycle
-(REQUEST/CLEAR/DEAD_BINDER_DONE phases incl. DEAD_BINDER_AND_CLEAR),
-oneway queuing + async-space budget, BR_DEAD_BINDER read-loop stop
-("goto done"), one-sync-transaction-per-read, BR_SPAWN_LOOPER pool gate
-(+child variant), sender_pid=TGID stamping, deferred tcomplete, fd/FDA/
-PTR translation incl. parent fixups, mmap/alloc ordering, ioctl
-surface incl. OH extensions. Documented divergences kept: binder
-priority inheritance (binder_set_nice — no nice in our scheduler),
-oneway-spam-suspect stats, desc lowest-free reuse (opaque to
-userspace), wait_for_context_manager crutch.
+Per-op phase tables, t=885s cumulative (vs the 39th's u2v7/u2v8):
+- UNIXRD-RM outer: u2v7 4852ns -> u2v8 1874 -> u2v9/u2v10 2166-2254ns.
+  Phases: cmsg 3313 -> 334 -> 369-379 (fast path holds); alloc 982/953
+  -> 0 (bounce GONE — direct-to-user verified live); recv 890-892 ->
+  1206-1249 (the split path's recv phase carries the queue lock + pop);
+  cout 84 -> 0.
+- UNIXRD-WV outer: 17785 -> 9589 -> 12634-12861; send 12917 -> 4619 ->
+  5783-6092 (the queue-split wake shape costs ~1.2-1.5us vs u2v8, still
+  2.1-2.8x below u2v7); gather 3147-4460 unchanged.
+- Peek (RF): sleep-dominated (recv 38818ns, ea~0-1) — same blocking
+  posture as the reference's hilogd.
+- Throughput: consume keeps pace with the storm (u2v9 45.3M RM by
+  1485s; u2v10 24.1M by 885s) — no regression from the split.
+- WEDGE LEDGER: u2v9 SA=37, u2v10 SA=47 — both wedge-class, face =
+  the FFRT-mutex park cascade (samgr OS_IPC workers parked sys=202,
+  TXN-HANG exec 750s+, thtodo=0). Pixels: every shot = frozen
+  82f0a25f. The 40th's fixes hold their per-op gains but the wedge
+  persists (consistent with the 39th's 11/11 ledger).
 
-## Futex (kernel/futex/ vs kernel/src/sync/futex.rs) — 4 fixed
+### PART B — systematic reference diff audit (census order)
 
-- **F1 (major) PI futexes implemented**: FUTEX_LOCK_PI / FUTEX_LOCK_PI2
-  / FUTEX_TRYLOCK_PI / FUTEX_UNLOCK_PI were ENOSYS; musl's PI-mutex
-  paths (pthread_mutex_timedlock_pi, setprotocol's one-shot probe on
-  every PTHREAD_PRIO_INHERIT request) need them. Implemented the exact
-  reference word protocol (pi.c futex_lock_pi_atomic 514-608 +
-  wake_futex_pi 760-779 + futex_unlock_pi 1100-1232): EDEADLK on
-  self-own, unowned take-over preserving OWNER_DIED and clearing stale
-  WAITERS, WAITERS-bit set before queueing, FIFO ownership handoff
-  (waiter_tid|WAITERS) on unlock, EPERM for non-owner unlock, EBUSY for
-  contended trylock, EINTR retryable, ABSOLUTE timeout. New per-arch
-  atomic user-word cmpxchg primitive (x86_64 lock cmpxchg, riscv64
-  lr.w/sc.w, aarch64 ldaxr/stlxr — all through the extable fixup);
-  without it the protocol's CAS-vs-userspace races cannot be honored.
-  Priority BOOSTING is not implemented (no rt_mutex PI chains in our
-  scheduler — the flagged sched-domain divergence); with all-NORMAL
-  tasks the reference's priority-ordered plist degenerates to the same
-  FIFO handoff. FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI stay
-  ENOSYS: glibc-only ops, musl never issues them (verified across the
-  OH tree; condvars are count-based).
-- **F2** CMP_REQUEUE value check moved under the bucket lock(s)
-  (reference futex_get_value_locked after double_lock_hb) — the old
-  pre-lock check left a store-race window.
-- **F3 (bug fix) robust-exit death mark**: now
-  (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED — the dying TID is CLEARED
-  (reference handle_futex_death 718). The old `v | FUTEX_OWNER_DIED`
-  kept the dead tid and left any PI waiter looping on an unreleasable
-  owner. Also added the reference's pending_op case (700-703): a
-  list_op_pending entry whose word is already released gets a plain
-  wake without touching the word (killed-between-unlock-and-syscall
-  race).
-- **F4** FUTEX_WAIT|FUTEX_CLOCK_REALTIME now ENOSYS like the reference
-  do_futex (syscalls.c 121-125); only WAIT_BITSET/WAIT_REQUEUE_PI/
-  LOCK_PI2 accept the flag.
+Reference census mix (fuxref-fx8 tscen): futex(202) 9137 parks,
+ioctl-BWR(16) 6894, epoll_pwait(281) 1868, poll(7) 284, nanosleep(35)
+174, recvmsg(47)+recvfrom(45) 144, rt_sigtimedwait(128) 60. ALL
+reference futex parks are WAIT|PRIVATE (0x80): val=0x2 (mutex) x23356,
+0xffffffff80000000 (rwlock) x1082 — NO PI ops, NO requeue parks, NO
+WAKE_OP in OH userspace (musl/FFRT never issue them).
 
-OH usage evidence for prioritization: the fuxref-fx8 reference census
-(24,438 parks) shows every OH boot park is FUTEX_WAIT|PRIVATE
-(op 0x80, val mostly 0x2 — musl barrier/condvar words); zero PI parks.
-PI support is preventive (qos_manager's pi_mutex.h
-(PTHREAD_PRIO_INHERIT) exists upstream and would ENOSYS-abort on our
-old kernel).
+Audited + verdicts:
+1. FUTEX (kernel/futex side-by-side) — FOUR divergences found, FIXED
+   (ed1549c5, make test riscv64 ALL PASSED, x3 builds rc=0):
+   a. No waiters-pending fast path: every uncontended FUTEX_WAKE took
+      the hash-bucket spinlock (the reference returns 0 lock-free when
+      hb->waiters==0, with the documented (A)/(B) barrier pair). Ported
+      with HASH_WAITERS + full fences; accounting = one dec per unlink.
+   b. LIFO wake order: our chain inserted at HEAD so FUTEX_WAKE woke
+      the NEWEST waiter; the reference plist is FIFO among equal
+      priorities. Starvation-class under churn (exactly the FFRT
+      cascade regime). Inserts + requeue moves now link at the tail.
+   c. nr_wake==0 woke nothing; reference wakes exactly one (post-
+      increment budget check).
+   d. CMP_REQUEUE's user-word compare ran BEFORE the bucket locks;
+      reference re-reads under both locks. Also the requeue count
+      transfer (dec src, inc dst) now happens between unlink and link
+      (reference requeue_futex order) — the fast path reads the count
+      WITHOUT the lock, so linked-but-uncounted was invisible to a
+      concurrent destination-bucket wake.
+2. AF_UNIX recvmsg re-verify vs __unix_dgram_recvmsg — ONE divergence
+   FIXED (6cf83b15): caller-passed MSG_TRUNC must return the FULL
+   record length (skb->len), we returned the copied prefix. EOF/error
+   propagation, peek non-consume, partial stream reads, fault
+   semantics all parity (the 40th's design comments check out).
+3. timerfd read/close, clock_nanosleep, kmsg read/write, prctl,
+   PROTNONE maps: verified parity or documented forensics (no action).
+4. Documented divergences NOT fixed (not in OH hot path): PI futex ops
+   still ENOSYS; WAKE_OP's user RMW is not atomic vs userspace AMOs
+   (no OH user issues WAKE_OP); UDP recvfrom does not honor
+   caller-passed MSG_TRUNC for its return value; futex returns -EINTR
+   instead of -ERESTARTSYS-restart (LTP-calibrated in-tree choice).
 
-## Scheduler (kernel/sched/ vs kernel/src/sched/) — no change, documented
+### The FFRT holder-chain lever (39th's queued item 3) — LANDED (121fc908)
 
-- Wake-up class selection exists (task_sched_class → select_task_rq);
-  select_task_rq's sync-wake affinity/load balancing is structurally
-  N/A under the registered GRQ divergence (global run queue —
-  docs/architecture/design-divergences.md entry 1).
-- try_to_wake_up's WAKE_Q deferred-wake batch: our model wakes under
-  the bucket lock (futex R12-2) or after lock drop (wait queues) with
-  the C8 flag-before-wake invariant — a deliberate, documented
-  divergence; wake→pick deltas are guarded by the perf gate.
-- rt_mutex priority-inheritance chains: genuinely absent; the PI-futex
-  work above implements the word protocol without boosting — the
-  remaining gap is priority boosting itself (needs scheduler priority
-  plumbing; nothing on the OH image measures it today).
-- Preempt discipline: lock_irqsave spinlocks around every wake-path
-  state change (stronger than the reference's preempt_disable +
-  local_irq_save pairs).
+TXN-HANG-HLD: pass 3 of txn_hang_audit prints every thread of a hung
+server's process carrying a SENDER txn-stack entry (a nested sync-IPC
+client parked in BWR — the futex-census blind spot) with its current
+syscall. First data (u2v12 @17s): foundation tid340 (todo=1! parked BWR
+-> power_host) / power_host tid632 parked sys=35 nanosleep holding a
+pending txn INTO foundation — the mutual deferral chain named. In the
+wedge era the hung proc is samgr and its workers hold NO sender
+entries (the same-proc rejection killed that class) — they park in
+FFRT-internal futexes with holder identity NOT in the mutex word
+(FFRT mutexPrivate l = LOCK|WAITERS bits only; the owner field exists
+only under FFRT_MUTEX_DEADLOCK_CHECK). The kernel-side holder hunt
+bottoms out: the residual wedge is genuinely userspace-internal.
 
-## Gates
+### Boots this session (u2v9/u2v10: 40th's kernel 6339074f; u2v12:
+### futex kernel 4ecce94e; u2v13: +MSG_TRUNC)
 
-- x3 builds rc=0 (x86_64 q35, riscv64 virt, aarch64 virt) with all
-  changes.
-- make test (riscv64 unit suite): run in this session; verdict below.
-- Push: origin/oh-binder.
+u2v9 (SA 37, wedge, frozen pixels, tables above), u2v10 (SA 47,
+wedge, frozen), u2v11 (aborted — 3 duplicate launches fought over the
+serial log; cleaned), u2v12 (SA 56 ceiling — best yet but wedge-class:
+samgr FFRT cascade from ~26s; HLD lines live), u2v13 (running).
+
+### Rig notes for successors
+- `make build` defaults to riscv64 (build/.config absent). The x86_64
+  OH kernel needs PLATFORM=x86_64 make build — check the bzImage md5
+  actually changed before booting (a stale-image trap that cost this
+  session 20 minutes).
+- The 20MB riscv64 test window: d057f973 (main) extends it to 24MB;
+  cherry-picked here as 7449a203. Without it make test fails at link.
+- The u2v-boot.py background-launch discipline: use ONE launch per tag
+  (run_in_background), never retry blind — duplicate drivers truncate
+  each other's serial logs.
+
+### 41st addendum — three more parity fixes + rig lessons
+
+1. 6cf83b15 fix(net): AF_UNIX recvmsg MSG_TRUNC return value — a caller
+   that passes MSG_TRUNC learns the FULL record length (reference
+   `err = (flags & MSG_TRUNC) ? skb->len - skip : size`); we returned
+   the copied prefix. DGRAM/SEQPACKET only, covers peek + direct paths.
+2. 62f6b670 fix(epoll): the 1024 maxevents cap was ours alone (reference
+   EP_MAX_EVENTS = INT_MAX/sizeof); dropped, scratch capacity clamped
+   separately (readiness is bounded by interest count, not maxevents).
+3. d402fa90 fix(net): AF_UNIX peer close with unread data now sets
+   ECONNRESET on the survivor (reference unix_release_sock sk_err
+   parity): recv drains then reports the reset (read-and-clear,
+   sock_error semantics); SO_ERROR reports+clears it; poll raises
+   POLLERR; recv_ready treats it as readable so blocked readers wake.
+   Gap class: "socket error propagation" from the audit list.
+
+Rig lessons this session:
+- make test QEMUs can OUTLIVE the wrapper's ALL-PASSED verdict (post-
+  halt writeback hang) and orphan holding test/rootfs.img's write
+  lock — the NEXT make test fails at QEMU start ("Failed to get write
+  lock"). Kill leftover qemu-system-riscv64 with rootfs.img before
+  rerunning; the verdict in the OLD log still stands.
+- The u2v-boot.py duplicate-launch trap: every retry spawns another
+  driver+QEMU on the same serial log (they truncate each other);
+  verify exactly one instance per tag before trusting a log.
+
+### 41st session close — final ledger
+
+BOOT LEDGER (all system-lb5 + fresh2 reflink, SMP2 KVM, LOGLEVEL6,
+dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1):
+- u2v9  (40th kernel 6339074f): SA 37, wedge, pixels frozen.
+- u2v10 (40th kernel): SA 47, wedge, pixels frozen.
+- u2v12 (futex batch 4ecce94e): SA 56, wedge, pixels frozen.
+- u2v13 (futex+MSG_TRUNC): SA 52, wedge, pixels frozen.
+- u2v14 (final 1672c7ed): SA 60 (best ceiling yet; baseline 53),
+  wedge, pixels frozen. Per-op: RM outer 2.3us (alloc 0, cmsg 0.38),
+  WV outer 13.1us (send 5.8) — same class as u2v12/13.
+- u2v15 (final): early-wedge branch (SA 27 at 200s), pixels frozen.
+Verdict: 6/6 wedge-class. The futex-parity kernel's SA ceilings read
+52-60 vs 37-53 on the pre-fix kernels — directionally better but
+within boot variance; the wedge face is unchanged (samgr FFRT-mutex
+park cascade, handlers parked sys=202, holders unnamed in userspace).
+
+GATES: make test riscv64 ALL TESTS PASSED (run/maketest-41d.log — the
+HUNG-CTX lines after the verdict are post-halt noise); x3 builds rc=0
+(x86_64 build-41-x86-4, aarch64 build-41-aa64-2, riscv64 build-41-rv-2).
+Branch pushed through the docs commit after d402fa90.
+
+COMMITS THIS SESSION (biofix-fieldpoll):
+7449a203 riscv64: LAYOUT-5 window 20->24MB (cherry-pick of main's
+  d057f973 — required for make test to link at all)
+ed1549c5 fix(futex): reference parity batch (waiters-pending fast path,
+  FIFO wait chain, nr_wake==0 quirk, cmp-under-locks requeue)
+121fc908 dfx(binder): TXN-HANG-HLD — BWR-parked nested clients named
+6cf83b15 fix(net): AF_UNIX recvmsg MSG_TRUNC return value
+62f6b670 fix(epoll): drop the 1024 maxevents cap
+d402fa90 fix(net): AF_UNIX peer close with unread data sets ECONNRESET
++ TASK.md docs (40th reconstruction, 41st session + addenda)
+
+NEXT-AGENT ENTRY POINTS (in order):
+1. The perf-gate rows for THIS branch's net/sync changes before main
+   merge: pbench P5 (pipe/unix roundtrip), wake-lat, syscost census on
+   a quiet host — the futex fast path + queue split claim structural
+   wins that need numbers (the OH boots only prove no regression).
+2. The wedge's remaining kernel-visible asymmetry vs the reference:
+   with every named divergence fixed, the residual delta is per-op cost
+   (recv 1.2-1.3us, send 5.8us, gather 4.7us — the reference runs the
+   same storm at ~2-5us TOTAL per record). The send phase (5.8us) is
+   now the fattest wall: profile the enqueue path (queue lock, segment
+   charge accounting, epoll_notify_file fan-out per record).
+3. u2v15-class early-wedge boots waste 1100s; consider a verdict
+   short-circuit in u2v-boot.py (SA frozen 120s + TXN-HANG present ->
+   wedge verdict, kill VM).
