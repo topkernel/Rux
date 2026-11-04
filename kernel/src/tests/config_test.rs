@@ -49,12 +49,10 @@ pub fn test_config() {
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     // kernel_stack_size is arch-gated since leg-17: 128KB base for
-    // riscv64/unmeasured arches (fee7774f: the 80KB slot overflowed on
-    // the riscv64 test kernel), 80KB packed-slab slots on x86_64.
-    #[cfg(target_arch = "x86_64")]
-    test_assert_eq!(KERNEL_STACK_SIZE, 81920, "KERNEL_STACK_SIZE == 80KB (x86_64 packed slab)");
-    #[cfg(not(target_arch = "x86_64"))]
-    test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
+    // nftw01/kill10 fix (c05f13ad): 128KB on all arches — the 80KB
+    // packed-slab slot overflowed on deep symlink-chain recursion and
+    // lying-slot wake-refusal under 6-child contention.
+    test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB (all arches)");
 
     // Test 5: Scheduler
     test_assert_eq!(KERNEL_HZ, 100, "KERNEL_HZ == 100");
