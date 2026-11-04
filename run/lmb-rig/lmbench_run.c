@@ -75,16 +75,43 @@ static pid_t start_server(const char *bench)
 
 /* Tracefs arming for the strand hunts (r13 lat_udp): the kernel's
  * unified trace events carry the whole UDP delivery→wake chain without
- * print budgets. Armed ONLY when the files exist (older kernels and
- * non-hunt boots take the no-op path). One token per write — the
- * reference set_event grammar applies a single token per write. */
+ * print budgets. Armed ONLY when (a) the files exist (older kernels
+ * and non-hunt boots take the no-op path) and (b) the kernel cmdline
+ * carries ktrace=1 — the per-packet ring pushes shift the send/recv
+ * loop's timing, so strand-repro boots run UNtraced by default and the
+ * hunt boots opt in. One token per write — the reference set_event
+ * grammar applies a single token per write. */
+static int cmdline_has(const char *key)
+{
+    char cl[1024];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, cl, sizeof(cl) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    cl[n] = 0;
+    size_t klen = strlen(key);
+    char *p = cl;
+    while ((p = strstr(p, key)) != NULL) {
+        char prev = (p == cl) ? ' ' : p[-1];
+        if (prev == ' ' && (p[klen] == ' ' || p[klen] == '\n' || p[klen] == 0))
+            return 1;
+        p += 1;
+    }
+    return 0;
+}
+
 static void arm_trace_events(void)
 {
     static const char *evs[] = {
-        "net:udp_deliver", "net:udp_wake", "net:lo_xmit",
+        "net:udp_deliver", "net:udp_wake", "net:lo_xmit", "net:pkt_drop",
         "net:sock_wait", "timer:itimer_arm", "signal:signal_generate",
         NULL,
     };
+    if (!cmdline_has("ktrace=1"))
+        return;
     int fd = open("/sys/kernel/tracing/tracing_on", O_WRONLY);
     if (fd < 0)
         return; /* no tracefs — nothing to arm */
@@ -296,6 +323,15 @@ int main(void)
     }
     printf("LMBENCH DONE %s\n", bench);
     fflush(stdout);
+    /* ktrace boots: the ring's tail is the evidence even when the case
+     * ended on its own (the "Recv timed out" shape — the SIGALRM
+     * watchdog escaped a >15 s recv park; the lost datagram wake is
+     * still in the ring). Dump before poweroff. */
+    if (cmdline_has("ktrace=1")) {
+        char tag[64];
+        snprintf(tag, sizeof(tag), "LMBENCH-DONE %s", bench);
+        dump_trace(tag);
+    }
     sync();
     /* end the boot immediately instead of idling to the outer cap */
     reboot(RB_POWER_OFF);

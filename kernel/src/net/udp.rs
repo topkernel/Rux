@@ -1413,7 +1413,15 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
 /// Ok(()) on success, Err(()) on failure
 pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Parse UDP header
-    let udp_hdr = udp_parse_packet(skb).ok_or(())?;
+    let udp_hdr = match udp_parse_packet(skb) {
+        Some(h) => h,
+        None => {
+            // net:pkt_drop (r13 hunt): the vanishing-datagram class needs
+            // every silent drop named.
+            crate::trace::trace_net_pkt_drop(skb.data as u64, 2, 7, 0, 0);
+            return Err(());
+        }
+    };
 
     // Verify UDP checksum (per RFC 768: checksum=0 means no checksum)
     if udp_hdr.check() != 0 {
@@ -1432,6 +1440,18 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // udp_rcv receives host-order values from ip_rcv.
         let computed = udp_checksum(src_ip.to_be(), dest_ip.to_be(), udp_hdr, data);
         if computed != udp_hdr.check() {
+            // net:pkt_drop (r13 hunt): stated (in-flight) vs computed, with
+            // the skb pointer — compare the stated value against the
+            // net:lo_xmit ucsum snapshot for THIS skb: equal convicts a
+            // build-side checksum bug, different convicts an in-flight
+            // byte rewrite between the backlog push and the drain.
+            crate::trace::trace_net_pkt_drop(
+                skb.data as u64,
+                2,
+                8,
+                udp_hdr.check(),
+                computed,
+            );
             // Checksum mismatch, silently drop packet
             return Ok(());
         }
