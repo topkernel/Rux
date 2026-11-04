@@ -360,7 +360,12 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 // SAFETY: header read of the task we refuse to resume.
                 let mut v = unsafe { (*next).pid() } as u64;
                 for _ in 0..8 {
-                    let n = (v >> 28) as u8;
+                    // Mask to a NIBBLE: (v >> 28) as u8 keeps bits 28-35 of
+                    // the (possibly freed/garbage) pid word — without the
+                    // mask b'a' + n - 10 overflows u8 and the guard's own
+                    // diagnostic panics the switch (u2v1 @316s, KOT-KILL
+                    // storm picked a freed task).
+                    let n = ((v >> 28) as u8) & 0xF;
                     putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                     v <<= 4;
                 }
