@@ -8,6 +8,10 @@ import os, socket, subprocess, sys, time
 
 TAG = sys.argv[1] if len(sys.argv) > 1 else "sp1"
 SECS = int(sys.argv[2]) if len(sys.argv) > 2 else 1100
+# sys.argv[3]: system image override (default the GL-injected oh-svc copy)
+# sys.argv[4]: kernel override (default this worktree's bzImage)
+SYSIMG = sys.argv[3] if len(sys.argv) > 3 else "run/oh-img/system.img"
+KERNEL = sys.argv[4] if len(sys.argv) > 4 else "target/x86_64-unknown-none/debug/bzImage"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
@@ -23,7 +27,7 @@ def drive(path, i):
     return (f" -drive file={path},if=none,id=ohd{i},format=raw,"
             f"file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd{i}")
 
-DISKS = (drive("run/oh-img/updater.img", 0) + drive("run/oh-img/system.img", 1)
+DISKS = (drive("run/oh-img/updater.img", 0) + drive(SYSIMG, 1)
          + drive("run/oh-img/vendor.img", 2) + drive("run/oh-img/sys_prod.img", 3)
          + drive("run/oh-img/chip_prod.img", 4) + drive("run/userdata-fresh.img", 5))
 APPEND = ("ip=dhcp loglevel=7 console=ttyS0,115200 init=init root=/dev/ram0 rw "
@@ -36,7 +40,7 @@ cmd = ["qemu-system-x86_64", "-M", "q35", "-accel", "kvm", "-cpu", "max",
        "-m", "4G", "-smp", "2", "-snapshot", "-display", "none", "-vga", "none",
        "-device", "virtio-gpu-pci,id=ohgpu,xres=720,yres=1280",
        "-serial", "stdio", "-monitor", f"unix:{MON},server=on,wait=off",
-       "-kernel", "target/x86_64-unknown-none/debug/bzImage",
+       "-kernel", KERNEL,
        "-initrd", "run/oh-img/ramdisk.img", "-append", APPEND] + DISKS.split() + [
        "-nic", "user,model=virtio-net-pci",
        "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"]

@@ -1,0 +1,4 @@
+    6.256 ServiceStart starting:appspawn
+    8.341 bootanimation.ready
+   14.398 bootanimation.finished
+   14.441 bootevent.launcher.ready
