@@ -1,0 +1,19 @@
+[preA] TIMEOUT | EXP-RESCHED calls=2004 sent=1709
+[curB] 2 2.47 | EXP-RESCHED calls=137010 sent=121738
+[w0C] 2 4.96 | EXP-RESCHED calls=485000 sent=484334
+[preA] TIMEOUT | EXP-RESCHED calls=2004 sent=1392
+[curB] Pipe latency: 4.6456 microseconds | EXP-RESCHED calls=359193 sent=347029
+[w0C] TIMEOUT | EXP-RESCHED calls=1993 sent=1565
+[preA] 2 4.69 | EXP-RESCHED calls=523130 sent=522514
+[curB] 2 2.29 | EXP-RESCHED calls=123052 sent=110963
+[w0C] TIMEOUT | EXP-RESCHED calls=1994 sent=1781
+[preA] Pipe latency: 7.8393 microseconds | EXP-RESCHED calls=909491 sent=908958
+[curB] Pipe latency: 4.6214 microseconds | EXP-RESCHED calls=353400 sent=330607
+[w0C] Pipe latency: 8.3549 microseconds | EXP-RESCHED calls=917342 sent=916691
+[preA] 2 4.65 | EXP-RESCHED calls=504228 sent=503595
+[curB] 2 2.44 | EXP-RESCHED calls=72028 sent=61985
+[w0C] 2 4.85 | EXP-RESCHED calls=489590 sent=489152
+[preA] Pipe latency: 8.2148 microseconds | EXP-RESCHED calls=882393 sent=881874
+[curB] TIMEOUT | EXP-RESCHED calls=1994 sent=1825
+[w0C] Pipe latency: 8.0099 microseconds | EXP-RESCHED calls=833091 sent=832572
+BATTERY-DONE
