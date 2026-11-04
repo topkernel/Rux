@@ -4400,6 +4400,14 @@ pub fn sys_fallocate(args: SyscallArgs) -> i64 {
 
 /// sys_fsync - Synchronize a file's in-core state with storage (NR 82)
 pub fn sys_fsync(args: SyscallArgs) -> i64 {
+    do_fsync(args, 0)
+}
+
+/// The fsync/fdatasync common body; `datasync` (1 for fdatasync) only
+/// feeds the ext4:ext4_sync_file_enter tracepoint's field — Rux's sync
+/// core is shared between the two syscalls (the reference threads the
+/// same flag into ext4_sync_file for its journal decisions).
+fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
     let fd = args[0] as i32;
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
@@ -4480,7 +4488,9 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                         crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
                         // SAFETY: both pointers were installed at file open
                         // time and live as long as the inode (Arc).
-                        match unsafe { crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode) } {
+                        match unsafe {
+                            crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode, datasync)
+                        } {
                             Ok(()) => 0,
                             Err(e) => e as i64,
                         }
@@ -4506,7 +4516,7 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
 pub fn sys_fdatasync(args: SyscallArgs) -> i64 {
     // Same durability path as fsync (ext4_sync_file already writes the data
     // blocks; the journal commit covers the metadata we updated).
-    sys_fsync(args)
+    do_fsync(args, 1)
 }
 
 /// sys_sync - synchronize filesystem caches

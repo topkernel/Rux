@@ -113,6 +113,16 @@ pub mod features {
     pub const EXT4_INDEX_FL: u32 = 0x1000;
 }
 
+/// The filesystem's dev_t for the ext4 trace events: (major << 20) |
+/// first_minor — the MKDEV packing the reference's MAJOR()/MINOR()
+/// printk expansion decodes (the block events' dev column convention).
+#[inline]
+pub(crate) fn dev_id(fs: &Ext4FileSystem) -> u32 {
+    // SAFETY: fs.device is the installed GenDisk pointer, valid for the
+    // filesystem's lifetime (set at mount, never detached).
+    unsafe { ((*fs.device).major << 20) | (*fs.device).first_minor }
+}
+
 pub struct Ext4FileSystem {
     /// Block device
     pub device: *const blkdev::GenDisk,

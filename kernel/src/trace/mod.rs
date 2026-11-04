@@ -1106,6 +1106,315 @@ tracepoints! {
             args[0], args[1] as u8, args[2] as u8, args[3] as u16, args[4] as u16
         )
     };
+
+    /// ext4:ext4_sync_file_enter — an fsync/fdatasync entered the ext4
+    /// durability path. The reference kernel's include/trace/events/
+    /// ext4.h TRACE_EVENT(ext4_sync_file_enter); field rows and print fmt
+    /// verbatim (MAJOR/MINOR expanded as the live format file shows).
+    /// Divergences (noted, none silent): `parent` reports 0 — Rux's
+    /// ext4_sync_file works from the inode with no dentry parent at
+    /// hand (the round-1 block_rq_issue ioprio precedent: keep the
+    /// reference field, report the honest constant); `datasync`
+    /// distinguishes fdatasync(1) from fsync(0) at the single VFS entry
+    /// (Rux's sync core is shared — the reference threads the same flag
+    /// into ext4_sync_file).
+    EVENT_EXT4_SYNC_FILE_ENTER / ext4_sync_file_enter_fmt / trace_ext4_sync_file_enter :
+        "ext4", "ext4_sync_file_enter", 38,
+    print: "\"dev %d,%d ino %llu parent %llu datasync %d \", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->parent, REC->datasync",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:u64 parent;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:dev_t dev;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:int datasync;\toffset:28;\tsize:4;\tsigned:1;\n",
+    call (dev: u32, ino: u64, parent: u64, datasync: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} parent {} datasync {} ",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[2], args[3] as i32
+        )
+    };
+
+    /// ext4:ext4_sync_file_exit — the durability point returned. The
+    /// reference's TRACE_EVENT(ext4_sync_file_exit), verbatim; `ret` is
+    /// 0 or the negative errno, same as the reference.
+    EVENT_EXT4_SYNC_FILE_EXIT / ext4_sync_file_exit_fmt / trace_ext4_sync_file_exit :
+        "ext4", "ext4_sync_file_exit", 39,
+    print: "\"dev %d,%d ino %llu ret %d\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->ret",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:dev_t dev;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:int ret;\toffset:20;\tsize:4;\tsigned:1;\n",
+    call (dev: u32, ino: u64, ret: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} ret {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[2] as i32
+        )
+    };
+
+    /// ext4:ext4_ext_map_blocks_enter — a logical-block lookup entered
+    /// the extent-mapping funnel. The reference's DEFINE_EVENT(
+    /// ext4__map_blocks_enter, ext4_ext_map_blocks_enter); field rows and
+    /// print fmt verbatim, show_map_flags expanded to the __print_flags
+    /// blob the live format file carries (TRACE_DEFINE_ENUM resolves the
+    /// EXT4_GET_BLOCKS_* values). Divergences (noted): Rux's funnel maps
+    /// ONE block per call, so len is always 1 (the reference carries the
+    /// requested span); Rux passes no EXT4_GET_BLOCKS_* flags, so flags
+    /// is 0 and renders empty.
+    EVENT_EXT4_EXT_MAP_BLOCKS_ENTER / ext4_ext_map_blocks_enter_fmt
+        / trace_ext4_ext_map_blocks_enter : "ext4", "ext4_ext_map_blocks_enter", 40,
+    print: "\"dev %d,%d ino %llu lblk %u len %u flags %s\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->lblk, REC->len, __print_flags(REC->flags, \"|\", { 0x1, \"CREATE\" }, { 0x2, \"UNWRIT\" }, { 0x4, \"DELALLOC\" }, { 0x8, \"SPLIT_NOMERGE\" }, { 0x10, \"CONVERT\" }, { 0x20, \"METADATA_NOFAIL\" }, { 0x40, \"NO_NORMALIZE\" }, { 0x100, \"CONVERT_UNWRITTEN\" }, { 0x200, \"ZERO\" }, { 0x400, \"IO_SUBMIT\" }, { 0x40000000, \"EX_NOCACHE\" })",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:dev_t dev;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:ext4_lblk_t lblk;\toffset:20;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int len;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int flags;\toffset:28;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, ino: u64, lblk: u32, len: u32, flags: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} lblk {} len {} flags {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[2] as u32,
+            args[3] as u32, map_flags_text(args[4])
+        )
+    };
+
+    /// ext4:ext4_ext_map_blocks_exit — the extent-mapping funnel's
+    /// verdict: pblk/len/mflags as resolved, ret as the reference's
+    /// ext4_map_blocks return (1 = one block mapped, 0 = hole with
+    /// nothing mapped, negative = errno). The reference's DEFINE_EVENT(
+    /// ext4__map_blocks_exit, ext4_ext_map_blocks_exit) verbatim, both
+    /// flag show-macros expanded. Divergences (noted): unwritten
+    /// (fallocate-preallocated) extents carry M|U with the real pblk —
+    /// the reference maps them the same way; a hole reports pblk 0 len
+    /// 0 mflags empty (the reader zero-fills), exactly the reference's
+    /// miss shape. The exthunt hunt's EXT-HUNT-READHOLE class is this
+    /// event's pblk=0 arm.
+    EVENT_EXT4_EXT_MAP_BLOCKS_EXIT / ext4_ext_map_blocks_exit_fmt
+        / trace_ext4_ext_map_blocks_exit : "ext4", "ext4_ext_map_blocks_exit", 41,
+    print: "\"dev %d,%d ino %llu flags %s lblk %u pblk %llu len %u mflags %s ret %d\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, __print_flags(REC->flags, \"|\", { 0x1, \"CREATE\" }, { 0x2, \"UNWRIT\" }, { 0x4, \"DELALLOC\" }, { 0x8, \"SPLIT_NOMERGE\" }, { 0x10, \"CONVERT\" }, { 0x20, \"METADATA_NOFAIL\" }, { 0x40, \"NO_NORMALIZE\" }, { 0x100, \"CONVERT_UNWRITTEN\" }, { 0x200, \"ZERO\" }, { 0x400, \"IO_SUBMIT\" }, { 0x40000000, \"EX_NOCACHE\" }), REC->lblk, REC->pblk, REC->len, __print_flags(REC->mflags, \"\", { 0x20, \"N\" }, { 0x10, \"M\" }, { 0x800, \"U\" }, { 0x200, \"B\" }), REC->ret",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:ext4_fsblk_t pblk;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:dev_t dev;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int flags;\toffset:28;\tsize:4;\tsigned:0;\n\
+             \tfield:ext4_lblk_t lblk;\toffset:32;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int len;\toffset:36;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int mflags;\toffset:40;\tsize:4;\tsigned:0;\n\
+             \tfield:int ret;\toffset:44;\tsize:4;\tsigned:1;\n",
+    call (dev: u32, ino: u64, pblk: u64, lblk: u32, len: u32, mflags: u32, flags: u32, ret: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} flags {} lblk {} pblk {} len {} mflags {} ret {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], map_flags_text(args[6]),
+            args[3] as u32, args[2], args[4] as u32, mflags_text(args[5]), args[7] as i32
+        )
+    };
+
+    /// ext4:ext4_da_write_begin — a delayed-allocation buffered write
+    /// began. The reference's DEFINE_EVENT(ext4__write_begin,
+    /// ext4_da_write_begin); field rows and print fmt verbatim (the
+    /// class is shared with ext4_write_begin — identical shapes). Rux's
+    /// buffered write path IS delayed allocation (bytes land in dirty
+    /// page-cache frames; block allocation + journaling defer to the
+    /// writeback points), so the da_ names are the honest ones.
+    EVENT_EXT4_DA_WRITE_BEGIN / ext4_da_write_begin_fmt / trace_ext4_da_write_begin :
+        "ext4", "ext4_da_write_begin", 42,
+    print: "\"dev %d,%d ino %llu pos %lld len %u\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->pos, REC->len",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:loff_t pos;\toffset:16;\tsize:8;\tsigned:1;\n\
+             \tfield:dev_t dev;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int len;\toffset:28;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, ino: u64, pos: i64, len: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} pos {} len {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[2] as i64, args[3] as u32
+        )
+    };
+
+    /// ext4:ext4_da_write_end — the delayed-allocation write returned.
+    /// The reference's DEFINE_EVENT(ext4__write_end, ext4_da_write_end)
+    /// verbatim. Divergence (noted): the reference fires write_end from
+    /// the page-copy function with the bytes copied; Rux fires it at the
+    /// buffered-write return with copied = the successful byte count,
+    /// and does NOT fire it for a failed write (nothing was copied) —
+    /// the failure stays visible as a write_begin with no matching
+    /// write_end.
+    EVENT_EXT4_DA_WRITE_END / ext4_da_write_end_fmt / trace_ext4_da_write_end :
+        "ext4", "ext4_da_write_end", 43,
+    print: "\"dev %d,%d ino %llu pos %lld len %u copied %u\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->pos, REC->len, REC->copied",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:loff_t pos;\toffset:16;\tsize:8;\tsigned:1;\n\
+             \tfield:dev_t dev;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int len;\toffset:28;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int copied;\toffset:32;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, ino: u64, pos: i64, len: u32, copied: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} pos {} len {} copied {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[2] as i64,
+            args[3] as u32, args[4] as u32
+        )
+    };
+
+    /// ext4:ext4_free_blocks — data/metadata blocks returned to the
+    /// allocator at the unlink/truncate free funnel. The reference's
+    /// TRACE_EVENT(ext4_free_blocks); field rows and print fmt verbatim,
+    /// show_free_flags expanded. Divergences (noted): Rux's free funnel
+    /// passes no EXT4_FREE_BLOCKS_* flags, so flags is 0 and renders
+    /// empty; count is the run length freed (1 for single-block frees,
+    /// the whole contiguous extent for run frees — the reference batches
+    /// the same way).
+    EVENT_EXT4_FREE_BLOCKS / ext4_free_blocks_fmt / trace_ext4_free_blocks :
+        "ext4", "ext4_free_blocks", 44,
+    print: "\"dev %d,%d ino %llu mode 0%o block %llu count %lu flags %s\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->ino, REC->mode, REC->block, REC->count, __print_flags(REC->flags, \"|\", { 0x1, \"METADATA\" }, { 0x2, \"FORGET\" }, { 0x4, \"VALIDATED\" }, { 0x8, \"NO_QUOTA\" }, { 0x10, \"1ST_CLUSTER\" }, { 0x20, \"LAST_CLUSTER\" })",
+    fields: "\tfield:u64 ino;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:__u64 block;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long count;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:dev_t dev;\toffset:32;\tsize:4;\tsigned:0;\n\
+             \tfield:int flags;\toffset:36;\tsize:4;\tsigned:1;\n\
+             \tfield:__u16 mode;\toffset:40;\tsize:2;\tsigned:0;\n",
+    call (dev: u32, ino: u64, block: u64, count: u64, flags: i32, mode: u16),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} ino {} mode 0{:o} block {} count {} flags {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1], args[5] as u16,
+            args[2], args[3], free_flags_text(args[4] as u32)
+        )
+    };
+
+    /// jbd2:jbd2_start_commit — a transaction began committing. The
+    /// reference's DEFINE_EVENT(jbd2_commit, jbd2_start_commit); field
+    /// rows and print fmt verbatim. Divergences (noted): fired at
+    /// Rux's single commit funnel (the jbd2_journal_stop commit call —
+    /// every commit in Rux passes there), and `sync_commit` carries the
+    /// stopping handle's h_sync (Rux's Transaction has no
+    /// t_synchronous_commit field; h_sync is what forces the commit,
+    /// the same datum the reference's field encodes).
+    EVENT_JBD2_START_COMMIT / jbd2_start_commit_fmt / trace_jbd2_start_commit :
+        "jbd2", "jbd2_start_commit", 45,
+    print: "\"dev %d,%d transaction %u sync %d\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->transaction, REC->sync_commit",
+    fields: "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:char sync_commit;\toffset:12;\tsize:1;\tsigned:1;\n\
+             \tfield:tid_t transaction;\toffset:16;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, transaction: u32, sync_commit: i8),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} transaction {} sync {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1] as u32, args[2] as i8
+        )
+    };
+
+    /// jbd2:jbd2_end_commit — the commit finished and the log tail
+    /// advanced. The reference's TRACE_EVENT(jbd2_end_commit) verbatim;
+    /// `head` is the post-commit j_tail_sequence, the value the
+    /// reference prints for the same reason (the oldest transaction
+    /// still needed for recovery).
+    EVENT_JBD2_END_COMMIT / jbd2_end_commit_fmt / trace_jbd2_end_commit :
+        "jbd2", "jbd2_end_commit", 46,
+    print: "\"dev %d,%d transaction %u sync %d head %u\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->transaction, REC->sync_commit, REC->head",
+    fields: "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:char sync_commit;\toffset:12;\tsize:1;\tsigned:1;\n\
+             \tfield:tid_t transaction;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:tid_t head;\toffset:20;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, transaction: u32, sync_commit: i8, head: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "dev {},{} transaction {} sync {} head {}",
+            args[0] >> 20, args[0] & 0xfffff, args[1] as u32,
+            args[2] as i8, args[3] as u32
+        )
+    };
+
+    /// rux:epoll_ctl_insert — an EPOLL_CTL_ADD registered an interest.
+    /// Documented divergence (the ledger's epollscan/epolltrace row):
+    /// the reference kernel carries NO epoll trace events, so the rux:
+    /// group is Rux-designed visibility in the reference's event/format
+    /// shape — pid, the epoll fd, the target fd, and the registered
+    /// event mask.
+    EVENT_EPOLL_CTL_INSERT / epoll_ctl_insert_fmt / trace_epoll_ctl_insert :
+        "rux", "epoll_ctl_insert", 47,
+    print: "\"pid=%d epfd=%d fd=%d events=%#x\", REC->pid, REC->epfd, REC->fd, REC->events",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int epfd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int fd;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int events;\toffset:20;\tsize:4;\tsigned:0;\n",
+    call (pid: i32, epfd: i32, fd: i32, events: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} epfd={} fd={} events={:#x}",
+            args[0] as i32, args[1] as i32, args[2] as i32, args[3] as u32
+        )
+    };
+
+    /// rux:epoll_ctl_remove — an EPOLL_CTL_DEL unregistered an interest.
+    /// Same provenance as epoll_ctl_insert.
+    EVENT_EPOLL_CTL_REMOVE / epoll_ctl_remove_fmt / trace_epoll_ctl_remove :
+        "rux", "epoll_ctl_remove", 48,
+    print: "\"pid=%d epfd=%d fd=%d\", REC->pid, REC->epfd, REC->fd",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int epfd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int fd;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (pid: i32, epfd: i32, fd: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!("pid={} epfd={} fd={}", args[0] as i32, args[1] as i32, args[2] as i32)
+    };
+
+    /// rux:epoll_wait_scan — one epoll_wait readiness scan round: how
+    /// many interests the scan saw and how many it collected. The
+    /// epollscan hunt's datum (the r13ep2 boot: 14 drained events, every
+    /// wait idle — the missing fact was whether the scan ran at all and
+    /// what it found). A wait that loops fires one record per round.
+    EVENT_EPOLL_WAIT_SCAN / epoll_wait_scan_fmt / trace_epoll_wait_scan :
+        "rux", "epoll_wait_scan", 49,
+    print: "\"pid=%d epfd=%d nent=%u ready=%u\", REC->pid, REC->epfd, REC->nent, REC->ready",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int epfd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int nent;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int ready;\toffset:20;\tsize:4;\tsigned:0;\n",
+    call (pid: i32, epfd: i32, nent: u32, ready: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} epfd={} nent={} ready={}",
+            args[0] as i32, args[1] as i32, args[2] as u32, args[3] as u32
+        )
+    };
+
+    /// rux:epoll_wait_exit — an epoll_wait returned: the syscall result
+    /// (>0 delivered count, 0 timeout, negative errno — the EINTR-storm
+    /// class the epolltrace hunt needed) with the timeout that was
+    /// asked for.
+    EVENT_EPOLL_WAIT_EXIT / epoll_wait_exit_fmt / trace_epoll_wait_exit :
+        "rux", "epoll_wait_exit", 50,
+    print: "\"pid=%d epfd=%d ret=%ld timeout_ms=%d\", REC->pid, REC->epfd, REC->ret, REC->timeout_ms",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int epfd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:long ret;\toffset:16;\tsize:8;\tsigned:1;\n\
+             \tfield:int timeout_ms;\toffset:24;\tsize:4;\tsigned:1;\n",
+    call (pid: i32, epfd: i32, ret: i64, timeout_ms: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} epfd={} ret={} timeout_ms={}",
+            args[0] as i32, args[1] as i32, args[2] as i64, args[3] as i32
+        )
+    };
+
+    /// rux:epoll_delivery — one ready interest handed to the waiter:
+    /// the fd, the delivered event mask, and the file-ops table pointer
+    /// rendered symbolic (%pS) — the epolltrace hunt's fd/ops identity,
+    /// distinguishing a pipe wake from a socket wake from an eventfd
+    /// wake without a print budget.
+    EVENT_EPOLL_DELIVERY / epoll_delivery_fmt / trace_epoll_delivery :
+        "rux", "epoll_delivery", 51,
+    print: "\"pid=%d fd=%d events=%#x ops=%pS\", REC->pid, REC->fd, REC->events, (void *)REC->ops",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int fd;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int events;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:void *ops;\toffset:24;\tsize:8;\tsigned:0;\n",
+    call (pid: i32, fd: i32, events: u32, ops: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "pid={} fd={} events={:#x} ops={}",
+            args[0] as i32, args[1] as i32, args[2] as u32, ps_render(args[3])
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
@@ -2063,6 +2372,78 @@ pub fn gfp_flags_text(gfp: u64) -> String {
         out.push_str(&format!("0x{:x}", val));
     }
     out
+}
+
+/// The __print_flags walk shared by every flag table below (and by
+/// gfp_flags_text above): iterate the {mask, name} pairs in order,
+/// print every fully-matched mask, consume it, and suffix any leftover
+/// bits as hex — fs/trace_output.c flags_str exactly. A zero input
+/// renders the empty string (the reference's __print_flags of 0).
+fn print_flags_walk(value: u64, delim: &str, table: &[(u64, &str)]) -> String {
+    let mut val = value;
+    let mut out = String::new();
+    for &(mask, name) in table {
+        if val & mask == mask {
+            if !out.is_empty() {
+                out.push_str(delim);
+            }
+            out.push_str(name);
+            val &= !mask;
+        }
+    }
+    if val != 0 {
+        if !out.is_empty() {
+            out.push_str(delim);
+        }
+        out.push_str(&format!("0x{:x}", val));
+    }
+    out
+}
+
+/// show_map_flags — the EXT4_GET_BLOCKS_* table of the ext4
+/// map_blocks pair, values as TRACE_DEFINE_ENUM resolves them in the
+/// live format file.
+fn map_flags_text(flags: u64) -> String {
+    const FLAGS: &[(u64, &str)] = &[
+        (0x1, "CREATE"),
+        (0x2, "UNWRIT"),
+        (0x4, "DELALLOC"),
+        (0x8, "SPLIT_NOMERGE"),
+        (0x10, "CONVERT"),
+        (0x20, "METADATA_NOFAIL"),
+        (0x40, "NO_NORMALIZE"),
+        (0x100, "CONVERT_UNWRITTEN"),
+        (0x200, "ZERO"),
+        (0x400, "IO_SUBMIT"),
+        (0x40000000, "EX_NOCACHE"),
+    ];
+    print_flags_walk(flags, "|", FLAGS)
+}
+
+/// show_mflags — the EXT4_MAP_* table (N new / M mapped / U unwritten /
+/// B boundary), bit values from the reference's BH_* enumeration;
+/// concatenated with no delimiter, as show_mflags prints them.
+fn mflags_text(mflags: u64) -> String {
+    const FLAGS: &[(u64, &str)] = &[
+        (0x20, "N"),
+        (0x10, "M"),
+        (0x800, "U"),
+        (0x200, "B"),
+    ];
+    print_flags_walk(mflags, "", FLAGS)
+}
+
+/// show_free_flags — the EXT4_FREE_BLOCKS_* table of ext4_free_blocks.
+fn free_flags_text(flags: u32) -> String {
+    const FLAGS: &[(u64, &str)] = &[
+        (0x1, "METADATA"),
+        (0x2, "FORGET"),
+        (0x4, "VALIDATED"),
+        (0x8, "NO_QUOTA"),
+        (0x10, "1ST_CLUSTER"),
+        (0x20, "LAST_CLUSTER"),
+    ];
+    print_flags_walk(flags as u64, "|", FLAGS)
 }
 
 /// Pick the kmalloc/kfree `call_site` out of a frame walk done at the
