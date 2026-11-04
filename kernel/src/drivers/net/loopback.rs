@@ -85,7 +85,6 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         // produces no other trace event anywhere — this record is the
         // only witness that the datagram left the sender at all.
         crate::trace::trace_net_lo_xmit(len, LO_BACKLOG_MAX as u32, -105, skb_data, ucsum_built);
-        crate::trace::trace_net_lo_xmit(len, LO_BACKLOG_MAX as u32, -105);
         // skb's Drop impl releases the buffer.
         return -105; // ENOBUFS
     }
@@ -99,7 +98,6 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
     );
     crate::trace::trace_net_lo_xmit(len, depth, 0, skb_data, ucsum_built);
-    crate::trace::trace_net_lo_xmit(len, depth, 0);
     0
 }
 
