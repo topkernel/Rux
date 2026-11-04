@@ -139,3 +139,138 @@ run/qa-runs-r2/ (fresh-boot classes, one per boot).
   handoff, F-1 variant), 1 FAIL(gap) F-2, plus 1 FAIL-toolchain F-3
   unchanged. Timers-domain probe (cyclictest) steady on new main.
 - Next: kselftest portable subset.
+
+## Round 3 — battery on new main 66cd9918 (LTP async-close + OH CSUM_V3
+## + stress rlimits/spin/wake_up landed between) + this lane's fixes
+
+Kernel revs (all in this round's boots, marked per row):
+- K1 = 66cd9918 + memfd reference rework + vm.memfd_noexec/pidns scope
+  + pidns tgkill/tkill + TSC ratchet CAS (through bca03e1b)
+- K2 = K1 + CLOCK_BOOTTIME/CLOCK_TAI in nanosleep/POSIX timers
+  (255f86f5) — only the three timer-clock rows + the memfd probe.
+
+### rt-tests battery (round-3 item 1) — one fresh boot per class, K1
+
+| class | round 2 (0c8e4b79) | round 3 (K1) | verdict |
+|---|---|---|---|
+| hackbench socketpair `20 process` | PASS 0.791 s | PASS 0.858 s | PASS (steady) |
+| hackbench pipe `-p 20` | PASS 0.415 s | PASS 0.415 s | PASS (steady) |
+| hackbench threads `-T 20` | PASS 0.807 s | PASS 0.890 s | PASS (steady) |
+| hackbench scale `-g 40 -l 500` | PASS 22.303 s | PASS 22.194 s | PASS (steady) |
+| hackbench inet `-i -g 2 -f 10` | TIMEOUT-TERM | **TIMEOUT-TERM** (120 s, 22 listens, same stall) | **F-1 UNCHANGED on new main** — P0 handoff stands (net lane) |
+| cyclictest SCHED_OTHER | 38 missed, avg 95, max 3149 | **25 missed, avg 89, max 1289** | PASS (**improved**: max -59 %, misses -34 %) |
+| cyclictest SCHED_FIFO p98 | 33 missed, avg 89, max 1142 | **2 missed, avg 87, max 396** | PASS (**improved**: max -65 %, misses 33x→2) |
+| pi_stress `-D 15 -g 2` | FAIL F-2 ENOSYS | FAIL F-2 ENOSYS (identical) | FAIL(gap), unchanged |
+
+- The cyclictest max-latency rows moved substantially on the new main
+  (stress lane's wake_up/optimistic-spin/rlimits fixes are the likely
+  producers; sched domain — worth a pbench P2 context-switch row when
+  the coordinator gates this merge).
+- F-1 (loopback TCP): 3rd fresh-boot reproduction (r2, r3 pre-battery,
+  r3 battery) — deterministic. Owner unchanged: net lane P0 hunt.
+
+### Round-3 kernel fixes (this lane, all reference-parity, x3 + make test green)
+
+1. **memfd reference rework** (round-2's dying work, completed + driven
+   to a verdict): seal state model, F_SEAL_EXEC, ftruncate/write/mmap/
+   mprotect/fallocate/chmod rules, /proc/pid/fd reopen, 0777 mode
+   matrix — memfd_test runs CREATE..SEAL-RESIZE green.
+2. **vm.memfd_noexec** (per-pidns, chain-max read, CAP_SYS_ADMIN +
+   floor-guarded write) + memfd_create scope matrix (0/1/2).
+3. **pidns tgkill/tkill**: caller-ns tid resolution (was global —
+   abort() inside CLONE_NEWPID died SIGSEGV because raise() could not
+   deliver SIGABRT). Reference do_tgkill uses find_vpid; ours now too.
+4. **TSC ratchet CAS**: threadtest caught CLOCK_MONOTONIC stepping
+   backward a few hundred ns — the ratchet published with a plain
+   store; two CPUs could interleave a clobber. compare_exchange_weak
+   publish now.
+5. **CLOCK_BOOTTIME/CLOCK_TAI in nanosleep + POSIX timers**: set-timer-
+   lat rc=1 was timer_create(BOOTTIME/TAI)=EINVAL. BOOTTIME is
+   monotonic-domain (no suspend); TAI = realtime + constant 37 s.
+
+### kselftest subset verdicts (round-3 item 2)
+
+| class | round 2 (0c8e4b79, budget-starved) | round 3 | verdict |
+|---|---|---|---|
+| memfd | rc=134 at sysctl (no sysctl node) + newpid SIGSEGV | rc=134 — last FLUSHED print is SEAL-FUTURE-WRITE, but the fault is in the nested-sysctl child (see F-4 decode) | **FAIL(bug F-4)** — all seal legs green |
+| nanosleep | pass:2 skip:10 (T=4 s) | K2: TAI/BOOTTIME now sleepable | see below (K2 rows) |
+| nsleep-lat | rc=0, BOOTTIME/TAI unsupported | K2 rerun | see below |
+| set-timer-lat | rc=1 (BOOTTIME/TAI timer_create EINVAL) | K2 rerun | see below |
+| mqueue-lat | OK (T=10 s) | OK (T=10 s) | PASS |
+| inconsistency-check | TIMEOUT (60 s TERM mid-run — 10 s/clock x 12 needs 120 s+) | **rc=0, 12/12 ok** (`-t 5`) | PASS (was under-budgeted) |
+| raw_skew | TIMEOUT at 90 s (test sleeps 120 s by design) | **rc=0, drift 0.0 [OK]** (180 s budget) | PASS (was under-budgeted) |
+| threadtest | [FAILED] — CLOCK_MONOTONIC backward steps | no [FAILED] in-window but the boot overran the QEMU budget; quiet rerun (pass2): test output NEVER appeared, boot wedged — see F-5 | **FAIL(TIMEOUT)** — sched-domain handoff (F-5) |
+| posix_timers | TIMEOUT at 60 s (itimer prof "Diff too high: 3" + signal-distribution stall) | TIMEOUT at 180 s + qsrun wedged in the TERM teardown (KSIG9/KOT-KILL cascade) | **FAIL(TIMEOUT)** — timers-domain handoff |
+
+### K2 rows (255f86f5-class kernel, pass2 fresh boots) — the three
+### CLOCK_BOOTTIME/CLOCK_TAI verdicts r3 was mid-writing
+
+| class | round 2 (0c8e4b79) | K2 (255f86f5) | verdict |
+|---|---|---|---|
+| nanosleep | pass:2 skip:10, BOOTTIME/TAI EINVAL | rc=0, **pass:4** skip:8 — ok 8 CLOCK_BOOTTIME, ok 12 CLOCK_TAI (T=8 s) | **PASS** (fix verified; harvested to main as ad0d5cb4) |
+| nsleep-lat | rc=0, BOOTTIME/TAI [UNSUPPORTED] | rc=0 — CLOCK_BOOTTIME [OK], CLOCK_TAI [OK] (T=85 s) | **PASS** (fix verified) |
+| set-timer-lat | rc=1 — timer_create(BOOTTIME/TAI)=EINVAL | rc=0 — all [OK] incl. TAI one-shot max latency 135.3 us (T=88 s) | **PASS** (fix verified) |
+| threadtest quiet rerun | — | `DFX=" "` boot: no test output at all; 8 workers spawn, pid 306 (qsrun forker) blocks >120 s, TERM at 300 s | **FAIL(TIMEOUT)** — F-5 |
+
+## Round-3 named findings (completing the mid-write)
+
+### F-4 (kernel pidns/mm): kselftest memfd_test dies in the NESTED-sysctl child, NOT at SEAL-FUTURE-WRITE
+- The round-3 table's "rc=134 at SEAL-FUTURE-WRITE" attribution was a
+  stdout-buffering artifact: on the serial (non-tty) console the stock
+  binary's stdout is fully buffered; everything after SEAL-FUTURE-WRITE
+  (SEAL-SHRINK/GROW/RESIZE, sysctl tests) stayed in the 8 KB buffer.
+- Kernel-side decode (run/qa-runs-r3/memfd.log):
+  - sysctl_simple_child (1st CLONE_NEWPID spawn, pid 309) exits CLEAN
+    (PIDNS-KILL ns-init victims=0) — the simple sysctl 0/1/0/2/1/0
+    sequence + vm.memfd_noexec write/memfd_create matrix all work
+    (kernel prints "memfd_create() requires MFD_NOEXEC_SEAL with
+    vm.memfd_noexec=2" on the expected-EPERM probe).
+  - sysctl_nested_child (2nd spawn, pid 310) takes `trap: #GP at
+    rip=0x403b63, mode=user` → SIGDEATH sig=11. 0x403b63 symbolizes
+    into musl abort() (0x403ae2): its terminal `hlt` at CPL3 is #GP.
+    So the child called abort() — a join_thread/sysctl assertion —
+    and died inside abort's crash path; SIGABRT/self-kill prints
+    downstream (SIGDEATH pid=307 sig=6, rc=134) are the parent's
+    abort on the signaled child.
+  - Its own nested child (pid 311) was then PIDNS-KILLed as a
+    consequence (ns-init death cascade) — not an independent fault.
+- memfdstep.c (step-isolated test_seal_future_write incl.
+  fork-private-write COW legs) passes ALL steps on the same kernel —
+  consistent: the seal legs are fine; the abort is in the nested
+  pidns sysctl legs (nested CLONE_NEWPID children + SIGSTOP/SIGCONT
+  choreography + sysctl read/write after fork).
+- Round-4 decoder: memfd-unbuf (same memfd_test.c, per-call-flushed
+  printf via the userspace/tests/kselftest/memfd-unbuf.c shim) — the
+  last printed line names the exact abort leg. Result below (r4).
+- Owner: this lane (the memfd_noexec/pidns surface we landed in r3)
+  unless the decode points elsewhere.
+
+### F-5 (kernel sched, cross-domain): threadtest wedges the whole boot — test output never appears
+- Round 2: [FAILED] CLOCK_MONOTONIC backward steps → root-caused and
+  fixed by the TSC ratchet CAS (bca03e1b) — the ratchet published with
+  a plain store; two CPUs could interleave a clobber.
+- Round 3 battery (K1, dfx=taskdump,watchdog): no [FAILED] line, but
+  the boot overran the QEMU budget.
+- Round 3 quiet rerun (pass2, `DFX=" "` so no dfx prints): threadtest
+  printed NOTHING beyond its /etc/localtime open; its 8 worker threads
+  spawn, then the serial fills with UNCONDITIONAL WAKE-HEAL-SKIP /
+  STALE-CLAIM-RESET / SCHED-IRQOFF prints (sched-lane instruments now
+  on main — rate-limited to 60/site but NOT dfx-gated), pid 306
+  (qsrun forker) blocks >120 s (same HUNG-CTX family as the
+  after-suite observation in round 1), TERM at 300 s, no RES line.
+- Two handoffs, one to each owner (via coordinator):
+  1. the threadtest wedge itself — sched domain (wake-path /
+     stale-claim neighborhood; the parked-forker shape matches the
+     stress-port k10 family);
+  2. the unconditional sched console instrumentation on main — it
+     fires on EVERY loaded boot and is a timing-hygiene liability for
+     latency rows (cyclictest medians improved anyway in r3, so it is
+     not currently dominating, but it should be dfx-gated or moved to
+     tracepoints per the 2026-11-02 observability policy).
+
+### posix_timers TIMEOUT (timers-domain handoff, unchanged from r3 table)
+- rc absent at both 60 s and 180 s budgets; the run ends in the
+  KSIG9/KOT-KILL teardown cascade (qsrun TERM → posix_timers children
+  signal each other, group kills loop). r2 shape: itimer prof
+  "Diff too high: 3" + a signal-distribution stall mid-test. P0-class
+  per house rules; owner: timers domain.

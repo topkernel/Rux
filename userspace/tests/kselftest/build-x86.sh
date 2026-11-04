@@ -43,6 +43,11 @@ CFLAGS="-O2 -Wall -static -D_GNU_SOURCE -I$SRC -I$SRC/uapi"
 echo "== memfd"
 "$MUSL_CC" $CFLAGS -o "$OUT/memfd" "$SRC/memfd/memfd_test.c" "$SRC/memfd/common.c"
 
+# memfd-unbuf: same test, per-call-flushed stdout (crash-site decoder
+# for the fully-buffered serial console; see memfd-unbuf.c header).
+"$MUSL_CC" $CFLAGS -I"$SRC/memfd" -o "$OUT/memfd-unbuf" \
+    "$DIR/memfd-unbuf.c" "$SRC/memfd/common.c"
+
 # Patch 1 (compat, applied to the scratch copy only): set-timer-lat.c
 # calls select() but only includes <sys/time.h>-side headers; glibc
 # declares select from <unistd.h> with _GNU_SOURCE, musl does not.
