@@ -9002,3 +9002,80 @@ their lane owns those) carried the sched-strand hunts.
    chmod=0 rename=0 fails) on the final tree; ftest03 class re-banked
    (item 1); kill10 (item 4). rc=254 family stays parked (r9: 25
    clean exec sets).
+
+## Round 12 (2026-11-04, stress-port @ 6ebf6859) — pick-gen ledger
+## completed and run live: R49 pick hypothesis REFUTED for lat_udp;
+## observed wake refusals PROVEN non-causal (woken=1); strand re-pointed
+## to a SILENT wake (recv + alarm watchdog) + a malloc-corruption marker
+
+Sync: origin/main merged (f5a78f93 — the r26 LTP close, cpu_running_idle
+came in; my r10 commits were already cherry-picked there as
+2d9e0d29/2686171d/7e09ea93). Kernel commits: c6d74e01 (ledger wiring
+complete), 6ebf6859 (LP-OUTCOME). Pushed 74f2a977..6ebf6859.
+
+1. MISSION 1 (r11 finish — the pick-generation counter): the r11 draft
+   had statics + tag-1 publish + repick retire. Completed: retire at
+   the post-context_switch point and in schedule_tail (the newborn arm
+   — without it every fork child left its publisher's generation open),
+   supersede (publish+retire in one breath) at all six heal-side slot
+   rewrites (R56c, R56d, R56 slot-capture steal, abort republish,
+   idle_heal_own_slot, the probe-gated R65 guard), and the conviction
+   hook at the LP observation (pickgen=LOST iff tag-1 ∧ TASK==slot ∧
+   unretired ≥2 jiffies; PICKGEN_LOST census). Ledger writes serialize
+   on the GRQ or run on-CPU IRQs-off; readers pin coherence via
+   PICK_GEN_TASK == slot task.
+2. LIVE VERDICT (release-opt KVM smp2, run/lmb-rig, lat_udp; strand
+   reproduced 2/3 boots — r12b/r12c strand, r12a2/r12d clean):
+   - pickgen=retired on ALL 6 lying-slot observations (both CPUs, three
+     pids). ZERO convictions. The R49 pick-published-never-switched
+     cascade is REFUTED for this family on the current tree; the r10
+     "slot lie is the stuck invariant" reading is CORRECTED — the slot
+     names a task whose pick genuinely materialized.
+   - NEW INSTRUMENT LP-WAKE-OUTCOME (6ebf6859): the wake that prints
+     why=c/LP RETURNS woken=1 — the enqueue below the diagnostics
+     landed (live capture on r12d; that boot also completed cleanly
+     with an LP observation on record). The why=c/why=s refusals are
+     mid-park protocol diagnostics (WAKE-SKIP-ORIGIN osite = the GRQ
+     acquire / wait.rs prepare bracket, oage_jif=0), not dropped wakes;
+     W2-ENQUEUE-HEAL-REFUSED never fired on any strand boot.
+   - ANATOMY (both stranding boots): the benchmp ping child (client's
+     child, pid 310) parks in recv AFTER the last datagram was
+     delivered to its socket, and its alarm(15) SIGALRM watchdog
+     (lat_udp.c doit) NEVER fires — two independent wake channels lost
+     with ZERO scheduler-side evidence. The WHS/LP instrument family
+     gates on pc!=0, so the stranding victim's wake is silent by
+     construction. r13 leads: (a) delivery-side wake to an empty/stale
+     wait-queue entry, (b) the silent not-sleeping drop in
+     Task::wake_up_impl (task.rs ~3250, prints nothing), (c)
+     socket_recv_ready missing the queued datagram (connected-UDP
+     filter path — udp-in prints "connected_filters_on"). Instrument
+     ask: a pc==0 lost-wake census or a delivery→wake tracer.
+   - SEPARATE MARKER: the ping child dies at TERM in musl malloc
+     get_meta (#GP rip=0x417e8b, non-canonical chunk-meta pointer, 2/2
+     stranding boots) — userspace heap corruption; kernel over-write
+     suspect near user buffers (udp/alloc paths); own hunt needed.
+   - The +0x100 SOFTIRQ pc orphan (seqlock.rs:137 SeqLock::write, the
+     R21-N5 loopback-stats bracket) rides the victims — known,
+     healable, unchanged.
+3. MISSION 2 (riscv suite row with 3df3fe17): make test 1306/1306 2x on
+   the round tree; "test: PASS wake_up running task (false)" — the row
+   is green with the reference contract + sound kthread vehicle.
+4. MISSION 3 (rlimits A/B re-run): OH 32's post-fix rolls (lb386+)
+   double as the cg26b leg per their TASK.md. pollwake leg skipped with
+   rationale (r10: the FFRT/samgr park family is kernel-independent;
+   one roll adds no decision power) — recorded in findings.md; revisit
+   if OH's post-fix rolls show the park family gone.
+5. Gates: x3 builds rc=0 (x86_64 debug, riscv64 via make test, aarch64
+   + dtb_blob.S restored); make test green 2x; renameco 300-iteration
+   clean on the final tree; branch pushed after gates.
+
+R13 ENTRY QUEUE (for the next round):
+1. The silent-wake hunt: pc==0 lost-wake census (the WHS/LP family's
+   pc!=0 gate is blind exactly on the stranding shape); delivery→wake
+   tracer in the udp path; socket_recv_ready-vs-delivery coherence
+   check (the connected-filter path).
+2. The malloc get_meta #GP: kernel over-write suspect near user
+   buffers; reproduce with a canary probe around the recv buffer.
+3. ltplong long-horizon loops (carried from r10).
+4. If OH's post-fix rolls show the park family gone: re-run one
+   pollwake-class roll for the A/B closure.
