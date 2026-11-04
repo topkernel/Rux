@@ -3294,3 +3294,97 @@ run/oh-lb416-serial.log):
   path enforces exactly this (the 26th-session comment mentions a
   rejection guard; verify it fires on the same predicate and returns
   the same error).
+
+## THIRTY-SIXTH-SUCCESSOR SESSION (2026-11-04 20:5x-.., branch biofix-fieldpoll @ 83b4d6e6+)
+
+Mission delivered on all three fronts + the src-lane queue. The
+round's arc: mission-1's literal target banked (comm-inline census
+rows), then the source lane's src-path.md landed mid-round and the
+lane pivoted to its instrumentation queue — and the FIRST bwr_snap
+wait-for graph (lb416) cracked the wedge shape open dynamically.
+
+### 1. Instruments landed (all committed, x3 x86_64 rc=0, make test
+### ALL PASSED twice: cg36-maketest.log 1310/1310 on rootfs-mine7,
+### cg36-maketest2.log on rootfs-mine8)
+- comm inline in FUX-STUCK rows (1533d8c9): phase B copies the parked
+  task's comm; one line now names owner thread + offset + u2v caller.
+- bwr_snap (queue item 3): wedge-time wait-for graph over every
+  BWR-blocked binder thread (edges EXEC/AWAIT with to/from pid/tid +
+  ages; idle reads summarized). Three hardening passes in-session:
+  latch precedence fix (the cg35 first-fire bug made the 20s dump fire
+  every 5s — 1019 task dumps on lb416), newest-12 edge window (a
+  first-12 window kept the OLDEST frames and hid the blocker), depth
+  + exec/await counts + *INNER* marker.
+- samgr-sig early verdict in poproll2b.sh (record-bounded python re:
+  serial records concatenate without newlines).
+
+### 2. MISSION-1 BANKED — the wedge signature row, owner named
+lb413: `FUX-STUCK-FRESH tgid=328 comm=OS_IPC_2_501 ... A+0x800194
+fto=0x0 u2v=0x7ff000e16000+0x32e02` (samgr=pid328 via ServiceStart).
+Dynamic + static agree: libc++ cv::wait = BlockUntilThreadAvailable
+(src lane §2.2). Neighbor +0x8001d4 banked on lb410 (OS_IPC_9_559,
+same u2v). mmi +0x8009c4 owner thread = comm=mmi-inject (lb415/417/
+418/420/421, all u2v +0x32e02, fto=0). foundation +0x800b44 banked
+with comm inline on lb423 (powermgr same slot, u2v +0xe998 variant).
+telephony +0x8001a4: still no sample (0 hits lb396-425).
+
+### 3. THE WAIT-FOR GRAPHS (bwr_snap first light)
+- lb416: samgr OS_IPC_0_339 <-> OS_IPC_1_349 interleaved EXEC/AWAIT
+  stacks frozen 100-152s under hdf_devmgr's txn112412 (code3);
+  sensors -> samgr main code 0x5f504e47 30s+. 51 idle readers at
+  wedge; every frozen txn is thread-targeted (from-walk), proc todo
+  empty — idle pool cannot drain it. Census blind spot confirmed.
+- lb418: samgr MAIN depth=3452 (main<->OS_IPC_x_350 code-3 ping-pong,
+  base hdf_devmgr txn59425); ALL frames age-identical (21700ms) — the
+  whole stack built within ~100ms then froze.
+- lb421: main depth=1681 vs OS_IPC_0_340 depth=1680, mirror images,
+  newest window alternating EXEC/AWAIT (txn68566..68577), all 21210ms;
+  main's innermost = EXEC delivered-unreplied while parked in BWR.
+- lb423 (SA=56): av_session -> samgr OS_IPC_0_340 code6 exec 97s
+  (downstream pile-up), probe parks on powermgr/foundation.
+- Verdict: the wedge is a FROZEN same-proc recursion inside samgr
+  (builds 1.7-3.5k frames in ~100ms, deadlocks at the bottom), which
+  exhausts the IPC pool; hicollie's probe parks (the A+0x800NNN
+  family); every dependent hangs behind samgr.
+
+### 4. Coordination with the parallel lanes
+- oh-src src-path.md consumed in full (mission-1's caller named; its
+  queue items drove this round's instruments).
+- Comprehensive-sweep agent: my from-walk first-match hypothesis
+  REFUTED (verified parity vs 6.6 myself: torvalds v6.6 binder.c
+  ~3100-3130 breaks at first match too — relayed via TASK.md). ITS
+  root-cause: the reference REJECTS same-process binder transactions
+  at two doors (context-manager-own-process + WARN_ON proc==target
+  "self transactions not allowed" -> BR_FAILED_REPLY); our lb122-era
+  port allowed both. The crosswait/recursion class is structurally
+  unbuildable on the reference. Its rejection fix batch lands on this
+  branch; THIS lane's verification job: fixed kernel shows zero
+  samgr same-proc EXEC edges, probe-park family gone/transient, SA
+  progression past the ~58-62 stall, pixel watch.
+- fx8 reference census (mission-2): COMPLETE (fuxref-fx8/: parks
+  1.29MB, fast 28k rows, tscen 18.7k rows, 12 maps snapshots, wedge
+  window covered; samgr OS_IPC = binder-read posture, matches fx7).
+  RIG TRAP found: run/oh-img/vendor.img dangled (oh-svc worktree
+  cleaned) — fuxref silently dropped the 6th disk and the reference
+  boot crashed at 34s via init's sysrq path; symlink repointed to
+  /home/william/rux-images/oh/vendor.img (md5-identical to
+  oh-robot's). Other lanes using the oh-svc path will hit this.
+
+### 5. Boots this round
+lb409-425 (poproll2b on bms-ref-derived userdata, private copies;
+kernels cg36-comm/cg36-bwrsnap/2/3; DFX=ams46,txnhunt,fuxstuck).
+Verdicts all wedge-class (SA 0-58 variance as before); zero panics;
+pixels unchanged (frozen md5 set — no PIXEL-CHANGE lines).
+
+### 6. Successor entry points (37th, in order)
+1. SYNC the sweep agent's same-proc rejection batch when it lands on
+   origin/biofix-fieldpoll (it had NOT landed at this session's close;
+   check git log origin/biofix-fieldpoll), rebuild, and run the
+   verification boot set above (§4 bullet 2). If OH userspace chokes
+   on BR_FAILED_REPLY somewhere (new crash-loop shapes), that service
+   is the next fork to compare against the reference.
+2. telephony +0x8001a4 u2v sample still open (grep new boots' serials
+   via run/u2vbank.py).
+3. The frozen BOTTOM of the recursion (why main's innermost EXEC never
+   replies) stays unexplained — moot if the rejection fix lands, but
+   the pre-fix serials (lb416/418/421) hold the evidence.
