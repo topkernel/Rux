@@ -28,7 +28,9 @@
 //! points Linux guards: ftruncate (F_SEAL_GROW / F_SEAL_SHRINK /
 //! F_SEAL_WRITE), write(2) (F_SEAL_WRITE), and F_ADD_SEALS itself
 //! (F_SEAL_SEAL prevents further additions; adding F_SEAL_WRITE is EBUSY
-//! while a writable MAP_SHARED mapping exists).
+//! while a writable MAP_SHARED mapping exists). A memfd created without
+//! MFD_ALLOW_SEALING starts pre-sealed F_SEAL_SEAL, like the reference
+//! kernel.
 
 use alloc::sync::Arc;
 
@@ -36,10 +38,13 @@ use crate::errno;
 use crate::fs::file::{File, FileFlags, REG_FILE_OPS};
 use crate::fs::inode::{setattr_attr, Inode, InodeMode, INodeOps};
 
-/// memfd_create flags (UAPI).
+/// memfd_create flags (UAPI). Values follow include/uapi/linux/memfd.h
+/// of the reference kernel exactly (MFD_HUGETLB is 0x0400 there — bit
+/// 0x0004 is NOT a flag; a caller passing it gets EINVAL as an unknown
+/// bit either way, since we have no hugetlbfs backing).
 pub const MFD_CLOEXEC: u32 = 0x0001;
 pub const MFD_ALLOW_SEALING: u32 = 0x0002;
-pub const MFD_HUGETLB: u32 = 0x0004;
+pub const MFD_HUGETLB: u32 = 0x0400;
 pub const MFD_NOEXEC_SEAL: u32 = 0x0008;
 pub const MFD_EXEC: u32 = 0x0010;
 pub const MFD_NONBLOCK: u32 = 0x0080;
@@ -50,6 +55,7 @@ pub const F_SEAL_SHRINK: u32 = 0x0002;
 pub const F_SEAL_GROW: u32 = 0x0004;
 pub const F_SEAL_WRITE: u32 = 0x0008;
 pub const F_SEAL_FUTURE_WRITE: u32 = 0x0010;
+pub const F_SEAL_EXEC: u32 = 0x0020;
 
 /// The longest name memfd_create accepts, in bytes (excluding the NUL).
 ///
@@ -58,22 +64,29 @@ pub const F_SEAL_FUTURE_WRITE: u32 = 0x0010;
 /// (kernel/mm/memfd.c: MFD_NAME_MAX_LEN = NAME_MAX - MFD_NAME_PREFIX_LEN).
 pub const MFD_NAME_MAX_LEN: usize = 249;
 
-/// All seal bits accepted by F_ADD_SEALS.
-const F_SEAL_KNOWN: u32 =
-    F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
+/// All seal bits accepted by F_ADD_SEALS (F_ALL_SEALS in the reference
+/// mm/memfd.c — includes F_SEAL_EXEC).
+const F_SEAL_KNOWN: u32 = F_SEAL_SEAL
+    | F_SEAL_SHRINK
+    | F_SEAL_GROW
+    | F_SEAL_WRITE
+    | F_SEAL_FUTURE_WRITE
+    | F_SEAL_EXEC;
 
 /// Per-memfd seal bookkeeping, owned by the inode.
 struct MemfdState {
-    /// MFD_ALLOW_SEALING was passed at creation.
-    allow_sealing: bool,
-    /// Current seal set (0 = no seals).
+    /// Current seal set. "Can seals be added" is expressed by the set
+    /// itself, exactly like the reference: a memfd created without
+    /// MFD_ALLOW_SEALING starts F_SEAL_SEAL (the add path EPERMs on it),
+    /// while MFD_NOEXEC_SEAL starts F_SEAL_EXEC with SEAL_SEAL cleared —
+    /// reference memfd_add_seals has no allow-sealing flag check.
     seals: core::sync::atomic::AtomicU32,
 }
 
 /// icache identity prefix for memfd inodes ("MEMF"). memfd inodes are never
 /// inserted into the icache (no path lookup can reach them), but a unique
 /// fs_id keeps them consistent with the VFS-H8 isolation discipline.
-const FS_ID_MEMFD: u64 = 0x4D45_4D46_0000_0004;
+pub const FS_ID_MEMFD: u64 = 0x4D45_4D46_0000_0004;
 
 /// Monotonic memfd inode number source.
 static MEMFD_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x1000);
@@ -150,21 +163,18 @@ unsafe fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 
     if attr == setattr_attr::ATTR_SIZE {
         let new_size = arg1 as usize;
 
-        // Seal enforcement (memfd_create(2)): F_SEAL_WRITE blocks ANY size
-        // change; F_SEAL_GROW blocks growing; F_SEAL_SHRINK blocks
-        // shrinking. EPERM like Linux memfd ftruncate.
+        // Seal enforcement (reference shmem_setattr): F_SEAL_GROW blocks
+        // growing, F_SEAL_SHRINK blocks shrinking — and that is ALL.
+        // F_SEAL_WRITE does NOT block ftruncate (memfd_test.c
+        // test_seal_write shrinks and grows under a plain F_SEAL_WRITE;
+        // the reference checks only SHRINK/GROW here).
         let seals = inode_seals(inode);
         let old_size = inode.get_size() as usize;
-        if seals != 0 {
-            if seals & F_SEAL_WRITE != 0 && new_size != old_size {
-                return -(errno::constants::EPERM as i32);
-            }
-            if seals & F_SEAL_GROW != 0 && new_size > old_size {
-                return -(errno::constants::EPERM as i32);
-            }
-            if seals & F_SEAL_SHRINK != 0 && new_size < old_size {
-                return -(errno::constants::EPERM as i32);
-            }
+        if seals & F_SEAL_GROW != 0 && new_size > old_size {
+            return -(errno::constants::EPERM as i32);
+        }
+        if seals & F_SEAL_SHRINK != 0 && new_size < old_size {
+            return -(errno::constants::EPERM as i32);
         }
 
         let mut guard = inode.data.lock();
@@ -185,17 +195,30 @@ unsafe fn memfd_setattr(inode: &Inode, attr: u32, arg1: u64, _arg2: u64) -> i32 
         return -(errno::constants::ENOMEM as i32);
     }
     if attr == setattr_attr::ATTR_MODE {
-        // fchmod: accept the mode bits (mask to permission bits, keep REG).
+        // F_SEAL_EXEC freezes the exec bits (reference shmem_setattr:
+        // "(info->seals & F_SEAL_EXEC) && ATTR_MODE: if ((i_mode ^
+        // ia_mode) & 0111) return -EPERM" — a chmod that would CHANGE any
+        // x bit, in either direction, is refused).
+        let new_mode = arg1 as u32;
+        if inode_seals(inode) & F_SEAL_EXEC != 0
+            && ((inode.mode.bits() ^ new_mode) & 0o111) != 0
+        {
+            return -(errno::constants::EPERM as i32);
+        }
+        // fchmod: store the permission bits, keep S_IFREG, and refresh
+        // the cached mode word so stat/open/DAC all observe it.
+        inode.update_cached_mode(InodeMode::new(InodeMode::S_IFREG | (new_mode & 0o7777)));
         return 0;
     }
     -(errno::constants::EPERM as i32)
 }
 
-/// Read the seal set of a memfd inode (0 for non-sealable memfds too).
+/// Read the seal set of a memfd inode (F_SEAL_SEAL for non-sealable
+/// memfds — set at creation; 0 for a fresh sealable memfd).
 fn inode_seals(inode: &Inode) -> u32 {
     // SAFETY: private_data for a memfd inode is a Box<MemfdState> installed
     // at creation (before the inode was published through the fd table) and
-    // only freed by destroy_inode when the last Arc drops — while we hold
+    // only freed by destroy_inode when the last Arc<Inode> drops — while we hold
     // one, the pointer is valid.
     unsafe {
         match inode.private_data {
@@ -205,6 +228,63 @@ fn inode_seals(inode: &Inode) -> u32 {
             None => 0,
         }
     }
+}
+
+/// fallocate(2) for memfd files — reference shmem_fallocate semantics
+/// (mm/shmem.c): only FALLOC_FL_KEEP_SIZE and FALLOC_FL_PUNCH_HOLE are
+/// supported, anything else is EOPNOTSUPP (the syscall layer already
+/// EINVAL'd unknown bits and PUNCH_HOLE without KEEP_SIZE).
+///   PUNCH_HOLE: F_SEAL_WRITE/F_SEAL_FUTURE_WRITE make it EPERM; the
+///   range is zeroed, the size stays.
+///   alloc: F_SEAL_GROW makes a range past EOF EPERM; without KEEP_SIZE
+///   the size grows to offset+len (zeros come from the sparse buffer).
+pub fn fallocate(inode: &Inode, mode: i32, offset: u64, len: u64) -> Result<(), i32> {
+    const FALLOC_FL_KEEP_SIZE: i32 = 1;
+    const FALLOC_FL_PUNCH_HOLE: i32 = 2;
+
+    if mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0 {
+        return Err(-(errno::constants::EOPNOTSUPP as i32));
+    }
+    // inode_newsize_ok's overflow answer (EFBIG) — loff_t end overflow.
+    let end = offset
+        .checked_add(len)
+        .ok_or(-(errno::constants::EINVAL as i32))?;
+
+    let seals = inode_seals(inode);
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        if seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
+            return Err(-(errno::constants::EPERM as i32));
+        }
+        // Zero [offset, offset+len) clipped to the current size
+        // (shmem_truncate_range on a page-rounded window; the FileBuffer
+        // keeps the observable contract: reads in the range return 0).
+        let size = inode.get_size() as usize;
+        let start = (offset as usize).min(size);
+        let stop = (end as usize).min(size);
+        if stop > start {
+            let mut guard = inode.data.lock();
+            if let Some(ref mut data) = *guard {
+                let zeros = alloc::vec![0u8; stop - start];
+                data.write(start, &zeros);
+            }
+        }
+        return Ok(());
+    }
+
+    if seals & F_SEAL_GROW != 0 && end > inode.get_size() {
+        return Err(-(errno::constants::EPERM as i32));
+    }
+    if mode & FALLOC_FL_KEEP_SIZE == 0 && end > inode.get_size() {
+        let mut guard = inode.data.lock();
+        if guard.is_none() {
+            *guard = Some(crate::fs::buffer::FileBuffer::new());
+        }
+        if let Some(ref mut data) = *guard {
+            data.resize(end as usize).map_err(|_| -(errno::constants::ENOMEM as i32))?;
+        }
+        inode.set_size(end);
+    }
+    Ok(())
 }
 
 /// destroy_inode hook: free the MemfdState Box.
@@ -277,27 +357,55 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
         return Err(-(errno::constants::EINVAL as i32)); // no hugetlbfs backing
     }
 
-    let umask = if let Some(task) = crate::sched::current() {
-        task.get_umask()
-    } else {
-        0o022
-    };
-
     let ino = MEMFD_INO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // sc138: remember the caller-supplied name for the probe printers.
     memfd_name_record(ino, name);
-    let mut inode = Inode::new(
-        ino,
-        InodeMode::new(InodeMode::S_IFREG | (0o666 & !umask)),
-    );
+
+    // Flag resolution mirrors the reference with vm.memfd_noexec scope 0
+    // (its default): a caller passing neither MFD_EXEC nor
+    // MFD_NOEXEC_SEAL gets MFD_EXEC implied (check_sysctl_memfd_noexec,
+    // kernel/mm/memfd.c). The reference's pr_warn_once on such calls is
+    // dmesg-only and intentionally not reproduced (serial spam for every
+    // legacy caller); scope 1/2 enforcement is not implemented (no sysctl
+    // surface yet).
+    let flags = if flags & (MFD_EXEC | MFD_NOEXEC_SEAL) == 0 {
+        flags | MFD_EXEC
+    } else {
+        flags
+    };
+
+    // Mode matrix, straight from the reference: shmem_file_setup creates
+    // the inode S_IFREG|0777 with NO umask (kernel-internal inode, not a
+    // VFS mknod), and MFD_NOEXEC_SEAL strips the exec bits (i_mode &=
+    // ~0111). kselftest memfd_test.c asserts 0777 for MFD_EXEC and 0666
+    // for MFD_NOEXEC_SEAL via fstat.
+    let mut mode = InodeMode::S_IFREG | 0o777;
+    if flags & MFD_NOEXEC_SEAL != 0 {
+        mode &= !0o111;
+    }
+    let mut inode = Inode::new(ino, InodeMode::new(mode));
     inode.fs_id = FS_ID_MEMFD;
     inode.ops = Some(&MEMFD_INODE_OPS);
-    // Seal bookkeeping hangs off the inode (shared by dups/forks of the fd);
-    // freed by memfd_destroy_inode when the last reference drops.
+    // Initial seal matrix (reference mm/memfd.c memfd_create over the
+    // shmem default info->seals = F_SEAL_SEAL, shmem_get_inode):
+    //   MFD_NOEXEC_SEAL          -> F_SEAL_SEAL cleared, F_SEAL_EXEC set
+    //                                (regardless of MFD_ALLOW_SEALING)
+    //   MFD_ALLOW_SEALING alone  -> F_SEAL_SEAL cleared (empty set)
+    //   neither                  -> F_SEAL_SEAL stays (sealing disabled;
+    //                                F_GET_SEALS reports it, and it is
+    //                                what makes F_ADD_SEALS EPERM)
+    // Seal bookkeeping hangs off the inode (shared by dups/forks of the
+    // fd); freed by memfd_destroy_inode when the last reference drops.
+    let initial_seals = if flags & MFD_NOEXEC_SEAL != 0 {
+        F_SEAL_EXEC
+    } else if flags & MFD_ALLOW_SEALING != 0 {
+        0
+    } else {
+        F_SEAL_SEAL
+    };
     inode.private_data = Some(
         alloc::boxed::Box::into_raw(alloc::boxed::Box::new(MemfdState {
-            allow_sealing: flags & MFD_ALLOW_SEALING != 0,
-            seals: core::sync::atomic::AtomicU32::new(0),
+            seals: core::sync::atomic::AtomicU32::new(initial_seals),
         })) as *mut u8,
     );
     let inode = Arc::new(inode);
@@ -332,16 +440,27 @@ fn memfd_file_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn memfd_file_write(file: &File, buf: &[u8]) -> isize {
-    // F_SEAL_WRITE blocks write(2) with EPERM (memfd_create(2)).
+    // Reference shmem write path seal rules:
+    // - F_SEAL_WRITE | F_SEAL_FUTURE_WRITE: write(2) is EPERM outright
+    //   (FUTURE_WRITE's "existing mappings keep working" carve-out is
+    //   about MAP_SHARED pages, not write(2));
+    // - F_SEAL_GROW: a write whose pos+len exceeds i_size is EPERM
+    //   (in-size writes stay allowed).
     // SAFETY: inode cell written once at open; read-only here.
-    let seals = unsafe {
+    let (seals, size) = unsafe {
         (*file.inode.get())
             .as_ref()
-            .map(|ino| inode_seals(ino))
-            .unwrap_or(0)
+            .map(|ino| (inode_seals(ino), ino.get_size() as usize))
+            .unwrap_or((0, 0))
     };
-    if seals & F_SEAL_WRITE != 0 {
+    if seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
         return -(errno::constants::EPERM as isize);
+    }
+    if seals & F_SEAL_GROW != 0 {
+        let pos = file.get_pos() as usize;
+        if pos.saturating_add(buf.len()) > size {
+            return -(errno::constants::EPERM as isize);
+        }
     }
     crate::fs::file::reg_file_write_pub(file, buf)
 }
@@ -383,6 +502,56 @@ fn file_memfd_inode(file: &File) -> Option<Arc<Inode>> {
 pub fn get_seals(file: &File) -> Result<u32, i32> {
     let inode = file_memfd_inode(file).ok_or(-(errno::constants::EINVAL as i32))?;
     Ok(inode_seals(&inode))
+}
+
+/// Seal set of `file` when it is a memfd, None otherwise (mmap gate).
+pub fn file_seals(file: &File) -> Option<u32> {
+    let inode = file_memfd_inode(file)?;
+    Some(inode_seals(&inode))
+}
+
+/// True when `file` is a memfd file (ops-table identity) — the magic-link
+/// reopen router.
+pub fn is_memfd_file(file: &File) -> bool {
+    file.get_ops()
+        .is_some_and(|o| core::ptr::eq(o as *const _, &MEMFD_FILE_OPS as *const _))
+}
+
+/// Reopen a memfd through its /proc/[pid]/fd/N magic link (the reference
+/// nd_jump_link lands on the shmem dentry and opens it: same inode, NEW
+/// file description carrying the caller's flags). O_TRUNC goes through
+/// the same seal-checked resize as ftruncate (reference handle_truncate
+/// -> shmem_setattr: F_SEAL_SHRINK blocks it, F_SEAL_WRITE does not).
+pub fn reopen(file: &File, flags: u32) -> Result<alloc::sync::Arc<File>, i32> {
+    use crate::fs::file::FileFlags;
+    let inode =
+        file_memfd_inode(file).ok_or(-(errno::constants::EINVAL as i32))?;
+
+    // DAC on the memfd mode like any reopen (0777 / 0666 from creation).
+    let accmode = flags & FileFlags::O_ACCMODE;
+    let mut mask = 0u32;
+    if accmode != FileFlags::O_WRONLY {
+        mask |= crate::fs::permission::MAY_READ;
+    }
+    if accmode != 0 {
+        mask |= crate::fs::permission::MAY_WRITE;
+    }
+    if !crate::fs::permission::inode_permission(&inode, mask) {
+        return Err(-(errno::constants::EACCES as i32));
+    }
+
+    let new_file = alloc::sync::Arc::new(File::new(FileFlags::new(flags)));
+    new_file.set_inode(alloc::sync::Arc::clone(&inode));
+    new_file.set_ops(&MEMFD_FILE_OPS);
+    if flags & FileFlags::O_TRUNC != 0 {
+        // SAFETY: memfd_setattr only touches this memfd inode's own state
+        // (seals, size, FileBuffer); we hold an Arc to it.
+        let r = unsafe { memfd_setattr(&inode, setattr_attr::ATTR_SIZE, 0, 0) };
+        if r != 0 {
+            return Err(r);
+        }
+    }
+    Ok(new_file)
 }
 
 /// True when the current task has a writable MAP_SHARED VMA backed by
@@ -435,20 +604,25 @@ pub fn add_seals(file: &File, seals: u32) -> Result<(), i32> {
         }
     };
 
-    if !state.allow_sealing {
-        // File created without MFD_ALLOW_SEALING.
-        return Err(-(errno::constants::EPERM as i32));
-    }
-
     let cur = state.seals.load(core::sync::atomic::Ordering::Acquire);
     if cur & F_SEAL_SEAL != 0 {
-        // Already sealed against further seals.
+        // Already sealed against further seals — this is also how the
+        // reference refuses F_ADD_SEALS on a memfd created without
+        // MFD_ALLOW_SEALING (it starts F_SEAL_SEAL).
         return Err(-(errno::constants::EPERM as i32));
     }
     if seals & F_SEAL_WRITE != 0 && cur & F_SEAL_WRITE == 0 && has_writable_shared_mapping(file)
     {
         // Adding F_SEAL_WRITE while a writable shared mapping exists.
         return Err(-(errno::constants::EBUSY as i32));
+    }
+
+    // "SEAL_EXEC implies SEAL_WRITE, making W^X from the start" (reference
+    // memfd_add_seals): adding F_SEAL_EXEC while the mode still has any
+    // exec bit expands the request to the full write-block set.
+    let mut seals = seals;
+    if seals & F_SEAL_EXEC != 0 && inode.mode.bits() & 0o111 != 0 {
+        seals |= F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
     }
 
     state

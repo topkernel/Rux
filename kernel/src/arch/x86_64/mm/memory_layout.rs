@@ -270,6 +270,7 @@ pub mod prot {
     pub const EBADF: i64 = -9;
     pub const EOPNOTSUPP: i64 = -95;
     pub const EEXIST: i64 = -17;
+    pub const EPERM: i64 = -1;
 }
 
 /// User-space layout constants
@@ -308,6 +309,7 @@ pub mod mmap_error {
     pub const EBADF: i64 = -9;
     pub const EOPNOTSUPP: i64 = -95;
     pub const EEXIST: i64 = -17;
+    pub const EPERM: i64 = -1;
 }
 
 // ==================== Address newtypes ====================

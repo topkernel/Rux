@@ -341,6 +341,7 @@ pub mod mmap_error {
     pub const EOPNOTSUPP: i64 = -95;
     /// File exists (MAP_FIXED_NOREPLACE over an existing mapping)
     pub const EEXIST: i64 = -17;
+    pub const EPERM: i64 = -1;
 }
 
 /// User space address range (Sv39 compatible)

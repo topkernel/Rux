@@ -2567,6 +2567,14 @@ fn follow_symlink_hinted(
                 pid_val,
                 (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
             ) {
+                // memfd target (dentry-less by design): TERMINAL like the
+                // ns links — file_open recognizes the fd-link inode and
+                // clones the file description onto the same inode.
+                if unsafe { &*file.dentry.get() }.is_none()
+                    && crate::fs::memfd::is_memfd_file(&file)
+                {
+                    return Ok(dentry);
+                }
                 // SAFETY: dentry written once at open; read-only access.
                 let target = unsafe { &*file.dentry.get() }.clone();
                 if let Some(d) = target {
@@ -4505,6 +4513,39 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                             };
                         }
                     }
+                    // /proc/[pid]/fd/N magic link over a MEMFD (dentry-less
+                    // target — follow_symlink left the walk at the link
+                    // dentry): clone the file description onto the same
+                    // inode, honoring O_TRUNC through the seal-checked
+                    // resize (reference: nd_jump_link + shmem open).
+                    if crate::fs::procfs::pid::is_valid_pid(pid_val)
+                        && rem >= crate::fs::procfs::FD_LINK_INO_OFF
+                        && rem < crate::fs::procfs::FD_LINK_INO_OFF + 1024
+                    {
+                        if let Some(target) = crate::fs::procfs::pid::get_fd_file(
+                            pid_val,
+                            (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
+                        ) {
+                            if crate::fs::memfd::is_memfd_file(&target) {
+                                let file =
+                                    crate::fs::memfd::reopen(&target, flags)?;
+                                if flags & FileFlags::O_CLOEXEC != 0 {
+                                    // set_cloexec after install (needs fd)
+                                    if let Some(fd) = get_file_fd_install(file) {
+                                        crate::fs::set_cloexec_fd(fd, true);
+                                        return Ok(fd);
+                                    }
+                                    return Err(errno::Errno::TooManyOpenFiles.as_neg_i32());
+                                }
+                                return match get_file_fd_install(file) {
+                                    Some(fd) => Ok(fd),
+                                    None => {
+                                        Err(errno::Errno::TooManyOpenFiles.as_neg_i32())
+                                    }
+                                };
+                            }
+                        }
+                    }
                 }
                 // O_PATH on a symlink: install a descriptor-only File on
                 // the link inode (no read/write ops — matches Linux, where
@@ -6189,6 +6230,12 @@ pub fn vfs_fallocate(fd: usize, mode: i32, offset: u64, len: u64) -> Result<(), 
 
     if !inode.mode.is_regular_file() {
         return Err(errno::Errno::DeviceOrResourceBusy.as_neg_i32());
+    }
+
+    // memfd files: shmem-style fallocate (PUNCH_HOLE / alloc), routed
+    // before the ext4 dispatch (memfd inodes carry no fs pointer).
+    if inode.fs_id == crate::fs::memfd::FS_ID_MEMFD {
+        return crate::fs::memfd::fallocate(inode, mode, offset, len);
     }
 
     // Route to the filesystem implementation (ext4).

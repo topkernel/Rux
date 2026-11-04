@@ -598,6 +598,21 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 {
                     return mmap_error::EACCES;
                 }
+                // F_SEAL_WRITE (and F_SEAL_FUTURE_WRITE — new writable
+                // mappings are denied too; only mappings that existed at
+                // seal time keep working) deny writable MAP_SHARED
+                // mappings outright (memfd_create(2); the reference via
+                // mapping_deny_writable / seal_check_future_write).
+                if map_flags & map::MAP_SHARED != 0
+                    && prot_flags & prot::PROT_WRITE != 0
+                    && crate::fs::memfd::file_seals(&file).is_some_and(|s| {
+                        s & (crate::fs::memfd::F_SEAL_WRITE
+                            | crate::fs::memfd::F_SEAL_FUTURE_WRITE)
+                            != 0
+                    })
+                {
+                    return mmap_error::EPERM;
+                }
             }
         }
     }
@@ -1870,6 +1885,18 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                 // until past the span.
                 if prot & 0x2 != 0 {
                     let range_end = addr + length;
+                    // F_SEAL_WRITE/F_SEAL_FUTURE_WRITE on a memfd VMA:
+                    // mprotect to PROT_WRITE is EPERM (memfd_create(2);
+                    // the reference strips VM_MAYWRITE at mmap time via
+                    // seal_check_future_write, and mapping_deny_writable
+                    // covers the full SEAL_WRITE case).
+                    let sealed_memfd = |file: &alloc::sync::Arc<crate::fs::file::File>| {
+                        crate::fs::memfd::file_seals(file).is_some_and(|s| {
+                            s & (crate::fs::memfd::F_SEAL_WRITE
+                                | crate::fs::memfd::F_SEAL_FUTURE_WRITE)
+                                != 0
+                        })
+                    };
                     let mut cursor = addr;
                     if let Some(v) = vma_mgr.find(crate::mm::page::VirtAddr::new(addr)) {
                         cursor = v.end().as_usize();
@@ -1877,6 +1904,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             if let Some(file) = addr_space.get_vma_file(v.start().as_usize()) {
                                 if file.flags().is_readonly() {
                                     return -13_i64; // EACCES
+                                }
+                                if sealed_memfd(&file) {
+                                    return -1_i64; // EPERM
                                 }
                             }
                         }
@@ -1893,6 +1923,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             if let Some(file) = addr_space.get_vma_file(vs) {
                                 if file.flags().is_readonly() {
                                     return -13_i64; // EACCES
+                                }
+                                if sealed_memfd(&file) {
+                                    return -1_i64; // EPERM
                                 }
                             }
                         }
