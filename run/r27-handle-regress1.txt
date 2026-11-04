@@ -1,0 +1,11 @@
+# idx|test|class|rc|tail
+0|stat01|PASS|0|TPASS: stat_buf.st_size == FILE_SIZE (1024) stat01.c:48: TPASS: stat_buf.st_mode & MASK == tc->mode (146) stat01.c:49: TPASS: stat_buf.st_nlink == 1 (1)  Summary: passed   12 failed   0 broken   0 skipped  0 warnings 0
+1|fstat02|PASS|0|: stat_buf.st_size == FILE_SIZE (1024) fstat02.c:34: TPASS: stat_buf.st_mode & 0777 == FILE_MODE (420) fstat02.c:35: TPASS: stat_buf.st_nlink == NLINK (2)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+2|stat03|PASS|0|eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop/test_eloop) failed; errno=20: ENOTDIR
+3|open14|PASS|0|0  TINFO  :  create multiple directories, link files into them open14      0  TINFO  :  and check file permissions open14      0  TINFO  :  remove files, directories open14      3  TPASS  :  file permission tests passed
+4|openat03|PASS|0|0  TINFO  :  create multiple directories, link files into them openat03    0  TINFO  :  and check file permissions openat03    0  TINFO  :  remove files, directories openat03    3  TPASS  :  file permission tests passed
+5|linkat02|TCONF|32|ev/loop0 with ext2 opts='' extra opts='' linkat02    1  TCONF  :  tst_cmd.c:75: Couldn't find 'mkfs.ext2' in $PATH at tst_cmd.c:75 linkat02    2  TCONF  :  tst_cmd.c:75: Remaining cases not appropriate for configuration
+6|creat01|PASS|0|creat() truncated file to 0 bytes creat01.c:55: TPASS: file was created and written to successfully creat01.c:60: TPASS: read failed expectedly: EBADF (9)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+7|write02|PASS|0|_test.c:1617: TINFO: Timeout per run is 0h 00m 30s write02.c:20: TPASS: write(fd, NULL, 0) returned 0 write02.c:22: TPASS: Expect: write(fd, NULL, 0) == 0  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+8|truncate04|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/truncate04: No such file or directory
+9|chown03|PASS|0|.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s chown03.c:63: TPASS: chown(chown03_testfile, -1, 65534) passed  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

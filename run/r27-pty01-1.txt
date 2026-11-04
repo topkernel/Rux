@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|pty01|FAIL|2|pty01       1  TBROK  :  pty01.c:106: open didn't fail as expected! pty01       2  TBROK  :  pty01.c:106: Remaining cases broken

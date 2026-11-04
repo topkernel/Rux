@@ -1,0 +1,8 @@
+# idx|test|class|rc|tail
+0|mc04|PASS|0|child mlock rc=0 child mincore rc=0 vec=1 1 1 mincore rc=0 vec=1 1 1 fresh-map mincore rc=0 vec=1 1 1 after-touch mincore rc=0 vec=1 1 1
+1|mincore01|PASS|0|ailed as expected: TEST_ERRNO=EFAULT(14): Bad address mincore01    3  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory mincore01    4  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory
+2|mincore02|PASS|0|t.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore02.c:56: TPASS: mincore(addr, size, vec) passed mincore02.c:63: TPASS: locked_pages == NUM_PAGES (4)  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+3|mincore03|PASS|0|is 0h 00m 30s mincore03.c:66: TPASS: mincore() reports untouched pages are not resident mincore03.c:66: TPASS: mincore() reports locked pages are resident  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+4|mincore04|PASS|0|on: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore04.c:99: TPASS: mincore reports all 3 pages locked by child process are resident  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|mlock201|FAIL|1|ock2(1) locked 8 pages, expected 4 mlock201.c:124: TFAIL: mlock2(1) locked 8 pages, expected 1 mlock201.c:124: TFAIL: mlock2(1) locked 8 pages, expected 4  Summary: passed   1 failed   7 broken   0 skipped  0 warnings 0
+6|mlock05|FAIL|1|tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mlock05.c:105: TFAIL: Rss (0) != MMAPLEN (1048576) mlock05.c:106: TPASS: Locked == MMAPLEN (1048576)  Summary: passed   1 failed   1 broken   0 skipped  0 warnings 0

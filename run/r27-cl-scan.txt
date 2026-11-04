@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|cl|PASS|0|flags=0x10911 -> rc=308 errno=0 flags=0x210911 -> rc=309 errno=0 flags=0x10900 -> rc=310 errno=0 flags=0x210900 -> rc=311 errno=0

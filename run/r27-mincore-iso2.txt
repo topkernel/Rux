@@ -1,0 +1,4 @@
+# idx|test|class|rc|tail
+0|mincore02|PASS|0|t.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore02.c:56: TPASS: mincore(addr, size, vec) passed mincore02.c:63: TPASS: locked_pages == NUM_PAGES (4)  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+1|mincore03|PASS|0|is 0h 00m 30s mincore03.c:66: TPASS: mincore() reports untouched pages are not resident mincore03.c:66: TPASS: mincore() reports locked pages are resident  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+2|mincore04|PASS|0|on: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore04.c:99: TPASS: mincore reports all 3 pages locked by child process are resident  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

@@ -1,0 +1,49 @@
+# generic
+*.a
+*.o
+*.o.d
+*.pyc
+*.so
+*~
+.*.swp
+
+# generated
+/version.h
+
+# programs
+/c2xml
+/compile
+/ctags
+/example
+/graph
+/obfuscate
+/scheck
+/semind
+/sparse
+/sparse-llvm
+/test-dissect
+/test-inspect
+/test-lexing
+/test-linearize
+/test-parsing
+/test-show-type
+/test-unssa
+
+# tags
+tags
+TAGS
+
+# stgit generated dirs
+patches-*
+
+# quilt's files
+patches
+series
+
+# local makefile
+local.mk
+.*.mk
+
+# cscope and Qt files
+cscope.out
+*.pro*
