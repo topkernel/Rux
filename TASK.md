@@ -2980,3 +2980,141 @@ completion. TALLY (this session, kernel WITH extent fix):
 - Successor priorities: entry points above stand; the dice need a
   quiet host window (roll r30roll.sh again when load <4 sustained);
   pixels unchanged (frozen classes checked every boot, 0 changes).
+
+## THIRTY-FIRST-SUCCESSOR SESSION (2026-11-04 08:39-.., branch biofix-fieldpoll @ 164fbf4b)
+
+Mission: NOSNAP population re-run (journal-live /data, e2fsck after hard
+kills as the acceptance), race rolls on populated stores, pixels. Outcome
+so far: ACCEPTANCE PASSED (twice over), the JBD2 CSUM_V3 PARITY FIX
+landed (164fbf4b) — e2fsck now REPLAYS our journal instead of resetting
+the jsb — and the populated-store series runs (all wedge/cascade dice
+under load 2.4-6.4, no healthy sample yet).
+
+### 1. The population substrate and the acceptance (mission 1)
+- userdata-warm.img is POISONED (pre-fix era: "Inode checksum does not
+  match inode" at the bms chain) — NOT usable; the reference-populated
+  bms-ref.img (fsck-clean, user-100 fully provisioned, store 43 rows,
+  /app/el2/100 populated, launcher installed) is the golden substrate.
+- lb386 (first NOSNAP populated boot, bzImage-fixext-dbg): early wedge
+  (txn574 from 11s, samgr), hard-killed, e2fsck -fy: store INTACT (43
+  rows), account_list.json identical, NO el1 destruction — the 28th's
+  poisoning class is GONE with the journal-live kernel. Residual fix
+  classes: jsb "corrupted" + orphans + zero-dtime + one extent-block
+  checksum (inode 262337 = time.db-wal, same block every kill) +
+  bitmap/count accounting. ALL samples (3 boots) show the IDENTICAL fix
+  list — deterministic per-boot state, not torn-write luck.
+- RIG BUG (fixed in poproll2b.sh): the 30th's r30roll/poproll kill step
+  used `pgrep -x qemu-system-x86_64` — the name is 17 chars, pgrep -x
+  matches comm (15) and NEVER matches, so QEMUs survived their verdicts
+  and two fsck samples ran against LIVE writers (tainted; the pop1 and
+  pop31-0 first-fsck logs are that shape). poproll2b.sh kills via
+  /proc/*/cmdline scan with verify-dead, and fscks only quiescent images.
+- lb388's untainted post-kill fsck: same classes (jsb corrupt, orphans,
+  262337 extent csum, bitmap). lb389 (init-cascade sysrq-c after DoUmount)
+  adds an xattr-block refcount off-by-one. NET: crash consistency of the
+  populated store PASSES (nothing the mission needs is lost), but the jsb
+  class named a real format bug — see 2.
+
+### 2. JBD2 CSUM_V3 parity — the jsb class root-caused and FIXED (164fbf4b)
+- The OH /data journal carries s_feature_incompat 0x13 = REVOKE|64BIT|
+  CSUM_V3 (mke2fs pairs metadata_csum with journal csum v3). Our jbd2
+  wrote NONE of the v2/v3 checksums: write_journal_superblock mutated
+  s_start/s_sequence without recomputing s_checksum; tags were emitted
+  through the V1 struct regardless of feature (for v3, a 12-byte packed
+  struct copied as 16 bytes — OOB stack read AND wrong layout); no
+  descriptor/revoke tail csums; no commit-block h_chksum[0].
+- e2fsck semantics (fetched upstream journal.c): e2fsck_journal_sb_csum_
+  verify fails on the stale jsb checksum -> "journal superblock
+  corrupted" -> reset_super (this was the 'one fixable class' residual
+  of the cc campaign and the 28th's divergence shape). Layout verified
+  bit-exact against the clean image BEFORE implementing: s_checksum
+  @252 = crc32c(~0, jsb[0..1024], field zeroed); j_csum_seed =
+  crc32c(~0, s_uuid) = 0x2a90e450 on this image.
+- Implemented per reference 6.6 (fs/jbd2 + jbd2.h): seed + jsb verify at
+  init (permissive journal-disable on mismatch — documented divergence;
+  the reference fails the mount), jsb csum on every jsb write AND on
+  write_clean_sb, descriptor/revoke tail csums (revoke entry capacity
+  now reserves the tail), commit-block csum, per-tag csum with correct
+  V3/V2/V1 layouts — data blocks are copied into the journal area FIRST
+  and the tag csum runs over the exact bytes that landed (write order is
+  recovery-neutral; commit block stays the atomic point). Recovery now
+  verifies descriptor tails / commit blocks / per-tag csums (variant-
+  aware tag parse too — the old V1 t_flags@+6 read missed LAST_TAG on
+  v3 tags and overcounted every v3-journal scan).
+- VERIFIED on the populated /data: csum1 boot (170s, commits 926->945,
+  init-cascade sysrq-c kill): jsb bytes post-kill carry a bit-exact
+  VALID checksum (host crc32c check), and e2fsck -fy RUNS JOURNAL
+  RECOVERY ('正在恢复日志', s_start=70) — first time our log is
+  reference-consumable. Remaining classes: orphans/zero-dtime/accounting
+  ONLY. Store 43 rows intact. This closes the 28th's crash-consistency
+  divergence at the format level.
+- Known residuals banked: (a) extent-tree-block tails (ext4_extent_csum)
+  are still unwired — csum.rs has the helpers (extent_block_csum_set)
+  with ZERO call sites; namei.rs:778-791 shows the wiring pattern
+  (generation-chained seed); the 262337/time.db-wal class is this gap;
+  extent.rs is bug-dense, do it carefully. (b) commit timestamps stay 0
+  (recovery-neutral). (c) init's jsb-csum-mismatch policy is permissive
+  (reference fails the mount).
+
+### 3. Populated-store series (poproll2b.sh, lb387+, all pre-rlimits-fix kernel)
+- TALLY: lb386/387/390/391/392/393/394 wedge (SA plateaus 15-18/35/57),
+  lb388 stall, lb389 init-cascade (see below), lb395 in flight at write
+  time. createNewUser=0 on ALL (user-100 found — the warm path is taken,
+  no recreation race). journal-less=0 on all (extent fix holds).
+- lb389 decode (the cascade face, lb381/bmsours1 family): render_service
+  (pid 811) exits CODE 0 silently at 38.8s -> init resets the graphic
+  stack (render/allocator/composer restart) -> appspawn reaped ->
+  restart-limit -> init sysrq-c deliberate crash at 47.7s. Reference
+  boots this image to GUI (render_service survives); our healthy fresh
+  boots (bmsours3/5, lb366) also keep it — exit(0) happens ONLY on
+  cascade-family boots (lb381, lb389): symptom, not root cause. No
+  hilog verdict visible (level-gated); render_service stderr shows only
+  benign config warnings before the exit.
+- The healthy-boot ceiling so far: 57 SA inserts + graphic stack up.
+  The two userspace walls on the populated store: the samgr wedge dice
+  and the render_service cascade. DFX watchdog kills leaf services
+  (inputmethod, useriam) but NEVER foundation/samgr — no image-side
+  restart lever exists for the wedge; kernel timers demonstrably fire
+  through wedges (TXN-HANG rescans on schedule) — userspace-internal
+  adjudication extends to the populated series.
+- PIXELS: every shot across all boots is the frozen set (82f0a25f /
+  06b933b4 classes); ZERO changes.
+
+### 4. Cross-lane (coordinator, this session)
+- Wedge-rate A/B verdict (pollwake worse, 0/5 vs 4/5) was measured
+  pre-3b352cf6 (rlimits self-deadlock fix) — my populated + fresh rolls
+  move to the post-fix kernel after the main sync (merge not rebase,
+  per coordinator; dtb_blob.S watched) and double as the A/B re-run.
+- 1784be54 (optimistic-spin holder guard) explains ftest03; ext4/htree
+  wave exonerated.
+
+### 5. Housekeeping / gates
+- Gates for 164fbf4b: x86_64 debug + fresh-config rebuild, riscv64,
+  aarch64 all rc=0 (dtb_blob.S clean); make test on private rootfs
+  (rootfs-mine3) GREEN — "suite verdict green", wrapper rc=124 post-halt
+  (the normal shape; run/cg31-maketest.log).
+- Assets: run/poproll2b.sh (fixed roller), run/userdata-csum1.img +
+  run/csum1-fsck.log (the fix's evidence pair), run/pop31-*-fsck*.log,
+  run/pop1-fsck.log (tainted-marked), /tmp/e2fsck-journal.c (upstream
+  reference used for the jsb verdict semantics).
+
+### Successor entry points (31st, in order)
+1. AFTER the main sync lands (r10: 3b352cf6 rlimits + 1784be54 spin
+   guard): rebuild, swap the roller kernel (poproll2b KERNEL=env), and
+   count wedge-class outcomes on the populated store — the coordinator's
+   A/B re-run rides these boots. Same for a fresh-store r30roll leg
+   (branch-fire tally still 0-fires/0-healthy-denominator this era).
+2. The healthy populated boot should take the warm ladder (user-100
+   exists -> no CreateNewUser -> activate -> startUser(100) -> launcher
+   AbilityInfo in the store -> appspawn -> pixels). Watch: startUser /
+   SwitchToUser / appspawn com.ohos.launcher / launcher-ready (use the
+   FIXED pattern 'Handle set param.*launcher\.ready' — bare
+   'launcher.ready' false-matches init's "not set" warnings).
+3. EXTENT-TAIL WIRING (fs residual): csum.rs extent_block_csum_set has
+   no call sites; mirror namei.rs:778-791 (read i_generation, dir_csum_
+   seed, set tail before the block goes dirty) at every extent.rs
+   mutation site; acceptance = the 262337-class vanishes from post-kill
+   e2fsck logs.
+4. The D-20 ledger entry should gain the csum-v3 line (this fix) when
+   the coordinator merges; divergence to record: permissive
+   journal-disable on jsb-csum mismatch (reference fails the mount).
