@@ -512,6 +512,15 @@ pub fn futex_stuck_census() {
         fop: u64,
         fval: u64,
         fto: u64,
+        // 34th successor — the timespec VALUE at fto (tv_sec/tv_nsec
+        // read through the same foreign-mm walker). fto!=0 alone does
+        // not say the park has a deadline: FFRT-class waiters pass a
+        // non-NULL timeout whose value may be effectively infinite.
+        // A short value that never fires indicts the timeout arm; a
+        // huge value re-points at the missing wake event.
+        fto_ok: bool,
+        fto_sec: i64,
+        fto_nsec: i64,
         uvma_ok: bool,
         uvma_start: usize,
         uvma_end: usize,
@@ -563,6 +572,9 @@ pub fn futex_stuck_census() {
                         fop: 0,
                         fval: 0,
                         fto: 0,
+                        fto_ok: false,
+                        fto_sec: 0,
+                        fto_nsec: 0,
                         uvma_ok: false,
                         uvma_start: 0,
                         uvma_end: 0,
@@ -689,6 +701,53 @@ pub fn futex_stuck_census() {
                                 }
                             };
                         }
+                        // (a2) the timespec at fto (34th successor): two
+                        // u64 words through the walker (the struct can
+                        // straddle a page boundary, so walk each word).
+                        // Only when fto is non-NULL and user-addressable;
+                        // misaligned/speculative pointers just skip the
+                        // decode (fto_ok stays false).
+                        if s.fto != 0
+                            && s.fto <= u64::MAX - 16
+                            && crate::arch::uaccess::access_ok(s.fto as usize, 16)
+                        {
+                            let root = aspace.root_ppn();
+                            let mut words = [0u64; 2];
+                            let mut ok = true;
+                            for wi in 0..2usize {
+                                let va = s.fto + 8 * (wi as u64);
+                                // SAFETY: read-only walk of the pinned
+                                // waiter's page tables; the timespec was
+                                // copied in by futex_parse_timeout before
+                                // the park, so the page is resident.
+                                match unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                                } {
+                                    Some((ppn, bits))
+                                        if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
+                                    {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word.
+                                        words[wi] = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                    }
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                s.fto_ok = true;
+                                s.fto_sec = words[0] as i64;
+                                s.fto_nsec = words[1] as i64;
+                            }
+                        }
                         // (b) user-stack return-address candidates: scan
                         // the 32 words above the entry sp; a word landing
                         // inside an EXECUTABLE vma is a plausible return
@@ -813,6 +872,9 @@ pub fn futex_stuck_census() {
         rep_fop: u64,
         rep_fval: u64,
         rep_fto: u64,
+        rep_fto_ok: bool,
+        rep_fto_sec: i64,
+        rep_fto_nsec: i64,
         rep_uvma_ok: bool,
         rep_uvma_start: usize,
         rep_uvma_end: usize,
@@ -854,6 +916,9 @@ pub fn futex_stuck_census() {
                         rep_fop: s.fop,
                         rep_fval: s.fval,
                         rep_fto: s.fto,
+                        rep_fto_ok: s.fto_ok,
+                        rep_fto_sec: s.fto_sec,
+                        rep_fto_nsec: s.fto_nsec,
                         rep_uvma_ok: s.uvma_ok,
                         rep_uvma_start: s.uvma_start,
                         rep_uvma_end: s.uvma_end,
@@ -902,8 +967,12 @@ pub fn futex_stuck_census() {
         for i in 0..g.rep_uret_n {
             let _ = write!(uret_s, "{:#x} ", g.rep_uret[i]);
         }
+        let mut fto_s = alloc::string::String::new();
+        if g.rep_fto_ok {
+            let _ = write!(fto_s, "={}s+{}ns", g.rep_fto_sec, g.rep_fto_nsec);
+        }
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
@@ -918,6 +987,7 @@ pub fn futex_stuck_census() {
             g.rep_fop,
             g.rep_fval,
             g.rep_fto,
+            fto_s,
             g.rep_uvma_start,
             g.rep_uvma_end,
             g.rep_uvma_cls as char,
