@@ -112,6 +112,16 @@ static void arm_trace_events(void)
     };
     if (!cmdline_has("ktrace=1"))
         return;
+ * print budgets. Armed ONLY when the files exist (older kernels and
+ * non-hunt boots take the no-op path). One token per write — the
+ * reference set_event grammar applies a single token per write. */
+static void arm_trace_events(void)
+{
+    static const char *evs[] = {
+        "net:udp_deliver", "net:udp_wake", "net:lo_xmit",
+        "net:sock_wait", "timer:itimer_arm", "signal:signal_generate",
+        NULL,
+    };
     int fd = open("/sys/kernel/tracing/tracing_on", O_WRONLY);
     if (fd < 0)
         return; /* no tracefs — nothing to arm */

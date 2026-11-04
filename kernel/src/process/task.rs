@@ -1462,6 +1462,17 @@ pub struct Task {
     /// PID of this task inside its pid namespace (== pid for the initial
     /// namespace; 1 for a CLONE_NEWPID namespace init).
     pub ns_local_pid: u32,
+    /// Per-level pid numbers for every pid namespace STRICTLY between
+    /// this task's own ns and the init ns — the reference struct pid's
+    /// upid[] chain minus its two ends (own-ns pid is `ns_local_pid`;
+    /// the init-ns pid is the global `pid`). A depth-1 task (own ns's
+    /// parent is init) has an EMPTY chain; a depth-2 task carries the
+    /// number the intermediate ns assigned it. Built once in
+    /// copy_namespaces; immutable afterwards.
+    pub ns_upids: alloc::vec::Vec<(
+        alloc::sync::Arc<crate::process::ns::PidNamespace>,
+        u32,
+    )>,
 
     // ==================== seccomp (U1c) ====================
 
@@ -1781,6 +1792,7 @@ impl Task {
             ns_net: None,
             ns_user: None,
             ns_local_pid: pid,
+            ns_upids: alloc::vec::Vec::new(),
             seccomp_mode: AtomicU32::new(0),
             seccomp_filter: Spinlock::new(None),
             no_new_privs: AtomicBool::new(false),
@@ -2356,6 +2368,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
             0,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_upids))
+                as *mut alloc::vec::Vec<(
+                    alloc::sync::Arc<crate::process::ns::PidNamespace>,
+                    u32,
+                )>,
+            alloc::vec::Vec::new(),
         );
 
         // Initialize children and sibling lists
@@ -2991,6 +3011,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
             pid,
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, ns_upids))
+                as *mut alloc::vec::Vec<(
+                    alloc::sync::Arc<crate::process::ns::PidNamespace>,
+                    u32,
+                )>,
+            alloc::vec::Vec::new(),
         );
 
         // Initialize children and sibling lists
