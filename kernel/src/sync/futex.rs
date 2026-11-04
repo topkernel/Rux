@@ -423,6 +423,51 @@ static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
     [INIT; HASH_SIZE]
 };
 
+/// Per-bucket waiter count — the reference's `hb->waiters`
+/// (kernel/futex/futex.h futex_hb_waiters_inc/dec/pending). Two jobs:
+///
+/// 1. PARITY: `futex_wake` on a bucket with no waiters returns 0 WITHOUT
+///    taking the bucket lock (waitwake.c futex_wake's
+///    futex_hb_waiters_pending fast path). Every uncontended
+///    pthread_mutex_unlock is a FUTEX_WAKE; the OH hot path issues them
+///    at storm volume, and the bucket lock was pure overhead there.
+/// 2. ORDERING: the increment happens BEFORE the waiter takes the bucket
+///    lock (paired with a full fence), and the wake-side check does a
+///    full fence before reading — the reference's (A)/(B) barrier pair
+///    (waitwake.c's ordering comment): a waker that observes count==0 is
+///    guaranteed the waiter's value re-check sees the new user word, so
+///    the waiter returns EAGAIN instead of sleeping through a lost wake.
+///
+/// Accounting discipline: exactly one dec per inc. The waiter incs at the
+/// top of each wait round; the dec belongs to whichever side UNLINKS the
+/// entry (the waker in futex_wake_in_mm, the sleeper via remove_waiter,
+/// the requeue move's source bucket, futex_cleanup for dying tasks, or
+/// the wait round's own error backtrack before queueing).
+static HASH_WAITERS: [core::sync::atomic::AtomicI32; HASH_SIZE] = {
+    const W: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+    [W; HASH_SIZE]
+};
+
+/// Reference futex_hb_waiters_inc: count++, then full barrier (A).
+#[inline]
+fn hb_waiters_inc(bucket: usize) {
+    HASH_WAITERS[bucket].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Reference futex_hb_waiters_dec.
+#[inline]
+fn hb_waiters_dec(bucket: usize) {
+    HASH_WAITERS[bucket].fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reference futex_hb_waiters_pending: full barrier (B), then read.
+#[inline]
+fn hb_waiters_pending(bucket: usize) -> bool {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    HASH_WAITERS[bucket].load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
 /// Diagnostic (b133/b134 stall hunt): find the live futex-waiter entry of
 /// `task`, if any. Returns (uaddr, key.mm, woken). The binder stall report
 /// calls this for txn-holder threads parked in futex_wait: a `woken=true`
@@ -1503,6 +1548,16 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
 
+    // Reference fast path (waitwake.c futex_wake): with no waiters
+    // pending on the bucket, return 0 without taking the bucket lock.
+    // The barrier pair with hb_waiters_inc guarantees a waiter that
+    // queued concurrently with this check re-read the user word after
+    // its inc — it either saw the new value (EAGAIN) or is findable by
+    // the NEXT wake.
+    if !hb_waiters_pending(bucket_idx) {
+        return 0;
+    }
+
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
     // Collect tasks to wake after releasing the bucket lock, like
@@ -1517,10 +1572,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 
     let mut current_idx = *head;
     while let Some(idx) = current_idx {
-        if ret >= nr_wake as i64 {
-            break;
-        }
-
         // Slot under the bucket guard — proof-checked (D-11 slice 3).
         let mut waiter_slot = WAITER_POOL[idx].lock_nested(&head.proof());
         let should_wake = match *waiter_slot {
@@ -1555,6 +1606,9 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                     pw.next = next_idx;
                 }
             }
+            // The waker unlinked the entry — the waiter's count reference
+            // is consumed here (reference __futex_unqueue's dec).
+            hb_waiters_dec(bucket_idx);
 
             // Do NOT free the waiter slot here: the sleeping task still
             // inspects it after waking and frees it itself (review IPC-H4).
@@ -1564,6 +1618,13 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             }
 
             ret += 1;
+            // Reference budget shape (waitwake.c `if (++ret >= nr_wake)
+            // break`): the check runs AFTER waking an entry, so nr_wake
+            // <= 0 still wakes exactly one waiter — the documented ABI
+            // quirk (LTP's futex_wake with val=0 expects 1 woken).
+            if ret >= nr_wake as i64 {
+                break;
+            }
             current_idx = next_idx;
         } else {
             prev_idx = Some(idx);
@@ -1724,6 +1785,12 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     // FUTEX_WAKEs) complete the wait early: the parent's wake found no
     // waiter and TBROK'd with ETIMEDOUT.
     loop {
+        // Reference waiter accounting (core.c futex_q_lock): count the
+        // waiter BEFORE taking the bucket lock, with the (A) fence. Every
+        // exit between here and the successful queue backtracks the inc;
+        // after queueing, the dec belongs to whichever side unlinks.
+        hb_waiters_inc(bucket_idx);
+
         // Lock the hash bucket.  All subsequent operations (value check,
         // waiter insertion, state change) happen under this lock.
         let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
@@ -1735,17 +1802,22 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             crate::arch::uaccess::get_user(uaddr_ptr as *const u32)
         } {
             Some(v) => v,
-            None => return -EFAULT as i64,
+            None => {
+                hb_waiters_dec(bucket_idx);
+                return -EFAULT as i64;
+            }
         };
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
         if uval != val {
+            hb_waiters_dec(bucket_idx);
             return -EAGAIN as i64;
         }
 
         // Deadline already passed while we were re-checking?
         if let Some(dl) = deadline {
             if crate::drivers::timer::get_jiffies() >= dl {
+                hb_waiters_dec(bucket_idx);
                 return -ETIMEDOUT as i64;
             }
         }
@@ -1769,13 +1841,18 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             Some(idx) => idx,
             None => {
                 drop(head);
+                hb_waiters_dec(bucket_idx);
                 pool_full_backoff();
                 continue;
             }
         };
 
-        // Initialize and insert waiter into hash chain (fill the placeholder
-        // reserved by alloc_waiter in place).
+        // Initialize waiter slot and insert at the chain TAIL (reference
+        // parity: the bucket chain is a plist ordered by priority with
+        // FIFO order among equal priorities — core.c __futex_queue's
+        // plist_add. The old head-insert woke the NEWEST waiter first;
+        // under churn the oldest waiter could starve while late arrivals
+        // kept winning every wake).
         {
             let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
             if let Some(ref mut w) = *slot {
@@ -1785,12 +1862,29 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.woken = false;
                 w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
-                w.next = *head;
+                w.next = None;
             }
         }
-
-        // Update chain head.
-        *head = Some(waiter_idx);
+        match *head {
+            None => *head = Some(waiter_idx),
+            Some(first) => {
+                let mut tail = first;
+                loop {
+                    let next = {
+                        let slot = WAITER_POOL[tail].lock_irqsave();
+                        slot.as_ref().and_then(|w| w.next)
+                    };
+                    match next {
+                        None => break,
+                        Some(n) => tail = n,
+                    }
+                }
+                let mut tail_slot = WAITER_POOL[tail].lock_irqsave();
+                if let Some(ref mut tw) = *tail_slot {
+                    tw.next = Some(waiter_idx);
+                }
+            }
+        }
 
         // Residency flag (see Task::futex_wait_enqueued): linked into the
         // chain here, cleared by every unlink/free path — do_exit's
@@ -1956,6 +2050,9 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
             n
         };
         *head = next;
+        // Sleeper-side unlink: consume the waiter's count reference
+        // (reference futex_unqueue's dec).
+        hb_waiters_dec(bucket_idx);
         free_waiter(target_idx);
         return;
     }
@@ -1987,6 +2084,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                     w.next = target_next;
                 }
             }
+            hb_waiters_dec(bucket_idx);
             free_waiter(target_idx);
             return;
         }
@@ -2045,6 +2143,9 @@ pub fn futex_cleanup(task: *mut Task) {
                         pw.next = next;
                     }
                 }
+                // Exit-side unlink: consume the dying task's count
+                // reference for this bucket.
+                hb_waiters_dec(bucket_idx);
                 free_waiter(idx);
                 current_idx = next;
             } else {
@@ -2170,21 +2271,6 @@ pub fn futex_requeue(
 
     let key1 = FutexKey::new_user(uaddr, mm, flags);
 
-    // For CMP_REQUEUE, verify *uaddr == cmpval
-    if is_cmp {
-        // SAFETY: exception-table protected read; unmapped address → EFAULT.
-        let uaddr_ptr = uaddr as *const u32;
-        let uval = match unsafe {
-            crate::arch::uaccess::get_user(uaddr_ptr)
-        } {
-            Some(v) => v,
-            None => return -EFAULT as i64,
-        };
-        if uval != cmpval {
-            return -EAGAIN as i64;
-        }
-    }
-
     // No requeue target or same address → just wake
     if uaddr2 == 0 || uaddr2 == uaddr || nr_requeue <= 0 {
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
@@ -2208,6 +2294,24 @@ pub fn futex_requeue(
     if bucket1 == bucket2 {
         // Same bucket — lock once.
         let mut head1 = HASH_HEADS[bucket1].lock_irqsave();
+
+        // For CMP_REQUEUE, verify *uaddr == cmpval UNDER the bucket lock
+        // (reference requeue.c: the compare runs after double_lock_hb, so
+        // a mismatched value aborts with EAGAIN before any waiter is
+        // touched — check-then-scan is atomic wrt other futex ops).
+        if is_cmp {
+            // SAFETY: exception-table protected read; unmapped address → EFAULT.
+            let uaddr_ptr = uaddr as *const u32;
+            let uval = match unsafe {
+                crate::arch::uaccess::get_user(uaddr_ptr)
+            } {
+                Some(v) => v,
+                None => return -EFAULT as i64,
+            };
+            if uval != cmpval {
+                return -EAGAIN as i64;
+            }
+        }
 
         let mut prev: Option<usize> = None;
         let mut cur = *head1;
@@ -2242,7 +2346,9 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                // The woken waiter frees its own slot (see futex_wait).
+                // The woken waiter frees its own slot (see futex_wait);
+                // this unlink consumes its count reference.
+                hb_waiters_dec(bucket1);
 
                 if !task.is_null() {
                     wake_list.push(task);
@@ -2253,7 +2359,8 @@ pub fn futex_requeue(
             } else if (requeue_list.len() as i32) < nr_requeue
             {
                 // Same bucket — just update the key (and keep the bucket
-                // field truthful), stay in chain.
+                // field truthful), stay in chain. Count unchanged: the
+                // waiter never left this bucket.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
@@ -2290,6 +2397,22 @@ pub fn futex_requeue(
         let mut prev: Option<usize> = None;
         let mut cur = *head1_ref;
 
+        // CMP_REQUEUE compare under both bucket locks (reference parity —
+        // see the same-bucket branch above).
+        if is_cmp {
+            // SAFETY: exception-table protected read; unmapped address → EFAULT.
+            let uaddr_ptr = uaddr as *const u32;
+            let uval = match unsafe {
+                crate::arch::uaccess::get_user(uaddr_ptr)
+            } {
+                Some(v) => v,
+                None => return -EFAULT as i64,
+            };
+            if uval != cmpval {
+                return -EAGAIN as i64;
+            }
+        }
+
         while let Some(idx) = cur {
             let (matches, next) = {
                 let slot = WAITER_POOL[idx].lock_irqsave();
@@ -2320,7 +2443,9 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                // The woken waiter frees its own slot (see futex_wait).
+                // The woken waiter frees its own slot (see futex_wait);
+                // this unlink consumes its count reference on bucket1.
+                hb_waiters_dec(bucket1);
 
                 if !task.is_null() {
                     wake_list.push(task);
@@ -2337,17 +2462,44 @@ pub fn futex_requeue(
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
                 }
+                // Count transfer BEFORE the destination link (reference
+                // requeue_futex order: del hb1, dec hb1, inc hb2, add
+                // hb2) — the wake fast path reads the count WITHOUT the
+                // bucket lock, so a linked-but-uncounted waiter would be
+                // invisible to a concurrent bucket2 wake.
+                hb_waiters_dec(bucket1);
+                hb_waiters_inc(bucket2);
                 // Update key (incl. bucket bookkeeping) and insert into
-                // destination chain immediately.
+                // the destination chain TAIL (FIFO parity — see the wait
+                // path's tail insert).
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
                         w.key = key2;
                         w.bucket = bucket2;
-                        w.next = *head2_ref;
+                        w.next = None;
                     }
                 }
-                *head2_ref = Some(idx);
+                match *head2_ref {
+                    None => *head2_ref = Some(idx),
+                    Some(first2) => {
+                        let mut tail = first2;
+                        loop {
+                            let next2 = {
+                                let slot = WAITER_POOL[tail].lock_irqsave();
+                                slot.as_ref().and_then(|w| w.next)
+                            };
+                            match next2 {
+                                None => break,
+                                Some(n) => tail = n,
+                            }
+                        }
+                        let mut tail_slot = WAITER_POOL[tail].lock_irqsave();
+                        if let Some(ref mut tw) = *tail_slot {
+                            tw.next = Some(idx);
+                        }
+                    }
+                }
 
                 requeue_list.push(idx);
                 ret += 1;
