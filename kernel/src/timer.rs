@@ -477,6 +477,41 @@ pub fn timer_softirq_handler(_nr: usize) {
             // line per second ONLY while anon reclaim is being exercised
             // (self-gated on census deltas; zero serial otherwise).
             crate::mm::vmscan::vscan_heartbeat();
+            // stress-port r9 (kill10 face-1 handoff): overdue-wheel
+            // anomaly — an entry still IN the wheel more than 2 s past
+            // its deadline is a wheel-side loss (the delivery-loss face
+            // leaves the wheel EMPTY while the waiter stays parked;
+            // absence + a parked waiter is the other branch). Anomaly-
+            // gated unconditional print (ticktrap precedent), globally
+            // rate-capped at 1/s, max 4 entries per heartbeat.
+            {
+                let snaps = snapshot_timers();
+                let mut budget = if ww_latefire_budget_ok() { 4u32 } else { 0u32 };
+                for t in snaps.iter() {
+                    let overdue_ticks = if t.expires_time != 0 {
+                        now_time.saturating_sub(t.expires_time)
+                    } else {
+                        // jiffy-only entry: compare at the jiffy grid
+                        current
+                            .saturating_sub(t.expires)
+                            .saturating_mul(crate::config::TIMER_CLOCK_FREQ_HZ
+                                / crate::config::KERNEL_HZ as u64)
+                    };
+                    if overdue_ticks > 2 * crate::config::TIMER_CLOCK_FREQ_HZ && budget > 0 {
+                        budget -= 1;
+                        crate::pr_err!(
+                            "HRES-OVERDUE id={:#x} expires_time={} age_ms={} pid={} signo={} wake_pid={} interval_jiffies={}",
+                            t.id,
+                            t.expires_time,
+                            overdue_ticks / (crate::config::TIMER_CLOCK_FREQ_HZ / 1000),
+                            t.pid,
+                            t.signo,
+                            t.wake_pid,
+                            t.interval_jiffies
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -599,6 +634,16 @@ pub fn timer_softirq_handler(_nr: usize) {
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
+
+    // lmbench-fix lane: sweep the unlinked-RUNNING phantom (the
+    // lat_sem/lat_connect/bw_tcp wedge family — a task frozen
+    // RUNNING+unqueued+slotless is reached by no pick and no wake).
+    // 1 Hz, unconditional: the scan is a pid-hash walk with an early
+    // state filter; the GRQ is taken only when a candidate exists.
+    if current.saturating_sub(LAST_PHANTOM_RELINK.load(Ordering::Relaxed)) >= 100 {
+        LAST_PHANTOM_RELINK.store(current, Ordering::Relaxed);
+        crate::sched::sched::relink_unlinked_running_phantoms();
+    }
 
     // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
@@ -729,6 +774,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LAST_PHANTOM_RELINK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Jiffies of the last wildwatch canary verify (dfx=wildwatch).
 static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

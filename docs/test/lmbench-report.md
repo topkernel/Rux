@@ -80,10 +80,10 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 | `bw_unix` | ~~2637.87~~ **42885.03 MB/s** *(unix staging elimination; landed 1/3 passes in the load window — quiet-window confirm pending)* | 22782.66 MB/s | **1.88x (faster)** |
 | `bw_file_rd 1m io_only /tmp/lmbench.file` | "inf" *(timer floor — per-iteration cost below clock granularity; ≥32 GB/s class)* | 33600.68 MB/s | at/above reference |
 | `bw_mmap_rd 1m mmap_only /tmp/lmbench.file` | 70917.84 MB/s *(11-01 value; not re-landed)* | 74316 MB/s | 1.05x slower |
-| `lat_tcp 127.0.0.1` | **TIMEOUT** *(tcp-in debug-print family chokes the case; no measurement line)* | 4.446 microseconds | - |
-| `lat_udp 127.0.0.1` | n/a | 4.37 microseconds | - |
-| `lat_connect 127.0.0.1` | **TIMEOUT** | 86.887 microseconds | - |
-| `bw_tcp 127.0.0.1` | **TIMEOUT** | 15195.35 MB/s | - |
+| `lat_tcp 127.0.0.1` | **7.75–8.03 µs** *(11-04 lane fix: AF_PACKET locks irqsave'd + TCP-table exhaustion fixed; 3/3 release boots — the earlier "debug-print chokes" attribution was wrong, the case was wedging)* | 4.446 microseconds | 1.78x |
+| `lat_udp 127.0.0.1` | 94–96 µs on the debug kernel *(source-address fix landed)*; **release kernel: 0/8** — the scheduler stale-claim strands the UDP server within ~20 roundtrips (see queue) | 4.37 microseconds | blocked (sched) |
+| `lat_connect 127.0.0.1` | **14.3–16.1 ms measured, 3/4 boots** *(was TIMEOUT: TCP-table exhaustion — the SYN spawn dropped every SYN once the 64-slot table filled with TIME_WAIT/CLOSE_WAIT corpses; eviction + 512 slots landed)*; remaining cost + 1-in-4 wedge = the same scheduler stale-claim refusing the accept server's wakes | 86.887 microseconds | 165x (sched-blocked) |
+| `bw_tcp 127.0.0.1` | **TIMEOUT** *(scheduler stale-claim refuses the benchmark worker's wakes — `WAKE-HEAL-SKIP pid=<worker> why=c` ×39 to the kill; connect/data path itself works)* | 15195.35 MB/s | - |
 | `lat_usleep 1000` | ~~5013.9~~ **1037.1 µs** *(LAPIC single-shot timer; consistent across all 3 passes)* | 1052.529 microseconds | **0.99x (at reference)** |
 
 
@@ -113,6 +113,46 @@ bimodal tail on lat_unix (base boots showed 16.7/6.05us bimodal; the
 Semop ping-pong under load stayed 2M-round clean through the soak.
 
 
+
+## Negative result (2026-11-04): adaptive idle-poll window — rejected with evidence
+
+The reference kernel's guest halt-polling discipline (adaptive
+`guest_halt_poll_ns` instead of a fixed window) was implemented in
+three variants and measured against the static 120 us window. None
+beat the static window on the primary perf platform (KVM lmbench);
+the change was reverted. Recorded here because the mechanisms are
+reusable knowledge:
+
+| variant | KVM lmbench (vs base, same-window interleave) | TCG pbench |
+|---|---|---|
+| v1 collapse-on-halt, ceiling 500 us | ctx +18%, pipe +8-12% | - |
+| v2 grow-on-fast-halt (ns clock), ceiling 500 us | ctx +13%, exec -14%, fork -6% | p4_fork_exit **+56%** |
+| v2 + ceiling 120 us | (not run) | p4_fork_exit +47% |
+| v2 + 5 ms decay hysteresis | (not run) | p4_fork_exit +55% |
+| X1 jiffy-clock verdict, ceiling 120 us | ctx +6%, pipe +8%, exec +43% (single pair), fork +4%, null flat | p4 flat, p2 -11%, p5a -13% |
+
+Mechanisms established by bisection (constant-window build isolated
+the code path from the window values):
+
+1. **Grow-only-on-catch is chicken-and-egg**: a window below every
+   wake gap can never grow (the wake always lands after the window),
+   so the 10-120 us gap class paid an IPI on every handoff (v1).
+2. **Measuring the halt with `monotonic_ns_since_boot` costs +50% on
+   translation rigs**: the call walks the HPET device model and its
+   lock twice per halt, serializing both vCPUs' timer traffic during
+   fork storms. Jiffy-granular verdicts (two atomic loads) fixed the
+   TCG p4 regression entirely — the idle/halt path must only use
+   cheap clocks.
+3. **Why adaptivity does not pay on this rig**: the host's KVM
+   `halt_poll_ns=200000` already keeps the vCPU THREAD from sleeping
+   through sub-200 us wakes — the guest-side window only saves the
+   guest IPI (waker-side VM-exit), and the static 120 us already
+   covers the ping-pong gap class. The adaptive variants only added
+   regrow transients at benchmark phase boundaries.
+
+Tool: `run/ab-haltpoll.sh` (interleaved same-window A/B boots — the
+interleaving is what separates real deltas from load drift; see the
+ctx rows: base read 1.85-1.88 at load 1.3 vs 1.96-2.17 at load 5).
 
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
@@ -195,23 +235,57 @@ the per-case optimization work):
 1. **Functional gaps (TIMEOUT / n-a rows) — each is a missing or
    wrong semantic, not a slow path.** Fixing one turns a dead row
    into a number:
-   - **lat_sem** — the writer's blocking 2-op `semop` (sem_flg=0)
-     returns `EAGAIN`, which the reference kernel never does for a
-     non-IPC_NOWAIT wait. Reproduced with serial evidence
-     (`run/repro-lat_sem.log` in the lane worktree: `(w) error on
-     semaphore: Resource temporarily unavailable`, plus
-     `WAKE-HEAL-SKIP` traces). Suspect: `kernel/src/ipc/sysv_sem.rs`
-     around the `blocking_idx` match — when
-     `find_blocking_op()` returns `None` after
-     `try_apply_semops()` reported NEED_BLOCK (a concurrent post
-     raced the scan), the code returns `-EAGAIN` where it must
-     `continue` the retry loop.
-   - **lat_tcp / lat_connect / bw_tcp** — loopback TCP: the in-guest
-     server reaches `tcp-listen`, the client's `connect(127.0.0.1)`
-     never completes (hangs to the kill; no error printed).
-   - **lat_udp** — loopback UDP: the client's handshake datagram gets
-     no reply within its own deadline (`Recv timed out` from
-     lat_udp.c), so the case exits instead of hanging.
+   - **lat_sem — RESOLVED** (main's R40 semop retry + the sched
+     fixes): 0.800 µs standing (perf-lmbench lane), re-confirmed
+     0.730 µs (debug) / 0.847 µs (release) on the 11-04
+     lmbench-fix tree. The EAGAIN blocking_idx suspect is fixed in
+     `kernel/src/ipc/sysv_sem.rs` (the `None => continue 'outer`
+     arm is on main).
+   - **lat_tcp — RESOLVED 11-04 (lmbench-fix lane), 7.75–8.03 µs,
+     3/3 release boots.** Two stacked causes: (a) the AF_PACKET
+     registry/per-socket locks were softirq-contended — a timer IRQ
+     landing on a CPU whose task context held PACKET_SOCKETS made
+     the RX fanout spin on its own holder (one-CPU self-deadlock,
+     system-wide at smp2); irqsave'd (predecessor commit 7f9c5e7b).
+     (b) TCP socket-table exhaustion: the SYN spawn path had no
+     reclamation and the 64-slot table cannot hold the workload's
+     60+ concurrent ESTABLISHED connections plus its TIME_WAIT /
+     orphaned CLOSE_WAIT corpses — the SYN was dropped silently and
+     every connect waited for the 1 s SYN retransmit (eviction +
+     512-slot table, commit c489347c).
+   - **lat_connect — TABLE EXHAUSTION FIXED (14.3–16.1 ms, 3/4
+     boots; was TIMEOUT).** Same table fixes; the residual 165x cost
+     and the 1-in-4 wedge are the scheduler stale-claim family (see
+     the queue's sched entry). With a healthy accept server the
+     handshake completes in the synchronous loopback drain.
+   - **lat_udp — NET SIDE RESOLVED** (unbound UDP socket to
+     127.0.0.1 stamped the eth0 address as source; the peer's echo
+     then routed out eth0 — commit d0452aaf): 94–96 µs, 5/5 on the
+     debug kernel. **The release kernel still fails 0/8**: within
+     ~20 ping-pong roundtrips the UDP server's wake is refused by
+     the scheduler stale-claim (`WAKE-HEAL-SKIP pid=<server> why=c`)
+     and the pong never comes — the same single producer as below.
+   - **bw_tcp — connect/data path works; the case is wedged by the
+     scheduler stale-claim** refusing the benchmark worker's wakes
+     (39 `WAKE-HEAL-SKIP why=c` to the kill, one `WAKE-HEAL was=1`
+     firing but not un-stranding). No net-side defect found on the
+     11-04 tree.
+   - **SCHEDULER STALE-CLAIM (the one remaining producer, blocks
+     lat_udp@release + bw_tcp + the lat_connect tail).** A task
+     parked in a socket wait is left {state=RUNNING, linked=0,
+     on_rq=0, on_cpu=1, pk=1, claim=<cpu>} — a leaked preempt
+     count on a sleeping task with the pick ownership never
+     released. Every wake of it is refused by the curr_on scan
+     (`WAKE-HEAL-SKIP why=c`), `STALE-CLAIM-RESET` fires on the
+     OTHER victims but never heals these, the 1 Hz phantom relink
+     (177eec0b) does not match (they are claim-named, not slotless),
+     and the r24 idle-slot heal only runs when the claiming CPU
+     idles. Faster (release) kernels hit the window within seconds;
+     debug timing mostly hides it. Fresh evidence this session:
+     lat_udp release 0/8 (server 308 refused mid-ping-pong),
+     bw_tcp wedges with the worker refused, lat_connect 1-in-4
+     wedge + 15 ms tail, all with the census shape above in the
+     serial. This is sched-lane territory (kill10/R63–R85 lineage).
    - **lat_fs** — no functional error, but the mk/rm calibration
      does not finish even in a 300 s single-case window: it creates
      thousands of 1k files, and at the measured 14–19x per-call file

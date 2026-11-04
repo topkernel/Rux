@@ -3283,6 +3283,47 @@ impl TcpSocketTable {
         }
     }
 
+    /// Under-pressure eviction (the bounded-table analogue of the
+    /// reference kernel's evictable orphan classes). Priority order:
+    /// TIME_WAIT first (the alloc()-side precedent — the reference evicts
+    /// tw buckets when its hash fills; a tw slot with no fd pin has no
+    /// future, its only job is remembering the 4-tuple until the deadline,
+    /// and a fresh connection outranks that memory), then fd-less
+    /// CLOSE_WAIT children (the R32-B8 timeout class — peer FINed, no fd
+    /// ever claimed them) and orphaned FIN_WAIT2 slots (the R23-1
+    /// half-close timeout class — the closer's fd is gone). All three are
+    /// dead ends the timer tick would reap on their timeout anyway;
+    /// evicting them when the table is full only applies that transition
+    /// early. Never touched: any slot with an fd pin (user_refs > 0) or a
+    /// live handshake.
+    fn reclaim_orphan_slot(&mut self) -> Option<usize> {
+        let mut victim_close_wait: Option<usize> = None;
+        let mut victim_fin_wait2: Option<usize> = None;
+        for i in 0..self.count {
+            if let Some(sk) = &self.sockets[i] {
+                if sk.user_refs.load(core::sync::atomic::Ordering::Acquire) != 0 {
+                    continue;
+                }
+                match sk.state {
+                    TcpState::TCP_TIME_WAIT => {
+                        self.sockets[i] = Some(TcpSocket::new());
+                        return Some(i);
+                    }
+                    TcpState::TCP_CLOSE_WAIT if sk.parent_fd.is_some() => {
+                        victim_close_wait = victim_close_wait.or(Some(i));
+                    }
+                    TcpState::TCP_FIN_WAIT2 if sk.orphaned => {
+                        victim_fin_wait2 = victim_fin_wait2.or(Some(i));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let victim = victim_close_wait.or(victim_fin_wait2)?;
+        self.sockets[victim] = Some(TcpSocket::new());
+        Some(victim)
+    }
+
     /// Allocate socket
     fn alloc(&mut self) -> Result<usize, ()> {
         // Reuse freed slots first
@@ -3294,24 +3335,14 @@ impl TcpSocketTable {
         }
         // No freed slots; append if room
         if self.count >= TCP_SOCKET_TABLE_SIZE {
-            // TIME_WAIT reclamation under pressure (Linux evicts the
-            // oldest tw buckets when the table fills): a TIME_WAIT slot
-            // with no fd pin has no future — its only purpose is to
-            // remember the 4-tuple until the timewait deadline, and a
-            // fresh connection outranks that memory. Without this, a
+            // Reclamation under pressure (Linux evicts the oldest tw
+            // buckets when the table fills). Without this, a
             // connect-churning workload (LTP send02: ~1000 short-lived
-            // loopback connections against a 64-slot table, 60 s tw
+            // loopback connections against a small table, 60 s tw
             // timeout) exhausts the table and every later SOCK_STREAM
             // socket() fails EMFILE.
-            for i in 0..self.count {
-                if let Some(sk) = &self.sockets[i] {
-                    if sk.state == TcpState::TCP_TIME_WAIT
-                        && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
-                    {
-                        self.sockets[i] = Some(TcpSocket::new());
-                        return Ok(i);
-                    }
-                }
+            if let Some(fd) = self.reclaim_orphan_slot() {
+                return Ok(fd);
             }
             return Err(());
         }
@@ -3330,6 +3361,22 @@ impl TcpSocketTable {
             }
         }
         if self.count >= TCP_SOCKET_TABLE_SIZE {
+            // Under-pressure eviction — the same reclaim the fd-side
+            // alloc() above applies (see reclaim_orphan_slot). The spawn
+            // path needs it MORE than socket() does: a connect-churning
+            // loopback workload (lmbench lat_connect — the client is the
+            // active closer, so every connection parks one slot in
+            // TIME_WAIT for the full 60 s, and unaccepted children pile
+            // up behind the accept loop in CLOSE_WAIT) can fill the table
+            // with reclamation-eligible corpses while a fresh SYN is
+            // mid-flight; socket() reclaims one slot for the new client,
+            // and the inbound SYN's spawn then found the table full again
+            // and silently dropped the SYN — the connect hung until the
+            // 1 s SYN retransmit and, once live states plus corpses
+            // saturated the table, wedged forever.
+            if let Some(fd) = self.reclaim_orphan_slot() {
+                return Ok(fd);
+            }
             return Err(());
         }
         let fd = self.count;

@@ -1011,3 +1011,167 @@ zero panics/wedges, leakhunt+allocwatch armed throughout (0 wildwrite,
 0 parked-leak, alloc sections max 0x43e cycles, over10ms=0). The
 rc=254 silent-child-death family: no recurrence (20 execs of
 glibc-static LTP binaries all reported results).
+
+## Round 9 — Mission 1+2: the r8 rmap fix's stress echo (3-kernel table, same recipe, same host load)
+
+Recipe: memory2 class (malloc 4x256M / mmap 4 / bigheap 2x384M, 100s
+budgets), x86_64+KVM q35 smp2 2G, dfx=allocwatch,taskdump,watchdog +
+syscost=1, OH A/B QEMU co-running (load parity across all three boots).
+
+| kernel (tree)              | unmap0 final | u0 split (live/dead/ovf) | kills | class verdicts |
+|----------------------------|--------------|--------------------------|-------|----------------|
+| abe5df57 (r7 close, PRE-fix)| 107-143      | (no split — pre-SP-8)    | 2     | malloc rc=1, bigheap rc=1 |
+| d1184d2d (r8 kernel)        | 68-72        | 2/70/0                   | 0     | malloc rc=1 (wedge SIGKILL), bigheap rc=1 |
+| 54be3925 (r9 = r8 + main 8d81c5da RCU-fd + ams46 tap) | 51 / 85 | 1/50/0 and 4/81/0 | 2+2 | malloc rc=1 x2, bigheap 137/1 |
+
+VERDICTS:
+1. The FileBacked-COW admission's benefit HOLDS under true-exhaustion
+   load: unmap0 halves (107-143 -> 51-85) at matched kill volume.
+2. NO new unmap/swap error class from the fix or from main's merge:
+   werr=0, partial=0, putnz=0, rotref=0 on every boot; rc buckets zero.
+3. The residue is dead-face dominated (u0dead 50-81) + a small live
+   face (u0live 1-4/boot). The u0live events cluster at the OOM-kill
+   teardown waves (boot 2: flat 0 through five censuses, then 4 in the
+   final kill window) — transient stale-slot shape, no monotone
+   per-round growth => NOT permanently-unswappable dead weight. The
+   r8 close's "residue is 100% the dead face" was measured on a boot
+   with no kill cascade; under kills a 1-4-event live face appears.
+4. malloc rc=1 ("worker needed SIGKILL") reproduces on ALL THREE
+   kernels under today's load — including the pre-fix r7-close tree.
+   It is the load shape (true-exhaustion OOM kills + slow teardown
+   under swapout), NOT a regression. OOM discipline held every time:
+   kills only at free_cnt=0 dumps (the SP-5/SP-7 design).
+5. r8's "unmap0 <=5/boot" class is confirmed as a NO-KILL-BOOT figure;
+   the comparable kill-boot class is 51-85 (pre-fix: 107-143+).
+
+## Round 9 — kill10 hunt (coordinator handoff, LTP r24): face-1 census + instruments
+
+- FACE 1 (park/lost-wake subset) CAUGHT LIVE, r9f boot (guest-side
+  k10loop loop, no serial input): loop 1 HUNG forever, loops 2-8 ALL
+  rc=0 (TPASS) — 1-in-8 intermittence on the current tree (kill10 fix
+  a5dfbe33 included). During the hang: ticks alive (TICKARM-RING
+  heartbeat advancing, seq 0xd91 -> 0x9141 over the window), both CPUs
+  alive, zero WAKE-REFUSED/SLOT-LIE prints — the silent-park class.
+- FACE 2 instrument LANDED: TICK_ARM_RING (commit ec141f0c) — last 16
+  timer events per CPU in plain memory, phys published at boot
+  (TICKARM-RING line), QEMU-monitor xp dump verified end-to-end on a
+  live machine (decodes ARM->SERVICE pairs; ra symbolizes to
+  timer_arm_oneshot / trap_handler). The freeze face now leaves a
+  readable corpse; NMI non-resumption (LTP k10-rux-nmi1) repeated.
+- Discriminating instrument LANDED: HRES-OVERDUE (commit 469a7be8) —
+  wheel-side overdue scan at the 1 Hz softirq heartbeat; r9g+ boots
+  adjudicate the two branches (stuck-in-wheel vs delivery-loss).
+- Rig lesson (host-side): the emulated 16550 RX FIFO drops bytes on
+  long serial-fed command lines (syntax-error face) AND serial RX can
+  die mid-delivery while ticks continue (observed r9d/r9e: input stops
+  ~15s in, ring heartbeat alive) — the hunt now runs fully guest-side
+  (k10loop init binary), no serial input dependency. The RX-loss shape
+  itself is logged for the interrupts domain (same delivery-loss
+  family as the freeze's irr-stuck capture).
+- fdreapd (main 8d81c5da) trips the hung-task detector once per quiet
+  boot (ppid=0 kernel thread, parked in its reaper wait) — cosmetic
+  watchdog noise, worth a look from the fs owner.
+
+## Round 9 — kill10 face-1 DECODE (the park subset root shape)
+
+r9f/r9g/r9h/r9i/r9j/r9k boots (k10loop guest-side, d8 protocol trace
+console-direct on r9k): the hang is FIRST-RUN-AFTER-BOOT DETERMINISTIC
+(5/5 boots: loop 1 hangs; loops 2-8 ALL rc=0 — 22 passing loops). This
+also explains the LTP r24 anomaly (census FAIL vs isolation PASS): the
+census always runs kill10 first-in-boot; isolation reruns are 2nd+ runs.
+
+Protocol state at the hang (r9k ordered trace):
+- Manager 310: FULL round — children "Child start signaling", SIGUSR2
+  storm, reply_to_child x10, "All children reported", USR2-done to
+  master (the master's "pausing for done (1/2)" = 310's report).
+- Manager 311: confirmed ready, entered its main pause loop, counter
+  stayed 0/10 — its TEN children NEVER received the round's group
+  USR1 (zero start-signaling prints from 311's children). The master
+  printed BOTH group kills ("test_loop, SIGUSR1 -> -310/-311").
+- Master: waits 1/2 forever, alarm(1) wakes flowing (ticks alive).
+
+Exonerated this round: wheel-side timer loss (HRES-OVERDUE silent all
+boots; wheel carries live alarm/wake entries that keep cycling); the
+group-kill primitive in steady state (k10pgid: 150 rounds x 10
+children, 0 dropped); ticks/LAPIC (TICKARM-RING heartbeat advances).
+
+Remaining suspect (successor entry): SIGNAL DELIVERY loss into ONE
+process group (311's family) around fork boundaries — two candidate
+losses observed in that family (the fork_pgrps ALRM to 311 landed
+concurrently with 311's first pause print and 311 only recovered via
+its own alarm(1) failsafe; the round's group-USR1 never landed at
+all). Discriminating instrument: a signal send/pend/deliver tracepoint
+(unified trace framework, pid-filterable) + a k10pgid variant that
+fires the group kill DURING child forking (the steady-state variant is
+clean). KILLTRACE currently covers KILL/TERM/SEGV/HUP only.
+
+Rig notes: 16550 RX FIFO drops long serial-fed lines (dribble fixed);
+serial RX itself can die mid-delivery with ticks alive (logged for the
+interrupts domain); kill10 d8 output to a shared file is stale-buffer
+garbage — console-direct (line-buffered) is the readable channel.
+
+## Round 10 (2026-11-04) — ftest03 decoded (budget-blown convoy, NOT a
+## data race; mutex optimistic-spin producer); rlimits irqsave fix (tick
+## self-deadlock = a real both-CPU freeze class); OH wedge-rate A/B table
+
+1. ftest03 (LTP r24 handoff, adjudicated REAL but re-classified):
+   - A/B reproduced 4/4 deterministic (tip FAIL 2/2, 1bde7490-mutex
+     PASS 2/2, ltpscan 30s-budget isolation, private stress rootfs).
+   - The children do NOT fail data checks: ZERO "bad verify" lines on
+     any failing boot. The failure chain is 30s-budget TERM ->
+     ftest03 parent term() fan-out -> still-running children take the
+     TBROK-unlink exit (nonzero) -> "Test{N} failed, expected 0 exit".
+     With a 120s budget the REAL binary PASSES on the tip kernel.
+   - Producer RE-ATTRIBUTED: 1bde7490's mutex.rs ALREADY carries the
+     da166982 recursion-arm gates; the swap reverted the optimistic-
+     spin rework (4x64 -> 100x64 + need_resched, merged e264a64b from
+     code-review-perf). That rework dropped the reference's
+     holder-on-CPU guard (mutex_spin_on_owner / owner->on_cpu): under
+     the fs biglock convoy (5-6 tasks, SMP2, ms sections through
+     jbd2) spinners burned full budgets against descheduled holders,
+     starving the holder. ft03probe (clone with HEART timestamps):
+     14s (old spin) -> 95s (rework) -> 13s (rework + holder-on-CPU
+     guard, committed 1784be54). Real ftest03 under budget: PASS 2/2.
+   - WAKE-HEAL-SKIP floods and the virtio "out-of-order completion"
+     witness fire on PASSING boots too — concomitant, not causal.
+   - pbench gate class (KVM smp2 2G, vs SP-7 anchor): p2_ctxsw 1.292
+     (anchor 1.242, +4.0%), p1_null 0.300 (0%), p3b 8.055 (-0.2%),
+     p6_append 5.44 (+4.8%), p6_unlink 48.9 (-10.5%); A-vs-C same-rig
+     p2 delta +1.2% — ctx-switch win preserved, all rows in band.
+2. rlimits tick self-deadlock (committed 3b352cf6): scheduler_tick
+   reads current's RLIMIT_CPU via lock_irqsave; sys_poll's NOFILE
+   bound and __send_signal's SIGPENDING check took the same per-task
+   spinlock PLAIN — a self-targeted holder interrupted by its own
+   tick spins forever at IF=0. Evidence: the OH A/B joint-run
+   DEADLOCK-spin class — pw-5 (byte-identical rebuild): cpu1 >1400s
+   at Task::rlimit+0x89 on two per-task locks (0x...ab2f4b8 /
+   0x...a3db4b8), cpu0 joining at the end; cg-1's 761-print storm is
+   the same lock-offset class. This is a REAL both-CPU interrupt
+   freeze family (NMI-only survivors) — kill10 face-2's shape, though
+   the k10 workload itself never printed DEADLOCK (its signals are
+   non-RT, no poll), so face-2 proper remains open with the ring.
+3. OH wedge-rate A/B (5v5 interleaved, same recipe/host):
+   - cg26b: 4/5 full ladder (bundles.ready 91-94s, create 60-63s,
+     startUser 91-94s); 1/5 wedge (cg-1 DEADLOCK-spin storm from 41s).
+     All 5 carry >=1 full-roll TXN strand (maxexec 1462-1486s) — the
+     pre-existing wedge family persists but does not block the ladder.
+   - pollwake (491ebc09): 0/5 ladder; 3/5 frozen pre-bootanimation
+     (pw-2/4: single FFRT park at ~5-6s anywoken=0 run=0; pw-5: that
+     park PLUS the terminal both-CPU rlimit spin); pw-1/3 reached
+     ba_ready ~11s but no bundles.
+   - VERDICT: pollwake does NOT reduce the wedge rate — it is
+     categorically worse under this recipe (0/5 vs 4/5 ladder; 3/5 vs
+     0/5 pre-ba freeze). The FFRT/samgr park family is unchanged
+     between kernels; do not merge pollwake on wedge-reduction
+     grounds. (Note: the pw-5 freeze mechanism (rlimit) is fixed on
+     our branch; the OH-side kernel predates the fix.)
+4. kill10 r10a re-hunt (post both fixes): first-run hang (face 1,
+   r9-decoded signal-loss) still present; loops 2-7 rc=0; ZERO freeze
+   dumps, ZERO DEADLOCK prints — no new class from today's changes.
+5. r9 freeze-capture re-adjudication: ALL r9 "FREEZE-WATCH" stalls
+   (r9a-e) were face-1 PARKS, not interrupt freezes — the TICKARM-RING
+   seq advanced ~200 events/s across every stall window (ticks alive
+   on both CPUs) and the dumped CPU sat HALT=1 (idle) with IF=1 at a
+   stable idle-halt RIP. True face-2 (both-CPU interrupt freeze) did
+   not occur in any of the 11 r9 hunt boots; the ring + HRES-OVERDUE
+   instruments remain armed for the next recurrence.

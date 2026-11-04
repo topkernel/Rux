@@ -328,6 +328,8 @@ pub fn udp_socket_get(fd: i32) -> Option<&'static mut UdpSocket> {
 /// # Returns
 /// 0 on success, error code on failure
 pub fn udp_bind(fd: i32, ip: u32, port: UdpPort) -> i32 {
+    // lmbench-fix TEMP probe (drop before merge).
+    crate::pr_info!("udp-bind fd={} ip={:#x} port={}", fd, ip, port);
     // R24 (HIGH-6): table leaf lock — serializes against udp_rcv (NetRx
     // softirq) and other syscalls touching the same slot.
     let _g = UDP_TABLE_LOCK.lock_irqsave();
@@ -427,6 +429,8 @@ pub fn udp_take_pending_error(fd: i32) -> i32 {
 /// Connect a UDP socket to a remote address (R24: locked entry point used
 /// by the socket layer instead of raw udp_socket_get).
 pub fn udp_connect(fd: i32, ip: u32, port: UdpPort) -> i32 {
+    // lmbench-fix TEMP probe (drop before merge).
+    crate::pr_info!("udp-conn fd={} ip={:#x} port={}", fd, ip, port);
     let _g = UDP_TABLE_LOCK.lock_irqsave();
     // SAFETY: UDP_SOCKET_TABLE is a global; fd was returned by udp_socket_alloc.
     unsafe {
@@ -559,6 +563,18 @@ pub fn udp_send(fd: i32, buf: &[u8]) -> isize {
 /// # Returns
 /// Bytes sent on success, error code on failure
 pub fn udp_sendto(fd: i32, buf: &[u8], dest_ip: u32, dest_port: u16) -> isize {
+    // lmbench-fix TEMP probe (drop before merge).
+    static US_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    if US_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+        crate::pr_info!(
+            "udp-send fd={} dip={:#x} dport={} len={}",
+            fd,
+            dest_ip,
+            dest_port,
+            buf.len()
+        );
+    }
     // R24 (HIGH-6) + review-s2b lock audit: build under the table lock,
     // emit after it drops (see udp_send).
     let built = {
@@ -712,13 +728,19 @@ fn udp_build_locked6(
         return Err(-5); // EIO
     }
 
-    // Source: the socket's bound v6 address, else our SLAAC link-local.
+    // Source: the socket's bound v6 address, else ::1 for ::1 (v6
+    // loopback parity with the v4 127/8 rule above), else our SLAAC
+    // link-local.
     let src6 = if crate::net::ipv6::is_unspecified(&socket.local_ip6) {
-        match crate::net::ipv6::get_link_local() {
-            Some(ll) => ll,
-            None => {
-                crate::net::buffer::kfree_skb(skb);
-                return Err(-99); // EADDRNOTAVAIL — no v6 source configured
+        if dest6 == crate::net::ipv6::IPV6_ADDR_LOOPBACK {
+            crate::net::ipv6::IPV6_ADDR_LOOPBACK
+        } else {
+            match crate::net::ipv6::get_link_local() {
+                Some(ll) => ll,
+                None => {
+                    crate::net::buffer::kfree_skb(skb);
+                    return Err(-99); // EADDRNOTAVAIL — no v6 source configured
+                }
             }
         }
     } else {
@@ -932,9 +954,21 @@ fn udp_build_locked(
         return Err(-5); // EIO
     }
 
-    // Send to IP layer (source = the socket's bound address; 0 = device)
+    // Send to IP layer (source = the socket's bound address; 0 = device).
+    // Loopback for loopback: a datagram to 127/8 must carry 127.0.0.1 as
+    // its source (the reference's route lookup selects the lo interface
+    // and its address), not the eth0 device address — an unbound socket
+    // sending on loopback used to stamp 10.0.2.15 onto the wire, so the
+    // peer's recvfrom reported a foreign source and its echo left via
+    // eth0 (lmbench lat_udp: the handshake datagram's reply never
+    // returned; the client died at its 15 s alarm). Same rule
+    // tcp_connect already applies for its 4-tuple.
     let src_ip = if socket.local_ip == 0 {
-        crate::net::arp::get_local_ip()
+        if (dest_ip >> 24) == 127 {
+            0x7F000001
+        } else {
+            crate::net::arp::get_local_ip()
+        }
     } else {
         socket.local_ip
     };
@@ -1415,6 +1449,18 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // R24 (HIGH-6): serialize table iteration/enqueue against syscalls
     // (alloc/free/bind/send/recv) — the NetRx softirq runs concurrently on
     // the 4-CPU kernel. Leaf lock: nothing below re-enters UDP.
+    // lmbench-fix TEMP probe (drop before merge).
+    static UIN_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    let uin_dbg = UIN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40;
+    if uin_dbg {
+        crate::pr_info!(
+            "udp-in dport={} sport={} len={} connected_filters_on",
+            dest_port,
+            src_port,
+            data_len
+        );
+    }
     let mut delivered_fd: Option<i32> = None;
     {
         let _g = UDP_TABLE_LOCK.lock_irqsave();
@@ -1454,8 +1500,14 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
 
     if let Some(fd) = delivered_fd {
         // W3: wake blocking recv waiters on this socket (after the lock).
+        if uin_dbg {
+            crate::pr_info!("udp-in -> delivered fd={}", fd);
+        }
         crate::net::socket::wake_udp_socket(fd);
         return Ok(());
+    }
+    if uin_dbg {
+        crate::pr_info!("udp-in -> NO MATCH (port unreach path)");
     }
 
     // No socket found bound to this port. If the datagram was addressed to
