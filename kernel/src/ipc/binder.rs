@@ -4275,7 +4275,10 @@ pub fn bwr_park_audit() {
             Some(r) => r,
             None => (0, 0, 0, 0),
         };
-        let in_bwr_ioctl = sys == SYS_IOCTL && a1 == BINDER_WRITE_READ as u64;
+        // x86_64 ioctl nr sign-extends in the 64-bit register (r41v3
+        // shows 0xffffffffc0306201 vs the constant 0xc0306201) —
+        // compare through u32 so the BWR decode path fires.
+        let in_bwr_ioctl = sys == SYS_IOCTL && (a1 as u32 as u64) == BINDER_WRITE_READ as u64;
         // Decode the live user BWR the thread is parked in (if any):
         // 6 x u64 LP64 fields, read fault-safe one by one.
         let mut bwr_txt = alloc::string::String::new();
