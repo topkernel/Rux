@@ -31,10 +31,15 @@
 //! - Peer links are `Weak` on both sides: the fds (File::private_data
 //!   raw Arcs) are the only strong owners, so "peer closed" is simply
 //!   "Weak::upgrade fails" and no reference cycle can leak a pair.
-//! - Wakeup ownership: receivers wait on their OWN queue for data,
-//!   senders wait on the TARGET's queue for room. Both conditions are
-//!   re-checked by every wake_up_all on that queue (spurious wakes are
-//!   harmless — the wait round returns Ok and the caller re-checks).
+//! - Wakeup ownership (reference reader/writer queue split): receivers
+//!   and acceptors wait on their OWN wait_queue for data/children;
+//!   senders blocked on a full target and connectors blocked on a full
+//!   listen backlog wait EXCLUSIVELY on the TARGET's peer_wait. Every
+//!   wait site re-checks its condition after registering (spurious
+//!   wakes are harmless — the wait round returns Ok and the caller
+//!   re-checks). Data arrival wakes ONE exclusive waiter + every
+//!   non-exclusive poller; a drain wakes ONE parked sender per freed
+//!   record; close/shutdown wake everything (EOF broadcast).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -220,8 +225,27 @@ pub struct UnixSocket {
     dead: Spinlock<bool>,
     /// Our write half was shut (shutdown(SHUT_WR) / SHUT_RDWR)
     shut_wr: Spinlock<bool>,
-    /// W3-style wait queue for blocking recv/send/accept
+    /// W3-style wait queue for blocking recv/accept — the data-arrival
+    /// queue. Reference shape: sk_sleep(sk) / sk_receive_queue.wq. Waiters:
+    /// blocking recv callers (DGRAM/SEQPACKET register EXCLUSIVE —
+    /// reference __skb_wait_for_more_packets; STREAM registers
+    /// non-exclusive — reference unix_stream_data_wait), accept callers
+    /// (EXCLUSIVE — reference unix_accept's skb_recv_datagram) and the
+    /// poll/epoll registrations (NON-exclusive — reference poll_wait).
+    /// Woken by data arrival (sk_data_ready = ONE exclusive + every
+    /// non-exclusive), EOF/close/shutdown (sock_def_wakeup = wake_all)
+    /// and, for STREAM, the peer's per-segment write_space (ONE).
     pub wait_queue: WaitQueueHead,
+    /// The peer-side wait queue: everyone blocked on THIS socket's
+    /// capacity/state — senders parked on a full receive queue and
+    /// connectors parked on a full listen backlog (reference
+    /// unix_sock->peer_wait; both park there EXCLUSIVELY via
+    /// unix_wait_for_peer). Woken on drain (ONE per freed record —
+    /// reference __unix_dgram_recvmsg's peer_wait sync_poll wake and the
+    /// STREAM per-skb consume_skb -> sock_wfree -> write_space chain) and
+    /// on close/shutdown (wake_all — reference unix_release_sock /
+    /// unix_shutdown).
+    pub peer_wait: WaitQueueHead,
     /// Stored socket options (shared shape with the AF_INET layer)
     pub options: Spinlock<SocketOptions>,
     /// Creator's credentials — reported to the peer by SO_PEERCRED /
@@ -266,6 +290,7 @@ impl UnixSocket {
             dead: Spinlock::new(false),
             shut_wr: Spinlock::new(false),
             wait_queue: WaitQueueHead::new(),
+            peer_wait: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
             creds: Spinlock::new(current_unix_cred()),
             file_id: AtomicU64::new(0),
@@ -762,12 +787,16 @@ pub unsafe fn put_sockaddr_un(
 // Blocking wait engine (W3 socket_wait_round discipline)
 // ============================================================================
 
-/// One blocking wait round on `wait_sock`'s wait queue, re-checking
-/// `ready` after registering (prepare → re-check → sleep → finish).
+/// One blocking wait round on `queue`, re-checking `ready` after
+/// registering (prepare → re-check → sleep → finish). `exclusive` mirrors
+/// the reference's prepare_to_wait{,_exclusive} choice per wait site:
+/// exclusive entries consume the wake budget (one wake per event reaches
+/// exactly one of them), non-exclusive entries are woken by every pass.
 /// Returns Ok(()) when the caller should re-check its condition,
 /// Err(errno) to abort (EINTR / timeout-as-EAGAIN / ENOMEM).
 fn unix_wait_round(
-    wait_sock: &Arc<UnixSocket>,
+    queue: &WaitQueueHead,
+    exclusive: bool,
     ready: &dyn Fn() -> bool,
     deadline: Option<u64>,
 ) -> Result<(), i32> {
@@ -776,12 +805,12 @@ fn unix_wait_round(
         None => return Err(-11), // no task context — behave non-blocking
     };
 
-    wait_sock.wait_queue.prepare_to_wait(current, false, true);
+    queue.prepare_to_wait(current, exclusive, true);
 
     // Re-check AFTER registering: if the condition was met between our
     // check and prepare_to_wait, the waker found an empty queue.
     if ready() {
-        wait_sock.wait_queue.finish_wait(current);
+        queue.finish_wait(current);
         // R36-B2: take ourselves back off the GRQ — we never slept, but a
         // concurrent wake may have enqueued us.
         crate::sched::dequeue_task(&*current);
@@ -789,7 +818,7 @@ fn unix_wait_round(
     }
 
     if crate::signal::signal_pending() {
-        wait_sock.wait_queue.finish_wait(current);
+        queue.finish_wait(current);
         crate::sched::dequeue_task(&*current);
         return Err(-4); // EINTR
     }
@@ -799,7 +828,7 @@ fn unix_wait_round(
         .unwrap_or(0);
     if deadline.is_some() && timer_id == 0 {
         // Timer pool exhausted — a timed wait would sleep forever.
-        wait_sock.wait_queue.finish_wait(current);
+        queue.finish_wait(current);
         crate::sched::dequeue_task(&*current);
         return Err(-12); // ENOMEM
     }
@@ -812,7 +841,7 @@ fn unix_wait_round(
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
     }
-    wait_sock.wait_queue.finish_wait(current);
+    queue.finish_wait(current);
 
     if crate::signal::signal_pending() {
         return Err(-4); // EINTR
@@ -854,7 +883,13 @@ pub fn unix_recv_ctl(
             return Err(-11);
         }
         let s = sock.clone();
-        unix_wait_round(&s, &|| sock_recv_ready(&s), deadline)?;
+        // Reference wait-exclusivity per kind: DGRAM/SEQPACKET readers
+        // register EXCLUSIVE (datagram.c __skb_wait_for_more_packets ->
+        // prepare_to_wait_exclusive); STREAM readers register
+        // non-exclusive (af_unix.c unix_stream_data_wait -> plain
+        // prepare_to_wait — an arrival wakes all parked stream readers).
+        let exclusive = !matches!(s.kind, UnixKind::Stream);
+        unix_wait_round(&s.wait_queue, exclusive, &|| sock_recv_ready(&s), deadline)?;
     }
 }
 
@@ -1068,11 +1103,16 @@ pub fn unix_connect(
                 if nonblock {
                     return Err(-11); // EAGAIN
                 }
-                // Blocking: sleep on the listener's queue until an accept
-                // pops a child (room) or the listener closes.
+                // Blocking: sleep on the LISTENER's peer_wait until an
+                // accept pops a child (room) or the listener closes —
+                // reference unix_wait_for_peer(other = the listener):
+                // prepare_to_wait_exclusive(&u->peer_wait). Woken by the
+                // accept pop (wake_up_one) and the listener's close
+                // (wake_all — unix_release_sock wakes its own peer_wait).
                 let s = server.clone();
                 unix_wait_round(
-                    &s,
+                    &s.peer_wait,
+                    true,
                     &|| {
                         s.accept_queue.lock().len() < *s.backlog.lock()
                             || *s.state.lock() != UnixState::Listening
@@ -1103,7 +1143,10 @@ pub fn unix_connect(
             *sock.peer.lock() = Some(Arc::downgrade(&child));
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
-            server.wait_queue.wake_up_all();
+            // Data arrival on the LISTENER — reference unix_stream_connect
+            // fires other->sk_data_ready (sock_def_readable, nr_exclusive
+            // = 1): every non-exclusive poller plus ONE exclusive acceptor.
+            server.wait_queue.wake_up_one();
             // A queued connection is an ARRIVAL on the listener — the
             // epoll analogue of unix_send's notify on the target. Without
             // it an EPOLLET-watched listener (Xorg registers its listener
@@ -1216,8 +1259,10 @@ pub fn unix_accept(sock: &Arc<UnixSocket>) -> Result<Arc<UnixSocket>, i32> {
     }
     let child = sock.accept_queue.lock().pop_front().ok_or(-11)?; // EAGAIN
     // An accept freed backlog room — wake blocking connects that are
-    // waiting for space on this listener (they re-check and enqueue).
-    sock.wait_queue.wake_up_all();
+    // waiting for space on this listener's peer_wait (they re-check and
+    // enqueue). Reference unix_accept: wake_up_interruptible(&u->peer_wait)
+    // — ONE exclusive waiter per freed slot (1 popped child = 1 slot).
+    sock.peer_wait.wake_up_one();
     Ok(child)
 }
 
@@ -1225,7 +1270,10 @@ pub fn unix_accept(sock: &Arc<UnixSocket>) -> Result<Arc<UnixSocket>, i32> {
 /// wait queue (woken by client connect / listener close) until a child is
 /// pending, the deadline expires, or a signal arrives.
 pub fn unix_accept_wait(sock: &Arc<UnixSocket>, deadline: Option<u64>) -> Result<(), i32> {
-    unix_wait_round(sock, &|| sock.accept_ready(), deadline)
+    // Reference unix_accept blocks via skb_recv_datagram ->
+    // __skb_wait_for_more_packets -> prepare_to_wait_exclusive on
+    // sk_sleep. The connect arrival wakes ONE acceptor per child.
+    unix_wait_round(&sock.wait_queue, true, &|| sock.accept_ready(), deadline)
 }
 
 /// The connected peer's bound name (accept/getpeername reporting).
@@ -1266,6 +1314,12 @@ fn target_has_room(target: &Arc<UnixSocket>, len: usize, cap: usize) -> bool {
     // and the sender went back to sleep forever — a wedged client whose
     // server had exited without draining (unixstress chaos child hang).
     if *target.dead.lock() || *target.state.lock() == UnixState::Closed {
+        return true;
+    }
+    // RCV_SHUTDOWN parity: a read-side-shut target will never drain for
+    // OUR sender's benefit — report room so the blocked sender wakes and
+    // takes the EPIPE path in the send loop (the check above).
+    if *target.eof.lock() {
         return true;
     }
     let queued = target.queued_truesize();
@@ -1374,6 +1428,14 @@ pub fn unix_send(
         };
 
         if *target.state.lock() == UnixState::Closed {
+            return Err(-32); // EPIPE
+        }
+        // RCV_SHUTDOWN parity (reference unix_dgram_sendmsg /
+        // unix_stream_sendmsg: `other->sk_shutdown & RCV_SHUTDOWN ->
+        // EPIPE`): the target's read side is shut (peer SHUT_WR toward it,
+        // or its peer closed). eof also releases a blocked sender: unix_wait_for_peer
+        // re-evaluates RCV_SHUTDOWN after every wake.
+        if *target.eof.lock() {
             return Err(-32); // EPIPE
         }
 
@@ -1949,7 +2011,12 @@ pub fn unix_send(
                     charge,
                 });
                 drop(q);
-                target.wait_queue.wake_up_all();
+                // Data arrival — reference sk_data_ready (sock_def_readable,
+                // wake_up_interruptible_sync_poll, nr_exclusive = 1): every
+                // non-exclusive poller plus ONE exclusive reader. Blocked
+                // senders are NOT on this queue anymore (they park on
+                // target.peer_wait) — an arrival no longer stampedes them.
+                target.wait_queue.wake_up_one();
                 // Readiness rose for the TARGET's file description: re-arm
                 // edge-triggered epoll watchers and wake blocked waiters.
                 // Every enqueue is a potential fresh edge (Linux re-queues
@@ -1966,10 +2033,12 @@ pub fn unix_send(
         if nonblock {
             return Err(-11); // EAGAIN
         }
-        // Block on the TARGET's queue (room condition) — the receiver's
-        // drain (and the target's close) wakes it.
+        // Block on the TARGET's peer_wait (room condition) — reference
+        // unix_wait_for_peer(other = the receiving socket): EXCLUSIVE on
+        // u->peer_wait, woken by the receiver's drain (ONE wake per freed
+        // record) and the target's close/shutdown (wake_all).
         let t = target.clone();
-        unix_wait_round(&t, &|| target_has_room(&t, data.len(), cap), deadline)?;
+        unix_wait_round(&t.peer_wait, true, &|| target_has_room(&t, data.len(), cap), deadline)?;
     }
 }
 
@@ -2022,6 +2091,10 @@ pub fn unix_recv(
                     let cred = front.cred;
                     let src = front.src.clone();
                     drop(q);
+                    // Reference __unix_dgram_recvmsg fires the peer_wait
+                    // wake on EVERY successful try-recv INCLUDING a peek
+                    // (wq_has_sleeper-guarded, nr_exclusive = 1).
+                    sock.peer_wait.wake_up_one();
                     return Ok(UnixRecvResult {
                         len: take,
                         orig_len,
@@ -2085,6 +2158,10 @@ pub fn unix_recv(
                 let mut src: Option<Arc<str>> = None;
                 let mut copied = 0usize;
                 let mut orig_total = 0usize;
+                // Fully-consumed segment count — the wake currency of the
+                // drain (reference: one consume_skb -> sock_wfree ->
+                // write_space chain per consumed skb).
+                let mut whole = 0usize;
                 // Drain this segment (and any following ones) into buf.
                 loop {
                     orig_total += seg.data.len();
@@ -2108,6 +2185,8 @@ pub fn unix_recv(
                             seg.charge = rest;
                             q.charge += rest;
                             q.segs.push_front(seg);
+                        } else {
+                            whole += 1;
                         }
                         break;
                     }
@@ -2118,8 +2197,14 @@ pub fn unix_recv(
                         }
                         next
                     } {
-                        Some(next) => seg = next,
-                        None => break,
+                        Some(next) => {
+                            whole += 1;
+                            seg = next;
+                        }
+                        None => {
+                            whole += 1;
+                            break;
+                        }
                     }
                 }
                 drop(q);
@@ -2156,8 +2241,17 @@ pub fn unix_recv(
                         }
                     }
                 }
-                // Room may have freed for senders blocked on our queue.
-                sock.wait_queue.wake_up_all();
+                // Room freed per fully-consumed segment: the reference
+                // fires consume_skb -> sock_wfree(sender) -> unix_write_space
+                // per consumed skb (nr_exclusive = 1). Wake ONE parked
+                // sender per freed segment on our peer_wait, and deliver the
+                // sender-side readiness ONCE on the peer's wait_queue (the
+                // reference's per-skb write_space wake on the sender's
+                // sk_sleep; one pass reports the same readiness with fewer
+                // spurious reader wakes).
+                for _ in 0..whole {
+                    sock.peer_wait.wake_up_one();
+                }
                 // Draining also raises the PEER's writability (its send
                 // queue just got room) — an EPOLLET edge on the peer's
                 // fd. Without this notify, a peer whose EPOLLOUT edge was
@@ -2166,6 +2260,9 @@ pub fn unix_recv(
                 // last_reported) never learns it can write again — Linux
                 // fires the sender's write_space callback here.
                 if let Some(peer) = sock.peer_arc() {
+                    if whole > 0 {
+                        peer.wait_queue.wake_up_one();
+                    }
                     let fid = peer.file_id.load(Ordering::Acquire);
                     if fid != 0 {
                         crate::syscall::misc::epoll_notify_file(fid);
@@ -2198,7 +2295,11 @@ pub fn unix_recv(
                 let cred = seg.cred;
                 let src = seg.src;
                 drop(q);
-                sock.wait_queue.wake_up_all();
+                // Record consumed: reference __unix_dgram_recvmsg wakes the
+                // receive queue's peer_wait with
+                // wake_up_interruptible_sync_poll (nr_exclusive = 1) — ONE
+                // parked sender per freed record, wq_has_sleeper-guarded.
+                sock.peer_wait.wake_up_one();
                 // Peer writability rose (see the STREAM branch above).
                 if let Some(peer) = sock.peer_arc() {
                     let fid = peer.file_id.load(Ordering::Acquire);
@@ -2257,7 +2358,13 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
         // SHUT_RD: subsequent recvs return EOF once the queue drains.
         *sock.eof.lock() = true;
     }
+    // sk_state_change(sk) (sock_def_wakeup = wake_all on sk_sleep): our
+    // own readers/acceptors/pollers see the state change.
     sock.wait_queue.wake_up_all();
+    // Parked senders on our peer_wait re-check too (the reference's
+    // unix_wait_for_peer re-evaluates RCV_SHUTDOWN after its wake; the
+    // send loop takes the EPIPE path).
+    sock.peer_wait.wake_up_all();
     Ok(())
 }
 
@@ -2291,7 +2398,15 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // Peer gets drain-then-EOF semantics.
     if let Some(peer) = sock.peer_arc() {
         *peer.eof.lock() = true;
+        // skpair->sk_state_change(skpair) (sock_def_wakeup = wake_all on
+        // the PEER's sk_sleep): the peer's readers/acceptors/pollers see
+        // EOF/POLLHUP.
         peer.wait_queue.wake_up_all();
+        // Senders parked on the PEER's peer_wait re-check and take EPIPE
+        // (the reference reaches them via the RCV_SHUTDOWN re-evaluation
+        // after their next wake; we wake them here so a blocked writev
+        // fails promptly instead of sleeping out its timeout).
+        peer.peer_wait.wake_up_all();
         // Peer close raises the peer's POLLIN|POLLHUP readiness — an edge
         // its EPOLLET watchers must see (Xorg detects dead clients this way).
         let fid = peer.file_id.load(Ordering::Acquire);
@@ -2322,7 +2437,11 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
             crate::dfx::scmtap::tap_orphan(nfds, segs);
         }
     }
-    // Wake senders blocked on OUR queue and our own waiters.
+    // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
+    // senders/connectors parked on OUR peer_wait re-check and take
+    // EPIPE/ECONNREFUSED; our own waiters (readers/pollers — an
+    // skpair-less self-reader still sees EOF) re-check too.
+    sock.peer_wait.wake_up_all();
     sock.wait_queue.wake_up_all();
 }
 
@@ -2692,6 +2811,10 @@ fn unix_recv_stream_user(
             };
             let Some(mut seg) = popped else { break };
             drained_any = true;
+            // Charge just dropped: reference consume_skb -> sock_wfree ->
+            // unix_write_space per consumed skb (nr_exclusive = 1). ONE
+            // parked sender per freed segment off our peer_wait.
+            sock.peer_wait.wake_up_one();
             // First-touch ancillary pickup (mirror of the engine drain).
             if !anc_seen && (!seg.files.is_empty() || seg.cred.is_some()) {
                 anc_seen = true;
@@ -2734,10 +2857,12 @@ fn unix_recv_stream_user(
             }
         }
         if drained_any {
-            // Room freed for senders blocked on our queue + the peer's
-            // EPOLLOUT edge — ONCE per syscall, not per segment.
-            sock.wait_queue.wake_up_all();
+            // Sender-side readiness: the reference's write_space fires on
+            // the SENDER's sk_sleep (its parked pollers/readers). Our
+            // parked senders were already woken per segment above; this
+            // delivers the EPOLLOUT edge to the peer's parked pollers.
             if let Some(peer) = sock.peer_arc() {
+                peer.wait_queue.wake_up_one();
                 let fid = peer.file_id.load(Ordering::Acquire);
                 if fid != 0 {
                     crate::syscall::misc::epoll_notify_file(fid);
@@ -2768,7 +2893,8 @@ fn unix_recv_stream_user(
             return -11; // EAGAIN
         }
         let s = sock.clone();
-        match unix_wait_round(&s, &|| sock_recv_ready(&s), deadline) {
+        // STREAM reader: non-exclusive (reference unix_stream_data_wait).
+        match unix_wait_round(&s.wait_queue, false, &|| sock_recv_ready(&s), deadline) {
             Ok(()) => continue,
             Err(e) => return e as isize,
         }
@@ -2870,11 +2996,16 @@ pub static UNIX_SOCKET_OPS: FileOps = FileOps::builder()
 // Poll-wait registration (P3: event-driven poll/select)
 // ============================================================================
 
-/// Register `task` on the socket's wait queue. Every readiness transition
-/// of this socket (peer data arrival, connect queued on a listener, send
-/// space freed by the peer's reads, peer EOF/HUP) does
-/// `wait_queue.wake_up_all()` on this same queue, so a poll/select waiter
-/// registered here is woken by real events.
+/// Register `task` on the socket's wait queue (NON-exclusive — reference
+/// poll_wait; the wake budget passes over non-exclusive entries, so every
+/// wake of this queue reaches every registered poller). Readiness events
+/// that wake this queue: data arrival (sk_data_ready), connect queued on
+/// a listener, peer EOF/HUP (close/shutdown wake_all), and for STREAM the
+/// peer-side per-drain write_space wake. Room-freed events for DGRAM
+/// reach the parked senders on peer_wait only (the reference's
+/// unix_dgram_peer_wake relay — which would additionally route them to a
+/// dgram POLLOUT poller's own queue — is not ported; epoll watchers are
+/// covered by the direct epoll_notify_file re-arm on every drain).
 pub fn unix_poll_wait(file: &File, task: *mut crate::process::task::Task) -> bool {
     // SAFETY: ops identity was verified by the dispatcher (UNIX_SOCKET_OPS)
     // before this is called; private_data holds Arc::into_raw(UnixSocket)
