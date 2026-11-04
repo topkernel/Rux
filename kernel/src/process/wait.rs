@@ -198,7 +198,17 @@ impl WaitQueueHead {
         // Use lock_irqsave: this is called from interrupt handlers.
         let list = self.list.lock_irqsave();
         let mut awakened = 0;
-        let max_wake = if nr == 0 { usize::MAX } else { nr };
+        // Reference __wake_up_common budget discipline: ONLY exclusive
+        // entries consume the nr_exclusive budget ("wake one" = wake ONE
+        // EXCLUSIVE waiter); non-exclusive entries (poll/epoll
+        // registrations) are woken on every pass WITHOUT consuming it —
+        // so a data-arrival wake reaches every poller plus exactly one
+        // exclusive reader. nr == 0 (wake_up_all) wakes EVERY entry,
+        // exclusive or not (the old form stopped at the first exclusive
+        // entry, which only worked because every registration was
+        // non-exclusive; the AF_UNIX reader/writer queue split registers
+        // exclusive waiters and needs the full reference semantics).
+        let mut budget = if nr == 0 { usize::MAX } else { nr };
 
         // R12-1 (deferred-wake UAF — the definitive fix): wake WHILE STILL
         // HOLDING the queue lock. A not-yet-woken entry on the queue proves
@@ -220,7 +230,7 @@ impl WaitQueueHead {
         // cannot mutate the list mid-iteration) and removes an in-lock
         // heap allocation from every event source's hot path.
         for entry in list.iter() {
-            if awakened >= max_wake {
+            if budget == 0 {
                 break;
             }
 
@@ -259,7 +269,10 @@ impl WaitQueueHead {
                 awakened += 1;
 
                 if entry.is_exclusive() {
-                    break;
+                    // Only an EXCLUSIVE entry consumes the budget (the
+                    // reference's `if (ret && (flags & WQ_FLAG_EXCLUSIVE)
+                    // && !--nr_exclusive) break;`).
+                    budget -= 1;
                 }
             } else {
                 // sc100 (sticky-token lost wake): a woken-flagged entry

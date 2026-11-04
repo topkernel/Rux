@@ -117,7 +117,14 @@ impl ConditionVariable {
         // 1. Atomically add to wait queue AND set INTERRUPTIBLE under the
         //    waitqueue lock, preventing the lost-wakeup race where signal()
         //    fires between unlock() and add()/set_state().
-        self.wait.prepare_to_wait(current, false, true);
+        //
+        // EXCLUSIVE registration (notify_one's documented intent): signal()
+        // is wake_up_one, whose reference budget semantics consume one unit
+        // PER EXCLUSIVE ENTRY — a non-exclusive waiter here would leave
+        // notify_one waking every waiter on the queue. Exclusive entries
+        // also queue FIFO (tail insert), the same anti-starve discipline
+        // Mutex::lock and Semaphore acquire use (R8-6).
+        self.wait.prepare_to_wait(current, true, true);
 
         // 2. Release mutex — any concurrent signal() will now see us in the
         //    waitqueue and wake us up.
@@ -164,7 +171,9 @@ impl ConditionVariable {
         // 1. Atomically add to wait queue AND set INTERRUPTIBLE under the
         //    waitqueue lock, preventing the lost-wakeup race where signal()
         //    fires between unlock() and add()/set_state().
-        self.wait.prepare_to_wait(current, false, true);
+        // EXCLUSIVE registration — same notify_one argument as wait()
+        // above.
+        self.wait.prepare_to_wait(current, true, true);
 
         // 2. Release mutex — any concurrent signal() will now see us in the
         //    waitqueue and wake us up.
