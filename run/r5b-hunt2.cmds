@@ -1,0 +1,1 @@
+150 fio --name=paio --ioengine=posixaio --numjobs=4 --rw=write --bs=4k --size=32M --filename=/test/qa/h2.bin

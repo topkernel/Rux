@@ -1,0 +1,1 @@
+150 fio --name=paio --ioengine=posixaio --numjobs=8 --rw=randrw --bs=4k --size=8M --filename=/test/qa/h3.bin

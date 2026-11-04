@@ -1,0 +1,1 @@
+240 fio --name=dd1 --ioengine=psync --direct=1 --numjobs=4 --rw=randrw --bs=4k --size=128M --filename=/test/qa/d1.bin

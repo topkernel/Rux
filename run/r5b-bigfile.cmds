@@ -1,0 +1,2 @@
+240 fio --name=bigw --ioengine=psync --rw=write --bs=1M --size=256M --filename=/test/qa/b1.bin
+240 fio --name=bigv --ioengine=psync --rw=read --bs=1M --size=256M --verify=crc32 --verify_state_save=0 --filename=/test/qa/b1.bin

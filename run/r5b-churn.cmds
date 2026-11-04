@@ -1,0 +1,1 @@
+240 fio --name=churn --ioengine=psync --rw=randwrite --bs=4k --size=4M --loops=40 --unlink=1 --create_on_open=1 --filename=/test/qa/c1.bin

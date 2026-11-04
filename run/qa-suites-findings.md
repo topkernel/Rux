@@ -479,3 +479,56 @@ classes across all eleven boots.
   support, not throughput. Throughput coverage comes from the class
   boots (aggregate 64MiB @ ~700MiB/s class in KVM, page-cache absorbed).
 - Tooling: run/r5-fio-battery.sh + run/r5-*.cmds (this round's boots).
+
+## Round 5b — F-6 hunt + extended fio classes
+
+Kernel/worktree unchanged (bf23f254 rebuilt). Logs run/qa-runs-r5b/.
+Hunt boots carry syscost=1. Worktree was cleared again by the user
+mid-session; rebuilt from branch (snapshot archived to
+archive/qa-suites-20261104 — 1756 build-scratch files committed there
+are NOT on the work branch).
+
+### F-6 hunt: 4 attempts, no capture (F-6 stays 1/6)
+
+| boot | shape | verdict |
+|---|---|---|
+| hunt1 | posixaio 4k 16M single | PASS, 0 fdreap stalls |
+| hunt2 | posixaio numjobs=4 write 32M | PASS (128MiB @31.5MiB/s, T=4s) — but see F-8 below |
+| hunt3 | posixaio numjobs=8 randrw 8M | PASS (64MiB moved in 2.4s) — but see F-8 below |
+| hunt4 | original 7-engine sequence replay | PASS 7/7, 0 stalls |
+
+The exit-wedge did not reproduce; fdreap stall counter stayed 0 on all
+four boots (the survey wedge showed 10k+). F-6 remains a rare (1/6)
+race; the census-on-wedge capture needs either many more boots or a
+load-correlated host (the original wedge fired on a quiet host too, so
+odds are ~1/6 per boot — a 10-boot roll would give ~80% capture odds).
+
+### Extended classes
+
+| class | load | verdict |
+|---|---|---|
+| churn | randwrite 4M loops=40 unlink=1 create_on_open=1 (open/create/close/unlink churn x40) | PASS |
+| bigfile | 256M write + 256M read+verify (write job stamps verify headers) | **PASS — full 256M crc32 verify clean** (bigfile2) |
+| bigfile (v1) | read job verified WITHOUT write-side header stamping | rc=1 after 1 block — **rig design bug, not kernel**: fio verify needs --verify on the WRITE job to stamp headers; v1's block 0 header check failed immediately (issued total=1). Rerun with stamped write (bigfile2) clean. Design note recorded. |
+| fsyncburn | randwrite 4k fsync=4 sustained 240s | PASS |
+| deepdirect | direct=1 numjobs=4 randrw 128M (16.3k reads + 16.4k writes issued) | PASS |
+
+Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all nine boots; zero
+fdreap stalls.
+
+### F-8 (handoff reinforcement): post-completion HUNG-CTX + KOT-KILL teardown cascade on numjobs boots
+
+hunt2/hunt3 both show, AFTER fio completed rc=0 (T=3-4s) and during the
+qsrun park phase: `INFO: task 306:306 blocked for more than 120 seconds`
+(hunt2 x3, hunt3 x1) followed by the KOT-KILL group-kill cascade —
+hunt3 logged 128 KSIG9 SIGKILLs (caller pid 314 comm='fio' -> group
+members in the 16xxx pid range) + repeated KOT-KILL lines. pid 306 is
+the SAME qsrun-forker task named in round-4's F-5 (threadtest wedge,
+sched handoff). So the F-5 family (parked forker / teardown cascade)
+reproduces on plain battery boots — not only under kselftest — whenever
+numjobs leaves a process group to reap. Strengthens the existing sched
+handoff; no new owner. fio's own results are unaffected (rc=0, data
+correct, group IO numbers intact).
+
+### Tooling
+- run/r5b-fio-battery.sh + run/r5b-*.cmds (this round's boots).
