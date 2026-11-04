@@ -452,6 +452,13 @@ pub fn timer_softirq_handler(_nr: usize) {
             // self-gated + rate-capped inside). Runs on the same ~1 Hz
             // heartbeat slot; zero cost when off.
             crate::ipc::binder::txn_hang_audit();
+            // holder-chain lane (dfx=txnhunt, same switch): BWR-park
+            // audit — every binder thread with a transaction stack (or
+            // an anomalous ioctl park) gets one line naming its CURRENT
+            // syscall + the decoded write sub-command of the BWR it is
+            // parked in; the FFRT mutex holders parked inside a binder
+            // ioctl (the futex-census blind spot) surface here.
+            crate::ipc::binder::bwr_park_audit();
             // leg-30B: AMS46 node/proc census (dfx=ams46, self-gated +
             // rate-capped inside) — the Gate-1 delivery adjudication
             // backdrop for the accountmgr->AMS StartUser oneway.
