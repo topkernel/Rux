@@ -1,0 +1,4 @@
+# idx|test|class|rc|tail
+0|fcntl14|PASS|0|TPASS  :  Test with negative whence locking PASSED fcntl14     0  TINFO  :  Exit block 3 fcntl14     0  TINFO  :  Enter block 4 fcntl14    96  TPASS  :  Test of locks on file PASSED fcntl14     0  TINFO  :  Exit block 4
+1|fcntl15|PASS|0|a file descriptor in parent fcntl15.c:104: TPASS: Succeeded to lock now ulocked region two fcntl15.c:110: TPASS: Failed to lock already locked region two  Summary: passed   12 failed   0 broken   0 skipped  0 warnings 0
+2|fcntl33|PASS|0|licts with fcntl(F_SETLEASE, F_RDLCK), unblocked within 5s fcntl33.c:194: TPASS: truncate() conflicts with fcntl(F_SETLEASE, F_RDLCK), unblocked within 5s  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0

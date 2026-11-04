@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|inotify11|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s inotify11.c:105: TPASS: Got 9999 IN_DELETE events  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

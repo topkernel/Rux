@@ -1,0 +1,4 @@
+# idx|test|class|rc|tail
+0|gettid02|PASS|0|m thread[8] ID (317) gettid02.c:29: TPASS: Expect: parent ID (308) differs from thread[9] ID (318) gettid02.c:61: TPASS: All threads have a different TID  Summary: passed   11 failed   0 broken   0 skipped  0 warnings 0
+1|float_exp_log|POISON||
+2|kill10|PASS|0|308: All 10 children reported in 309: All 10 children reported in kill10      1  TPASS  :  All 2 pgrps received their signals
