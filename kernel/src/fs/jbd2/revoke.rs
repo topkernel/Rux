@@ -228,8 +228,17 @@ pub fn jbd2_journal_write_revoke_records(
     let block_size = journal.j_blocksize as usize;
     let entry_size = journal.revoke_entry_size();
     let header_len = core::mem::size_of::<journal_header_t>() + core::mem::size_of::<u32>();
+    // CSUM_V2/V3 journals reserve the 4-byte block tail at the end of
+    // every descriptor-format block (revoke blocks included) — the entry
+    // capacity must not write into it (reference
+    // journal_revoke_records_per_block subtracts descr_csum_size).
+    let tail_len = if journal.has_csum_v2or3() {
+        core::mem::size_of::<journal_block_tail_t>()
+    } else {
+        0
+    };
     let per_block = if entry_size > 0 {
-        (block_size - header_len) / entry_size
+        (block_size.saturating_sub(tail_len) - header_len) / entry_size
     } else {
         0
     };
@@ -291,6 +300,20 @@ pub fn jbd2_journal_write_revoke_records(
                     .add(core::mem::size_of::<journal_header_t>()) as *mut u32,
                 (off as u32).to_be(),
             );
+            // CSUM_V2/V3 tail (reference jbd2_descriptor_block_csum_set —
+            // revoke blocks use the descriptor tail): crc32c(seed, whole
+            // block with the tail zeroed), stored in the tail.
+            if journal.has_csum_v2or3() {
+                let n = bh_ref.b_data.len();
+                bh_ref.b_data[n - tail_len..].fill(0);
+                let bytes: &[u8] = core::slice::from_raw_parts(
+                    bh_ref.b_data.as_ptr(),
+                    n,
+                );
+                let csum = crate::fs::ext4::csum::crc32c(journal.csum_seed(), bytes);
+                bh_ref.b_data[n - tail_len..]
+                    .copy_from_slice(&csum.to_be_bytes());
+            }
             bh_ref.set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
         }
         current_journal_block += 1;
