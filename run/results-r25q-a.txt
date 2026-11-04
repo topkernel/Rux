@@ -1,0 +1,5 @@
+# idx|test|class|rc|tail
+0|ppoll01|FAIL|1|e INVALID_NFDS ppoll01.c:285: TPASS: ret: -1, errno: EINVAL (22) ppoll01.c:246: TINFO: case INVALID_FDS ppoll01.c:285: TPASS: ret: -1, errno: EFAULT (14)  Summary: passed   18 failed   2 broken   0 skipped  0 warnings 0
+1|msgstress01|FAIL|2|OK: msgsnd() failed: EINVAL (22) msgstress01.c:120: TBROK: msgsnd() failed: EINVAL (22) tst_test.c:1665: TINFO: Killed the leftover descendant processes  Summary: passed   0 failed   0 broken   263 skipped  0 warnings 0
+2|shmat1|TIMEOUT|143|cess, got segment of size 1294336   [0x7ff000021f38]: Map address = 0x7ff000045000   [0x7ff000021f38]: Num iter: [999] Total Num Iter: [1000]     [0x7ff000044f38]: write_to_mem(): memory address: [0x7ff000045000]       [
+3|ftest03|FAIL|1|pected 0 exit. ftest03     4  TFAIL  :  ftest03.c:209:  Test{835} failed, expected 0 exit. ftest03     5  TFAIL  :  ftest03.c:209:  Test{837} failed, expected 0 exit. ftest03     6  TFAIL  :  ftest03.c:120: Test failed.

@@ -2250,11 +2250,18 @@ pub fn do_waitid(
                         result_kind = 1; // stopped
                     }
                 }
-                // Check for continued — only if WCONTINUED
-                else if options & WCONTINUED != 0 {
-                    // A continued child would have been STOPPED with
-                    // stop_signal == 0 (cleared by SIGCONT handler).
-                    // For now this is a future enhancement.
+                // Check for continued — only if WCONTINUED (reference
+                // wait_task_continued). SIGCONT's default action marks
+                // the resume on the child: stop_signal sentinel
+                // -SIGCONT with stop_reported re-armed. Report once.
+                else if options & WCONTINUED != 0 && result_child.is_none() {
+                    if !child.stop_reported.load(core::sync::atomic::Ordering::Acquire)
+                        && child.stop_signal() == -(crate::signal::Signal::SIGCONT as i32)
+                    {
+                        result_child = Some(child_ptr);
+                        result_code = crate::signal::Signal::SIGCONT as i32;
+                        result_kind = 2; // continued
+                    }
                 }
             });
 
@@ -2267,6 +2274,10 @@ pub fn do_waitid(
                 let (si_code, si_status) = if result_kind == 1 {
                     // Stopped
                     (CLD_STOPPED, result_code)
+                } else if result_kind == 2 {
+                    // Continued: si_status is SIGCONT (reference
+                    // do_notify_parent_cldstop's CLD_CONTINUED payload)
+                    (CLD_CONTINUED, result_code)
                 } else if result_kind == 3 {
                     // Killed by signal (CLD_DUMPED when a core was written)
                     if child.core_dumped() {
@@ -2291,8 +2302,9 @@ pub fn do_waitid(
                     release_task(child_ptr);
                 }
 
-                // Mark the stop event reported (one-shot, wait4-consistent)
-                if result_kind == 1 && options & WNOWAIT == 0 {
+                // Mark the stop/continue event reported (one-shot,
+                // wait4-consistent)
+                if (result_kind == 1 || result_kind == 2) && options & WNOWAIT == 0 {
                     (*child_ptr).stop_reported.store(true, core::sync::atomic::Ordering::Release);
                 }
 

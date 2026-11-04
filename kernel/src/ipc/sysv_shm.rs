@@ -164,10 +164,12 @@ static SHM_IDS: IpcIds<ShmSegment> = IpcIds::new();
 /// shmget sizes above it to fail EINVAL); shmctl(IPC_INFO) reports the
 /// same value (shmctl03 asserts equality with the sysctl file).
 pub static SHM_CTLMAX: AtomicU64 = AtomicU64::new(1 << 30);
-/// SHMMNI — max segments system-wide. Capped in practice by the fixed
-/// IPC_IDS_MAX slot table; /proc/sys/kernel/shmmni reports this value
-/// (shmget03 creates exactly this many segments and expects ENOSPC after).
-pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(IPC_IDS_MAX as u64);
+/// SHMMNI — max segments system-wide. The reference default is 4096;
+/// /proc/sys/kernel/shmmni reports this value (shmget03 creates exactly
+/// this many segments and expects ENOSPC after). Pinned explicitly now
+/// that IPC_IDS_MAX is 32768 — deriving it from the table size would
+/// report 32768 and make shmget03 fill the whole table.
+pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(4096);
 /// SHMALL — max total shm pages system-wide (shmget returns ENOSPC past
 /// it). 1 GiB worth of pages: generous for the LTP workloads while still
 /// bounding runaway allocation.
@@ -787,16 +789,36 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
     } else {
         0o6
     };
-    let idx = match SHM_IDS.find_with_perms(shmid, desired) {
-        Ok(i) => i,
-        Err(e) => return e as i64,
-    };
-
-    // Get segment info
+    // Reference do_shmat uses shm_obtain_object_check: a freed id is
+    // EINVAL, but an IPC_RMID-marked segment that still lives in the ids
+    // table (nattch > 0, deferred destroy) is -EIDRM, NOT EINVAL. The old
+    // find_with_perms path returned EINVAL for both (its !deleted filter
+    // made the EIDRM check unreachable) — LTP shm_test's reader/writer
+    // threads, which straddle a concurrent IPC_RMID, saw "Invalid
+    // argument" where the reference reports "Identifier removed".
+    // Lookup, permission check, deleted check and the size read run under
+    // ONE slots lock: a second lock would open the slot-reuse window (an
+    // RMID + fresh shmget could swap the entry between the two critical
+    // sections, and the seq is not revalidated downstream).
     let segsz;
+    let idx = super::util::ipc_id_to_index(shmid);
     {
+        let ns = super::util::caller_ipc_ns_inum();
+        let expected_seq = super::util::ipc_id_seq(shmid);
+        if idx >= super::util::IPC_IDS_MAX {
+            return -(errno::EINVAL as i64);
+        }
         let slots = SHM_IDS.slots.lock();
         if let Some(ref entry) = slots[idx] {
+            let perm = entry.inner.get_perm();
+            if perm.seq != expected_seq || perm.ns_inum != ns {
+                // Freed and the slot reused by another segment (or a
+                // foreign-namespace id): stale id, reference EINVAL.
+                return -(errno::EINVAL as i64);
+            }
+            if !super::util::ipc_check_permissions(perm, desired) {
+                return -(errno::EACCES as i64);
+            }
             if entry.deleted {
                 return -(errno::EIDRM as i64);
             }

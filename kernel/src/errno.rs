@@ -99,6 +99,9 @@ pub enum Errno {
     /// Not a typewriter (ENOTTY, 25)
     NotATypewriter = 25,
 
+    /// Text file busy (ETXTBSY, 26)
+    TextFileBusy = 26,
+
     /// No space left on device (ENOSPC, 28)
     NoSpaceLeftOnDevice = 28,
 
@@ -191,6 +194,7 @@ impl Errno {
             23 => Self::FileTableOverflow,
             24 => Self::TooManyOpenFiles,
             25 => Self::NotATypewriter,
+            26 => Self::TextFileBusy,
             28 => Self::NoSpaceLeftOnDevice,
             29 => Self::IllegalSeek,
             27 => Self::FileTooLarge,

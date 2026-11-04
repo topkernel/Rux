@@ -291,6 +291,15 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, signal::sys_pause(args));
             return;
         }
+        139 => {
+            // sysfs(2): query the registered filesystem list. No
+            // asm-generic number (riscv64/aarch64 never issue it);
+            // untranslated, 139 would hit the generic table's
+            // rt_sigreturn and pop a garbage signal frame (LTP
+            // sysfs01..05 "Test killed by SIGSEGV").
+            syscall_set_return_value(regs, file::sys_sysfs(args));
+            return;
+        }
         213 => {
             // epoll_create(size): Linux rejects size <= 0 with EINVAL.
             let result = if (args[0] as i64) <= 0 {

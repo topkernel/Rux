@@ -1,0 +1,6 @@
+# idx|test|class|rc|tail
+0|sysfs01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysfs01.c:22: TPASS: sysfs(1, 'proc') returned 1  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+1|sysfs02|FAIL|1|1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysfs02.c:25: TFAIL: sysfs(2,0,buf) invalid retval 7: SUCCESS (0)  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0
+2|sysfs03|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysfs03.c:21: TPASS: sysfs(3) returned 8  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+3|sysfs04|PASS|0|t_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysfs04.c:22: TPASS: sysfs(INVALID_OPTION) : EINVAL (22)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+4|sysfs05|PASS|0|option : EINVAL (22) sysfs05.c:35: TPASS: Address is out of your address space : EFAULT (14) sysfs05.c:38: TPASS: fs_index is out of bounds : EINVAL (22)  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0

@@ -1,0 +1,15 @@
+creat01
+creat03
+creat04
+creat05
+creat06
+creat07
+execve04
+execl01
+execve01
+execve06
+fork_procs
+msg_comm
+sighold02
+waitid08
+shmt04

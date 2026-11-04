@@ -1175,17 +1175,81 @@ fn poll_event_wait_round(
     PollEventWait::Woken
 }
 
+/// RAII restore for a wait-scoped signal mask (ppoll/pselect6). The
+/// caller's mask is restored on EVERY exit path — return value, timeout,
+/// EINTR, error — matching the reference's set_restore_sigmask discipline
+/// where the swap + wait + restore is one atomic operation from the
+/// caller's viewpoint. On the EINTR exit the restore is DEFERRED instead
+/// (defer_restore): the wait mask stays active so the interrupting signal
+/// is deliverable at return-to-user, and the saved mask is reinstated by
+/// the delivery path after the handler runs (reference -ERESTARTNOHAND +
+/// restore_saved_sigmask — the same discipline rt_sigsuspend uses).
+struct WaitScopedMask {
+    saved: u64,
+    live: bool,
+}
+
+impl WaitScopedMask {
+    /// Install `new_mask` as the running task's blocked set. SIGKILL/
+    /// SIGSTOP are cleared (unblockable — same rule as rt_sigprocmask
+    /// and epoll_pwait's scoped mask).
+    fn install(new_mask: u64) -> Option<Self> {
+        let current = crate::sched::current()?;
+        // SAFETY: current is the running task; sigmask is a plain u64
+        // field written only by the task itself (syscall context).
+        let saved = unsafe { (*current).sigmask };
+        unsafe { (*current).sigmask = new_mask & !((1u64 << 8) | (1u64 << 18)); }
+        Some(WaitScopedMask { saved, live: true })
+    }
+
+    /// Signal-interrupted exit: hand the restore to the signal-delivery
+    /// path (sigmask_restore) instead of restoring here, so the pending
+    /// interrupting signal — unblocked by the wait mask — is selected and
+    /// delivered, and the handler runs with the reference's mask state.
+    fn defer_restore(mut self) {
+        if self.live {
+            self.live = false;
+            if let Some(current) = crate::sched::current() {
+                // SAFETY: see install().
+                unsafe {
+                    (*current).sigmask_restore = self.saved;
+                    (*current).sigmask_restore_valid = true;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WaitScopedMask {
+    fn drop(&mut self) {
+        if self.live {
+            self.live = false;
+            if let Some(current) = crate::sched::current() {
+                // SAFETY: see install().
+                unsafe { (*current).sigmask = self.saved; }
+            }
+        }
+    }
+}
+
 /// sys_ppoll - I/O multiplexing (ppoll style, syscall nr=73)
 ///
 /// # Arguments
 /// - args[0]: fds - pointer to pollfd array
 /// - args[1]: nfds - length of pollfd array
 /// - args[2]: timeout - pointer to struct timespec (sec, nsec), or NULL for infinite
-/// - args[3]: sigmask - pointer to signal mask (ignored)
+/// - args[3]: sigmask - pointer to signal mask replacing the blocked set
+///   for the duration of the wait, or NULL to keep the current mask
+/// - args[4]: sigsetsize - must be sizeof(sigset_t) (8)
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
 pub fn sys_ppoll(args: SyscallArgs) -> i64 {
+    // Reference SYSCALL_DEFINE5(ppoll) rejects a wrong sigsetsize before
+    // anything else; glibc/musl always pass 8 on x86_64.
+    if args[4] as usize != 8 {
+        return -(errno::EINVAL as i64);
+    }
     // ppoll has same pollfd checking logic as poll, but reads timeout from timespec
     let timeout_ptr = args[2] as *const u64;
 
@@ -1233,6 +1297,41 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
         }
     };
 
+    // ppoll's sigmask (args[3]): the caller's mask REPLACES the blocked
+    // set for the duration of the wait and the original is restored on
+    // every exit — reference do_sys_poll + set_restore_sigmask. The swap
+    // is what makes the mask+wait atomic: a signal queued while blocked
+    // under the CALLER's mask (e.g. SIGINT blocked, then sent) is pending
+    // when the wait starts with the replacement mask; the poll loop's
+    // signal_pending() check now sees it unblocked and returns EINTR
+    // instead of sleeping through (LTP ppoll01 SEND_SIGINT_RACE_TEST
+    // slept out its 2 s timeout and returned 0; the reference returns
+    // EINTR because recalc_sigpending runs after the swap).
+    let sigmask_ptr = args[3] as *const u64;
+    if !sigmask_ptr.is_null() {
+        if !crate::arch::uaccess::access_ok(sigmask_ptr as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        let new_mask = match unsafe { crate::arch::uaccess::get_user(sigmask_ptr) } {
+            Some(v) => v,
+            None => return -(errno::EFAULT as i64),
+        };
+        let scoped = match WaitScopedMask::install(new_mask) {
+            Some(g) => g,
+            None => return -(errno::EPERM as i64),
+        };
+        // Delegate to sys_poll with converted timeout; the mask is
+        // restored on return by the guard (deferred to the signal path
+        // when the wait ends in EINTR — see WaitScopedMask).
+        let poll_args: super::SyscallArgs =
+            [args[0], args[1], timeout_ms as u64, 0, 0, 0];
+        let ret = sys_poll(poll_args);
+        if ret == -(errno::EINTR as i64) {
+            scoped.defer_restore();
+        }
+        return ret;
+    }
+
     // Delegate to sys_poll with converted timeout
     let poll_args: super::SyscallArgs = [args[0], args[1], timeout_ms as u64, 0, 0, 0];
     sys_poll(poll_args)
@@ -1246,11 +1345,46 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
 /// - args[2]: writefds - pointer to writable file descriptor set
 /// - args[3]: exceptfds - pointer to exception file descriptor set
 /// - args[4]: timeout - pointer to TimeSpec structure (sec, nsec)
-/// - args[5]: sigmask - pointer to signal mask
+/// - args[5]: sig - pointer to { const sigset_t *ss; size_t ss_len; }
+///   (the raw-syscall shape; glibc packs the pair). A non-NULL ss
+///   replaces the blocked set for the duration of the wait.
 ///
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
 pub fn sys_pselect6(args: SyscallArgs) -> i64 {
+    // pselect6's sixth argument is a pointer to the {ss, size} pair, not
+    // the mask itself (reference SYSCALL_DEFINE6(pselect6) copies the
+    // pair first, then do_sys_select validates size and copies the mask).
+    let sig_pair_ptr = args[5] as *const u64;
+    let mut wait_mask: Option<u64> = None;
+    if !sig_pair_ptr.is_null() {
+        if !crate::arch::uaccess::access_ok(sig_pair_ptr as usize, 16) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: sig_pair_ptr validated with access_ok; get_user is the
+        // exception-table copy path (SUM=0 safe).
+        let ss_ptr = match unsafe { crate::arch::uaccess::get_user(sig_pair_ptr) } {
+            Some(v) => v as *const u64,
+            None => return -(errno::EFAULT as i64),
+        };
+        let ss_len = match unsafe { crate::arch::uaccess::get_user(sig_pair_ptr.add(1)) } {
+            Some(v) => v as usize,
+            None => return -(errno::EFAULT as i64),
+        };
+        if !ss_ptr.is_null() {
+            if ss_len != 8 {
+                return -(errno::EINVAL as i64);
+            }
+            if !crate::arch::uaccess::access_ok(ss_ptr as usize, 8) {
+                return -(errno::EFAULT as i64);
+            }
+            wait_mask = match unsafe { crate::arch::uaccess::get_user(ss_ptr) } {
+                Some(v) => Some(v),
+                None => return -(errno::EFAULT as i64),
+            };
+        }
+    }
+
     // pselect6's timeout is a *timespec*, not a timeval: parsing it as a
     // timeval inflated every wait 1000x (tv_nsec read as tv_usec).
     let timeout_ptr = args[4] as *const i64; // { tv_sec, tv_nsec }
@@ -1287,7 +1421,24 @@ pub fn sys_pselect6(args: SyscallArgs) -> i64 {
         }
     };
 
-    pselect6_common(args, timeout_ns, has_timeout)
+    // A wait mask from the {ss, size} pair swaps the blocked set for the
+    // duration of the wait, restored on every exit (reference
+    // do_sys_select + set_restore_sigmask — same atomicity story as
+    // ppoll's sigmask above).
+    let scoped = match wait_mask {
+        Some(m) => match WaitScopedMask::install(m) {
+            Some(g) => Some(g),
+            None => return -(errno::EPERM as i64),
+        },
+        None => None,
+    };
+    let ret = pselect6_common(args, timeout_ns, has_timeout);
+    if ret == -(errno::EINTR as i64) {
+        if let Some(g) = scoped {
+            g.defer_restore();
+        }
+    }
+    ret
 }
 
 /// sys_select — same core, but the timeout argument is a *timeval*

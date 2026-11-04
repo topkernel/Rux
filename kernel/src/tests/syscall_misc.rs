@@ -451,10 +451,21 @@ fn test_sys_poll() {
     test_skip("sys_poll returns ready count",
         "requires valid user-space pollfd array (no user address space in test context)");
 
-    // Test: ppoll delegates to sys_poll (same validation)
-    let ret = sys_ppoll([0, 1, 0, 0, 0, 0]);
+    // Test: ppoll delegates to sys_poll (same validation). sigsetsize is
+    // passed as 8 (real-caller shape): the reference SYSCALL_DEFINE5(ppoll)
+    // rejects a wrong sigsetsize with EINVAL BEFORE any fd-pointer check,
+    // so the old call with args[4]=0 now exercises that path instead.
+    let ret = sys_ppoll([0, 1, 0, 0, 8, 0]);
     let expected = -(errno::EFAULT as i64);
     test_assert!(ret == expected, "sys_ppoll null fds returns -EFAULT",
+        &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
+
+    // Test: ppoll rejects a wrong sigsetsize up front (reference order:
+    // the EINVAL for sigsetsize != sizeof(sigset_t) precedes the EFAULT
+    // for the bad fds pointer).
+    let ret = sys_ppoll([0, 1, 0, 0, 0, 0]);
+    let expected = -(errno::EINVAL as i64);
+    test_assert!(ret == expected, "sys_ppoll wrong sigsetsize returns -EINVAL",
         &alloc::format!("got {:#x}, expected {:#x}", ret, expected));
 }
 

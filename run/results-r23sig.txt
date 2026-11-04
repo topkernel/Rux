@@ -1,0 +1,3 @@
+# idx|test|class|rc|tail
+0|rt_sigprocmask01|CRASH|139|
+1|rt_sigsuspend01|FAIL|2|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s tst_test.c:1677: TBROK: Test killed by SIGSEGV!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
