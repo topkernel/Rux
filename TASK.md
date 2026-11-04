@@ -6394,3 +6394,136 @@ under load 2.4-6.4, no healthy sample yet).
 4. The D-20 ledger entry should gain the csum-v3 line (this fix) when
    the coordinator merges; divergence to record: permissive
    journal-disable on jsb-csum mismatch (reference fails the mount).
+
+## THIRTY-SECOND-SUCCESSOR SESSION (2026-11-04 12:45-.., branch biofix-fieldpoll @ 9096ae0d+)
+
+Mission: roll the race on the FULLY-FIXED kernel (journal LIVE + CSUM_V3
++ rlimits + spin-guard + wake_up contract), populated-series re-run,
+mission-2 instruments if wedges persist, pixels. Outcome: THE WEDGE DICE
+ARE NOT DEFANGED — 8/8 populated wedges, 6/6 fresh wedges, 0 branch
+fires — but the kernel side is now FORMALLY ACQUITTED as the producer:
+the stress lane's pick-generation ledger returns pickgen=retired on
+every lying-slot observation (R49 pick-published-never-switched NOT the
+OH producer), the lying-slot census proves boot-onset transient (healthy
+boots show the identical 58-60 why=c budget exhaustion by t=13-22s), and
+WAKE-HEALs keep firing continuously THROUGH the wedge (lb421: 103 heals
+past 180s; healthy boots go silent after ~60s) — the wake machinery is
+alive and repairing while the OH userspace stays wedged. The wedge is
+userspace-internal (samgr worker waits), matching the 4th successor's
+TXN-HUNT adjudication, now with the pick side convicted-free.
+
+### 0. Sync (the d453519e-class content the briefing promised)
+- 428c8155: merge origin/main (ltp r26: 3cd911bd fd-close task_work
+  parity + census docs). TASK.md conflict resolved --ours (lane doc
+  convention, same as 661249ba).
+- 02e3418e: merge origin/main AGAIN when d453519e (wake_up of a RUNNING
+  target returns false — reference contract) + the coordinator's CSUM_V3
+  landing (51ab2963) appeared. The first roll kernel (bzImage-fullfix-dbg,
+  md5 165d1852) lacked d453519e; lb404/405 rode it (banked as the
+  intermediate A/B point); bzImage-fullfix2-dbg (103670dc) carries it.
+- 9096ae0d: cherry-pick of the stress lane's c6d74e01 (pick-generation
+  ledger, origin/stress-port) — their instrument, used not re-invented;
+  dfx-only, default-off; dedupes when stress-port merges to main.
+
+### 1. Roll tallies (all x86_64 KVM SMP2, NOSNAP populated / fresh2,
+system-lb5, dfx=ams46,txnhunt negmemo=1)
+- POPULATED (bms-ref reflink), intermediate kernel (rlimits+spinguard,
+  NO wake_up fix): lb404 WEDGE SA=61 (first-hang txn500
+  OS_IPC_2_527->OS_IPC_1_383 @12.0s), lb405 WEDGE SA=60
+  (bundles.ready fired, account phase never starts; missing SAs incl
+  1301 the account/AMS family — the wedge halts samgr SA registration
+  wholesale at insert ~#61).
+- POPULATED, FULL fix set: lb406 WEDGE SA=1 — face=INIT-CASCADE
+  (StopAllServices @78s, /log/startup mkdir err=2, deliberate sysrq-c;
+  the lb381/lb389 family), lb407 WEDGE SA=0 (dark; storage_manager ->
+  OS_IPC_1_349 first hang @7.0s; samgrClient regObject=null retries to
+  the end), lb408 WEDGE SA=45, lb409 WEDGE SA=0 AT LOAD 2.35 (quiet
+  window — load does not explain the early faces), lb410 WEDGE SA=57,
+  lb411 WEDGE SA=0. TOTAL 8/8 wedge, 0 healthy, 0 startUser.
+- FRESH (userdata-fresh2 reflink), FULL fix set: lb430-435 ALL WEDGE
+  (el 241-270s), install_list opens 0/6, bms mkdirs 0/6 — the race
+  never reaches the branch decision; branch-fire 0/6 with 0 healthy
+  denominators (same shape as the 30th/31st eras).
+- journal-less=0 on every boot (extent fix holds everywhere); loads at
+  boot start 2.35-5.56 — wedges at ALL loads.
+- PIXELS: 17 boots, every shot the frozen 82f0a25f class (dark boots
+  lb406-class produce no lit shot). ZERO changes.
+
+### 2. Mission 2 — the instruments' verdict (lb421/lb422/lb423)
+- lb421 (populated, dfx+=lostpark): 58 why=c lying-slot refusals; the
+  lostpark census names pid 318 x45 (naming_cpu=0/1, slotw=1 = PICK
+  writer, idlebit=0 = CPU not idle) from t=6.8s — the wedge onset.
+- lb422 (dfx+=leakhunt,taskdump): WAKE-SKIP-ORIGIN sites are
+  wait.rs:384/199 brackets (the benign mid-schedule park class per the
+  stress lane's r10 adjudication) for pid 318 x25; pid 329 = SAMGR x19
+  with origin sched.rs:2677. taskdump produced NOTHING without
+  dfx=watchdog (the periodic dump rides the watchdog timer — the
+  AGENTS.md pairing is load-bearing).
+- THE DISCRIMINATOR: healthy boots (bmsours3/5, lb366) show the SAME
+  58-60 why=c refusals with the same early-exhaustion (last skip at
+  t=13-22s on every boot, healthy or wedged) — the lying-slot census is
+  BOOT-ONSET TRANSIENT, not the wedge producer. Dominant victim is one
+  pid per boot (318/319/320 — the ±1 slot holder).
+- lb423 (populated, pickgen kernel 16b6dab5): pickgen=retired on ALL
+  59 LP observations, pickgen=LOST = 0 — per the ledger's design
+  ("retired acquits the pick path and re-points the hunt"), R49 is
+  ACQUITTED for the OH wedge.
+- WAKE-HEAL time distribution: healthy bmsours5 = 1 heal <60s then
+  SILENT; wedged lb410 = 25 heals spread to 300s; wedged lb421 = 177
+  (103 past 180s). The wake machinery runs and repairs all through the
+  wedge.
+- VERDICT: the OH wedge producer is NOT in the kernel scheduler's
+  pick/wake path (with these instruments' reach). Everything still
+  points at samgr's userspace-internal worker waits (TXN-HANG exec
+  waits, sys=202 futex, server stack = plain scheduler park). The next
+  instrument that can advance this is a userspace-side wait-site census
+  (name the rip/ret addr of the futex the stuck OS_IPC workers sleep
+  on) — tracepoint-shaped, or re-test after the stress lane's R49 hunt
+  lands a producer conviction on their own workload.
+
+### 3. Crash consistency on real kills (the 31st's acceptance, re-run)
+- All 8 populated post-kill fscks rc=1 with SMALL deterministic fix
+  lists (4-11 lines: orphans, zero-dtime, bitmap/count accounting, the
+  KNOWN 262337/time.db-wal extent-tail csum gap — csum.rs
+  extent_block_csum_set still has zero call sites, entry point 3 of the
+  31st stands).
+- THE JOURNAL REPLAYS on real kills (pop31-1-fsck.log: 'superblock
+  lacks needs_recovery but journal has data -> run journal: yes') —
+  CSUM_V3 works against e2fsck outside the lab rig.
+- Re-fsck of an already-fixed image: rc=0 clean.
+- createNewUser=0 on every boot — user-100 survives every hard kill.
+- Rig note: the two pop chains shared the pop31-N-fsck.log names, so
+  only the last per-index file survived; the per-boot tallies live in
+  run/roll-logs/poproll31.log (the authoritative record).
+
+### 4. Gates (for the push)
+- x86_64 debug rc=0 x3 (fullfix 165d1852, fullfix2 103670dc, pickgen
+  16b6dab5); riscv64 fresh-config rc=0; aarch64 rc=0, dtb_blob.S clean
+  (git tree clean after all builds).
+- make test: ALL TESTS PASSED (private rootfs copy test/rootfs-mine5.img;
+  wrapper rc=124 post-halt, the normal shape — run/cg32-maketest.log).
+
+### 5. Assets
+- run/bzImage-fullfix-dbg (md5 165d1852), run/bzImage-fullfix2-dbg
+  (103670dc), run/bzImage-fullfix2-pg-dbg (16b6dab5 + pickgen).
+- run/cg32-decode.sh (per-boot classifier), run/cg32-diag.sh (+ the
+  inline diag2 variant: add leakhunt,taskdump), run/cg32-diag2.sh.
+- run/r30roll.sh fixed (wedge detect + proc-cmdline kill).
+- Serials: run/oh-lb{404..411,421,422,423,430..435}-serial.log.
+
+### Successor entry points (32nd, in order)
+1. The kernel is acquitted at the instruments' reach; the wedge hunt
+   needs the USERSPACE wait-site census (rip of the futex the stuck
+   OS_IPC workers sleep on) — a tracepoint in the unified framework
+   (kernel/src/trace/), NOT a new bespoke dfx switch (frozen). The
+   TXN-HANG sampler already walks the server's kernel stack; the
+   userspace return address of the FUTEX_WAIT is one frame further.
+2. If the stress lane convicts an R49 producer on their workload,
+   re-run the pickgen diagnostic here (run/cg32-diag.sh KERNEL=run/
+   bzImage-fullfix2-pg-dbg lbNNN) — the hook is already in our tree.
+3. The dice: SA=61/60 came on the intermediate kernel; the full-fix
+   set sampled SA={1,0,45,0,57,0} — no load correlation (wedge at 2.35
+   and at 5.56). A true sustained-quiet window (<2) is still untested;
+   roll poproll2b again if one appears.
+4. The 262337 extent-tail csum gap (entry point 3 of the 31st) is the
+   remaining fs residual — visible again in every post-kill fsck here.
