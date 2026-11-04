@@ -3829,3 +3829,59 @@ Assets: run/u2v-boot.py (DUMP! driver), run/bzImage-u2v{1,2,3,5}-dbg,
 run/oh-u2v{1..5}-serial.log; kernels: 555ec7d3 (u2v1),
 225d24f5 (u2v2), c77280f6 (u2v3/4), aaabf556 (u2v5). Gates: x3 rc=0 +
 make test ALL PASSED x3 this round; pushed through de217e70.
+
+### 9. u2v6 (timerfd-fix kernel ca4a8fbb) — verification + the quantified engine
+
+The fix is correct parity but does not stop the wedge on this substrate:
+SA stuck 26-27 (early-wedge branch again), txn2138 code-6 held 510s
+(sys=202 futex park, same FFRT-mutex face), pixels = frozen set 82f0a25f
+(no change). The timer churn loops no longer dominate the ring (pid 588's
+loop is gone from the u2v6 tail; the 538/588 clock rows remain at modest
+rate) — but the hilogd.server flood RAGED HARDER (8.72M recvmsg+recvfrom
+by 285s vs u2v2's 6.25M — boot variance on the producer side).
+
+**The u2v6 ring finally caught the flood consumer verbatim** (pid 320 =
+hilogd.server): recvfrom(peek) entries+exits ret=2 (the 2-byte length
+peek SUCCEEDS — records ARE queued), recvmsg entries without visible
+exits in the 64-entry tail (34 entries vs 7 exits ret=60) = the consume
+side runs ~0.7-1ms per record — 28k/s x ~0.7ms ~= 1 full CPU in the
+recvmsg kernel path alone. Combined with writev 25k/s (the producers),
+the epolls, and the clocks, the storm accounts for the measured 93%
+kernel-tick saturation (ticks u/k/i 638/14212/228, 731/13874/329 at
+105s — unchanged from pre-fix u2v2/u2v5).
+
+**The quantified engine (this session's decisive answer):** the boot's
+log/scan storm x OUR per-op kernel costs (recvmsg 28-58us->~0.7ms-class
+on the passcred path, writev 22us, open 42-85us — the 17-72x per-op wall
+family) saturates both CPUs; the cooperative FFRT-mutex userspace
+starves; handlers park in ffrt::mutexPrivate::wait behind holders that
+never complete their critical sections; SA progression freezes. The
+parked handlers are clean (no retry — lastsys frozen, anywoken=0, park
+ages monotonic). The wedge is DOWNSTREAM of the per-op wall + the
+producer storm; the reference runs the same flood at ~2-5us/op and
+reaches the GUI.
+
+### 10. Handoff state (39th)
+- Branch pushed through ca4a8fbb (timerfd ticks-reset fix, make test ALL
+  PASSED x4 this session, x3 builds rc=0 every round). TASK.md is the
+  memory; run/u2v-boot.py drives the DUMP! uart-magic boots.
+- The two instruments this session added: FUX-STUCK-U2V continuation
+  rows (caller chains per park) + SYSCOST-RING (fd+ret per dump, joins
+  the flood table's comm attribution). REMEMBER: dfx=sysring needs
+  dfx=sysforensic to actually record (the ring sites sit behind the
+  SysForensic gate); the OH image uses NATIVE x86_64 nrs (translate
+  maps them; TXN-HANG/flood print native, SYSCOST-RING prints generic).
+- Next levers, in order: (1) the recvmsg/SO_PASSCRED per-op cost (the
+  ~0.7ms-class consume) — profile our unix_recvmsg cred path; the
+  reference delivers ucred at connect time and re-serves it from the
+  socket, no per-record lookup; (2) name the writev producer comms
+  (FLOOD table slots 16->64); (3) the FFRT-mutex holders need TXN-HANG
+  to print every stack=1 thread's current sys (the BWR-parked holders
+  are the futex-census blind spot); (4) the ffrt::mutexPrivate::wait
+  parks are the wedge face — any CPU-capacity fix deflates them.
+- Pixels: every shot every boot = frozen set 82f0a25f (no change).
+- Wedge verdicts this session: u2v1 (SA 43, panic @316s = the guard
+  printer overflow, fixed), u2v2 (SA 26), u2v3/u2v4 (SA 21/14, ring
+  rigs), u2v5 (SA 54), u2v6 (SA 26). Unbiased rate unchanged: every
+  boot wedges; the face is the FFRT-mutex park cascade under CPU
+  saturation.
