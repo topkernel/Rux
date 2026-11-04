@@ -1059,6 +1059,22 @@ tracepoints! {
         format!(
             "skb={:#x} layer={} reason={} ucsum={:#x} computed={:#x}",
             args[0], args[1] as u8, args[2] as u8, args[3] as u16, args[4] as u16
+    /// backlog depth after the push (or at the drop), and the return
+    /// code (0 queued, -105 ENOBUFS backlog full). The r13 hunt's hop 0:
+    /// the echo's entire wire journey is the loopback backlog → NetRx
+    /// softirq → udp_rcv chain; a datagram dropped at the backlog cap
+    /// produces no other event anywhere.
+    EVENT_NET_LO_XMIT / net_lo_xmit_fmt / trace_net_lo_xmit :
+        "net", "lo_xmit", 34,
+    print: "\"len=%u backlog=%u rc=%d\", REC->len, REC->backlog, REC->rc",
+    fields: "\tfield:unsigned int len;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int backlog;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (len: u32, backlog: u32, rc: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "len={} backlog={} rc={}",
+            args[0] as u32, args[1] as u32, args[2] as i32
         )
     };
 
