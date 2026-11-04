@@ -56,3 +56,24 @@ claim cites file:line or a disassembly offset.
    file:line.
 
 ## Session log (append per session)
+
+### Session 1 (2026-11-04): wedge wait named; producer chain closed
+- Deliverable: run/src-path.md (read it first). Summary:
+  A+offsets are musl condvar waiter-node depths on the waiter's own
+  8MiB stack (pthread_cond_timedwait.c:107, barrier=2 => fval 0x2).
+  +0x800194 = IPCProcessSkeleton::BlockUntilThreadAvailable
+  (ipc_process_skeleton.cpp:441), reached via hicollie's XCollie
+  IpcCheck probe (handler_checker.cpp:43) through libc++
+  condition_variable::wait (u2v +0x32e02 is in libc++.so, NOT
+  libffrt — the 34th's PollOnce+0x802 binding was a stale stack word,
+  0x98e02 is mid-instruction in libffrt). +0x800714 = the hicollie
+  WatchdogInner tick (libhicollie 0x1b1b7, clockwait). Probe parks
+  forever <=> numExecuting_ (HandleCommands bracket,
+  binder_invoker.cpp:561-565) pinned at pool max; waker is
+  UnlockForNumExecuting (ipc_process_skeleton.cpp:483). Ours-only
+  sibling offsets = the same probe in pool-exhausted peers
+  (telephony/foundation/softbus/mmi). Stuck workers sit in
+  BINDER_WRITE_READ ioctls invisible to the futex census. Ranked
+  next-instrumentation list in run/src-path.md §6.
+- Binaries + sweep artifacts under run/ohlibs/ (extracted read-only
+  from system-lb5.img).
