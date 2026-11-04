@@ -4149,3 +4149,52 @@ Census + make test + Tier-2 pbench (mm fault path + fs touched): see
 below/committed logs.
 
 ### r27 census: <TO-FILL> /1869
+
+## COORDINATOR GAP SURVEY (2026-11-05, main@e23d3c3f+LAYOUT-5) — the queue for r27 session 8+
+
+User mandate: "看看还有哪些大的差距，慢慢补齐" — steady, one subsystem
+at a time, full gates per landing. Census FIRST (session 7 died before
+D): bank the 6 fixes' conversions, then work the queue in order.
+
+### TCONF 503 decomposition (r26 census, r27 fixes not yet counted)
+- 64 _16 compat variants (chown/fchown/setreuid/setresuid/setregid/
+  setfsuid/setgroups _16) — STRUCTURAL, reference parity, never chase.
+- 12 rig fixes, no kernel: mkfs.ext2 missing in guest (umount 5 +
+  mkfs 7) — add e2fsprogs to the LTP image build; tmpfs "Skipping
+  tmpfs" 13 — investigate why tests' tmpfs mounts fail (we mount
+  tmpfs fine at boot; likely fstype string or mount flags).
+- 9 wqueue = O_NOTIFICATION_PIPE flag EINVAL — small kernel: accept
+  the flag in pipe2/open paths (reference O_NOTIFICATION_PIPE).
+- 6 input = uinput device; 7+7 ksm/bpf + 7 af_alg + 23 fanotify +
+  31 hugemmap + 9 quotactl + 8 userns + 18 keyring family + 11
+  move_pages = THE MOUNTAINS, one subsystem per session, estimates
+  to be filled as each is attempted.
+
+### Priority queue (session 8+)
+1. **Census** (session 7 closes): expect +12-15 from the 6 fixes
+   (pidfd 4, name_to_handle 4, mincore 3 + mlock05, pty 2, rusage
+   faces; sysctl 3 clean FAIL->TCONF). Deliver delta-r27-vs-r26.
+2. **Rig batch** (no kernel): mkfs.ext2 in image; tmpfs mount probe.
+3. **Small kernel batch**: O_NOTIFICATION_PIPE; move_pages
+   single-node semantics (11); memfd_secret; open_tree/move_mount/
+   fspick trio; setsockopt ack family (7+2); madvise shapes (2).
+4. **cgroup2 subsystem** (biggest single unlock ~15): cpuctl 8 CRASH
+   faces + cgroup_core01/02 + memcg 2 + pids_task2 + clone303
+   CLONE_INTO_CGROUP. Controller-skeleton approach: cpuset/cpu/
+   memoryacct stubs with reference read/write semantics first.
+5. **ptrace/mount/pidns/clone remaining FAILs** (12 total, medium).
+6. **Mountains** (one per session, order by payoff): keyring 18
+   (errno-shape decision first), fanotify 23 (inotify shape known),
+   quotactl 9, hugetlbfs 31 (heaviest), userns 8, ksm 7, af_alg 7,
+   bpf 7, uinput 6.
+7. **Structural throughput family** (fdt conditional-refcount fast
+   path — the fdt lane handoff): unlocks timerfd_settime02 +
+   msgstress01, relieves mmap1/mmap3/shm_test budgets.
+
+### Boot.S layout note
+r27 session 7 pushed the riscv64 debug image past the 20MB early
+window — coordinator landed RUX-RISCV-LAYOUT-5 (20->24MB, boot.S 12
+PMDs both tables, linker ASSERT, KERNEL_SIZE/HEAP_START/KERNEL_
+RESERVE_SIZE/KERNEL_HEAP_PHYS moved together). Lane builds on main
+above e23d3c3f will pass; do NOT re-bump anything layout-related
+without reading linker.ld's LAYOUT-5 comment first.
