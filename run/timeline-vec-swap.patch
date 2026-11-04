@@ -1,0 +1,377 @@
+diff --git a/kernel/src/sched/fair.rs b/kernel/src/sched/fair.rs
+index 5824af4f..15dd18ab 100644
+--- a/kernel/src/sched/fair.rs
++++ b/kernel/src/sched/fair.rs
+@@ -587,12 +587,29 @@ static SKIP_TRACK: [SkipTrackEntry; 64] = [
+ ];
+ 
+ /// CFS run queue
++/// Timeline Vec reserve (see tasks_timeline): sized so growth-past-
++/// capacity (which would allocate under the GRQ lock) is unreachable —
++/// 4096 runnable CFS entries on a global queue is already pathological.
++const TIMELINE_RESERVE: usize = 4096;
++
+ pub struct CfsRunQueue {
+     /// Task queue sorted by vruntime
+     ///
+     /// Key: (vruntime, task_id)
+     /// Value: Task pointer
+-    tasks_timeline: BTreeMap<VruntimeKey, *mut crate::process::Task>,
++    /// Ordered timeline as a PREALLOCATED sorted Vec (2026-11-04): the
++    /// BTreeMap allocated its root node on 99.96% of inserts (measured,
++    /// lat_ctx boot: 2,644,267 of 2,645,446 inserts hit an empty map)
++    /// — every one an alloc+free pair INSIDE the GRQ irqsave section,
++    /// which put the allocator's slow path (slab refill/buddy, µs-ms
++    /// under memory pressure) on the scheduler's critical path: avg
++    /// hold ~12-18K cycles, 14 ms max tails, all of it vanishing with
++    /// the allocator. The Vec is reserved once at boot (outside any
++    /// lock); steady-state insert/remove are a binary search plus a
++    /// 16-byte-entry memmove — no allocation. Growth past the reserve
++    /// would allocate under the lock (counted by TIMELINE_GREW); the
++    /// reserve is sized to make that unreachable on real loads.
++    tasks_timeline: alloc::vec::Vec<(VruntimeKey, *mut crate::process::Task)>,
+ 
+     /// Currently running scheduling entity
+     pub curr: *mut crate::process::Task,
+@@ -625,7 +642,11 @@ impl CfsRunQueue {
+     /// Create new CFS run queue
+     pub fn new() -> Self {
+         Self {
+-            tasks_timeline: BTreeMap::new(),
++            tasks_timeline: {
++                let mut v = alloc::vec::Vec::new();
++                v.try_reserve_exact(TIMELINE_RESERVE).ok();
++                v
++            },
+             curr: core::ptr::null_mut(),
+             min_vruntime: AtomicU64::new(0),
+             nr_running: AtomicU64::new(0),
+@@ -643,9 +664,8 @@ impl CfsRunQueue {
+         if self.leftmost_cache.is_none() {
+             self.leftmost_cache = self
+                 .tasks_timeline
+-                .iter()
+-                .next()
+-                .map(|(&k, &t)| (k, t));
++                .first()
++                .map(|&(k, t)| (k, t));
+         }
+         self.leftmost_cache
+     }
+@@ -655,7 +675,20 @@ impl CfsRunQueue {
+         let lower = self
+             .leftmost_cache
+             .map_or(true, |(ck, _)| key < ck);
+-        self.tasks_timeline.insert(key, task);
++        let pos = match self
++            .tasks_timeline
++            .binary_search_by(|(k, _)| k.cmp(&key))
++        {
++            Ok(i) => i, // same key (task_id collision): insert before
++            Err(i) => i,
++        };
++        if self.tasks_timeline.len() == self.tasks_timeline.capacity() {
++            crate::sched::sched::GRQ_EXP_TOT_INS
++                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++        }
++        crate::sched::sched::GRQ_EXP_TOT_INS
++            .fetch_add(0, core::sync::atomic::Ordering::Relaxed);
++        self.tasks_timeline.insert(pos, (key, task));
+         if lower {
+             self.leftmost_cache = Some((key, task));
+         }
+@@ -663,7 +696,12 @@ impl CfsRunQueue {
+ 
+     #[inline]
+     fn timeline_remove(&mut self, key: &VruntimeKey) {
+-        self.tasks_timeline.remove(key);
++        if let Ok(i) = self
++            .tasks_timeline
++            .binary_search_by(|(k, _)| k.cmp(key))
++        {
++            self.tasks_timeline.remove(i);
++        }
+         if self.leftmost_cache.as_ref().map_or(false, |(ck, _)| ck == key) {
+             // Removing the leftmost: invalidate; the next read recomputes
+             // once. (Scanning the successor here would re-walk anyway.)
+@@ -780,7 +818,7 @@ impl CfsRunQueue {
+     /// Wakewatch: the leftmost queued entity's vruntime (None when the
+     /// timeline is empty). Diagnostic read; callers hold the GRQ lock.
+     pub fn leftmost_vruntime(&self) -> Option<u64> {
+-        self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime)
++        self.tasks_timeline.first().map(|&(k, _)| k.vruntime)
+     }
+ 
+     /// s16 (A2 census): how many timeline entries sort at or before
+@@ -795,7 +833,7 @@ impl CfsRunQueue {
+     /// called only from the rate-gated strand print path (GRQ held).
+     pub fn ww_tie_mass(&self, vr: u64) -> u64 {
+         let mut n = 0u64;
+-        for (&k, _) in self.tasks_timeline.iter() {
++        for &(k, _) in self.tasks_timeline.iter() {
+             if k.vruntime <= vr {
+                 n += 1;
+             } else {
+@@ -942,7 +980,14 @@ impl CfsRunQueue {
+             // exact. The pointer-identity check guards a scribbled key.
+             let stored = se.timeline_key();
+             let found_key = match stored {
+-                Some(key) if self.tasks_timeline.get(&key) == Some(&task) => {
++                Some(key)
++                    if self
++                        .tasks_timeline
++                        .binary_search_by(|(k, _)| k.cmp(&key))
++                        .ok()
++                        .map(|i| self.tasks_timeline[i].1 == task)
++                        .unwrap_or(false) =>
++                {
+                     Some(key)
+                 }
+                 // Heal fallback (scribble/divergence family): the old
+@@ -950,7 +995,7 @@ impl CfsRunQueue {
+                 // state the fast path does not recognize.
+                 _ => {
+                     let mut found = None;
+-                    for (&key, &ptr) in self.tasks_timeline.iter() {
++                    for &(key, ptr) in self.tasks_timeline.iter() {
+                         if ptr == task {
+                             found = Some(key);
+                             break;
+@@ -1005,7 +1050,12 @@ impl CfsRunQueue {
+         // the timeline discipline covers its sched_entity access.
+         let se = unsafe { (*task).sched_entity() };
+         match se.timeline_key() {
+-            Some(key) => self.tasks_timeline.get(&key) == Some(&task),
++            Some(key) => self
++                .tasks_timeline
++                .binary_search_by(|(k, _)| k.cmp(&key))
++                .ok()
++                .map(|i| self.tasks_timeline[i].1 == task)
++                .unwrap_or(false),
+             None => false,
+         }
+     }
+@@ -1163,7 +1213,7 @@ impl CfsRunQueue {
+     /// the GRQ lock.
+     pub fn claim_inject_scan(&mut self) -> usize {
+         let mut n = 0;
+-        for (_, &task) in self.tasks_timeline.iter() {
++        for &(_, task) in self.tasks_timeline.iter() {
+             // SAFETY: diagnostic write of one atomic field on a task pinned
+             // in the timeline by the caller's GRQ lock.
+             unsafe {
+@@ -1190,7 +1240,7 @@ impl CfsRunQueue {
+     /// ~50 jiffies (STALE-ONCPU-RESET). Caller holds the GRQ lock.
+     pub fn oncpu_inject_scan(&mut self) -> usize {
+         let mut n = 0;
+-        for (_, &task) in self.tasks_timeline.iter() {
++        for &(_, task) in self.tasks_timeline.iter() {
+             // SAFETY: diagnostic publish on a task pinned in the timeline
+             // by the caller's GRQ lock. Only tasks with a fully released
+             // qword are stamped, so no legitimate in-flight ownership is
+@@ -1253,7 +1303,7 @@ impl CfsRunQueue {
+         let mut oncpu_marked = 0usize;
+         let mut oncpu_pids = [0u32; 4];
+         let mut owned_pids = [0u32; 4];
+-        for (_, &task) in self.tasks_timeline.iter() {
++        for &(_, task) in self.tasks_timeline.iter() {
+             // b50 #GP guard family: a scribbled timeline slot must not
+             // reach the deref below.
+             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
+@@ -1382,7 +1432,7 @@ impl CfsRunQueue {
+     ///
+     /// Used to check next task without changing queue state
+     pub fn peek_next(&self) -> Option<*mut crate::process::Task> {
+-        if let Some((&_key, &task)) = self.tasks_timeline.iter().next() {
++        if let Some(&(_key, task)) = self.tasks_timeline.first() {
+             return Some(task);
+         }
+         None
+@@ -1618,8 +1668,17 @@ impl CfsRunQueue {
+                 break;
+             }
+ 
+-            // Not allowed — remove temporarily and stash
+-            self.tasks_timeline.remove(&key);
++            // Not allowed — remove temporarily and stash. MUST go
++            // through timeline_remove (not a raw Vec splice): the walk
++            // re-reads leftmost_entry() every iteration, and the
++            // wrapper invalidates leftmost_cache when the removed entry
++            // IS the leftmost — a raw splice leaves the cache naming the
++            // stashed task, the walk stashes it a SECOND time, and the
++            // re-insert path then links it twice (Vec allows duplicate
++            // keys where the BTreeMap could not) — nr_running drifts and
++            // an exited task stays linked for the pick to walk into
++            // (riscv soak: KERNPANIC pfault on a freed task).
++            self.timeline_remove(&key);
+             // s14 (msg-region strand family): PICK-SKIP-ALL names only
+             // the total-failure shape (nothing pickable). A victim
+             // refused AMID other candidates is invisible — yet that is
+@@ -1980,7 +2039,7 @@ impl CfsRunQueue {
+     /// Clear run queue
+     pub fn clear(&mut self) {
+         // Mark all tasks as not in queue
+-        for (_, &task) in self.tasks_timeline.iter() {
++        for &(_, task) in self.tasks_timeline.iter() {
+             if !task.is_null() {
+                 // SAFETY: task is from the queue, a valid pointer; clear() drains the entire queue.
+                 unsafe {
+diff --git a/kernel/src/sched/sched.rs b/kernel/src/sched/sched.rs
+index efe10a2c..7756d3bd 100644
+--- a/kernel/src/sched/sched.rs
++++ b/kernel/src/sched/sched.rs
+@@ -91,6 +91,38 @@ static LAST_IDLE_HINT: core::sync::atomic::AtomicUsize =
+ 
+ unsafe impl Sync for GlobalRunQueue {}
+ 
++// EXP statics (2026-11-04 GRQ hold decomposition) — NOT for merge.
++pub static GRQ_EXP_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_T0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_T1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
++pub static GRQ_EXP_SPIN_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_WORK_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_SN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_TAIL_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_TAIL_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_SPIN_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_LINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_EMPTY_INS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static GRQ_EXP_TOT_INS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub struct GrqTailSite {
++    pub line: core::sync::atomic::AtomicU64,
++    pub n: core::sync::atomic::AtomicU64,
++}
++impl GrqTailSite {
++    const fn new() -> Self {
++        Self {
++            line: core::sync::atomic::AtomicU64::new(0),
++            n: core::sync::atomic::AtomicU64::new(0),
++        }
++    }
++}
++pub static GRQ_EXP_TAIL_SITES: [GrqTailSite; 8] =
++    [const { GrqTailSite::new() }; 8];
++/// Tail threshold in TSC cycles (~10us at ~3GHz-class).
++const GRQ_EXP_TAIL_THR_CYC: u64 = 30_000;
++
+ impl GlobalRunQueue {
+     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
+     fn new() -> Self {
+@@ -116,7 +148,23 @@ impl GlobalRunQueue {
+         crate::interrupt::preempt::preempt_count_add(
+             crate::interrupt::preempt::PREEMPT_OFFSET,
+         );
++        // EXP (2026-11-04 GRQ hold decomposition, NOT for merge): sample
++        // every 64th acquisition; split acquire-spin from critical
++        // section; tails (>10us cycles-class) counted separately.
++        let sampled = GRQ_EXP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 64 == 0;
++        let t0 = if sampled { Some(crate::arch::cpu::read_counter()) } else { None };
++        if sampled {
++            GRQ_EXP_LINE.store(
++                core::panic::Location::caller().line() as u64,
++                core::sync::atomic::Ordering::Relaxed,
++            );
++        }
+         self.lock.lock();
++        if let Some(t0) = t0 {
++            GRQ_EXP_T0.store(t0, core::sync::atomic::Ordering::Relaxed);
++            GRQ_EXP_T1.store(crate::arch::cpu::read_counter(), core::sync::atomic::Ordering::Relaxed);
++            GRQ_EXP_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
++        }
+         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
+     }
+ 
+@@ -404,6 +452,38 @@ impl core::ops::DerefMut for GrqGuard<'_> {
+ 
+ impl Drop for GrqGuard<'_> {
+     fn drop(&mut self) {
++        // EXP: charge the sampled section (spin vs work vs tail).
++        if GRQ_EXP_ACTIVE
++            .swap(false, core::sync::atomic::Ordering::Relaxed)
++        {
++            let t2 = crate::arch::cpu::read_counter();
++            let t0 = GRQ_EXP_T0.load(core::sync::atomic::Ordering::Relaxed);
++            let t1 = GRQ_EXP_T1.load(core::sync::atomic::Ordering::Relaxed);
++            let spin = t1.saturating_sub(t0);
++            let work = t2.saturating_sub(t1);
++            let total = spin + work;
++            GRQ_EXP_SPIN_CYC.fetch_add(spin, core::sync::atomic::Ordering::Relaxed);
++            GRQ_EXP_WORK_CYC.fetch_add(work, core::sync::atomic::Ordering::Relaxed);
++            GRQ_EXP_SN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++            if total > GRQ_EXP_TAIL_THR_CYC {
++                GRQ_EXP_TAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++                GRQ_EXP_TAIL_CYC.fetch_add(total, core::sync::atomic::Ordering::Relaxed);
++                let line = GRQ_EXP_LINE.load(core::sync::atomic::Ordering::Relaxed);
++                let mut slot = 7;
++                for i in 0..8 {
++                    if GRQ_EXP_TAIL_SITES[i].line.load(core::sync::atomic::Ordering::Relaxed) == line
++                        || GRQ_EXP_TAIL_SITES[i].n.load(core::sync::atomic::Ordering::Relaxed) == 0
++                    {
++                        slot = i;
++                        break;
++                    }
++                }
++                GRQ_EXP_TAIL_SITES[slot].line.store(line, core::sync::atomic::Ordering::Relaxed);
++                GRQ_EXP_TAIL_SITES[slot].n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++            }
++            GRQ_EXP_MAX.fetch_max(total, core::sync::atomic::Ordering::Relaxed);
++            GRQ_EXP_SPIN_MAX.fetch_max(spin, core::sync::atomic::Ordering::Relaxed);
++        }
+         unsafe { (*self.grq).lock.unlock() };
+         crate::interrupt::preempt::preempt_count_sub(
+             crate::interrupt::preempt::PREEMPT_OFFSET,
+@@ -4711,6 +4791,13 @@ fn g_diag_idle_bit(cpu: usize) -> bool {
+ /// CPU (within the task's affinity) whose current task loses to the waker
+ /// by the wakeup granularity.
+ fn check_cfs_preempt(task: *mut Task, cpus_allowed: u32) {
++    // NOTE (2026-11-04 A/B, reverted): deferring this resched to after
++    // the GRQ unlock cost the ping-pong family ~150-200 ns per handoff
++    // (the IPI lands that much later; pipe med 2.15->2.48 us in the
++    // interleaved A/B) — at uncontended loads the waker pays the ICR
++    // VM exit either way, so the immediate send is strictly better for
++    // the handoff; the lock-held send only hurts when OTHER cpus want
++    // the GRQ during a host-stalled exit. Kept: send immediately.
+     // SAFETY: task is a valid pointer from enqueue_task; per-CPU current/idle
+     // pointers are valid when not null (set during CPU init).
+     unsafe {
+diff --git a/kernel/src/syscall/process.rs b/kernel/src/syscall/process.rs
+index 9242da82..7d62f3b4 100644
+--- a/kernel/src/syscall/process.rs
++++ b/kernel/src/syscall/process.rs
+@@ -5891,6 +5891,34 @@ pub fn init_exited_fallback_cascade() {
+         return; // reboot(2)/CAD cascade in flight — it finishes the job
+     }
+     crate::println!("kernel: init exited — powering system down");
++    {
++        use crate::sched::sched::*;
++        let n = GRQ_EXP_SN.load(core::sync::atomic::Ordering::Relaxed);
++        if n > 0 {
++            let spin = GRQ_EXP_SPIN_CYC.load(core::sync::atomic::Ordering::Relaxed) / n;
++            let work = GRQ_EXP_WORK_CYC.load(core::sync::atomic::Ordering::Relaxed) / n;
++            crate::println!(
++                "EXP-GRQ n={} avg_spin_cyc={} avg_work_cyc={} tail_n={} tail_cyc={} max_cyc={} spin_max_cyc={}",
++                n, spin, work,
++                GRQ_EXP_TAIL_N.load(core::sync::atomic::Ordering::Relaxed),
++                GRQ_EXP_TAIL_CYC.load(core::sync::atomic::Ordering::Relaxed),
++                GRQ_EXP_MAX.load(core::sync::atomic::Ordering::Relaxed),
++                GRQ_EXP_SPIN_MAX.load(core::sync::atomic::Ordering::Relaxed)
++            );
++            crate::println!(
++                "EXP-GRQ-INS empty={} total={}",
++                GRQ_EXP_EMPTY_INS.load(core::sync::atomic::Ordering::Relaxed),
++                GRQ_EXP_TOT_INS.load(core::sync::atomic::Ordering::Relaxed)
++            );
++            for i in 0..8 {
++                let line = GRQ_EXP_TAIL_SITES[i].line.load(core::sync::atomic::Ordering::Relaxed);
++                let n = GRQ_EXP_TAIL_SITES[i].n.load(core::sync::atomic::Ordering::Relaxed);
++                if n > 0 {
++                    crate::println!("EXP-GRQ-TAIL line={} n={}", line, n);
++                }
++            }
++        }
++    }
+     shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
+     // shutdown_cascade returns only on total SBI failure — park.
+     loop {
