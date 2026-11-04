@@ -6785,6 +6785,20 @@ fn binder_transaction(
                 if mgr.reg_tgid != 0 && mgr.reg_tgid == thread.tgid {
                     sendfail_why(22);
                     *err_cmd = BR_FAILED_REPLY;
+                    // Bounded always-on verdict print (reference parity
+                    // fires this on every attempt; we budget 40/boot so
+                    // verification boots can COUNT the rejections without
+                    // flooding the console under a retry storm).
+                    static CTX_OWN_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if CTX_OWN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        crate::pr_warn!(
+                            "BINDER-REJECT pid={} tid={} ctxmgr-own-process code={:#x}",
+                            proc.pid,
+                            thread.tid,
+                            tr.code
+                        );
+                    }
                     app_txn_fail_print(proc, "ctxmgr-own-process", 0, tr.code as u64);
                     return;
                 }
@@ -6852,6 +6866,18 @@ fn binder_transaction(
                 if node_reg_tgid == 0 || node_reg_tgid == thread.tgid {
                     sendfail_why(23);
                     *err_cmd = BR_FAILED_REPLY;
+                    // Bounded always-on verdict print (see the why=22 arm).
+                    static SELF_TXN_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if SELF_TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        crate::pr_warn!(
+                            "BINDER-REJECT pid={} tid={} self-transaction handle={:#x} code={:#x}",
+                            proc.pid,
+                            thread.tid,
+                            tr.target_handle,
+                            tr.code
+                        );
+                    }
                     app_txn_fail_print(proc, "self-transaction", tr.target_handle as u64, tr.code as u64);
                     return;
                 }
