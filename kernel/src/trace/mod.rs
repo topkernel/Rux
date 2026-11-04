@@ -1059,6 +1059,8 @@ tracepoints! {
         format!(
             "skb={:#x} layer={} reason={} ucsum={:#x} computed={:#x}",
             args[0], args[1] as u8, args[2] as u8, args[3] as u16, args[4] as u16
+        )
+    },
     /// backlog depth after the push (or at the drop), and the return
     /// code (0 queued, -105 ENOBUFS backlog full). The r13 hunt's hop 0:
     /// the echo's entire wire journey is the loopback backlog → NetRx
