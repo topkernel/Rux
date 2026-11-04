@@ -1499,12 +1499,22 @@ impl PageCache {
                     if n == PASS_MAX {
                         break;
                     }
-                    if page.ref_count.load(Ordering::Acquire) == 0 {
+                    // PCACHE_RO alias guard (perf-gap-hunt): a MAPPED frame
+                    // with no pin must die exactly like a PINNED one —
+                    // invalidated now, reclaimed by the eviction walk's
+                    // mapcount check once the last mapping drops.
+                    let mapped = {
+                        let pd = pfn_to_page_mut(page.pfn);
+                        // SAFETY: vmemmap descriptor of a live cache frame;
+                        // read-only is_mapped check under the inode lock.
+                        !pd.is_null() && unsafe { (*pd).is_mapped() }
+                    };
+                    if page.ref_count.load(Ordering::Acquire) == 0 && !mapped {
                         page.invalidated = true; // marker; removed below
                         doomed[n] = (idx, page.pfn);
                         n += 1;
                     } else {
-                        page.invalidated = true; // pinned: dies on its final put
+                        page.invalidated = true; // pinned/mapped: dies on its final put/eviction
                     }
                 }
                 // Remove the doomed entries while the lock still covers
@@ -2137,8 +2147,19 @@ impl PageCache {
                                     // Session 25: dirty frames hold unflushed
                                     // shared-mapping stores — evicting one
                                     // would lose the only copy of that data.
+                                    // PCACHE_RO aliases (perf-gap-hunt): a
+                                    // frame with mapcount > 0 is mapped by
+                                    // pin-free leaves — with no cache pin to
+                                    // stop us, the MAPCOUNT is the only
+                                    // eviction guard (the reference kernel's
+                                    // page_mapped() shape).
                                     let evictable = cached.count_locked() == 0
-                                        && !cached.dirty.load(Ordering::Acquire);
+                                        && !cached.dirty.load(Ordering::Acquire)
+                                        && !{
+                                            let pg_desc = pfn_to_page_mut(cached.pfn);
+                                            !pg_desc.is_null()
+                                                && (*pg_desc).is_mapped()
+                                        };
                                     if !evictable {
                                         Victim::Skip
                                     } else {
@@ -2241,6 +2262,11 @@ impl PageCache {
                 if !page_desc.is_null() {
                     unsafe {
                         let p = &*page_desc;
+                        // PCACHE_RO alias guard (see the LRU-walk twin): a
+                        // mapped frame is not evictable.
+                        if p.is_mapped() {
+                            continue;
+                        }
                         if p.test_flag(PageFlag::Referenced) {
                             p.clear_flag(PageFlag::Referenced);
                             lru::lru_activate_young(p);

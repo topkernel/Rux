@@ -664,7 +664,8 @@ pub fn handle_mm_fault(
                     raw & super::mm_ops::cow_flags::COW;
                 let pcache_bit = raw
                     & (super::mm_ops::cow_flags::PCACHE
-                        | super::mm_ops::cow_flags::PCACHE_SHARED);
+                        | super::mm_ops::cow_flags::PCACHE_SHARED
+                        | super::mm_ops::cow_flags::PCACHE_RO);
                 if cow_bit != 0 {
                     flags |= cow_bit;
                     flags &= !PageTableEntry::W;
@@ -672,7 +673,10 @@ pub fn handle_mm_fault(
                 if pcache_bit != 0 {
                     flags |= pcache_bit;
                     if flags & PageTableEntry::W != 0
-                        && pcache_bit & super::mm_ops::cow_flags::PCACHE_SHARED == 0
+                        && pcache_bit
+                            & (super::mm_ops::cow_flags::PCACHE_SHARED
+                                | super::mm_ops::cow_flags::PCACHE_RO)
+                            == 0
                     {
                         // Private cache-backed leaf: never W in place —
                         // divert the first write through COW (see
@@ -914,20 +918,43 @@ pub fn handle_mm_fault(
                             let cache = crate::fs::page_cache::get_page_cache();
                             let (fs_id, ino) =
                                 (inode.fs_id, inode.ino as u64);
-                            let mut sp_flags = PageTableEntry::P
-                                | PageTableEntry::A
-                                | PageTableEntry::D
-                                | PageTableEntry::NX
-                                | PageTableEntry::U
-                                | super::mm_ops::cow_flags::PCACHE;
                             let want_w = vma_flags.is_writable();
-                            if want_w {
-                                sp_flags |= PageTableEntry::W
-                                    | super::mm_ops::cow_flags::PCACHE_SHARED;
-                            }
-                            if vma_flags.is_executable() {
-                                sp_flags &= !PageTableEntry::NX;
-                            }
+                            // Leaf form: a W VMA maps cache frames writable
+                            // with full pin+ref ownership (PCACHE_SHARED,
+                            // session 25). A read fault on a read-only VMA
+                            // installs the PIN-FREE RO alias (PCACHE_RO):
+                            // mapcount-only protection (see cow_flags) —
+                            // the pins taken by the batch below are
+                            // RELEASED once the leaves + mapcounts are in
+                            // (one put_range per chunk), so a 512-page
+                            // window costs one mapcount RMW per page
+                            // instead of a pin+refcount round trip each.
+                            let sp_flags = if want_w {
+                                let mut f = PageTableEntry::P
+                                    | PageTableEntry::A
+                                    | PageTableEntry::D
+                                    | PageTableEntry::NX
+                                    | PageTableEntry::U
+                                    | super::mm_ops::cow_flags::PCACHE
+                                    | super::mm_ops::cow_flags::PCACHE_SHARED
+                                    | PageTableEntry::W;
+                                if vma_flags.is_executable() {
+                                    f &= !PageTableEntry::NX;
+                                }
+                                f
+                            } else {
+                                let mut f = PageTableEntry::P
+                                    | PageTableEntry::A
+                                    | PageTableEntry::D
+                                    | PageTableEntry::NX
+                                    | PageTableEntry::U
+                                    | super::mm_ops::cow_flags::PCACHE
+                                    | super::mm_ops::cow_flags::PCACHE_RO;
+                                if vma_flags.is_executable() {
+                                    f &= !PageTableEntry::NX;
+                                }
+                                f
+                            };
                             let mut base_off = 0usize; // window pages consumed
                             let mut mapped_total: u64 = 0;
                             let mut fault_pg_failed = false;
@@ -993,6 +1020,26 @@ pub fn handle_mm_fault(
                                 // map_page_noflush for that page, which
                                 // allocates/demotes, then re-resolves.
                                 let mut l1: Option<(*mut PageTable, usize)> = None;
+                                // Pin ownership per page of this chunk: all
+                                // n start pinned (get_range_into). A page
+                                // that fails its map releases its own pin
+                                // immediately (pin_released). At chunk end
+                                // the RO form releases every still-held pin
+                                // (its leaves own none — mapcount only);
+                                // the W form releases only the pins of
+                                // pages that never got installed (an
+                                // installed W leaf owns its pin).
+                                let mut pin_released = [false; SHARED_PIN_CHUNK];
+                                let mut installed_mark = [false; SHARED_PIN_CHUNK];
+                                // Gap-fill stop: the first ALREADY-MAPPED
+                                // page ends the chunk (and the window).
+                                // Random touch order makes pages ahead of
+                                // the faulting one mostly covered by a
+                                // prior window — pinning+checking hundreds
+                                // of them per trap was the dominant batch
+                                // overhead.
+                                let mut stop_at = n;
+                                let mut hit_mapped = false;
                                 for i in 0..n {
                                     let va = fault_page
                                         + (base_off + i) * PAGE_SIZE_USIZE;
@@ -1023,15 +1070,10 @@ pub fn handle_mm_fault(
                                                     va as u64,
                                                 )
                                             {
-                                                // Lost the race to an
-                                                // identical mapping: the
-                                                // pin is surplus.
-                                                cache.put_range(
-                                                    fs_id,
-                                                    ino,
-                                                    &run[i..i + 1],
-                                                );
-                                                continue;
+                                                // Already mapped — stop here.
+                                                stop_at = i;
+                                                hit_mapped = true;
+                                                break;
                                             }
                                             let phys_i = virt_to_phys(
                                                 VirtAddr::new(run[i].1 as u64),
@@ -1079,6 +1121,7 @@ pub fn handle_mm_fault(
                                                     ino,
                                                     &run[i..i + 1],
                                                 );
+                                                pin_released[i] = true;
                                                 if base_off + i == 0 {
                                                     fault_pg_failed = true;
                                                 }
@@ -1088,29 +1131,93 @@ pub fn handle_mm_fault(
                                         }
                                     }
                                     if installed {
-                                        // One descriptor ref + mapcount per
-                                        // mapped leaf (dropped at unmap like
-                                        // every PCACHE mapping); no rmap —
-                                        // the frame's eviction keys belong
-                                        // to the page cache.
-                                        // SAFETY: pinned cache frame just
-                                        // mapped under the PTE lock.
-                                        unsafe {
-                                            filemap_bookkeep_mapped_cache_page(
-                                                virt_to_phys(VirtAddr::new(
+                                        installed_mark[i] = true;
+                                        if want_w {
+                                            // Full-form leaf: one descriptor
+                                            // ref + mapcount (dropped at
+                                            // unmap like every PCACHE
+                                            // mapping); no rmap — the
+                                            // frame's eviction keys belong
+                                            // to the page cache.
+                                            // SAFETY: pinned cache frame
+                                            // just mapped under the PTE
+                                            // lock.
+                                            unsafe {
+                                                filemap_bookkeep_mapped_cache_page(
+                                                    virt_to_phys(VirtAddr::new(
+                                                        run[i].1 as u64,
+                                                    ))
+                                                    .bits(),
+                                                );
+                                            }
+                                        } else {
+                                            // RO-form leaf: mapcount ONLY
+                                            // (the descriptor ref and the
+                                            // cache pin are deliberately
+                                            // absent — see PCACHE_RO). The
+                                            // mapcount is what blocks
+                                            // eviction from freeing the
+                                            // frame while mapped.
+                                            use crate::mm::page_desc::pfn_to_page_mut;
+                                            let pd = pfn_to_page_mut(
+                                                (virt_to_phys(VirtAddr::new(
                                                     run[i].1 as u64,
                                                 ))
-                                                .bits(),
+                                                .bits()
+                                                    >> PAGE_SHIFT)
+                                                    as usize,
                                             );
+                                            if !pd.is_null() {
+                                                // SAFETY: descriptor of a
+                                                // live cache frame, pinned
+                                                // at this moment (released
+                                                // only after this loop).
+                                                unsafe {
+                                                    (*pd).inc_mapcount();
+                                                }
+                                            }
                                         }
                                         mapped_total += 1;
                                     }
                                 }
                                 drop(_pte_guard);
                                 drop(vma_mgr2);
-                                base_off += n;
-                                if n < want {
-                                    break; // hole ended the resident run
+                                // Chunk-end pin accounting. RO form: every
+                                // still-held pin goes back (mapcounts were
+                                // installed under the PTE lock above —
+                                // eviction safety has transferred). W form:
+                                // only the never-installed pages' pins
+                                // (installed W leaves own theirs).
+                                {
+                                    let mut rel: [(u64, *const u8);
+                                        SHARED_PIN_CHUNK] =
+                                        [(0, core::ptr::null::<u8>());
+                                         SHARED_PIN_CHUNK];
+                                    let mut rn = 0usize;
+                                    for i in 0..n {
+                                        let leaf_owns_pin =
+                                            want_w && installed_mark[i];
+                                        if !pin_released[i] && !leaf_owns_pin {
+                                            rel[rn] = run[i];
+                                            rn += 1;
+                                        }
+                                    }
+                                    if rn > 0 {
+                                        cache.put_range(fs_id, ino, &rel[..rn]);
+                                    }
+                                }
+                                // Advance past the processed pages; a
+                                // gap-fill stop also ends the WINDOW (the
+                                // mapped page and its followers belong to a
+                                // prior window; a hole ends the resident
+                                // run). Both stop the outer chunk loop.
+                                base_off += if hit_mapped {
+                                    stop_at + 1
+                                } else {
+                                    n
+                                };
+                                if hit_mapped || n < want {
+                                    break;
                                 }
                             }
                             if verify_failed {
