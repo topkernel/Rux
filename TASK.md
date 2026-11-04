@@ -4029,3 +4029,122 @@ hold chain broken. Both are queued below.
 4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
+
+## 40TH SESSION (2026-11-05 03:4x-04:1x, branch biofix-fieldpoll @ 453914a5, unwritten until now)
+
+The 40th died on quota after pushing three net/unix reference-parity
+fixes, without a TASK section or verification boots. The commits (all on
+the branch, merged to main by the coordinator as 02e3c900):
+1. d8a0d979 fix(sync): wake budget consumed only by exclusive entries —
+   reference __wake_up_common parity (ConditionVariable waiters now
+   register EXCLUSIVE).
+2. d3ebcc59 fix(net): AF_UNIX reader/writer wait-queue split —
+   sk_receive_queue.wq vs peer_wait shape (UnixSocket gains peer_wait;
+   per-site exclusivity per datagram.c/stream sites; drain wakes one
+   parked sender per freed record).
+3. 453914a5 perf(net): AF_UNIX recvmsg copies direct-to-user — bounce
+   buffer removal (unix_recvmsg_user_ctl; DGRAM pops then copies outside
+   the queue lock; STREAM per-segment with released lock + requeued
+   tails; MSG_PEEK keeps the staged path).
+
+## 41ST SESSION (2026-11-05 04:1x-.., branch biofix-fieldpoll @ 6cf83b15+)
+
+Mission: (A) verify the 40th's three fixes on OH boots, (B) systematic
+reference-diff audit of the census's top syscall classes.
+
+### PART A — verification (substrate: system-lb5 + fresh2 reflinks, SMP2
+### KVM, LOGLEVEL6, dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1)
+
+Per-op phase tables, t=885s cumulative (vs the 39th's u2v7/u2v8):
+- UNIXRD-RM outer: u2v7 4852ns -> u2v8 1874 -> u2v9/u2v10 2166-2254ns.
+  Phases: cmsg 3313 -> 334 -> 369-379 (fast path holds); alloc 982/953
+  -> 0 (bounce GONE — direct-to-user verified live); recv 890-892 ->
+  1206-1249 (the split path's recv phase carries the queue lock + pop);
+  cout 84 -> 0.
+- UNIXRD-WV outer: 17785 -> 9589 -> 12634-12861; send 12917 -> 4619 ->
+  5783-6092 (the queue-split wake shape costs ~1.2-1.5us vs u2v8, still
+  2.1-2.8x below u2v7); gather 3147-4460 unchanged.
+- Peek (RF): sleep-dominated (recv 38818ns, ea~0-1) — same blocking
+  posture as the reference's hilogd.
+- Throughput: consume keeps pace with the storm (u2v9 45.3M RM by
+  1485s; u2v10 24.1M by 885s) — no regression from the split.
+- WEDGE LEDGER: u2v9 SA=37, u2v10 SA=47 — both wedge-class, face =
+  the FFRT-mutex park cascade (samgr OS_IPC workers parked sys=202,
+  TXN-HANG exec 750s+, thtodo=0). Pixels: every shot = frozen
+  82f0a25f. The 40th's fixes hold their per-op gains but the wedge
+  persists (consistent with the 39th's 11/11 ledger).
+
+### PART B — systematic reference diff audit (census order)
+
+Reference census mix (fuxref-fx8 tscen): futex(202) 9137 parks,
+ioctl-BWR(16) 6894, epoll_pwait(281) 1868, poll(7) 284, nanosleep(35)
+174, recvmsg(47)+recvfrom(45) 144, rt_sigtimedwait(128) 60. ALL
+reference futex parks are WAIT|PRIVATE (0x80): val=0x2 (mutex) x23356,
+0xffffffff80000000 (rwlock) x1082 — NO PI ops, NO requeue parks, NO
+WAKE_OP in OH userspace (musl/FFRT never issue them).
+
+Audited + verdicts:
+1. FUTEX (kernel/futex side-by-side) — FOUR divergences found, FIXED
+   (ed1549c5, make test riscv64 ALL PASSED, x3 builds rc=0):
+   a. No waiters-pending fast path: every uncontended FUTEX_WAKE took
+      the hash-bucket spinlock (the reference returns 0 lock-free when
+      hb->waiters==0, with the documented (A)/(B) barrier pair). Ported
+      with HASH_WAITERS + full fences; accounting = one dec per unlink.
+   b. LIFO wake order: our chain inserted at HEAD so FUTEX_WAKE woke
+      the NEWEST waiter; the reference plist is FIFO among equal
+      priorities. Starvation-class under churn (exactly the FFRT
+      cascade regime). Inserts + requeue moves now link at the tail.
+   c. nr_wake==0 woke nothing; reference wakes exactly one (post-
+      increment budget check).
+   d. CMP_REQUEUE's user-word compare ran BEFORE the bucket locks;
+      reference re-reads under both locks. Also the requeue count
+      transfer (dec src, inc dst) now happens between unlink and link
+      (reference requeue_futex order) — the fast path reads the count
+      WITHOUT the lock, so linked-but-uncounted was invisible to a
+      concurrent destination-bucket wake.
+2. AF_UNIX recvmsg re-verify vs __unix_dgram_recvmsg — ONE divergence
+   FIXED (6cf83b15): caller-passed MSG_TRUNC must return the FULL
+   record length (skb->len), we returned the copied prefix. EOF/error
+   propagation, peek non-consume, partial stream reads, fault
+   semantics all parity (the 40th's design comments check out).
+3. timerfd read/close, clock_nanosleep, kmsg read/write, prctl,
+   PROTNONE maps: verified parity or documented forensics (no action).
+4. Documented divergences NOT fixed (not in OH hot path): PI futex ops
+   still ENOSYS; WAKE_OP's user RMW is not atomic vs userspace AMOs
+   (no OH user issues WAKE_OP); UDP recvfrom does not honor
+   caller-passed MSG_TRUNC for its return value; futex returns -EINTR
+   instead of -ERESTARTSYS-restart (LTP-calibrated in-tree choice).
+
+### The FFRT holder-chain lever (39th's queued item 3) — LANDED (121fc908)
+
+TXN-HANG-HLD: pass 3 of txn_hang_audit prints every thread of a hung
+server's process carrying a SENDER txn-stack entry (a nested sync-IPC
+client parked in BWR — the futex-census blind spot) with its current
+syscall. First data (u2v12 @17s): foundation tid340 (todo=1! parked BWR
+-> power_host) / power_host tid632 parked sys=35 nanosleep holding a
+pending txn INTO foundation — the mutual deferral chain named. In the
+wedge era the hung proc is samgr and its workers hold NO sender
+entries (the same-proc rejection killed that class) — they park in
+FFRT-internal futexes with holder identity NOT in the mutex word
+(FFRT mutexPrivate l = LOCK|WAITERS bits only; the owner field exists
+only under FFRT_MUTEX_DEADLOCK_CHECK). The kernel-side holder hunt
+bottoms out: the residual wedge is genuinely userspace-internal.
+
+### Boots this session (u2v9/u2v10: 40th's kernel 6339074f; u2v12:
+### futex kernel 4ecce94e; u2v13: +MSG_TRUNC)
+
+u2v9 (SA 37, wedge, frozen pixels, tables above), u2v10 (SA 47,
+wedge, frozen), u2v11 (aborted — 3 duplicate launches fought over the
+serial log; cleaned), u2v12 (SA 56 ceiling — best yet but wedge-class:
+samgr FFRT cascade from ~26s; HLD lines live), u2v13 (running).
+
+### Rig notes for successors
+- `make build` defaults to riscv64 (build/.config absent). The x86_64
+  OH kernel needs PLATFORM=x86_64 make build — check the bzImage md5
+  actually changed before booting (a stale-image trap that cost this
+  session 20 minutes).
+- The 20MB riscv64 test window: d057f973 (main) extends it to 24MB;
+  cherry-picked here as 7449a203. Without it make test fails at link.
+- The u2v-boot.py background-launch discipline: use ONE launch per tag
+  (run_in_background), never retry blind — duplicate drivers truncate
+  each other's serial logs.
