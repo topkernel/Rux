@@ -6510,3 +6510,128 @@ Kernel commits this round: ec141f0c (TICK_ARM_RING), 469a7be8
 Gates: x3 builds rc=0 (x86 469a7be8 tree + riscv64 + aarch64 with
 dtb_blob.S restored), make test GREEN (run/maketest-r9.log), final-tree
 memory echo clean (see mission 1). Pushed origin/stress-port.
+
+## Round 10 (2026-11-04) — ftest03 decoded+fixed (budget-blown convoy,
+## NOT a data race; mutex optimistic-spin producer, holder-on-CPU guard);
+## rlimits irqsave fix (tick self-deadlock = a real both-CPU freeze
+## class, byte-exact decode); OH wedge-rate A/B adjudicated (pollwake
+## worse, do-not-merge verdict); sched strand head: 4/4 repro + the
+## lying-slot fingerprint (pick-path writer, busy namer)
+
+Sync: branch tip 952895a9 (r9; the coordinator was merging it to main
+at round start — origin/main did NOT carry it yet at close; re-merge
+next round). Kernel commits this round: 3b352cf6 (rlimits irqsave),
+1784be54 (optimistic_probe holder-on-CPU guard + probes tarball +
+ft03 rig), 6a2becbf (why=c slot/origin instruments). Guest sources →
+probes.tar.gz (ft03probe.c, runft03.c). A local r10-hunt branch
+(stress-port + lmbench-fix net picks d0452aaf/c489347c, NOT pushed —
+their lane owns those) carried the sched-strand hunts.
+
+1. MISSION 3 (ftest03 fs/biglock handoff from LTP r24) — DECODED and
+   FIXED; the handoff's two attributions corrected:
+   - The children do NOT fail data checks. Zero "bad verify" lines on
+     any failing boot; the failure chain is the 30s ltpscan budget
+     TERM → ftest03 parent term() fan-out → still-running children take
+     the TBROK-unlink nonzero exit → "expected 0 exit" rows. With a
+     120s budget the REAL binary PASSES on the tip kernel.
+   - The bisect's "recursion-arm gates" attribution is wrong: 1bde7490's
+     mutex.rs ALREADY carries the da166982 gates; the swap reverted the
+     optimistic-spin rework (4×64→100×64 + need_resched, merged via
+     e264a64b from code-review-perf) — the actual producer. It dropped
+     the reference's OTHER half: mutex_spin_on_owner stops spinning the
+     moment the holder is off-CPU. Under the fs biglock convoy (5-6
+     tasks, SMP2, ms sections through jbd2) spinners burned their full
+     budget against descheduled holders, starving the holder.
+   - Numbers (ft03probe 10-iteration clone, KVM, HEART timestamps):
+     old 4×64 spin 14s; spin rework 95s (7×); rework + holder-on-CPU
+     guard 13s. Real ftest03 under the 30s budget: rework kernel FAIL
+     2/2, guard kernel PASS 2/2 (deterministic 4/4 A/B).
+   - Perf gate (KVM pbench vs SP-7 anchor): p2_ctxsw 1.292 vs 1.242
+     (+4.0%), p1_null 0.300 (0%), p3b 8.055 (-0.2%), p6_append 5.44
+     (+4.8%), p6_unlink 48.9 (-10.5%); A-vs-C same-rig p2 +1.2% — the
+     rework's ctx-switch win is preserved; all rows in ±20%. (TCG P2
+     28-vs-18 scare = the documented load-hostage TCG class.)
+   - WAKE-HEAL-SKIP floods and the virtio "out-of-order completion"
+     witness fire on PASSING boots too — concomitant, not causal.
+2. NEW KERNEL BUG FIXED (found via the OH A/B): rlimits tick
+   self-deadlock. scheduler_tick reads current's RLIMIT_CPU through
+   Task::rlimit's lock_irqsave; the invariant (documented at rlimit())
+   is that every task-context acquisition of that per-task spinlock
+   must be irqsave. sys_poll's NOFILE bound (syscall/misc.rs) and
+   __send_signal's SIGPENDING check (signal.rs) used plain lock(): a
+   self-targeted holder interrupted by its own CPU's tick spins at
+   IF=0 forever. Evidence: OH A/B pollwake roll pw-5 (byte-identical
+   491ebc09 rebuild): cpu1 >1400s spinning at Task::rlimit+0x89 on two
+   per-task locks (0x...ab2f4b8 / 0x...a3db4b8), cpu0 joining at the
+   end; cg26b roll cg-1's 761-print storm is the same site/offset
+   class (cg26b byte-identical rebuild not achieved — ksyms
+   provenance; the lock-address signature + the byte-exact pw decode
+   carry the identification). This is a REAL both-CPU interrupt-freeze
+   family — kill10 face-2's shape, though k10 itself never printed it
+   (non-RT signals, no poll): kill10 face-2 proper stays open.
+3. MISSION 2 (OH wedge-rate A/B, 5v5 interleaved joint run) —
+   ADJUDICATED:
+   - cg26b: 4/5 full ladder (bundles.ready 91-94s, CreateNewUser 60-63s,
+     startUser 91-94s); 1/5 wedge (cg-1: the rlimit DEADLOCK-spin storm
+     from 41s). All 5 rolls carry ≥1 full-roll TXN strand (maxexec
+     1462-1486s) — the pre-existing wedge family persists.
+   - pollwake (491ebc09): 0/5 ladder; 3/5 frozen pre-bootanimation
+     (pw-2/4: single FFRT park ~5-6s anywoken=0 run=0; pw-5: that park
+     PLUS the terminal both-CPU rlimit spin); pw-1/3 reached ba_ready
+     ~11s but no bundles.
+   - VERDICT for the coordinator/OH lane: pollwake does NOT reduce the
+     wedge rate — categorically worse under this recipe (0/5 vs 4/5
+     ladder; 3/5 vs 0/5 pre-ba freeze; the FFRT/samgr park family is
+     unchanged). Do not merge pollwake on wedge-reduction grounds.
+     (The pw-5 freeze mechanism is fixed by 3b352cf6 on our branch.)
+4. kill10: r10a re-hunt on the round tree — first-run hang (face 1,
+   r9-decoded signal-loss) still present, loops 2-7 rc=0, ZERO freeze
+   dumps, ZERO DEADLOCK. r9's FREEZE-WATCH captures re-adjudicated:
+   ALL were face-1 parks (TICKARM-RING seq advanced ~200 events/s
+   across every stall; the dumped CPU HALT=1 with IF=1 at the idle
+   site) — true face-2 did not occur in 11 r9 boots; ring + HRES-OVERDUE
+   stay armed. UART-RX + hung-task fdreapd cosmetics stand as r9 left
+   them.
+5. ROUND-10 HEAD (coordinator redirect, lmbench-fix handoff): the
+   lat_udp/bw_tcp release-mode strand — reproduced 4/4 on my rig
+   (lmbench rig copy in run/lmb-rig, release kernel, their net fixes
+   cherry-picked on local branch r10-hunt), instruments extended
+   (6a2becbf), producer fingerprinted:
+   - LP-WAKE-SKIP-EMPTY pid=<udp-server> naming_cpu=0 slotw=1
+     idlebit=0 — the lying slot's last writer is the PICK path; the
+     naming CPU is BUSY on other work. The R49 pick-published-but-
+     never-switched-in cascade, named live per strand.
+   - WAKE-SKIP-ORIGIN sites VARY (sched GRQ acquire / wake path /
+     socket.rs) — the preempt count on the victims is the mid-schedule
+     park bracket (benign); the count is NOT the stuck invariant, the
+     SLOT LIE is. The lmbench "find who bumped pc" lead is answered:
+     pc's origin moves with the last park; hunt the slot writer.
+   - BIT-ORPHAN-SOFTIRQ ssite=sync/seqlock.rs:137 recurs on the client
+     (SeqLock::write softirq bracket orphaned) — separate class, healed
+     at the next voluntary park (lostpark adjudication); watch it.
+   - r11 entry: pick-generation counter on the SLOT tag-1 publish; a
+     generation that never materializes into a context switch-in is
+     the producer. Healer candidate (after producer fix): extend the
+     R49 orphan-mark heal to a BUSY-named slot when the named task is
+     verifiably parked-and-refused for >N attempts (the idle-slot heal
+     and STALE-CLAIM-RESET both miss this shape).
+6. Second flag (riscv in-kernel "wake_up running task" 1299/1300,
+   deterministic on pure main — lmbench lane verified): mechanism
+   identified by code reading. The test (kernel/src/tests/
+   sleep_wakeup.rs) creates a STACK Task, wakes it once — which
+   ENQUEUES the fake task into the LIVE GRQ (the test's own comment
+   admits the dangling-pointer hazard — another CPU can pick pid-1000
+   and context-switch into a garbage frame). The second wake expects
+   false (reference try_to_wake_up refuses a RUNNING target); it now
+   returns true when the first wake's enqueue got picked+dequeued
+   elsewhere, leaving RUNNING∧unlinked∧unowned — the R46 phantom HEAL
+   path falls through to the insert and returns true. NOTE FOR THE
+   SCHED LANE + design register: heal-makes-wake_up-return-true is an
+   API divergence from the reference contract; the test is also
+   unsound (live-queue enqueue of a stack Task under SMP). Fix
+   direction: the test must not enqueue into the live queue; the heal
+   semantics deserve a divergence note once the R49 producer is dead.
+7. Family sweep cadence: renameco 300-iteration clean (plain=0
+   chmod=0 rename=0 fails) on the final tree; ftest03 class re-banked
+   (item 1); kill10 (item 4). rc=254 family stays parked (r9: 25
+   clean exec sets).
