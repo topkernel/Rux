@@ -701,6 +701,9 @@ impl BlockCache {
             // Phase 1: Lookup under bucket lock
             let mut skipped_evicting = false;
             {
+                // fsw fine bracket (G4): the whole bucket-lock section a
+                // cache-hit bread pays (search + move-to-head + LRU move).
+                let p1t0 = crate::dfx::fsw::pc_now();
                 let mut bucket = self.buckets[index].lock();
                 let mut prev: Option<*mut CacheEntry> = None;
                 let mut current = bucket.head;
@@ -817,9 +820,16 @@ impl BlockCache {
                             bucket.head = Some(entry_ptr);
                         }
                         // Move to LRU head (bucket lock held — enforces ordering)
+                        let lt0 = crate::dfx::fsw::pc_now();
                         let mut lru = unsafe { self.lru_lock_under_bucket() };
                         Self::move_to_lru_head(&mut lru, entry_ptr);
+                        drop(lru);
+                        crate::dfx::fsw::stage(&crate::dfx::fsw::GLRU_N, &crate::dfx::fsw::GLRU_NS, lt0);
                         (*entry.bh).get();
+                        if crate::dfx::fsw::on() {
+                            crate::dfx::fsw::GHIT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        crate::dfx::fsw::stage(&crate::dfx::fsw::GP1_N, &crate::dfx::fsw::GP1_NS, p1t0);
                         return Some(entry.bh);
                     }
                     prev = Some(entry_ptr);
@@ -845,6 +855,10 @@ impl BlockCache {
             }
 
             // Phase 2: Read from disk (no locks held)
+            // fsw fine bracket (G4): the whole miss arm (device read +
+            // insert), so hit/miss split is direct: GP1 covers hits, GMS
+            // covers misses, GHIT counts hits.
+            let mst0 = crate::dfx::fsw::pc_now();
             // dfx=exthunt: fresh-entry fabrication, sync path.
             crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
@@ -854,6 +868,7 @@ impl BlockCache {
                 blocknr * (self.block_size as u64 / 512),
                 &mut bh.b_data,
             ) {
+                crate::dfx::fsw::stage(&crate::dfx::fsw::GMS_N, &crate::dfx::fsw::GMS_NS, mst0);
                 return None;
             }
             crate::dfx::fsw::note_dev_read();
@@ -907,6 +922,7 @@ impl BlockCache {
             }
 
             self.count.fetch_add(1, Ordering::Release);
+            crate::dfx::fsw::stage(&crate::dfx::fsw::GMS_N, &crate::dfx::fsw::GMS_NS, mst0);
             Some((*entry_ptr).bh)
         }
     }
@@ -1316,7 +1332,11 @@ fn get_block_cache() -> &'static BlockCache {
 /// Read a block from cache (or disk if not cached)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
     crate::dfx::fsw::note_bread();
-    get_block_cache().get(device, blocknr)
+    // fsw stage bracket (G4): avg per-call cost of the buffer-cache fetch.
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = get_block_cache().get(device, blocknr);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::BR_N, &crate::dfx::fsw::BR_NS, t0);
+    r
 }
 
 /// Fetch a block for a full-block overwrite: no disk read on a miss — the
@@ -1331,7 +1351,10 @@ pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut 
 /// MUST overwrite the whole block before the buffer becomes observable.
 /// See BlockCache::get_overwrite.
 pub fn getblk_overwrite(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-    get_block_cache().get_overwrite(device, blocknr)
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = get_block_cache().get_overwrite(device, blocknr);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::GBO_N, &crate::dfx::fsw::GBO_NS, t0);
+    r
 }
 
 /// Forget a FREED block's dirty buffer without writing it (see
@@ -1853,6 +1876,10 @@ pub unsafe fn bfree_multi(bh: *mut BufferHead) {
 /// transaction to commit; sync(2) writes the whole cache), and
 /// buffer-cache eviction (dirty victims are synced before reuse).
 pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
+    // fsw stage bracket (G4): skip-vs-sync split — under an active journal
+    // handle the sync is suppressed, and that suppressed arm is what every
+    // metadata op pays per write; the DID arm carries the device round trip.
+    let t0 = crate::dfx::fsw::pc_now();
     // SAFETY: get_current_handle reads the current task's handle slot and
     // is null-safe when no task context exists (interrupt/early boot).
     let journal_active = unsafe {
@@ -1860,6 +1887,7 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     };
     if journal_active {
         crate::dfx::fsw::note_sync_dirty_skip();
+        crate::dfx::fsw::stage(&crate::dfx::fsw::SDS_N, &crate::dfx::fsw::SDS_NS, t0);
         return Ok(());
     }
     crate::dfx::fsw::note_sync_dirty();
@@ -1880,10 +1908,12 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     }
     // SAFETY: bh is a raw pointer returned by bread(); it points to a valid
     // BufferHead owned by a CacheEntry in the cache.
-    unsafe {
+    let r = unsafe {
         let bh_ref = &*bh;
         bh_ref.sync()
-    }
+    };
+    crate::dfx::fsw::stage(&crate::dfx::fsw::SDD_N, &crate::dfx::fsw::SDD_NS, t0);
+    r
 }
 
 /// Sync all dirty buffers
@@ -2233,6 +2263,17 @@ pub fn publication_defer_entry_only(
 /// Runs in the dirty-marking hot path; the unarmed fast path is two loads
 /// (task, handle).
 fn publication_capture_note_dirty(
+    device: Option<*const blkdev::GenDisk>,
+    blocknr: u64,
+) {
+    // fsw stage bracket (G4): every dirty-mark under a journal handle pays
+    // this hook (two loads unarmed; lock+push armed).
+    let t0 = crate::dfx::fsw::pc_now();
+    publication_capture_note_dirty_impl(device, blocknr);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::PCN_N, &crate::dfx::fsw::PCN_NS, t0);
+}
+
+fn publication_capture_note_dirty_impl(
     device: Option<*const blkdev::GenDisk>,
     blocknr: u64,
 ) {
@@ -2663,6 +2704,9 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         crate::dfx::fsw::note_pub_flush(batch.len());
         let mut first_err: i32 = 0;
         for p in &batch {
+            // fsw stage bracket (G4): per-record drain cost (pre->entry->post
+            // ordered syncs; a miss in the cache is a cheap no-op pass).
+            let pt0 = crate::dfx::fsw::pc_now();
             for &b in &p.pre {
                 if let Err(e) = sync_block_ordered(p.device, b) {
                     if first_err == 0 {
@@ -2684,6 +2728,7 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
                     }
                 }
             }
+            crate::dfx::fsw::stage(&crate::dfx::fsw::PBR_N, &crate::dfx::fsw::PBR_NS, pt0);
         }
         if first_err != 0 {
             // Requeue what we did not get to; the error is reported.

@@ -77,15 +77,29 @@ pub const S_IRWXO: u16 = 0o0007;
 /// Read a block into a Vec<u8>
 // SAFETY: device pointer is valid; bio::bread returns valid bh or error
 unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, block_size: usize) -> Result<Vec<u8>, i32> {
-    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
-    let data = (*bh).b_data.clone();
-    bio::brelse(bh);
-    Ok(data)
+    // fsw stage bracket (G4): bread + 4K clone (heap alloc + memcpy).
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = (|| -> Result<Vec<u8>, i32> {
+        let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
+        let data = (*bh).b_data.clone();
+        bio::brelse(bh);
+        Ok(data)
+    })();
+    crate::dfx::fsw::stage(&crate::dfx::fsw::RBV_N, &crate::dfx::fsw::RBV_NS, t0);
+    r
 }
 
 /// Write a Vec<u8> to a block
 // SAFETY: device pointer is valid; bio functions handle buffer lifecycle
 unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
+    // fsw stage bracket (G4): fetch + 4K copy + journal register + sync arm.
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = write_block_from_vec_impl(device, blocknr, data);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::WBV_N, &crate::dfx::fsw::WBV_NS, t0);
+    r
+}
+
+unsafe fn write_block_from_vec_impl(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
     // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
     // (perf: the plain bread here read EVERY block it was about to
     // completely overwrite — a fresh dir block allocated by mkdir was
@@ -1777,6 +1791,19 @@ pub fn ext4_delete_entry(
 
 /// Unlocked body of ext4_delete_entry — caller holds ENTRY_MUTEX.
 fn ext4_delete_entry_locked(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<u32, i32> {
+    // fsw stage bracket (G4): the delete-side entry removal body (rmdir
+    // phase 2 / unlink's main step): find + RMW + write-back.
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = ext4_delete_entry_locked_impl(fs, dir_ino, name);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::DEL_N, &crate::dfx::fsw::DEL_NS, t0);
+    r
+}
+
+fn ext4_delete_entry_locked_impl(
     fs: &Ext4FileSystem,
     dir_ino: u32,
     name: &[u8],

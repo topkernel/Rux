@@ -60,6 +60,14 @@ impl<'a> BlockAllocator<'a> {
     /// 2. `goal_group ± 1, ± 2, ...` (spiral outward)
     /// 3. All groups from 0 (fallback)
     pub fn alloc_block(&self, goal_group: u32) -> Result<u64, i32> {
+        // fsw stage bracket (G4).
+        let t0 = crate::dfx::fsw::pc_now();
+        let r = self.alloc_block_impl(goal_group);
+        crate::dfx::fsw::stage(&crate::dfx::fsw::ALR_N, &crate::dfx::fsw::ALR_NS, t0);
+        r
+    }
+
+    fn alloc_block_impl(&self, goal_group: u32) -> Result<u64, i32> {
         let block_groups = self.fs.group_count;
         crate::dfx::fsw::note_alloc_run();
 
@@ -102,6 +110,14 @@ impl<'a> BlockAllocator<'a> {
     /// minutes under TCG while holding EXT4_BIG_LOCK — every LTP test
     /// with .needs_device wedged the whole sweep.
     pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
+        // fsw stage bracket (G4): shares the ALR bucket with alloc_block.
+        let t0 = crate::dfx::fsw::pc_now();
+        let r = self.alloc_block_run_impl(goal_group, want);
+        crate::dfx::fsw::stage(&crate::dfx::fsw::ALR_N, &crate::dfx::fsw::ALR_NS, t0);
+        r
+    }
+
+    fn alloc_block_run_impl(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
         let block_groups = self.fs.group_count;
         crate::dfx::fsw::note_alloc_run();
 
@@ -272,6 +288,14 @@ impl<'a> BlockAllocator<'a> {
     /// 300MB — 76800 per-block frees wedged the whole system through the
     /// block-I/O wait path).
     pub fn free_block_run(&self, start: u64, len: u64) -> Result<(), i32> {
+        // fsw stage bracket (G4): free_block funnels here too.
+        let t0 = crate::dfx::fsw::pc_now();
+        let r = self.free_block_run_impl(start, len);
+        crate::dfx::fsw::stage(&crate::dfx::fsw::FRR_N, &crate::dfx::fsw::FRR_NS, t0);
+        r
+    }
+
+    fn free_block_run_impl(&self, start: u64, len: u64) -> Result<(), i32> {
         if len == 0 {
             return Ok(());
         }

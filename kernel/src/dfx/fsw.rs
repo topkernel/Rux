@@ -145,6 +145,77 @@ pub static WALK_HIT: AtomicU64 = AtomicU64::new(0);
 /// Walk components that needed a filesystem lookup (dcache miss).
 pub static WALK_MISS: AtomicU64 = AtomicU64::new(0);
 
+// === stage-bracket anatomy (perf-gaps G4, 2026-11-02) ====================
+// Per-CALL nanosecond brackets on the metadata machinery pieces the mkdir/
+// rmdir/unlink ops are built from, so (count x avg) ranks the fixed per-op
+// costs against the FSW2 volumes and the FSW3 phase splits. Zero traffic
+// when the probe is off (t0 == 0 skips both the clock read and the adds).
+//   BR  bio::bread            (hit+miss total)
+//   GBO bio::getblk_overwrite (write-fetch, no read)
+//   SDD sync_dirty_buffer DID sync   / SDS skip-under-handle arm
+//   RBV namei read_block_to_vec (bread + 4K clone)
+//   WBV namei write_block_from_vec
+//   DEL namei ext4_delete_entry_locked
+//   WID ext4 write_inode_disk / RIN read_inode
+//   JGW jbd2 get_write/create_access / JDM dirty_metadata
+//   ALR allocator alloc_block[_run]  / FRR free_block[_run]
+//   PBR publication record processing (flush loop body)
+//   PCN publication_capture_note_dirty (every dirty-mark under a handle)
+pub static BR_N: AtomicU64 = AtomicU64::new(0);
+pub static BR_NS: AtomicU64 = AtomicU64::new(0);
+pub static GBO_N: AtomicU64 = AtomicU64::new(0);
+pub static GBO_NS: AtomicU64 = AtomicU64::new(0);
+pub static SDD_N: AtomicU64 = AtomicU64::new(0);
+pub static SDD_NS: AtomicU64 = AtomicU64::new(0);
+pub static SDS_N: AtomicU64 = AtomicU64::new(0);
+pub static SDS_NS: AtomicU64 = AtomicU64::new(0);
+pub static RBV_N: AtomicU64 = AtomicU64::new(0);
+pub static RBV_NS: AtomicU64 = AtomicU64::new(0);
+pub static WBV_N: AtomicU64 = AtomicU64::new(0);
+pub static WBV_NS: AtomicU64 = AtomicU64::new(0);
+pub static DEL_N: AtomicU64 = AtomicU64::new(0);
+pub static DEL_NS: AtomicU64 = AtomicU64::new(0);
+pub static WID_N: AtomicU64 = AtomicU64::new(0);
+pub static WID_NS: AtomicU64 = AtomicU64::new(0);
+pub static RIN_N: AtomicU64 = AtomicU64::new(0);
+pub static RIN_NS: AtomicU64 = AtomicU64::new(0);
+pub static JGW_N: AtomicU64 = AtomicU64::new(0);
+pub static JGW_NS: AtomicU64 = AtomicU64::new(0);
+pub static JDM_N: AtomicU64 = AtomicU64::new(0);
+pub static JDM_NS: AtomicU64 = AtomicU64::new(0);
+pub static ALR_N: AtomicU64 = AtomicU64::new(0);
+pub static ALR_NS: AtomicU64 = AtomicU64::new(0);
+pub static FRR_N: AtomicU64 = AtomicU64::new(0);
+pub static FRR_NS: AtomicU64 = AtomicU64::new(0);
+pub static PBR_N: AtomicU64 = AtomicU64::new(0);
+pub static PBR_NS: AtomicU64 = AtomicU64::new(0);
+pub static PCN_N: AtomicU64 = AtomicU64::new(0);
+pub static PCN_NS: AtomicU64 = AtomicU64::new(0);
+// Fine split inside BlockCache::get (same G4 pass): the phase-1 bucket-lock
+// section (search + move-to-head + LRU move) is where a cache-hit bread's
+// time goes; the LRU move itself is bracketed separately because it takes
+// the irqsave LRU lock; the miss arm (device read + insert) separately.
+pub static GP1_N: AtomicU64 = AtomicU64::new(0);
+pub static GP1_NS: AtomicU64 = AtomicU64::new(0);
+pub static GLRU_N: AtomicU64 = AtomicU64::new(0);
+pub static GLRU_NS: AtomicU64 = AtomicU64::new(0);
+pub static GMS_N: AtomicU64 = AtomicU64::new(0);
+pub static GMS_NS: AtomicU64 = AtomicU64::new(0);
+pub static GHIT: AtomicU64 = AtomicU64::new(0);
+
+/// Close a stage bracket opened with pc_now(): +1 count, +delta ns.
+/// No-op when t0 == 0 (probe off) — same zero-traffic contract as pc_add.
+#[inline]
+pub fn stage(n: &AtomicU64, ns: &AtomicU64, t0: u64) {
+    if t0 != 0 {
+        n.fetch_add(1, Ordering::Relaxed);
+        ns.fetch_add(
+            crate::drivers::timer::monotonic_ns_since_boot().saturating_sub(t0),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 // === path-walk cost anatomy (perf-path lane 2026-11-01) ==================
 // Sub-microsecond phases: NS sums (converted at dump), one count each
 // where the divisor is not implied by the counters above. The brackets
@@ -612,5 +683,30 @@ pub fn dump() {
         v(&WALK_PRE_NS), v(&WALK_LOOP_NS), v(&WALK_TAIL_NS),
         v(&WALK_COMP_N), v(&WALK_A_NS), v(&WALK_B_NS),
         v(&WALK_C_NS), v(&WALK_D_NS), v(&WALK_MISSCOST_NS),
+    );
+    crate::pr_warn!(
+        // stage-bracket anatomy (perf-gaps G4): count.NSsum pairs, ns.
+        // Averages: BR_NS/BR_N = avg bio::bread, etc. Ratio against the
+        // FSW2 volumes and FSW3 phase splits ranks the fixed per-op costs.
+        "FSW4 t={}s br={}.{} gbo={}.{} sdd={}.{} sds={}.{} rbv={}.{} wbv={}.{} del={}.{}",
+        secs,
+        v(&BR_N), v(&BR_NS), v(&GBO_N), v(&GBO_NS),
+        v(&SDD_N), v(&SDD_NS), v(&SDS_N), v(&SDS_NS),
+        v(&RBV_N), v(&RBV_NS), v(&WBV_N), v(&WBV_NS),
+        v(&DEL_N), v(&DEL_NS),
+    );
+    crate::pr_warn!(
+        "FSW5 t={}s wid={}.{} rin={}.{} jgw={}.{} jdm={}.{} alr={}.{} frr={}.{} pbr={}.{} pcn={}.{}",
+        secs,
+        v(&WID_N), v(&WID_NS), v(&RIN_N), v(&RIN_NS),
+        v(&JGW_N), v(&JGW_NS), v(&JDM_N), v(&JDM_NS),
+        v(&ALR_N), v(&ALR_NS), v(&FRR_N), v(&FRR_NS),
+        v(&PBR_N), v(&PBR_NS), v(&PCN_N), v(&PCN_NS),
+    );
+    crate::pr_warn!(
+        "FSW6 t={}s gp1={}.{} glru={}.{} gms={}.{} ghit={}",
+        secs,
+        v(&GP1_N), v(&GP1_NS), v(&GLRU_N), v(&GLRU_NS),
+        v(&GMS_N), v(&GMS_NS), v(&GHIT),
     );
 }

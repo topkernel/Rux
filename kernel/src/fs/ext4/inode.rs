@@ -368,6 +368,17 @@ pub fn read_inode(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ino: u32,
 ) -> Result<Ext4InodeOnDisk, i32> {
+    // fsw stage bracket (G4).
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = read_inode_impl(fs, ino);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::RIN_N, &crate::dfx::fsw::RIN_NS, t0);
+    r
+}
+
+fn read_inode_impl(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Result<Ext4InodeOnDisk, i32> {
     use crate::fs::bio;
 
     // ino == 0 is invalid (would underflow in group/index calculation)
@@ -656,6 +667,18 @@ pub fn inode_table_block_of(
 /// - `Ok(())` on success
 /// - `Err(errno)` on failure
 pub fn write_inode_disk(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+    inode: &Ext4InodeOnDisk,
+) -> Result<(), i32> {
+    // fsw stage bracket (G4).
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = write_inode_disk_impl(fs, ino, inode);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::WID_N, &crate::dfx::fsw::WID_NS, t0);
+    r
+}
+
+fn write_inode_disk_impl(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ino: u32,
     inode: &Ext4InodeOnDisk,

@@ -353,6 +353,14 @@ pub fn jbd2_journal_extend(handle: &mut Handle, nblocks: i32) -> Result<(), i32>
 /// This must be called before modifying a buffer that will be journaled.
 /// It freezes a copy of the buffer's current data for the journal.
 pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
+    // fsw stage bracket (G4): registration arm.
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = jbd2_journal_get_write_access_impl(handle, bio_bh);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::JGW_N, &crate::dfx::fsw::JGW_NS, t0);
+    r
+}
+
+fn jbd2_journal_get_write_access_impl(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -386,6 +394,15 @@ pub fn jbd2_journal_get_write_access(handle: &mut Handle, bio_bh: *mut crate::fs
 /// Similar to get_write_access but the buffer doesn't have meaningful
 /// prior content, so we don't need to preserve old data.
 pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
+    // fsw stage bracket (G4): shares the JGW bucket with get_write_access
+    // (same shape and cost class).
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = jbd2_journal_get_create_access_impl(handle, bio_bh);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::JGW_N, &crate::dfx::fsw::JGW_NS, t0);
+    r
+}
+
+fn jbd2_journal_get_create_access_impl(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
@@ -414,6 +431,14 @@ pub fn jbd2_journal_get_create_access(handle: &mut Handle, bio_bh: *mut crate::f
 /// buffer-cache content through the block number at commit time, which
 /// is always at least as new as any registration-time image (R20).
 pub fn jbd2_journal_dirty_metadata(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
+    // fsw stage bracket (G4).
+    let t0 = crate::dfx::fsw::pc_now();
+    let r = jbd2_journal_dirty_metadata_impl(handle, bio_bh);
+    crate::dfx::fsw::stage(&crate::dfx::fsw::JDM_N, &crate::dfx::fsw::JDM_NS, t0);
+    r
+}
+
+fn jbd2_journal_dirty_metadata_impl(handle: &mut Handle, bio_bh: *mut crate::fs::bio::BufferHead) -> Result<(), i32> {
     if is_handle_aborted(handle) {
         return Err(EROFS);
     }
