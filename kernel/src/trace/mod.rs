@@ -1012,11 +1012,15 @@ tracepoints! {
     };
 
     /// net:lo_xmit — one record per loopback transmit: payload length,
-    /// backlog depth after the push (or at the drop), and the return
-    /// code (0 queued, -105 ENOBUFS backlog full). The r13 hunt's hop 0:
-    /// the echo's entire wire journey is the loopback backlog → NetRx
-    /// softirq → udp_rcv chain; a datagram dropped at the backlog cap
-    /// produces no other event anywhere.
+    /// backlog depth after the push (or at the drop), the return code
+    /// (0 queued, -105 ENOBUFS backlog full), the skb data pointer, and
+    /// the UDP checksum AS BUILT (0 when the frame is too short to be
+    /// eth+ip+udp — the r13 hunt reads it back at any later drop site:
+    /// a changed value convicts an in-flight byte rewrite between the
+    /// backlog push and the drain). The r13 hunt's hop 0: the echo's
+    /// entire wire journey is the loopback backlog → NetRx softirq →
+    /// udp_rcv chain; a datagram dropped at the backlog cap produces no
+    /// other event anywhere.
     EVENT_NET_LO_XMIT / net_lo_xmit_fmt / trace_net_lo_xmit :
         "net", "lo_xmit", 34,
     print: "\"len=%u backlog=%u rc=%d skb=%pL ucsum=%#x\", REC->len, REC->backlog, REC->rc, REC->skb, REC->ucsum",

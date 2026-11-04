@@ -118,10 +118,12 @@ static void arm_trace_events(void)
 static void arm_trace_events(void)
 {
     static const char *evs[] = {
-        "net:udp_deliver", "net:udp_wake", "net:lo_xmit",
+        "net:udp_deliver", "net:udp_wake", "net:lo_xmit", "net:pkt_drop",
         "net:sock_wait", "timer:itimer_arm", "signal:signal_generate",
         NULL,
     };
+    if (!cmdline_has("ktrace=1"))
+        return;
     int fd = open("/sys/kernel/tracing/tracing_on", O_WRONLY);
     if (fd < 0)
         return; /* no tracefs — nothing to arm */
