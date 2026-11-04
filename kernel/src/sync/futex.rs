@@ -24,7 +24,7 @@ use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
 use crate::process::Task;
 use crate::process::task::TaskState;
-use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT, EPERM, EBUSY, EDEADLK};
+use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
 
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
@@ -615,6 +615,13 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
+        // 36th successor — comm of the parked task, filled by phase B
+        // from the same task pointer. Until now naming a park's owner
+        // needed host-side tgid->ServiceStart correlation; with the comm
+        // inline, one FUX-STUCK line names the owner directly (grep
+        // 'samgr.*800194.*u2v=' picks the wedge signature out of the
+        // burst without post-hoc pid correlation).
+        comm: [u8; 16],
         // 33rd successor — wait-site map. Futex syscall args from the
         // SAME entry frame (op/val/timeout) plus the user-space wait
         // site: the uaddr's VMA decode (which mapping, offset inside
@@ -655,6 +662,19 @@ pub fn futex_stuck_census() {
         u2v_end: usize,
         u2v_off: usize,
         u2v_cls: u8,
+        // 37th successor — caller-chain decode. uret[1] anchors inside
+        // the wait primitive itself (libc++ condition_variable::wait);
+        // uret[2]/uret[3] carry the CALLERS above it (libipc_single /
+        // libhicollie / the service's own binary). Decoding both the
+        // same way names the wait site without a guest-side unwinder.
+        u2v2_ok: bool,
+        u2v2_start: usize,
+        u2v2_off: usize,
+        u2v2_cls: u8,
+        u2v3_ok: bool,
+        u2v3_start: usize,
+        u2v3_off: usize,
+        u2v3_cls: u8,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -683,7 +703,15 @@ pub fn futex_stuck_census() {
             };
             if let Some((task, uaddr, mm, age, woken)) = entry {
                 total += 1;
-                if stuck.len() < 32 {
+                // u2v1 blind-spot fix: the old 32-sample cap filled with
+                // whichever buckets hashed FIRST (the benign-cycle waiters)
+                // — a wedged samgr's parks (the whole point of the census)
+                // sat in later buckets, below the cap, invisible to the
+                // wedge-full burst (u2v1: 357 FUX-STUCK-FULL rows for
+                // sharing_service, ZERO rows for samgr tgid=329). 64
+                // samples + a 192-walk cap still bound the 1 Hz cost while
+                // covering the wedge window's park map.
+                if stuck.len() < 64 {
                     stuck.push(Stuck {
                         task,
                         uaddr,
@@ -694,6 +722,7 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
+                        comm: [0; 16],
                         fop: 0,
                         fval: 0,
                         fto: 0,
@@ -714,9 +743,17 @@ pub fn futex_stuck_census() {
                         u2v_end: 0,
                         u2v_off: 0,
                         u2v_cls: b'-',
+                        u2v2_ok: false,
+                        u2v2_start: 0,
+                        u2v2_off: 0,
+                        u2v2_cls: b'-',
+                        u2v3_ok: false,
+                        u2v3_start: 0,
+                        u2v3_off: 0,
+                        u2v3_cls: b'-',
                     });
-                } else if total > 64 {
-                    // Sample cap reached with clear headroom — stop the
+                } else if total > 192 {
+                    // Walk cap reached with clear headroom — stop the
                     // walk (the SUM line carries the truncation).
                     drop(h);
                     break 'buckets;
@@ -747,6 +784,7 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
+                s.comm = *tk.comm();
                 let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
@@ -950,6 +988,65 @@ pub fn futex_stuck_census() {
                                 };
                             }
                         }
+                        // (c2) caller-chain decode (37th successor): the
+                        // same VMA decode for uret[2] and uret[3]. Only the
+                        // start-relative offset is kept (the host has the
+                        // identical .so; base+off is what symbolizes). A
+                        // word landing in the SAME vma as uret[1] (still
+                        // inside the wait primitive) is skipped so the
+                        // fields carry the first DIFFERENT-library frames
+                        // above the anchor.
+                        for (ui, okf, startf, offf, clsf) in [
+                            (
+                                2usize,
+                                &mut s.u2v2_ok,
+                                &mut s.u2v2_start,
+                                &mut s.u2v2_off,
+                                &mut s.u2v2_cls,
+                            ),
+                            (
+                                3usize,
+                                &mut s.u2v3_ok,
+                                &mut s.u2v3_start,
+                                &mut s.u2v3_off,
+                                &mut s.u2v3_cls,
+                            ),
+                        ] {
+                            if s.uret_n <= ui || s.uret[ui] == 0 {
+                                continue;
+                            }
+                            // Same-VMA skip: uret words are u64, the VMA
+                            // fields usize — cast like the decode below
+                            // (64-bit platforms, lossless).
+                            if s.u2v_ok
+                                && (s.uret[ui] as usize) >= s.u2v_start
+                                && (s.uret[ui] as usize) < s.u2v_end
+                            {
+                                continue;
+                            }
+                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[ui] as usize)) {
+                                let start = vma.start().as_usize();
+                                let fl = vma.flags();
+                                let cls = if fl.contains(
+                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                ) {
+                                    b'S'
+                                } else if start == aspace.start_brk() {
+                                    b'H'
+                                } else {
+                                    match vma.vma_type() {
+                                        VmaType::FileBacked => b'F',
+                                        VmaType::SharedMemory => b'M',
+                                        VmaType::Device => b'D',
+                                        VmaType::Anonymous => b'A',
+                                    }
+                                };
+                                *okf = true;
+                                *startf = start;
+                                *offf = s.uret[ui] as usize - start;
+                                *clsf = cls;
+                            }
+                        }
                     }
                 }
                 break;
@@ -1023,6 +1120,7 @@ pub fn futex_stuck_census() {
         min_age: u32,
         any_woken: bool,
         rep_tid: u32,
+        rep_comm: [u8; 16],
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
@@ -1046,6 +1144,14 @@ pub fn futex_stuck_census() {
         rep_u2v_end: usize,
         rep_u2v_off: usize,
         rep_u2v_cls: u8,
+        rep_u2v2_ok: bool,
+        rep_u2v2_start: usize,
+        rep_u2v2_off: usize,
+        rep_u2v2_cls: u8,
+        rep_u2v3_ok: bool,
+        rep_u2v3_start: usize,
+        rep_u2v3_off: usize,
+        rep_u2v3_cls: u8,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -1072,6 +1178,7 @@ pub fn futex_stuck_census() {
                         min_age: s.age_s,
                         any_woken: s.woken,
                         rep_tid: s.tid,
+                        rep_comm: s.comm,
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
@@ -1095,6 +1202,14 @@ pub fn futex_stuck_census() {
                         rep_u2v_end: s.u2v_end,
                         rep_u2v_off: s.u2v_off,
                         rep_u2v_cls: s.u2v_cls,
+                        rep_u2v2_ok: s.u2v2_ok,
+                        rep_u2v2_start: s.u2v2_start,
+                        rep_u2v2_off: s.u2v2_off,
+                        rep_u2v2_cls: s.u2v2_cls,
+                        rep_u2v3_ok: s.u2v3_ok,
+                        rep_u2v3_start: s.u2v3_start,
+                        rep_u2v3_off: s.u2v3_off,
+                        rep_u2v3_cls: s.u2v3_cls,
                     });
                 }
             }
@@ -1102,10 +1217,11 @@ pub fn futex_stuck_census() {
     }
     let mut order: Vec<usize> = (0..groups.len()).collect();
     order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
-    let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
+    // Marker: 0 = old-anchor slot, 1 = fresh slot, 2 = wedge-full slot.
+    let mut chosen: Vec<(usize, u8)> = Vec::new(); // (group idx, marker)
     for (i, &gi) in order.iter().enumerate() {
         if i < 4 {
-            chosen.push((gi, false));
+            chosen.push((gi, 0));
         }
     }
     let mut fresh_order = order.clone();
@@ -1115,11 +1231,45 @@ pub fn futex_stuck_census() {
             break;
         }
         if !chosen.iter().any(|(c, _)| *c == gi) {
-            chosen.push((gi, true));
+            chosen.push((gi, 1));
+        }
+    }
+    // 37th successor — wedge-full burst: the 32-waiter sample hides most
+    // of a wedged process's park map (a stuck samgr shows 15+ DISTINCT
+    // uaddrs but the 8-line budget prints 2-3 of them). When ONE tgid
+    // owns >= 4 distinct stuck-uaddr groups this burst, print ALL its
+    // groups (cap 16 extra lines) so the complete map — one shared
+    // uaddr (a mutex hold-and-wait) vs scattered per-task condvars (a
+    // producer that never ran) — is legible in a single burst. The
+    // global 1200-line LINES cap still bounds the boot.
+    {
+        let mut per_tgid: Vec<(u32, usize)> = Vec::new();
+        for g in groups.iter() {
+            match per_tgid.iter_mut().find(|e| e.0 == g.tgid) {
+                Some(e) => e.1 += 1,
+                None => per_tgid.push((g.tgid, 1)),
+            }
+        }
+        per_tgid.sort_by(|a, b| b.1.cmp(&a.1));
+        if let Some(&(focus, n_distinct)) = per_tgid.first() {
+            if n_distinct >= 4 {
+                let mut added = 0usize;
+                for (gi, g) in groups.iter().enumerate() {
+                    if added >= 16 {
+                        break;
+                    }
+                    if g.tgid == focus
+                        && !chosen.iter().any(|(c, _)| *c == gi)
+                    {
+                        chosen.push((gi, 2));
+                        added += 1;
+                    }
+                }
+            }
         }
     }
     let mut printed = 0usize;
-    for (gi, is_fresh) in chosen {
+    for (gi, marker) in chosen {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
         // HOTPATH-PRINT: fuxstuck census report — gated by
@@ -1148,10 +1298,70 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
+        // 37th: caller-chain anchors — uret[2]/uret[3] decoded through the
+        // same VMA machinery (offset-only; the host has the identical
+        // .so). printk_ln truncates at RECORD_TEXT_SIZE (256) and the main
+        // row is already at the ceiling, so the new payload rides a
+        // CONTINUATION row (the TXN-HANG-STK pattern) instead of the main
+        // line. Emitted only when a caller frame actually decoded — the
+        // benign park classes (stack-top waits, no u2v) print nothing.
+        let mut u2v_cont = alloc::string::String::new();
+        if g.rep_u2v2_ok {
+            let _ = write!(
+                u2v_cont,
+                " u2v2={:#x}+{:#x}{}",
+                g.rep_u2v2_start,
+                g.rep_u2v2_off,
+                g.rep_u2v2_cls as char
+            );
+        }
+        if g.rep_u2v3_ok {
+            let _ = write!(
+                u2v_cont,
+                " u2v3={:#x}+{:#x}{}",
+                g.rep_u2v3_start,
+                g.rep_u2v3_off,
+                g.rep_u2v3_cls as char
+            );
+        }
+        if !u2v_cont.is_empty() || (g.rep_uret_n > 0 && g.rep_u2v_ok) {
+            // Same parser discipline as the main row: (tgid, tid, uaddr)
+            // key so host-side extractors can join the two records.
+            crate::pr_warn!(
+                "FUX-STUCK-U2V tgid={} tid={} uaddr={:#x}{}{}uret={} thr[run={} futex={} int={} unint={}]",
+                g.tgid,
+                g.rep_tid,
+                g.uaddr,
+                u2v_s,
+                u2v_cont,
+                uret_s,
+                h.map(|h| h.run).unwrap_or(0),
+                h.map(|h| h.futex).unwrap_or(0),
+                h.map(|h| h.int_other).unwrap_or(0),
+                h.map(|h| h.unint).unwrap_or(0),
+            );
+        }
+        // comm_str discipline (task.rs): arbitrary bytes, lossy-decode —
+        // never hand raw bytes to char-aware formatting.
+        let comm_len = g
+            .rep_comm
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(g.rep_comm.len());
+        let comm_s = alloc::string::String::from_utf8_lossy(&g.rep_comm[..comm_len]);
+        // Main row: parser contract fields only (u2vbank.py reads through
+        // "u2v= u2v=<value>"); the raw uret words + tgidthr counters ride
+        // the FUX-STUCK-U2V continuation above (the 256-byte printk record
+        // cannot hold the old tail plus the caller-chain anchors).
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
-            if is_fresh { "-FRESH" } else { "" },
+            "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={}",
+            match marker {
+                1 => "-FRESH",
+                2 => "-FULL",
+                _ => "",
+            },
             g.tgid,
+            comm_s,
             g.rep_tid,
             g.uaddr,
             g.rep_mm,
@@ -1171,24 +1381,21 @@ pub fn futex_stuck_census() {
             g.rep_uvma_off,
             vmx,
             u2v_s,
-            uret_s,
-            h.map(|h| h.run).unwrap_or(0),
-            h.map(|h| h.futex).unwrap_or(0),
-            h.map(|h| h.int_other).unwrap_or(0),
-            h.map(|h| h.unint).unwrap_or(0),
         );
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
             break;
         }
     }
-    if total > printed && printed == 8 {
+    if total > printed {
         // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
-        // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
+        // and 5s burst budget as the FUX-STUCK rows above (8 regular +
+        // up to 16 wedge-full per burst).
         crate::pr_warn!(
-            "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
+            "FUX-STUCK-SUM stuck_total={} printed={} (sampled {})",
             total,
-            32
+            printed,
+            64
         );
     }
 }
@@ -2064,24 +2271,8 @@ pub fn futex_requeue(
 
     let key1 = FutexKey::new_user(uaddr, mm, flags);
 
-    // For CMP_REQUEUE, *uaddr == cmpval is verified UNDER the bucket
-    // lock (reference futex_requeue: futex_get_value_locked after
-    // double_lock_hb) — checking before the lock left a window where a
-    // concurrent userspace store changed the word between the check and
-    // the wake/requeue pass.
-
     // No requeue target or same address → just wake
     if uaddr2 == 0 || uaddr2 == uaddr || nr_requeue <= 0 {
-        if is_cmp {
-            // SAFETY: exception-table protected read; unmapped → EFAULT.
-            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
-                Some(v) => v,
-                None => return -EFAULT as i64,
-            };
-            if uval != cmpval {
-                return -EAGAIN as i64;
-            }
-        }
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     }
 
@@ -2104,17 +2295,6 @@ pub fn futex_requeue(
         // Same bucket — lock once.
         let mut head1 = HASH_HEADS[bucket1].lock_irqsave();
 
-        if is_cmp {
-            // SAFETY: exception-table protected read under the lock.
-            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
-                Some(v) => v,
-                None => {
-                    drop(head1);
-                    return -EFAULT as i64;
-                }
-            };
-            if uval != cmpval {
-                drop(head1);
         // For CMP_REQUEUE, verify *uaddr == cmpval UNDER the bucket lock
         // (reference requeue.c: the compare runs after double_lock_hb, so
         // a mismatched value aborts with EAGAIN before any waiter is
@@ -2206,24 +2386,6 @@ pub fn futex_requeue(
 
         let mut guard_lo = HASH_HEADS[lo].lock_irqsave();
         let mut guard_hi = HASH_HEADS[hi].lock_irqsave();
-
-        if is_cmp {
-            // SAFETY: exception-table protected read under both locks
-            // (reference double_lock_hb parity).
-            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
-                Some(v) => v,
-                None => {
-                    drop(guard_hi);
-                    drop(guard_lo);
-                    return -EFAULT as i64;
-                }
-            };
-            if uval != cmpval {
-                drop(guard_hi);
-                drop(guard_lo);
-                return -EAGAIN as i64;
-            }
-        }
 
         // Get references to the actual heads we need.
         let (head1_ref, head2_ref) = if bucket1 < bucket2 {
@@ -2504,351 +2666,6 @@ pub fn futex_wake_op(
     woken
 }
 
-// ============================================================================
-// PI futexes (FUTEX_LOCK_PI / FUTEX_TRYLOCK_PI / FUTEX_UNLOCK_PI)
-// ============================================================================
-
-/// Word layout (include/uapi/linux/futex.h): bits 0..29 = owner TID,
-/// bit 30 = FUTEX_OWNER_DIED, bit 31 = FUTEX_WAITERS.
-pub const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
-pub const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
-pub const FUTEX_WAITERS: u32 = 0x8000_0000;
-
-/// Atomic compare-exchange on the user word (reference
-/// futex_cmpxchg_value_locked): returns the observed old value, or None
-/// on a user page fault.
-fn futex_cmpxchg_user(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
-    // SAFETY: uaddr is the syscall's user word; the arch core faults
-    // into its extable fixup and returns the packed fault marker.
-    unsafe { crate::arch::uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) }
-}
-
-/// FUTEX_LOCK_PI / FUTEX_TRYLOCK_PI (reference kernel/futex/pi.c
-/// futex_lock_pi + futex_lock_pi_atomic).
-///
-/// Word protocol per the reference:
-/// - EDEADLK if the word already carries OUR tid (538-539);
-/// - unowned word (tid == 0): take it over, PRESERVING the OWNER_DIED
-///   bit and CLEARING a stale WAITERS bit (558-590);
-/// - owned word: set FUTEX_WAITERS (598), queue as a PI waiter, sleep;
-///   the owner's FUTEX_UNLOCK_PI hands the lock over by writing
-///   our_tid | WAITERS into the word and waking exactly us
-///   (wake_futex_pi, 760-779).
-///
-/// musl retries LOCK_PI on EINTR and treats 0 as "we own the word"
-/// (pthread_mutex_timedlock_pi); the timeout is ABSOLUTE (FLAGS_CLOCKRT
-/// is forced for FUTEX_LOCK_PI in the reference do_futex).
-///
-/// Priority-inheritance BOOSTING is not implemented (our scheduler has
-/// no priority boosting); waiter handoff is FIFO — with all-NORMAL
-/// tasks the reference's priority-ordered plist degenerates to the same
-/// order. This is the registered PI divergence (TASK.md, this lane).
-pub fn futex_lock_pi(
-    uaddr: usize,
-    flags: u32,
-    deadline: Option<u64>,
-    trylock: bool,
-) -> i64 {
-    let Some(current) = crate::sched::current() else {
-        return -EFAULT as i64;
-    };
-    // SAFETY: current is valid for the duration of this syscall.
-    let mytid = unsafe { (*current).pid() };
-    let mm = task_futex_mm_id(current);
-    let key = FutexKey::new_user(uaddr, mm, flags);
-    let bucket_idx = futex_hash(&key);
-
-    loop {
-        // ---- fast path (reference futex_lock_pi_atomic) --------------
-        let uval = match get_user_word(uaddr) {
-            Some(v) => v,
-            None => return -EFAULT as i64,
-        };
-        if uval & FUTEX_TID_MASK == mytid {
-            return -EDEADLK as i64;
-        }
-        if uval & FUTEX_TID_MASK == 0 {
-            // Unowned: take over, preserve OWNER_DIED, drop a stale
-            // WAITERS bit (reference clears it on acquisition).
-            let newval = (uval & FUTEX_OWNER_DIED) | mytid;
-            match futex_cmpxchg_user(uaddr, uval, newval) {
-                None => return -EFAULT as i64,
-                Some(old) if old == uval => return 0, // acquired
-                Some(_) => continue,                  // raced: re-read
-            }
-        }
-        if trylock {
-            // Reference futex_lock_pi(trylock=1): a held lock is EBUSY,
-            // never a queue+sleep.
-            return -EBUSY as i64;
-        }
-
-        // ---- contended: WAITERS bit + queue + sleep ------------------
-        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
-        // Re-validate under the bucket lock (a concurrent unlock may
-        // have released the word since the fast-path read).
-        let uval = match get_user_word(uaddr) {
-            Some(v) => v,
-            None => {
-                drop(head);
-                return -EFAULT as i64;
-            }
-        };
-        if uval & FUTEX_TID_MASK == mytid {
-            drop(head);
-            return -EDEADLK as i64;
-        }
-        if uval & FUTEX_TID_MASK == 0 {
-            let newval = (uval & FUTEX_OWNER_DIED) | mytid;
-            match futex_cmpxchg_user(uaddr, uval, newval) {
-                None => {
-                    drop(head);
-                    return -EFAULT as i64;
-                }
-                Some(old) if old == uval => {
-                    drop(head);
-                    return 0;
-                }
-                Some(_) => {
-                    drop(head);
-                    continue;
-                }
-            }
-        }
-        // Set the WAITERS bit (reference 598: first waiter forces the
-        // owner's unlock into the kernel).
-        match futex_cmpxchg_user(uaddr, uval, uval | FUTEX_WAITERS) {
-            None => {
-                drop(head);
-                return -EFAULT as i64;
-            }
-            Some(old) if old == uval => {}
-            Some(_) => {
-                drop(head);
-                continue;
-            }
-        }
-        // Waiter slot (same pool + shape as the plain waiters; a PI
-        // waiter is delivered ownership by futex_unlock_pi, which
-        // unlinks it exactly like futex_wake does).
-        let waiter_idx = match alloc_waiter() {
-            Some(idx) => idx,
-            None => {
-                drop(head);
-                pool_full_backoff();
-                continue;
-            }
-        };
-        {
-            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-            if let Some(ref mut w) = *slot {
-                w.key = key;
-                w.task = current;
-                w.bitset = FUTEX_BITSET_MATCH_ANY;
-                w.woken = false;
-                w.park_j = crate::drivers::timer::get_jiffies();
-                w.bucket = bucket_idx;
-                w.next = *head;
-            }
-        }
-        *head = Some(waiter_idx);
-        // SAFETY: current task; residency flag per the plain wait path.
-        unsafe {
-            (*current)
-                .futex_wait_enqueued
-                .store(true, core::sync::atomic::Ordering::Release);
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
-        drop(head);
-
-        crate::arch::cpu::restore_irq(true);
-        let wake = deadline
-            .map(|dl| crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid()));
-        if deadline.is_some() && wake.is_none() {
-            remove_waiter(bucket_idx, waiter_idx);
-            return -ENOMEM as i64;
-        }
-        crate::sched::schedule();
-        drop(wake);
-
-        // Ownership was handed to us (woken=true, the unlocker unlinked
-        // the entry): free the slot and confirm the word.
-        {
-            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-            let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
-            if mine {
-                let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
-                if was_woken {
-                    *slot = None;
-                    // SAFETY: our own flag; the unlink already happened.
-                    unsafe {
-                        (*current)
-                            .futex_wait_enqueued
-                            .store(false, core::sync::atomic::Ordering::Release);
-                    }
-                    // The handoff wrote our tid into the word.
-                    match get_user_word(uaddr) {
-                        Some(v) if v & FUTEX_TID_MASK == mytid => return 0,
-                        Some(_) => continue, // word moved on: re-lock from scratch
-                        None => return -EFAULT as i64,
-                    }
-                }
-            }
-        }
-        // Signal / timeout / spurious: still linked — unlink and decide.
-        let live_bucket = {
-            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-            slot.as_ref().map(|w| w.bucket).unwrap_or(bucket_idx)
-        };
-        remove_waiter(live_bucket, waiter_idx);
-        if crate::signal::signal_pending() {
-            return -crate::syscall::errno::EINTR as i64;
-        }
-        if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
-                return -ETIMEDOUT as i64;
-            }
-        }
-        // Spurious wake: loop and re-queue.
-    }
-}
-
-/// FUTEX_UNLOCK_PI (reference futex_unlock_pi 1100-1232): only the
-/// owner may release (-EPERM otherwise). With kernel waiters queued,
-/// the lock is HANDED to the top waiter — the word becomes
-/// waiter_tid | FUTEX_WAITERS (OWNER_DIED preserved) and that task is
-/// woken (wake_futex_pi 760-779). Without waiters the word is cleared
-/// to 0 (1197-1215).
-pub fn futex_unlock_pi(uaddr: usize, flags: u32) -> i64 {
-    let Some(current) = crate::sched::current() else {
-        return -EFAULT as i64;
-    };
-    // SAFETY: current is valid for the duration of this syscall.
-    let mytid = unsafe { (*current).pid() };
-    let mm = task_futex_mm_id(current);
-    let key = FutexKey::new_user(uaddr, mm, flags);
-    let bucket_idx = futex_hash(&key);
-
-    loop {
-        let uval = match get_user_word(uaddr) {
-            Some(v) => v,
-            None => return -EFAULT as i64,
-        };
-        if uval & FUTEX_TID_MASK != mytid {
-            return -EPERM as i64;
-        }
-        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
-        let uval = match get_user_word(uaddr) {
-            Some(v) => v,
-            None => {
-                drop(head);
-                return -EFAULT as i64;
-            }
-        };
-        if uval & FUTEX_TID_MASK != mytid {
-            drop(head);
-            return -EPERM as i64;
-        }
-        // Top waiter = first matching entry (FIFO handoff).
-        let mut cur = *head;
-        let mut prev: Option<usize> = None;
-        let mut top: Option<usize> = None;
-        while let Some(idx) = cur {
-            let (matches, next) = {
-                let slot = WAITER_POOL[idx].lock_irqsave();
-                match *slot {
-                    Some(ref w) => (w.key.matches(&key), w.next),
-                    None => (false, None),
-                }
-            };
-            if matches {
-                top = Some(idx);
-                break;
-            }
-            prev = Some(idx);
-            cur = next;
-        }
-        match top {
-            Some(idx) => {
-                // Handoff: waiter_tid | WAITERS, OWNER_DIED preserved.
-                let (wtask, wnext) = {
-                    let mut slot = WAITER_POOL[idx].lock_irqsave();
-                    let mut wtask = core::ptr::null_mut();
-                    let mut wnext = None;
-                    if let Some(ref mut w) = *slot {
-                        w.woken = true;
-                        wtask = w.task;
-                        wnext = w.next;
-                    }
-                    (wtask, wnext)
-                };
-                let waiter_tid = if wtask.is_null() {
-                    0
-                } else {
-                    // SAFETY: task linked in the bucket under the lock.
-                    unsafe { (*wtask).pid() }
-                };
-                let newval = (uval & FUTEX_OWNER_DIED) | FUTEX_WAITERS | waiter_tid;
-                match futex_cmpxchg_user(uaddr, uval, newval) {
-                    None => {
-                        drop(head);
-                        return -EFAULT as i64;
-                    }
-                    Some(old) if old == uval => {
-                        // Unlink (waker side, exactly futex_wake).
-                        if prev.is_none() {
-                            *head = wnext;
-                        } else if let Some(p) = prev {
-                            let mut ps = WAITER_POOL[p].lock_irqsave();
-                            if let Some(ref mut pw) = *ps {
-                                pw.next = wnext;
-                            }
-                        }
-                        if !wtask.is_null() {
-                            // SAFETY: waiter still linked under the bucket
-                            // lock (R12-2 wake-under-bucket invariant).
-                            unsafe {
-                                Task::wake_up_in_futex_bucket(wtask, &head.proof())
-                            };
-                        }
-                        drop(head);
-                        return 0;
-                    }
-                    Some(_) => {
-                        // Word changed under us (reference -EAGAIN →
-                        // retry the whole unlock).
-                        drop(head);
-                        continue;
-                    }
-                }
-            }
-            None => {
-                // No waiters: clear the word to 0.
-                match futex_cmpxchg_user(uaddr, uval, 0) {
-                    None => {
-                        drop(head);
-                        return -EFAULT as i64;
-                    }
-                    Some(old) if old == uval => {
-                        drop(head);
-                        return 0;
-                    }
-                    Some(_) => {
-                        drop(head);
-                        continue;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Raw u32 user read through the exception-table path.
-fn get_user_word(uaddr: usize) -> Option<u32> {
-    // SAFETY: uaddr is the syscall's user word; faults → None.
-    unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) }
-}
-
 /// DFX: dump the live state of a futex word + its waiter chain.
 #[cfg(feature = "dfx-futex-trace")]
 pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
@@ -2929,18 +2746,6 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // All futex words must be 4-byte aligned (Linux get_futex_key).
     if uaddr & 0x3 != 0 {
         return -EINVAL as i64;
-    }
-
-    // Reference parity (kernel/futex/syscalls.c do_futex 121-125):
-    // FUTEX_CLOCK_REALTIME is only meaningful for WAIT_BITSET,
-    // WAIT_REQUEUE_PI and LOCK_PI2 — for anything else (plain
-    // FUTEX_WAIT included) it is -ENOSYS.
-    if op & crate::sync::futex::FUTEX_CLOCK_REALTIME != 0
-        && cmd != FUTEX_WAIT_BITSET
-        && cmd != FUTEX_WAIT_REQUEUE_PI
-        && cmd != FUTEX_LOCK_PI2
-    {
-        return -ENOSYS as i64;
     }
 
     // sc185 RWFRZ-WATCH: any futex op on a word that RWFRZ-PARK named (a
@@ -3199,23 +3004,8 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
-        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
-            // Reference syscalls.c 145-149: FUTEX_LOCK_PI forces
-            // FLAGS_CLOCKRT — the timeout is an ABSOLUTE timespec (both
-            // clocks share our boot-based jiffies timeline; see
-            // futex_parse_timeout). musl pthread_mutex_timedlock_pi
-            // relies on the absolute interpretation.
-            match futex_parse_timeout(_timeout, true) {
-                Ok(dl) => futex_lock_pi(uaddr, flags, dl, false),
-                Err(e) => -(e as i64),
-            }
-        }
-        FUTEX_TRYLOCK_PI => futex_lock_pi(uaddr, flags, None, true),
-        FUTEX_UNLOCK_PI => futex_unlock_pi(uaddr, flags),
         _ => {
-            // FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI remain
-            // unimplemented: glibc-only ops (musl never issues them —
-            // verified across the OH tree; condvars are count-based).
+            // PI-related operations not yet supported
             -ENOSYS as i64
         }
     }
