@@ -383,3 +383,52 @@ __clear_user:
     sub     a0, a3, a0
     ret
 .size __clear_user, . - __clear_user
+
+// ============================================================================
+// __futex_cmpxchg_u32 - Atomic compare-exchange on a user u32 (PI futex)
+//
+// Arguments:
+//   a0: user space u32 pointer
+//   a1: expected value
+//   a2: new value
+//
+// Returns:
+//   a0: packed result — bit 32 set = page fault, low 32 bits = the old
+//   value observed at the word. The exchange happens only when the old
+//   value equals the expected one; either way the observed value is
+//   returned. Atomic against userspace atomics (amoswap/cas) by the
+//   lr.w/sc.d reservation protocol.
+// ============================================================================
+.global __futex_cmpxchg_u32
+.type __futex_cmpxchg_u32, @function
+__futex_cmpxchg_u32:
+    // Enable user memory access
+    li      t6, SR_SUM
+    csrs    sstatus, t6
+
+.Lfcx_retry:
+.Lfcx_lr:
+    lr.w    t0, (a0)
+    EXTABLE .Lfcx_lr, .Lfcx_fault
+    bne     t0, a1, .Lfcx_out
+.Lfcx_sc:
+    sc.w    t1, a2, (a0)
+    EXTABLE .Lfcx_sc, .Lfcx_fault
+    bnez    t1, .Lfcx_retry
+    j       .Lfcx_out
+
+.Lfcx_out:
+    // Disable user memory access
+    li      t6, SR_SUM
+    csrc    sstatus, t6
+    mv      a0, t0
+    ret
+
+.Lfcx_fault:
+    // Disable user memory access
+    li      t6, SR_SUM
+    csrc    sstatus, t6
+    li      a0, 1
+    slli    a0, a0, 32
+    ret
+.size __futex_cmpxchg_u32, . - __futex_cmpxchg_u32

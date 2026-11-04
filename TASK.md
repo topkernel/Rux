@@ -4029,3 +4029,116 @@ hold chain broken. Both are queued below.
 4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
+
+---
+
+# oh-binder lane: BINDER+FUTEX+SCHED reference-diff audit (2026-11-05)
+
+Branch oh-binder from main 02e3c900. Mission: systematic side-by-side
+diff of binder transaction lifecycle, the full futex op set, and the
+scheduler wake/PI path against the reference kernel source
+(/home/william/workspace/oh-robot/kernel/linux/linux-6.6/), fixing every
+divergence the 22 earlier parity fixes did not already cover.
+
+## Binder (drivers/android/binder.c vs kernel/src/ipc/binder.rs) — 5 fixed
+
+- **B1 (critical) failed-reply error routing**: reference binder.c
+  3806-3812 + binder_send_failed_reply (1640-1696) — once in_reply_to is
+  validated, a failed BC_REPLY NEVER gives the error to the replier: the
+  replier gets BR_TRANSACTION_COMPLETE, the ORIGINATOR gets the error
+  (BR_FAILED_REPLY/BR_DEAD_REPLY), its txn-stack entry popped, woken.
+  Ours queued ReturnError on the replier in every case → the parked
+  client waited forever. Fixed at requester-dead, alloc-none,
+  buffer-alloc-fail, target-died-before-copy, data/offsets copy fault,
+  translate failure, originator-thread-gone. New helper
+  send_failed_reply() also drops the originating txn's node pin (the
+  old requester-dead path leaked it).
+- **B2** BC_INCREFS_DONE/ACQUIRE_DONE cookie mismatch now ignored
+  (reference 3986-3995); we processed the command regardless.
+- **B3** strong-ref requirement on handle use (reference 3062/2238,
+  "tried to use weak ref as strong ref"): transaction target resolution
+  and BINDER_TYPE_HANDLE translation now require strong != 0.
+- **B4** unknown BC command fails the write with -EINVAL (reference
+  4306-4309); we logged and returned 0.
+- **B5** post-read proc-todo re-kick (reference 5181-5184),
+  eligibility-gated for the sc161 child-routing model.
+
+Audited and found already at parity (no change): BC_FREE_BUFFER
+protocol incl. async-slot handoff, death-notification lifecycle
+(REQUEST/CLEAR/DEAD_BINDER_DONE phases incl. DEAD_BINDER_AND_CLEAR),
+oneway queuing + async-space budget, BR_DEAD_BINDER read-loop stop
+("goto done"), one-sync-transaction-per-read, BR_SPAWN_LOOPER pool gate
+(+child variant), sender_pid=TGID stamping, deferred tcomplete, fd/FDA/
+PTR translation incl. parent fixups, mmap/alloc ordering, ioctl
+surface incl. OH extensions. Documented divergences kept: binder
+priority inheritance (binder_set_nice — no nice in our scheduler),
+oneway-spam-suspect stats, desc lowest-free reuse (opaque to
+userspace), wait_for_context_manager crutch.
+
+## Futex (kernel/futex/ vs kernel/src/sync/futex.rs) — 4 fixed
+
+- **F1 (major) PI futexes implemented**: FUTEX_LOCK_PI / FUTEX_LOCK_PI2
+  / FUTEX_TRYLOCK_PI / FUTEX_UNLOCK_PI were ENOSYS; musl's PI-mutex
+  paths (pthread_mutex_timedlock_pi, setprotocol's one-shot probe on
+  every PTHREAD_PRIO_INHERIT request) need them. Implemented the exact
+  reference word protocol (pi.c futex_lock_pi_atomic 514-608 +
+  wake_futex_pi 760-779 + futex_unlock_pi 1100-1232): EDEADLK on
+  self-own, unowned take-over preserving OWNER_DIED and clearing stale
+  WAITERS, WAITERS-bit set before queueing, FIFO ownership handoff
+  (waiter_tid|WAITERS) on unlock, EPERM for non-owner unlock, EBUSY for
+  contended trylock, EINTR retryable, ABSOLUTE timeout. New per-arch
+  atomic user-word cmpxchg primitive (x86_64 lock cmpxchg, riscv64
+  lr.w/sc.w, aarch64 ldaxr/stlxr — all through the extable fixup);
+  without it the protocol's CAS-vs-userspace races cannot be honored.
+  Priority BOOSTING is not implemented (no rt_mutex PI chains in our
+  scheduler — the flagged sched-domain divergence); with all-NORMAL
+  tasks the reference's priority-ordered plist degenerates to the same
+  FIFO handoff. FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI stay
+  ENOSYS: glibc-only ops, musl never issues them (verified across the
+  OH tree; condvars are count-based).
+- **F2** CMP_REQUEUE value check moved under the bucket lock(s)
+  (reference futex_get_value_locked after double_lock_hb) — the old
+  pre-lock check left a store-race window.
+- **F3 (bug fix) robust-exit death mark**: now
+  (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED — the dying TID is CLEARED
+  (reference handle_futex_death 718). The old `v | FUTEX_OWNER_DIED`
+  kept the dead tid and left any PI waiter looping on an unreleasable
+  owner. Also added the reference's pending_op case (700-703): a
+  list_op_pending entry whose word is already released gets a plain
+  wake without touching the word (killed-between-unlock-and-syscall
+  race).
+- **F4** FUTEX_WAIT|FUTEX_CLOCK_REALTIME now ENOSYS like the reference
+  do_futex (syscalls.c 121-125); only WAIT_BITSET/WAIT_REQUEUE_PI/
+  LOCK_PI2 accept the flag.
+
+OH usage evidence for prioritization: the fuxref-fx8 reference census
+(24,438 parks) shows every OH boot park is FUTEX_WAIT|PRIVATE
+(op 0x80, val mostly 0x2 — musl barrier/condvar words); zero PI parks.
+PI support is preventive (qos_manager's pi_mutex.h
+(PTHREAD_PRIO_INHERIT) exists upstream and would ENOSYS-abort on our
+old kernel).
+
+## Scheduler (kernel/sched/ vs kernel/src/sched/) — no change, documented
+
+- Wake-up class selection exists (task_sched_class → select_task_rq);
+  select_task_rq's sync-wake affinity/load balancing is structurally
+  N/A under the registered GRQ divergence (global run queue —
+  docs/architecture/design-divergences.md entry 1).
+- try_to_wake_up's WAKE_Q deferred-wake batch: our model wakes under
+  the bucket lock (futex R12-2) or after lock drop (wait queues) with
+  the C8 flag-before-wake invariant — a deliberate, documented
+  divergence; wake→pick deltas are guarded by the perf gate.
+- rt_mutex priority-inheritance chains: genuinely absent; the PI-futex
+  work above implements the word protocol without boosting — the
+  remaining gap is priority boosting itself (needs scheduler priority
+  plumbing; nothing on the OH image measures it today).
+- Preempt discipline: lock_irqsave spinlocks around every wake-path
+  state change (stronger than the reference's preempt_disable +
+  local_irq_save pairs).
+
+## Gates
+
+- x3 builds rc=0 (x86_64 q35, riscv64 virt, aarch64 virt) with all
+  changes.
+- make test (riscv64 unit suite): run in this session; verdict below.
+- Push: origin/oh-binder.
