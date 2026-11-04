@@ -278,6 +278,36 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
     let taint_display = unsafe { core::str::from_utf8_unchecked(&taint_str) };
     let _ = write!(w, "      Tainted: {}\n", taint_display);
 
+    // 38th (u2v wedge hunt): one-shot boot-wide syscall-ring replay. The
+    // hung task itself is PARKED (blocked calls never reach the exit-side
+    // record), so at a wedge the ring tail is the RUNNING side's pattern:
+    // the spin threads' (pid, nr, a0=fd, ret). The u2v2 flood table named
+    // hilogd.server spinning recvmsg/recvfrom at ~56k/s EAGAIN; this dump
+    // adds the fd and the exact return values. Same dfx=sysring gate as
+    // the trap-path replay; 256 entries bounds the serial cost.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+        static RING_DUMPED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !RING_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+            let _ = write!(w, "      HUNG-SYSRING (pid nr a0 ret, newest first):\n");
+            let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+            let len = SYSCALL_RING.len();
+            for k in 0..256usize {
+                let idx = (cur + len - 1 - k) % len;
+                let e = &SYSCALL_RING[idx];
+                let _ = write!(
+                    w,
+                    "      HUNG-SYS {} {} {:#x} {}\n",
+                    e.pid.load(core::sync::atomic::Ordering::Relaxed),
+                    e.nr.load(core::sync::atomic::Ordering::Relaxed),
+                    e.a0.load(core::sync::atomic::Ordering::Relaxed),
+                    e.ret.load(core::sync::atomic::Ordering::Relaxed) as i64,
+                );
+            }
+        }
+    }
+
     // Stack trace
     backtrace::dump_stack();
 
