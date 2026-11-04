@@ -744,9 +744,17 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // tkill(2) takes CALLER-NAMESPACE tids like tgkill(2) (reference
+    // do_tkill -> do_send_specific resolves via find_vpid); identity in
+    // the init namespace.
+    let global_tid = match crate::process::ns::resolve_vtid(tid) {
+        Some(g) => g,
+        None => return -(errno::ESRCH as i64),
+    };
+
     // Find target task (also needed for the sig==0 permission probe)
     // SAFETY: find_task_by_pid returns null if tid not found; result checked below.
-    let task = unsafe { crate::sched::find_task_by_pid(tid) };
+    let task = unsafe { crate::sched::find_task_by_pid(global_tid) };
     if task.is_null() {
         return -(errno::ESRCH as i64);
     }
@@ -767,7 +775,7 @@ pub fn sys_tkill(args: SyscallArgs) -> i64 {
     // tkill/tgkill — and glibc raise(), which is tgkill — must queue the
     // sender's pid so fatal self-raises are attributable at delivery time).
     // Err values are already negative errnos.
-    match crate::signal::send_signal_from_user_tkill(tid, sig) {
+    match crate::signal::send_signal_from_user_tkill(global_tid, sig) {
         Ok(()) => 0,
         Err(e) => e as i64,
     }

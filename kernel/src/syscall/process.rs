@@ -3287,16 +3287,30 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // tgkill(2) takes CALLER-NAMESPACE numbers (reference do_tgkill ->
+    // do_send_specific resolves the tid via find_vpid; musl's raise()
+    // passes getpid()/gettid() results, which are ns-local inside a pid
+    // namespace). Resolve both to global ids before any lookup; identity
+    // in the init namespace.
+    let global_tid = match crate::process::ns::resolve_vtid(tid) {
+        Some(g) => g,
+        None => return -(errno::ESRCH as i64),
+    };
+    let global_tgid = match crate::process::ns::resolve_vpid(tgid) {
+        Some(g) => g,
+        None => return -(errno::ESRCH as i64),
+    };
+
     // Validate target exists and caller has permission, even for sig==0.
     // SAFETY: find_task_by_pid returns valid pointer when non-null; we check null.
-    let target = unsafe { crate::sched::find_task_by_pid(tid) };
+    let target = unsafe { crate::sched::find_task_by_pid(global_tid) };
     if target.is_null() {
         return -(errno::ESRCH as i64);
     }
     // SAFETY: target validated non-null above.
     let target_task = unsafe { &*target };
     // tgid must match: a stale tgid with a live tid is ESRCH (Linux).
-    if target_task.tgid() != tgid {
+    if target_task.tgid() != global_tgid {
         return -(errno::ESRCH as i64);
     }
     if !crate::security::can_send_signal(target_task.cred()) {
@@ -3313,7 +3327,7 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     // and pthread_kill() both land here, so the queued siginfo must carry
     // the sender's pid — otherwise a raise()d fatal signal (SIGTERM
     // suicide etc.) reports si_pid=0 and the sender is unattributable.
-    crate::signal::send_signal_from_user_tkill(tid, sig)
+    crate::signal::send_signal_from_user_tkill(global_tid, sig)
         .map(|_| 0)
         // send_signal_* returns the negated errno in Err (e.g. -EAGAIN
         // when RLIMIT_SIGPENDING is hit on an RT signal). Surface that

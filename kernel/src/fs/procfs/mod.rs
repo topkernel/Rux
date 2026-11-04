@@ -803,6 +803,14 @@ impl ProcFSSuperBlock {
             sysctl::write_overcommit_memory,
             self.alloc_ino(),
         )));
+        // memfd_noexec — per-pidns memfd exec policy (kselftest memfd
+        // sysctl family; chain-max read, floor-guarded write).
+        vm.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"memfd_noexec".to_vec(),
+            sysctl::generate_memfd_noexec,
+            sysctl::write_memfd_noexec,
+            self.alloc_ino(),
+        )));
 
         let fsdir = Arc::new(ProcFSNode::new_dir(b"fs".to_vec(), self.alloc_ino()));
         sys.add_child(fsdir.clone());

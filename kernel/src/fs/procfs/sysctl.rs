@@ -188,6 +188,50 @@ pub fn generate_overcommit_memory() -> Vec<u8> {
     alloc::format!("{}\n", OVERCOMMIT_MEMORY.load(Ordering::Relaxed)).into_bytes()
 }
 
+/// /proc/sys/vm/memfd_noexec — per-pid-namespace memfd exec policy
+/// (reference kernel/pid_sysctl.h pid_mfd_noexec_dointvec_minmax over
+/// pidns_memfd_noexec_scope). Read shows the EFFECTIVE scope: the max of
+/// the caller's active namespace's stored value over its whole ancestor
+/// chain, so a namespace can never display a laxer policy than any
+/// ancestor enforces.
+pub fn generate_memfd_noexec() -> Vec<u8> {
+    let ns = crate::process::ns::current_pid_ns();
+    alloc::format!(
+        "{}\n",
+        crate::process::ns::pidns_memfd_noexec_scope(Some(&ns))
+    )
+    .into_bytes()
+}
+
+/// Write side — reference semantics exactly:
+///   - CAP_SYS_ADMIN required (EPERM otherwise; ns_capable over the ns's
+///     user_ns — our userns is identity, security::capable is the face).
+///   - Value must be within [ancestors' effective scope, 2]
+///     ("You cannot set a lower enforcement value than your parent";
+///     proc_dointvec_minmax's extra1/extra2 bounds → EINVAL outside).
+///   - Stores into the caller's ACTIVE namespace only (children snapshot
+///     the chain max at their creation).
+pub fn write_memfd_noexec(input: &[u8]) -> i32 {
+    if !crate::security::capable(
+        crate::security::capability::CAP_SYS_ADMIN,
+    ) {
+        return -(crate::errno::constants::EPERM as i32);
+    }
+    let ns = crate::process::ns::current_pid_ns();
+    let floor = crate::process::ns::pidns_memfd_noexec_scope(ns.parent.as_ref());
+    match parse_u64(input) {
+        Ok(v) => {
+            if v > 2 || v < floor as u64 {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            ns.memfd_noexec_scope
+                .store(v as i32, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
 pub fn generate_file_max() -> Vec<u8> {
     alloc::format!("{}\n", FILE_MAX.load(Ordering::Relaxed)).into_bytes()
 }

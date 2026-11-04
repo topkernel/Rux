@@ -361,18 +361,41 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
     // sc138: remember the caller-supplied name for the probe printers.
     memfd_name_record(ino, name);
 
-    // Flag resolution mirrors the reference with vm.memfd_noexec scope 0
-    // (its default): a caller passing neither MFD_EXEC nor
-    // MFD_NOEXEC_SEAL gets MFD_EXEC implied (check_sysctl_memfd_noexec,
-    // kernel/mm/memfd.c). The reference's pr_warn_once on such calls is
-    // dmesg-only and intentionally not reproduced (serial spam for every
-    // legacy caller); scope 1/2 enforcement is not implemented (no sysctl
-    // surface yet).
-    let flags = if flags & (MFD_EXEC | MFD_NOEXEC_SEAL) == 0 {
-        flags | MFD_EXEC
-    } else {
-        flags
-    };
+    // check_sysctl_memfd_noexec (kernel/mm/memfd.c), verbatim semantics:
+    // the ACTIVE pid namespace's effective vm.memfd_noexec scope decides
+    // the implied flag for callers passing neither MFD_EXEC nor
+    // MFD_NOEXEC_SEAL:
+    //   0 EXEC           -> MFD_EXEC implied
+    //   1 NOEXEC_SEAL    -> MFD_NOEXEC_SEAL implied
+    //   2 NOEXEC_ENFORCED-> same as 1, and any memfd created WITHOUT
+    //     MFD_NOEXEC_SEAL is rejected with EACCES.
+    // (The imply decision reads the stored-chain max exactly like the
+    // reference's pidns_memfd_noexec_scope; the reference's
+    // pr_warn_ratelimited on the EACCES path is emitted once per boot —
+    // ratelimiting is approximated with a one-shot latch to keep the
+    // serial console clean.)
+    let scope = crate::process::ns::pidns_memfd_noexec_scope(Some(
+        &crate::process::ns::current_pid_ns(),
+    ));
+    let mut flags = flags;
+    if flags & (MFD_EXEC | MFD_NOEXEC_SEAL) == 0 {
+        if scope >= 1 {
+            flags |= MFD_NOEXEC_SEAL;
+        } else {
+            flags |= MFD_EXEC;
+        }
+    }
+    if flags & MFD_NOEXEC_SEAL == 0 && scope >= 2 {
+        static WARNED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::pr_warn!(
+                "memfd_create() requires MFD_NOEXEC_SEAL with vm.memfd_noexec={}\n",
+                scope
+            );
+        }
+        return Err(-(errno::constants::EACCES as i32));
+    }
 
     // Mode matrix, straight from the reference: shmem_file_setup creates
     // the inode S_IFREG|0777 with NO umask (kernel-internal inode, not a

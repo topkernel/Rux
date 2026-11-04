@@ -25,7 +25,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use crate::sync::spinlock::Spinlock;
 
@@ -217,22 +217,30 @@ pub struct PidNamespace {
     /// nsfs inode number.
     pub inum: u64,
     /// Parent (enclosing) namespace; None for the init namespace.
-    #[allow(dead_code)] // structural (level already derived at creation)
     pub parent: Option<Arc<PidNamespace>>,
     /// Depth below the init namespace (init == 0).
     pub level: u32,
     /// Last ns-local pid handed out.
     pub last_pid: AtomicU32,
+    /// vm.memfd_noexec policy scope stored by THIS namespace
+    /// (kernel/pid_namespace.h: int memfd_noexec_scope). 0 EXEC /
+    /// 1 NOEXEC_SEAL / 2 NOEXEC_ENFORCED; inherited from the parent's
+    /// EFFECTIVE (chain-max) scope at namespace creation, written through
+    /// /proc/sys/vm/memfd_noexec — see pidns_memfd_noexec_scope.
+    pub memfd_noexec_scope: AtomicI32,
 }
 
 impl PidNamespace {
     fn new(inum: u64, parent: Option<Arc<PidNamespace>>) -> Self {
         let level = parent.as_ref().map_or(0, |p| p.level + 1);
+        let memfd_noexec_scope =
+            pidns_memfd_noexec_scope(parent.as_ref());
         Self {
             inum,
             parent,
             level,
             last_pid: AtomicU32::new(0),
+            memfd_noexec_scope: AtomicI32::new(memfd_noexec_scope),
         }
     }
 
@@ -334,6 +342,37 @@ pub fn init_pid_ns() -> Arc<PidNamespace> {
     let ns = Arc::new(PidNamespace::new(alloc_ns_inum(), None));
     *guard = Some(ns.clone());
     ns
+}
+
+// ============================================================================
+// vm.memfd_noexec scope (kernel/pid_namespace.h pidns_memfd_noexec_scope)
+// ============================================================================
+
+/// Effective vm.memfd_noexec scope of a pid namespace: the MAXIMUM of the
+/// stored value over the namespace and its whole ancestor chain. `None`
+/// (the init namespace's absent parent) contributes 0, so the init
+/// namespace's effective scope is exactly its stored value. Mirrors the
+/// reference inline verbatim:
+/// ```c
+/// static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
+/// {
+/// 	int scope = MEMFD_NOEXEC_SCOPE_EXEC;
+/// 	for (; ns; ns = ns->parent)
+/// 		scope = max(scope, READ_ONCE(ns->memfd_noexec_scope));
+/// 	return scope;
+/// }
+/// ```
+pub fn pidns_memfd_noexec_scope(ns: Option<&Arc<PidNamespace>>) -> i32 {
+    let mut scope: i32 = 0; // MEMFD_NOEXEC_SCOPE_EXEC
+    let mut cur = ns;
+    while let Some(ns) = cur {
+        let v = ns.memfd_noexec_scope.load(Ordering::Relaxed);
+        if v > scope {
+            scope = v;
+        }
+        cur = ns.parent.as_ref();
+    }
+    scope
 }
 
 pub fn init_net_ns() -> Arc<NetNamespace> {
@@ -583,6 +622,38 @@ pub fn resolve_vpid(local: u32) -> Option<u32> {
                 .as_ref()
                 .map_or(false, |a| Arc::ptr_eq(a, &ns));
             if same_ns && task.ns_local_pid == local && task.pid() == task.tgid() {
+                found = Some(task.pid());
+            }
+        });
+    }
+    found
+}
+
+/// Translate a caller-namespace TID into the global tid — the THREAD-level
+/// variant of resolve_vpid (any task in the caller's namespace matches, not
+/// just thread-group leaders). This is the reference's find_vpid(pid) as
+/// used by do_tgkill/do_send_specific: tgkill(2) takes caller-ns numbers
+/// (musl raise() passes getpid()/gettid() results, which are ns-local), so
+/// resolving them globally misfires inside a pid namespace.
+pub fn resolve_vtid(local: u32) -> Option<u32> {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return Some(local);
+    }
+    let mut found: Option<u32> = None;
+    // SAFETY: callback receives hash-table task pointers; we only read
+    // pid/ns fields that are immutable after fork-enqueue.
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task(|t| {
+            if found.is_some() || t.is_null() {
+                return;
+            }
+            let task = &*t;
+            let same_ns = task
+                .ns_pid
+                .as_ref()
+                .map_or(false, |a| Arc::ptr_eq(a, &ns));
+            if same_ns && task.ns_local_pid == local {
                 found = Some(task.pid());
             }
         });
