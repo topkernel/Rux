@@ -3477,8 +3477,25 @@ pub fn txn_hang_audit() {
         queued: bool,
         ms: u32,
     }
+    // Pass-3 record (39th-successor lever 3 — the FFRT holder chain):
+    // a thread of a hung server's process carrying a SENDER entry on its
+    // txn stack is a nested sync-IPC client parked in BINDER_WRITE_READ —
+    // the futex-census BLIND SPOT (fuxstuck sees futex parks; a BWR park
+    // is an ioctl). When the hung handler's FFRT mutex is held by such a
+    // thread, this names it.
+    struct Holder {
+        pid: u32,
+        tid: u32,
+        txn_id: u64,
+        code: u32,
+        to_pid: u32,
+        to_tid: u32,
+        todo: usize,
+        looper: u32,
+    }
     let mut hung: alloc::vec::Vec<Hung> = alloc::vec::Vec::new();
     let mut outs: alloc::vec::Vec<Out> = alloc::vec::Vec::new();
+    let mut holders: alloc::vec::Vec<Holder> = alloc::vec::Vec::new();
     let mut hung_pids: [u32; 4] = [0; 4];
     let mut hung_n = 0usize;
     {
@@ -3620,6 +3637,37 @@ pub fn txn_hang_audit() {
                         // SAFETY: to_tid read under WORLD.
                         let ttid = unsafe { x.to_tid() }.unwrap_or(0);
                         scan(x, x.to_proc.pid, ttid);
+                    }
+                }
+            }
+            // Pass 3: collect the BWR-parked nested clients inside the
+            // hung servers' processes (see the Holder record). Bounded to
+            // 8 — one line each at print time.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                if !is_hung_proc(&hung_pids[..hung_n], proc.pid) {
+                    continue;
+                }
+                'th: for t in &proc.im().threads {
+                    for x in &t.st().txn_stack {
+                        // SAFETY: to_tid read under WORLD.
+                        if unsafe { x.to_tid() } == Some(t.tid) {
+                            continue; // server-side entry, not a client park
+                        }
+                        if holders.len() >= 8 {
+                            break 'th;
+                        }
+                        let th = t.st();
+                        holders.push(Holder {
+                            pid: proc.pid,
+                            tid: t.tid,
+                            txn_id: x.id,
+                            code: x.code,
+                            to_pid: x.to_proc.pid,
+                            to_tid: unsafe { x.to_tid() }.unwrap_or(0),
+                            todo: th.todo.len(),
+                            looper: th.looper,
+                        });
                     }
                 }
             }
@@ -3967,6 +4015,71 @@ pub fn txn_hang_audit() {
             o.ttid,
             if o.queued { "queue" } else { "exec" },
             o.ms
+        );
+    }
+    // Pass-3 prints (the FFRT holder chain): one line per BWR-parked
+    // nested client inside a hung server's process, WITH its current
+    // syscall posture (entry-frame read — same contract as the server
+    // line above; sys=16 ioctl BWR confirms the park, sys=202 futex
+    // means it moved on). These threads are the futex-census blind
+    // spot: if the hung handler's FFRT mutex is held by one of them,
+    // the chain is handler -> mutex -> holder -> nested BWR -> peer.
+    for hl in &holders {
+        let t = unsafe { crate::sched::find_task_by_pid(hl.tid) };
+        let (state, sys, a0, a1) = if t.is_null() {
+            (0u64, 0u64, 0u64, 0u64)
+        } else {
+            // SAFETY: diagnostic reads of the task's own fields and its
+            // mapped kernel stack (sleep_snapshot contract, sc261).
+            let tk = unsafe { &*t };
+            let state = tk.state().bits() as u64;
+            match tk.kernel_stack_top_checked() {
+                None => (state, 0, 0, 0),
+                Some(top) => {
+                    #[cfg(feature = "x86_64")]
+                    let (sys, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+                    };
+                    #[cfg(feature = "riscv64")]
+                    let (sys, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).a7, (*regs).a0, (*regs).a1) }
+                    };
+                    #[cfg(feature = "aarch64")]
+                    let (sys, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).syscallno, (*regs).regs[0], (*regs).regs[1]) }
+                    };
+                    (state, sys as u64, a0 as u64, a1 as u64)
+                }
+            }
+        };
+        let _ = writeln!(
+            w,
+            "TXN-HANG-HLD pid {} tid {} ({}) holds-pending txn{} code{} -> pid {} tid {}: state={:#x} sys={} a0={:#x} a1={:#x} todo={} looper={:#x}",
+            hl.pid,
+            hl.tid,
+            comm_of(t),
+            hl.txn_id,
+            hl.code,
+            hl.to_pid,
+            hl.to_tid,
+            state,
+            sys,
+            a0,
+            a1,
+            hl.todo,
+            hl.looper
         );
     }
 }
