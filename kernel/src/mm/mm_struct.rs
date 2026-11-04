@@ -936,6 +936,14 @@ impl MmStruct {
         self.vma_manager.read()
     }
 
+    /// Try-acquire VMA read lock (None when contended). Diagnostic
+    /// callers in softirq context (the fuxstuck census) skip their
+    /// decode on contention instead of spinning IF=0 against a writer.
+    #[inline]
+    pub fn vma_try_read(&self) -> Option<crate::sync::rwlock::RwSpinlockReadGuard<'_, VmaManager>> {
+        self.vma_manager.try_read()
+    }
+
     /// Acquire VMA write lock
     #[inline]
     /// Pin a file reference for a file-backed VMA (Linux vm_file hold).
