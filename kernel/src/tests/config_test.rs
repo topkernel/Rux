@@ -53,6 +53,13 @@ pub fn test_config() {
     // packed-slab slot overflowed on deep symlink-chain recursion and
     // lying-slot wake-refusal under 6-child contention.
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB (all arches)");
+    // kernel_stack_size: 128KB on every arch since 8734020c (the PICK-
+    // PC-ZERO round doubled the old 80KB/128KB split uniformly). The
+    // stale x86_64-gated 80KB pin below that commit made
+    // `PLATFORM=x86_64 make test` fail on main (1312/1313); it is
+    // updated here to the current intended constant so the x86_64 unit
+    // gate is usable again.
+    test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
 
     // Test 5: Scheduler
     test_assert_eq!(KERNEL_HZ, 100, "KERNEL_HZ == 100");
