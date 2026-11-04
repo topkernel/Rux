@@ -502,6 +502,13 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
+        // 36th successor — comm of the parked task, filled by phase B
+        // from the same task pointer. Until now naming a park's owner
+        // needed host-side tgid->ServiceStart correlation; with the comm
+        // inline, one FUX-STUCK line names the owner directly (grep
+        // 'samgr.*800194.*u2v=' picks the wedge signature out of the
+        // burst without post-hoc pid correlation).
+        comm: [u8; 16],
         // 33rd successor — wait-site map. Futex syscall args from the
         // SAME entry frame (op/val/timeout) plus the user-space wait
         // site: the uaddr's VMA decode (which mapping, offset inside
@@ -581,6 +588,7 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
+                        comm: [0; 16],
                         fop: 0,
                         fval: 0,
                         fto: 0,
@@ -634,6 +642,7 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
+                s.comm = *tk.comm();
                 let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
@@ -910,6 +919,7 @@ pub fn futex_stuck_census() {
         min_age: u32,
         any_woken: bool,
         rep_tid: u32,
+        rep_comm: [u8; 16],
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
@@ -959,6 +969,7 @@ pub fn futex_stuck_census() {
                         min_age: s.age_s,
                         any_woken: s.woken,
                         rep_tid: s.tid,
+                        rep_comm: s.comm,
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
@@ -1035,10 +1046,19 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
+        // comm_str discipline (task.rs): arbitrary bytes, lossy-decode —
+        // never hand raw bytes to char-aware formatting.
+        let comm_len = g
+            .rep_comm
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(g.rep_comm.len());
+        let comm_s = alloc::string::String::from_utf8_lossy(&g.rep_comm[..comm_len]);
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
+            comm_s,
             g.rep_tid,
             g.uaddr,
             g.rep_mm,
