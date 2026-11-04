@@ -25,6 +25,8 @@ use crate::process::task::{Pid, Task, TaskState};
 const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
 /// TID mask of a futex word (low 30 bits hold the owner TID).
 const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+/// FUTEX_WAITERS bit (bit 31) — preserved by the death mark.
+const FUTEX_WAITERS: u32 = 0x8000_0000;
 /// Max entries walked per robust list (defensive bound, Linux uses
 /// ROBUST_LIST_LIMIT=2048 per chain).
 const ROBUST_LIST_LIMIT: u32 = 2048;
@@ -67,6 +69,13 @@ unsafe fn exit_robust_list(task: *mut Task) {
     };
 
     // Process one entry: mark OWNER_DIED if we still own it, wake waiters.
+    // Reference parity (kernel/futex/core.c handle_futex_death 695-720):
+    // the death mark is `(uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED` — the
+    // dying TID is CLEARED so an inheriting waiter (PI lock_pi take-over
+    // or plain re-check) sees an unowned word, exactly like the
+    // reference. The old `v | FUTEX_OWNER_DIED` kept the dead tid in the
+    // word and left every PI waiter looping on an owner that could never
+    // release.
     // SAFETY: all user accesses go through the exception-table helpers.
     unsafe fn handle_robust_entry(entry: usize, futex_offset: i64, tid: u32, mm_id: usize) {
         use crate::arch::uaccess::{get_user, put_user};
@@ -79,7 +88,7 @@ unsafe fn exit_robust_list(task: *mut Task) {
             None => return, // bad pointer — skip entry
         };
         if v & FUTEX_TID_MASK == tid {
-            let _ = put_user(uaddr as *mut u32, v | FUTEX_OWNER_DIED);
+            let _ = put_user(uaddr as *mut u32, (v & FUTEX_WAITERS) | FUTEX_OWNER_DIED);
             crate::sync::futex::futex_wake_in_mm(
                 uaddr as usize,
                 mm_id,
@@ -87,6 +96,26 @@ unsafe fn exit_robust_list(task: *mut Task) {
                 1,
                 u32::MAX,
             );
+        }
+    }
+
+    // The list_op_pending entry with an already-released word (owner==0):
+    // the dying thread was killed between the userspace unlock and the
+    // FUTEX_WAKE syscall — reference handle_futex_death's pending_op case
+    // (700-703) wakes one waiter WITHOUT touching the word.
+    // SAFETY: exception-table user reads.
+    unsafe fn handle_pending_entry(pending: usize, futex_offset: i64, tid: u32, mm_id: usize) {
+        use crate::arch::uaccess::get_user;
+        let uaddr = (pending as i64).wrapping_add(futex_offset) as u64;
+        if uaddr & 0x3 != 0 {
+            return;
+        }
+        let v: u32 = match get_user(uaddr as *const u32) {
+            Some(v) => v,
+            None => return,
+        };
+        if v & FUTEX_TID_MASK == 0 {
+            crate::sync::futex::futex_wake_in_mm(uaddr as usize, mm_id, 0, 1, u32::MAX);
         }
     }
 
@@ -114,10 +143,12 @@ unsafe fn exit_robust_list(task: *mut Task) {
             walk_robust_chain(first as usize, head, futex_offset, my_tid, mm_id);
         }
         // Pending list (held-when-killed locks): pointer at head+16; the
-        // pointed-to node is itself an entry.
+        // pointed-to node is itself an entry. Its word may already be
+        // released (the unlock-syscall race) — handle it with the
+        // reference's pending_op semantics instead of the list walk.
         if let Some(pending) = get_user((head + 16) as *const u64) {
             if pending as usize != 0 {
-                walk_robust_chain(pending as usize, head, futex_offset, my_tid, mm_id);
+                handle_pending_entry(pending as usize, futex_offset, my_tid, mm_id);
             }
         }
     }
