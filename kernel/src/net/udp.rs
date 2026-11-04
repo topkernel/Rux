@@ -1402,6 +1402,35 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
     Some(udp_hdr)
 }
 
+/// RFC 768 zero-escape parity for UDP-over-IPv4 checksum verification.
+///
+/// `udp_checksum` computes the TRANSMITTER-side value (complement of the
+/// one's-complement fold, WITHOUT the zero escape), while a conforming
+/// sender transmits 0xFFFF whenever that value computes to 0x0000 (RFC
+/// 768: "If the computed checksum is zero, it is transmitted as all
+/// ones") — this stack's own TX builders do exactly that
+/// (udp_build_locked / udp_build_locked6).
+///
+/// The reference verifies by SUMMATION — the fold including the stated
+/// field must be all-ones, fold(S + T) == 0xFFFF — which accepts both
+/// representations of the same checksum. This predicate is exactly
+/// equivalent to that test on every input pair: fold(S + T) == 0xFFFF
+/// holds iff S + T == 0xFFFF (T == !S == computed, no carry) or
+/// S + T == 0x1FFFE with the end-around carry folding to 0xFFFF, whose
+/// only in-range solution is S == T == 0xFFFF (computed == 0, the
+/// escape). Callers must skip verification entirely for stated == 0
+/// (RFC 768 "no checksum") before consulting this.
+///
+/// The r13 lat_udp strand conviction: the previous plain
+/// `computed != stated` inequality silently dropped every zero-escape
+/// datagram — a 1-in-65536 content collision (fold(S) == 0xFFFF) that
+/// stranded the lmbench ping child mid-benchmark (net:pkt_drop
+/// reason=8 captures r13o/r13p: computed=0x0000 vs stated=0xFFFF,
+/// datagram byte-identical to the net:lo_xmit build snapshot).
+pub fn udp_csum_accepts(computed: u16, stated: u16) -> bool {
+    computed == stated || (computed == 0 && stated == 0xFFFF)
+}
+
 /// Receive and process UDP packet
 ///
 /// # Arguments
@@ -1439,7 +1468,13 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // udp_checksum expects network-order IPs (matching the TX callers);
         // udp_rcv receives host-order values from ip_rcv.
         let computed = udp_checksum(src_ip.to_be(), dest_ip.to_be(), udp_hdr, data);
-        if computed != udp_hdr.check() {
+        let stated = udp_hdr.check();
+        // RFC 768 zero-escape parity — see udp_csum_accepts (r13 lat_udp
+        // strand conviction: the old plain inequality silently dropped
+        // every zero-escape datagram, net:pkt_drop reason=8 captures
+        // r13o/r13p — computed=0x0000 vs stated=0xFFFF, datagram
+        // byte-identical to the net:lo_xmit build snapshot).
+        if !udp_csum_accepts(computed, stated) {
             // net:pkt_drop (r13 hunt): stated (in-flight) vs computed, with
             // the skb pointer — compare the stated value against the
             // net:lo_xmit ucsum snapshot for THIS skb: equal convicts a
@@ -1449,7 +1484,7 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
                 skb.data as u64,
                 2,
                 8,
-                udp_hdr.check(),
+                stated,
                 computed,
             );
             // Checksum mismatch, silently drop packet
@@ -1674,5 +1709,61 @@ mod tests {
 
         let csum = udp_checksum(shdr, dhdr, &uhdr, data);
         assert!(csum != 0 || csum == 0xFFFF);
+    }
+
+    #[test]
+    fn test_udp_csum_zero_escape_parity() {
+        // Build a datagram whose transmitter-side checksum computes to
+        // 0x0000 (fold == 0xFFFF): vary the last payload word — exactly
+        // one word hits it (verified: 0xba96 for these constants).
+        let shdr = 0x7F000001u32;
+        let dhdr = 0x7F000001u32;
+        let mut uhdr = UdpHdr::default();
+        uhdr.source = 34298u16.to_be();
+        uhdr.dest = 32768u16.to_be();
+        let data = [0x41u8, 0x42, 0x43, 0x44];
+        uhdr.len = ((UDP_HLEN + data.len()) as u16).to_be();
+        uhdr.check = 0;
+
+        let mut found = None;
+        for w in 0u16..=u16::MAX {
+            let mut d = data;
+            d[2..4].copy_from_slice(&w.to_be_bytes());
+            if udp_checksum(shdr, dhdr, &uhdr, &d) == 0 {
+                found = Some(w);
+                break;
+            }
+        }
+        let w = found.expect("some payload word forces a zero checksum");
+
+        // The TX convention (udp_build_locked): transmit 0xFFFF for the
+        // computed 0x0000. The RX parity must accept it — the reference's
+        // summation test folds (0xFFFF + 0xFFFF) == 0xFFFF.
+        let mut d = data;
+        d[2..4].copy_from_slice(&w.to_be_bytes());
+        let computed = udp_checksum(shdr, dhdr, &uhdr, &d);
+        assert_eq!(computed, 0);
+        assert!(udp_csum_accepts(computed, 0xFFFF));
+
+        // Equivalence sweep against the reference's summation test,
+        // fold(S + T) == 0xFFFF with S = !computed, for every computed
+        // value and the stated values that matter (identity, complement,
+        // the escape, and zero): the predicate and the reference accept
+        // exactly the same set.
+        for x in 0u16..=u16::MAX {
+            for t in [x, !x, 0xFFFF, 0] {
+                let s = !x;
+                let mut sum = s as u32 + t as u32;
+                while sum >> 16 != 0 {
+                    sum = (sum & 0xFFFF) + (sum >> 16);
+                }
+                let reference_accepts = sum == 0xFFFF;
+                assert_eq!(
+                    udp_csum_accepts(x, t),
+                    reference_accepts,
+                    "computed={x:#06x} stated={t:#06x}"
+                );
+            }
+        }
     }
 }
