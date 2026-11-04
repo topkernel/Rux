@@ -1,0 +1,291 @@
+diff --git a/kernel/src/fs/ext4/namei.rs b/kernel/src/fs/ext4/namei.rs
+index 86b04439..93a6ffd6 100644
+--- a/kernel/src/fs/ext4/namei.rs
++++ b/kernel/src/fs/ext4/namei.rs
+@@ -86,7 +86,25 @@ unsafe fn read_block_to_vec(device: *const crate::drivers::blkdev::GenDisk, bloc
+ /// Write a Vec<u8> to a block
+ // SAFETY: device pointer is valid; bio functions handle buffer lifecycle
+ unsafe fn write_block_from_vec(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64, data: &[u8]) -> Result<(), i32> {
+-    let bh = bio::bread(device, blocknr).ok_or(errno::Errno::IOError.as_neg_i32())?;
++    // Full-block overwrite: fetch the buffer WITHOUT reading it from disk
++    // (perf: the plain bread here read EVERY block it was about to
++    // completely overwrite — a fresh dir block allocated by mkdir was
++    // READ from disk first, one synchronous device round trip per create,
++    // the ~3ms p6_mkdrmdir floor after the publication-drain fix. The
++    // reference kernel never reads a block it is about to fully rewrite).
++    // Partial writes still take the read path — they splice into existing
++    // content. The buffer cache's block size is fixed at 4 KiB
++    // (bio::get_block_cache), so >=4096 is full coverage.
++    // SAFETY: getblk_overwrite returns a valid BufferHead (cached or
++    // freshly created zeroed+dirty); the full-block copy below overwrites
++    // every byte, so the never-read content never becomes observable.
++    let full_block = data.len() >= 4096;
++    let bh = if full_block {
++        bio::getblk_overwrite(device, blocknr)
++    } else {
++        bio::bread(device, blocknr)
++    }
++    .ok_or(errno::Errno::IOError.as_neg_i32())?;
+ 
+     // Get mutable reference to buffer head
+     let bh_ref = &mut *bh;
+@@ -537,8 +555,23 @@ fn ext4_add_entry_locked(
+         0
+     };
+ 
+-    // Iterate through directory blocks looking for space
+-    for block_idx in 0..num_blocks as u64 {
++    // Iterate through directory blocks looking for space — TAIL BLOCK
++    // FIRST, and the space SEARCH runs in place on the cached buffer.
++    //
++    // Scan order (perf, p6_mkdrmdir anatomy): free space in a directory
++    // under churn is overwhelmingly in the LAST block (appends grow the
++    // tail; a fresh delete frees the slot it just appended). A forward
++    // scan made every mkdir/rmdir/create walk the whole directory — the
++    // pbench tree's ~63 blocks at ~50us/block (4 KiB read + clone + parse
++    // per block) was the 3-4ms residual floor after the publication-drain
++    // fix. Any slot is a correct host (the on-disk format does not prefer
++    // one), so trying the tail first only changes which slot wins.
++    //
++    // In-place search (no b_data.clone() per scanned block): the clone
++    // was a 4 KiB kernel-heap alloc + copy per block per operation —
++    // 60+ allocs per create into a large directory. Only the block that
++    // actually hosts the entry is cloned (for the mutation below).
++    for block_idx in (0..num_blocks as u64).rev() {
+         let block_nr = match get_dir_block_nr(fs, &dir, block_idx) {
+             Ok(nr) => nr,
+             Err(_) => {
+@@ -550,27 +583,25 @@ fn ext4_add_entry_locked(
+             continue;
+         }
+ 
+-        let block_data = unsafe {
++        // Try to find space in this block, in place. metadata_csum blocks
++        // reserve the final 12 bytes for the dir tail; entry placement must
++        // stay short of it. (Declared before the loop — the fresh-block path
++        // below shares it.)
++        let found = unsafe {
+             let bh = bio::bread(fs.device, block_nr)
+                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
+-            let data = (*bh).b_data.clone();
++            let hit = find_entry_space(&(*bh).b_data, name.len(), block_size, tail_reserve)
++                .map(|off| (off, (*bh).b_data.clone()));
+             bio::brelse(bh);
+-            data
++            hit
+         };
+-
+-        // Try to find space in this block. metadata_csum blocks reserve
+-        // the final 12 bytes for the dir tail; entry placement must stay
+-        // short of it. (Declared before the loop — the fresh-block path
+-        // below shares it.)
+-        if let Some(offset) =
+-            find_entry_space(&block_data, name.len(), block_size, tail_reserve)
+-        {
++        if let Some((offset, block_data)) = found {
+             // Found space, create entry. add_entry_to_block now reports
+             // "no space" (Err) when the selected slot cannot host the
+             // entry (e.g. a live entry whose slack is exactly the used
+             // length); on that, try the NEXT block instead of returning
+             // a success that never linked anything (oh-svc cook bug).
+-            let mut new_block = block_data.clone();
++            let mut new_block = block_data;
+             match add_entry_to_block(
+                 &mut new_block,
+                 offset,
+@@ -730,6 +761,55 @@ fn name_chunks_eq(a: &[u8], b: &[u8]) -> bool {
+     true
+ }
+ 
++/// Scan one directory block (in place, no copy) for an entry whose name
++/// equals `name`. Returns (offset, ino) on hit. Shared by the linear
++/// lookup paths (find_dir_entry and friends).
++fn scan_dir_block_for_name(block_data: &[u8], name: &[u8], block_size: usize) -> Option<(usize, u32)> {
++    let mut offset = 0;
++    while offset + 8 <= block_size {
++        let rec_len = u16::from_le_bytes([
++            block_data[offset + 4],
++            block_data[offset + 5],
++        ]);
++
++        if rec_len == 0 {
++            break;
++        }
++
++        let ino = u32::from_le_bytes([
++            block_data[offset],
++            block_data[offset + 1],
++            block_data[offset + 2],
++            block_data[offset + 3],
++        ]);
++
++        if ino == 0 {
++            offset += rec_len as usize;
++            continue;
++        }
++
++        let entry_name_len = block_data[offset + 6] as usize;
++
++        // Compare name. Leg-56B Option A (perf-report 8.10.27): the
++        // entry loop's per-candidate cost was a memcmp CALL per entry
++        // (the grind's memcmp/bcmp page share) — most entries mismatch
++        // in the first 8 bytes, so compare full u64 chunks inline
++        // first (equality of full-width chunks is endian-independent:
++        // both sides read the same order) and only byte-compare the
++        // 0-7 byte tail. Names are 8-20 bytes in the load-phase shape;
++        // the call+prologue was a third of the compare cost.
++        if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
++            let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
++            if name_chunks_eq(entry_name, name) {
++                return Some((offset, ino));
++            }
++        }
++
++        offset += rec_len as usize;
++    }
++    None
++}
++
+ fn find_entry_space(
+     block_data: &[u8],
+     name_len: usize,
+@@ -1213,24 +1293,21 @@ fn ext4_mkdir_no_journal(
+     parent.i_ctime = sec;
+     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
+ 
+-    // Best-effort publication of THIS mkdir's own deferred entry record
+-    // (per-cookie scoped flush: the new inode's table/bitmap blocks,
+-    // then the directory entry block). NOT fatal to the syscall. The old
+-    // whole-cache sync_buffers here made every mkdir pay the WORLD's
+-    // dirty buffers plus the global publication backlog — the
+-    // storage-daemon D-state family under provisioning churn (leg-29A
+-    // adjudication). Foreign records and unrelated dirty blocks ride the
+-    // buffer-cache write-back as on any write-back mount; the per-block
+-    // guards keep their ordering whenever they do reach disk. Foreign
+-    // devices are never touched, so the r8 mkdtemp ENXIO storm shape
+-    // (mkdir inheriting a dead loop device's writeback error) cannot
+-    // recur here either.
+-    if let Err(e) = bio::flush_publications_scoped() {
+-        crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
+-    }
+-    // Leg-55: counted even on the flushed path — the lazy-variant
+-    // follow-up reads this against the phase mix (the flush is a
+-    // fixed cost per mkdir; see the reversal note in the ledger).
++    // Per-op publication of THIS mkdir's deferred entry record is GONE
++    // (perf, the e3c1ec35/fab0e029 saga resolved by batching): the scoped
++    // drain here cost 5-8 synchronous block round trips at EVERY mkdir
++    // return — p6_mkdrmdir 15.5-30ms vs the reference kernel's ~150us
++    // (pa85: journal/no-journal arms flat, the drain owned the cost; the
++    // drain's only product was durability POSIX does not promise — entry
++    // durability belongs to fsync(dirfd)). Ordering is NOT lost: the
++    // records stay queued with their H1/H2 guards enforced at every
++    // out-of-band write (sync_dirty_buffer, eviction Phase 4, journal
++    // write-through), and the queue is kept short by the op-boundary
++    // batch drain (bio::publication_batch_drain, PUB_BATCH=64) that
++    // every entry op pays amortized instead of per-op — the fab0e029
++    // lesson: deleting this drain WITHOUT the batch bound pushed the
++    // deferred bill onto the next constrained writer (unlink 100x).
++    // Durability points remain fsync/sync(2)/eviction/commit.
+     crate::dfx::fsw::note_pub_lazy();
+ 
+     Ok(new_ino)
+@@ -1766,59 +1843,53 @@ fn find_dir_entry(
+         0
+     };
+ 
+-    for block_idx in 0..num_blocks as u64 {
++    // Bidirectional block walk (perf, same anatomy as the add-entry
++    // tail-first fix): a linear-from-0 search pays the FULL directory
++    // walk for every entry that lives near the tail — under churn
++    // (create/delete loops, rename targets) recently created entries are
++    // appended at the tail, and every rmdir/unlink/rename of them walked
++    // all ~63 blocks of the pbench tree. Names are unique within a
++    // directory (creators check existence first), so the search order
++    // only decides SPEED, not the result: alternating from both ends
++    // finds tail-resident and head-resident entries in 1-2 blocks and
++    // halves the worst case (middle of the directory).
++    let n = num_blocks as u64;
++    let mut lo = 0u64;
++    let mut hi = n; // exclusive
++    let mut from_tail = true;
++    while lo < hi {
++        let block_idx = if from_tail { hi - 1 } else { lo };
++        if from_tail {
++            hi -= 1;
++        } else {
++            lo += 1;
++        }
++        from_tail = !from_tail;
++
+         let block_nr = get_dir_block_nr(fs, dir_inode, block_idx)?;
+ 
+         if block_nr == 0 {
+             continue;
+         }
+ 
+-        let block_data = unsafe {
+-            read_block_to_vec(fs.device, block_nr, block_size)?
++        // In-place scan of the cached buffer (perf: the old
++        // read_block_to_vec cloned 4 KiB per block per lookup — a
++        // kernel-heap alloc+copy for every block of every lookup into a
++        // large directory).
++        // SAFETY: bread returns a valid BufferHead pointer; b_data is a
++        // block_size-byte Vec; brelse releases the cache reference after
++        // the scan (the hit path copies nothing — it returns positions).
++        let scan = unsafe {
++            let bh = match bio::bread(fs.device, block_nr) {
++                Some(b) => b,
++                None => return Err(errno::Errno::IOError.as_neg_i32()),
++            };
++            let r = scan_dir_block_for_name(&(*bh).b_data, name, block_size);
++            bio::brelse(bh);
++            r
+         };
+-
+-        // Search for entry in this block
+-        let mut offset = 0;
+-        while offset + 8 <= block_size {
+-            let rec_len = u16::from_le_bytes([
+-                block_data[offset + 4],
+-                block_data[offset + 5],
+-            ]);
+-
+-            if rec_len == 0 {
+-                break;
+-            }
+-
+-            let ino = u32::from_le_bytes([
+-                block_data[offset],
+-                block_data[offset + 1],
+-                block_data[offset + 2],
+-                block_data[offset + 3],
+-            ]);
+-
+-            if ino == 0 {
+-                offset += rec_len as usize;
+-                continue;
+-            }
+-
+-            let entry_name_len = block_data[offset + 6] as usize;
+-
+-            // Compare name. Leg-56B Option A (perf-report 8.10.27): the
+-            // entry loop's per-candidate cost was a memcmp CALL per entry
+-            // (the grind's memcmp/bcmp page share) — most entries mismatch
+-            // in the first 8 bytes, so compare full u64 chunks inline
+-            // first (equality of full-width chunks is endian-independent:
+-            // both sides read the same order) and only byte-compare the
+-            // 0-7 byte tail. Names are 8-20 bytes in the load-phase shape;
+-            // the call+prologue was a third of the compare cost.
+-            if entry_name_len == name.len() && offset + 8 + entry_name_len <= block_data.len() {
+-                let entry_name = &block_data[offset + 8..offset + 8 + entry_name_len];
+-                if name_chunks_eq(entry_name, name) {
+-                    return Ok((block_nr, offset, ino));
+-                }
+-            }
+-
+-            offset += rec_len as usize;
++        if let Some((offset, ino)) = scan {
++            return Ok((block_nr, offset, ino));
+         }
+     }
+ 

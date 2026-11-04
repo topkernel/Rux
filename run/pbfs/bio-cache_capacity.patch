@@ -1,0 +1,25 @@
+diff --git a/kernel/src/fs/bio.rs b/kernel/src/fs/bio.rs
+index 7dad7712..26cddfa3 100644
+--- a/kernel/src/fs/bio.rs
++++ b/kernel/src/fs/bio.rs
+@@ -1175,7 +1203,19 @@ fn get_block_cache() -> &'static BlockCache {
+     if !CACHE_INIT.load(Ordering::Acquire) {
+         let _guard = CACHE_INIT_LOCK.lock();
+         if !CACHE_INIT.load(Ordering::Acquire) {
+-            let cache = BlockCache::new(64, 1024, 4096);
++            // Capacity: 8192 entries (32 MiB at 4K blocks, allocated ON
++            // DEMAND — an entry exists only once its block is first read).
++            // The old 1024-entry/4 MiB cache evicted constantly under any
++            // real metadata working set (pbench P6 tree ~1300 blocks:
++            // ~2.5 evictions per mkdir+rmdir pair, ~46% of victims dirty —
++            // each dirty eviction is a synchronous round trip INSIDE the
++            // caller's bread, plus a publication-constraint guard pass).
++            // The reference kernel caches all free memory; 8 MiB/2048 was
++            // still churny, 32 MiB/8192 covers GNOME-class small loads.
++            // Buckets 64 -> 2048 (power of two for the hash mask): at 8192
++            // entries the old 64 buckets averaged 128-long chains, making
++            // every bread/get/peek walk tens of pointers.
++            let cache = BlockCache::new(2048, 8192, 4096);
+             // SAFETY: we hold the lock and CACHE_INIT is false, so no other
+             // CPU can access BLOCK_CACHE concurrently.
+             unsafe { BLOCK_CACHE = Some(cache); }

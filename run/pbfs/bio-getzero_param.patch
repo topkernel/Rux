@@ -1,0 +1,85 @@
+diff --git a/kernel/src/fs/bio.rs b/kernel/src/fs/bio.rs
+index 7dad7712..26cddfa3 100644
+--- a/kernel/src/fs/bio.rs
++++ b/kernel/src/fs/bio.rs
+@@ -834,6 +834,27 @@ impl BlockCache {
+     /// contents are irrelevant (freshly allocated blocks being zeroed) —
+     /// reading through this API would fabricate zeros for real data.
+     fn get_zero(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
++        self.get_zero_impl(device, blocknr, true)
++    }
++
++    /// Full-block-overwrite fetch, no disk read on miss and NO zeroing on
++    /// hit: the caller overwrites every byte before anyone can observe the
++    /// buffer (same visibility class as any in-place metadata edit — this
++    /// is exactly what the plain bread + copy path did, minus the read of
++    /// data that is about to be discarded). Used by metadata writers that
++    /// rewrite whole blocks (directory blocks, bitmaps, group descriptors):
++    /// reading a just-allocated directory block from disk before rewriting
++    /// it cost one synchronous round trip per create.
++    fn get_overwrite(&self, device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
++        self.get_zero_impl(device, blocknr, false)
++    }
++
++    fn get_zero_impl(
++        &self,
++        device: *const blkdev::GenDisk,
++        blocknr: u64,
++        zero_on_hit: bool,
++    ) -> Option<*mut BufferHead> {
+         // SAFETY: same entry-lifetime guarantees as get(); the BufferHead is
+         // either found in the cache (pinned via get()) or freshly created and
+         // inserted below, never freed while the caller holds a reference.
+@@ -862,18 +883,22 @@ impl BlockCache {
+                         if !(*entry.bh).get_state().is_uptodate() {
+                             continue;
+                         }
+-                        // HIT: zero it. The caller just ALLOCATED this
+-                        // block for a partial-block first write and needs
+-                        // the unwritten span to read back as zeros — the
+-                        // cache may still hold the block's PREVIOUS life
+-                        // (freed by truncate, reallocated from the bitmap
+-                        // without an intervening eviction), and returning
+-                        // that stale content spliced old file data around
+-                        // the new write (LTP ftest05 "bad verify should be
+-                        // 0" read back a previous iteration's pattern).
+-                        // Dirty so the zeros also reach disk.
+-                        (*entry.bh).b_data.fill(0);
+-                        (*entry.bh).set_state_bit(BufferState::BH_Dirty);
++                        // HIT: for get_zero callers, zero it. The caller just
++                        // ALLOCATED this block for a partial-block first
++                        // write and needs the unwritten span to read back
++                        // as zeros — the cache may still hold the block's
++                        // PREVIOUS life (freed by truncate, reallocated from
++                        // the bitmap without an intervening eviction), and
++                        // returning that stale content spliced old file
++                        // data around the new write (LTP ftest05 "bad
++                        // verify should be 0" read back a previous
++                        // iteration's pattern). Dirty so the zeros also
++                        // reach disk. get_overwrite callers skip this —
++                        // they rewrite every byte themselves.
++                        if zero_on_hit {
++                            (*entry.bh).b_data.fill(0);
++                            (*entry.bh).set_state_bit(BufferState::BH_Dirty);
++                        }
+                         (*entry.bh).get();
+                         return Some(entry.bh);
+                     }
+@@ -917,10 +942,13 @@ impl BlockCache {
+                             current = (*cp).hash_next;
+                             continue;
+                         }
+-                        // Duplicate insert lost the race: same zero-on-hit
+-                        // contract as Phase 1 (see the comment there).
+-                        (*(*cp).bh).b_data.fill(0);
+-                        (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
++                        // Duplicate insert lost the race: same contract as
++                        // Phase 1 (zero for get_zero callers; untouched for
++                        // get_overwrite callers, who rewrite every byte).
++                        if zero_on_hit {
++                            (*(*cp).bh).b_data.fill(0);
++                            (*(*cp).bh).set_state_bit(BufferState::BH_Dirty);
++                        }
+                         (*(*cp).bh).get();
+                         let _ = Box::from_raw(entry_ptr);
+                         return Some((*cp).bh);

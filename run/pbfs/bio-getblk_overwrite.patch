@@ -1,0 +1,19 @@
+diff --git a/kernel/src/fs/bio.rs b/kernel/src/fs/bio.rs
+index 7dad7712..26cddfa3 100644
+--- a/kernel/src/fs/bio.rs
++++ b/kernel/src/fs/bio.rs
+@@ -1203,6 +1243,14 @@ pub fn getblk_zero(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut
+     get_block_cache().get_zero(device, blocknr)
+ }
+ 
++/// Fetch a block for a full-block overwrite: no disk read on a miss (the
++/// buffer is created zeroed and dirty) and no zeroing on a hit. The caller
++/// MUST overwrite the whole block before the buffer becomes observable.
++/// See BlockCache::get_overwrite.
++pub fn getblk_overwrite(device: *const crate::drivers::blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
++    get_block_cache().get_overwrite(device, blocknr)
++}
++
+ /// Invalidate every cached buffer of `device` without writing anything
+ /// back (loop detach — see BlockCache::invalidate_device).
+ pub fn invalidate_device(device: *const blkdev::GenDisk) {
