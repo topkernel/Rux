@@ -1,0 +1,31 @@
+# 116pb1 — Tier-2 debug-KVM board medians (2026-11-04, main@12c5e326 debug bzImage md5 696e6c43)
+# rig: test/pbench_boot.py --accel kvm, q35 smp2 2G, foreign_qemus=6, DONE rc=0 at t=63s
+# vs SP-7 KVM debug anchor (median-of-3): all 8 anchor cells within +-20%
+p1_null n_1000000 0.301 us
+p1_clock n_1000000 0.371 us
+p2_ctxsw n_100000 1.307 us
+p3a_fault_anon n_16384 0.010 us
+p3b_fault_cow n_8192 8.075 us
+p3c_fault_file n_4096 0.010 us
+p4_fork_exit n_1000 577.965 us
+p4_fork_exec n_1000 771.726 us
+p5a_pipe n_100000 1.493 us
+p5b_dgram_send n_20000 1.723 us
+p5b_dgram_recv_peek n_20000 3.316 us
+p5c_stream_write n_100000 1.773 us
+p5c2_stream_send n_100000 1.633 us
+p5c3_stream_wrecv n_100000 1.723 us
+p5d_rt_read n_100000 2.805 us
+p5d_rt_recv n_100000 3.296 us
+p5e_stream_send n_100000 1.583 us
+p5e_child_spin n_323 120.765 us
+p5f_stream_dwait n_100000 1.723 us
+p6_stat n_10000 2.725 us
+p6_openclose n_10000 7.414 us
+p6_getdents n_1000 553.039 us
+p6_read_cached n_10000 9.418 us
+p6_write_fsync n_1000 8486.460 us
+p6_append n_1000 5.159 us
+p6_mkdrmdir n_1000 227.433 us
+p6_unlink n_1000 47.609 us
+p7_sleep1ms n_10000 15.843 us

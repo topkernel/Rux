@@ -1,0 +1,24 @@
+=== pa-116seed1 wedge excerpt (main@12c5e326 merge cf119c53, seed lineage, KVM q35 smp2 4G, syscost=1 dfx=wwcensus, launched 21:29:50) ===
+--- window at wedge formation ---
+window sample start 2026-11-04 21:29:50
+21:29:50 load1=6.95 qemus=7
+21:30:20 load1=7.58 qemus=11
+21:30:50 load1=10.28 qemus=11
+21:31:20 load1=11.82 qemus=11
+21:31:50 load1=9.44 qemus=6
+21:32:20 load1=7.93 qemus=6
+21:32:50 load1=6.84 qemus=10
+21:33:20 load1=7.77 qemus=10
+--- first 6 PREEMPT-LEAK lines ---
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000001 pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff802f0a54 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000001 pc=0000000000010000 held_nonzero_for=00000000000000f0jiffies rip=ffffffff802f0a54 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000001 pc=0000000000010000 held_nonzero_for=0000000000000104jiffies rip=ffffffff802f0a54 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000001 pc=0000000000010000 held_nonzero_for=0000000000000123jiffies rip=ffffffff802f0a54 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000154 pc=0000000000010000 held_nonzero_for=00000000000000cbjiffies rip=0000003fbf084b50 pctick=0000000000000000
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000154 pc=0000000000010003 held_nonzero_for=00000000000000dfjiffies rip=ffffffff80784238 pctick=0000000000000003
+--- last SYSCOST ticks line before stall ---
+SYSCOST t=120s ticks(u/k/i): c0=515/7464/8620 c1=410/3642/12673
+SYSCOST t=180s ticks(u/k/i): c0=515/7513/14990 c1=414/3694/19011
+--- serial line count / leak count ---
+5092
+1094
