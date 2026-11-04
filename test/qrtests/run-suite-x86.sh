@@ -28,11 +28,19 @@ BUDGET="${BUDGET:-300}"
 mkdir -p "$OUTDIR"
 
 # ---- build + inject (always rewrite: binaries may have been rebuilt) ----
+# INJBINS: extra dir of static binaries to inject alongside the suites
+# (e.g. run/kselftest-bin for the kselftest classes).
 echo "inject: building rt-tests suite + qsrun into $IMAGE"
 userspace/tests/rttests/build-x86.sh > "$OUTDIR/build.log" 2>&1 || {
     cat "$OUTDIR/build.log" >&2
     exit 1
 }
+if [ "${INJBINS:-}" = "$ROOT_DIR/run/kselftest-bin" ]; then
+    userspace/tests/kselftest/build-x86.sh > "$OUTDIR/build-kselftest.log" 2>&1 || {
+        cat "$OUTDIR/build-kselftest.log" >&2
+        exit 1
+    }
+fi
 toolchain/x86_64-rux-linux-musl/bin/musl-gcc -static -O2 -Wall \
     -o "$OUTDIR/qsrun" test/qrtests/qsrun.c 2>/dev/null
 toolchain/x86_64-rux-linux-musl/bin/musl-gcc -static -O2 -Wall \
@@ -52,6 +60,13 @@ INJ=$(mktemp /tmp/qa-inj-XXXX)
         echo "rm $f"
         echo "write $BIN/$f $f"
     done
+    if [ -n "${INJBINS:-}" ] && [ -d "$INJBINS" ]; then
+        for f in "$INJBINS"/*; do
+            b="$(basename "$f")"
+            echo "rm $b"
+            echo "write $f $b"
+        done
+    fi
 } > "$INJ"
 debugfs -w -f "$INJ" "$IMAGE" 2>&1 | grep -aE "not found|error|Bad|invalid" || true
 rm -f "$INJ"
