@@ -1012,22 +1012,53 @@ tracepoints! {
     };
 
     /// net:lo_xmit — one record per loopback transmit: payload length,
-    /// backlog depth after the push (or at the drop), and the return
-    /// code (0 queued, -105 ENOBUFS backlog full). The r13 hunt's hop 0:
-    /// the echo's entire wire journey is the loopback backlog → NetRx
-    /// softirq → udp_rcv chain; a datagram dropped at the backlog cap
-    /// produces no other event anywhere.
+    /// backlog depth after the push (or at the drop), the return code
+    /// (0 queued, -105 ENOBUFS backlog full), the skb data pointer, and
+    /// the UDP checksum AS BUILT (0 when the frame is too short to be
+    /// eth+ip+udp — the r13 hunt reads it back at any later drop site:
+    /// a changed value convicts an in-flight byte rewrite between the
+    /// backlog push and the drain). The r13 hunt's hop 0: the echo's
+    /// entire wire journey is the loopback backlog → NetRx softirq →
+    /// udp_rcv chain; a datagram dropped at the backlog cap produces no
+    /// other event anywhere.
     EVENT_NET_LO_XMIT / net_lo_xmit_fmt / trace_net_lo_xmit :
         "net", "lo_xmit", 34,
-    print: "\"len=%u backlog=%u rc=%d\", REC->len, REC->backlog, REC->rc",
+    print: "\"len=%u backlog=%u rc=%d skb=%pL ucsum=%#x\", REC->len, REC->backlog, REC->rc, REC->skb, REC->ucsum",
     fields: "\tfield:unsigned int len;\toffset:8;\tsize:4;\tsigned:0;\n\
              \tfield:unsigned int backlog;\toffset:12;\tsize:4;\tsigned:0;\n\
-             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n",
-    call (len: u32, backlog: u32, rc: i32),
+             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:void *skb;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned short ucsum;\toffset:32;\tsize:2;\tsigned:0;\n",
+    call (len: u32, backlog: u32, rc: i32, skb: u64, ucsum: u16),
     render |args: &[u64; TRACE_ARGS]| {
         format!(
-            "len={} backlog={} rc={}",
-            args[0] as u32, args[1] as u32, args[2] as i32
+            "len={} backlog={} rc={} skb={:#x} ucsum={:#x}",
+            args[0] as u32, args[1] as u32, args[2] as i32, args[3], args[4] as u16
+        )
+    };
+
+    /// net:pkt_drop — the SILENT early-return drops of the loopback
+    /// delivery chain (the r13 hunt: the stranding datagram vanished
+    /// between the backlog push and udp_rcv with no event anywhere).
+    /// layer 1 = ip_rcv (reasons: 1 version, 2 ihl, 3 hdr_len>frame,
+    /// 4 ip checksum, 5 tot_len, 6 hdr_len>tot_len), layer 2 = udp_rcv
+    /// (7 header parse, 8 UDP checksum — with the stated and computed
+    /// values so a changed stated value vs the lo_xmit snapshot convicts
+    /// an in-flight rewrite while equal values convict a build-side
+    /// checksum bug).
+    EVENT_NET_PKT_DROP / net_pkt_drop_fmt / trace_net_pkt_drop :
+        "net", "pkt_drop", 37,
+    print: "\"skb=%pL layer=%u reason=%u ucsum=%#x computed=%#x\", REC->skb, REC->layer, REC->reason, REC->ucsum, REC->computed",
+    fields: "\tfield:void *skb;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned char layer;\toffset:16;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned char reason;\toffset:17;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned short ucsum;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:unsigned short computed;\toffset:20;\tsize:2;\tsigned:0;\n",
+    call (skb: u64, layer: u8, reason: u8, ucsum: u16, computed: u16),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "skb={:#x} layer={} reason={} ucsum={:#x} computed={:#x}",
+            args[0], args[1] as u8, args[2] as u8, args[3] as u16, args[4] as u16
         )
     };
 

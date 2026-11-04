@@ -60,6 +60,22 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
     }
 
     let len = skb.len as u32;
+    // Snapshot for net:lo_xmit (r13 hunt): the skb data pointer and the
+    // UDP checksum AS BUILT (eth 14 + ip 20 + udp 8 layout; guarded for
+    // shorter frames). Any later net:pkt_drop on this skb compares its
+    // stated checksum against this snapshot — equal convicts a
+    // build-side bug, different convicts an in-flight byte rewrite.
+    // SAFETY: guarded by the length check; read-only.
+    let (skb_data, ucsum_built) = unsafe {
+        let p = skb.data as usize;
+        let c = if skb.len >= 42 {
+            let bp = skb.data.add(40) as *const u16;
+            u16::from_be(core::ptr::read_volatile(bp))
+        } else {
+            0
+        };
+        (p as u64, c)
+    };
     let mut backlog = LO_BACKLOG.lock_irqsave();
     if backlog.len() >= LO_BACKLOG_MAX {
         drop(backlog);
@@ -68,7 +84,7 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
         // net:lo_xmit (r13 lat_udp strand hunt): the backlog-cap drop
         // produces no other trace event anywhere — this record is the
         // only witness that the datagram left the sender at all.
-        crate::trace::trace_net_lo_xmit(len, LO_BACKLOG_MAX as u32, -105);
+        crate::trace::trace_net_lo_xmit(len, LO_BACKLOG_MAX as u32, -105, skb_data, ucsum_built);
         // skb's Drop impl releases the buffer.
         return -105; // ENOBUFS
     }
@@ -81,7 +97,7 @@ fn loopback_xmit(skb: SkBuff) -> i32 {
     crate::interrupt::softirq::raise_softirq(
         crate::interrupt::softirq::SoftirqIndex::NetRx as usize,
     );
-    crate::trace::trace_net_lo_xmit(len, depth, 0);
+    crate::trace::trace_net_lo_xmit(len, depth, 0, skb_data, ucsum_built);
     0
 }
 
