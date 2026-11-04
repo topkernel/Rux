@@ -4035,7 +4035,13 @@ pub fn bwr_snap(_reason: &str) {
                         nedges: 0,
                         depth: th.txn_stack.len(),
                     };
-                    for x in &th.txn_stack {
+                    // cg36c: collect NEWEST-first (txn_stack.push
+                    // appends, so .rev() starts at the innermost live
+                    // frame) and cap at 12 — a deeper stack must keep
+                    // its INNERMOST frames visible, not its oldest
+                    // (the blocker is always the newest frame; the
+                    // older ones are the frozen unwind chain).
+                    for x in th.txn_stack.iter().rev() {
                         if s.nedges >= 12 {
                             break;
                         }
@@ -4158,7 +4164,15 @@ pub fn bwr_snap(_reason: &str) {
             nexec,
             nawait
         );
-        for i in 0..s.nedges {
+        // Print oldest -> newest (chronological unwind order); edges[]
+        // holds newest-first, so walk it backwards. The newest frame
+        // carries the *INNER* marker; when depth exceeded the 12-edge
+        // window the oldest frames were dropped (leading truncation
+        // marker).
+        if s.depth > s.nedges {
+            let _ = write!(line, " | ...+{}older", s.depth - s.nedges);
+        }
+        for i in (0..s.nedges).rev() {
             let (id, code, own, to_pid, to_tid, from_pid, from_tid, pick_j, enq_j) = s.edges[i];
             let age_ms = if pick_j != 0 {
                 now.wrapping_sub(pick_j)
@@ -4166,13 +4180,10 @@ pub fn bwr_snap(_reason: &str) {
                 now.wrapping_sub(enq_j)
             }
             .saturating_mul(10);
-            // INNERMOST marker on the last collected edge: with a
-            // frozen interleave everything above the deepest EXEC is
-            // the unwind chain; the deepest frame names the blocker.
             let _ = write!(
                 line,
                 " | {}txn{} code{:#x} {} to pid{} tid{} from pid{} tid{} {}ms",
-                if i + 1 == s.nedges { "*INNER* " } else { "" },
+                if i == 0 { "*INNER* " } else { "" },
                 id,
                 code,
                 if own { "EXEC" } else { "AWAIT-REPLY" },
