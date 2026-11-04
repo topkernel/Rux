@@ -2090,6 +2090,17 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     epoll_wake_register(new, epoll_ptr);
                 }
             }
+            // rux:epoll_ctl_insert — the interest is live (a Rebind is an
+            // insert onto the reused fd number; the mask reported is the
+            // new registration's).
+            if crate::trace::EVENT_EPOLL_CTL_INSERT.armed() {
+                crate::trace::trace_epoll_ctl_insert(
+                    crate::process::current_pid() as i32,
+                    epfd,
+                    fd,
+                    event.events,
+                );
+            }
         }
         EPOLL_CTL_DEL => {
             let mut entries = epoll.entries.lock();
@@ -2097,6 +2108,14 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 let removed = entries.remove(pos);
                 drop(entries);
                 epoll_wake_unregister(removed.file_id, epoll_ptr);
+                // rux:epoll_ctl_remove — the interest is gone.
+                if crate::trace::EVENT_EPOLL_CTL_REMOVE.armed() {
+                    crate::trace::trace_epoll_ctl_remove(
+                        crate::process::current_pid() as i32,
+                        epfd,
+                        fd,
+                    );
+                }
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -2142,6 +2161,22 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of ready events on success, 0 on timeout, negative error code on failure
 pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
+    // rux:epoll_wait_exit — the syscall's verdict in one record (the
+    // EINTR-storm / timeout classes the epolltrace hunt needed). The
+    // wrapper sees every return path of the inner body.
+    let ret = sys_epoll_wait_inner(args);
+    if crate::trace::EVENT_EPOLL_WAIT_EXIT.armed() {
+        crate::trace::trace_epoll_wait_exit(
+            crate::process::current_pid() as i32,
+            args[0] as i32,
+            ret,
+            args[3] as i32,
+        );
+    }
+    ret
+}
+
+fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
     use epoll_events::*;
     use poll_events::*;
 
@@ -2311,7 +2346,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 let report_mask = entry.events | EPOLLERR | EPOLLHUP;
                 if crate::dfx::switches::enabled(
                     crate::dfx::switches::DfxSwitch::EpollTrace,
-                ) {
+                ) || crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                     trace_fds.push((
                         entry.fd,
                         ep_events & report_mask,
@@ -2337,6 +2372,18 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             entries.retain(|e| !dead_fds.contains(&(e.fd as usize)));
         }
         drop(entries);
+
+        // rux:epoll_wait_scan — the scan round's census (the epollscan
+        // hunt's datum: the scan RAN and what it collected). One record
+        // per round; a looping wait shows the rounds.
+        if crate::trace::EVENT_EPOLL_WAIT_SCAN.armed() {
+            crate::trace::trace_epoll_wait_scan(
+                crate::process::current_pid() as i32,
+                epfd,
+                nent as u32,
+                ready_events.len() as u32,
+            );
+        }
 
         // dfx=epollscan (leg-9 epoll hunt): one raw-console line per scan —
         // the r13ep2 boot had 14 events drained into the device queue yet
@@ -2370,6 +2417,20 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         }
 
         if !ready_events.is_empty() {
+            // rux:epoll_delivery — one record per delivered interest (the
+            // epolltrace hunt's fd/ops identity; the ring's overwrite
+            // discipline replaces the bespoke rate limit).
+            if crate::trace::EVENT_EPOLL_DELIVERY.armed() {
+                let pid = crate::process::current_pid() as i32;
+                for (fd, ev, ops) in trace_fds.iter() {
+                    crate::trace::trace_epoll_delivery(
+                        pid,
+                        *fd,
+                        *ev,
+                        *ops as usize as u64,
+                    );
+                }
+            }
             // dfx=epolltrace: who got woken by which fd. Rate-limited to the
             // first 400 deliveries plus every 2000th after, so a spinning
             // waiter does not flood the serial console.
