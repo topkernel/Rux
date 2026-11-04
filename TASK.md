@@ -1,48 +1,26 @@
-Lane: LTP r27 — census + gap-filling (x86_64+KVM)
-Base: main@12c5e326 — the ltp-r21 merge landed ALL r22-r26 fixes
-(close-parity retire_complete, ppoll sigmask, SysV IPC ns/limits,
-sysfs(2), ETXTBSY, O_DIRECT flush, execveat, idle lying-slot heal,
-timers ns deadline, poll RLIMIT gate, SA_RESTORER, WCONTINUED,
-futex physkey page-in). Work autonomously; never ask.
-Worktree = THIS. test/rootfs-x86_64-ltp.img is symlinked to the
-central store — boot with -snapshot + file.locking=off only.
-History of prior sessions (r20-r26 + inherited lane notes):
-TASK-history.md.bak (4163 lines).
+# arch-s1 lane: S-1 model-checking pilot (Kani/loom on kernel concurrency primitives)
 
-## Mission
-Baseline: r26 census 1067/1869 (results/results-r26.txt on this
-branch's history; delta files alongside). Target: beat 1067.
+## Charter (from the survey shortlist, docs/architecture/os-kernel-survey.md S-1; user go 2026-11-03)
+Pilot, 1-2 sessions: evaluate whether Kani (verification) and loom
+(concurrency model checking) can run against Rux kernel concurrency
+primitives in a HOST-side harness, and whether they pay. This is the
+methodology adoption the survey recommends (seL4-lineage verification
+methods applied to Rust-native primitives).
 
-### A. CRASH family (28) — isolate every one (r26 classes)
-cpuctl_def_task01-04 + cpuctl_test01-04 (8, cgroup cpu controller
-face), sched_tc0/tc1/tc6 + sched_driver + pm_get_sched_values +
-trace_sched (sched conformance set), rt_sigaction01 +
-rt_sigprocmask01 (**still CRASH in r26 DESPITE the SA_RESTORER fix
-being on the scan tree — isolate and decode; the fix either misses a
-subtest shape or the crash is a different face**), acct02_helper
-(BSD process acct), frag, genexp_log/genpower/gentrigo (float
-class), shmat1, vma05_vdso, prot_hsymlinks, eject_check_tray.
-Isolation rig: single-test boots 2x; capture the panic/abort shape;
-symbolize with addr2line. Kernel fixes follow reference semantics
-(NEVER the word "Linux" in commits — write "the reference kernel").
+## Known constraint going in
+The kernel crate cannot link std (no_std; unit tests collide with
+panic_impl — recorded house lesson). loom/kani need host builds. The
+pilot's core question is EXTRACTION cost: can the primitive's logic be
+built for the host (cfg-gated, or extracted to a small inner crate)
+without semantic drift?
 
-### B. FAIL families with real kernel work (from r26)
-- name_to_handle_at + open_by_handle_at (4): exportable file handles.
-- ptrace06 TIMEOUT + ptrace FAILs (3): the VA-translate fix landed;
-  find the remaining faces.
-- mincore (3), madvise (2), mprotect/mremap shapes under mmap FAILs.
-- sysctl (3): /proc/sys shapes.
-- pidns (3) + clone (3): namespace/flag gaps.
-- mount (3): mount(2) edge semantics.
-- pty (2 FAIL + 4 TCONF): ptmx/TIOCGPTN family.
-- setsockopt (2 FAIL + 7 TCONF): which options; implement the cheap
-  sock-opt acks with reference semantics.
-- io_uring (2), getrusage (2), nftw (2 — probably ftw semantics),
-  testsf_s/testsf_c (4).
-- mmapstress 8 = adjudicated NOT-OURS host parity (verdicts-r25);
-  ftest 4 = stress lane owns (fix landing on main separately —
-  re-verify once main moves past 12c5e326); mmap1/mmap3/shm_test =
-  documented budget/racy classes. Do NOT re-litigate.
+## Targets (in order)
+1. kernel/src/sync/mutex.rs SleepMutex (the R84 handoff state machine:
+   waiters/tokens/anti-starve — historically bug-dense, now the
+   canonical primitive).
+2. kernel/src/sync/spinlock.rs + the preempt-count interplay (if time).
+3. The futex wait-queue key resolution (physical-word keys from the
+   LTP fix) if S-1 finishes early.
 
 ## Deliverables
 - A host-side harness (kani/loom configs in-repo, English comments)
@@ -4051,101 +4029,116 @@ hold chain broken. Both are queued below.
 4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
-### C. TCONF quick wins (503 total; ranked by cheapness)
-- pidfd_open/pidfd_send_signal family (4): cheap fd-for-pid.
-- move_pages (11): non-NUMA reference semantics (single node).
-- autogroup, memfd_secret, open_tree/move_mount/fspick trio.
-- add_key/keyctl/request_key (18): check what LTP actually asserts;
-  reference errno shapes beat blanket ENOSYS if the tests assert
-  behavior, else leave for a real keyring subsystem round.
-- af_alg (7): assess. fanotify (23)/hugemmap (31)/quotactl (9)/
-  userns (8)/bpf (7)/ksm (7): effort estimates into TASK.md for the
-  coordinator; don't sink the round.
-- CONFIG_BSD_PROCESS_ACCT: check how tst_kconfig reads it — if it's
-  a /proc/config export, that's one file.
 
-### D. Census
-Full 1869 scan (negmemo=1, --append flow, rescue/splice discipline
-from r26 — wedge rows rerun in isolation boots 2x before counting;
-run/ltpscan-x86_64 + run/r25-drive.sh + run/r24-pipeline.sh are the
-rigs, archived on this branch). results/results-r27.txt +
-delta-r27-vs-r26.txt. Push origin/ltp-r27.
+---
 
-## Discipline (binding)
-- One QEMU at a time (check ps; other lanes live); kill only yours;
-  pkill FORBIDDEN. KVM for x86_64. -smp 2 -m 1G for scans (census
-  boots used 2G — check the r26 driver log for the exact shape).
-- Known flakes (rerun 2x before counting): accept02 getrusage04
-  kill02 genfmod rename/statfs families + float_exp_log.
-- Kernel changes: small commits, English, reference-parity comments.
-  Gates per change: affected family 2x green in isolation. Round
-  close: x3 builds rc=0 (x86_64/riscv64/aarch64; aarch64 rewrites
-  dtb_blob.S — git checkout after), make test green (riscv64,
-  lock-aware wait on test/rootfs.img — run/r26-maketest-wait.sh),
-  Tier-2 pbench if hot paths touched (sched/fs/ipc/mm/timer).
-- NEVER write to /home/william/workspace/Rux. Main-repo merges are
-  the coordinator's.
-- Throughput-bound faces (timerfd_settime02, msgstress01): the fdt
-  conditional-refcount fast path is the real fix — note, don't hack.
-Final message: r27 number + delta table + 2x rerun evidence for every
-new-failure verdict + fixes list + results path.
+# oh-binder lane: BINDER+FUTEX+SCHED reference-diff audit (2026-11-05)
 
-## SESSION 7 (r27) LOG — branch ltp-r27 @ 12c5e326+ (2026-11-04/05)
+Branch oh-binder from main 02e3c900. Mission: systematic side-by-side
+diff of binder transaction lifecycle, the full futex op set, and the
+scheduler wake/PI path against the reference kernel source
+(/home/william/workspace/oh-robot/kernel/linux/linux-6.6/), fixing every
+divergence the 22 earlier parity fixes did not already cover.
 
-### Kernel fixes landed (6 commits, all 2x-green in isolation)
-1. **83fa2937 pidfd subsystem** — pidfd_open/pidfd_send_signal/pidfd_getfd,
-   waitid(P_PIDFD) incl. the nonblocking EAGAIN contract, poll-exit
-   readiness (global pidfd queue woken in do_exit), /proc/<pid> dir fds
-   as pidfds with PINNED-instance identity (pid reuse resolves ESRCH),
-   /proc/sys/kernel/ns_last_pid rw (CRIU-style cursor moves).
-   Family: 8 PASS + 1 WARN (pidfd_send_signal03 TWARN: /proc ino
-   aliasing across pid reuse — instance-coded inos deferred).
-2. **09dce204 name_to_handle_at / open_by_handle_at** — 12-byte
-   [gen][ino] ext4 handles, export iget from disk, EOVERFLOW size
-   probe with the reference's copy order (mount id + size out before
-   EOVERFLOW), AT_SYMLINK_FOLLOW=0x400 fixed, symlink handles ELOOP,
-   CAP_DAC_READ_SEARCH gate, ESTALE for cross-fs mount fds. 4/4 PASS.
-3. **7f70866e x86_64 syscall-hole parity** — native 156 (_sysctl) no
-   longer falls through to the generic table's getsid (ESRCH); ENOSYS
-   like the reference's hole. sysctl01/03/04 FAIL -> TCONF
-   (host-verified identical verdict).
-4. **1994215f mincore/mlock residency** — mincore's Sv39-hardcoded
-   walk replaced with the portable PageTableWalker (x86 read garbage
-   before: every page non-resident); file-backed no-PTE pages consult
-   the PAGE CACHE (reference __mincore_unmapped_range); private reads
-   of file holes instantiate cached zero folios (reference folio
-   semantics); mlock populate faults through handle_mm_fault with
-   WRITE faults for anon/shm (Rss; PROT_WRITE-only mappings) and READ
-   for file spans. mincore02/03/04 + mlock05 PASS 2x.
-5. **f9643a85 pty devpts parity** — slave nodes 0620, pairs born
-   locked (TTY_PTY_LOCK; TIOCSPTLCK real), slave-write-after-master-
-   hangup returns EIO (never SIGPIPE). pty01 all 5 blocks PASS.
-6. **6e7b911c RUSAGE_CHILDREN** — cmaxrss/exit_maxrss zero-init in the
-   raw Task initializers (recycled-page garbage), fold moved to REAP
-   time (release_task; includes the child's own children totals).
-   getrusage03 6/7 (last face: SIGCHLD-SIG_IGN auto-reap, open).
+## Binder (drivers/android/binder.c vs kernel/src/ipc/binder.rs) — 5 fixed
 
-### Section A (CRASH families) — all 28 adjudicated (verdicts-r27.txt)
-- rt_sigaction01/rt_sigprocmask01: NOT-OURS re-confirmed with FRESH
-  host runs (rc=139 both) — musl never fills oact.sa_restorer, LTP
-  harvests stack junk as the restorer; the "SA_RESTORER fix missed a
-  face" theory is dead: the landing was correct, the crash is the
-  test's own junk restorer.
-- 20 helper/usage/environment artifacts (prot_hsymlinks needs useradd,
-  sched_tc0/1/6 need env vars, cpuctl/memctl/trace_sched/frag/gen*/
-  acct02_helper/eject_check_tray/vma05_vdso/pm_get_sched_values/
-  sched_driver/testsf_* = bare-invocation helpers).
-- REAL gap kept: cgroup_core01/02 (cgroup2 subsystem; same bucket as
-  clone303 CLONE_INTO_CGROUP and the controller faces).
-- clone08: NOT-OURS by a NEW decode — musl 1.2.5's clone() wrapper
-  rejects CLONE_THREAD/SETTLS/CHILD_CLEARTID with EINVAL IN LIBC
-  (src/linux/clone.c badflags); raw syscall succeeds on our kernel
-  (probe ltp_r27_clone_argshape.c archived in probes.tar.gz). Host
-  parity: rc=2, same TBROK.
+- **B1 (critical) failed-reply error routing**: reference binder.c
+  3806-3812 + binder_send_failed_reply (1640-1696) — once in_reply_to is
+  validated, a failed BC_REPLY NEVER gives the error to the replier: the
+  replier gets BR_TRANSACTION_COMPLETE, the ORIGINATOR gets the error
+  (BR_FAILED_REPLY/BR_DEAD_REPLY), its txn-stack entry popped, woken.
+  Ours queued ReturnError on the replier in every case → the parked
+  client waited forever. Fixed at requester-dead, alloc-none,
+  buffer-alloc-fail, target-died-before-copy, data/offsets copy fault,
+  translate failure, originator-thread-gone. New helper
+  send_failed_reply() also drops the originating txn's node pin (the
+  old requester-dead path leaked it).
+- **B2** BC_INCREFS_DONE/ACQUIRE_DONE cookie mismatch now ignored
+  (reference 3986-3995); we processed the command regardless.
+- **B3** strong-ref requirement on handle use (reference 3062/2238,
+  "tried to use weak ref as strong ref"): transaction target resolution
+  and BINDER_TYPE_HANDLE translation now require strong != 0.
+- **B4** unknown BC command fails the write with -EINVAL (reference
+  4306-4309); we logged and returned 0.
+- **B5** post-read proc-todo re-kick (reference 5181-5184),
+  eligibility-gated for the sc161 child-routing model.
 
-### Gates
-x3 builds rc=0 (x86_64 final, riscv64, aarch64 + dtb_blob.S restored).
-Census + make test + Tier-2 pbench (mm fault path + fs touched): see
-below/committed logs.
+Audited and found already at parity (no change): BC_FREE_BUFFER
+protocol incl. async-slot handoff, death-notification lifecycle
+(REQUEST/CLEAR/DEAD_BINDER_DONE phases incl. DEAD_BINDER_AND_CLEAR),
+oneway queuing + async-space budget, BR_DEAD_BINDER read-loop stop
+("goto done"), one-sync-transaction-per-read, BR_SPAWN_LOOPER pool gate
+(+child variant), sender_pid=TGID stamping, deferred tcomplete, fd/FDA/
+PTR translation incl. parent fixups, mmap/alloc ordering, ioctl
+surface incl. OH extensions. Documented divergences kept: binder
+priority inheritance (binder_set_nice — no nice in our scheduler),
+oneway-spam-suspect stats, desc lowest-free reuse (opaque to
+userspace), wait_for_context_manager crutch.
 
-### r27 census: <TO-FILL> /1869
+## Futex (kernel/futex/ vs kernel/src/sync/futex.rs) — 4 fixed
+
+- **F1 (major) PI futexes implemented**: FUTEX_LOCK_PI / FUTEX_LOCK_PI2
+  / FUTEX_TRYLOCK_PI / FUTEX_UNLOCK_PI were ENOSYS; musl's PI-mutex
+  paths (pthread_mutex_timedlock_pi, setprotocol's one-shot probe on
+  every PTHREAD_PRIO_INHERIT request) need them. Implemented the exact
+  reference word protocol (pi.c futex_lock_pi_atomic 514-608 +
+  wake_futex_pi 760-779 + futex_unlock_pi 1100-1232): EDEADLK on
+  self-own, unowned take-over preserving OWNER_DIED and clearing stale
+  WAITERS, WAITERS-bit set before queueing, FIFO ownership handoff
+  (waiter_tid|WAITERS) on unlock, EPERM for non-owner unlock, EBUSY for
+  contended trylock, EINTR retryable, ABSOLUTE timeout. New per-arch
+  atomic user-word cmpxchg primitive (x86_64 lock cmpxchg, riscv64
+  lr.w/sc.w, aarch64 ldaxr/stlxr — all through the extable fixup);
+  without it the protocol's CAS-vs-userspace races cannot be honored.
+  Priority BOOSTING is not implemented (no rt_mutex PI chains in our
+  scheduler — the flagged sched-domain divergence); with all-NORMAL
+  tasks the reference's priority-ordered plist degenerates to the same
+  FIFO handoff. FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI stay
+  ENOSYS: glibc-only ops, musl never issues them (verified across the
+  OH tree; condvars are count-based).
+- **F2** CMP_REQUEUE value check moved under the bucket lock(s)
+  (reference futex_get_value_locked after double_lock_hb) — the old
+  pre-lock check left a store-race window.
+- **F3 (bug fix) robust-exit death mark**: now
+  (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED — the dying TID is CLEARED
+  (reference handle_futex_death 718). The old `v | FUTEX_OWNER_DIED`
+  kept the dead tid and left any PI waiter looping on an unreleasable
+  owner. Also added the reference's pending_op case (700-703): a
+  list_op_pending entry whose word is already released gets a plain
+  wake without touching the word (killed-between-unlock-and-syscall
+  race).
+- **F4** FUTEX_WAIT|FUTEX_CLOCK_REALTIME now ENOSYS like the reference
+  do_futex (syscalls.c 121-125); only WAIT_BITSET/WAIT_REQUEUE_PI/
+  LOCK_PI2 accept the flag.
+
+OH usage evidence for prioritization: the fuxref-fx8 reference census
+(24,438 parks) shows every OH boot park is FUTEX_WAIT|PRIVATE
+(op 0x80, val mostly 0x2 — musl barrier/condvar words); zero PI parks.
+PI support is preventive (qos_manager's pi_mutex.h
+(PTHREAD_PRIO_INHERIT) exists upstream and would ENOSYS-abort on our
+old kernel).
+
+## Scheduler (kernel/sched/ vs kernel/src/sched/) — no change, documented
+
+- Wake-up class selection exists (task_sched_class → select_task_rq);
+  select_task_rq's sync-wake affinity/load balancing is structurally
+  N/A under the registered GRQ divergence (global run queue —
+  docs/architecture/design-divergences.md entry 1).
+- try_to_wake_up's WAKE_Q deferred-wake batch: our model wakes under
+  the bucket lock (futex R12-2) or after lock drop (wait queues) with
+  the C8 flag-before-wake invariant — a deliberate, documented
+  divergence; wake→pick deltas are guarded by the perf gate.
+- rt_mutex priority-inheritance chains: genuinely absent; the PI-futex
+  work above implements the word protocol without boosting — the
+  remaining gap is priority boosting itself (needs scheduler priority
+  plumbing; nothing on the OH image measures it today).
+- Preempt discipline: lock_irqsave spinlocks around every wake-path
+  state change (stronger than the reference's preempt_disable +
+  local_irq_save pairs).
+
+## Gates
+
+- x3 builds rc=0 (x86_64 q35, riscv64 virt, aarch64 virt) with all
+  changes.
+- make test (riscv64 unit suite): run in this session; verdict below.
+- Push: origin/oh-binder.

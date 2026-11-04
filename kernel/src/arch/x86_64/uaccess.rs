@@ -145,6 +145,36 @@ __x64_clear_user:
 66: ret
 60: xorl %eax, %eax
     ret
+
+/* __x64_futex_cmpxchg_u32: rdi = user u32*, esi = expected, edx = new.
+ * ATOMIC (vs userspace) compare-exchange on the user word — the PI
+ * futex protocol primitive (reference futex_cmpxchg_value_locked).
+ * If (*uaddr == expected) *uaddr = new; either way rax = the observed
+ * old value. Returns rax = packed: bit 32 set = page fault (old = 0),
+ * low 32 bits = old value. */
+.global __x64_futex_cmpxchg_u32
+.hidden __x64_futex_cmpxchg_u32
+__x64_futex_cmpxchg_u32:
+    movl %esi, %eax
+    cmpb $0, {smap}(%rip)
+    je 91f
+    stac
+91: lock cmpxchgl %edx, (%rdi)
+    .pushsection __ex_table, "a"
+    .balign 8
+    .quad 91b
+    .quad 94f
+    .popsection
+    cmpb $0, {smap}(%rip)
+    je 92f
+    clac
+92: ret
+94: cmpb $0, {smap}(%rip)
+    je 95f
+    clac
+95: movl $1, %eax           /* fault: 1<<32 packed marker */
+    shlq $32, %rax
+    ret
 "#,
     options(att_syntax),
     smap = sym super::cpu::SMAP_ENABLED
@@ -154,6 +184,28 @@ extern "C" {
     fn __x64_copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __x64_copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __x64_clear_user(to: *mut u8, n: usize) -> usize;
+    fn __x64_futex_cmpxchg_u32(uaddr: *mut u32, expected: u32, new: u32) -> u64;
+}
+
+/// Atomic compare-exchange on a user u32 word (PI futex protocol,
+/// reference futex_cmpxchg_value_locked). If `*uaddr == expected`,
+/// stores `new`; returns the observed old value either way. `None` on a
+/// user page fault (EFAULT at the futex layer).
+///
+/// # Safety
+/// `uaddr` must point at a 4-byte user word; access_ok-checked here.
+pub unsafe fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32> {
+    if !access_ok(uaddr as usize, 4) {
+        return None;
+    }
+    // SAFETY: the asm core faults into the extable fixup which returns
+    // the packed fault marker instead of panicking.
+    let packed = unsafe { __x64_futex_cmpxchg_u32(uaddr, expected, new) };
+    if packed >> 32 != 0 {
+        None
+    } else {
+        Some(packed as u32)
+    }
 }
 
 /// Is the [addr, addr+size) window inside user VA space?

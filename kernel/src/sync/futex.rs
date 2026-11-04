@@ -24,7 +24,7 @@ use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::AtomicU32;
 use crate::process::Task;
 use crate::process::task::TaskState;
-use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT};
+use crate::syscall::errno::{EINVAL, EFAULT, EAGAIN, ENOSYS, ETIMEDOUT, EPERM, EBUSY, EDEADLK};
 
 /// FUTEX opcodes
 pub const FUTEX_WAIT: i32 = 0;
@@ -1963,23 +1963,24 @@ pub fn futex_requeue(
 
     let key1 = FutexKey::new_user(uaddr, mm, flags);
 
-    // For CMP_REQUEUE, verify *uaddr == cmpval
-    if is_cmp {
-        // SAFETY: exception-table protected read; unmapped address → EFAULT.
-        let uaddr_ptr = uaddr as *const u32;
-        let uval = match unsafe {
-            crate::arch::uaccess::get_user(uaddr_ptr)
-        } {
-            Some(v) => v,
-            None => return -EFAULT as i64,
-        };
-        if uval != cmpval {
-            return -EAGAIN as i64;
-        }
-    }
+    // For CMP_REQUEUE, *uaddr == cmpval is verified UNDER the bucket
+    // lock (reference futex_requeue: futex_get_value_locked after
+    // double_lock_hb) — checking before the lock left a window where a
+    // concurrent userspace store changed the word between the check and
+    // the wake/requeue pass.
 
     // No requeue target or same address → just wake
     if uaddr2 == 0 || uaddr2 == uaddr || nr_requeue <= 0 {
+        if is_cmp {
+            // SAFETY: exception-table protected read; unmapped → EFAULT.
+            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(v) => v,
+                None => return -EFAULT as i64,
+            };
+            if uval != cmpval {
+                return -EAGAIN as i64;
+            }
+        }
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     }
 
@@ -2001,6 +2002,21 @@ pub fn futex_requeue(
     if bucket1 == bucket2 {
         // Same bucket — lock once.
         let mut head1 = HASH_HEADS[bucket1].lock_irqsave();
+
+        if is_cmp {
+            // SAFETY: exception-table protected read under the lock.
+            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(v) => v,
+                None => {
+                    drop(head1);
+                    return -EFAULT as i64;
+                }
+            };
+            if uval != cmpval {
+                drop(head1);
+                return -EAGAIN as i64;
+            }
+        }
 
         let mut prev: Option<usize> = None;
         let mut cur = *head1;
@@ -2072,6 +2088,24 @@ pub fn futex_requeue(
 
         let mut guard_lo = HASH_HEADS[lo].lock_irqsave();
         let mut guard_hi = HASH_HEADS[hi].lock_irqsave();
+
+        if is_cmp {
+            // SAFETY: exception-table protected read under both locks
+            // (reference double_lock_hb parity).
+            let uval = match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(v) => v,
+                None => {
+                    drop(guard_hi);
+                    drop(guard_lo);
+                    return -EFAULT as i64;
+                }
+            };
+            if uval != cmpval {
+                drop(guard_hi);
+                drop(guard_lo);
+                return -EAGAIN as i64;
+            }
+        }
 
         // Get references to the actual heads we need.
         let (head1_ref, head2_ref) = if bucket1 < bucket2 {
@@ -2307,6 +2341,351 @@ pub fn futex_wake_op(
     woken
 }
 
+// ============================================================================
+// PI futexes (FUTEX_LOCK_PI / FUTEX_TRYLOCK_PI / FUTEX_UNLOCK_PI)
+// ============================================================================
+
+/// Word layout (include/uapi/linux/futex.h): bits 0..29 = owner TID,
+/// bit 30 = FUTEX_OWNER_DIED, bit 31 = FUTEX_WAITERS.
+pub const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+pub const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+pub const FUTEX_WAITERS: u32 = 0x8000_0000;
+
+/// Atomic compare-exchange on the user word (reference
+/// futex_cmpxchg_value_locked): returns the observed old value, or None
+/// on a user page fault.
+fn futex_cmpxchg_user(uaddr: usize, expected: u32, new: u32) -> Option<u32> {
+    // SAFETY: uaddr is the syscall's user word; the arch core faults
+    // into its extable fixup and returns the packed fault marker.
+    unsafe { crate::arch::uaccess::futex_cmpxchg_u32_user(uaddr as *mut u32, expected, new) }
+}
+
+/// FUTEX_LOCK_PI / FUTEX_TRYLOCK_PI (reference kernel/futex/pi.c
+/// futex_lock_pi + futex_lock_pi_atomic).
+///
+/// Word protocol per the reference:
+/// - EDEADLK if the word already carries OUR tid (538-539);
+/// - unowned word (tid == 0): take it over, PRESERVING the OWNER_DIED
+///   bit and CLEARING a stale WAITERS bit (558-590);
+/// - owned word: set FUTEX_WAITERS (598), queue as a PI waiter, sleep;
+///   the owner's FUTEX_UNLOCK_PI hands the lock over by writing
+///   our_tid | WAITERS into the word and waking exactly us
+///   (wake_futex_pi, 760-779).
+///
+/// musl retries LOCK_PI on EINTR and treats 0 as "we own the word"
+/// (pthread_mutex_timedlock_pi); the timeout is ABSOLUTE (FLAGS_CLOCKRT
+/// is forced for FUTEX_LOCK_PI in the reference do_futex).
+///
+/// Priority-inheritance BOOSTING is not implemented (our scheduler has
+/// no priority boosting); waiter handoff is FIFO — with all-NORMAL
+/// tasks the reference's priority-ordered plist degenerates to the same
+/// order. This is the registered PI divergence (TASK.md, this lane).
+pub fn futex_lock_pi(
+    uaddr: usize,
+    flags: u32,
+    deadline: Option<u64>,
+    trylock: bool,
+) -> i64 {
+    let Some(current) = crate::sched::current() else {
+        return -EFAULT as i64;
+    };
+    // SAFETY: current is valid for the duration of this syscall.
+    let mytid = unsafe { (*current).pid() };
+    let mm = task_futex_mm_id(current);
+    let key = FutexKey::new_user(uaddr, mm, flags);
+    let bucket_idx = futex_hash(&key);
+
+    loop {
+        // ---- fast path (reference futex_lock_pi_atomic) --------------
+        let uval = match get_user_word(uaddr) {
+            Some(v) => v,
+            None => return -EFAULT as i64,
+        };
+        if uval & FUTEX_TID_MASK == mytid {
+            return -EDEADLK as i64;
+        }
+        if uval & FUTEX_TID_MASK == 0 {
+            // Unowned: take over, preserve OWNER_DIED, drop a stale
+            // WAITERS bit (reference clears it on acquisition).
+            let newval = (uval & FUTEX_OWNER_DIED) | mytid;
+            match futex_cmpxchg_user(uaddr, uval, newval) {
+                None => return -EFAULT as i64,
+                Some(old) if old == uval => return 0, // acquired
+                Some(_) => continue,                  // raced: re-read
+            }
+        }
+        if trylock {
+            // Reference futex_lock_pi(trylock=1): a held lock is EBUSY,
+            // never a queue+sleep.
+            return -EBUSY as i64;
+        }
+
+        // ---- contended: WAITERS bit + queue + sleep ------------------
+        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+        // Re-validate under the bucket lock (a concurrent unlock may
+        // have released the word since the fast-path read).
+        let uval = match get_user_word(uaddr) {
+            Some(v) => v,
+            None => {
+                drop(head);
+                return -EFAULT as i64;
+            }
+        };
+        if uval & FUTEX_TID_MASK == mytid {
+            drop(head);
+            return -EDEADLK as i64;
+        }
+        if uval & FUTEX_TID_MASK == 0 {
+            let newval = (uval & FUTEX_OWNER_DIED) | mytid;
+            match futex_cmpxchg_user(uaddr, uval, newval) {
+                None => {
+                    drop(head);
+                    return -EFAULT as i64;
+                }
+                Some(old) if old == uval => {
+                    drop(head);
+                    return 0;
+                }
+                Some(_) => {
+                    drop(head);
+                    continue;
+                }
+            }
+        }
+        // Set the WAITERS bit (reference 598: first waiter forces the
+        // owner's unlock into the kernel).
+        match futex_cmpxchg_user(uaddr, uval, uval | FUTEX_WAITERS) {
+            None => {
+                drop(head);
+                return -EFAULT as i64;
+            }
+            Some(old) if old == uval => {}
+            Some(_) => {
+                drop(head);
+                continue;
+            }
+        }
+        // Waiter slot (same pool + shape as the plain waiters; a PI
+        // waiter is delivered ownership by futex_unlock_pi, which
+        // unlinks it exactly like futex_wake does).
+        let waiter_idx = match alloc_waiter() {
+            Some(idx) => idx,
+            None => {
+                drop(head);
+                pool_full_backoff();
+                continue;
+            }
+        };
+        {
+            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.key = key;
+                w.task = current;
+                w.bitset = FUTEX_BITSET_MATCH_ANY;
+                w.woken = false;
+                w.park_j = crate::drivers::timer::get_jiffies();
+                w.bucket = bucket_idx;
+                w.next = *head;
+            }
+        }
+        *head = Some(waiter_idx);
+        // SAFETY: current task; residency flag per the plain wait path.
+        unsafe {
+            (*current)
+                .futex_wait_enqueued
+                .store(true, core::sync::atomic::Ordering::Release);
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        drop(head);
+
+        crate::arch::cpu::restore_irq(true);
+        let wake = deadline
+            .map(|dl| crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid()));
+        if deadline.is_some() && wake.is_none() {
+            remove_waiter(bucket_idx, waiter_idx);
+            return -ENOMEM as i64;
+        }
+        crate::sched::schedule();
+        drop(wake);
+
+        // Ownership was handed to us (woken=true, the unlocker unlinked
+        // the entry): free the slot and confirm the word.
+        {
+            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            let mine = slot.as_ref().map(|w| w.task == current).unwrap_or(false);
+            if mine {
+                let was_woken = slot.as_ref().map(|w| w.woken).unwrap_or(false);
+                if was_woken {
+                    *slot = None;
+                    // SAFETY: our own flag; the unlink already happened.
+                    unsafe {
+                        (*current)
+                            .futex_wait_enqueued
+                            .store(false, core::sync::atomic::Ordering::Release);
+                    }
+                    // The handoff wrote our tid into the word.
+                    match get_user_word(uaddr) {
+                        Some(v) if v & FUTEX_TID_MASK == mytid => return 0,
+                        Some(_) => continue, // word moved on: re-lock from scratch
+                        None => return -EFAULT as i64,
+                    }
+                }
+            }
+        }
+        // Signal / timeout / spurious: still linked — unlink and decide.
+        let live_bucket = {
+            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            slot.as_ref().map(|w| w.bucket).unwrap_or(bucket_idx)
+        };
+        remove_waiter(live_bucket, waiter_idx);
+        if crate::signal::signal_pending() {
+            return -crate::syscall::errno::EINTR as i64;
+        }
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
+                return -ETIMEDOUT as i64;
+            }
+        }
+        // Spurious wake: loop and re-queue.
+    }
+}
+
+/// FUTEX_UNLOCK_PI (reference futex_unlock_pi 1100-1232): only the
+/// owner may release (-EPERM otherwise). With kernel waiters queued,
+/// the lock is HANDED to the top waiter — the word becomes
+/// waiter_tid | FUTEX_WAITERS (OWNER_DIED preserved) and that task is
+/// woken (wake_futex_pi 760-779). Without waiters the word is cleared
+/// to 0 (1197-1215).
+pub fn futex_unlock_pi(uaddr: usize, flags: u32) -> i64 {
+    let Some(current) = crate::sched::current() else {
+        return -EFAULT as i64;
+    };
+    // SAFETY: current is valid for the duration of this syscall.
+    let mytid = unsafe { (*current).pid() };
+    let mm = task_futex_mm_id(current);
+    let key = FutexKey::new_user(uaddr, mm, flags);
+    let bucket_idx = futex_hash(&key);
+
+    loop {
+        let uval = match get_user_word(uaddr) {
+            Some(v) => v,
+            None => return -EFAULT as i64,
+        };
+        if uval & FUTEX_TID_MASK != mytid {
+            return -EPERM as i64;
+        }
+        let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+        let uval = match get_user_word(uaddr) {
+            Some(v) => v,
+            None => {
+                drop(head);
+                return -EFAULT as i64;
+            }
+        };
+        if uval & FUTEX_TID_MASK != mytid {
+            drop(head);
+            return -EPERM as i64;
+        }
+        // Top waiter = first matching entry (FIFO handoff).
+        let mut cur = *head;
+        let mut prev: Option<usize> = None;
+        let mut top: Option<usize> = None;
+        while let Some(idx) = cur {
+            let (matches, next) = {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                match *slot {
+                    Some(ref w) => (w.key.matches(&key), w.next),
+                    None => (false, None),
+                }
+            };
+            if matches {
+                top = Some(idx);
+                break;
+            }
+            prev = Some(idx);
+            cur = next;
+        }
+        match top {
+            Some(idx) => {
+                // Handoff: waiter_tid | WAITERS, OWNER_DIED preserved.
+                let (wtask, wnext) = {
+                    let mut slot = WAITER_POOL[idx].lock_irqsave();
+                    let mut wtask = core::ptr::null_mut();
+                    let mut wnext = None;
+                    if let Some(ref mut w) = *slot {
+                        w.woken = true;
+                        wtask = w.task;
+                        wnext = w.next;
+                    }
+                    (wtask, wnext)
+                };
+                let waiter_tid = if wtask.is_null() {
+                    0
+                } else {
+                    // SAFETY: task linked in the bucket under the lock.
+                    unsafe { (*wtask).pid() }
+                };
+                let newval = (uval & FUTEX_OWNER_DIED) | FUTEX_WAITERS | waiter_tid;
+                match futex_cmpxchg_user(uaddr, uval, newval) {
+                    None => {
+                        drop(head);
+                        return -EFAULT as i64;
+                    }
+                    Some(old) if old == uval => {
+                        // Unlink (waker side, exactly futex_wake).
+                        if prev.is_none() {
+                            *head = wnext;
+                        } else if let Some(p) = prev {
+                            let mut ps = WAITER_POOL[p].lock_irqsave();
+                            if let Some(ref mut pw) = *ps {
+                                pw.next = wnext;
+                            }
+                        }
+                        if !wtask.is_null() {
+                            // SAFETY: waiter still linked under the bucket
+                            // lock (R12-2 wake-under-bucket invariant).
+                            unsafe {
+                                Task::wake_up_in_futex_bucket(wtask, &head.proof())
+                            };
+                        }
+                        drop(head);
+                        return 0;
+                    }
+                    Some(_) => {
+                        // Word changed under us (reference -EAGAIN →
+                        // retry the whole unlock).
+                        drop(head);
+                        continue;
+                    }
+                }
+            }
+            None => {
+                // No waiters: clear the word to 0.
+                match futex_cmpxchg_user(uaddr, uval, 0) {
+                    None => {
+                        drop(head);
+                        return -EFAULT as i64;
+                    }
+                    Some(old) if old == uval => {
+                        drop(head);
+                        return 0;
+                    }
+                    Some(_) => {
+                        drop(head);
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Raw u32 user read through the exception-table path.
+fn get_user_word(uaddr: usize) -> Option<u32> {
+    // SAFETY: uaddr is the syscall's user word; faults → None.
+    unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) }
+}
+
 /// DFX: dump the live state of a futex word + its waiter chain.
 #[cfg(feature = "dfx-futex-trace")]
 pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
@@ -2387,6 +2766,18 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // All futex words must be 4-byte aligned (Linux get_futex_key).
     if uaddr & 0x3 != 0 {
         return -EINVAL as i64;
+    }
+
+    // Reference parity (kernel/futex/syscalls.c do_futex 121-125):
+    // FUTEX_CLOCK_REALTIME is only meaningful for WAIT_BITSET,
+    // WAIT_REQUEUE_PI and LOCK_PI2 — for anything else (plain
+    // FUTEX_WAIT included) it is -ENOSYS.
+    if op & crate::sync::futex::FUTEX_CLOCK_REALTIME != 0
+        && cmd != FUTEX_WAIT_BITSET
+        && cmd != FUTEX_WAIT_REQUEUE_PI
+        && cmd != FUTEX_LOCK_PI2
+    {
+        return -ENOSYS as i64;
     }
 
     // sc185 RWFRZ-WATCH: any futex op on a word that RWFRZ-PARK named (a
@@ -2645,8 +3036,23 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
+            // Reference syscalls.c 145-149: FUTEX_LOCK_PI forces
+            // FLAGS_CLOCKRT — the timeout is an ABSOLUTE timespec (both
+            // clocks share our boot-based jiffies timeline; see
+            // futex_parse_timeout). musl pthread_mutex_timedlock_pi
+            // relies on the absolute interpretation.
+            match futex_parse_timeout(_timeout, true) {
+                Ok(dl) => futex_lock_pi(uaddr, flags, dl, false),
+                Err(e) => -(e as i64),
+            }
+        }
+        FUTEX_TRYLOCK_PI => futex_lock_pi(uaddr, flags, None, true),
+        FUTEX_UNLOCK_PI => futex_unlock_pi(uaddr, flags),
         _ => {
-            // PI-related operations not yet supported
+            // FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI remain
+            // unimplemented: glibc-only ops (musl never issues them —
+            // verified across the OH tree; condvars are count-based).
             -ENOSYS as i64
         }
     }

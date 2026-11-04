@@ -107,6 +107,32 @@ __aa64_clear_user:
 .Lclru_fault:
     mov x0, x2
     ret
+
+    // x0 = user u32*, w1 = expected, w2 = new; returns packed x0
+    // (bit 32 set = page fault, low 32 = observed old). ATOMIC
+    // compare-exchange on the user word — the PI futex protocol
+    // primitive (reference futex_cmpxchg_value_locked).
+    .align 4
+    .global __aa64_futex_cmpxchg_u32
+    .type __aa64_futex_cmpxchg_u32, %function
+__aa64_futex_cmpxchg_u32:
+.Lfcx_retry:
+.Lfcx_ldx:
+    ldaxr w3, [x0]
+    extable .Lfcx_ldx, .Lfcx_fault
+    cmp w3, w1
+    b.ne .Lfcx_out
+.Lfcx_stx:
+    stlxr w4, w2, [x0]
+    extable .Lfcx_stx, .Lfcx_fault
+    cbnz w4, .Lfcx_retry
+.Lfcx_out:
+    mov x0, x3
+    ret
+.Lfcx_fault:
+    mov x0, #1
+    lsl x0, x0, #32
+    ret
 "#
 );
 
@@ -146,6 +172,28 @@ extern "C" {
     fn __aa64_copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __aa64_copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __aa64_clear_user(to: *mut u8, n: usize) -> usize;
+    fn __aa64_futex_cmpxchg_u32(uaddr: *mut u32, expected: u32, new: u32) -> u64;
+}
+
+/// Atomic compare-exchange on a user u32 word (PI futex protocol,
+/// reference futex_cmpxchg_value_locked). If `*uaddr == expected`,
+/// stores `new`; returns the observed old value either way. `None` on a
+/// user page fault (EFAULT at the futex layer).
+///
+/// # Safety
+/// `uaddr` must point at a 4-byte user word; access_ok-checked here.
+pub unsafe fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32> {
+    if !access_ok(uaddr as usize, 4) {
+        return None;
+    }
+    // SAFETY: the ldxr/stxr core faults into the extable fixup which
+    // returns the packed fault marker instead of panicking.
+    let packed = unsafe { __aa64_futex_cmpxchg_u32(uaddr, expected, new) };
+    if packed >> 32 != 0 {
+        None
+    } else {
+        Some(packed as u32)
+    }
 }
 
 /// Copy data from kernel to user space. Returns number of uncopied bytes.

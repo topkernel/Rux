@@ -93,6 +93,7 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 extern "C" {
     fn __copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize;
     fn __copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize;
+    fn __futex_cmpxchg_u32(uaddr: *mut u32, expected: u32, new: u32) -> u64;
     fn __clear_user(to: *mut u8, n: usize) -> usize;
 }
 
@@ -485,4 +486,25 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
     }
 
     0 // String too long
+}
+
+/// Atomic compare-exchange on a user u32 word (PI futex protocol,
+/// reference futex_cmpxchg_value_locked). If `*uaddr == expected`,
+/// stores `new`; returns the observed old value either way. `None` on a
+/// user page fault (EFAULT at the futex layer).
+///
+/// # Safety
+/// `uaddr` must point at a 4-byte user word; access_ok-checked here.
+pub unsafe fn futex_cmpxchg_u32_user(uaddr: *mut u32, expected: u32, new: u32) -> Option<u32> {
+    if !access_ok(uaddr as usize, 4) {
+        return None;
+    }
+    // SAFETY: the lr/sc core faults into the extable fixup which returns
+    // the packed fault marker instead of panicking.
+    let packed = unsafe { __futex_cmpxchg_u32(uaddr, expected, new) };
+    if packed >> 32 != 0 {
+        None
+    } else {
+        Some(packed as u32)
+    }
 }
