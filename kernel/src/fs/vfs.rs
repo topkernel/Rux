@@ -4659,6 +4659,17 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             if mask != 0 && !inode_permission(&inode, mask) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
             }
+            // ETXTBSY (reference may_open -> get_write_access vs negative
+            // i_writecount): a write-mode (or O_TRUNC) open of a regular
+            // file some live process still EXECUTES fails with ETXTBSY —
+            // the exec side registered its text hold (deny_write_access
+            // analogue; LTP creat07's creat of a running child image).
+            if mask & MAY_WRITE != 0
+                && inode.mode.is_regular_file()
+                && crate::fs::locks::inode_text_hold_count(&inode) > 0
+            {
+                return Err(errno::Errno::TextFileBusy.as_neg_i32());
+            }
         }
 
         // File leases (P3): a conflicting open blocks while the holder is

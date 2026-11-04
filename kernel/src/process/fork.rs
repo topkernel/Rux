@@ -808,6 +808,23 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             }
         }
 
+        // Exec text hold (copy_mm leg): the child's fresh mm duplicates
+        // the parent's exe-file text reference (reference dup_mm's
+        // get_file(mm->exe_file)) so the exec'd image stays write-denied
+        // (ETXTBSY on write-mode opens) until the last fork descendant's
+        // mm dies. CLONE_VM shares the parent's mm Arc — nothing to
+        // duplicate.
+        if args.flags & CLONE_VM == 0 {
+            if let (Some(parent_as), Some(child_as)) = (
+                (*current_ptr).address_space_arc(),
+                (*task_ptr).address_space_arc(),
+            ) {
+                if !alloc::sync::Arc::ptr_eq(&parent_as, &child_as) {
+                    child_as.inherit_exe_text(&parent_as);
+                }
+            }
+        }
+
         // Copy brk value
         let parent_brk = (*current_ptr).get_brk();
         (*task_ptr).set_brk(parent_brk);

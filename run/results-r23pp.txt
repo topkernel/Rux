@@ -1,0 +1,3 @@
+# idx|test|class|rc|tail
+0|ppoll01|FAIL|1|e INVALID_NFDS ppoll01.c:285: TPASS: ret: -1, errno: EINVAL (22) ppoll01.c:246: TINFO: case INVALID_FDS ppoll01.c:285: TPASS: ret: -1, errno: EFAULT (14)  Summary: passed   18 failed   2 broken   0 skipped  0 warnings 0
+1|kill10|FAIL|2|317: All 10 children reported in kill10      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 315). kill10      2  TBROK  :  tst_sig.c:232: Remaining cases broken

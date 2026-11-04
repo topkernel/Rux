@@ -279,6 +279,16 @@ pub struct MmStruct {
 
     /// Owning task (optional)
     owner_pid: AtomicI32,
+
+    /// Inode key of the exec'd image this mm holds a text denial on
+    /// (the mm->exe_file stand-in: reference deny_write_access at exec,
+    /// allow at the last mm's death). None until this mm's first exec
+    /// commit; fork's copy_mm duplicates it with one more hold. Written
+    /// once by the owning task at exec commit (or by fork before the
+    /// child is published), read at Drop (single, last-Arc) — the lock
+    /// only provides interior mutability through the Arc, never
+    /// contends.
+    exe_text_key: Spinlock<Option<(u64, u64)>>,
 }
 
 /// MmStruct flags
@@ -388,6 +398,7 @@ impl MmStruct {
             // Other
             flags: AtomicU64::new(0),
             owner_pid: AtomicI32::new(-1),
+            exe_text_key: Spinlock::new(None),
         }
     }
 
@@ -414,6 +425,26 @@ impl MmStruct {
     /// Create user address space (convenience method)
     pub unsafe fn new_user(pgd: u64) -> Self {
         Self::new(pgd, PageTableType::User)
+    }
+
+    /// Exec commit (do_execve success on THIS mm): record the executed
+    /// image's text hold. The caller has already taken the hold
+    /// (fs::locks::inode_text_hold_acquire_key); while it is live a
+    /// write-mode open/creat of the image fails ETXTBSY (reference
+    /// deny_write_access held via mm->exe_file; LTP creat07). Re-exec
+    /// overwrites: the previous mm (with its hold) is dropped separately.
+    pub fn set_exe_text_key(&self, key: (u64, u64)) {
+        *self.exe_text_key.lock() = Some(key);
+    }
+
+    /// copy_mm (fork without CLONE_VM): the child's mm duplicates the
+    /// exe text reference — reference dup_mm's get_file(mm->exe_file) —
+    /// so the write denial lives until the last fork descendant exits.
+    pub fn inherit_exe_text(&self, parent: &MmStruct) {
+        if let Some(key) = *parent.exe_text_key.lock() {
+            crate::fs::locks::inode_text_hold_acquire_key(key);
+            *self.exe_text_key.lock() = Some(key);
+        }
     }
 
     // ==================== Basic Accessors ====================
@@ -1094,6 +1125,13 @@ unsafe impl Sync for MmStruct {}
 
 impl Drop for MmStruct {
     fn drop(&mut self) {
+        // Exec text hold (reference allow_write_access at the final mmput):
+        // this mm dying releases its share of the write denial on the
+        // exec'd image — the last drop re-enables write opens of the file.
+        if let Some(key) = self.exe_text_key.lock().take() {
+            crate::fs::locks::inode_text_hold_release(key);
+        }
+
         // Free ASID
         self.free_asid();
 

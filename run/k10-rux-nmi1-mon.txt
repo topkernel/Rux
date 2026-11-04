@@ -1,0 +1,18 @@
+$ info cpus
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo c[K[D[D[D[D[D[Dinfo cp[K[D[D[D[D[D[D[Dinfo cpu[K[D[D[D[D[D[D[D[Dinfo cpus[K
+* CPU #0: thread_id=432570 model=max
+  CPU #1: thread_id=432572 model=max
+(qemu) 
+$ nmi
+n[K[Dnm[K[D[Dnmi[K
+(qemu) 
+$ info cpus
+i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo c[K[D[D[D[D[D[Dinfo cp[K[D[D[D[D[D[D[Dinfo cpu[K[D[D[D[D[D[D[D[Dinfo cpus[K
+* CPU #0: thread_id=432570 model=max
+  CPU #1: thread_id=432572 model=max
+(qemu) 
+== console tail after NMI ==
+TICKTRAP[idle-prehalt] self cpu=0 lvt=0xe0 tmict=624014 tmcct=615252 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 IF=true pid=0 idlephase=3 schedphase=0 verdict=counting arms=4525 armop=1 arm_tb_delta=1325 arm_deadline=361400000 arm_counts=624014 tickirq=4111 tickaTICKTRAP[idle-prehalt] peer cpu=1 lvt=0xe0 tmict=623939 tmcct=427737 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 verdict=counting armseq=4285 armop=1 arm_tb_delta=31861 arm_deadline=361400000 arm_counts=623939 tickirq=3999 tickage_ms=3 snap_age_ms=0
+TICKTRAP[idle-prehalt] self cpu=1 lvt=0xe0 tmict=623345 tmcct=613597 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 IF=true pid=0 idlephase=3 schedphase=0 verdict=counting arms=4286 armop=1 arm_tb_delta=1405 arm_deadline=361500000 arm_counts=623345 tickirq=4000 tickaTICKTRAP[idle-prehalt] peer cpu=0 lvt=0xe0 tmict=623895 tmcct=408343 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 verdict=counting armseq=4526 armop=1 arm_tb_delta=35147 arm_deadline=361500000 arm_counts=623895 tickirq=4112 tickage_ms=3 snap_age_ms=0
+TICKTRAP[idle-prehalt] self cpu=0 lvt=0xe0 tmict=623320 tmcct=614300 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 IF=true pid=0 idlephase=3 schedphase=0 verdict=counting arms=5036 armop=1 arm_tb_delta=1349 arm_deadline=412500000 arm_counts=623320 tickirq=4622 tickaTICKTRAP[idle-prehalt] peer cpu=1 lvt=0xe0 tmict=623932 tmcct=394207 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 verdict=counting armseq=4796 armop=1 arm_tb_delta=37255 arm_deadline=412500000 arm_counts=623932 tickirq=4510 tickage_ms=3 snap_age_ms=0
+TICKTRAP[idle-prehalt] self cpu=1 lvt=0xe0 tmict=623945 tmcct=615105 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 IF=true pid=0 idlephase=3 schedphase=0 verdict=counting arms=4797 armop=1 arm_tb_delta=1343 arm_deadline=412600000 arm_counts=623945 tickirq=4511 tickaTICKTRAP[idle-prehalt] peer cpu=0 lvt=0xe0 tmict=623807 tmcct=427779 svr=0x1ff tpr=0x0 irr7=0x0 isr7=0x0 verdict=counting armseq=5037 armop=1 arm_tb_delta=32207 arm_deadline=412600000 arm_counts=623807 tickirq=4623 tickage_ms=3 snap_age_ms=0

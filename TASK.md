@@ -22,6 +22,916 @@ without semantic drift?
 3. The futex wait-queue key resolution (physical-word keys from the
    LTP fix) if S-1 finishes early.
 
+### Kernel fixes this session (all pushed on ltp-r21)
+1. **58b27dc4 x86_64 stack 80KB -> 128KB** (twin landed on main as c05f13ad):
+   symlink-chain recursion, 2240B/hop x 40 cap, overflowed the 80KB slot
+   (chunk@700 panic). Repro x2 clean + live-scan chunk@700 100/100.
+2. **b5480343 DFX forensics** (KSO census, overflow-zone ra dump,
+   dead-resume guard, rsp0 witnesses, freed-stack ring) — silent on
+   clean boots; panic-path only.
+3. **ad17db72 futex shared-key = PHYSICAL word** — FutexKey::matches for
+   shared keys compared raw uaddr and futex_hash bucketed uaddr, so a
+   parent's FUTEX_WAIT and an exec'd child's FUTEX_WAKE (fresh mmap at a
+   DIFFERENT address — LTP tst_checkpoint) never met: waitid08/sighold02
+   ETIMEDOUT family. Now: resolve (frame<<12|off) from the caller's
+   tables; bucket on it for BOTH private and shared keys (musl cleartid
+   interop preserved — same word); match shared keys on it. Probe V4b:
+   fw=0 fw_errno=0. sighold02 recovered.
+4. **91d005f6 tmpfs MAP_SHARED page-cache alias** — LTP setup_ipc puts
+   the results+checkpoint page on /dev/shm (tmpfs mmap was
+   documented-unsupported -> private copy per mapper). x86_64 SHARED
+   fault arm now admits tmpfs via is_tmpfs_file and populates through
+   the fs-agnostic shared_file_fault_page; invalidate alias entries at
+   inode destroy + truncate. riscv64 already had the generic arm.
+   Isolation: execl01 execlp01 execv01 execve01 execle01 execvp01
+   execve06 ALL PASS (7/7, was 7x TBROK "Test haven't reported results").
+
+### Scans this session (all x86_64+KVM, 1869 list)
+- run/results-r22b-raw.txt: 1028 PASS, main@819a1be2 + stack fix only
+  (zero WEDGE — chunk 700 recovered).
+- run/results-r22c-raw.txt: 1035 PASS, + futex + tmpfs fixes.
+- run/results-r22d-raw.txt: FINAL on the merged tree (main incl.
+  e9029b74 stat-size fix + SP-3 fsync(dirfd) + the 4 commits above) —
+  spliced to results/results-r22.txt at scan completion.
+- r21 -> r22c delta: +25 (gains 40 / losses 15;
+  results/delta-r22-vs-r21.txt). Losses adjudicated 2x isolation:
+  stat01/_64 fstat02/_64 getpriority01 mmap02 = REAL (all six FIXED by
+  main's e9029b74 — VERIFIED on the merged kernel); getrusage04 = known
+  flake family; float_* TIMEOUT = float-bench flake; kill02/crash02
+  POISON = driver artifacts; diotest2/5 dirtyc0w inotify01 setpgid03 =
+  still-open real (isolation 2/2), next-session families.
+
+### Next-session queue (ranked)
+1. waitid08 CRASH: waitid(WCONTINUED) never returns after SIGCONT —
+   child parks at checkpoint, parent stuck at second waitid, harness
+   timeout. Evidence: run/iso22-logs-tmpfsfix2/chunk0000-a1.log.
+2. Still-failing checkpoint tests despite futex+tmpfs fixes:
+   sigtimedwait01 sigwaitinfo01 pselect01 epoll_wait02/06
+   epoll_pwait03 timerfd_settime02 — check whether they share the
+   waitid/WCONTINUED leg; isolate one by one.
+3. diotest2/5 dirtyc0w (O_DIRECT), inotify01 (event coalescing:
+   "mask=08 expected 2"), setpgid03, execveat01/02.
+4. msg_comm "messages leak between namespaces" — reproducer rig in
+   /home/william/rux-agents/stress-port/run/stress-runs/ (stress-lane
+   intel 2026-11-02).
+5. Flaky family (stress-lane intel): exec'd glibc-static children dying
+   silently pre-output (rc=254, waitpid-ECHILD), intermittent under
+   fork-heavy load — isolation-retest before regression verdicts.
+6. fs-lane long-term: follow_symlink is recursive (2240B/hop); the
+   reference kernel resolves chains ITERATIVELY — an iterative rewrite
+   would decouple stack depth from path shape.
+
+### Rig notes
+- Probe image: run/rootfs-x86_64-probe.img with zz_shmprobe(V4b)/
+  zz_statprobe/zz_statprobe2 injected; boot via run/repro-nftw.sh <name>
+  (writes chunk.txt into the image, 180s drain).
+- Coordinator policy (2026-11-02): new probe SOURCES go into
+  userspace/tests/probes.tar.gz (extract.sh restores to test/);
+  host-side drivers stay in test/ or run/.
+
+## SESSION 4 CLOSE (2026-11-03 ~23:30, branch ltp-r21 @ 44fca140+) — r24 census 1060/1869 WITH negmemo=1
+
+Base: merged origin/main twice (02d9cbde, then the stress-r6 tip 91de1d04 —
+ticktrap DFX, tick-regression driver, SP-6). r23's queue was stale: the
+timers fix had already recovered waitid08/diotest/dirtyc0w/inotify01/
+setpgid03; the census confirms they stayed green.
+
+### Mission 1 — signal-class verdicts (all CLOSED by host reference parity)
+The rig's LTP is MUSL-built; running the same binaries on the host
+reference kernel gives IDENTICAL verdicts for five of the six "open"
+families — they are musl artifacts, not Rux bugs (the r21 PASSes rode
+the removed in-frame executable signal trampoline crutch; stack-NX made
+our kernel die exactly like the reference):
+- rt_sigprocmask01: host rc=139 SIGSEGV at rip=0 (LTP sig_initial
+  harvests oact.sa_restorer; musl never fills it back -> SA_RESTORER|0
+  -> handler returns to NULL). Rux CRASH 139 = parity.
+- rt_sigsuspend01: host rc=2 TBROK "Test killed by SIGSEGV" = parity.
+- sigrelse01: host rc=2, same "signal() failed for signal 34 EINVAL".
+- sigtimedwait01 / sigwaitinfo01: host rc=2 TBROK timeout = parity.
+- kill10: host rc=0 in 1.0s -> REAL divergence. See below.
+
+### Mission 1b — kill10 decoded to a scheduler wake-refusal family (+1 fix)
+Two faces, one test:
+1. PARK face (the census symptom: no progress in 30s, machine alive):
+   children parked mid-storm; WAKE-HEAL-SKIP why=c floods (a BUSY slot
+   names the parked task; its wakes are refused by the curr_on scan).
+   On x86_64 NOTHING heals this shape (pid-hash orphan harvester is
+   riscv64-gated since the x86-scribble4 steal crash; R56c only heals
+   idle-marked slots). FIX LANDED (a5dfbe33): idle_heal_own_slot — the
+   executing idle task is the sole authority on what its CPU runs; when
+   its own slot names a real task after schedule() returned, rewrite it
+   to the idle task under the GRQ and requeue the un-named victim
+   (SLOT_W_IDLE_HEAL=6, SLOT-LIE-HEALED census line, budget 32). The
+   WAKE-REFUSED-SLEEPING (W2) report also gained the refusing guard's
+   discriminators (linked/on_rq/busy/idle slot/exec clock/quantum) via
+   sched::w2_refusal_census.
+2. FREEZE face (rarer, both KVM+TCG): ~1-2s after both managers ack,
+   ALL interrupts stop arriving on both CPUs (UART RX magic dead, timer
+   dead); gdb: both vCPUs in wfi, IF=1; TCG -d int trace ENDS at
+   "Servicing INT 0xe0" (ticks were being delivered into wfi, then the
+   timer stops firing entirely); the frozen-tick trap's last in-guest
+   snapshots (hooked at W2 + idle-prehalt during the hunt) read
+   verdict=counting (LAPIC armed, arms advancing) — the one-shot
+   re-arm chain breaks at the freeze and NOTHING executes afterward to
+   observe why. Evidence pack in run/k10-rux-* logs + the irr-stuck
+   capture at the W2 moment (peer cpu0 irr7=0x1 tmcct=0
+   pending-never-serviced, minutes before the freeze). HANDOFF: this is
+   timers/interrupts guarded-domain (stress lane owns SP-5/ticktrap;
+   next lever: arm-trail dump on the last pre-freeze tick, or an NMI-
+   armed snapshot via QEMU monitor — NMI wakes halted vCPUs).
+   Census impact: kill10 still FAILs (30s SIGTERM TBROK) — the park
+   face has a second subset (lost timer wake in the usleep(100) storm,
+   no refusal prints) that my heal does not cover; sched-domain.
+
+### Mission 2 — r23 losses adjudicated (all CLOSED)
+- getpriority01, pidns20: RECOVERED, isolation PASS 2/2 each (r23
+  losses were transient — merged main's timers/ns work).
+- creat07: RECOVERED PASS 2/2 — the r23-close writecount/ETXTBSY fix
+  (33a4936a) working as designed ("creat() received ETXTBSY").
+- mmap3: budget artifact — the HOST itself needs 60s wall (21min sys
+  CPU) for this test; the 30s harness budget kills it there too.
+- shm_test: budget artifact — host hits my 180s wall still churning.
+
+### Mission 3 — r24 census WITH negmemo=1: 1060/1869 (+1 vs r23)
+First census with negmemo=1 (cmdline gate; scan driver grew --append).
+negmemo is LTP-neutral at census scale: no new fs-family failures
+attributable to it (the one real loss is negmemo-independent, below).
+- Gains: creat07, getpriority01, pidns20, cve-2017-17052 + kill02
+  (r23 POISONS — scan artifacts — now real PASSes).
+- Flakes (PASS 2/2 isolation): creat06, epoll_pwait03, getrusage04.
+- REAL LOSS: ftest03 FAIL 2/2 — BISECTED to a single file swap:
+  kernel/src/sync/mutex.rs. Tip tree FAIL 2x2; tip with ONLY mutex.rs
+  swapped to 1bde7490's version PASS 2x2 (and e264a64b+good-spin-only
+  PASS 2x2). Producer = the recursion-arm gates from da166982/011a71c5
+  ("require locked on the acquire recursion arms — pid-0 free-state
+  alias", loom-motivated). The claimed invariant (owner==pid implies
+  locked for real pids) holds per code reading, so the failure is a
+  TIMING REVEALER: the gates shift SleepMutex handoff timing (the fs
+  biglock convoy under 6-child contention), exposing a deeper fs/
+  biglock race — children fail DATA checks (nonzero exits), not
+  timeouts; WAKE-HEAL-SKIP floods + one virtio-blk "out-of-order
+  completion" witness. HANDOFF: sync lane (their primitive + loom
+  model) + fs lane (the exposed race). Deterministic A/B recipe:
+  ftest03 isolation, 2 boots each. Do NOT revert the gates blindly —
+  they close a real mutual-exclusion hole (pid-0 bogus guard can free
+  a held lock).
+- oom01 parked POISON (chunk@1300 stall, in-flight at wedge); oom02-04
+  recovered on retry. Same class as r23's oom shape.
+
+### Gates on final tree (ltp-r21 @ 44fca140)
+x3 builds rc=0 (x86_64 final rebuild + riscv64 + aarch64, dtb_blob.S
+restored); make test GREEN (maketest-r24-1.log, MT_GREEN attempt=1 of
+the write-lock retry loop).
+
+### Successor queue (r25)
+1. ppoll01 (2 FAIL cases, host PASS — real divergence; the r23 poll
+   fixes left 2 arms failing) + msgstress01 (msgsnd EINVAL, host PASS,
+   flaky — check the ipc-ns ids tables under churn).
+2. shmat1/shm_test CRASH 255 family (shm_test budget-artifact too, but
+   the CRASH 255 variant may be a real bug — needs one isolation boot
+   with the 255 shape captured).
+3. ftest03 handoff follow-up with the sync lane (recipe above).
+
+## SESSION 6 (r26) LOG — branch ltp-r21 @ f747cf8f+ (2026-11-04)
+
+Base: origin/main 0c8e4b79 merged (cc0e762c; only DFX/docs came in —
+BMSSCAN probes + lmbench/geekbench refresh). The r25 census (1049/1869)
+was COMPLETE at quota death and is committed with its delta; this round
+adjudicated its 20 losses.
+
+### THE r25 DIP IS ONE BUG: 8d81c5da's async close decisions
+Root cause of 13 of the 20 losses (all isolated deterministically,
+1st attempt, no host load): **fs(fdt) RCU retire (8d81c5da) moved the
+last-reference close decisions — record-lock release, ops.close (pipe
+reader drop, epoll purge), and the final Arc drop's IN_CLOSE_*
+fsnotify — into the fdreapd kthread behind a grace period. close(2)
+therefore returned to userspace BEFORE its side effects ran.** The
+reference kernel runs the final fput in TASK WORK at the
+return-to-userspace boundary, so userspace never observes that window
+(HARD DESIGN DIRECTIVE: reference wins every dispute).
+
+Family evidence (all FAIL pre-fix, all PASS 2x post-fix):
+- pipe02/pipe08/write05/writev01: write/writev to a pipe whose reader
+  closed returned SUCCESS instead of EPIPE/SIGPIPE.
+- fcntl14/15/33 (+fcntl36_64 census POISON = artifact): locks/leases
+  still held right after the closing fd died -> EAGAIN.
+- inotify01/02/05: queue was [04,20,01,**20**,02] vs expected
+  [04,20,01,**10**,20,02,**08**] — both IN_CLOSE_* missing (they fire
+  in File::drop, i.e. in the reaper), everything after shifted.
+- execve03: the ENOEXEC case saw ETXTBSY (setup fd's write-count not
+  dropped at close).
+- access02: close-timing subtest.
+- BONUS: kill10 PASSES 2/2 for the first time since r24 — the park
+  face's engine was the same divergence (children parked on harness
+  pipes whose writer's close never delivered the EOF wake).
+- creat07: flake (checkpoint ETIMEDOUT under census load; PASS 2x in
+  isolation). gettid02 POISON = artifact (PASS 2/2). float_exp_log =
+  known float-bench flake (POISONs even isolated boots). shm_test =
+  racy/budget (r25 verdict stands).
+
+### Fix (f747cf8f): retire_complete — reference task_work parity
+Syscall-context displacement (close(2), dup2/dup3) parks the file as
+before, then COMPLETES the close decisions for everything parked up to
+and including its own push before returning: FIFO queue + monotonic
+PUSHED/PROCESSED ordinals prove completion; the closer drains the batch
+itself when the reaper does not win the race (one grace covers the
+batch). fdreapd stays as the parallel processor + monopolist retry.
+
+Two latency pieces without which the synchronous wait was unusable
+(measured: inotify11's 10k-file churn blew its 30s budget — every close
+stalled ~1 jiffy):
+1. rcu: a CPU executing its idle task is quiescent by construction
+   (get_file reader windows run only over a non-idle current); a halted
+   idle CPU's stale QS report no longer holds up grace periods
+   (sched::cpu_running_idle + cpu_quiescent in all three check sites).
+2. rcu: synchronize_rcu_forced_polled — pause-hinted ~100us poll covers
+   a busy peer's next user-return BEFORE the 1-jiffy sleepy fallback.
+   inotify11: 35s timeout -> 5s PASS (2x). Regression batch 39 tests:
+   53s wall (was 116s under the sleepy-only form).
+
+### Gates on the fix
+- Families 2x green in isolation (12 members) + kill10 2x + 39-test
+  dup/close/fcntl/flock/inotify regression batch 34 PASS (only the
+  pre-existing inotify09 timeout remains, unchanged vs r25 census).
+- x3 builds rc=0 (x86_64 f747cf8f, riscv64, aarch64; dtb_blob.S
+  restored). make test GREEN 1301/1301 (maketest-r26-1.log; lock-aware
+  wait — no other lane's gate was blocked; the known post-suite
+  halt-time hung-task witness appears after "All tests passed!",
+  pre-existing shape).
+- Tier-2 pbench (same rig, q35 KVM SMP2/1G): **p6_openclose med
+  134.2us vs the last-ACCEPTED baseline 156us — 14% BETTER** (8d81c5da
+  async was ~123us; the sync completion costs ~11us over async and
+  still beats the accepted band). p6_stat 37.4 (base 71), p6_read_
+  cached 185.9 (base 204), p6_append 84.8 (base 77, +10%), p6_unlink
+  822 (base 808, +1.8%), p6_mkdrmdir 2892 (base 2760, +4.8%),
+  p6_write_fsync 13.9ms (base 14.2ms) — all inside ±20% or improved.
+  Full log: work/pbench-r26-fix-serial.log.
+
+### ftest03
+No stress-r9/r10 fix on origin/main as of this merge (stress r8 close
+97b7dc17 is the latest). ftest03 still FAIL 2/2 on my tree (children
+fail DATA checks) — unchanged, still the stress lane's queue. Their
+fix not landing mid-round; the census point stays theirs to take back.
+
+### Handoff notes
+- **fdt lane (8d81c5da owner)**: the fast path to reclaim the full
+  async gain is the reference's CONDITIONAL increment (fget's
+  inc_not_zero) — Arc has no try-clone, so it needs a manual refcount
+  beside the Arc (kref shape); then close decisions need NO grace at
+  all and only the memory free waits post-grace (fdreapd keeps that
+  duty). Also noted: the FdTable Drop teardown path runs
+  displaced_close_decision WITHOUT a grace — mid-window resurrection
+  by a cross-fork get_file reader is theoretically possible there
+  (pre-existing, not observed).
+- The census QEMU holds test/rootfs-x86_64-ltp.img (NOT the shared
+  test/rootfs.img); make test used rootfs.img lock-aware with short
+  hold windows.
+
+### r26 census: **1067/1869 (+18, NEW PEAK; previous best r24 1060)**
+Final tree, negmemo=1, results/results-r26.txt + delta-r26-vs-r25.txt.
+- Gains 21 (the whole async-close family + r25 POISON artifacts +
+  creat07 flake), kill10 CRASH->FAIL (PASS 2/2 isolated), loss 1:
+  timerfd_settime02 — THROUGHPUT-BOUND (fuzzy-sync close churn pays
+  the per-close grace; TPASS at a 170s budget, same class as
+  msgstress01).
+- chunk@1300 hit the host-load wedge family (mmap1's child SEGV +
+  driver hang; the r25 census had the same SEGV class in that chunk —
+  futex_waitv02 there). The scanner's parking rule stalls when an
+  attempt reports 0, so 51 rows came back WEDGE/POISON; ALL were
+  re-run in rescue boots and spliced (r22d flow) — 23 PASS, 11 TCONF
+  (ksm*/oom02-04/cpuset01 pre-existing classes), 15 FAIL matched
+  their r25 classes, oom01 POISON (r24 precedent). fcntl34 and
+  tgkill03 additionally isolated 2x (PASS; flaky-boot class).
+- The rescue scan reused run/r26-scan-logs chunk names — rescue
+  chunk0000-*.log OVERWROTE the census's chunk0/200/400 logs (results
+  files unaffected; noted for log archaeology).
+
+## SESSION 5 (r25) LOG — branch ltp-r21 @ 0ca98990+ (2026-11-04)
+
+Base: origin/main d08f8cd7 merged (dad20901). FOUR notes for the
+coordinator:
+
+**MERGE GAP (action needed): d08f8cd7 does NOT contain the contents of
+four earlier ltp-lane fixes** (verified by tree-diff origin/main vs the
+merged worktree, 11 files): 2515424b x86_64 SA_RESTORER-mandatory
+(signal.rs still has the in-frame trampoline on main), ab5b5da9
+WCONTINUED wait events (process/exit.rs), 33a4936a ETXTBSY exec text
+holds (errno/locks/vfs/mm_struct/fork/syscall-process), 1ed73f7d futex
+page-in on physical-key resolve (sync/futex.rs). On main those tests
+(rt_sigprocmask01/rt_sigsuspend01 parity shapes, waitid08 WCONTINUED,
+creat07 ETXTBSY, sighold02-class futex waits) will read as the OLD
+behavior — the r24 census numbers were measured with the fixes. The
+r24-census artifacts merged fine; the KERNEL bits did not follow. My
+branch carries them (merge kept my versions); cherry-pick or merge the
+branch whole.
+
+**Rootfs.img lock reversal this round:** the main session's merge gate
+(w28b) held test/rootfs.img legitimately while my make test needed it;
+my suite now waits lock-aware (run/r25-maketest-wait.sh). No gate was
+blocked by me this round.
+
+### Fixes landed (4 kernel commits + 1 test commit)
+1. **a6f7a562 ppoll/pselect6 apply their sigmask argument** — sys_ppoll
+   IGNORED args[3] (doc said so), pselect6 ignored args[5]; only
+   epoll_pwait implemented the wait-scoped mask. ppoll01's
+   SEND_SIGINT_RACE_TEST (both variants) slept out its 2s timeout and
+   returned 0 instead of EINTR: the caller-blocked SIGINT stayed blocked
+   through the wait. Now: WaitScopedMask guard (install, restore on
+   every exit; EINTR exits DEFER the restore to the signal-delivery
+   path via sigmask_restore — reference -ERESTARTNOHAND discipline, same
+   mechanism rt_sigsuspend uses); ppoll validates sigsetsize==8 first;
+   pselect6 parses the raw {ss,size} pair. Verified: ppoll01 PASS 20/0/0
+   + pselect01/_64, select02, poll02, epoll_pwait03 no regressions.
+2. **66192155 reference IPC limits** — IPC_IDS_MAX 256→32768 (IPCMNI;
+   id encoding keeps positive i32), msgmni default 256→32000, shmmni
+   pinned 4096. Root cause of msgstress01: the test creates 1000 queues
+   on its DEFAULT run (the -n clamp never applies without the option),
+   msgget ENOSPC'd at 257, cleanup RMID cascaded EINVAL into every
+   child (broken 44–263). VERIFIED CORRECT: full run with
+   LTP_TIMEOUT_MUL=3 PASSES. The plain 30s-harness census verdict is now
+   throughput-bound (msg+usleep churn needs minutes at -smp 2) — not a
+   correctness bug; msg-path perf (per-queue locks vs the one global
+   ids Spinlock) is perf-lane material.
+3. **27d244ab shmat EIDRM errno parity** — shmat on an IPC_RMID-marked
+   but still-live segment returned EINVAL (find_with_perms' !deleted
+   filter made the EIDRM check dead code); reference shm_obtain_object_
+   check says EIDRM (EINVAL only for freed/reused ids). Lookup+perms+
+   deleted+size now one slots lock with seq/ns revalidation (the old
+   two-lock shape had a slot-reuse window).
+4. **sysfs(2) implemented (x86_64-native 139)** — 139 was missing from
+   the x86_64→generic translate table, so native sysfs() hit the
+   generic table's rt_sigreturn(139), which popped a garbage signal
+   frame and resumed at a STACK address (NX fault): LTP sysfs01..05 all
+   died "Test killed by SIGSEGV" in setup. Implemented over a shared
+   FS_TABLE (also drives /proc/filesystems): option1 index-by-name
+   (EINVAL/EFAULT), option2 name-by-index returns 0 (modern reference;
+   sysfs02's TST_EXP_PASS demands exactly 0), option3 count, else
+   EINVAL. Verified: sysfs01-05 ALL PASS (5-point family, host parity
+   confirmed first).
+
+### Verdicts (results/verdicts-r25.txt — the NOT-OURS ledger)
+- **shmat1 CRASH-255 = NOT-OURS**: the musl binary on the HOST
+  reference kernel dies identically (rc=255, "caught signal 11 --
+  exiting.", -l 400): sig_handler's sigsetjmp recovery is #ifdef
+  __i386__ ONLY, so the test's by-design shmdt race kills it on every
+  x86_64 kernel. Full transcript in the r25 log below.
+- **mmapstress family DISSOLVES (8 members)**: 02/03/05/08 (the
+  "errno=12 couldn't round up brk" arm) fail IDENTICALLY on the host
+  (same TFAIL lines, rc=1) — NOT-OURS; 06/07/09/10 fail only because
+  our tests-all.txt invokes them BARE while LTP's runtest passes args
+  (06 "20", 09/10 "-p 20 -t 0.2", 07 needs a tmpfile argument) —
+  invocation artifacts. A follow-up rig improvement (ltpscan arg
+  support) could recover up to 4, but the runner currently execs bare
+  names only.
+- **shm_test = racy legacy mtest07** (byte-wise sched_yield churn;
+  intrinsic shmget/shmat-vs-RMID thundering race the reference also
+  loses with nonzero probability — host passes only at small -l/-t).
+  Census stays non-PASS; errno parity fixed kernel-side.
+
+### Leads captured (not chased)
+- **Post-test exit hang after msgstress01** (mul3 run): after "Test
+  passed" + summary, a task (pid 306, state=2) stays blocked; khungtaskd
+  reports but its victim-stack dump prints its own frame (walker bug?).
+  RWFRZ TID-VANISHED (reader-exit window) prints nearby. Exit-path hunt
+  under IPC+futex churn; log run/r25-msgstress-mul3.log.
+- **ftest03**: still FAIL 2/2 on the stress-r8 merged tree (children
+  fail DATA checks + one out-of-order virtio completion witness) —
+  stress lane round-9 owns the fs/biglock fix; re-verify when it lands.
+- **epoll_pwait** still uses the direct-restore (pre-defer) mask exit —
+  same TIF_RESTORE_SIGMASK nuance ppoll now has; no LTP test observes
+  it today; switch it to WaitScopedMask when touching that file next.
+
+### Gates
+x3 builds rc=0 (x86_64 after each fix + riscv64/aarch64 twice,
+dtb_blob.S restored each time); make test GREEN 1301/1301
+(maketest-r25-2.log; attempt 3 hit the shared rootfs.img lock held by
+the main-session merge gate — relaunched lock-aware, see above). Full
+r25 census WITH negmemo=1 launched on the final tree
+(results/results-r25.txt + run/r25-scan-logs).
+4. The kill10 freeze face with the timers owner (evidence pack).
+
+## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
+
+### Kernel fixes this session (3 commits, on top of the fs-lane negmemo/chroot base)
+1. **d326c72e poll: nfds > RLIMIT_NOFILE rejected before allocating**
+   (reference do_sys_poll parity) — ppoll01 INVALID_NFDS arm.
+2. **0115667a timers: poll-family waiters wake at the PRECISE ns deadline;
+   timerfd accepts TFD_TIMER_CANCEL_ON_SET** — recovered the whole
+   checkpoint-timer family: epoll_wait02 epoll_pwait03 pselect01
+   pselect01_64 select02 poll02 timerfd_settime02 (+ timerfd_settime01,
+   waitid08 WCONTINUED leg). The coarse-tick wait was the r22 "checkpoint
+   tests still failing" family's engine.
+3. **e2169c01 ipc: namespace-scope SysV IPC objects — per-ipc_namespace ids
+   tables** (the msg_comm "messages leak between namespaces" fix).
+   VERIFIED: msg_comm PASS x2 (fix1/fix2 chunks) + msgctl01 msgget01
+   msgsnd01 msgrcv01 semget01 semctl01 shmctl02 all PASS. Census gains:
+   msg_comm sem_comm shm_comm (the whole *_comm namespace family).
+
+### Census (x86_64+KVM, 1869 list, final kernel = the 3 fixes on the
+merged base): PASS 1042 -> **1059 (+17)**; 21 gains / 4 losses.
+Full table: results/delta-r23-vs-r22.txt. Gains include all r22-close
+queue targets: waitid08 (was CRASH), diotest2/5, dirtyc0w, inotify01,
+setpgid03, execveat01/02, fcntl17, setns02, float_exp_log, getrusage04.
+
+### Loss adjudication pending (r24 first item): getpriority01 FAIL
+(PRIO_USER arm, was PASS r22), pidns20 FAIL (was PASS), creat07
+FAIL->TIMEOUT (checkpoint family), shm_test TIMEOUT->CRASH 255,
+mmap3 POISON->FAIL (slow-machine class). cve-2017-17052 + kill02 =
+POISON (scan-driver artifacts, known flake family).
+
+### STILL OPEN (top): rt_sigprocmask01 CRASH 139 + rt_sigsuspend01 FAIL
+("Test killed by SIGSEGV") — r21 PASS -> r22 broken (window pinned:
+NOT caused by this session's fixes; producers are the r21->r22 set:
+preempt-heal observation bar 1918c4b5, binder deferral 963b3e95,
+128KB stacks e336143a, futex physical keys 122d8a78, tmpfs MAP_SHARED
+799cb942, WCONTINUED/waitid ab5b5da9, pretcode SA_RESTORER 2515424b,
+execveat 26540f5f, futex page-in 1ed73f7d). 2x isolation confirmed
+REAL (results-r23iso-a/b). Other open families: sigrelse01 (signal 34
+EINVAL), kill10 (SIGTERM), ppoll01 FAIL 2 cases, sigtimedwait01/
+sigwaitinfo01 (timeout class), msgstress01 (msgsnd EINVAL, flaky),
+shmat1 CRASH 255, shm_test CRASH.
+
+### Gates on final tree (predecessor logs): x3 builds rc=0
+(build-r23fix2-x86 / build-r23final-rv / build-r23final-aa64),
+make test GREEN (maketest-r23final4, "MT_GREEN attempt=10" — the
+rootfs.img write-lock trap needs the retry loop).
+
+## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
+The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
+"PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —
+ROOT CAUSE = KERNEL STACK EXHAUSTION by the recursive symlink resolver.
+Decode chain (all evidence in run/repro-nftw01.log + gdb dumps):
+1. The call-trace frame below trap_handler was the fault STUB's return
+   address (mis-symbolized as census_peek3::is_userva / AlignedStorage —
+   DWARF pollution over the stub region); the real RIP never printed.
+   Added rip + kstack bounds to the panic line: rip=0x0 (instruction
+   FETCH at NULL), rsp 19KB BELOW task 307's stack bottom.
+2. KSO census (new, in exception.rs): task 307 cpu1 slot CORRECT, rsp0
+   CORRECT, no dead-task resume, no foreign-sp switch-in, no
+   freed-stack/rsp0 staleness — the freed-slot theory died; the plain
+   classification was right: the task overflowed its own stack INTO the
+   adjacent (free) kstack slot [0x7c5a8000,0x7c5bc000) of the 256KB
+   block, tearing through stale "./loop" path-buffer data; a return
+   through a zeroed slot jumped to rip=0.
+3. Overflow-zone frame dump (new): follow_symlink/follow_symlink_hinted
+   frames at a measured 2240-BYTE STRIDE per nested hop. The resolver is
+   depth-capped at 40 (MAX_SYMLINKS, review 5.1) but 40 hops x 2240B =
+   ~90KB of chain frames alone — past the 80KB x86_64 kernel stack
+   before the counter can return ELOOP. nftw01's tree has the symlinks.
+4. FIX: Kernel.toml kernel_stack_size_x86_64 81920 -> 131072 (128KB,
+   riscv64 parity; this file's own history documents the same lesson for
+   riscv64), kstack slab 3 slots/block -> 2 (zero tail waste; buddy
+   fallback = one perfect order-5 block). OH-floor memory cost +48KB/
+   stack (~+125MB at 2690 stacks) — flagged to coordinator for the
+   merge gate (mm guarded domain).
+5. Also landed (b5480343): KSO census + overflow-zone ra dump + dead-task
+   resume guard at switch-in + rsp0 skip/free-vs-live-rsp0 witnesses +
+   freed-stack ring. All silent on clean boots; they convert this panic
+   class into named prints.
+6. GATES: x3 builds rc=0 (x86_64/riscv64/aarch64); make test GREEN
+   (run/maketest-128k.log "All tests passed!"); repro-nftw.sh x2 clean
+   (nftw01 completes, rc=1 = its r21-class real FAIL, SCAN_DONE).
+7. Long-term note for the fs lane: the reference kernel resolves symlink
+   chains ITERATIVELY (link_path_walk) — 40 hops cost ~0 stack there.
+   Making follow_symlink iterative would decouple stack size from path
+   shape entirely (big surgery in fs/vfs.rs; NOT done this session).
+
+## Method
+- One stressor class per boot; serial console is the log.
+- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
+  run/findings.md + minimal reproducer.
+- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
+  clean before push (origin/stress-port).
+- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
+  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
+  double as Tier-1-under-load evidence for the perf gate.
+- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
+  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
+  by exact cmdline).
+## Session log (append per session)
+
+### 2026-11-02, round 1 — rs suite ported, 2 kernel bug families fixed, 2 stressors re-run clean
+
+**Ported** (stress-ng stressor logic as standalone static musl probes,
+per charter method; sources archived in userspace/tests/probes.tar.gz
+per the 394c16ce policy, host driver test/stressng/run-class-x86.sh):
+14 classes — malloc/mmap/bigheap (memory churn), fork/exec, fsmeta
+(metadata storm with read-back verify), pipe/sock/sem/msg/shm (IPC),
+futex/sched (wakeup storms), timer (create/settime/delete + CLOCK_
+MONOTONIC discipline + nanosleep latency), plus --spawn passthrough
+for minimal reproducers. Vehicle: the x86_64+KVM LTP rootfs (copy of
+the permanent-store image in run/, rs/rsrun/renameco injected via
+debugfs); PID-1 rsrun runs cmds.txt lines with per-class budgets.
+
+**Round-1 campaign** (baseline 819a1be2, one family per boot,
+dfx=allocwatch,taskdump,watchdog + syscost=1, logs in
+run/stress-runs/): ipc / sched / timer / memory PASS (0 panics, 0
+wedges, 0 probe errors); fsmeta FAIL (SP-2); forker survived but lit
+up the SP-1 storm. Verdicts + census numbers: run/stress-runs/
+findings.md.
+
+**SP-1 (fixed, verified)**: PREEMPT-HEAL false-fires stripped live
+guard bits of fresh fork/exec tasks (15,577 heals + 169 underflows per
+120 s of fork churn). Two producers: (1) stale_200's j==0 arm treated
+never-stamped fields as instantly stale — fixed with arm-on-first-
+observation (sched.rs); (2) new_task_at did not zero the four
+ti_pc_*_zero_jif stamps on recycled Task pages — same class as R68a
+(task.rs). Verification boot (fork 8 + exec 4, full 100 s budgets):
+**0 heals, 0 underflows, 0 panics** (was 15,577/169/0).
+
+**SP-2 (fixed, verified)**: ext4 setattr corrupted freshly-written
+files — the success tail ran page-cache invalidate_inode for EVERY
+attr flavor (chmod dropped dirty unflushed pages) and metadata-only
+setattrs wrote back the disk-read inode's stale i_size (0 for pending
+writeback). renameco minimal reproducer isolated chmod (3/300 fails,
+reads returned EOF; rename alone clean). Fix: invalidate gated to
+ATTR_SIZE, metadata setattrs carry the live VFS size (ext4/mod.rs).
+Verification boot: renameco 0/300 on every sequence; fsmeta 4-worker
+class full 120 s rc=0 (was: all 4 workers corrupt on cycle 1).
+
+**Driver bug found+fixed in-flight**: rsrun killed classes at an
+absolute 60 s (RES rc=137 truncation in the first campaign's memory/
+forker boots); now parses --timeout per class.
+
+**Tier-1-under-load evidence** (syscost, memory boot): IF=0 cpu0
+17.6 s/60 s (rest 17.2 s, hard 408 ms, uart 3 ms), top rest-site
+sched.rs:2568 (37.4M ops avg 834 ns); no ALLOCTHROW / DEADLOCK /
+KERNPANIC classes in any boot. Follow-up hunts queued: IRQ-OFF-WINDOW
+idle-wake prints 65-142 ms under load (pre-existing, guarded domain
+interrupts); WAKE-STRANDED 118 s face under memory churn (SP-1
+family; re-check on fixed kernel in round 2).
+
+## SCAN RESULT (raw, unspliced)
+run/results-r22-raw.txt (3431s, x86_64+KVM, main@2fd5215f):
+  PASS=966 FAIL=258 TCONF=482 CRASH=30 EXECFAIL=17 TIMEOUT=14 POISON=2
+  WEDGE=100  <- ALL of chunk 700 (tests 700-799) lost to the boot panic
+Headline 966 vs r21's 1010 (-44) is PANIC-DRIVEN: r21 scored ~72 PASSes in
+the 700-799 range, so on the comparable 1769 tests r22 is ~+28 (the
+r21-bugs fixes + sockets + sched trio + ftest04 recovery visible live:
+"RES|ftest04|0|Test passed" in chunk1400 log). PRIORITY 1 for the successor:
+fix the chunk-700 panic, rerun tests 700-799 (bash run/rerun-chunk.sh 700
+799 r22c7), splice into results/results-r22.txt (currently only the raw
+copy exists), then run run/r22-pipeline.sh for the delta table.
+NOTE: pipeline script run/r22-pipeline.sh copies raw -> results/, prints
+class counts + delta vs r21 (adapt as needed after the splice).
+
+## LTP IPC path fact (for the execl-family fix)
+The rig's LTP uses a FIXED ipc path: guest env LTP_IPC_PATH=/tmp/ltp-ipc
+(companions TBROK "File /tmp/ltp-ipc does not exist!" when run standalone —
+chunk1700/1800 logs). /tmp is the ext4 root (boot mounts tmpfs only on
+/dev/shm and /run). So the execl01-family coherence failure is on the EXT4
+MAP_SHARED arm (kernel/src/arch/x86_64/mm/page_fault.rs "session 25"
+filemap_pin_cache_page path), NOT tmpfs (tmpfs mmap is separately
+documented-unsupported in kernel/src/fs/tmpfs.rs:31 — future landmine if
+any test ever mmaps /dev/shm files). waitid08's tst_checkpoint ETIMEDOUT
+(chunk1300 log) is the same page's futex leg.
+
+## Successor immediate queue (in order)
+1. Bash-recovery burst: grep PARKWALK in kernel/src/sched/sched.rs; boot
+   run/repro-nftw.sh nftw01 (full KERNPANIC dump); addr2line the rip.
+2. Fix the chunk-700 panic; x3 builds + make test; rerun chunk 700;
+   splice; rerun run/r22-pipeline.sh for the real r22 delta.
+3. Recompile+reinject the V1-V4 probe (run/zz_shmprobe.c has V4 now;
+   the injected binary is the older V1-V3 build): musl-gcc -O2 -static,
+   debugfs-write zz_shmprobe/zz_shmchild/zz_shmchild2 into
+   run/rootfs-x86_64-probe.img, chunk.txt=zz_shmprobe, boot, read the
+   ZZP verdict line. v1/v2/v3/v4 discriminate: double-mmap / fork-inherit
+   / exec-fresh-mmap / exec-futex-wake coherence on ext4 MAP_SHARED.
+4. Commit results/ + TASK.md; push origin/ltp-r21.
+
+## Mission
+1. Reconstruct deleted infra from git (main + `git branch -r | grep archived`): the LTP runner, the 1,869-case list, the per-round results layout (convention /home/william/rux-agents/ltp-r<N>/results/). test/patrol-runbook.md + test/suite.sh carry conventions. LTP source: userspace/linux-ltp/ltp-20240524.tar.xz (extract-build convention like toybox; musl SDK via `make sdk`; soft-fp overlay discipline userspace/build-softfp.sh — BUG-S005 zcb pin).
+2. Build kernel (riscv64) + LTP with the pinned march.
+3. Full 1,869 scan (detached/setsid; long runs survive tool timeouts). Known flake families (rerun 2x in isolation before counting new failures): accept02 getrusage04 kill02 genfmod rename/statfs.
+4. Results to /home/william/rux-agents/ltp-r20/results/. Deliver r20 vs r19 delta table.
+5. New real failures: triage against recent main merges (aarch64 merge b238ebd1 shared diffs: virtio device-ID table, wake floor per-arch, ELF machine checks, boot-table honesty) — compare failing syscall surface vs merge diff.
+6. Small kernel fixes welcome (small commits, English, NEVER "Linux"); rerun affected family.
+---
+
+(main carries the stress-port charter below — other lane's TASK content, keep)
+
+## Charter (user directive 2026-11-02)
+"Supplement stress test cases — stability is still a problem. If the
+industry has stress tests for the reference kernel, port them directly
+and run them." PRIMARY vehicle: x86_64 + KVM (platform priority).
+Goal: panics, wedges, leaks, and scheduler starvation exposed by
+sustained load — then kernel-side fixes.
+
+## What to port, in order
+1. stress-ng (the industry standard, ~300 stressors). Build a static
+   x86_64 subset against the toolchain already used for probes (see
+   test/ build patterns; musl static preferred). Inject via the LTP
+   vehicle in /home/william/rux-images/testimages/ (boot rig there
+   already runs x86_64+KVM). Start with the classes our bug ledger
+   says are weak:
+   - memory: malloc/mmap churn (allocator class-lock family),
+     mmapfixed, bigheap (zone exhaustion vs the fake-OOM history)
+   - fork/exec churn (p4 regression history; exit-path RCU grace)
+   - filesystem metadata churn (mkdir/rmdir/unlink storms — the OH
+     chmod-storm shape; bio write-plan under load)
+   - IPC: pipe/socket storms, SysV sem/msg/shm
+   - sched: many-thread yield/wakeup storms (phantom preempt family,
+     WAKE-STRANDED census)
+   - timer/clock: settime/interval storms (tick discipline)
+2. LTP robustness subset already in the tree (fork12, mmapstress,
+   mmap-corruption, sem/msg stress) — run long-loop, not just once.
+3. (later) syscall-fuzzer class (trinity-like) once 1-2 are clean.
+
+## Method
+- One stressor class per boot; serial console is the log.
+- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
+  run/findings.md + minimal reproducer.
+- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
+  clean before push (origin/stress-port).
+- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
+  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
+  double as Tier-1-under-load evidence for the perf gate.
+- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
+  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
+  by exact cmdline).
+
+### Scans this session (all x86_64+KVM, 1869 list)
+- run/results-r22b-raw.txt: 1028 PASS, main@819a1be2 + stack fix only
+  (zero WEDGE — chunk 700 recovered).
+- run/results-r22c-raw.txt: 1035 PASS, + futex + tmpfs fixes.
+- run/results-r22d-raw.txt: FINAL on the merged tree (main incl.
+  e9029b74 stat-size fix + SP-3 fsync(dirfd) + the 4 commits above) —
+  spliced to results/results-r22.txt at scan completion.
+- r21 -> r22c delta: +25 (gains 40 / losses 15;
+  results/delta-r22-vs-r21.txt). Losses adjudicated 2x isolation:
+  stat01/_64 fstat02/_64 getpriority01 mmap02 = REAL (all six FIXED by
+  main's e9029b74 — VERIFIED on the merged kernel); getrusage04 = known
+  flake family; float_* TIMEOUT = float-bench flake; kill02/crash02
+  POISON = driver artifacts; diotest2/5 dirtyc0w inotify01 setpgid03 =
+  still-open real (isolation 2/2), next-session families.
+
+### Next-session queue (ranked)
+1. waitid08 CRASH: waitid(WCONTINUED) never returns after SIGCONT —
+   child parks at checkpoint, parent stuck at second waitid, harness
+   timeout. Evidence: run/iso22-logs-tmpfsfix2/chunk0000-a1.log.
+2. Still-failing checkpoint tests despite futex+tmpfs fixes:
+   sigtimedwait01 sigwaitinfo01 pselect01 epoll_wait02/06
+   epoll_pwait03 timerfd_settime02 — check whether they share the
+   waitid/WCONTINUED leg; isolate one by one.
+3. diotest2/5 dirtyc0w (O_DIRECT), inotify01 (event coalescing:
+   "mask=08 expected 2"), setpgid03, execveat01/02.
+4. msg_comm "messages leak between namespaces" — reproducer rig in
+   /home/william/rux-agents/stress-port/run/stress-runs/ (stress-lane
+   intel 2026-11-02).
+5. Flaky family (stress-lane intel): exec'd glibc-static children dying
+   silently pre-output (rc=254, waitpid-ECHILD), intermittent under
+   fork-heavy load — isolation-retest before regression verdicts.
+6. fs-lane long-term: follow_symlink is recursive (2240B/hop); the
+   reference kernel resolves chains ITERATIVELY — an iterative rewrite
+   would decouple stack depth from path shape.
+
+### Rig notes
+- Probe image: run/rootfs-x86_64-probe.img with zz_shmprobe(V4b)/
+  zz_statprobe/zz_statprobe2 injected; boot via run/repro-nftw.sh <name>
+  (writes chunk.txt into the image, 180s drain).
+- Coordinator policy (2026-11-02): new probe SOURCES go into
+  userspace/tests/probes.tar.gz (extract.sh restores to test/);
+  host-side drivers stay in test/ or run/.
+
+## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
+
+### Kernel fixes this session (3 commits, on top of the fs-lane negmemo/chroot base)
+1. **d326c72e poll: nfds > RLIMIT_NOFILE rejected before allocating**
+   (reference do_sys_poll parity) — ppoll01 INVALID_NFDS arm.
+2. **0115667a timers: poll-family waiters wake at the PRECISE ns deadline;
+   timerfd accepts TFD_TIMER_CANCEL_ON_SET** — recovered the whole
+   checkpoint-timer family: epoll_wait02 epoll_pwait03 pselect01
+   pselect01_64 select02 poll02 timerfd_settime02 (+ timerfd_settime01,
+   waitid08 WCONTINUED leg). The coarse-tick wait was the r22 "checkpoint
+   tests still failing" family's engine.
+3. **e2169c01 ipc: namespace-scope SysV IPC objects — per-ipc_namespace ids
+   tables** (the msg_comm "messages leak between namespaces" fix).
+   VERIFIED: msg_comm PASS x2 (fix1/fix2 chunks) + msgctl01 msgget01
+   msgsnd01 msgrcv01 semget01 semctl01 shmctl02 all PASS. Census gains:
+   msg_comm sem_comm shm_comm (the whole *_comm namespace family).
+
+### Census (x86_64+KVM, 1869 list, final kernel = the 3 fixes on the
+merged base): PASS 1042 -> **1059 (+17)**; 21 gains / 4 losses.
+Full table: results/delta-r23-vs-r22.txt. Gains include all r22-close
+queue targets: waitid08 (was CRASH), diotest2/5, dirtyc0w, inotify01,
+setpgid03, execveat01/02, fcntl17, setns02, float_exp_log, getrusage04.
+
+### Loss adjudication pending (r24 first item): getpriority01 FAIL
+(PRIO_USER arm, was PASS r22), pidns20 FAIL (was PASS), creat07
+FAIL->TIMEOUT (checkpoint family), shm_test TIMEOUT->CRASH 255,
+mmap3 POISON->FAIL (slow-machine class). cve-2017-17052 + kill02 =
+POISON (scan-driver artifacts, known flake family).
+
+### STILL OPEN (top): rt_sigprocmask01 CRASH 139 + rt_sigsuspend01 FAIL
+("Test killed by SIGSEGV") — r21 PASS -> r22 broken (window pinned:
+NOT caused by this session's fixes; producers are the r21->r22 set:
+preempt-heal observation bar 1918c4b5, binder deferral 963b3e95,
+128KB stacks e336143a, futex physical keys 122d8a78, tmpfs MAP_SHARED
+799cb942, WCONTINUED/waitid ab5b5da9, pretcode SA_RESTORER 2515424b,
+execveat 26540f5f, futex page-in 1ed73f7d). 2x isolation confirmed
+REAL (results-r23iso-a/b). Other open families: sigrelse01 (signal 34
+EINVAL), kill10 (SIGTERM), ppoll01 FAIL 2 cases, sigtimedwait01/
+sigwaitinfo01 (timeout class), msgstress01 (msgsnd EINVAL, flaky),
+shmat1 CRASH 255, shm_test CRASH.
+
+### Gates on final tree (predecessor logs): x3 builds rc=0
+(build-r23fix2-x86 / build-r23final-rv / build-r23final-aa64),
+make test GREEN (maketest-r23final4, "MT_GREEN attempt=10" — the
+rootfs.img write-lock trap needs the retry loop).
+
+## CHUNK@700 PANIC: DECODED AND FIXED (commit 58b27dc4)
+The deterministic boot panic (4/4 raw-scan attempts + 2/2 repro boots):
+"PANIC: Kernel stack overflow in task 307 (fault_addr=0x0, rip=0x0)" —
+ROOT CAUSE = KERNEL STACK EXHAUSTION by the recursive symlink resolver.
+Decode chain (all evidence in run/repro-nftw01.log + gdb dumps):
+1. The call-trace frame below trap_handler was the fault STUB's return
+   address (mis-symbolized as census_peek3::is_userva / AlignedStorage —
+   DWARF pollution over the stub region); the real RIP never printed.
+   Added rip + kstack bounds to the panic line: rip=0x0 (instruction
+   FETCH at NULL), rsp 19KB BELOW task 307's stack bottom.
+2. KSO census (new, in exception.rs): task 307 cpu1 slot CORRECT, rsp0
+   CORRECT, no dead-task resume, no foreign-sp switch-in, no
+   freed-stack/rsp0 staleness — the freed-slot theory died; the plain
+   classification was right: the task overflowed its own stack INTO the
+   adjacent (free) kstack slot [0x7c5a8000,0x7c5bc000) of the 256KB
+   block, tearing through stale "./loop" path-buffer data; a return
+   through a zeroed slot jumped to rip=0.
+3. Overflow-zone frame dump (new): follow_symlink/follow_symlink_hinted
+   frames at a measured 2240-BYTE STRIDE per nested hop. The resolver is
+   depth-capped at 40 (MAX_SYMLINKS, review 5.1) but 40 hops x 2240B =
+   ~90KB of chain frames alone — past the 80KB x86_64 kernel stack
+   before the counter can return ELOOP. nftw01's tree has the symlinks.
+4. FIX: Kernel.toml kernel_stack_size_x86_64 81920 -> 131072 (128KB,
+   riscv64 parity; this file's own history documents the same lesson for
+   riscv64), kstack slab 3 slots/block -> 2 (zero tail waste; buddy
+   fallback = one perfect order-5 block). OH-floor memory cost +48KB/
+   stack (~+125MB at 2690 stacks) — flagged to coordinator for the
+   merge gate (mm guarded domain).
+5. Also landed (b5480343): KSO census + overflow-zone ra dump + dead-task
+   resume guard at switch-in + rsp0 skip/free-vs-live-rsp0 witnesses +
+   freed-stack ring. All silent on clean boots; they convert this panic
+   class into named prints.
+6. GATES: x3 builds rc=0 (x86_64/riscv64/aarch64); make test GREEN
+   (run/maketest-128k.log "All tests passed!"); repro-nftw.sh x2 clean
+   (nftw01 completes, rc=1 = its r21-class real FAIL, SCAN_DONE).
+7. Long-term note for the fs lane: the reference kernel resolves symlink
+   chains ITERATIVELY (link_path_walk) — 40 hops cost ~0 stack there.
+   Making follow_symlink iterative would decouple stack size from path
+   shape entirely (big surgery in fs/vfs.rs; NOT done this session).
+
+## Method
+- One stressor class per boot; serial console is the log.
+- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
+  run/findings.md + minimal reproducer.
+- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
+  clean before push (origin/stress-port).
+- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
+  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
+  double as Tier-1-under-load evidence for the perf gate.
+- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
+  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
+  by exact cmdline).
+## Session log (append per session)
+
+### 2026-11-02, round 1 — rs suite ported, 2 kernel bug families fixed, 2 stressors re-run clean
+
+**Ported** (stress-ng stressor logic as standalone static musl probes,
+per charter method; sources archived in userspace/tests/probes.tar.gz
+per the 394c16ce policy, host driver test/stressng/run-class-x86.sh):
+14 classes — malloc/mmap/bigheap (memory churn), fork/exec, fsmeta
+(metadata storm with read-back verify), pipe/sock/sem/msg/shm (IPC),
+futex/sched (wakeup storms), timer (create/settime/delete + CLOCK_
+MONOTONIC discipline + nanosleep latency), plus --spawn passthrough
+for minimal reproducers. Vehicle: the x86_64+KVM LTP rootfs (copy of
+the permanent-store image in run/, rs/rsrun/renameco injected via
+debugfs); PID-1 rsrun runs cmds.txt lines with per-class budgets.
+
+**Round-1 campaign** (baseline 819a1be2, one family per boot,
+dfx=allocwatch,taskdump,watchdog + syscost=1, logs in
+run/stress-runs/): ipc / sched / timer / memory PASS (0 panics, 0
+wedges, 0 probe errors); fsmeta FAIL (SP-2); forker survived but lit
+up the SP-1 storm. Verdicts + census numbers: run/stress-runs/
+findings.md.
+
+**SP-1 (fixed, verified)**: PREEMPT-HEAL false-fires stripped live
+guard bits of fresh fork/exec tasks (15,577 heals + 169 underflows per
+120 s of fork churn). Two producers: (1) stale_200's j==0 arm treated
+never-stamped fields as instantly stale — fixed with arm-on-first-
+observation (sched.rs); (2) new_task_at did not zero the four
+ti_pc_*_zero_jif stamps on recycled Task pages — same class as R68a
+(task.rs). Verification boot (fork 8 + exec 4, full 100 s budgets):
+**0 heals, 0 underflows, 0 panics** (was 15,577/169/0).
+
+**SP-2 (fixed, verified)**: ext4 setattr corrupted freshly-written
+files — the success tail ran page-cache invalidate_inode for EVERY
+attr flavor (chmod dropped dirty unflushed pages) and metadata-only
+setattrs wrote back the disk-read inode's stale i_size (0 for pending
+writeback). renameco minimal reproducer isolated chmod (3/300 fails,
+reads returned EOF; rename alone clean). Fix: invalidate gated to
+ATTR_SIZE, metadata setattrs carry the live VFS size (ext4/mod.rs).
+Verification boot: renameco 0/300 on every sequence; fsmeta 4-worker
+class full 120 s rc=0 (was: all 4 workers corrupt on cycle 1).
+
+**Driver bug found+fixed in-flight**: rsrun killed classes at an
+absolute 60 s (RES rc=137 truncation in the first campaign's memory/
+forker boots); now parses --timeout per class.
+
+**Tier-1-under-load evidence** (syscost, memory boot): IF=0 cpu0
+17.6 s/60 s (rest 17.2 s, hard 408 ms, uart 3 ms), top rest-site
+sched.rs:2568 (37.4M ops avg 834 ns); no ALLOCTHROW / DEADLOCK /
+KERNPANIC classes in any boot. Follow-up hunts queued: IRQ-OFF-WINDOW
+idle-wake prints 65-142 ms under load (pre-existing, guarded domain
+interrupts); WAKE-STRANDED 118 s face under memory churn (SP-1
+family; re-check on fixed kernel in round 2).
+
+## SCAN RESULT (raw, unspliced)
+run/results-r22-raw.txt (3431s, x86_64+KVM, main@2fd5215f):
+  PASS=966 FAIL=258 TCONF=482 CRASH=30 EXECFAIL=17 TIMEOUT=14 POISON=2
+  WEDGE=100  <- ALL of chunk 700 (tests 700-799) lost to the boot panic
+Headline 966 vs r21's 1010 (-44) is PANIC-DRIVEN: r21 scored ~72 PASSes in
+the 700-799 range, so on the comparable 1769 tests r22 is ~+28 (the
+r21-bugs fixes + sockets + sched trio + ftest04 recovery visible live:
+"RES|ftest04|0|Test passed" in chunk1400 log). PRIORITY 1 for the successor:
+fix the chunk-700 panic, rerun tests 700-799 (bash run/rerun-chunk.sh 700
+799 r22c7), splice into results/results-r22.txt (currently only the raw
+copy exists), then run run/r22-pipeline.sh for the delta table.
+NOTE: pipeline script run/r22-pipeline.sh copies raw -> results/, prints
+class counts + delta vs r21 (adapt as needed after the splice).
+
+## LTP IPC path fact (for the execl-family fix)
+The rig's LTP uses a FIXED ipc path: guest env LTP_IPC_PATH=/tmp/ltp-ipc
+(companions TBROK "File /tmp/ltp-ipc does not exist!" when run standalone —
+chunk1700/1800 logs). /tmp is the ext4 root (boot mounts tmpfs only on
+/dev/shm and /run). So the execl01-family coherence failure is on the EXT4
+MAP_SHARED arm (kernel/src/arch/x86_64/mm/page_fault.rs "session 25"
+filemap_pin_cache_page path), NOT tmpfs (tmpfs mmap is separately
+documented-unsupported in kernel/src/fs/tmpfs.rs:31 — future landmine if
+any test ever mmaps /dev/shm files). waitid08's tst_checkpoint ETIMEDOUT
+(chunk1300 log) is the same page's futex leg.
+
+## Successor immediate queue (in order)
+1. Bash-recovery burst: grep PARKWALK in kernel/src/sched/sched.rs; boot
+   run/repro-nftw.sh nftw01 (full KERNPANIC dump); addr2line the rip.
+2. Fix the chunk-700 panic; x3 builds + make test; rerun chunk 700;
+   splice; rerun run/r22-pipeline.sh for the real r22 delta.
+3. Recompile+reinject the V1-V4 probe (run/zz_shmprobe.c has V4 now;
+   the injected binary is the older V1-V3 build): musl-gcc -O2 -static,
+   debugfs-write zz_shmprobe/zz_shmchild/zz_shmchild2 into
+   run/rootfs-x86_64-probe.img, chunk.txt=zz_shmprobe, boot, read the
+   ZZP verdict line. v1/v2/v3/v4 discriminate: double-mmap / fork-inherit
+   / exec-fresh-mmap / exec-futex-wake coherence on ext4 MAP_SHARED.
+4. Commit results/ + TASK.md; push origin/ltp-r21.
+
+## Mission
+1. Reconstruct deleted infra from git (main + `git branch -r | grep archived`): the LTP runner, the 1,869-case list, the per-round results layout (convention /home/william/rux-agents/ltp-r<N>/results/). test/patrol-runbook.md + test/suite.sh carry conventions. LTP source: userspace/linux-ltp/ltp-20240524.tar.xz (extract-build convention like toybox; musl SDK via `make sdk`; soft-fp overlay discipline userspace/build-softfp.sh — BUG-S005 zcb pin).
+2. Build kernel (riscv64) + LTP with the pinned march.
+3. Full 1,869 scan (detached/setsid; long runs survive tool timeouts). Known flake families (rerun 2x in isolation before counting new failures): accept02 getrusage04 kill02 genfmod rename/statfs.
+4. Results to /home/william/rux-agents/ltp-r20/results/. Deliver r20 vs r19 delta table.
+5. New real failures: triage against recent main merges (aarch64 merge b238ebd1 shared diffs: virtio device-ID table, wake floor per-arch, ELF machine checks, boot-table honesty) — compare failing syscall surface vs merge diff.
+6. Small kernel fixes welcome (small commits, English, NEVER "Linux"); rerun affected family.
+---
+
+(main carries the stress-port charter below — other lane's TASK content, keep)
+
+## Charter (user directive 2026-11-02)
+"Supplement stress test cases — stability is still a problem. If the
+industry has stress tests for the reference kernel, port them directly
+and run them." PRIMARY vehicle: x86_64 + KVM (platform priority).
+Goal: panics, wedges, leaks, and scheduler starvation exposed by
+sustained load — then kernel-side fixes.
+
+## What to port, in order
+1. stress-ng (the industry standard, ~300 stressors). Build a static
+   x86_64 subset against the toolchain already used for probes (see
+   test/ build patterns; musl static preferred). Inject via the LTP
+   vehicle in /home/william/rux-images/testimages/ (boot rig there
+   already runs x86_64+KVM). Start with the classes our bug ledger
+   says are weak:
+   - memory: malloc/mmap churn (allocator class-lock family),
+     mmapfixed, bigheap (zone exhaustion vs the fake-OOM history)
+   - fork/exec churn (p4 regression history; exit-path RCU grace)
+   - filesystem metadata churn (mkdir/rmdir/unlink storms — the OH
+     chmod-storm shape; bio write-plan under load)
+   - IPC: pipe/socket storms, SysV sem/msg/shm
+   - sched: many-thread yield/wakeup storms (phantom preempt family,
+     WAKE-STRANDED census)
+   - timer/clock: settime/interval storms (tick discipline)
+2. LTP robustness subset already in the tree (fork12, mmapstress,
+   mmap-corruption, sem/msg stress) — run long-loop, not just once.
+3. (later) syscall-fuzzer class (trinity-like) once 1-2 are clean.
+
+## Method
+- One stressor class per boot; serial console is the log.
+- PASS = zero panics/wedges over the budget; FAIL = named bug entry in
+  run/findings.md + minimal reproducer.
+- Every kernel fix: x3 builds rc=0 + make test green + stressor rerun
+  clean before push (origin/stress-port).
+- Use the in-tree DFX under load: dfx=allocwatch (class-lock holder
+  watch), syscost census bands, PREEMPT-HEAL counters — stability runs
+  double as Tier-1-under-load evidence for the perf gate.
+- Host discipline: at most 2 own QEMUs; -snapshot + file.locking=off;
+  kill only your PIDs; pkill forbidden (pgrep -f self-matches: verify
+  by exact cmdline).
 ## Deliverables
 - A host-side harness (kani/loom configs in-repo, English comments)
   with the extraction pattern documented.

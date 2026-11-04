@@ -128,8 +128,10 @@ static MSG_IDS: IpcIds<MsgQueue> = IpcIds::new();
 /// Runtime MSGMNI — number of message queues allowed system-wide. Writable
 /// through /proc/sys/kernel/msgmni (LTP msgget03 lowers it to a small value
 /// and expects the very next msgget to fail with ENOSPC). Capped by the
-/// slot-array size IPC_IDS_MAX.
-static MSGMNI: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(256);
+/// slot-array size IPC_IDS_MAX. Default 32000 = the reference default
+/// (msgmni scaled for large-memory machines since 2.6.36; the old 256 made
+/// msgstress01's 1000-queue default run hit ENOSPC).
+static MSGMNI: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(32000);
 
 /// Read the runtime MSGMNI limit (procfs sysctl + IPC_INFO/MSG_INFO).
 pub fn msgmni() -> i32 {
