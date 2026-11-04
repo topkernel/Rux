@@ -476,6 +476,30 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         core::hint::spin_loop();
     }
 
+    // ===== RUSAGE_CHILDREN fold at reap (reference wait_task_zombie) =====
+    // The reaped child's own tick totals PLUS the totals it accumulated
+    // from ITS reaped children roll into the real parent's cutime/cstime;
+    // ru_maxrss takes the max over (child's own exit rss, child's own
+    // children-hiwater). Runs before any child state is torn down.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let u = (*task).utime_ticks.load(Relaxed);
+        let s = (*task).stime_ticks.load(Relaxed);
+        let cu = (*task).cutime_ticks.load(Relaxed);
+        let cs = (*task).cstime_ticks.load(Relaxed);
+        let rss = (*task).exit_maxrss_kb.load(Relaxed);
+        let crss = (*task).cmaxrss_kb.load(Relaxed);
+        // release_task only ever runs in the REAPING parent's wait
+        // context (do_wait/do_waitid, including init reaping orphans);
+        // the child's own parent pointer is already None here (the
+        // E8-REPAR claim), so the fold targets the caller.
+        if let Some(parent) = crate::sched::current() {
+            (*parent).cutime_ticks.fetch_add(u + cu, Relaxed);
+            (*parent).cstime_ticks.fetch_add(s + cs, Relaxed);
+            let _ = (*parent).cmaxrss_kb.fetch_max(rss.max(crss), Relaxed);
+        }
+    }
+
     // Remove from PID hash table before freeing resources
     crate::process::pid_hash::pid_hash_remove((*task).pid());
 
@@ -938,11 +962,13 @@ pub fn do_exit(exit_code: i32) -> ! {
             };
             (*current).exit_maxrss_kb.store(rss_kb, Relaxed);
             if is_leader {
-                if let Some(parent) = crate::process::find_task_by_pid(parent_pid) {
-                    (*parent).cutime_ticks.fetch_add(u, Relaxed);
-                    (*parent).cstime_ticks.fetch_add(s, Relaxed);
-                    let _ = (*parent).cmaxrss_kb.fetch_max(rss_kb, Relaxed);
-                }
+                // RUSAGE_CHILDREN folds at REAP time, not exit time
+                // (reference wait_task_zombie accumulates into the
+                // parent's signal struct only when the zombie is
+                // waited): a parent reading RUSAGE_CHILDREN while the
+                // child is still a ZOMBIE must NOT see its contribution
+                // (LTP getrusage03's pre_wait assertion). The fold lives
+                // in release_task; exit only captures exit_maxrss_kb.
             } else {
                 (*leader).utime_ticks.fetch_add(u, Relaxed);
                 (*leader).stime_ticks.fetch_add(s, Relaxed);
