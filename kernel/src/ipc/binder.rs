@@ -2279,6 +2279,51 @@ unsafe fn dead_reply_to_sender(
     wakes
 }
 
+/// Failed-BC_REPLY error routing (reference binder.c 6.6, error tail
+/// 3806-3812 + binder_send_failed_reply 1640-1696): once in_reply_to
+/// was validated, a FAILED reply NEVER surfaces the error on the
+/// replier's read — the replier gets BR_TRANSACTION_COMPLETE (it did
+/// its job; its userspace loop continues) and the error
+/// (BR_FAILED_REPLY / BR_DEAD_REPLY) is delivered to the ORIGINATOR
+/// thread of the replied transaction: its txn-stack entry is popped
+/// and it is woken. The originator would otherwise park in its BWR
+/// read forever — the old path queued ReturnError on the REPLIER and
+/// left the client stranded.
+///
+/// If the originator thread's pool entry is already gone, its stack
+/// was drained by the reap path (binder_reap_thread ->
+/// dead_reply_to_sender already BR_DEAD_REPLY'd every frame's sender —
+/// the same coverage the reference gets from the from_parent walk).
+/// SAFETY: caller holds WORLD.
+unsafe fn send_failed_reply(
+    world: &World,
+    thread: &Arc<BinderThread>,
+    in_reply_to: &Arc<BinderTxn>,
+    err: u32,
+) {
+    // The originating transaction is finished on every failed-reply
+    // path — drop its node pin exactly once (the success twin does
+    // this at reply delivery).
+    unpin_txn_node(world, in_reply_to);
+    // Replier: BR_TRANSACTION_COMPLETE, non-deferred (reference
+    // binder_enqueue_thread_work on thread->return_error.work at 3810).
+    let th = thread.st();
+    th.todo.push_back(Work::TransactionComplete);
+    th.process_todo = true;
+    thread.hist(EV_ERR_RECV, err, in_reply_to.id as u32);
+    // Originator: pop + error + exact-thread wake.
+    if let (Some(fp), Some(ftid)) = (in_reply_to.from_proc.clone(), in_reply_to.from_tid) {
+        if let Some(ft) = pm(world, &fp).im().threads.iter().find(|x| x.tid == ftid).cloned() {
+            let fth = ft.st();
+            fth.txn_stack.retain(|x| !Arc::ptr_eq(x, in_reply_to));
+            fth.todo.push_back(Work::ReturnError(err, 0));
+            fth.process_todo = true;
+            ft.hist(EV_DEAD_REPLY, in_reply_to.id as u32, ftid);
+            wake_thread(&ft);
+        }
+    }
+}
+
 /// Abort a pool thread's in-flight state and remove it from the pool.
 ///
 /// Shared by BINDER_THREAD_EXIT (musl's clean IPC-thread shutdown) and
@@ -5475,6 +5520,28 @@ fn binder_ioctl_write_read(
             }
             return ret;
         }
+        // Reference parity (binder.c 5181-5184): after a read, if the
+        // proc todo still holds work, kick another waiting thread —
+        // the reader that just returned may have consumed only its own
+        // thread work. Eligibility-gated for the sc161 child-routing
+        // model: only daemon-readable items trigger the daemon wake
+        // (child-owned deliveries were woken at enqueue and must stay
+        // with their child).
+        let rekick = {
+            let w = world_lock();
+            // SAFETY: read-only peek under WORLD.
+            unsafe {
+                let world = w.as_ref().unwrap();
+                let pim = pm(world, proc);
+                pim.im()
+                    .todo
+                    .iter()
+                    .any(|wk| work_readable_by(wk, proc.pid as u32, pim))
+            }
+        };
+        if rekick {
+            wake_proc_one(&proc, 0);
+        }
     }
     // SAFETY: same 48-byte copy-back.
     unsafe {
@@ -6179,7 +6246,7 @@ fn binder_thread_write(
                     *consumed = ptr as u64;
                     return -(EFAULT as i64);
                 };
-                let Some(_cookie) = get_user_at::<u64>(buffer, ptr + 8) else {
+                let Some(cookie) = get_user_at::<u64>(buffer, ptr + 8) else {
                     *consumed = ptr as u64;
                     return -(EFAULT as i64);
                 };
@@ -6211,6 +6278,20 @@ fn binder_thread_write(
                         );
                         continue;
                     };
+                    // Reference parity (binder.c 3986-3995): a cookie
+                    // mismatch is a user error — the command is ignored,
+                    // the node state untouched.
+                    if cookie != node.cookie {
+                        drop(w);
+                        crate::pr_info!(
+                            "binder: pid {} BC_{}_DONE cookie mismatch {:#x} != {:#x}",
+                            proc.pid,
+                            if cmd == BC_ACQUIRE_DONE { "ACQUIRE" } else { "DECREFS" },
+                            cookie,
+                            node.cookie
+                        );
+                        continue;
+                    }
                     let ns = node.st();
                     if cmd == BC_ACQUIRE_DONE {
                         if !ns.pending_strong_ref {
@@ -6481,8 +6562,13 @@ fn binder_thread_write(
                 if cmd == 0 {
                     bc_corruption_snapshot(proc, thread, buffer, size, ptr - 4, cmd);
                 }
-                ptr -= 4; // not consumed
-                break;
+                // Reference parity (binder.c 4306-4309): an unknown BC
+                // command fails the whole write with -EINVAL (consumed
+                // stops before the bad command, exactly like the
+                // reference's mid-iteration return leaves *consumed at
+                // the last successful command).
+                *consumed = (ptr - 4) as u64;
+                return -(EINVAL as i64);
             }
         }
     }
@@ -6674,7 +6760,11 @@ fn binder_transaction(
                 thread.hist(EV_REPLY_POP, t.id as u32, from_proc.pid);
                 if from_proc.im().is_dead {
                     sendfail_why(9);
-                    *err_cmd = BR_DEAD_REPLY;
+                    // Reference parity (binder.c 3806-3812): the error
+                    // goes to the originator, the replier gets
+                    // BR_TRANSACTION_COMPLETE — not the error.
+                    // SAFETY: under WORLD.
+                    unsafe { send_failed_reply(world, thread, &t, BR_DEAD_REPLY) };
                     crate::pr_info!("binder: BC_REPLY requester dead");
                     return;
                 }
@@ -6727,11 +6817,16 @@ fn binder_transaction(
                 }
                 in_reply_to = Some(t);
             } else if tr.target_handle != 0 {
+                // Reference parity (binder.c 3062, binder_get_ref_olocked
+                // with need_strong_ref=true): a transaction may only be
+                // sent on a handle whose STRONG count is non-zero —
+                // "tried to use weak ref as strong ref" is an invalid
+                // handle (BR_FAILED_REPLY).
                 let node = pm(world, proc)
                     .im()
                     .refs
                     .iter()
-                    .find(|r| r.desc == tr.target_handle)
+                    .find(|r| r.desc == tr.target_handle && r.strong != 0)
                     .map(|r| r.node.clone());
                 let Some(node) = node else {
                     sendfail_why(1);
@@ -6884,7 +6979,19 @@ fn binder_transaction(
             }
             if tp.im().alloc.is_none() {
                 sendfail_why(10);
-                *err_cmd = BR_FAILED_REPLY;
+                if reply {
+                    // SAFETY: under WORLD; reference parity error routing.
+                    unsafe {
+                        send_failed_reply(
+                            world,
+                            thread,
+                            in_reply_to.as_ref().unwrap(),
+                            BR_FAILED_REPLY,
+                        )
+                    };
+                } else {
+                    *err_cmd = BR_FAILED_REPLY;
+                }
                 return;
             }
             if offsets_size % 8 != 0 {
@@ -7075,6 +7182,22 @@ fn binder_transaction(
                         Some(Some(o)) => o,
                         _ => {
                             sendfail_why(12);
+                            // Reference parity: a failed REPLY routes the
+                            // error to the originator (binder_send_failed_
+                            // reply); only a failed TRANSACTION queues
+                            // ReturnError on the sender.
+                            if reply {
+                                // SAFETY: under WORLD.
+                                unsafe {
+                                    send_failed_reply(
+                                        world,
+                                        thread,
+                                        in_reply_to.as_ref().unwrap(),
+                                        BR_FAILED_REPLY,
+                                    )
+                                };
+                                return;
+                            }
                             *err_cmd = BR_FAILED_REPLY;
                             crate::pr_info!(
                                 "binder: buffer alloc failed (need {}+{}+{})",
@@ -7136,7 +7259,17 @@ fn binder_transaction(
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(14);
-            *err_cmd = BR_DEAD_REPLY;
+            if reply {
+                // Reference parity: error to the originator, tcomplete to
+                // the replier (err_dead_proc_or_thread path).
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                unsafe {
+                    send_failed_reply(w.as_ref().unwrap(), thread, in_reply_to.as_ref().unwrap(), BR_DEAD_REPLY)
+                };
+            } else {
+                *err_cmd = BR_DEAD_REPLY;
+            }
             crate::pr_info!(
                 "binder: target pid {} died before payload copy — BR_DEAD_REPLY",
                 target.pid
@@ -7153,7 +7286,13 @@ fn binder_transaction(
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(15);
-            *err_cmd = BR_FAILED_REPLY;
+            if reply {
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                send_failed_reply(w.as_ref().unwrap(), thread, in_reply_to.as_ref().unwrap(), BR_FAILED_REPLY);
+            } else {
+                *err_cmd = BR_FAILED_REPLY;
+            }
             crate::pr_info!("binder: txn data copy fault from {:#x}", tr.data_buffer);
             return;
         }
@@ -7167,7 +7306,13 @@ fn binder_transaction(
             release_block(&target, block_off);
             unpin_after_failure(&target, target_node.as_ref(), reply, oneway);
             sendfail_why(16);
-            *err_cmd = BR_FAILED_REPLY;
+            if reply {
+                let w = world_lock();
+                // SAFETY: under WORLD.
+                send_failed_reply(w.as_ref().unwrap(), thread, in_reply_to.as_ref().unwrap(), BR_FAILED_REPLY);
+            } else {
+                *err_cmd = BR_FAILED_REPLY;
+            }
             crate::pr_info!("binder: txn offsets copy fault from {:#x}", tr.data_offsets);
             return;
         }
@@ -7223,7 +7368,7 @@ fn binder_transaction(
             // kvirt + block_off - 4 (binder audit: offsets-entry wrap).
             let obj_end4 = obj_off.checked_add(4).filter(|&e| e <= data_size);
             if obj_end4.is_none() {
-                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                 crate::pr_info!("binder: object offset {} out of range", obj_off);
                 return;
             }
@@ -7231,7 +7376,7 @@ fn binder_transaction(
             let ty = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off) as *const u32) };
             let osz = binder_object_size(ty);
             if osz == 0 || !obj_off.checked_add(osz).map_or(false, |e| e <= data_size) {
-                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                 crate::pr_info!("binder: object type {:#x} at {} out of range", ty, obj_off);
                 return;
             }
@@ -7241,12 +7386,12 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let fd = unsafe { core::ptr::read_volatile(kvirt.add(block_off + obj_off + 8) as *const u32) };
                     if !allows_fd {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: fd {} to target that does not accept fds", fd);
                         return;
                     }
                     let Some(tfd) = translate_fd_into(fd, &target) else {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: fd {} install into pid {} failed", fd, target.pid);
                         return;
                     };
@@ -7262,7 +7407,7 @@ fn binder_transaction(
                     let mut bp = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderBufferObject).cast_mut()) };
                     let bp_len = bp.length as usize;
                     if bp_len > sg_total - sg_used {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: sg buffer overruns buffers_size");
                         return;
                     }
@@ -7274,7 +7419,7 @@ fn binder_transaction(
                             crate::arch::uaccess::copy_from_user(sg_dst, bp.buffer as *const u8, bp_len)
                         } != 0
                     {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: sg copy fault from {:#x}", bp.buffer);
                         return;
                     }
@@ -7290,12 +7435,12 @@ fn binder_transaction(
                         let Some((parent_kernel, parent_len)) =
                             (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, bp.parent) })
                         else {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: PTR fixup parent invalid");
                             return;
                         };
                         if parent_len < 8 || bp.parent_offset > (parent_len - 8) as u64 {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: PTR fixup offset out of parent");
                             return;
                         }
@@ -7309,24 +7454,24 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let fda = unsafe { core::ptr::read_volatile((kvirt.add(block_off + obj_off) as *const BinderFdArrayObject).cast_mut()) };
                     if !allows_fd {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: fda to target that does not accept fds");
                         return;
                     }
                     if fda.num_fds >= usize::MAX as u64 / 4 {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         return;
                     }
                     let Some((parent_kernel, parent_len)) =
                         (unsafe { resolve_parent_ptr(kvirt, block_off, block_user, align8(data_size), data_size, offsets_size, sg_total, i, fda.parent) })
                     else {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: FDA parent invalid");
                         return;
                     };
                     let fd_buf_size = 4 * fda.num_fds as usize;
                     if fd_buf_size > parent_len || fda.parent_offset as usize > parent_len - fd_buf_size {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!("binder: FDA does not fit in parent buffer");
                         return;
                     }
@@ -7336,7 +7481,7 @@ fn binder_transaction(
                         // SAFETY: bounds validated above against the parent.
                         let fd = unsafe { core::ptr::read_volatile(fd_array.add(k)) };
                         let Some(tfd) = translate_fd_into(fd, &target) else {
-                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                            fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                             crate::pr_info!("binder: fda fd {} install into pid {} failed", fd, target.pid);
                             return;
                         };
@@ -7350,7 +7495,7 @@ fn binder_transaction(
                     // SAFETY: validated within the data area.
                     let obj = unsafe { &mut *(kvirt.add(block_off + obj_off) as *mut FlatBinderObject) };
                     if !translate_object(proc, obj, &target) {
-                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, err_cmd);
+                        fail_txn_after_fixups(&target, block_off, &installed_fds, target_node.as_ref(), reply, oneway, Some(thread), in_reply_to.as_ref(), err_cmd);
                         crate::pr_info!(
                             "binder: object type {:#x} handle {:#x} translate failed",
                             obj.hdr_type,
@@ -8073,18 +8218,26 @@ fn binder_transaction(
                     wakes.push(proc.clone());
                 } else {
                     sendfail_why(17);
-                    *err_cmd = BR_DEAD_REPLY;
                     reply_target_gone = true;
                     thread.hist(
                         EV_REPLY_GONE,
                         in_reply_to.as_ref().map(|x| x.id as u32).unwrap_or(0),
                         *rtid,
                     );
-                    // Unpin the original transaction's node while we still
-                    // hold WORLD (unpin_txn_node expects it); the buffer
-                    // and any installed fds are freed after the lock.
+                    // The original transaction's node pin is dropped inside
+                    // send_failed_reply (exactly once, on every path); the
+                    // buffer and any installed fds are freed after the lock.
+                    // Reference parity (binder.c 3806-3812): the replier
+                    // gets BR_TRANSACTION_COMPLETE, never the error; the
+                    // error routing is the originator chain's (usually
+                    // already reaped — then the delivery part no-ops).
                     if let Some(orig) = &in_reply_to {
-                        unpin_txn_node(world, orig);
+                        // SAFETY: under WORLD.
+                        unsafe { send_failed_reply(world, thread, orig, BR_DEAD_REPLY) };
+                    } else {
+                        let th = thread.st();
+                        th.todo.push_back(Work::TransactionComplete);
+                        th.process_todo = true;
                     }
                     crate::pr_info!(
                         "binder: BC_REPLY originator thread {} gone (proc {})",
@@ -8423,12 +8576,25 @@ fn fail_txn_after_fixups(
     node: Option<&Arc<BinderNode>>,
     reply: bool,
     oneway: bool,
+    thread: Option<&Arc<BinderThread>>,
+    in_reply_to: Option<&Arc<BinderTxn>>,
     err_cmd: &mut u32,
 ) {
     release_block(target, block_off);
     close_installed_fds(installed_fds);
     unpin_after_failure(target, node, reply, oneway);
     sendfail_why(18);
+    // Reference parity: a failed REPLY routes BR_FAILED_REPLY to the
+    // originator (binder_send_failed_reply); the replier gets
+    // BR_TRANSACTION_COMPLETE.
+    if reply {
+        if let (Some(th), Some(orig)) = (thread, in_reply_to) {
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe { send_failed_reply(w.as_ref().unwrap(), th, orig, BR_FAILED_REPLY) };
+        }
+        return;
+    }
     *err_cmd = BR_FAILED_REPLY;
 }
 
@@ -8637,11 +8803,16 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                 }
                 BINDER_TYPE_HANDLE | BINDER_TYPE_WEAK_HANDLE => {
                     let strong = obj.hdr_type == BINDER_TYPE_HANDLE;
+                    // Reference parity (binder.c 2238,
+                    // binder_get_node_from_ref with need_strong_ref for
+                    // BINDER_TYPE_HANDLE): a strong handle whose ref
+                    // strong count is zero is invalid ("tried to use
+                    // weak ref as strong ref").
                     let node = pm(world, sender)
                         .im()
                         .refs
                         .iter()
-                        .find(|r| r.desc == obj.handle)
+                        .find(|r| r.desc == obj.handle && (!strong || r.strong != 0))
                         .map(|r| r.node.clone());
                     let Some(node) = node else { return false };
                     // Sending a handle BACK to the node's owner restores
