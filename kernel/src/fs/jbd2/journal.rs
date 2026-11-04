@@ -780,7 +780,9 @@ pub struct Journal {
     /// Private data for fs
     pub j_private: *mut core::ffi::c_void,
     /// Precomputed journal UUID checksum for seeding other checksums
-    pub j_csum_seed: u32,
+    /// (CSUM_V2/V3). Set once at journal init, read on every commit —
+    /// atomic because Journal is Arc-shared.
+    pub j_csum_seed: core::sync::atomic::AtomicU32,
     /// Fast commit cleanup callback
     pub j_fc_cleanup_callback: Option<fn(&Journal, bool, Tid)>,
     /// Fast commit replay callback
@@ -847,7 +849,7 @@ impl Journal {
             j_finish_inode_data_buffers: None,
             j_failed_commit: 0,
             j_private: core::ptr::null_mut(),
-            j_csum_seed: 0,
+            j_csum_seed: core::sync::atomic::AtomicU32::new(0),
             j_fc_cleanup_callback: None,
             j_fc_replay_callback: None,
             j_bmap: None,
@@ -890,6 +892,23 @@ impl Journal {
     /// Check if journal has checksum v2 feature
     pub fn has_csum_v2(&self) -> bool {
         self.j_feature_incompat.load(Ordering::SeqCst) & JBD2_FEATURE_INCOMPAT_CSUM_V2 != 0
+    }
+
+    /// Check if journal carries v2/v3 block checksums (reference
+    /// jbd2_journal_has_csum_v2or3: every journal metadata block, tag and
+    /// the superblock are crc32c-protected when either feature is set).
+    pub fn has_csum_v2or3(&self) -> bool {
+        self.has_csum_v2() || self.has_csum_v3()
+    }
+
+    /// The checksum seed for CSUM_V2/V3 block/tag checksums.
+    pub fn csum_seed(&self) -> u32 {
+        self.j_csum_seed.load(Ordering::SeqCst)
+    }
+
+    /// One-shot seed store at journal init (before any commit runs).
+    pub fn set_csum_seed(&self, seed: u32) {
+        self.j_csum_seed.store(seed, Ordering::SeqCst);
     }
 
     /// Size of one revoke-table entry on disk (block number width).
