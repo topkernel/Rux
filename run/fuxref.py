@@ -93,6 +93,8 @@ FAST_SH = r'''
 mmi_uinput_serv|installs|hilogd|el5_filekey_man|time_service|\
 huks_service|render_service|inputmethod_ser|resource_schedu|\
 storage_daemon|storage_manager|audio_server|media_service) echo $p ;;
+      samgr|foundation|memmgrservice|bluetooth_service|telephony|\
+mmi_uinput_service|installs|hilogd|el5_filekey_manager) echo $p ;;
     esac
   done > /data/local/tmp/fxpids
   sleep 5

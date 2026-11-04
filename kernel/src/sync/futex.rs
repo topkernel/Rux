@@ -1037,6 +1037,8 @@ pub fn futex_stuck_census() {
         }
         crate::pr_warn!(
             "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+        crate::pr_warn!(
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
