@@ -2862,3 +2862,85 @@ left alone; it wedged in the DEADLOCK class at ~1319s).
   preinstall store), run/bzImage-ladder-bmsscan26 (cg26b+probe, the
   roll kernel), run/bzImage-ladder-bmsscan (mainline-tip+probe),
   run/bmsdump.sh + run/sp-ref-n.py (rig).
+
+## LMBENCH-FIX RETRY SESSION CLOSE (2026-11-04, branch lmbench-fix @ c489347c+)
+
+Mission: the four-timeout charter (lat_sem / loopback TCP / lat_udp),
+retry after the predecessor died mid-re-measurement. All state
+reconstructed from commits + run/ logs (no handoff note existed).
+
+### What the predecessor left (all three commits verified good)
+- 7f9c5e7b packet-socket locks irqsave'd — the lat_tcp smp2
+  self-deadlock (PACKET_SOCKETS held in task context, RX fanout in
+  softirq spins on its own CPU).
+- d0452aaf UDP loopback source fix — lat_udp 94-96us on the debug
+  kernel, 5/5.
+- 177eec0b 1 Hz structural relink — the unlinked-RUNNING phantom
+  (lat_sem's benchmp controller). lat_sem now lands: 0.730us debug /
+  0.847us release this tree (main's standing 0.800us; the EAGAIN
+  blocking_idx suspect was already fixed on main via R40).
+
+### This session: the lat_connect/bw_tcp decode (the table family)
+Every connect after the warmup waited EXACTLY 100 jiffies (the SYN
+retransmit RTO rescuing a silently-dropped original SYN). Peeling the
+silent drops one by one (instruments since deleted):
+1. NOT the SYN-swallow (pass-a match of stale slots): zero hits.
+2. NOT the loopback backlog cap (256): zero drops.
+3. NOT emit-path skb failures: zero drops.
+4. TCP TABLE EXHAUSTION — the real one, three layers:
+   a. hist dump at alloc_slot failure: 36-58/64 slots parked in
+      TIME_WAIT (60s residence, client = active closer). The SYN
+      spawn (alloc_slot) had NO reclamation while socket()'s alloc()
+      did — socket() reclaimed a slot for the new client, the spawn
+      found the table full AGAIN, dropped the SYN silently.
+   b. After TIME_WAIT eviction: FIN_WAIT2(26)+CLOSE_WAIT(26) orphans
+      (unaccepted children behind the accept loop) became the pile.
+   c. After orphan eviction: 60 genuinely-ESTABLISHED concurrent
+      connections — 64 slots is simply under the workload's real
+      concurrency (socket() EMFILE'd mid-calibration).
+FIX (c489347c): reclaim_orphan_slot() on BOTH alloc paths covering
+the three dead-end classes the timer already reaps on timeout
+(TIME_WAIT / fd-less CLOSE_WAIT children R32-B8 / orphaned FIN_WAIT2
+R23-1 — the bounded-table analogue of the reference's tw eviction),
+plus tcp_socket_table_size 64 -> 512 (~384B/slot, ~197KB).
+
+Results on the release (strong) kernel: lat_tcp 7.75/7.75/8.03us
+3/3 (was 2/5 flaky); lat_sem 0.847us; lat_connect 14.3-16.1ms
+completing 3/4 boots (was TIMEOUT); lat_udp still 0/3 release;
+bw_tcp still TIMEOUT — see the sched entry.
+
+### THE ONE REMAINING PRODUCER (handoff to the sched lanes)
+The scheduler stale-claim family now blocks every remaining row:
+- lat_udp@release: ping-pong runs ~20 rounds, then the UDP SERVER's
+  wake is refused (WAKE-HEAL-SKIP pid=308 why=c) and the pong never
+  comes. 0/8 on release, 6/6 on debug — the faster kernel opens the
+  window reliably.
+- bw_tcp: worker pid 310 refused x39 to the kill (one WAKE-HEAL
+  was=1 fired, did not un-strand).
+- lat_connect: 15ms tail + 1-in-4 permanent wedge = the accept
+  server refused.
+- Victim census shape (lostpark tail): {st=1(RUNNING), linked=0,
+  on_rq=0, on_cpu=1, pk=1, claim=<cpu>, naming=0} — a task parked in
+  a socket wait with a LEAKED PREEMPT COUNT (pk=1) and pick ownership
+  never released. STALE-CLAIM-RESET heals other victims, never these;
+  the 1 Hz relink does not match (they are claim-named, not slotless);
+  the r24 idle-slot heal needs the claiming CPU to idle.
+- The pk=1-on-a-sleeper is the sharpest lead: the switch-out never
+  published {sleep state, ownership release} — find who bumped pc
+  around the wait round (waitqueue prepare/finish imbalance?) and the
+  whole family collapses.
+- Same family visible on riscv (rv-boot WAKE-STRANDED pc=1).
+
+### Gates on the final tree (c489347c)
+x86_64 debug+release rc=0; riscv64 debug rc=0; make test green ("All
+tests passed", suite verdict green); aarch64 rc=0 with dtb_blob.S
+restored. riscv smoke boot NOTE: the in-kernel test suite reports
+1299/1300 — "wake_up running task" FAILS DETERMINISTICALLY ON PURE
+ORIGIN/MAIN TOO (0c8e4b79, verified by building main directly) —
+pre-existing main-side, NOT from this branch; make test (the binding
+gate) is green. Coordinator: that unit test needs a sched-lane look.
+
+### Rows state (docs/test/lmbench-report.md updated)
+lat_sem 0.80us LANDED; lat_tcp 1.78x LANDED; lat_connect measured
+(165x, sched-blocked tail); lat_udp net-fixed (sched-blocked on
+release); bw_tcp sched-blocked. Queue carries the full evidence.
