@@ -274,3 +274,119 @@ Kernel revs (all in this round's boots, marked per row):
   signal each other, group kills loop). r2 shape: itimer prof
   "Diff too high: 3" + a signal-distribution stall mid-test. P0-class
   per house rules; owner: timers domain.
+
+### Arch-file edits clarification (for the coordinator's r2 revert question)
+The only kernel/src/arch/ edits this lane has ever carried are three
+lines, one per arch:
+`pub const EPERM: i64 = -1;` added to the `mmap_error` tables in
+kernel/src/arch/{x86_64,riscv64,aarch64}/mm/memory_layout.rs.
+- Where they came from: the memfd reference-parity commit (originally
+  45e8afea in round 2, rebased to e3f0dc02 in round 3) — identical
+  content in both; the commit message documents them ("mmap/mprotect
+  writable MAP_SHARED under F_SEAL_WRITE/F_SEAL_FUTURE_WRITE is EPERM
+  (mmap_error::EPERM added on all three arches)").
+- Why they exist: the reference kernel's shmem_mmap returns -EPERM for
+  writable shared mappings of a sealed memfd; Rux's mmap errno
+  constants live in the per-arch mmap_error tables (alongside
+  EBADF/EOPNOTSUPP/EEXIST) and EPERM was missing. No behavioral arch
+  change — a constant the fs seal path returns.
+- Why the coordinator saw them as unexplained: they ride in the memfd
+  commit, which is NOT yet harvested to main; when harvesting only
+  255f86f5 (timers) as ad0d5cb4, the branch's arch delta had no
+  visible owner in the timers diff. Nothing to reintroduce — they are
+  already in e3f0dc02 awaiting harvest with this note as the intent.
+
+## Round 4 — battery on merged main 8d47783a + lane fixes; F-4 CLOSED
+
+Kernel: merge b6f49579 (main 8d47783a: jbd2 csum, sched wake-contract
+fix, CLOCK_BOOTTIME harvest, tracepoints) + r3 lane commits. Fresh boot
+per class, logs run/qa-runs-r4/.
+
+### rt-tests battery (round-4 item 1)
+
+| class | round 3 (K1) | round 4 (merged) | verdict |
+|---|---|---|---|
+| hackbench socketpair `20 process` | PASS 0.858 s | PASS 0.815 s | PASS (steady; 4 rounds within 0.79-0.86) |
+| hackbench pipe `-p 20` | PASS 0.415 s | PASS 0.420 s | PASS (steady; 4 rounds within 0.41-0.42) |
+| cyclictest SCHED_OTHER `-D 30 -i 1000 -m` | 25 missed, avg 89, max 1289 | **26 missed, avg 89, max 1018** | PASS (max-latency trend improves every round: 3149 r2 → 1289 r3 → 1018 r4) |
+| cyclictest SCHED_FIFO p98 | 2 missed, avg 87, max 396 | **28 missed, avg 89, max 1857** | PASS but see note (isolation rerun below) |
+| pi_stress `-D 15 -g 2` | FAIL F-2 ENOSYS | FAIL F-2 ENOSYS (identical) | FAIL(gap), unchanged — PI-futex owner handoff stands |
+
+- cyclictest FIFO p98 note: r4's one boot shows 28 missed / max 1857 us
+  vs r3's 2 / 396. Misses remain <0.1 % of 30k cycles and the avg is
+  unchanged (87-89); the max moved. Main gained the pickgen
+  LP-WAKE-OUTCOME instruments + wake-contract fix between r3 and r4 —
+  sched domain should see the isolation rerun row (below) and, if the
+  class matters at gate time, a pbench P2 row.
+- Both cyclictest rows now run on the CLOCK_BOOTTIME/TAI-fixed timer
+  code (r3 rows predate 255f86f5) — clean numbers as requested.
+
+### kselftest subset (round 4)
+
+| class | round 3 | round 4 | verdict |
+|---|---|---|---|
+| memfd | FAIL F-4 (rc=134, nested-sysctl child) | **rc=0, `memfd: DONE`** — every leg green | **PASS — F-4 FIXED** (3 fixes below) |
+| threadtest | FAIL(TIMEOUT) F-5 | TIMEOUT again (no RES; qsrun forker blocks >120 s) | **FAIL(TIMEOUT) — F-5 stands**, sched handoff |
+| posix_timers | FAIL(TIMEOUT) | TIMEOUT again (no RES, no QS-ALL-DONE) | **FAIL(TIMEOUT) — timers handoff stands** |
+
+### F-4 root causes and fixes (this lane; all reference-parity, verified by probe + full test)
+
+1. **pidns depth-2 numbering (kernel/src/process/ns.rs, task.rs)**:
+   a CLONE_NEWPID child of a task that is ITSELF in a pidns got clone(2)
+   returning its GLOBAL pid, but waitpid/kill resolve by caller-ns
+   numbers → the nested-sysctl child aborted with waitpid ECHILD on its
+   own just-spawned child. Fix: per-level upid chain on Task (the
+   reference struct pid's upid[] semantics): copy_namespaces allocates
+   the child a fresh number in every intermediate ns; all six
+   translation/resolution helpers (translate_sender_pid_ns,
+   resolve_vpid/vtid, resolve_local_pid_to_global, wait_vpid, task_vpid)
+   resolve through the chain; init-ns view stays the global pid.
+2. **SIGSTOP/SIGCONT on a pid-ns init (kernel/src/signal.rs)**: the
+   delivery-path SIGNAL_UNKILLABLE gate discarded every non-handled
+   signal for ns inits — SIGSTOP included, so kselftest's
+   sysctl_nested_wait children never parked (they ran ahead of the
+   parent's sysctl write, then "write sysctl 0 succeeded, but failure
+   expected"). Reference get_signal() applies SIGNAL_UNKILLABLE only to
+   FATAL default actions; group-stop signals stop an ns init and SIGCONT
+   resumes it. Gate now passes 18-22 through.
+3. **F_ADD_SEALS on an O_RDONLY fd (kernel/src/fs/memfd.rs)**: reference
+   memfd_add_seals refuses with EPERM unless the fd is open for writing
+   (test_share_open's O_RDONLY reopen). Gate added.
+
+Decode trail: memfd-unbuf (per-call-flushed memfd_test via the
+memfd-unbuf.c shim) named the abort leg ("newpid thread: waitpid()
+failed: No child process"); memfdsysctl.c (step probe replicating the
+"0 -> 1 after fork" leg) isolated the SIGSTOP non-park; then the two
+gates. memfd: CREATE through DONE green, including all nested-sysctl
+"after fork" legs and both SHARE (plain + shared file-table) batteries.
+
+### Tooling (round 4)
+- userspace/tests/kselftest/unbuf.c: generic unbuffered-printf shim
+  (-DUNBUF_TARGET='"<test>.c"'); posix_timers-unbuf + threadtest-unbuf
+  built alongside the stock binaries (stall-site decoders).
+- run/r4-battery.sh, run/r4-pass2.sh, run/r4-pass3.sh: the round's
+  boot scripts.
+
+### Round-4 pass-3 (final kernel with the three F-4 fixes) + gates
+- memfd (STOCK binary, official class boot): **rc=0** — F-4 fix
+  confirmed on the unmodified test.
+- cyclictest FIFO p98 isolation rerun: 27 missed, avg 88, max 1352
+  (two r4 boots: 28/1857, 27/1352 vs r3 single boot 2/396; avg stable
+  87-89 across all rounds). Sched domain should adjudicate the
+  max-latency shift (main gained pickgen LP-WAKE-OUTCOME instruments
+  and the wake-contract fix between r3 and r4).
+- cyclictest SCHED_OTHER on the final kernel: 29 missed, avg 88,
+  max 667 (best max yet) — the OTHER row is not affected by the shift.
+- hackbench socketpair on the final kernel: 0.793 s (steady; the
+  pidns/fork-path changes are behavior-neutral for plain processes).
+- posix_timers-unbuf: NO test output even with per-call flushing —
+  the wedge precedes the test's first print (threads spawn: pids
+  308-310; no hung-task report this boot; qsrun's TERM teardown wedges
+  after the 150 s budget). Timers-domain P0 handoff stands, sharpened:
+  the stall is before any TAP/result line, i.e. in early setup or the
+  first timed wait, not mid-matrix.
+- threadtest-unbuf: same shape — no output at all (F-5 sharpened the
+  same way: the wedge is before "using independent threads", i.e.
+  during thread spawn/setup, not the measurement loop).
+- Gates: PLATFORM=x86_64 make build rc=0; PLATFORM=riscv64 rc=0;
+  PLATFORM=aarch64 rc=0; `make test` ALL GREEN (1096/1096) on riscv64.

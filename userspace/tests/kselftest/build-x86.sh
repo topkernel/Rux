@@ -65,5 +65,13 @@ for t in posix_timers nanosleep nsleep-lat set-timer-lat mqueue-lat \
     "$MUSL_CC" $CFLAGS -o "$OUT/$t" "$SRC/timers/$t.c"
 done
 
+# unbuffered variants (stall-site decoders: per-call-flushed stdout, see
+# unbuf.c header) for the two wedge classes whose round-3 boots showed
+# zero test output.
+for t in posix_timers threadtest; do
+    "$MUSL_CC" $CFLAGS -DUNBUF_TARGET="\"$t.c\"" -I"$SRC/timers" \
+        -o "$OUT/$t-unbuf" "$DIR/unbuf.c"
+done
+
 file "$OUT"/memfd "$OUT"/posix_timers | sed 's/, BuildID.*//'
 echo "binaries in $OUT"
