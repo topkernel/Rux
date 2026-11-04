@@ -198,6 +198,226 @@ the write-lock retry loop).
    the CRASH 255 variant may be a real bug — needs one isolation boot
    with the 255 shape captured).
 3. ftest03 handoff follow-up with the sync lane (recipe above).
+<<<<<<< HEAD
+=======
+
+## SESSION 6 (r26) LOG — branch ltp-r21 @ f747cf8f+ (2026-11-04)
+
+Base: origin/main 0c8e4b79 merged (cc0e762c; only DFX/docs came in —
+BMSSCAN probes + lmbench/geekbench refresh). The r25 census (1049/1869)
+was COMPLETE at quota death and is committed with its delta; this round
+adjudicated its 20 losses.
+
+### THE r25 DIP IS ONE BUG: 8d81c5da's async close decisions
+Root cause of 13 of the 20 losses (all isolated deterministically,
+1st attempt, no host load): **fs(fdt) RCU retire (8d81c5da) moved the
+last-reference close decisions — record-lock release, ops.close (pipe
+reader drop, epoll purge), and the final Arc drop's IN_CLOSE_*
+fsnotify — into the fdreapd kthread behind a grace period. close(2)
+therefore returned to userspace BEFORE its side effects ran.** The
+reference kernel runs the final fput in TASK WORK at the
+return-to-userspace boundary, so userspace never observes that window
+(HARD DESIGN DIRECTIVE: reference wins every dispute).
+
+Family evidence (all FAIL pre-fix, all PASS 2x post-fix):
+- pipe02/pipe08/write05/writev01: write/writev to a pipe whose reader
+  closed returned SUCCESS instead of EPIPE/SIGPIPE.
+- fcntl14/15/33 (+fcntl36_64 census POISON = artifact): locks/leases
+  still held right after the closing fd died -> EAGAIN.
+- inotify01/02/05: queue was [04,20,01,**20**,02] vs expected
+  [04,20,01,**10**,20,02,**08**] — both IN_CLOSE_* missing (they fire
+  in File::drop, i.e. in the reaper), everything after shifted.
+- execve03: the ENOEXEC case saw ETXTBSY (setup fd's write-count not
+  dropped at close).
+- access02: close-timing subtest.
+- BONUS: kill10 PASSES 2/2 for the first time since r24 — the park
+  face's engine was the same divergence (children parked on harness
+  pipes whose writer's close never delivered the EOF wake).
+- creat07: flake (checkpoint ETIMEDOUT under census load; PASS 2x in
+  isolation). gettid02 POISON = artifact (PASS 2/2). float_exp_log =
+  known float-bench flake (POISONs even isolated boots). shm_test =
+  racy/budget (r25 verdict stands).
+
+### Fix (f747cf8f): retire_complete — reference task_work parity
+Syscall-context displacement (close(2), dup2/dup3) parks the file as
+before, then COMPLETES the close decisions for everything parked up to
+and including its own push before returning: FIFO queue + monotonic
+PUSHED/PROCESSED ordinals prove completion; the closer drains the batch
+itself when the reaper does not win the race (one grace covers the
+batch). fdreapd stays as the parallel processor + monopolist retry.
+
+Two latency pieces without which the synchronous wait was unusable
+(measured: inotify11's 10k-file churn blew its 30s budget — every close
+stalled ~1 jiffy):
+1. rcu: a CPU executing its idle task is quiescent by construction
+   (get_file reader windows run only over a non-idle current); a halted
+   idle CPU's stale QS report no longer holds up grace periods
+   (sched::cpu_running_idle + cpu_quiescent in all three check sites).
+2. rcu: synchronize_rcu_forced_polled — pause-hinted ~100us poll covers
+   a busy peer's next user-return BEFORE the 1-jiffy sleepy fallback.
+   inotify11: 35s timeout -> 5s PASS (2x). Regression batch 39 tests:
+   53s wall (was 116s under the sleepy-only form).
+
+### Gates on the fix
+- Families 2x green in isolation (12 members) + kill10 2x + 39-test
+  dup/close/fcntl/flock/inotify regression batch 34 PASS (only the
+  pre-existing inotify09 timeout remains, unchanged vs r25 census).
+- x3 builds rc=0 (x86_64 f747cf8f, riscv64, aarch64; dtb_blob.S
+  restored). make test GREEN 1301/1301 (maketest-r26-1.log; lock-aware
+  wait — no other lane's gate was blocked; the known post-suite
+  halt-time hung-task witness appears after "All tests passed!",
+  pre-existing shape).
+- Tier-2 pbench (same rig, q35 KVM SMP2/1G): **p6_openclose med
+  134.2us vs the last-ACCEPTED baseline 156us — 14% BETTER** (8d81c5da
+  async was ~123us; the sync completion costs ~11us over async and
+  still beats the accepted band). p6_stat 37.4 (base 71), p6_read_
+  cached 185.9 (base 204), p6_append 84.8 (base 77, +10%), p6_unlink
+  822 (base 808, +1.8%), p6_mkdrmdir 2892 (base 2760, +4.8%),
+  p6_write_fsync 13.9ms (base 14.2ms) — all inside ±20% or improved.
+  Full log: work/pbench-r26-fix-serial.log.
+
+### ftest03
+No stress-r9/r10 fix on origin/main as of this merge (stress r8 close
+97b7dc17 is the latest). ftest03 still FAIL 2/2 on my tree (children
+fail DATA checks) — unchanged, still the stress lane's queue. Their
+fix not landing mid-round; the census point stays theirs to take back.
+
+### Handoff notes
+- **fdt lane (8d81c5da owner)**: the fast path to reclaim the full
+  async gain is the reference's CONDITIONAL increment (fget's
+  inc_not_zero) — Arc has no try-clone, so it needs a manual refcount
+  beside the Arc (kref shape); then close decisions need NO grace at
+  all and only the memory free waits post-grace (fdreapd keeps that
+  duty). Also noted: the FdTable Drop teardown path runs
+  displaced_close_decision WITHOUT a grace — mid-window resurrection
+  by a cross-fork get_file reader is theoretically possible there
+  (pre-existing, not observed).
+- The census QEMU holds test/rootfs-x86_64-ltp.img (NOT the shared
+  test/rootfs.img); make test used rootfs.img lock-aware with short
+  hold windows.
+
+### r26 census: **1067/1869 (+18, NEW PEAK; previous best r24 1060)**
+Final tree, negmemo=1, results/results-r26.txt + delta-r26-vs-r25.txt.
+- Gains 21 (the whole async-close family + r25 POISON artifacts +
+  creat07 flake), kill10 CRASH->FAIL (PASS 2/2 isolated), loss 1:
+  timerfd_settime02 — THROUGHPUT-BOUND (fuzzy-sync close churn pays
+  the per-close grace; TPASS at a 170s budget, same class as
+  msgstress01).
+- chunk@1300 hit the host-load wedge family (mmap1's child SEGV +
+  driver hang; the r25 census had the same SEGV class in that chunk —
+  futex_waitv02 there). The scanner's parking rule stalls when an
+  attempt reports 0, so 51 rows came back WEDGE/POISON; ALL were
+  re-run in rescue boots and spliced (r22d flow) — 23 PASS, 11 TCONF
+  (ksm*/oom02-04/cpuset01 pre-existing classes), 15 FAIL matched
+  their r25 classes, oom01 POISON (r24 precedent). fcntl34 and
+  tgkill03 additionally isolated 2x (PASS; flaky-boot class).
+- The rescue scan reused run/r26-scan-logs chunk names — rescue
+  chunk0000-*.log OVERWROTE the census's chunk0/200/400 logs (results
+  files unaffected; noted for log archaeology).
+
+## SESSION 5 (r25) LOG — branch ltp-r21 @ 0ca98990+ (2026-11-04)
+
+Base: origin/main d08f8cd7 merged (dad20901). FOUR notes for the
+coordinator:
+
+**MERGE GAP (action needed): d08f8cd7 does NOT contain the contents of
+four earlier ltp-lane fixes** (verified by tree-diff origin/main vs the
+merged worktree, 11 files): 2515424b x86_64 SA_RESTORER-mandatory
+(signal.rs still has the in-frame trampoline on main), ab5b5da9
+WCONTINUED wait events (process/exit.rs), 33a4936a ETXTBSY exec text
+holds (errno/locks/vfs/mm_struct/fork/syscall-process), 1ed73f7d futex
+page-in on physical-key resolve (sync/futex.rs). On main those tests
+(rt_sigprocmask01/rt_sigsuspend01 parity shapes, waitid08 WCONTINUED,
+creat07 ETXTBSY, sighold02-class futex waits) will read as the OLD
+behavior — the r24 census numbers were measured with the fixes. The
+r24-census artifacts merged fine; the KERNEL bits did not follow. My
+branch carries them (merge kept my versions); cherry-pick or merge the
+branch whole.
+
+**Rootfs.img lock reversal this round:** the main session's merge gate
+(w28b) held test/rootfs.img legitimately while my make test needed it;
+my suite now waits lock-aware (run/r25-maketest-wait.sh). No gate was
+blocked by me this round.
+
+### Fixes landed (4 kernel commits + 1 test commit)
+1. **a6f7a562 ppoll/pselect6 apply their sigmask argument** — sys_ppoll
+   IGNORED args[3] (doc said so), pselect6 ignored args[5]; only
+   epoll_pwait implemented the wait-scoped mask. ppoll01's
+   SEND_SIGINT_RACE_TEST (both variants) slept out its 2s timeout and
+   returned 0 instead of EINTR: the caller-blocked SIGINT stayed blocked
+   through the wait. Now: WaitScopedMask guard (install, restore on
+   every exit; EINTR exits DEFER the restore to the signal-delivery
+   path via sigmask_restore — reference -ERESTARTNOHAND discipline, same
+   mechanism rt_sigsuspend uses); ppoll validates sigsetsize==8 first;
+   pselect6 parses the raw {ss,size} pair. Verified: ppoll01 PASS 20/0/0
+   + pselect01/_64, select02, poll02, epoll_pwait03 no regressions.
+2. **66192155 reference IPC limits** — IPC_IDS_MAX 256→32768 (IPCMNI;
+   id encoding keeps positive i32), msgmni default 256→32000, shmmni
+   pinned 4096. Root cause of msgstress01: the test creates 1000 queues
+   on its DEFAULT run (the -n clamp never applies without the option),
+   msgget ENOSPC'd at 257, cleanup RMID cascaded EINVAL into every
+   child (broken 44–263). VERIFIED CORRECT: full run with
+   LTP_TIMEOUT_MUL=3 PASSES. The plain 30s-harness census verdict is now
+   throughput-bound (msg+usleep churn needs minutes at -smp 2) — not a
+   correctness bug; msg-path perf (per-queue locks vs the one global
+   ids Spinlock) is perf-lane material.
+3. **27d244ab shmat EIDRM errno parity** — shmat on an IPC_RMID-marked
+   but still-live segment returned EINVAL (find_with_perms' !deleted
+   filter made the EIDRM check dead code); reference shm_obtain_object_
+   check says EIDRM (EINVAL only for freed/reused ids). Lookup+perms+
+   deleted+size now one slots lock with seq/ns revalidation (the old
+   two-lock shape had a slot-reuse window).
+4. **sysfs(2) implemented (x86_64-native 139)** — 139 was missing from
+   the x86_64→generic translate table, so native sysfs() hit the
+   generic table's rt_sigreturn(139), which popped a garbage signal
+   frame and resumed at a STACK address (NX fault): LTP sysfs01..05 all
+   died "Test killed by SIGSEGV" in setup. Implemented over a shared
+   FS_TABLE (also drives /proc/filesystems): option1 index-by-name
+   (EINVAL/EFAULT), option2 name-by-index returns 0 (modern reference;
+   sysfs02's TST_EXP_PASS demands exactly 0), option3 count, else
+   EINVAL. Verified: sysfs01-05 ALL PASS (5-point family, host parity
+   confirmed first).
+
+### Verdicts (results/verdicts-r25.txt — the NOT-OURS ledger)
+- **shmat1 CRASH-255 = NOT-OURS**: the musl binary on the HOST
+  reference kernel dies identically (rc=255, "caught signal 11 --
+  exiting.", -l 400): sig_handler's sigsetjmp recovery is #ifdef
+  __i386__ ONLY, so the test's by-design shmdt race kills it on every
+  x86_64 kernel. Full transcript in the r25 log below.
+- **mmapstress family DISSOLVES (8 members)**: 02/03/05/08 (the
+  "errno=12 couldn't round up brk" arm) fail IDENTICALLY on the host
+  (same TFAIL lines, rc=1) — NOT-OURS; 06/07/09/10 fail only because
+  our tests-all.txt invokes them BARE while LTP's runtest passes args
+  (06 "20", 09/10 "-p 20 -t 0.2", 07 needs a tmpfile argument) —
+  invocation artifacts. A follow-up rig improvement (ltpscan arg
+  support) could recover up to 4, but the runner currently execs bare
+  names only.
+- **shm_test = racy legacy mtest07** (byte-wise sched_yield churn;
+  intrinsic shmget/shmat-vs-RMID thundering race the reference also
+  loses with nonzero probability — host passes only at small -l/-t).
+  Census stays non-PASS; errno parity fixed kernel-side.
+
+### Leads captured (not chased)
+- **Post-test exit hang after msgstress01** (mul3 run): after "Test
+  passed" + summary, a task (pid 306, state=2) stays blocked; khungtaskd
+  reports but its victim-stack dump prints its own frame (walker bug?).
+  RWFRZ TID-VANISHED (reader-exit window) prints nearby. Exit-path hunt
+  under IPC+futex churn; log run/r25-msgstress-mul3.log.
+- **ftest03**: still FAIL 2/2 on the stress-r8 merged tree (children
+  fail DATA checks + one out-of-order virtio completion witness) —
+  stress lane round-9 owns the fs/biglock fix; re-verify when it lands.
+- **epoll_pwait** still uses the direct-restore (pre-defer) mask exit —
+  same TIF_RESTORE_SIGMASK nuance ppoll now has; no LTP test observes
+  it today; switch it to WaitScopedMask when touching that file next.
+
+### Gates
+x3 builds rc=0 (x86_64 after each fix + riscv64/aarch64 twice,
+dtb_blob.S restored each time); make test GREEN 1301/1301
+(maketest-r25-2.log; attempt 3 hit the shared rootfs.img lock held by
+the main-session merge gate — relaunched lock-aware, see above). Full
+r25 census WITH negmemo=1 launched on the final tree
+(results/results-r25.txt + run/r25-scan-logs).
+>>>>>>> 830c89ae (ltp: r26 session close — census 1067/1869 (+18, new peak), gates green, verdicts + handoffs recorded)
 4. The kill10 freeze face with the timers owner (evidence pack).
 
 ## SESSION 3 CLOSE (2026-11-03 ~09:45, branch ltp-r21 @ e2169c01) — r23 census 1059/1869
