@@ -4148,3 +4148,29 @@ samgr FFRT cascade from ~26s; HLD lines live), u2v13 (running).
 - The u2v-boot.py background-launch discipline: use ONE launch per tag
   (run_in_background), never retry blind — duplicate drivers truncate
   each other's serial logs.
+
+### 41st addendum — three more parity fixes + rig lessons
+
+1. 6cf83b15 fix(net): AF_UNIX recvmsg MSG_TRUNC return value — a caller
+   that passes MSG_TRUNC learns the FULL record length (reference
+   `err = (flags & MSG_TRUNC) ? skb->len - skip : size`); we returned
+   the copied prefix. DGRAM/SEQPACKET only, covers peek + direct paths.
+2. 62f6b670 fix(epoll): the 1024 maxevents cap was ours alone (reference
+   EP_MAX_EVENTS = INT_MAX/sizeof); dropped, scratch capacity clamped
+   separately (readiness is bounded by interest count, not maxevents).
+3. d402fa90 fix(net): AF_UNIX peer close with unread data now sets
+   ECONNRESET on the survivor (reference unix_release_sock sk_err
+   parity): recv drains then reports the reset (read-and-clear,
+   sock_error semantics); SO_ERROR reports+clears it; poll raises
+   POLLERR; recv_ready treats it as readable so blocked readers wake.
+   Gap class: "socket error propagation" from the audit list.
+
+Rig lessons this session:
+- make test QEMUs can OUTLIVE the wrapper's ALL-PASSED verdict (post-
+  halt writeback hang) and orphan holding test/rootfs.img's write
+  lock — the NEXT make test fails at QEMU start ("Failed to get write
+  lock"). Kill leftover qemu-system-riscv64 with rootfs.img before
+  rerunning; the verdict in the OLD log still stands.
+- The u2v-boot.py duplicate-launch trap: every retry spawns another
+  driver+QEMU on the same serial log (they truncate each other);
+  verify exactly one instance per tag before trusting a log.
