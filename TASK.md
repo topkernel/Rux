@@ -4029,3 +4029,79 @@ hold chain broken. Both are queued below.
 4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
+
+## 41ST SESSION — CONTINUOUS ROLL (2026-11-05 04:30-, branch oh-roll @ 02e3c900)
+
+Mission: roll OH boots continuously on the LATEST main (the 40th's three
+net/unix fixes 9fe9b754 wake-budget-exclusive + 89d6df0e queue-split +
+02e3c900 direct-recv were never booted), hunt pixels vs the frozen set
+{82f0a25f, 06b933b4}, bank wedge/SA/phase data. Roller: run/r41-roll.sh
+(100-boot loop, lb-boot.py shape, system-lb5 + userdata-fresh2, SMP2
+KVM, 900s window, cmdline "dfx=ams46,txnhunt,fuxstuck unixrd=1
+syscost=1"). Ledger: run/r41/ledger.csv + per-boot run/r41/<tag>-summary.txt.
+Kernel: run/r41/bzImage-current = x86_64 debug @ 02e3c900.
+
+### Boot 1 (r41v1, 04:30-04:45) — SA NEEDLE UP, WEDGE FACE CHANGED
+
+- PIXELS: all shots frozen 82f0a25f (no change; no alert fired).
+- SA: ceiling 58 (SA inserts 57, distinct 57, last insert t=34.3s) —
+  vs u2v8's ceiling 53 / 52 inserts / last 28.7s. The 40th's fixes
+  moved the ladder FURTHER (5 more SA registrations, 5.6s longer
+  ladder). Still no CreateNewUser (wedge before provisioning, same
+  class as u2v8 — which also never reached it).
+- DIRECT-RECV CONFIRMED (unixrd RM): alloc 1028 -> 0ns, cout 88 -> 0ns
+  (bounce gone, allocb 73B -> 1B); recv absorbs the user copy
+  (964 -> 1557ns); outer 2021 -> 2544ns at the early window — net wash
+  on per-op wall, one slab alloc/record dropped as designed.
+- NEW WEDGE FACE (the important finding): total socket-plane freeze at
+  t~60s. UNIXRD counters frozen from t=60 through t=840 (RM n=174,991;
+  RF 175,085; WV 198,897) vs u2v8's continuously-flowing storm (31.1M
+  recvmsg by 885s). Both CPUs 100% kernel-busy with idle FROZEN at
+  314/411 ticks from t~35 to t=840.
+- The burn: syscost rest-sites t=240: sched.rs:2782 (pick) n=155.9M
+  tot=236s avg=1516ns — 650k picks/s (u2v8: 60k/s) — paired 1:1 with
+  fdreap.rs:132 n=155.9M. fdreap.rs:132 is the `schedule(); continue`
+  yield in retire_complete's completion loop: a close() caller spins
+  there because PROCESSED_SEQ never reaches its ord — the retire
+  reaper took the batch and never finished it. One RCU-GP-BOUND
+  site=fdreap-close print at t=12.3 (gen=9419 qs=9418,9419 — cpu0 one
+  quiescent report behind), then silence; the burn continues to end.
+- FUX-STUCK census (first boot with fuxstuck armed): 180 lines, 7
+  distinct tids over the boot, terminal singleton storage_daemon
+  tgid=326 tid=348 uaddr=0x7ff0831396b4 parked 831s+ with anywoken=0
+  and fto=59.99s — A 60s FUTEX TIMEOUT THAT NEVER FIRED. Park grows
+  unbounded past the timeout; the timer wake for the timed wait is
+  lost. (u2v8 could not see this: fuxstuck not armed; its "samgr
+  workers parked sys=202" TXN-HANG face is likely the same class.)
+- TXN-HANG: n=1390, codes {12:692, 1:177, 2:173, 8:173, 49:173,
+  64:1, 6:1}, max exec 865.9s; comms dominated OS_FFRT_2_0 (519) +
+  bootanimation/render_service/resource_schedu/wifi (173 each) — the
+  FFRT park cascade, now with an explicit lost-timer-wake member.
+- WEDGE LEDGER: 12/12 wedge-class (r41v1 adds one).
+- READ: the 40th's wake changes plausibly interact with (a) the
+  fdreap reaper's completion (schedule-yield spin needs the reaper to
+  finish; the reaper's own wait/wake shape changed) and (b) timed
+  futex waits (60s fto not firing). Both are for the futex/sched and
+  verification lanes — this lane keeps rolling for frequency data.
+
+### Gate notes (this session)
+
+- x86_64 build from stock main 02e3c900: rc=0. `make test` gate on
+  riscv64 (default platform) FAILS ON STOCK MAIN with a deterministic
+  link error: "rust-lld: kernel image outgrew the boot.S 20MB early
+  window: extend the window (both PMD tables) and move heap+
+  reservation together" (run/r41-maketest-x86-main.log, log line
+  21256; tree was clean at 02e3c900). The riscv64 debug+test-cfg image
+  now exceeds the 20MB boot window — the merge-gate riscv64 suite run
+  needs either the window extended or the test image slimmed. Gate for
+  this session follows the 39th's precedent: make test PLATFORM=x86_64
+  (building rootfs first; verdict appended below when done).
+- BWR-SNAP (pool health) rows are ZERO on main by construction: the
+  bwr_snap probe (53d2c6e8) lives on biofix-fieldpoll and is NOT
+  merged. Do not read 0 as "pool healthy" on main boots.
+
+### Rolling bank (kernel 02e3c900, updated per boot)
+
+- r41v1: SA 58/57@34.3s | ladder NONE (wedge pre-provisioning) | FUX
+  180L/7tids/terminal tid348 fto-lost 831s | TXN 1390 {12:692} max
+  865.9s | sched-burn 650k/s fdreap-paired | pixels 82f0a25f x6 | 12/12
