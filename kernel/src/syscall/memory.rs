@@ -3428,60 +3428,68 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
     // 2. Get page table root
     let root_ppn = address_space.root_ppn();
 
-    // 3. Check if each page is in memory
-    // SAFETY: root_ppn is a valid page table root; we traverse 3-level Sv39 page tables
-    // via linear mapping. vec_ptr validated with access_ok(page_count).
+    // 3. Check if each page is in memory.
+    //
+    // Present PTE via the PORTABLE arch walker (the old hand-rolled walk
+    // was Sv39-3-level shaped and read garbage on x86-64's 4-level
+    // tables, so every page reported not-resident there). A file-backed
+    // page with NO local PTE falls back to PAGE-CACHE residency — the
+    // reference's __mincore_unmapped_range consults the page cache, so
+    // pages another process faulted in (a child's mlock) report
+    // resident to an untouched mapper (LTP mincore04).
+    let vma_mgr = address_space.vma_read();
     let mut vec_ok = true;
-    unsafe {
-        for i in 0..page_count {
-            let page_addr = addr + i * PAGE_SIZE;
+    for i in 0..page_count {
+        let page_addr = addr + i * PAGE_SIZE;
 
-            // Find page table entry
-            let vpn = [
-                (page_addr >> 12) & 0x1FF,
-                (page_addr >> 21) & 0x1FF,
-                (page_addr >> 30) & 0x1FF,
-            ];
+        // SAFETY: read-only inspection of the task's own page tables.
+        let mut page_in_memory = unsafe {
+            crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, page_addr as u64)
+        }
+        .is_some();
 
-            // Traverse page table using linear mapping
-            let mut pte_virt = get_page_table_virt(root_ppn << PAGE_SHIFT) as *const PageTableEntry;
-            let mut page_in_memory = false;
-
-            for level in (0..3usize).rev() {
-                let pte = &*pte_virt.add(vpn[level]);
-
-                if !pte.is_valid() {
-                    // Page table entry invalid, page not in memory
-                    break;
+        if !page_in_memory {
+            // File-backed? consult the page cache for the (fs,ino,off).
+            if let Some(vma) = vma_mgr.find(VirtAddr::new(page_addr)) {
+                if vma.vma_type() == crate::mm::vma::VmaType::FileBacked
+                    || vma.vma_type() == crate::mm::vma::VmaType::SharedMemory
+                {
+                    let fd = vma.file_fd();
+                    if fd >= 0 {
+                        if let Some(ft) = crate::sched::get_current_fdtable() {
+                            if let Some(file) = ft.get_file(fd as usize) {
+                                // SAFETY: inode written once at open.
+                                if let Some(inode) = unsafe { (*file.inode.get()).as_ref() } {
+                                    let voff = vma.offset() as u64
+                                        + (page_addr - vma.start().as_usize()) as u64;
+                                    let idx = voff / crate::mm::page::PAGE_SIZE as u64;
+                                    page_in_memory = crate::fs::page_cache::get_page_cache()
+                                        .get(inode.fs_id, inode.ino, idx)
+                                        .is_some();
+                                }
+                            }
+                        }
+                    }
                 }
-
-                // Check if leaf node (R/W/X any set indicates leaf node)
-                let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
-
-                if level == 0 || is_leaf {
-                    // Reached leaf node or huge page, page is in memory
-                    page_in_memory = true;
-                    break;
-                }
-
-                // Continue to next level
-                pte_virt = get_page_table_virt(pte.ppn() << PAGE_SHIFT) as *const PageTableEntry;
-            }
-
-            // Set result: lowest bit indicates if page is in memory.
-            // put_user (exception-table): a raw store faults in S-mode on
-            // every U page (SUM=0) and panics the kernel — glibc's malloc
-            // probes with mincore, so any allocator-heavy program hit this.
-            // A store that fails (vec page unmapped — LTP mincore01
-            // setup2) must surface as EFAULT, not be swallowed.
-            if !crate::arch::uaccess::put_user(
-                vec_ptr.add(i),
-                if page_in_memory { 1u8 } else { 0u8 },
-            ) {
-                vec_ok = false;
             }
         }
+
+        // Set result: lowest bit indicates if page is in memory.
+        // put_user (exception-table): a raw store faults in kernel mode
+        // on every U page (SUM=0) and panics the kernel — glibc's malloc
+        // probes with mincore, so any allocator-heavy program hit this.
+        // A store that fails (vec page unmapped — LTP mincore01
+        // setup2) must surface as EFAULT, not be swallowed.
+        if !unsafe {
+            crate::arch::uaccess::put_user(
+                vec_ptr.add(i),
+                if page_in_memory { 1u8 } else { 0u8 },
+            )
+        } {
+            vec_ok = false;
+        }
     }
+    drop(vma_mgr);
 
     if !vec_ok {
         return mmap_error::EFAULT;
@@ -3656,54 +3664,53 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
 
     // Linux mlock PREFAULTS the whole range (populate_vma_page_range):
     // locked pages are resident — mincore02 asserts every locked page
-    // shows present. MLOCK_ONFAULT (mlock2) skips this: pages lock as
-    // they fault in (LTP mlock201 ONFAULT cases expect locked-but-not-
-    // present pages). Anonymous/SharedMemory VMAs get zero pages mapped
-    // here (file-backed pages stay demand-read; mincore02 uses anon).
+    // shows present, file-backed included (the populate faults the file
+    // pages in through the page cache). MLOCK_ONFAULT (mlock2) skips
+    // this: pages lock as they fault in (LTP mlock201 ONFAULT cases
+    // expect locked-but-not-present pages).
+    //
+    // The fault runs through the ARCH fault handler (handle_mm_fault
+    // READ) rather than a direct zero-map: one code path for anonymous
+    // zero-fill AND file-backed reads, and the PTE flags come from the
+    // mapping's own protections (the old direct-map wrote Sv39-shaped
+    // PTE bits, which do not spell present|rw|user on x86-64).
+    // Syscall context, no VMA-manager guard held — sleeping in file I/O
+    // is legal here (same discipline as the futex page-in).
     if !onfault {
         let root_ppn = address_space.root_ppn();
-        for (seg_start, seg_end, zero_fill) in prefault_spans {
-            if !zero_fill {
-                continue;
-            }
+        for (seg_start, seg_end, anon_or_shm) in prefault_spans {
             let mut p = seg_start & !(crate::mm::page::PAGE_SIZE - 1);
             while p < seg_end {
                 // SAFETY: PageTableWalker::walk is a read-only inspection
                 // of the task's own page tables.
                 let present = unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(
-                        root_ppn,
-                        p as u64,
-                    )
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, p as u64)
                 }
                 .is_some();
                 if !present {
-                    // SAFETY: alloc + map under the PTE lock, same as the
-                    // sysv shm attach path; p is page-aligned user memory.
+                    // Populate fault type per mapping kind (the reference
+                    // prefaults with FOLL_WRITE semantics on writable
+                    // mappings): anonymous/shm pages take a WRITE fault —
+                    // a real zeroed page is allocated (Rss accounting; a
+                    // READ fault on a PROT_WRITE-only mapping is a
+                    // permission violation and prefaulted nothing —
+                    // LTP mlock05). File-backed spans take a READ fault:
+                    // the fault-around arm maps the PAGE-CACHE frame
+                    // (cross-mapper mincore residency, LTP mincore04)
+                    // without dirtying writable mappings.
+                    // SAFETY: handle_mm_fault operates on the current
+                    // task's address space, same as the trap path.
                     unsafe {
-                        let _pte_guard =
-                            crate::arch::mm::mm_ops::pte_lock_for(address_space)
-                                .lock_irqsave();
-                        if let Some(phys) =
-                            crate::arch::mm::mm_ops::alloc_user_phys_page()
-                        {
-                            let page_ptr = crate::arch::mm::phys_to_virt(
-                                crate::arch::mm::PhysAddr::new(phys),
-                            )
-                            .0 as *mut u8;
-                            core::ptr::write_bytes(page_ptr, 0, crate::mm::page::PAGE_SIZE);
-                            let pte_flags =
-                                crate::arch::mm::PageTableEntry::V
-                                    | crate::arch::mm::PageTableEntry::A
-                                    | crate::arch::mm::PageTableEntry::D
-                                    | crate::arch::mm::PageTableEntry::U
-                                    | crate::arch::mm::PageTableEntry::R
-                                    | crate::arch::mm::PageTableEntry::W;
-                            crate::arch::mm::mm_ops::map_user_page(
-                                root_ppn,
+                        if let Some(mm) = (*current_task).address_space() {
+                            let flags = if anon_or_shm {
+                                crate::arch::mm::FaultFlags::WRITE
+                            } else {
+                                crate::arch::mm::FaultFlags::READ
+                            };
+                            let _ = crate::arch::mm::handle_mm_fault(
+                                &mm,
                                 crate::arch::mm::VirtAddr::new(p as u64),
-                                crate::arch::mm::PhysAddr::new(phys),
-                                pte_flags,
+                                flags,
                             );
                         }
                     }
