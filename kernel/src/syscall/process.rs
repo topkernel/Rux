@@ -88,6 +88,32 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     let flags = flags & 0xffff_ffff;
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
+
+    // CLONE_PIDFD: the pointer rides parent_tid (kernel_clone_args) and
+    // must be writable BEFORE the child is created — same pre-child
+    // fault probe as clone3's (do_clone runs after the COW mm copy has
+    // write-protected the parent's pages, so the check cannot live
+    // there; LTP clone302 "invalid pidfd" arms an unwritable word).
+    if flags & 0x00001000 != 0 && !parent_tid.is_null() {
+        let root = crate::sched::current()
+            .and_then(|t| t.address_space())
+            .map(|a| a.root_ppn());
+        let ok = match root {
+            Some(root_ppn) => unsafe {
+                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                    root_ppn,
+                    parent_tid as usize as u64 & !0xfff,
+                )
+                .map(|(_, pte)| pte & crate::arch::mm::PageTableEntry::W != 0
+                    && pte & crate::arch::mm::PageTableEntry::U != 0)
+                .unwrap_or(false)
+            },
+            None => false,
+        };
+        if !ok {
+            return -(errno::EFAULT as i64);
+        }
+    }
     // clone syscall argument ORDER differs by arch (verified against
     // toolchain/musl-1.2.5 clone.s for both):
     //
@@ -6860,6 +6886,14 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             None => false,
         };
         if !ok {
+            static PF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_warn!(
+                    "clone3-pidfd: probe fail target={:#x}",
+                    pidfd_ptr as usize,
+                );
+            }
             return -(errno::EFAULT as i64);
         }
     }

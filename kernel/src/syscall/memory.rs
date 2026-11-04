@@ -2168,6 +2168,11 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             crate::mm::page::VirtAddr::new(range_start),
                             full_flags,
                         );
+                        // Vma::new forces VM_DUMPABLE (fresh-mapping
+                        // default); a split must carry the source VMA's
+                        // EXACT bits (MADV_DONTDUMP'd ranges survive
+                        // mprotect with the bit still cleared).
+                        h.set_flags(full_flags);
                         h.set_type(old_type);
                         h.set_origin(old_origin);
                         h.set_file_fd(old_fd);
@@ -2185,6 +2190,8 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             crate::mm::page::VirtAddr::new(v_end),
                             full_flags,
                         );
+                        // Exact flags (see head piece — VM_DUMPABLE note).
+                        t.set_flags(full_flags);
                         t.set_type(old_type);
                         t.set_origin(old_origin);
                         t.set_file_fd(old_fd);
@@ -2199,13 +2206,16 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // new permission bits, non-permission flags preserved.
                     let cov_start = v_start.max(range_start);
                     let cov_end = v_end.min(range_end);
+                    let cov_flags = crate::mm::vma::VmaFlags::from_bits(
+                        (full_flags.bits() & !0x7) | perm_bits,
+                    );
                     let mut cov = crate::mm::vma::Vma::new(
                         crate::mm::page::VirtAddr::new(cov_start),
                         crate::mm::page::VirtAddr::new(cov_end),
-                        crate::mm::vma::VmaFlags::from_bits(
-                            (full_flags.bits() & !0x7) | perm_bits,
-                        ),
+                        cov_flags,
                     );
+                    // Exact flags (VM_DUMPABLE survives a cleared source).
+                    cov.set_flags(cov_flags);
                     cov.set_type(old_type);
                     cov.set_origin(crate::mm::vma::VmaOrigin::from_bits(
                         crate::mm::vma::VmaOrigin::MPROTECT,
@@ -3373,6 +3383,11 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
                         piece.set_file_fd(old_fd);
                         piece.set_file_size(old_fsz);
                         piece.set_offset(off);
+                        // Vma::new forces VM_DUMPABLE as the default for
+                        // fresh mappings; a split must carry the source
+                        // VMA's EXACT bits (a DONTDUMP'd range keeps the
+                        // bit cleared across head/tail/covered pieces).
+                        piece.set_flags(flags);
                         piece
                     };
 

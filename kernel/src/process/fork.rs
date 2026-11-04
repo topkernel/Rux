@@ -996,29 +996,13 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // its pidfd field — sys_clone maps both into args.pidfd. LTP
         // clone301 sends the child SIGUSR1 through this descriptor.
         if args.flags & CLONE_PIDFD != 0 && !args.pidfd.is_null() {
-            // Fault probe BEFORE anything is allocated (the reference
-            // fails the fork on a bad pointer; probing first keeps every
-            // failure path free of half-built state).
-            let root = (*current_ptr)
-                .address_space()
-                .map(|a| a.root_ppn());
-            let ok = match root {
-                Some(root_ppn) => unsafe {
-                    crate::arch::mm::mm_ops::PageTableWalker::walk(
-                        root_ppn,
-                        args.pidfd as usize as u64 & !0xfff,
-                    )
-                    .map(|(_, pte)| {
-                        pte & crate::arch::mm::PageTableEntry::W != 0
-                            && pte & crate::arch::mm::PageTableEntry::U != 0
-                    })
-                    .unwrap_or(false)
-                },
-                None => false,
-            };
-            if !ok {
-                return unwind(task_ptr, efault());
-            }
+            // NOTE: no W|U page probe here — by this point the COW mm
+            // copy has already write-protected the parent's private
+            // pages, so a plain walk-based probe would false-EFAULT on
+            // perfectly writable memory. Both syscall layers probe the
+            // pointer BEFORE do_clone (clone3's existing check; sys_clone
+            // gained the same one) and the put_user below is extable-
+            // backed: a fault there still fails the fork cleanly.
             let child_pid = (*task_ptr).pid();
             let data = match crate::fs::pidfd::make_pidfd_data(child_pid) {
                 Some(d) => d,
@@ -1048,8 +1032,17 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             // SAFETY: args.pidfd is a parent-context user pointer, probed
             // writable by sys_clone3's fault probe; sys_clone probes below.
             if !unsafe {
-                crate::arch::uaccess::put_user(args.pidfd, fd as i32)
+                crate::arch::uaccess::put_user(args.pidfd, fd as u32)
             } {
+                static PU: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if PU.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_warn!(
+                        "clone-pidfd: put_user fail parent={} target={:#x}",
+                        unsafe { (*current_ptr).pid() },
+                        args.pidfd as usize,
+                    );
+                }
                 return unwind(task_ptr, efault());
             }
         }
