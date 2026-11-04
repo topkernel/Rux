@@ -114,6 +114,16 @@ struct SleepMutexState {
     handoff_epoch: u64,
 }
 
+/// Outcome of one optimistic_probe round (see optimistic_probe).
+enum OptimisticProbe {
+    /// Acquired (free+unwaited fast path or recursion) — guard inside.
+    Acquired(SleepMutexGuard),
+    /// Holder is on-CPU: optimistic spinning is profitable.
+    Spin,
+    /// Holder off-CPU / handoff window: queue instead of spinning.
+    Stop,
+}
+
 /// Sleeping mutex for coarse, I/O-holding serialization (see the module
 /// doc). All users are `static`s, hence the `&'static self` API.
 pub struct SleepMutex {
@@ -226,6 +236,69 @@ impl SleepMutex {
         }
     }
 
+    /// Optimistic-spin probe (one state-lock section + owner on-CPU
+    /// check). Reference discipline: mutex_optimistic_spin only spins
+    /// while the OWNER IS RUNNING on a CPU (mutex_spin_on_owner reads
+    /// owner->on_cpu); the moment the holder is descheduled the
+    /// reference stops spinning and queues. Spinning against an
+    /// off-CPU holder is pure waste — and worse than waste under a
+    /// convoy: on a 2-CPU box with 5-6 contenders on VFS_MUTATION_LOCK
+    /// / EXT4_BIG_LOCK (ftest03 shape), spinners burning their whole
+    /// optimistic budget per round starve the very holder whose
+    /// critical section gates everyone (measured: 10 probe iterations
+    /// 14s -> ~95s, 7x, LTP ftest03 census FAIL via the 30s budget
+    /// TERM -> child TBROK unlink exits).
+    ///
+    /// Outcomes:
+    /// - `Acquired`: the fair try succeeded (free+unwaited, or
+    ///   recursion) — same gates as try_acquire_or_recurse_fair.
+    /// - `Spin`: lock held by ANOTHER task that is on-CPU right now —
+    ///   optimistic spinning is profitable, keep going.
+    /// - `Stop`: stop spinning and queue — holder off-CPU (or its task
+    ///   is gone), or the lock is free behind counted waiters (the R84
+    ///   handoff window: a fresh caller must not take it, so there is
+    ///   nothing to spin FOR).
+    fn optimistic_probe(&'static self, pid: u32) -> OptimisticProbe {
+        // One locked section: the fair-try gates + owner snapshot.
+        let owner_pid = {
+            let mut st = self.state.lock();
+            if !st.locked && st.waiters == 0 {
+                st.locked = true;
+                st.owner = pid;
+                st.depth = 1;
+                st.acquired_at = crate::drivers::timer::get_jiffies();
+                return OptimisticProbe::Acquired(SleepMutexGuard { lock: self });
+            } else if st.locked && st.owner == pid {
+                st.depth += 1;
+                return OptimisticProbe::Acquired(SleepMutexGuard { lock: self });
+            } else if !st.locked {
+                // Free behind counted waiters: the handoff window. The
+                // fair gate refuses us; the woken token holder is on its
+                // way. Spinning here only burns the CPU it needs.
+                return OptimisticProbe::Stop;
+            }
+            st.owner
+        };
+        // Holder task on-CPU? Pinned lookup keeps the Task alive across
+        // the read (a racing release+exit would otherwise free it).
+        let t = crate::process::pid_hash::pid_hash_lookup_pinned(owner_pid);
+        if t.is_null() {
+            // Owner pid unresolvable (exiting / hash moment): cannot
+            // prove spinning is profitable — queue. The R77 stall
+            // tripwire separately watches a dead-owner leak.
+            return OptimisticProbe::Stop;
+        }
+        let on_cpu = unsafe {
+            (*t).ti_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+        };
+        crate::process::task::Task::task_put(t);
+        if on_cpu {
+            OptimisticProbe::Spin
+        } else {
+            OptimisticProbe::Stop
+        }
+    }
+
     /// R84 fairness: spend the release() handoff token. The woken
     /// waiter takes a FREE lock unconditionally and leaves the waiter
     /// count in the same critical section — the count keeps covering the
@@ -268,17 +341,26 @@ impl SleepMutex {
         // Adaptive optimistic spin (reference mutex discipline): the
         // reference kernel's mutex_optimistic_spin / osq spins with a
         // generous budget while the holder is on-CPU, only falling to
-        // the wait queue when need_resched fires or the budget ends.
-        // Our 4×64 budget (~100ns total) fell through to the queue on
-        // nearly every SMP ping-pong contention — the ctx-switch cost
-        // regression (0.73→1.85µs) traced here. The R84 fair gate is
-        // preserved: the spin still checks try_acquire_or_recurse_fair,
-        // so a barger cannot steal past parked waiters. The 100×
-        // outer budget is ~10-20µs of optimistic spin, matching the
-        // reference's class; need_resched breaks out immediately.
+        // the wait queue when need_resched fires, the budget ends, or
+        // the HOLDER LEAVES THE CPU (mutex_spin_on_owner reads
+        // owner->on_cpu every round). Our 4×64 budget (~100ns total)
+        // fell through to the queue on nearly every SMP ping-pong
+        // contention — the ctx-switch cost regression (0.73→1.85µs)
+        // traced here. The holder-on-CPU guard is load-bearing: without
+        // it the ftest03 convoy (5-6 tasks on the fs biglocks, 2 CPUs,
+        // ms-long sections through jbd2) had spinners burning their
+        // full budget against descheduled holders — starving the very
+        // holder that gates everyone (10 probe iterations 14s -> ~95s,
+        // 7x; LTP census FAIL via the 30s budget TERM). The R84 fair
+        // gate is preserved inside the probe; need_resched still breaks
+        // out immediately.
         'outer: for _ in 0..100 {
-            if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
-                return g;
+            match self.optimistic_probe(pid) {
+                OptimisticProbe::Acquired(g) => return g,
+                // Holder off-CPU / handoff window: spinning is waste —
+                // queue now (reference: mutex_spin_on_owner false).
+                OptimisticProbe::Stop => break 'outer,
+                OptimisticProbe::Spin => {}
             }
             for _ in 0..64 {
                 core::hint::spin_loop();

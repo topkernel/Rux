@@ -36,9 +36,12 @@
 //! - `schedule()` -> blocking on the park condvar; `get_jiffies()` ->
 //!   a model clock that advances by 1 on every read (time passes
 //!   arbitrarily between scheduling points).
-//! - The adaptive 4-iteration spin in `lock()` collapses to ONE fair
+//! - The adaptive optimistic spin in `lock()` collapses to ONE fair
 //!   try (the spin is a performance retry of the identical predicate —
-//!   no protocol state involved).
+//!   no protocol state involved; the holder-on-CPU guard of
+//!   optimistic_probe only decides whether to retry, and the
+//!   scheduler/owner liveness it samples is environment, not
+//!   protocol).
 //! - The R85 anti-starve self-wake timer (re-armed at every park,
 //!   deadline = park time + ANTI_STARVE_JIFFIES) is modeled PARTIALLY:
 //!   a park-time deadline check delivers the timer wake when other
