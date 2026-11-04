@@ -154,6 +154,39 @@ Tool: `run/ab-haltpoll.sh` (interleaved same-window A/B boots — the
 interleaving is what separates real deltas from load drift; see the
 ctx rows: base read 1.85-1.88 at load 1.3 vs 1.96-2.17 at load 5).
 
+## Attribution experiment (2026-11-04): the sync-realign ctx story corrected; the poll window is the whole show
+
+Three-arm interleaved A/B on the same rig and load window
+(run/ab-halt-attribution.sh, results in run/halt-attribution-results.txt;
+EXP counters printed at init exit: resched_cpu calls vs actual IPI sends):
+
+| arm | ctx (med of landed) | pipe | IPI send rate |
+|---|---|---|---|
+| pre-realign (ab397dfd, no poll window) | 4.67 us (4.69/4.65) | 7.84 | 99.9% |
+| current, window 120 us | **2.40 us** (2.47/2.29/2.44) | **4.63** | 86-96% |
+| current, window 0 (forced halt) | 4.91 us (4.96/4.85) | 8.18 | 99.7% |
+
+Findings, each measured:
+
+1. **The yielding-spinlock removal was NOT the handoff cost.** The
+   pre-realign kernel reads statistically identical to current-with-
+   window-0 (4.67 vs 4.91 ctx, 7.84 vs 8.18 pipe). The historical
+   "0.73 -> 1.85 caused by sync-realign" attribution was an era
+   confound: the pre-realign kernel does not reproduce 0.73 on today's
+   rig — it pays the same full halt tax as any window-less kernel.
+2. **The halt boundary is the dominant per-handoff cost and the poll
+   window is worth 2.5 us/ctx and 3.6 us/pipe** (same code, only the
+   window differs). This is the single largest scheduler-adjacent
+   number on the rig and it is already banked in main.
+3. The window converts 99.9% send-rate to 86-96% (the remainder
+   includes preemption IPIs to RUNNING targets, which the flag cannot
+   skip by design).
+
+Corollary for the optimization queue: locks are not the handoff lever;
+the remaining kernel-side levers are the resched-IPI volume to halted
+CPUs (coverage), the GRQ hold time on the wake/pick path, and the
+syscall entry floor (null 1.31x). See the session close report.
+
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
 Both kernels under the same q35+KVM rig (reference column frozen from
