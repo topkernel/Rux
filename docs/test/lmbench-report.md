@@ -114,6 +114,46 @@ Semop ping-pong under load stayed 2M-round clean through the soak.
 
 
 
+## Negative result (2026-11-04): adaptive idle-poll window — rejected with evidence
+
+The reference kernel's guest halt-polling discipline (adaptive
+`guest_halt_poll_ns` instead of a fixed window) was implemented in
+three variants and measured against the static 120 us window. None
+beat the static window on the primary perf platform (KVM lmbench);
+the change was reverted. Recorded here because the mechanisms are
+reusable knowledge:
+
+| variant | KVM lmbench (vs base, same-window interleave) | TCG pbench |
+|---|---|---|
+| v1 collapse-on-halt, ceiling 500 us | ctx +18%, pipe +8-12% | - |
+| v2 grow-on-fast-halt (ns clock), ceiling 500 us | ctx +13%, exec -14%, fork -6% | p4_fork_exit **+56%** |
+| v2 + ceiling 120 us | (not run) | p4_fork_exit +47% |
+| v2 + 5 ms decay hysteresis | (not run) | p4_fork_exit +55% |
+| X1 jiffy-clock verdict, ceiling 120 us | ctx +6%, pipe +8%, exec +43% (single pair), fork +4%, null flat | p4 flat, p2 -11%, p5a -13% |
+
+Mechanisms established by bisection (constant-window build isolated
+the code path from the window values):
+
+1. **Grow-only-on-catch is chicken-and-egg**: a window below every
+   wake gap can never grow (the wake always lands after the window),
+   so the 10-120 us gap class paid an IPI on every handoff (v1).
+2. **Measuring the halt with `monotonic_ns_since_boot` costs +50% on
+   translation rigs**: the call walks the HPET device model and its
+   lock twice per halt, serializing both vCPUs' timer traffic during
+   fork storms. Jiffy-granular verdicts (two atomic loads) fixed the
+   TCG p4 regression entirely — the idle/halt path must only use
+   cheap clocks.
+3. **Why adaptivity does not pay on this rig**: the host's KVM
+   `halt_poll_ns=200000` already keeps the vCPU THREAD from sleeping
+   through sub-200 us wakes — the guest-side window only saves the
+   guest IPI (waker-side VM-exit), and the static 120 us already
+   covers the ping-pong gap class. The adaptive variants only added
+   regrow transients at benchmark phase boundaries.
+
+Tool: `run/ab-haltpoll.sh` (interleaved same-window A/B boots — the
+interleaving is what separates real deltas from load drift; see the
+ctx rows: base read 1.85-1.88 at load 1.3 vs 1.96-2.17 at load 5).
+
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
 Both kernels under the same q35+KVM rig (reference column frozen from
