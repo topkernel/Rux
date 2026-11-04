@@ -1,0 +1,34 @@
+r25 census vs r24: 1049/1869 PASS (-11)
+=======================================
+Tree: ltp-r21 @ d08f8cd7 merge + r25 fixes (a6f7a562 ppoll/pselect6
+sigmask, 66192155 reference IPC limits, 27d244ab shmat EIDRM,
+f348fc57 sysfs(2)), x86_64+KVM, negmemo=1, 1869 list.
+The r25 session died on quota at scan completion; the loss
+adjudication moved to r26.
+
+Gains (+8):
+  ppoll01        FAIL -> PASS   (fix a6f7a562)
+  sysfs01..05    FAIL -> PASS   (fix f348fc57; +5)
+  creat06        CRASH-> PASS   (known flake family, recovered)
+  epoll_pwait03  FAIL -> PASS   (known flake family, recovered)
+
+Losses (-20), adjudication in r26:
+  fcntl14/14_64/15/15_64/33/33_64 FAIL, fcntl36_64 POISON
+                                (NEW record-lock family, 7 members)
+  inotify01/02/05  PASS -> FAIL (inotify01 was recovered by the r23
+                                timers fix; regressed or flake)
+  pipe02 pipe08    PASS -> FAIL (pipe family)
+  write05 writev01 PASS -> FAIL (write family)
+  access02         PASS -> FAIL
+  execve03         PASS -> FAIL
+  creat07          PASS -> FAIL (r24 gain, ETXTBSY fix 33a4936a)
+  kill10           FAIL -> CRASH (known open hunt: park face subset 2)
+  shm_test         CRASH-> TIMEOUT (adjudicated racy/budget, see
+                                verdicts-r25.txt)
+  float_exp_log    PASS -> POISON (known flake family)
+  gettid02         PASS -> POISON (scan artifact class)
+
+Unchanged-notable: msgstress01 FAIL (now throughput-bound after the
+IPC-limits fix: correct at LTP_TIMEOUT_MUL=3, 30s harness kills it);
+ftest03 FAIL (stress r9/r10 owns the fs/biglock race); ftest03-family
+and mmapstress families adjudicated NOT-OURS in verdicts-r25.txt.

@@ -1,0 +1,49 @@
+# idx|test|class|rc|tail
+0|accept02|PASS|0|is using guarded buffers accept02.c:131: TINFO: Starting listener on port: 32768 accept02.c:75: TPASS: Multicast group was not copied: EADDRNOTAVAIL (99)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+1|fcntl34|POISON||
+2|gettid02|PASS|0|m thread[8] ID (317) gettid02.c:29: TPASS: Expect: parent ID (308) differs from thread[9] ID (318) gettid02.c:61: TPASS: All threads have a different TID  Summary: passed   11 failed   0 broken   0 skipped  0 warnings 0
+3|dirtyc0w_shmem|FAIL|2|nel/git/torvalds/linux.git/commit/?id=5535be309971  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-2590  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+4|tgkill01|PASS|0|test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s tgkill01.c:99: TPASS: SIGUSR1 delivered to correct threads  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|tgkill03|POISON||
+6|futex_wake02|PASS|0|SS: futex_wake() woken up 9 threads futex_wake02.c:91: TPASS: futex_wake() woken up 10 threads futex_wake02.c:103: TPASS: futex_wake() woken up 0 threads  Summary: passed   11 failed   0 broken   0 skipped  0 warnings 0
+7|mmstress|POISON||
+8|mmap2|PASS|0|128 Available memory: 961MB creating tmp file and writing 'a' to it created file of size 134217728 content of the file is 'a' file mapped at 0x7feffffff000 changing file content to 'A' unmapped file at 0x7feffffff000
+9|mem02|PASS|0|3  TPASS  :  realloc - realloc of 5 bytes succeeded mem02       4  TPASS  :  realloc - realloc of 15 bytes succeeded mem02       5  TPASS  :  valloc - valloc of rand() size of memory succeeded for 15000 iteration
+10|page01|PASS|0|page01      1  TPASS  :  Test passed
+11|page02|PASS|0|page02      1  TPASS  :  Test passed
+12|data_space|PASS|0|data_space    1  TPASS  :  Test passed
+13|stack_space|PASS|0|stack_space    1  TPASS  :  Test passed
+14|shmt02|PASS|0|shmt02      1  TPASS  :  shmget shmt02      2  TPASS  :  shmat shmt02      3  TPASS  :  Correct shared memory contents
+15|shmt03|PASS|0|shmt03      1  TPASS  :  shmget shmt03      2  TPASS  :  1st shmat shmt03      3  TPASS  :  2nd shmat shmt03      4  TPASS  :  Correct shared memory contents
+16|shmt04|PASS|0|shmt04      1  TPASS  :  shmget,shmat shmt04      2  TPASS  :  shmdt
+17|shmt05|PASS|0|shmt05      1  TPASS  :  shmget & shmat shmt05      2  TPASS  :  2nd shmget & shmat
+18|shmt06|PASS|0|shmt06      1  TPASS  :  shmget,shmat shmt06      2  TPASS  :  shmdt
+19|shmt07|PASS|0|shmt07      1  TPASS  :  shmget,shmat shmt07      2  TPASS  :  cp & cp+1 correct
+20|shmt08|FAIL|1|shmt08      1  TPASS  :  shmget,shmat shmdt1: Invalid argument shmt08      2  TFAIL  :  shmt08.c:97: shmdt:cp1 shmt08      3  TPASS  :  shmdt
+21|shmt09|FAIL|1|sbrk: Out of memory shmt09      1  TFAIL  :  shmt09.c:84: Error: sbrk failed, errno = 12
+22|shmt10|PASS|0|shmt10      1  TPASS  :  shmat,shmdt
+23|shm_test|TIMEOUT|143|000 pid[311]: shmat_rd_wr(): shmget():success got segment id 917520 pid[311]: do_shmat_shmadt(): got shmat address = pid[311]: do_shmat_shmadt(): shmat_addr = 0xffffffffffffffff do_shmat_shmadt(): shmat(): Out of memory
+24|mallocstress|FAIL|2|t process... tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+25|mmapstress01|PASS|0|n is 0h 00m 42s mmapstress01.c:107: TINFO: creating file <mmapstress01.out> with 4096 bytes, pattern 162 mmapstress01.c:340: TPASS: file has expected data  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+26|mmapstress02|FAIL|1|mmapstress02: errno = 12; couldn't round up brk mmapstress02    1  TFAIL  :  mmapstress02.c:186: Test failed
+27|mmapstress03|FAIL|1|mmapstress03    0  TINFO  :  uname.machine=x86_64 kernel is 64bit mmapstress03: errno = 12: couldn't brk large space for segments mmapstress03    1  TFAIL  :  mmapstress03.c:212: Test failed
+28|mmapstress04|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmapstress04.c:94: TPASS: blocks have expected data  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+29|mmapstress05|FAIL|1|mmapstress05:  errno = 12; couldn't round up brk mmapstress05    1  TFAIL  :  mmapstress05.c:214: Test failed
+30|mmapstress06|FAIL|1|usage: mmapstress06 sleep_time mmapstress06    1  TFAIL  :  mmapstress06.c:113: Test failed
+31|mmapstress08|FAIL|1|mmapstress08: errno = 12: couldn't round up brk to a page boundary mmapstress08    1  TFAIL  :  mmapstress08.c:116: Test failed
+32|mmapstress09|FAIL|1|usage: mmapstress09 -p nprocs [-t minutes -s mapsize -m -r -d] mmapstress09    1  TFAIL  :  mmapstress09.c:496: Test failed
+33|mmapstress10|FAIL|1|usage: mmapstress10 -p nprocs [-t minutes -w nbytes -s secs -f fsize -S sparseoffset -r -o -m -l -d]
+34|mmap10|PASS|0|mmap10      0  TINFO  :  use /dev/zero. mmap10      0  TINFO  :  start tests. mmap10      0  TINFO  :  start tests. mmap10      0  TINFO  :  start tests. mmap10      0  TINFO  :  start tests.
+35|kallsyms|FAIL|2|t process... tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+36|ksm01|TCONF|32|ig.c:531: TINFO: Constraint 'CONFIG_KSM=y' not satisfied! tst_kconfig.c:477: TINFO: Variables: tst_kconfig.c:486: TINFO:  CONFIG_KSM Undefined tst_test.c:1192: TCONF: Aborting due to unsuitable kernel config, see above!
+37|ksm02|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+38|ksm03|TCONF|32|ig.c:531: TINFO: Constraint 'CONFIG_KSM=y' not satisfied! tst_kconfig.c:477: TINFO: Variables: tst_kconfig.c:486: TINFO:  CONFIG_KSM Undefined tst_test.c:1192: TCONF: Aborting due to unsuitable kernel config, see above!
+39|ksm04|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+40|ksm05|TCONF|32|ig.c:531: TINFO: Constraint 'CONFIG_KSM=y' not satisfied! tst_kconfig.c:477: TINFO: Variables: tst_kconfig.c:486: TINFO:  CONFIG_KSM Undefined tst_test.c:1192: TCONF: Aborting due to unsuitable kernel config, see above!
+41|ksm06|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+42|ksm07|TCONF|32|ig.c:531: TINFO: Constraint 'CONFIG_KSM=y' not satisfied! tst_kconfig.c:477: TINFO: Variables: tst_kconfig.c:486: TINFO:  CONFIG_KSM Undefined tst_test.c:1192: TCONF: Aborting due to unsuitable kernel config, see above!
+43|cpuset01|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+44|oom02|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+45|oom03|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+46|oom04|TCONF|32|tst_test.c:1175: TCONF: NUMA support was disabled during build
+47|float_trigo|PASS|0|float_trigo    1  TPASS  :  Test passed float_trigo    1  TPASS  :  Test passed

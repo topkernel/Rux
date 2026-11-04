@@ -1,0 +1,6 @@
+pipe02
+pipe08
+write05
+writev01
+execve03
+access02

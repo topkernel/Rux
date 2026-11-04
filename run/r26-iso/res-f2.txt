@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|ftest03|FAIL|1|pected 0 exit. ftest03     4  TFAIL  :  ftest03.c:209:  Test{311} failed, expected 0 exit. ftest03     5  TFAIL  :  ftest03.c:209:  Test{310} failed, expected 0 exit. ftest03     6  TFAIL  :  ftest03.c:120: Test failed.

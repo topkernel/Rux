@@ -1632,6 +1632,22 @@ pub fn cpu_online(cpu: usize) -> bool {
     cpu < MAX_CPUS && !cpu_state(cpu).idle.is_null()
 }
 
+/// Whether CPU `cpu_id` is currently executing its idle task (including
+/// while halted). Read-only remote query, used by the RCU grace-period
+/// check: a CPU inside the idle loop executes no fd-table reader
+/// windows (get_file runs only in task/IRQ context over a non-idle
+/// `current`), so it is quiescent regardless of when it last managed to
+/// store a QS report — a halted idle CPU's stale report must not hold
+/// up a grace period (r26: close-completion waits stalled ~1 jiffy per
+/// close otherwise). The pointer load is atomic and `current` only
+/// transitions idle→task at switch-in (after the reporting site in
+/// `__schedule`), so a `true` result always means genuinely-idle-loop.
+#[inline]
+pub fn cpu_running_idle(cpu_id: usize) -> bool {
+    let s = cpu_state(cpu_id);
+    !s.idle.is_null() && s.current == s.idle
+}
+
 // ==================== Dummy RunQueue (compatibility) ====================
 
 /// Dummy RunQueue for compatibility with SchedClass trait / procfs output.
