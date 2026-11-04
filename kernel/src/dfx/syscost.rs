@@ -1584,6 +1584,26 @@ pub fn dump() {
             KMSG_FIRST_FLAGS.load(Ordering::Relaxed)
         );
     }
+
+    // 38th (u2v wedge hunt): the syscall ring's newest 64 entries join the
+    // flood table's COMM attribution with the (pid, nr, a0=fd, ret) tuples.
+    // The spin comm is known (hilogd.server); this names its fd and return
+    // values at EVERY dump cadence — the hung-task one-shot replay caught
+    // only the first (too-early) wedge phase (u2v4 @181s).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+        use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+        let cur = SYSCALL_CURSOR.load(Ordering::Relaxed);
+        let len = SYSCALL_RING.len();
+        for k in (0..64usize).rev() {
+            let idx = (cur + len - 1 - k) % len;
+            let e = &SYSCALL_RING[idx];
+            let pid = e.pid.load(Ordering::Relaxed);
+            let nr = e.nr.load(Ordering::Relaxed);
+            let a0 = e.a0.load(Ordering::Relaxed);
+            let ret = e.ret.load(Ordering::Relaxed) as i64;
+            crate::pr_warn!("SYSCOST-RING {} {} {:#x} {}", pid, nr, a0, ret);
+        }
+    }
     for f in 0..FLOOD_NRS.len() {
         let mut line = alloc::string::String::new();
         for i in 0..16 {
