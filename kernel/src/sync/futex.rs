@@ -617,6 +617,19 @@ pub fn futex_stuck_census() {
         u2v_end: usize,
         u2v_off: usize,
         u2v_cls: u8,
+        // 37th successor — caller-chain decode. uret[1] anchors inside
+        // the wait primitive itself (libc++ condition_variable::wait);
+        // uret[2]/uret[3] carry the CALLERS above it (libipc_single /
+        // libhicollie / the service's own binary). Decoding both the
+        // same way names the wait site without a guest-side unwinder.
+        u2v2_ok: bool,
+        u2v2_start: usize,
+        u2v2_off: usize,
+        u2v2_cls: u8,
+        u2v3_ok: bool,
+        u2v3_start: usize,
+        u2v3_off: usize,
+        u2v3_cls: u8,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -677,6 +690,14 @@ pub fn futex_stuck_census() {
                         u2v_end: 0,
                         u2v_off: 0,
                         u2v_cls: b'-',
+                        u2v2_ok: false,
+                        u2v2_start: 0,
+                        u2v2_off: 0,
+                        u2v2_cls: b'-',
+                        u2v3_ok: false,
+                        u2v3_start: 0,
+                        u2v3_off: 0,
+                        u2v3_cls: b'-',
                     });
                 } else if total > 64 {
                     // Sample cap reached with clear headroom — stop the
@@ -914,6 +935,65 @@ pub fn futex_stuck_census() {
                                 };
                             }
                         }
+                        // (c2) caller-chain decode (37th successor): the
+                        // same VMA decode for uret[2] and uret[3]. Only the
+                        // start-relative offset is kept (the host has the
+                        // identical .so; base+off is what symbolizes). A
+                        // word landing in the SAME vma as uret[1] (still
+                        // inside the wait primitive) is skipped so the
+                        // fields carry the first DIFFERENT-library frames
+                        // above the anchor.
+                        for (ui, okf, startf, offf, clsf) in [
+                            (
+                                2usize,
+                                &mut s.u2v2_ok,
+                                &mut s.u2v2_start,
+                                &mut s.u2v2_off,
+                                &mut s.u2v2_cls,
+                            ),
+                            (
+                                3usize,
+                                &mut s.u2v3_ok,
+                                &mut s.u2v3_start,
+                                &mut s.u2v3_off,
+                                &mut s.u2v3_cls,
+                            ),
+                        ] {
+                            if s.uret_n <= ui || s.uret[ui] == 0 {
+                                continue;
+                            }
+                            // Same-VMA skip: uret words are u64, the VMA
+                            // fields usize — cast like the decode below
+                            // (64-bit platforms, lossless).
+                            if s.u2v_ok
+                                && (s.uret[ui] as usize) >= s.u2v_start
+                                && (s.uret[ui] as usize) < s.u2v_end
+                            {
+                                continue;
+                            }
+                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[ui] as usize)) {
+                                let start = vma.start().as_usize();
+                                let fl = vma.flags();
+                                let cls = if fl.contains(
+                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                ) {
+                                    b'S'
+                                } else if start == aspace.start_brk() {
+                                    b'H'
+                                } else {
+                                    match vma.vma_type() {
+                                        VmaType::FileBacked => b'F',
+                                        VmaType::SharedMemory => b'M',
+                                        VmaType::Device => b'D',
+                                        VmaType::Anonymous => b'A',
+                                    }
+                                };
+                                *okf = true;
+                                *startf = start;
+                                *offf = s.uret[ui] as usize - start;
+                                *clsf = cls;
+                            }
+                        }
                     }
                 }
                 break;
@@ -1011,6 +1091,14 @@ pub fn futex_stuck_census() {
         rep_u2v_end: usize,
         rep_u2v_off: usize,
         rep_u2v_cls: u8,
+        rep_u2v2_ok: bool,
+        rep_u2v2_start: usize,
+        rep_u2v2_off: usize,
+        rep_u2v2_cls: u8,
+        rep_u2v3_ok: bool,
+        rep_u2v3_start: usize,
+        rep_u2v3_off: usize,
+        rep_u2v3_cls: u8,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -1061,6 +1149,14 @@ pub fn futex_stuck_census() {
                         rep_u2v_end: s.u2v_end,
                         rep_u2v_off: s.u2v_off,
                         rep_u2v_cls: s.u2v_cls,
+                        rep_u2v2_ok: s.u2v2_ok,
+                        rep_u2v2_start: s.u2v2_start,
+                        rep_u2v2_off: s.u2v2_off,
+                        rep_u2v2_cls: s.u2v2_cls,
+                        rep_u2v3_ok: s.u2v3_ok,
+                        rep_u2v3_start: s.u2v3_start,
+                        rep_u2v3_off: s.u2v3_off,
+                        rep_u2v3_cls: s.u2v3_cls,
                     });
                 }
             }
@@ -1068,10 +1164,11 @@ pub fn futex_stuck_census() {
     }
     let mut order: Vec<usize> = (0..groups.len()).collect();
     order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
-    let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
+    // Marker: 0 = old-anchor slot, 1 = fresh slot, 2 = wedge-full slot.
+    let mut chosen: Vec<(usize, u8)> = Vec::new(); // (group idx, marker)
     for (i, &gi) in order.iter().enumerate() {
         if i < 4 {
-            chosen.push((gi, false));
+            chosen.push((gi, 0));
         }
     }
     let mut fresh_order = order.clone();
@@ -1081,11 +1178,45 @@ pub fn futex_stuck_census() {
             break;
         }
         if !chosen.iter().any(|(c, _)| *c == gi) {
-            chosen.push((gi, true));
+            chosen.push((gi, 1));
+        }
+    }
+    // 37th successor — wedge-full burst: the 32-waiter sample hides most
+    // of a wedged process's park map (a stuck samgr shows 15+ DISTINCT
+    // uaddrs but the 8-line budget prints 2-3 of them). When ONE tgid
+    // owns >= 4 distinct stuck-uaddr groups this burst, print ALL its
+    // groups (cap 16 extra lines) so the complete map — one shared
+    // uaddr (a mutex hold-and-wait) vs scattered per-task condvars (a
+    // producer that never ran) — is legible in a single burst. The
+    // global 1200-line LINES cap still bounds the boot.
+    {
+        let mut per_tgid: Vec<(u32, usize)> = Vec::new();
+        for g in groups.iter() {
+            match per_tgid.iter_mut().find(|e| e.0 == g.tgid) {
+                Some(e) => e.1 += 1,
+                None => per_tgid.push((g.tgid, 1)),
+            }
+        }
+        per_tgid.sort_by(|a, b| b.1.cmp(&a.1));
+        if let Some(&(focus, n_distinct)) = per_tgid.first() {
+            if n_distinct >= 4 {
+                let mut added = 0usize;
+                for (gi, g) in groups.iter().enumerate() {
+                    if added >= 16 {
+                        break;
+                    }
+                    if g.tgid == focus
+                        && !chosen.iter().any(|(c, _)| *c == gi)
+                    {
+                        chosen.push((gi, 2));
+                        added += 1;
+                    }
+                }
+            }
         }
     }
     let mut printed = 0usize;
-    for (gi, is_fresh) in chosen {
+    for (gi, marker) in chosen {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
         // HOTPATH-PRINT: fuxstuck census report — gated by
@@ -1114,6 +1245,26 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
+        // 37th: caller-chain anchors (offset-only — the host has the
+        // identical image and symbolizes base+off per library).
+        if g.rep_u2v2_ok {
+            let _ = write!(
+                u2v_s,
+                " u2v2={:#x}+{:#x}{}",
+                g.rep_u2v2_start,
+                g.rep_u2v2_off,
+                g.rep_u2v2_cls as char
+            );
+        }
+        if g.rep_u2v3_ok {
+            let _ = write!(
+                u2v_s,
+                " u2v3={:#x}+{:#x}{}",
+                g.rep_u2v3_start,
+                g.rep_u2v3_off,
+                g.rep_u2v3_cls as char
+            );
+        }
         // comm_str discipline (task.rs): arbitrary bytes, lossy-decode —
         // never hand raw bytes to char-aware formatting.
         let comm_len = g
@@ -1124,7 +1275,11 @@ pub fn futex_stuck_census() {
         let comm_s = alloc::string::String::from_utf8_lossy(&g.rep_comm[..comm_len]);
         crate::pr_warn!(
             "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
-            if is_fresh { "-FRESH" } else { "" },
+            match marker {
+                1 => "-FRESH",
+                2 => "-FULL",
+                _ => "",
+            },
             g.tgid,
             comm_s,
             g.rep_tid,
@@ -1157,12 +1312,14 @@ pub fn futex_stuck_census() {
             break;
         }
     }
-    if total > printed && printed == 8 {
+    if total > printed {
         // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
-        // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
+        // and 5s burst budget as the FUX-STUCK rows above (8 regular +
+        // up to 16 wedge-full per burst).
         crate::pr_warn!(
-            "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
+            "FUX-STUCK-SUM stuck_total={} printed={} (sampled {})",
             total,
+            printed,
             32
         );
     }
