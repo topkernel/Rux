@@ -3750,6 +3750,12 @@ pub fn txn_hang_audit() {
                     .is_ok()
             {
                 crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                // cg36 (src-lane queue item 3): the wait-for graph over
+                // every BWR-blocked binder thread — orders the
+                // pool-exhaustion cascade and names the first-wedged
+                // peer (client edges carry to-pid; EXEC edges carry the
+                // running handler's age).
+                bwr_snap("txn-hang-20s");
                 // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
                 // -> wait_for_used_interruptible, 441 s): capture the
                 // virtio ring state at the hang moment — at_device vs
@@ -3956,6 +3962,207 @@ pub fn txn_hang_audit() {
             o.ms
         );
     }
+}
+
+/// cg36 (source-lane queue item 3, oh-src src-path.md §6.3): wedge-time
+/// snapshot of EVERY binder thread blocked in ioctl(BINDER_WRITE_READ),
+/// with the in-flight txn edges needed to order an IPC-pool-exhaustion
+/// cascade. The hicollie probe park (A+0x800194 family) only proves
+/// numExecuting_ is pinned at pool max; the pool-consuming workers sit
+/// in BWR ioctls invisible to the futex census. This snapshot prints,
+/// per BWR-blocked thread: its binder posture (looper / waiting-for-
+/// proc-work / own todo) and its txn_stack edges as
+/// (txn, code, own?, to pid/tid, from pid/tid, age), where
+///  - own=true  -> the thread is EXECUTING that dispatched txn (server
+///    side; the interesting age is exec since pick_j),
+///  - own=false -> the thread is a CLIENT awaiting the peer's reply
+///    (age since enqueue; to-pid names the first-wedged peer),
+///  - no edges + wfpw + todo=0 -> idle server read (the reference-side
+///    benign posture; summarized as a count, not per-thread lines).
+/// Edges build a wait-for graph: the cascade ROOT is the node every
+/// chain converges on with no outgoing own-exec edge of its own that
+/// ever completes. Fires only from the txn-hang-20s dump latch (zero
+/// cost on healthy boots; once per 600 s at most).
+pub fn bwr_snap(_reason: &str) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // Per-thread POD collected under WORLD; pt_regs forensics and prints
+    // happen after release (same discipline as txn_hang_audit, sc89/sc207).
+    struct Snap {
+        tgid: u32,
+        tid: u32,
+        looper: u32,
+        wfpw: bool,
+        todo: usize,
+        edges: [(u64, u32, bool, u32, u32, u32, u32, u32, u32); 4],
+        nedges: usize,
+    }
+    let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts reach live
+        // procs' thread lists; POD copies only — sc89).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let th = t.st();
+                    let mut s = Snap {
+                        tgid: proc.pid,
+                        tid: t.tid,
+                        looper: th.looper,
+                        wfpw: th.waiting_for_proc_work,
+                        todo: th.todo.len(),
+                        edges: [(0, 0, false, 0, 0, 0, 0, 0, 0); 4],
+                        nedges: 0,
+                    };
+                    for x in &th.txn_stack {
+                        if s.nedges >= 4 {
+                            break;
+                        }
+                        // SAFETY: to_tid/pick_j read under WORLD.
+                        let to_tid = unsafe { x.to_tid() }.unwrap_or(0);
+                        s.edges[s.nedges] = (
+                            x.id,
+                            x.code,
+                            to_tid == t.tid,
+                            x.to_proc.pid,
+                            to_tid,
+                            x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0),
+                            x.from_tid.unwrap_or(0),
+                            // SAFETY: pick_j read under WORLD.
+                            unsafe { *x.pick_j.get() },
+                            x.enq_j,
+                        );
+                        s.nedges += 1;
+                    }
+                    snaps.push(s);
+                }
+            }
+        }
+    }
+    // WORLD released — resolve each thread's entry frame, keep only the
+    // ones blocked in ioctl(BINDER_WRITE_READ).
+    let comm_of = |p: *mut crate::process::Task| -> &str {
+        if p.is_null() {
+            return "?";
+        }
+        // SAFETY: diagnostic comm read of a live task.
+        let c = unsafe { (*p).comm() };
+        core::str::from_utf8(&c[..])
+            .unwrap_or("?")
+            .trim_end_matches('\0')
+    };
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    use core::fmt::Write as _;
+    let mut idle_reads = 0usize;
+    let mut edged = 0usize;
+    for s in &snaps {
+        let tk = unsafe { crate::sched::find_task_by_pid(s.tid) };
+        let (sys, a0, a1) = if tk.is_null() {
+            (0u64, 0u64, 0u64)
+        } else {
+            // SAFETY: diagnostic reads of the task's mapped kernel
+            // stack (sleep_snapshot contract, sc261).
+            let tk = unsafe { &*tk };
+            match tk.kernel_stack_top_checked() {
+                None => (0, 0, 0),
+                Some(top) => {
+                    #[cfg(feature = "x86_64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's stack.
+                        unsafe { ((*regs).orig_rax as u64, (*regs).rdi as u64, (*regs).rsi as u64) }
+                    }
+                    #[cfg(feature = "riscv64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's stack.
+                        unsafe { ((*regs).a7 as u64, (*regs).a0 as u64, (*regs).a1 as u64) }
+                    }
+                    #[cfg(feature = "aarch64")]
+                    {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's stack.
+                        unsafe {
+                            ((*regs).syscallno as u64, (*regs).regs[0] as u64, (*regs).regs[1] as u64)
+                        }
+                    }
+                }
+            }
+        };
+        // x86_64 ioctl nr 16; asm-generic 29. BWR cmd sign-extends in
+        // the 64-bit register, so compare the low 32 bits.
+        #[cfg(feature = "x86_64")]
+        let ioctl_nr = 16u64;
+        #[cfg(not(feature = "x86_64"))]
+        let ioctl_nr = 29u64;
+        if sys != ioctl_nr || (a1 & 0xffff_ffff) != 0xc030_6201 {
+            continue;
+        }
+        if s.nedges == 0 && s.wfpw && s.todo == 0 {
+            idle_reads += 1;
+            continue;
+        }
+        if edged >= 64 {
+            continue;
+        }
+        edged += 1;
+        let tk = unsafe { crate::sched::find_task_by_pid(s.tid) };
+        let mut line = alloc::string::String::new();
+        let _ = write!(
+            line,
+            "BWR-SNAP tid={} tgid={} comm={} fd={:#x} looper={:#x} wfpw={} todo={}",
+            s.tid,
+            s.tgid,
+            comm_of(tk),
+            a0,
+            s.looper,
+            s.wfpw as u32,
+            s.todo
+        );
+        for i in 0..s.nedges {
+            let (id, code, own, to_pid, to_tid, from_pid, from_tid, pick_j, enq_j) = s.edges[i];
+            let age_ms = if pick_j != 0 {
+                now.wrapping_sub(pick_j)
+            } else {
+                now.wrapping_sub(enq_j)
+            }
+            .saturating_mul(10);
+            let _ = write!(
+                line,
+                " | txn{} code{:#x} {} to pid{} tid{} from pid{} tid{} {}ms",
+                id,
+                code,
+                if own { "EXEC" } else { "AWAIT-REPLY" },
+                to_pid,
+                to_tid,
+                from_pid,
+                from_tid,
+                age_ms
+            );
+        }
+        let _ = writeln!(w, "{}", line);
+    }
+    let _ = writeln!(
+        w,
+        "BWR-SNAP-SUM edged={} idle-reads={} total-threads={}",
+        edged,
+        idle_reads,
+        snaps.len()
+    );
 }
 
 /// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
