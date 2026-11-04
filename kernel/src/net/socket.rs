@@ -1212,6 +1212,23 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         None => return Err(-11), // no task context — behave non-blocking
     };
 
+    // net:sock_wait (r13 lat_udp strand hunt) — the trace ids of this
+    // round: pid, the protocol slot, kind/stage. Stage 0 fires at the
+    // post-register re-check with its verdict; stage 1 when schedule()
+    // returns. A strand boot's victim ends at stage=0 ready=0 and never
+    // records stage 1.
+    let tkind = match kind {
+        WaitKind::Recv => 0u8,
+        WaitKind::Send => 1u8,
+        WaitKind::Accept => 2u8,
+        WaitKind::Connect => 3u8,
+    };
+    let tfd = match socket.sock_type {
+        SocketType::Udp => socket.udp_fd.load(core::sync::atomic::Ordering::Acquire),
+        SocketType::Tcp => socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire),
+    };
+    let tpid = unsafe { (*current).pid() } as i32;
+
     // Atomically set INTERRUPTIBLE and add to the queue under the same
     // lock — prevents the lost-wakeup race (prepare_to_wait contract).
     socket.wait_queue.prepare_to_wait(current, false, true);
@@ -1224,6 +1241,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
         WaitKind::Accept => socket_accept_ready(socket),
         WaitKind::Connect => socket_connect_ready(socket),
     };
+    crate::trace::trace_net_sock_wait(tpid, tfd, tkind, 0, ready as u8);
     if ready {
         socket.wait_queue.finish_wait(current);
         // R36-B2: take ourselves back off the GRQ — we never slept, but a
@@ -1255,6 +1273,7 @@ fn socket_wait_round(socket: &Socket, kind: WaitKind, deadline: Option<u64>) -> 
     // ticks/IPIs reach this CPU across the wait.
     crate::arch::cpu::restore_irq(true);
     crate::sched::schedule();
+    crate::trace::trace_net_sock_wait(tpid, tfd, tkind, 1, 1);
 
     if timer_id != 0 {
         crate::timer::del_timer(timer_id);
@@ -1790,10 +1809,27 @@ impl SocketTable {
 
     /// W3: wake every VFS socket wrapping the given UDP protocol slot.
     fn wake_udp_matches(&self, udp_fd: i32) {
+        let mut matched = 0u32;
         for slot in self.sockets.iter() {
             if let Some(s) = slot {
                 if s.udp_fd.load(core::sync::atomic::Ordering::Acquire) == udp_fd {
-                    s.wait_queue.wake_up_all();
+                    matched += 1;
+                    // net:udp_wake (r13 lat_udp strand hunt): matched =
+                    // how many VFS sockets wrap this protocol slot (0 =
+                    // the wake call found no queue to touch); sleepers =
+                    // the queue's lock-free waiters counter read just
+                    // before the walk (0 = the empty fast path returns
+                    // without waking anything); woken = wake_up_all's
+                    // own count of tasks it transitioned.
+                    let sleepers =
+                        s.wait_queue.has_sleepers() as u32;
+                    let woken = s.wait_queue.wake_up_all();
+                    crate::trace::trace_net_udp_wake(
+                        udp_fd,
+                        matched,
+                        sleepers,
+                        woken as u32,
+                    );
                 }
             }
         }
