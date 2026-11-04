@@ -3450,13 +3450,28 @@ impl Task {
                 // wake_up_enqueue's authoritative current-slot scan sorts
                 // them apart.
                 if old_state == TaskState::new(TaskState::RUNNING) {
-                    if !crate::sched::wake_up_enqueue_opt(task, bucket) {
-                        return false;
+                    // r11 (reference wake contract): try_to_wake_up
+                    // returns 1 only when it transitioned a non-RUNNING
+                    // task to running — the reference's entry filter
+                    // (`p->__state & state`) refuses a RUNNING target
+                    // outright and returns 0. Keep the R46/R49 phantom
+                    // RELINK (RUNNING ∧ unlinked ∧ unowned is a
+                    // divergence shape this tree's phantom families can
+                    // produce; relinking restores the reference invariant
+                    // that a RUNNING task is queued or on a CPU) and its
+                    // resched nudge, but report the reference's answer:
+                    // nobody "woke" a task that was already RUNNING. The
+                    // old true-return was an API divergence — the
+                    // sleep_wakeup suite hit it deterministically once
+                    // the first wake's enqueue had been picked+dequeued
+                    // elsewhere, leaving the heal as the only arm.
+                    if crate::sched::wake_up_enqueue_opt(task, bucket) {
+                        // Linked again — nudge its last CPU so it is
+                        // picked promptly instead of waiting for the
+                        // next idle tick.
+                        crate::sched::resched_cpu((*task).ti_cpu() as usize);
                     }
-                    // Linked again — nudge its last CPU so it is picked
-                    // promptly instead of waiting for the next idle tick.
-                    crate::sched::resched_cpu((*task).ti_cpu() as usize);
-                    return true;
+                    return false;
                 }
                 false
             }
