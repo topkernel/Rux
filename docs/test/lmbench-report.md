@@ -81,7 +81,7 @@ python3 userspace/lmbench/make-report.py run/lmbench-rux.txt run/lmbench-linux.t
 | `bw_file_rd 1m io_only /tmp/lmbench.file` | "inf" *(timer floor — per-iteration cost below clock granularity; ≥32 GB/s class)* | 33600.68 MB/s | at/above reference |
 | `bw_mmap_rd 1m mmap_only /tmp/lmbench.file` | 70917.84 MB/s *(11-01 value; not re-landed)* | 74316 MB/s | 1.05x slower |
 | `lat_tcp 127.0.0.1` | **7.75–8.03 µs** *(11-04 lane fix: AF_PACKET locks irqsave'd + TCP-table exhaustion fixed; 3/3 release boots — the earlier "debug-print chokes" attribution was wrong, the case was wedging)* | 4.446 microseconds | 1.78x |
-| `lat_udp 127.0.0.1` | 94–96 µs on the debug kernel *(source-address fix landed)*; **release kernel: 0/8** — the scheduler stale-claim strands the UDP server within ~20 roundtrips (see queue) | 4.37 microseconds | blocked (sched) |
+| `lat_udp 127.0.0.1` | **6.90–7.07 µs (release-opt, 9/11 boots; the 2 misses are host-contention budget hits with ring-proven live traffic)** *(r14: the 0/8 strand was NOT sched — it was the UDP-v4 checksum zero-escape drop in udp_rcv, the RFC 768 0xFFFF representation silently rejected; fixed, 0 pkt_drop in 11 boots)* | 4.37 microseconds | 1.60x |
 | `lat_connect 127.0.0.1` | **14.3–16.1 ms measured, 3/4 boots** *(was TIMEOUT: TCP-table exhaustion — the SYN spawn dropped every SYN once the 64-slot table filled with TIME_WAIT/CLOSE_WAIT corpses; eviction + 512 slots landed)*; remaining cost + 1-in-4 wedge = the same scheduler stale-claim refusing the accept server's wakes | 86.887 microseconds | 165x (sched-blocked) |
 | `bw_tcp 127.0.0.1` | **TIMEOUT** *(scheduler stale-claim refuses the benchmark worker's wakes — `WAKE-HEAL-SKIP pid=<worker> why=c` ×39 to the kill; connect/data path itself works)* | 15195.35 MB/s | - |
 | `lat_usleep 1000` | ~~5013.9~~ **1037.1 µs** *(LAPIC single-shot timer; consistent across all 3 passes)* | 1052.529 microseconds | **0.99x (at reference)** |
@@ -187,6 +187,59 @@ the remaining kernel-side levers are the resched-IPI volume to halted
 CPUs (coverage), the GRQ hold time on the wake/pick path, and the
 syscall entry floor (null 1.31x). See the session close report.
 
+## GRQ critical-section anatomy (2026-11-04, instrumented build)
+
+Per-boot rdtsc sampling of every 64th GRQ irqsave section (spin vs
+work split, >10us tails attributed by caller line; counters printed at
+init exit), interleaved A/B for each hypothesis:
+
+| hypothesis | test | verdict |
+|---|---|---|
+| lock contention | avg spin 241-328 cycles across all loads | **excluded** — the section cost is the work, not waiting |
+| in-lock resched-IPI (VM exit) | defer-send A/B | **excluded at handoff loads** — pipe +15% WORSE (the IPI lands ~200ns later per handoff); in-lock send is strictly better when uncontended |
+| BTreeMap node alloc under lock | 99.96% of 2.64M inserts/boot hit an EMPTY map (guaranteed root alloc+free per insert, inside the GRQ irqsave section); swap to a preallocated sorted Vec (`run/timeline-vec-swap.patch`) | **excluded as a latency cost** — avg_work and tails unchanged (the small allocator serves this size class in ~100ns); kept as a robustness lead, NOT merged |
+
+Remaining facts: the __schedule pick section (sched.rs lock at the
+pick site) averages 10-18K cycles on ctx-class loads (3-4.5us) with
+14ms max tails, and is NOT explained by spin, IPI, or allocation —
+the next attribution step is sub-section rdtsc pairs (accounting /
+pick-walk / requeue). The 14ms tails concentrate (99.9%) in the
+__schedule section line.
+
+Soak-instability note for the stress lane: 150s riscv TCG soaks panic
+on BOTH the base kernel (PREEMPT-UNDERFLOW, c3c4c3c4 scribble pattern —
+the known scribble engine family) and the timeline-swap build
+(different signature, freed-task pfault) — the 90s standard soak is
+clean on both. The 150s window is a sharper probe than the standard
+soak and should be adopted by the stress lane with signature
+comparison before any scheduler-structure merge.
+
+## Context-switch first-principles audit (2026-11-04, cctx decomposition)
+
+One lat_ctx handoff (1.39-1.42 us at load ~4.5, main kernel, cctx=1
+boots, n=2.4-2.6M switches per boot), decomposed against the
+component floors:
+
+| segment | measured | first-principles floor | verdict |
+|---|---|---|---|
+| __schedule: pre+acct+deq+pub | 125 ns | bookkeeping | near floor |
+| GRQ lock acquire | 102 ns | ~20 ns uncontended | global-queue design price |
+| pick walk | 96 ns | ~50 ns | lean (retires the "slow pick section" lead: the µs-class GRQ section AVERAGES were tail-inflated) |
+| mm switch | 202-295 ns | ~40 ns (CR3 write) | PCID + same-mm CR3-write skip already present; remainder = asid resolve + guard read_cr3 probe (~30-60 ns trimmable) |
+| fpu save/restore | 34 ns | | xsaveopt skip working |
+| MSR/FS-GS base | 33+21 ns | | FSGSBASE path |
+| GPR asm | 21-23 ns | | near floor |
+| **kernel machinery total** | **~620 ns** | | **below the reference's native whole-switch 910 ns** |
+| remainder ~780 ns | | | wake/sleep rendezvous + halt/IPI residue (optimized to plateau) + benchmark's own user-side work |
+
+Conclusion: the switch machinery itself has no fat left within the
+current design; every component carries its known fast path (same-mm
+CR3 skip, PCID, FSGSBASE, xsaveopt). The two remaining structural
+levers, in size order: (1) runqueue sharding — attacks the 102 ns lock
+AND wake-path queuing; that is the D-1 divergence decision, a campaign
+with its own gate budget, not a patch; (2) a per-CPU prev-root tag
+cache replacing the read_cr3 guard probe (~30-60 ns/switch, marginal).
+
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
 Both kernels under the same q35+KVM rig (reference column frozen from
@@ -291,20 +344,40 @@ the per-case optimization work):
      and the 1-in-4 wedge are the scheduler stale-claim family (see
      the queue's sched entry). With a healthy accept server the
      handshake completes in the synchronous loopback drain.
-   - **lat_udp — NET SIDE RESOLVED** (unbound UDP socket to
-     127.0.0.1 stamped the eth0 address as source; the peer's echo
-     then routed out eth0 — commit d0452aaf): 94–96 µs, 5/5 on the
-     debug kernel. **The release kernel still fails 0/8**: within
-     ~20 ping-pong roundtrips the UDP server's wake is refused by
-     the scheduler stale-claim (`WAKE-HEAL-SKIP pid=<server> why=c`)
-     and the pong never comes — the same single producer as below.
+   - **lat_udp — RESOLVED (r14, 11-04 stress-port lane): the 0/8
+     release strand was a NET defect, not sched.** After the
+     source-address fix (d0452aaf) the remaining strand reproduced
+     6/6 on properly-invoked release boots; the r13 tracepoints
+     (net:lo_xmit checksum snapshot + net:pkt_drop) convicted the
+     exact hop: the ping child's datagram left the sender with the
+     RFC 768 zero-escape checksum (computed 0x0000 transmitted as
+     0xFFFF — both TX builders do this), traversed loopback
+     byte-identical, and was SILENTLY DROPPED by udp_rcv's plain
+     `computed != stated` verification, which lacks the zero-escape
+     parity (udp_rcv6 and TCP verify by summation and were always
+     correct). Content varies per datagram, so each roundtrip rolls
+     a 1-in-65536 die; at release speed the boot hits it within
+     seconds (debug timing mostly hides it — the old 94-96 µs
+     5/5 debug passes never rolled the collision). Fix:
+     udp_csum_accepts() (equivalence to the reference summation
+     test proven per input pair + swept in the suite). Post-fix:
+     6.90–7.07 µs, 9/11 boots clean, 0 pkt_drop, 0 SIGALRM rescues;
+     the 2 misses are host-contention budget hits with the ring
+     showing live ping-pong at the kill. The `WAKE-HEAL-SKIP
+     pid=<server> why=c` prints riding the strand were adjudicated
+     non-causal in r12 (woken=1 measured) and are now moot for this
+     case. NOTE for bw_tcp/lat_connect below: those rows keep the
+     sched attribution until re-tested on the r14 tree — the lat_udp
+     lesson is that a wake-refused print on a stranded task does
+     not by itself convict the scheduler.
    - **bw_tcp — connect/data path works; the case is wedged by the
      scheduler stale-claim** refusing the benchmark worker's wakes
      (39 `WAKE-HEAL-SKIP why=c` to the kill, one `WAKE-HEAL was=1`
      firing but not un-stranding). No net-side defect found on the
      11-04 tree.
    - **SCHEDULER STALE-CLAIM (the one remaining producer, blocks
-     lat_udp@release + bw_tcp + the lat_connect tail).** A task
+     bw_tcp + the lat_connect tail; lat_udp was misattributed here
+     — its strand was the r14 checksum zero-escape fix).** A task
      parked in a socket wait is left {state=RUNNING, linked=0,
      on_rq=0, on_cpu=1, pk=1, claim=<cpu>} — a leaked preempt
      count on a sleeping task with the pick ownership never
@@ -315,8 +388,9 @@ the per-case optimization work):
      and the r24 idle-slot heal only runs when the claiming CPU
      idles. Faster (release) kernels hit the window within seconds;
      debug timing mostly hides it. Fresh evidence this session:
-     lat_udp release 0/8 (server 308 refused mid-ping-pong),
-     bw_tcp wedges with the worker refused, lat_connect 1-in-4
+     (this session's lat_udp 0/8 was re-attributed to the r14
+     checksum fix — see the lat_udp bullet;) bw_tcp wedges with
+     the worker refused, lat_connect 1-in-4
      wedge + 15 ms tail, all with the census shape above in the
      serial. This is sched-lane territory (kill10/R63–R85 lineage).
    - **lat_fs** — no functional error, but the mk/rm calibration

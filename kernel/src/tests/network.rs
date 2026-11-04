@@ -24,6 +24,9 @@ pub fn test_network() {
 
     // Test 4: Loopback device
     test_loopback();
+
+    // Test 5: UDP checksum zero-escape parity (RFC 768 / r13 strand fix)
+    test_udp_csum_zero_escape();
 }
 
 fn test_skb_alloc() {
@@ -181,4 +184,73 @@ fn test_loopback() {
     } else {
         test_fail("loopback stats", "mismatch");
     }
+}
+
+/// RFC 768 zero-escape parity (r13/r14 lat_udp strand root cause): a
+/// sender whose transmitter-side UDP checksum computes to 0x0000
+/// transmits 0xFFFF, and the receiver must accept both representations.
+/// Constructs a real zero-escape datagram through udp_checksum (varying
+/// the last payload word; exactly one word hits computed==0), then
+/// sweeps udp_csum_accepts against the reference's summation test
+/// (fold(S + T) == 0xFFFF with S = !computed) over every 16-bit
+/// computed value for the stated values that matter (identity,
+/// complement, escape, zero).
+fn test_udp_csum_zero_escape() {
+    use crate::net::udp::{udp_csum_accepts, udp_checksum, UdpHdr, UDP_HLEN};
+
+    let shdr = 0x7F000001u32; // 127.0.0.1 (network order at the call)
+    let dhdr = 0x7F000001u32;
+    let mut uhdr = UdpHdr::default();
+    uhdr.source = 34298u16.to_be();
+    uhdr.dest = 32768u16.to_be();
+    let data = [0x41u8, 0x42, 0x43, 0x44];
+    uhdr.len = ((UDP_HLEN + data.len()) as u16).to_be();
+    uhdr.check = 0;
+
+    let mut found: Option<u16> = None;
+    for w in 0u16..=u16::MAX {
+        let mut d = data;
+        d[2..4].copy_from_slice(&w.to_be_bytes());
+        if udp_checksum(shdr, dhdr, &uhdr, &d) == 0 {
+            found = Some(w);
+            break;
+        }
+    }
+    let w = match found {
+        Some(w) => w,
+        None => {
+            test_fail("udp csum zero-escape", "no payload word forces checksum 0");
+            return;
+        }
+    };
+
+    let mut d = data;
+    d[2..4].copy_from_slice(&w.to_be_bytes());
+    let computed = udp_checksum(shdr, dhdr, &uhdr, &d);
+    if computed != 0 {
+        test_fail("udp csum zero-escape", "construction did not compute 0");
+        return;
+    }
+    // The TX convention (udp_build_locked): transmit 0xFFFF for the
+    // computed 0x0000 — the RX parity must accept it.
+    if !udp_csum_accepts(computed, 0xFFFF) {
+        test_fail("udp csum zero-escape", "stated 0xFFFF rejected");
+        return;
+    }
+
+    for x in 0u16..=u16::MAX {
+        for t in [x, !x, 0xFFFF, 0] {
+            let s = !x;
+            let mut sum = s as u32 + t as u32;
+            while sum >> 16 != 0 {
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+            let reference_accepts = sum == 0xFFFF;
+            if udp_csum_accepts(x, t) != reference_accepts {
+                test_fail("udp csum zero-escape", "summation equivalence broken");
+                return;
+            }
+        }
+    }
+    test_pass("udp csum zero-escape parity");
 }

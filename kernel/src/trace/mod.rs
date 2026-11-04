@@ -1019,15 +1019,17 @@ tracepoints! {
     /// produces no other event anywhere.
     EVENT_NET_LO_XMIT / net_lo_xmit_fmt / trace_net_lo_xmit :
         "net", "lo_xmit", 34,
-    print: "\"len=%u backlog=%u rc=%d\", REC->len, REC->backlog, REC->rc",
+    print: "\"len=%u backlog=%u rc=%d skb=%pL ucsum=%#x\", REC->len, REC->backlog, REC->rc, REC->skb, REC->ucsum",
     fields: "\tfield:unsigned int len;\toffset:8;\tsize:4;\tsigned:0;\n\
              \tfield:unsigned int backlog;\toffset:12;\tsize:4;\tsigned:0;\n\
-             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n",
-    call (len: u32, backlog: u32, rc: i32),
+             \tfield:int rc;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:void *skb;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned short ucsum;\toffset:32;\tsize:2;\tsigned:0;\n",
+    call (len: u32, backlog: u32, rc: i32, skb: u64, ucsum: u16),
     render |args: &[u64; TRACE_ARGS]| {
         format!(
-            "len={} backlog={} rc={}",
-            args[0] as u32, args[1] as u32, args[2] as i32
+            "len={} backlog={} rc={} skb={:#x} ucsum={:#x}",
+            args[0] as u32, args[1] as u32, args[2] as i32, args[3], args[4] as u16
         )
     };
 
@@ -1081,6 +1083,27 @@ tracepoints! {
         format!(
             "pid={} expires={} interval={} arm_ok={}",
             args[0] as i32, args[1], args[2], args[3] as u32
+        )
+    };
+
+    /// net:pkt_drop — the SILENT early-return drops of the loopback
+    /// delivery chain (the r13 hunt). layer 1 = ip_rcv (version/ihl/
+    /// hdr_len/checksum/tot_len classes), layer 2 = udp_rcv (header
+    /// parse, UDP checksum — stated vs computed values name a
+    /// build-side checksum bug vs an in-flight rewrite).
+    EVENT_NET_PKT_DROP / net_pkt_drop_fmt / trace_net_pkt_drop :
+        "net", "pkt_drop", 37,
+    print: "\"skb=%pL layer=%u reason=%u ucsum=%#x computed=%#x\", REC->skb, REC->layer, REC->reason, REC->ucsum, REC->computed",
+    fields: "\tfield:void *skb;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned char layer;\toffset:16;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned char reason;\toffset:17;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned short ucsum;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:unsigned short computed;\toffset:20;\tsize:2;\tsigned:0;\n",
+    call (skb: u64, layer: u8, reason: u8, ucsum: u16, computed: u16),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "skb={:#x} layer={} reason={} ucsum={:#x} computed={:#x}",
+            args[0], args[1] as u8, args[2] as u8, args[3] as u16, args[4] as u16
         )
     };
 }

@@ -1402,6 +1402,35 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
     Some(udp_hdr)
 }
 
+/// RFC 768 zero-escape parity for UDP-over-IPv4 checksum verification.
+///
+/// `udp_checksum` computes the TRANSMITTER-side value (complement of the
+/// one's-complement fold, WITHOUT the zero escape), while a conforming
+/// sender transmits 0xFFFF whenever that value computes to 0x0000 (RFC
+/// 768: "If the computed checksum is zero, it is transmitted as all
+/// ones") — this stack's own TX builders do exactly that
+/// (udp_build_locked / udp_build_locked6).
+///
+/// The reference verifies by SUMMATION — the fold including the stated
+/// field must be all-ones, fold(S + T) == 0xFFFF — which accepts both
+/// representations of the same checksum. This predicate is exactly
+/// equivalent to that test on every input pair: fold(S + T) == 0xFFFF
+/// holds iff S + T == 0xFFFF (T == !S == computed, no carry) or
+/// S + T == 0x1FFFE with the end-around carry folding to 0xFFFF, whose
+/// only in-range solution is S == T == 0xFFFF (computed == 0, the
+/// escape). Callers must skip verification entirely for stated == 0
+/// (RFC 768 "no checksum") before consulting this.
+///
+/// The r13 lat_udp strand conviction: the previous plain
+/// `computed != stated` inequality silently dropped every zero-escape
+/// datagram — a 1-in-65536 content collision (fold(S) == 0xFFFF) that
+/// stranded the lmbench ping child mid-benchmark (net:pkt_drop
+/// reason=8 captures r13o/r13p: computed=0x0000 vs stated=0xFFFF,
+/// datagram byte-identical to the net:lo_xmit build snapshot).
+pub fn udp_csum_accepts(computed: u16, stated: u16) -> bool {
+    computed == stated || (computed == 0 && stated == 0xFFFF)
+}
+
 /// Receive and process UDP packet
 ///
 /// # Arguments
@@ -1413,7 +1442,15 @@ pub fn udp_parse_packet(skb: &SkBuff) -> Option<&UdpHdr> {
 /// Ok(()) on success, Err(()) on failure
 pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
     // Parse UDP header
-    let udp_hdr = udp_parse_packet(skb).ok_or(())?;
+    let udp_hdr = match udp_parse_packet(skb) {
+        Some(h) => h,
+        None => {
+            // net:pkt_drop (r13 hunt): the vanishing-datagram class needs
+            // every silent drop named.
+            crate::trace::trace_net_pkt_drop(skb.data as u64, 2, 7, 0, 0);
+            return Err(());
+        }
+    };
 
     // Verify UDP checksum (per RFC 768: checksum=0 means no checksum)
     if udp_hdr.check() != 0 {
@@ -1431,7 +1468,25 @@ pub fn udp_rcv(skb: &SkBuff, src_ip: u32, dest_ip: u32) -> Result<(), ()> {
         // udp_checksum expects network-order IPs (matching the TX callers);
         // udp_rcv receives host-order values from ip_rcv.
         let computed = udp_checksum(src_ip.to_be(), dest_ip.to_be(), udp_hdr, data);
-        if computed != udp_hdr.check() {
+        let stated = udp_hdr.check();
+        // RFC 768 zero-escape parity — see udp_csum_accepts (r13 lat_udp
+        // strand conviction: the old plain inequality silently dropped
+        // every zero-escape datagram, net:pkt_drop reason=8 captures
+        // r13o/r13p — computed=0x0000 vs stated=0xFFFF, datagram
+        // byte-identical to the net:lo_xmit build snapshot).
+        if !udp_csum_accepts(computed, stated) {
+            // net:pkt_drop (r13 hunt): stated (in-flight) vs computed, with
+            // the skb pointer — compare the stated value against the
+            // net:lo_xmit ucsum snapshot for THIS skb: equal convicts a
+            // build-side checksum bug, different convicts an in-flight
+            // byte rewrite between the backlog push and the drain.
+            crate::trace::trace_net_pkt_drop(
+                skb.data as u64,
+                2,
+                8,
+                stated,
+                computed,
+            );
             // Checksum mismatch, silently drop packet
             return Ok(());
         }

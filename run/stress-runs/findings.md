@@ -1239,3 +1239,67 @@ the known cosmetic). Pushed 74f2a977..6ebf6859.
 5. Sweep cadence: renameco 300-iteration clean on the final tree (gates
    paragraph above); ltplong long-horizon loops remain pending from r10
    (compaction priority — carry to r13).
+
+## Round 13+14 (2026-11-04) — lat_udp strand ROOT-CAUSED and FIXED:
+## UDP v4 checksum zero-escape parity (RFC 768) in udp_rcv
+
+Vehicle: run/lmb-rig (x86_64 release-opt KVM q35 smp2 2G, one boot per
+case, lmbench=lat_udp,127.0.0.1). Kernels: pre-fix = r13 instrumentation
+tree (10c9ca12^..10c9ca12), post-fix = 5b2711df.
+
+STRAND CLASS (pre-fix, properly-invoked boots only):
+| boot | shape | evidence |
+|------|-------|----------|
+| r13k | Recv timed out, recovered | last udp-in delivered fd=1 then silence (drop had no print) |
+| r13l | Recv timed out, recovered | same |
+| r13m | 35s budget TIMEOUT + #GP at TERM | ring wrapped, drop out of window |
+| r13n | Recv timed out, recovered | ring wrapped |
+| r13o | 35s budget TIMEOUT + #GP at TERM | pkt_drop r=8 ucsum=0xffff computed=0x0 at 32.44s (drop 2.6s before budget beat the 15s alarm) |
+| r13p | Recv timed out, recovered | pkt_drop r=8 ucsum=0xffff computed=0x0 at 2.26s; SIGALRM sig=14 at +14.57s |
+| r13a-j | (NOT clean runs) | "Usage: lat_udp -s" — no server arg, benchmark never ran, 0 udp-in prints |
+
+Pre-fix strand rate 6/6 on real runs; 0/6 ever printed a measurement.
+
+ROOT CAUSE: udp_checksum() returns the transmitter-side value (!fold,
+no escape); both TX builders escape computed 0x0000 -> transmit 0xFFFF
+(RFC 768). udp_rcv compared with plain `computed != stated` and
+silently dropped every zero-escape datagram — including this stack's
+own TX and any conforming peer's. udp_rcv6 / TCP v4+v6 RX verify by
+summation (inherently correct); only the IPv4 UDP gate diverged.
+Content varies per datagram (ucsum walks -1 per exchange on the
+counter payload), so each RTT rolls a 1-in-65536 die on the escape.
+
+FIX (5b2711df): udp_csum_accepts() = equality OR (computed==0 &&
+stated==0xFFFF); proven equivalent to the reference summation test
+fold(S+T)==0xFFFF on every input pair; unit test sweeps all 65536
+computed values x {identity, complement, escape, zero} = 0 mismatches.
+
+POST-FIX (11 boots):
+| boot | outcome |
+|------|---------|
+| r14a2/a4/t1/t2/t3/t4/t5 | CLEAN, measured 6.90-9.07 us (t1: 10.1M trace events ~= 2M exchanges ~= ~30 escapes served) |
+| r14a3 | 35s budget hit, untraced |
+| r14t6 | 35s budget hit; ring tail = LIVE ping-pong at kill (36.35s, 7.2M events/36s vs t1 10M/9.6s = 5x slow host) — contention, not a strand; ZERO pkt_drop |
+| r14b1/b2 (budget=120) | CLEAN, measured 6.92/6.93 us |
+
+Zero pkt_drop (any reason), zero "Recv timed out", zero #GP, zero
+SIGDEATH across all 11. Strand class CLOSED. First-ever lat_udp
+measurements from this rig: 6.90-7.07 us quiet host.
+
+CHANNEL VERDICTS (r13 charter):
+1. UDP delivery->wake lost hop: NOT enqueue/wake/queue/membership —
+   the datagram died at the udp_rcv checksum gate before any queue.
+2. Alarm/SIGALRM channel: ACQUITTED — itimer arms, sig=14 generated
+   on schedule (r13p +14.57s); the m/o "never fires" shape was the
+   35s runner budget beating the alarm (r13o drop at 32.4s).
+3. musl get_meta #GP (rip=0x417e8b): STRAND-ASSOCIATED — only ever in
+   TERM cleanup after a strand (r12 2/2, r13 m+o); TERM'd post-fix
+   boots (a3/t6/b1/b2) show zero #GP/SIGDEATH. No known repro with the
+   strand dead; userspace-family shape (benchmp longjmp from SIGALRM
+   vs musl malloc reentrancy). Reopen on any non-strand recurrence
+   (canary probe around recv buffers).
+
+SIDE LEAD (writev lane): EFAULTTRAC nr=66 writev a0=2 a1=<stack
+iovec> fires once per usage()-path fprintf (r13a-j, r14a) — a valid
+stack iovec got -EFAULT once while the text still printed. Error-path
+only; never in working runs. Hand to the ipc/writev lane.
