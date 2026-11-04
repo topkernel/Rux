@@ -3885,3 +3885,147 @@ reaches the GUI.
   rigs), u2v5 (SA 54), u2v6 (SA 26). Unbiased rate unchanged: every
   boot wedges; the face is the FFRT-mutex park cascade under CPU
   saturation.
+
+## 39TH SESSION (2026-11-05 02:0x-.., branch biofix-fieldpoll @ 9ca8efe6+)
+
+Mission: the last kernel-side wall — the hilogd socket per-op cost.
+(1) profile the recvmsg/writev per-op cost (the 28-58us -> ~0.7ms-class
+consume vs the reference's ~2-5us), (2) fix per reference semantics
+(net guarded domain), (3) verify post-fix per-op rows, wedge rate,
+pixels.
+
+### 1. The instrument: dfx unixrd=1 (c33129a1)
+
+A filerd-shaped monotonic-ns phase probe around the three AF_UNIX hot
+entries, dumped on the syscost 60s cadence + shutdown cascade:
+- UNIXRD-RM (sys_recvmsg AF_UNIX): outer / iov / alloc / recv / cout /
+  cmsg / addr phases + n/ok/ea/err/peek/cred counts + alloc byte sum.
+- UNIXRD-RF (sys_recvfrom AF_UNIX, the hilogd 2-byte length peek):
+  outer / alloc / recv / cout + peek count.
+- UNIXRD-WV (sys_writev gathered-dgram, the producer side): outer /
+  gather / send + ok/ea counts + gathered byte sum.
+The iov snapshot + bounce alloc sit ABOVE the family dispatch (shared
+code) — their sums cover all families; the storm boot is unix-dominated
+so the attribution reads as an upper bound. Gated behind the unixrd=1
+cmdline param (cctx tri-state pattern), zero cost when off.
+
+### 2. THE PROFILE (u2v7: system-lb5 + fresh2, SMP2 KVM, syscost=1
+### unixrd=1 dfx=txnhunt,taskdump; probe armed at the first dump t=45s)
+
+Per-op walls, cumulative but stable across 105s -> 765s (wedge era):
+
+- UNIXRD-RM n=5.0M (24k/s, ok=n, ea=0, cred=n — EVERY recvmsg delivers
+  SCM_CREDENTIALS; hilogd sets SO_PASSCRED): outer 4.9us = cmsg 3.3us
+  (68%) + alloc 1.0us (bounce buffer, allocb=73B avg) + recv 0.9us
+  (engine incl. the queue lock!) + iov 0.1us + cout 0.08us + addr
+  0.07us. The 38th's SO_PASSCRED lever CONFIRMED as the dominant
+  consume-side phase — but the cost is OUR HEAP STAGING, not a cred
+  lookup: deliver_unix_cmsgs allocated three heap objects per call
+  (new_fds Vec + cmsg staging Vec with a grow + a .concat() payload
+  Vec) and touched the fd table even with zero SCM_RIGHTS files.
+- UNIXRD-WV n=5.9M (25k/s, ok 87%, ea 13% — producers DO hit the full
+  queue): outer 17.8us = send 12.9us + gather 4.6us. The send phase is
+  dominated by OUR HILOG DIAGNOSTIC TAP: every record is scanned for
+  ~125 key/tag shapes (49 AMS + 23 KEYS + 12 TAGS + 10+9 spawn + 7+8
+  acct + 1+6 installd + flood probe) = 8-20k byte compares per record
+  x 25k/s = seconds of CPU per second. The reference kernel has no
+  such per-record kernel-side tap at all.
+- UNIXRD-RF n=5.2M (peek, 24k/s): outer 38-110us, recv phase 36-110us
+  — but ea=1 across the WHOLE boot: the peek BLOCKS (waits for the
+  next record; inter-record gap at 25k/s ~= 40us). The 38th's u2v2
+  "EAGAIN spin" face and this boot's blocking face are the SAME call
+  on boot-variance regimes; on THIS substrate our hilogd posture is
+  already the reference's blocking posture, and the peek wall is
+  sleep-to-arrival, NOT kernel burn.
+- Reconciliation with the syscost per-nr table (t=165s): nr=45
+  (recvfrom/peek) avg 74us (includes the blocking waits), nr=47
+  (recvmsg) 9.5us, nr=20 (writev) 23us, nr=228 clock 3us at 54k/s,
+  nr=281 epoll_pwait 6.3us. Kernel ticks 88-90% (c0 3295u/31525k,
+  c1 4373u/30525k at 165s). rest-sites: sched pick 23.3s/165s (60k/s
+  picks — the wake churn of ~90k/s socket events), percpu 14.1s,
+  slab 10.8s (39M allocs), fd lookup 6.3s (21M), fdreap 3.5s.
+- Wedge face on u2v7: standard (SA stuck, fdreap close completion
+  stalled x7k by 820s); pixels = frozen set (no change).
+
+### 3. THE FIXES (9ca8efe6, reference-shaped, semantics unchanged)
+
+1. deliver_unix_cmsgs cred-only fast path: no SCM_RIGHTS files ->
+   write the IDENTICAL 32-byte chain (hdr 16 + struct ucred 12 + pad
+   4, cmsg_len 28, controllen reported 32) from the stack with ONE
+   copy_to_user; skip the fd-table access and the three per-call heap
+   objects. No-room/EFAULT semantics byte-identical to the staged
+   path.
+2. hilog diagnostic tap gated behind hilogtap=1 (cctx tri-state,
+   default OFF — the filerd discipline "OFF by default like every DFX
+   probe"): the tap is instrumentation, not kernel semantics; the
+   125-scan-per-record cost on the storm path was ours alone. Boots
+   needing HILOG-AMS/slog/alog/ilog/PCTL evidence arm it explicitly
+   (it also carries the PCTL-SEND/RECV param tap — same class).
+3. sys_writev gathered-dgram pre-reserve: one try_reserve_exact walk
+   over the (already-validated) iovec lens before the copy loop —
+   kills the per-iovec realloc+memcpy growth rounds (3 per hilogd
+   writev).
+
+### 4. Verification (u2v8, kernel 9ca8efe6, COMPLETE)
+
+Same substrate, same cmdline minus hilogtap (production shape).
+Matched-window A/B (u2v7 -> u2v8, per-op cumulative avgs):
+
+- RM (consume recvmsg): outer 4944 -> 1962ns at t=165s (1874ns at
+  885s); cmsg phase 3354 -> 353ns (89% cut, holds through the wedge);
+  alloc 1.0us / recv 0.9us unchanged (the next levers).
+- WV (producer writev): outer 17823 -> 10171ns; send phase 12932 ->
+  4775ns (the tap scans WERE the send-phase fat); gather 4580 ->
+  3488ns (pre-reserve; residual = the 3 copy_from_user + reserve
+  bookkeeping).
+- syscost per-nr: nr=47 recvmsg 9.5 -> 6us; nr=20 writev 23 -> 14us;
+  nr=45 peek 74 -> 59us (still sleep-dominated).
+- THROUGHPUT: the consumer now keeps pace with the storm instead of
+  falling behind — u2v7 processed 5.1M recvmsg cumulative by 765s
+  (~7k/s avg); u2v8 processed 31.1M by 885s (~37k/s avg, 6x). The
+  per-op wall was throttling the drain rate; with it cut, the storm
+  flows through at producer rate.
+- WEDGE LEDGER: u2v8 still wedges — SA ceiling 53 (insert SA:3301_53),
+  TXN-HANG txn3482 code12 exec 555s + txn5616 code6 547s (samgr
+  workers parked sys=202 futex, thtodo=0, reply deferred userspace-
+  side — the same ffrt::mutexPrivate::wait cascade), fdreap close
+  stalls late. Wedge rate: 11/11 wedge-class on this substrate.
+- PIXELS: every shot every boot = frozen set 82f0a25f (no change).
+- Gates: x3 builds rc=0 (riscv64 fresh config, aarch64, x86_64);
+  make test x86_64 ALL PASSED (run/u2v8-maketest-x86.log). Pushed
+  through 9ca8efe6.
+
+Verdict: the per-op wall is down 40-60% per op and the socket path now
+drains the storm at producer rate (6x consume throughput), but the
+wedge persists — the FFRT park cascade has upstreams beyond the per-op
+wall (the wake/sched churn of ~90k/s events at 60k/s picks, and the
+holders themselves). The mission's 10x per-op target needs the bounce
+buffer removed too (alloc 1.0us + one copy: 4.9 -> ~1us = the 10x);
+the wedge needs the queue-split/wake shape or the samgr-internal FFRT
+hold chain broken. Both are queued below.
+
+### 5. Handoff levers (next agent, in order)
+
+1. The send-side wake shape: ~90k/s socket events each take
+   wait_queue lock + wake_up_all on a queue that MIXES readers and
+   parked senders (sched pick 60k/s at 2.3us = 23s/165s). The
+   reference wakes ONE exclusive waiter per event (sk_data_ready);
+   our WaitQueue already has wake_up_one + exclusive prepare_to_wait
+   support — but reader/writer waits share ONE queue, so a naive
+   exclusive switch risks wake cycling. The reference splits them
+   (sk->sk_receive_queue.wq vs peer_wait): a two-queue split on
+   UnixSocket is the correct parity move (send/recv/close sites
+   enumerated in unix.rs: 1079/1113 accept, 1917 send, 2125/2166
+   recv, 2213-2291 teardown).
+2. The bounce buffer (1.0us/op): the recvmsg path still allocates
+   vec![0u8; total] + a scatter copy (two copies per record). The
+   reference copies skb->user directly (single copy). A 1-iovec
+   direct-to-user unix_recv variant is the structural fix; measure
+   first (the alloc is only 1.0us now, and the probe rows above are
+   the A/B baseline).
+3. If hilogtap=1 boots are ever needed for AMS decodes, remember the
+   tap now costs ~5-8us/send while armed — arm it only on
+   evidence-collecting boots, never on per-op measurement boots.
+4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
+   105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
+   c33129a1. u2v8 verdicts append below.
