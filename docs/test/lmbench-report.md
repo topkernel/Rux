@@ -214,6 +214,32 @@ clean on both. The 150s window is a sharper probe than the standard
 soak and should be adopted by the stress lane with signature
 comparison before any scheduler-structure merge.
 
+## Context-switch first-principles audit (2026-11-04, cctx decomposition)
+
+One lat_ctx handoff (1.39-1.42 us at load ~4.5, main kernel, cctx=1
+boots, n=2.4-2.6M switches per boot), decomposed against the
+component floors:
+
+| segment | measured | first-principles floor | verdict |
+|---|---|---|---|
+| __schedule: pre+acct+deq+pub | 125 ns | bookkeeping | near floor |
+| GRQ lock acquire | 102 ns | ~20 ns uncontended | global-queue design price |
+| pick walk | 96 ns | ~50 ns | lean (retires the "slow pick section" lead: the µs-class GRQ section AVERAGES were tail-inflated) |
+| mm switch | 202-295 ns | ~40 ns (CR3 write) | PCID + same-mm CR3-write skip already present; remainder = asid resolve + guard read_cr3 probe (~30-60 ns trimmable) |
+| fpu save/restore | 34 ns | | xsaveopt skip working |
+| MSR/FS-GS base | 33+21 ns | | FSGSBASE path |
+| GPR asm | 21-23 ns | | near floor |
+| **kernel machinery total** | **~620 ns** | | **below the reference's native whole-switch 910 ns** |
+| remainder ~780 ns | | | wake/sleep rendezvous + halt/IPI residue (optimized to plateau) + benchmark's own user-side work |
+
+Conclusion: the switch machinery itself has no fat left within the
+current design; every component carries its known fast path (same-mm
+CR3 skip, PCID, FSGSBASE, xsaveopt). The two remaining structural
+levers, in size order: (1) runqueue sharding — attacks the 102 ns lock
+AND wake-path queuing; that is the D-1 divergence decision, a campaign
+with its own gate budget, not a patch; (2) a per-CPU prev-root tag
+cache replacing the read_cr3 guard probe (~30-60 ns/switch, marginal).
+
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
 Both kernels under the same q35+KVM rig (reference column frozen from
