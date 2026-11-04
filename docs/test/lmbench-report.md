@@ -187,6 +187,33 @@ the remaining kernel-side levers are the resched-IPI volume to halted
 CPUs (coverage), the GRQ hold time on the wake/pick path, and the
 syscall entry floor (null 1.31x). See the session close report.
 
+## GRQ critical-section anatomy (2026-11-04, instrumented build)
+
+Per-boot rdtsc sampling of every 64th GRQ irqsave section (spin vs
+work split, >10us tails attributed by caller line; counters printed at
+init exit), interleaved A/B for each hypothesis:
+
+| hypothesis | test | verdict |
+|---|---|---|
+| lock contention | avg spin 241-328 cycles across all loads | **excluded** — the section cost is the work, not waiting |
+| in-lock resched-IPI (VM exit) | defer-send A/B | **excluded at handoff loads** — pipe +15% WORSE (the IPI lands ~200ns later per handoff); in-lock send is strictly better when uncontended |
+| BTreeMap node alloc under lock | 99.96% of 2.64M inserts/boot hit an EMPTY map (guaranteed root alloc+free per insert, inside the GRQ irqsave section); swap to a preallocated sorted Vec (`run/timeline-vec-swap.patch`) | **excluded as a latency cost** — avg_work and tails unchanged (the small allocator serves this size class in ~100ns); kept as a robustness lead, NOT merged |
+
+Remaining facts: the __schedule pick section (sched.rs lock at the
+pick site) averages 10-18K cycles on ctx-class loads (3-4.5us) with
+14ms max tails, and is NOT explained by spin, IPI, or allocation —
+the next attribution step is sub-section rdtsc pairs (accounting /
+pick-walk / requeue). The 14ms tails concentrate (99.9%) in the
+__schedule section line.
+
+Soak-instability note for the stress lane: 150s riscv TCG soaks panic
+on BOTH the base kernel (PREEMPT-UNDERFLOW, c3c4c3c4 scribble pattern —
+the known scribble engine family) and the timeline-swap build
+(different signature, freed-task pfault) — the 90s standard soak is
+clean on both. The 150s window is a sharper probe than the standard
+soak and should be adopted by the stress lane with signature
+comparison before any scheduler-structure merge.
+
 ## Standing (2026-11-04 00:45, kernel 8d81c5da — fair KVM-vs-KVM, RCU fd lookup)
 
 Both kernels under the same q35+KVM rig (reference column frozen from
