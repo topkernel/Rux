@@ -3549,3 +3549,28 @@ face.
   run/roll-logs/cgf-roll.log for the final rate table.
 - Host load 5.8-11.8 the whole evening (36th's rolls + other lanes) —
   no quiet window; the dice numbers are load-inflated.
+
+### 8. Final verification tally (evening session, load 3.9-11.8 — no quiet window)
+Complete kernel (bzImage-cgf3-dbg): cgf1-cgf5 ALL wedge (SA 52-60
+frozen 240s+), but the FACE is uniformly the post-fix residual:
+- ZERO same-proc transactions on every boot (was: the dominant
+  SLOW-TXN class, pid 329->329 codes 2/3/12/20/30).
+- ZERO mirror crosswaits / deep stacks (the 36th confirmed: lb426/427
+  zero recursion).
+- Pool persists (17 workers + main; the ERESTARTSYS fix).
+- The stuck engines are now uniformly: samgr handler threads parked
+  INSIDE HandleCommands in userspace FFRT waits, thtodo=0, reply
+  deferred userspace-side (cgf5: THREE workers on code-12
+  CHECK_SYSTEM_ABILITY_IMMEDIATELY from softbus/EventRunner/netmanager,
+  exec 376s+; cgf3: the hdf<->power code-1 pair; cgf2: code-6s) —
+  the adjudicated userspace-internal family. Rate same as the old
+  kernel's rolls under the same load, face completely changed: every
+  kernel-authored wedge engine found by the audit is dead.
+NEXT AGENT'S SINGLE TARGET (per the campaign method): the FFRT-handler
+completion wall — why samgr's code-12 handler (and siblings) never
+returns on our kernel. Levers: (a) the per-op wall inside the handler's
+own syscall mix (syscost the window), (b) FFRT's own wake/queue
+machinery (eventfd-poll now prompt — verify FFRT's condvar signalers
+run), (c) the pid-1 monopolist face (rcu-gp-frozen-cpu dump armed,
+zero fires so far this evening — that face did not recur on the
+complete kernel).
