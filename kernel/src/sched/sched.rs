@@ -4579,6 +4579,14 @@ pub fn wake_up_enqueue_opt(
         // preemptible from its first instruction, so the monopoly never
         // forms at all. Full zero (base + stranded hardirq bits), the
         // same medicine PARKED-HEAL administers to the same class.
+        //
+        // r12 (LP-OUTCOME): set when this wake's lying-slot observation
+        // printed (the LP block below); consumed after the enqueue
+        // decision so a strand boot says whether the OBSERVED wake
+        // finally landed (woken=1) or was silently dropped there
+        // (woken=0) — the bit that separates a refused-diagnostic wake
+        // (concomitant) from a genuinely lost one.
+        let mut lp_observed = false;
         {
             let pc = (*task).preempt_count();
             if pc != 0 {
@@ -4767,6 +4775,7 @@ pub fn wake_up_enqueue_opt(
                             if LPW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                 < 96
                             {
+                                lp_observed = true;
                                 fn pdec2(mut v: u64) {
                                     use crate::console::putchar_no_lock as putchar;
                                     let mut buf = [0u8; 20];
@@ -4907,6 +4916,37 @@ pub fn wake_up_enqueue_opt(
             }
             false
         };
+        // r12 (LP-OUTCOME): for every wake whose lying-slot observation
+        // printed above, name the FINAL outcome — the enqueue below is
+        // the step the LP protocol analysis says cannot drop the wake;
+        // woken=0 here convicts it, woken=1 acquits the wake path
+        // entirely. Same gate and budget discipline as the LP print
+        // (LostParkTrace already checked; 16-line boot budget, GRQ held
+        // so direct console).
+        if lp_observed {
+            static LPO_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if LPO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                use crate::console::putchar_no_lock as putchar;
+                const MSG: &[u8] = b"LP-WAKE-OUTCOME pid=";
+                for &b in MSG {
+                    putchar(b);
+                }
+                let v = (*task).pid() as u64;
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((v >> sh) & 0xF) as u8;
+                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+                const W: &[u8] = b" woken=";
+                for &b in W {
+                    putchar(b);
+                }
+                putchar(if woken { b'1' } else { b'0' });
+                putchar(b'\n');
+            }
+        }
         // The sched:sched_wakeup tracepoint — the reference's
         // ttwu_do_wakeup record: the task left the wait queue and is
         // enqueued (or was still linked in the R42 race window), state
