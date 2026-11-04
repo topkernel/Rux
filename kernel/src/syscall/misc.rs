@@ -4024,6 +4024,20 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         tfd.kernel_timer_id = 0;
     }
 
+    // Reference timerfd_setup parity (kernel/linux/linux-6.6/fs/timerfd.c
+    // timerfd_setup: `ctx->expired = 0; ctx->ticks = 0;` before the arm —
+    // called from do_timerfd_settime on EVERY re-programming): a
+    // successful settime DISCARDS the pending unread expirations. Without
+    // the reset the timerfd stays readable FOREVER after its first expiry
+    // and the OH timer loops (epoll_pwait returning instantly + settime
+    // rearm, the TimeOut read never scheduled) churn at CPU rate instead
+    // of sleeping until the new deadline — the u2v5 ring named the loop
+    // (pid 588/693/694: epoll_pwait ret=1 + timerfd_settime +
+    // clock_gettime, no read of the timerfd), and the same stale
+    // readiness feeds the clock_gettime/epoll syscost storms (66k/s,
+    // ~10k/s).
+    tfd.expiration_count.store(0, core::sync::atomic::Ordering::Release);
+
     // If value is zero, timer is disarmed. The old settings are still
     // copied out in that case (the reference programs the timer - or does
     // not - and copies `old` out afterwards in both paths).
