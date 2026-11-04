@@ -2862,3 +2862,121 @@ left alone; it wedged in the DEADLOCK class at ~1319s).
   preinstall store), run/bzImage-ladder-bmsscan26 (cg26b+probe, the
   roll kernel), run/bzImage-ladder-bmsscan (mainline-tip+probe),
   run/bmsdump.sh + run/sp-ref-n.py (rig).
+
+## THIRTIETH-SUCCESSOR SESSION (2026-11-04 07:00-.., branch biofix-fieldpoll @ 90083ddd+)
+
+Mission: land/verify the 29th's uncommitted extent.rs work, verify the
+jbd2 write-through campaign against the fsync->kill->fsck repro, race
+rolls with the free discriminator. Outcome: THE EXTENT FIX IS THE ROOT
+CAUSE OF "EVERY /data MOUNT RAN JOURNAL-LESS" — verified, committed
+(90083ddd), pushed, and the OH /data now mounts with a live journal.
+
+### The 29th's uncommitted work (recovered, verified, landed)
+The 29th died after D-19 (renumbered D-20, see below) + ccprobe
+archive but left extent.rs UNCOMMITTED with no TASK notes. Intent read
+from its doc comments + verified against reference v6.6 ext4_extents.h
+VERBATIM: ext4_ext_is_unwritten is ee_len STRICTLY > 0x8000; ee_len ==
+0x8000 is a WRITTEN extent of exactly 32768 blocks. Our bit-15 test +
+0x7FFF length mask turned that extent into an unwritten hole of length
+0. TRIGGER CONFIRMED TWO WAYS: (a) debugfs on run/userdata-fresh2.img:
+journal inode 8 = ONE extent (0-32767):2129920-2162687, Size 134217728
+(128MB journal = exactly 32768 blocks — mke2fs emits the maximal
+written extent); (b) new rig golden run/ccrust/cc-test-max.img (1.3GB,
+feature-matched, -J size=128) reproduces the identical inode-8 shape.
+Every pre-fix boot printed 'ext4: journal inode empty, disabled' AT THE
+/DATA MOUNT (bmsours3/4/5: 1 line each) — init_journal's block-0
+resolve hit the 0-length extent.
+
+### Rig A/B (x86_64 debug, KVM, run/ccrust)
+- PRE-fix kernel (bzImage-prefix-dbg, stash-built): cc-test-max boot
+  prints 'journal inode empty, disabled'; postfsync kill -> e2fsck
+  rc=4 (block-bitmap diff, group free counts, BITMAP CHECKSUM class),
+  no journal recovery. THE 28th's POISONED-/data DIVERGENCE, minimal.
+- FIXED kernel (bzImage-fixext-dbg): journal silent-live; postfsync
+  kill rc=0 30/30 markers; midloop 2.5s rc=0 44/44; midloop 6.5s rc=0
+  111/111; replay pass rc=0 (journal clean at kill — D-20 write-through
+  leaves s_start 0, no replay line, expected).
+- Small-journal golden (cc-test.img, 4MB journal — under 0x8000 blocks,
+  the old bug never fired there): postfsync rc=0 30/30 (no regression);
+  6.5s midloop rc=0 111/111 this roll; 9.0s rc=4 KEEPING the D-20
+  residual (one fixable class, 157/157 markers survive replay).
+- ccrun.py grew --img (override golden). ccanalyze.sh unchanged.
+
+### In-situ OH verification (the campaign image set)
+Roll boots (system-lb5 + fresh2 reflink, SMP2 LOGLEVEL6
+dfx=ams46,txnhunt negmemo=1, kernel bzImage-fixext-dbg): journal-empty
+line 0 per boot (was 1); /data mounts at ~2.26s. The jbd2 write-through
++ parity fixes (c917a4b6) are now actually ACTIVE on /data — the 28th's
+NOSNAP-population plans inherit real journaling for free.
+
+### Housekeeping found on the way
+- config_test.rs x86_64 stack assertion was stale (81920 vs the
+  deliberate 131072 of c05f13ad/e336143a): every x86_64 suite run
+  failed 1095/1096 since. Fixed (7af48a38): x86_64 suite now ALL PASSED.
+- The 29th's divergence entry duplicated "D-19" (timer wheel owns it in
+  both companion ledgers): renumbered D-20 + max-journal evidence line
+  (c71af344).
+- Gates on the final tree: x86_64 debug + release, riscv64, aarch64
+  all rc=0 (dtb_blob.S clean); make test ALL PASSED on riscv64 AND
+  x86_64 (private rootfs copies rootfs-mine/-mine2; LTP r26's suite
+  QEMU untouched; my own leftover suite QEMU killed by exact match).
+
+### Race rolls (r30roller = run/r30roll.sh, lb380+)
+Free discriminator: BMSSCAN install_list opens + bms-chain mkdirs =
+branch FIRED; RDB storm ~34s + 40s park + zero mkdirs = empty
+completion. TALLY (this session, kernel WITH extent fix):
+- lb380: EARLY WEDGE (lb362/364 family: txn1038 hiview->OS_IPC_6_602
+  hung from ~11s, SA inserts froze at 10.0s/17 inserts, BMSSCAN froze
+  at 14.8s; serial alive only via txnhunt repeats). Same class as the
+  28th's bmsours2/bmsrace1/ab9cg wedges (pre-fix) — not new.
+- lb381: HEALTHY, EMPTY completion (RDB ctor storm 34.4s, parent
+  MISSING, SA:1301 at 40.7s, 68 SA inserts).
+(roll tally completed at session close below)
+
+### Successor entry points (30th, in order)
+1. THE JOURNAL IS NOW LIVE ON /data — re-run any NOSNAP population
+   plan and CHECK e2fsck after hard kills: the 28th's 'image poisoned'
+   extraction hazard should be gone (write-through journaling). If a
+   /data image still fails journal recovery, that is a NEW class (the
+   jbd2 slow path / revoke records never exercised by the cc rig).
+2. Race rolls: continue run/r30roll.sh (it self-classifies; kills only
+   its own QEMUs by userdata-r30-N path). Branch-fire rate so far 0/1
+   healthy boots (lb381 empty; lb380 wedge). The dice unchanged: need
+   status-0 BEFORE SA:1301 OpenSo (lb368 ordering) for the install
+   branch.
+3. The D-20 residual (mid-commit write-through window, 9.0s-class
+   kills rc=4 one fixable class) is the WAL follow-up — unchanged.
+4. cc-test-max.img + ccrun.py --img are the standing rig for any
+   maximal-extent/journal-shape question.
+
+### Session close (30th, 2026-11-04 08:2x)
+- ROLL TALLY FINAL (r30roller, lb380-385, all kernel WITH extent fix):
+  6/6 NON-HEALTHY, 0 branch-fires, 0 healthy boots.
+  * lb380 WEDGE txn1038 hiview->OS_IPC_6_602, SA froze 10.0s (17)
+  * lb381 INIT-CASCADE at 53.2s: /log/startup mkdir err=2 ->
+    stopAllServices -> DoUmount /data -> sysrq-c (bmsours1 family,
+    died mid-KVS-park after a healthy start: SA:1301 at 40.7s, 68 SAs)
+  * lb382 WEDGE txn572 OS_IPC_0_382->OS_IPC_5_518, SA froze 8.2s (13)
+  * lb383 WEDGE txn2247 (SA 32)
+  * lb384 WEDGE txn820 (SA 18)
+  * lb385 WEDGE txn1349 (SA 18)
+  Host load 3.3-6.9 the whole session — never a <4.5 quiet window
+  (identical to the 28th's last session). All wedges are the KNOWN
+  lb362/364 early-samgr-IPC family, seen pre-fix (bmsours2, bmsrace1,
+  ab9cg-1); NO new wedge class with the journal-live /data, but also
+  no healthy-boot timing sample — branch-fire rate this session:
+  0/0-healthy (no denominator). journal-less-lines=0 on ALL SIX boots
+  (the extent fix held on every boot, wedge or not).
+- Branch pushed after gates: 90083ddd (extent fix) + 7af48a38 (stale
+  x86_64 stack assertion) + c71af344 (D-20 renumber + evidence); this
+  TASK update closes the session. Gates: x86_64 debug + release,
+  riscv64, aarch64 rc=0; make test ALL PASSED riscv64 AND x86_64
+  (private rootfs copies; other lanes' QEMUs untouched throughout).
+- Assets added: run/ccrust/cc-test-max.img (128MB-journal golden),
+  run/ccrust/bzImage-prefix-dbg + bzImage-fixext-dbg (A/B pair),
+  run/ccrust/cc-run-{prefix-max1,fixext-max1,fixext-sj1,fixext-max-ml25,
+  fixext-max-ml65,fixext-sj-ml65,fixext-sj-ml90}.* (the evidence set),
+  run/r30roll.sh (the roller).
+- Successor priorities: entry points above stand; the dice need a
+  quiet host window (roll r30roll.sh again when load <4 sustained);
+  pixels unchanged (frozen classes checked every boot, 0 changes).
