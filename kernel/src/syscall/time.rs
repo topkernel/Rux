@@ -19,6 +19,16 @@ const CLOCK_MONOTONIC_COARSE: u32 = 6;
 const CLOCK_BOOTTIME: u32 = 7;
 const CLOCK_TAI: u32 = 11;
 
+/// CLOCK_TAI - CLOCK_REALTIME offset (ns). No clock_adjtime (ADJ_TAI)
+/// support, so the constant is the current real-world TAI-UTC offset
+/// (37 s, in force since 2017) — reference behavior when no NTP daemon
+/// has ever set the offset. Shared by clock_gettime, clock_nanosleep and
+/// the POSIX-timer absolute-deadline conversion so the three cannot
+/// drift apart.
+const fn tai_offset_ns() -> u64 {
+    37 * 1_000_000_000
+}
+
 /// Read the monotonic clock as (seconds, nanoseconds) from the CLINT.
 fn monotonic_time() -> (u64, u64) {
     let cycles = crate::arch::cpu::read_time();
@@ -134,14 +144,13 @@ pub fn sys_clock_gettime(args: SyscallArgs) -> i64 {
             // observable). CLOCK_TAI is REALTIME + TAI-UTC offset. No
             // clock_adjtime (ADJ_TAI) support, so use the current
             // real-world constant 37 s (2017+ offset) as the boot default.
-            let tai_offset: u64 = 37;
             let (mono_sec, mono_nsec) = monotonic_time();
             let total_ns = (mono_sec as u64)
                 .saturating_mul(1_000_000_000)
                 .saturating_add(mono_nsec as u64)
                 .saturating_add(wall_epoch_offset_ns())
                 .saturating_add(if clk_id == CLOCK_TAI {
-                    tai_offset.saturating_mul(1_000_000_000)
+                    tai_offset_ns()
                 } else {
                     0
                 });
@@ -965,9 +974,13 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
 
     // Only the sleepable clocks are valid here. THREAD-cputime has no
     // nsleep op in Linux and fails with ENOTSUP (LTP clock_nanosleep01
-    // expects EOPNOTSUPP for the raw-syscall variant).
+    // expects EOPNOTSUPP for the raw-syscall variant). BOOTTIME is
+    // MONOTONIC + suspend time — there is no suspend on this platform,
+    // so it sleeps on the monotonic clock exactly like the reference
+    // does while running; TAI sleeps to a wall deadline shifted by the
+    // (constant) TAI offset.
     match clk_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_TAI => {}
         CLOCK_THREAD_CPUTIME_ID => return fail(errno::EOPNOTSUPP),
         _ => return fail(errno::EINVAL),
     }
@@ -1025,15 +1038,18 @@ pub fn sys_clock_nanosleep(args: SyscallArgs) -> i64 {
         let (mono_sec, mono_nsec) = monotonic_time();
         let now_nanos = mono_sec.saturating_mul(1_000_000_000).saturating_add(mono_nsec);
         // For CLOCK_REALTIME the deadline is expressed against the wall
-        // epoch: shift it back into the monotonic domain.
+        // epoch: shift it back into the monotonic domain. CLOCK_TAI is
+        // the wall clock + TAI offset; BOOTTIME has no wall component.
         let epoch_nanos = wall_epoch_offset_ns();
         let target_nanos = (req.tv_sec.max(0) as u64)
             .saturating_mul(1_000_000_000)
             .saturating_add(req.tv_nsec as u64);
-        let target_monotonic = if clk_id == CLOCK_REALTIME {
-            target_nanos.saturating_sub(epoch_nanos)
-        } else {
-            target_nanos
+        let target_monotonic = match clk_id {
+            CLOCK_REALTIME => target_nanos.saturating_sub(epoch_nanos),
+            CLOCK_TAI => target_nanos
+                .saturating_sub(epoch_nanos)
+                .saturating_sub(tai_offset_ns()),
+            _ => target_nanos,
         };
         if target_monotonic <= now_nanos {
             return 0; // deadline already passed
@@ -1073,8 +1089,16 @@ pub fn sys_timer_create(args: SyscallArgs) -> i64 {
     // CLOCK_REALTIME (0), CLOCK_MONOTONIC (1) arm on the wall timer
     // wheel; the CPU-time clocks (2/3) arm against sum_exec_runtime and
     // are checked in scheduler_tick (LTP timer_settime01/timer_delete01
-    // create timers on all four).
-    if !(0..=3).contains(&clockid) {
+    // create timers on all four). Reference posix-timers additionally
+    // accept BOOTTIME (7, monotonic-domain deadlines — no suspend here)
+    // and TAI (11, wall deadlines + the constant TAI offset).
+    // kselftest set-timer-lat covers both; the ALARM clockids (8/9/10)
+    // stay EINVAL (no alarmtimer infrastructure) which the test reads
+    // as its no-CAP_WAKE_ALARM unsupported path.
+    if !(0..=3).contains(&clockid)
+        && clockid != CLOCK_BOOTTIME as i32
+        && clockid != CLOCK_TAI as i32
+    {
         return -(errno::EINVAL as i64);
     }
 
@@ -1302,7 +1326,12 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
             .saturating_add(val_nsec);
         if timer.clock_id == CLOCK_REALTIME as i32 {
             abs_ns.saturating_sub(wall_epoch_offset_ns() as i64)
+        } else if timer.clock_id == CLOCK_TAI as i32 {
+            abs_ns
+                .saturating_sub(wall_epoch_offset_ns() as i64)
+                .saturating_sub(tai_offset_ns() as i64)
         } else {
+            // MONOTONIC and BOOTTIME (no suspend: boottime == monotonic).
             abs_ns
         }
     } else {
