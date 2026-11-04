@@ -3574,3 +3574,47 @@ machinery (eventfd-poll now prompt — verify FFRT's condvar signalers
 run), (c) the pid-1 monopolist face (rcu-gp-frozen-cpu dump armed,
 zero fires so far this evening — that face did not recur on the
 complete kernel).
+
+### 36th session CLOSE (2026-11-05 00:0x) — sweep fixes verified; unbiased wedge rate
+
+The comprehensive-sweep agent landed 5 commits in this shared worktree
+during the round (4f955ec2 same-proc rejection, 94c48416 eventfd
+poll_wait, 2daa78b3 BINDER-REJECT verdict prints, ea7e4218 rcu-gp-
+frozen-cpu dump, 22fdd846 BWR -ERESTARTSYS pool-drain fix). This
+lane rebuilt on the tip (bzImage-cg36-poolfix-dbg) and verified:
+
+1. SAME-PROC DOORS FIRE: BINDER-REJECT pid=samgr tid=OS_IPC_*
+   ctxmgr-own-process code=0x5f504e47 (lb427/428); the 1681-3452-deep
+   frozen recursion class (lb416/418/421 graphs) is unbuildable now —
+   zero same-proc EXEC edges on every fixed-kernel boot.
+2. POOL PERSISTS: samgr = 17 OS_IPC workers + main alive at wedge
+   (lb432 task-dump census; was 8 workers pre-ERESTARTSYS on lb428);
+   BWR-SNAP idle-reads 157/271 threads at the 20s latch.
+3. UNBIASED WEDGE RATE on the COMPLETE kernel, THIS lane's substrate
+   (bms-ref userdata, poproll2b boots): 10/10 wedge-class verdicts
+   (lb432-437 early-kill batch: wedge/samgr-sig mix; lb438-441
+   SIGKILL=0 long-mode: 4/4 standard wedge detector, SA scatter
+   15-62, zero milestones, zero pixel changes from the frozen set).
+   The sweep's cgf1 healthy-noladder boot used its own rig — on THIS
+   substrate the wedge is still certain; its remaining face matches
+   the 25th's userspace-internal family (single stuck handler per
+   boot kernel-side — security_guard code3 97s on OS_IPC_5, wifi/
+   distributeddata code6 90-99s, render_service->composer_host
+   code1 95s, ui_service probe park 166s — with the pool healthy and
+   the probe tripping userspace-side; source lane's numExecuting_
+   adjudication: 17 handlers genuinely inside HandleCommands in FFRT
+   condvar waits; the per-op wall / FFRT handler slowness lever is
+   the named suspect).
+4. make test on the complete tree: ALL PASSED rc=0
+   (run/cg36-maketest3.log, private rootfs-mineA); x3 x86_64 builds
+   rc=0 across the round's four kernel snapshots.
+5. Assets: run/bzImage-cg36-{comm,bwrsnap,bwrsnap2,bwrsnap3,sameproc,
+   poolfix}-dbg; run/u2vbank.py (record-bounded offset-bank
+   extractor); run/system-lb5r.img (private quiescent copy of
+   system-lb5 for reference boots — recook from a QUIESCENT lb5,
+   never while a NOSNAP=1 roller boot is live); fx8 census under
+   run/fuxref-fx8/. The 37th's first move: read the sweep agent's
+   full session note (75a90b05) + this one, then chase the per-op
+   wall lever (timerfd_create storm caller STILL unnamed — entry
+   point 3 of the 4th-successor notes) if the source lane confirms
+   the FFRT-slowness adjudication.
