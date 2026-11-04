@@ -4174,3 +4174,51 @@ Rig lessons this session:
 - The u2v-boot.py duplicate-launch trap: every retry spawns another
   driver+QEMU on the same serial log (they truncate each other);
   verify exactly one instance per tag before trusting a log.
+
+### 41st session close — final ledger
+
+BOOT LEDGER (all system-lb5 + fresh2 reflink, SMP2 KVM, LOGLEVEL6,
+dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1):
+- u2v9  (40th kernel 6339074f): SA 37, wedge, pixels frozen.
+- u2v10 (40th kernel): SA 47, wedge, pixels frozen.
+- u2v12 (futex batch 4ecce94e): SA 56, wedge, pixels frozen.
+- u2v13 (futex+MSG_TRUNC): SA 52, wedge, pixels frozen.
+- u2v14 (final 1672c7ed): SA 60 (best ceiling yet; baseline 53),
+  wedge, pixels frozen. Per-op: RM outer 2.3us (alloc 0, cmsg 0.38),
+  WV outer 13.1us (send 5.8) — same class as u2v12/13.
+- u2v15 (final): early-wedge branch (SA 27 at 200s), pixels frozen.
+Verdict: 6/6 wedge-class. The futex-parity kernel's SA ceilings read
+52-60 vs 37-53 on the pre-fix kernels — directionally better but
+within boot variance; the wedge face is unchanged (samgr FFRT-mutex
+park cascade, handlers parked sys=202, holders unnamed in userspace).
+
+GATES: make test riscv64 ALL TESTS PASSED (run/maketest-41d.log — the
+HUNG-CTX lines after the verdict are post-halt noise); x3 builds rc=0
+(x86_64 build-41-x86-4, aarch64 build-41-aa64-2, riscv64 build-41-rv-2).
+Branch pushed through the docs commit after d402fa90.
+
+COMMITS THIS SESSION (biofix-fieldpoll):
+7449a203 riscv64: LAYOUT-5 window 20->24MB (cherry-pick of main's
+  d057f973 — required for make test to link at all)
+ed1549c5 fix(futex): reference parity batch (waiters-pending fast path,
+  FIFO wait chain, nr_wake==0 quirk, cmp-under-locks requeue)
+121fc908 dfx(binder): TXN-HANG-HLD — BWR-parked nested clients named
+6cf83b15 fix(net): AF_UNIX recvmsg MSG_TRUNC return value
+62f6b670 fix(epoll): drop the 1024 maxevents cap
+d402fa90 fix(net): AF_UNIX peer close with unread data sets ECONNRESET
++ TASK.md docs (40th reconstruction, 41st session + addenda)
+
+NEXT-AGENT ENTRY POINTS (in order):
+1. The perf-gate rows for THIS branch's net/sync changes before main
+   merge: pbench P5 (pipe/unix roundtrip), wake-lat, syscost census on
+   a quiet host — the futex fast path + queue split claim structural
+   wins that need numbers (the OH boots only prove no regression).
+2. The wedge's remaining kernel-visible asymmetry vs the reference:
+   with every named divergence fixed, the residual delta is per-op cost
+   (recv 1.2-1.3us, send 5.8us, gather 4.7us — the reference runs the
+   same storm at ~2-5us TOTAL per record). The send phase (5.8us) is
+   now the fattest wall: profile the enqueue path (queue lock, segment
+   charge accounting, epoll_notify_file fan-out per record).
+3. u2v15-class early-wedge boots waste 1100s; consider a verdict
+   short-circuit in u2v-boot.py (SA frozen 120s + TXN-HANG present ->
+   wedge verdict, kill VM).
