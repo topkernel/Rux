@@ -1067,7 +1067,7 @@ fn sendfail_reason_name(code: u64) -> &'static str {
         2 => "child-node-dead",
         3 => "owner-proc-dead",
         4 => "no-ctxmgr",
-        5 => "self-ctxmgr (removed: mainline delivers mgr self-sends)",
+        5 => "self-ctxmgr (superseded by why=22: reference rejects mgr self-sends)",
         6 => "reply-empty-stack",
         7 => "reply-stack-top",
         8 => "reply-oneway",
@@ -1083,6 +1083,8 @@ fn sendfail_reason_name(code: u64) -> &'static str {
         18 => "translate-fd",
         20 => "sender-stack-top (reference parity guard)",
         21 => "sender-todo-head-txn (reference parity guard)",
+        22 => "ctxmgr-own-process (reference parity, 6.6)",
+        23 => "self-transaction (reference parity, 6.6)",
         _ => "unknown",
     }
 }
@@ -6751,19 +6753,41 @@ fn binder_transaction(
                     app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
                     return;
                 };
-                // Reference-ABI note (lb122 @4.09s): mainline
-                // binder_transaction has NO self-send refusal for handle
-                // 0 — only the no-context-manager leg fails (BR_DEAD_REPLY
-                // above). The context manager's own process MAY send to
-                // handle 0; mainline delivers it to the mgr node like any
-                // other transaction (the S1-era BR_FAILED_REPLY refusal
-                // was an unverified port assumption, and it broke OH
-                // samgr's early self-registration oneway — code
-                // 0x5f504e47, refused at 4.09s on every ams46 boot, with
-                // the registry degradation cascade behind it). Safe here:
-                // the delivery thread picker only hands work to threads
-                // WAITING for proc work — never the sender — so even a
-                // sync self-send cannot self-deadlock.
+                // Reference parity (6.6 binder.c binder_transaction, the
+                // context-manager arm): "got transaction to context
+                // manager from process owning it" — a send to handle 0
+                // from the process that INSTALLED the manager fails with
+                // BR_FAILED_REPLY (-EINVAL at the uapi level). The old
+                // note below (kept for history) removed this refusal
+                // after calibrating against VANILLA mainline, which has
+                // no such check — but the reference bzImage this image
+                // actually boots (OH 6.6.101) HAS it (vmlinux string
+                // verified). Dynamic evidence (comprehensive-fix audit,
+                // 2026-11-04): samgr workers executing ADD_SYSTEM_ABILITY
+                // handlers issue NESTED registry calls via the in-process
+                // SystemAbilityManagerClient proxy (handle 0) — codes
+                // 2/3/12/20/30 from pid 329 -> pid 329 on every wedge
+                // boot (lb423/lb430 SAREG); on the reference these die
+                // here instantly (zero WARN splats, zero
+                // PrintErrorDetailedInfo on refu8/9 — OH tolerates the
+                // failure), while our kernel executed them and the
+                // from-walk ping-pong between the workers built the
+                // mirror-image crosswait wedge (36th successor's bwr_snap
+                // lb416). tgid nuance: the mgr node's reg_tgid is the
+                // registering process's pid; a forked child of samgr is
+                // a FRESH binder proc on the reference and MAY send to
+                // handle 0 — only the registering tgid itself is refused.
+                // (lb122 history: the S1-era refusal was removed after
+                // "samgr's early self-registration oneway 0x5f504e47 was
+                // refused at 4.09s" — that oneway is actually CROSS-PROC
+                // (lb421 SACMP: pid 757/760/761 -> 329), unaffected by
+                // this check; the refusal was mis-blamed.)
+                if mgr.reg_tgid != 0 && mgr.reg_tgid == thread.tgid {
+                    sendfail_why(22);
+                    *err_cmd = BR_FAILED_REPLY;
+                    app_txn_fail_print(proc, "ctxmgr-own-process", 0, tr.code as u64);
+                    return;
+                }
                 target_node = Some(mgr);
             }
 
@@ -6789,15 +6813,49 @@ fn binder_transaction(
                 }
             }
             let tp = target_proc.as_ref().unwrap();
-            // NOTE: no same-proc rejection here. Linux 5.10 (the OH
-            // baseline) has no "self transaction" check — only master
-            // gained one — so a transaction to a node owned by the
-            // caller's own process queues on the (own) proc todo and is
-            // served by a sibling worker (b85: samgr worker 357's calls
-            // into samgr-hosted services died here with BR_FAILED_REPLY,
-            // wedging the whole SA storm). Handle 0 from the manager's
-            // own process stays an error above, exactly like 5.10's
-            // "got transaction to context manager from process owning it".
+            // Reference parity (6.6 binder.c, right after target_node
+            // resolution): WARN_ON(proc == target_proc) — "self
+            // transactions not allowed", BR_FAILED_REPLY / -EINVAL. The
+            // reference bzImage this image boots (OH 6.6.101) carries the
+            // check (vmlinux string verified); the b85-era note below was
+            // calibrated against VANILLA 5.10, which lacks it. The
+            // comprehensive-fix audit (2026-11-04) convicted this gap as
+            // the wedge family's door: our kernel executed samgr's
+            // in-process registry calls (a worker handling an incoming
+            // txn re-entering the registry through a proxy whose node is
+            // samgr-owned), and the from-walk then delivered each nested
+            // call to the parked originator thread — the mirror-image
+            // crosswait the 36th successor's bwr_snap caught (lb416: two
+            // samgr workers with [EXEC from peer, AWAIT->peer]* stacks,
+            // ages 100-152s). On the reference these sends never execute
+            // (they fail here instantly; OH tolerates it and boots to
+            // GUI in ~12s on the same image).
+            // tgid nuance (sc161 shared-proc model): the reference
+            // compares PROCS, and a forked child is a fresh binder proc
+            // there — so a send is "self" only when the sender thread's
+            // tgid matches the node's REGISTERING tgid (reg_tgid==0
+            // nodes are daemon-legacy: any thread of the shared proc is
+            // the owner). Cross-child and daemon->child sends stay
+            // legal, exactly like cross-proc on the reference. Replies
+            // are exempt: on the reference a reply can never be
+            // same-proc (the txn it answers could not have existed), and
+            // exempting them keeps BC_REPLY on its own checked path.
+            //
+            // b85 history (why this was once open): the blanket reject
+            // broke samgr's calls into samgr-hosted services UNDER THE
+            // PRE-PARITY KERNEL (pre-deferred-tcomplete, pre-availability
+            // parity). With the 18 reference-parity fixes since, traffic
+            // is reference-shaped; the reference rejects these calls and
+            // the same userspace boots to GUI.
+            if !reply && Arc::ptr_eq(tp, proc) {
+                let node_reg_tgid = target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0);
+                if node_reg_tgid == 0 || node_reg_tgid == thread.tgid {
+                    sendfail_why(23);
+                    *err_cmd = BR_FAILED_REPLY;
+                    app_txn_fail_print(proc, "self-transaction", tr.target_handle as u64, tr.code as u64);
+                    return;
+                }
+            }
             if tp.im().alloc.is_none() {
                 sendfail_why(10);
                 *err_cmd = BR_FAILED_REPLY;
@@ -6821,20 +6879,16 @@ fn binder_transaction(
             // once-per-boot why=7 reply-stack-top orphan (useriam lb253
             // @100.9s, accountmgr lb302 @190.8s — each orphaned a sync
             // client whose TXN-HANG exec then grows without bound).
-            // GATED (dfx=syncguard): lb304 showed always-on rejection
-            // wedges the early SA storm (samgr's own first code-20/3
-            // sends violate the shape under OUR bookkeeping — OH boots
-            // on the reference, so our sender-thread state already
-            // diverges upstream; the guard is a diagnostic that names
-            // those sends until that divergence is fixed).
+            // Reference parity, UNCONDITIONAL (comprehensive-fix audit
+            // 2026-11-04): the reference rejects these two shapes for
+            // every sync send — no gating. The lb304-era gating existed
+            // because samgr's first code-20/3 sends violated the shape
+            // under our then-bookkeeping; those sends are the SAME-PROC
+            // registry re-entries now rejected earlier (why=23), so the
+            // traffic reaching these guards is reference-shaped. The
+            // print stays bounded (80/boot) for verification counts.
             if !reply && !oneway {
-                let sg_reject = crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::SyncGuard,
-                );
-                let sw_watch = crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::SyncWatch,
-                );
-                if sg_reject || sw_watch {
+                {
                     let st = thread.st();
                     let todo_head_txn = matches!(st.todo.front(), Some(Work::Transaction(_)));
                     let bad_stack_top = match st.txn_stack.last() {
@@ -6884,7 +6938,7 @@ fn binder_transaction(
                             let _ = writeln!(
                             w,
                             "SYNCSEND-{} pid={} tid={} why={} stack_depth={} top=txn{} code{:#x} to_tid={:?} from pid{} tid{} todo_head=txn{} code{:#x} to_tid={:?} from pid{} tid{}",
-                            if sg_reject { "GUARD" } else { "WATCH" },
+                            "GUARD",
                             proc.pid,
                             thread.tid,
                             if todo_head_txn { "todo-head-txn" } else { "stack-top-not-mine" },
@@ -6911,11 +6965,11 @@ fn binder_transaction(
                                 hist_line_of(thread.tid, &hist_snapshot(&thread))
                             );
                         }
-                        if sg_reject {
-                            sendfail_why(if todo_head_txn { 21 } else { 20 });
-                            *err_cmd = BR_FAILED_REPLY;
-                            return;
-                        }
+                        // Unconditional reference-parity rejection.
+                        sendfail_why(if todo_head_txn { 21 } else { 20 });
+                        *err_cmd = BR_FAILED_REPLY;
+                        app_txn_fail_print(proc, "syncsend-guard", tr.target_handle as u64, tr.code as u64);
+                        return;
                     }
                 }
             }
