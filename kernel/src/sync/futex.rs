@@ -530,6 +530,18 @@ pub fn futex_stuck_census() {
         uvma_voff: usize, // file offset when FileBacked (vma.offset + off)
         uret: [u64; 4],
         uret_n: usize,
+        // 34th successor — VMA decode of the STRONGEST return-address
+        // candidate (uret[1], the first non-libc one: uret[0] is the
+        // wrapper's own internals): its containing VMA start/end/class
+        // and, for file-backed, the file offset. Host-side: the file
+        // offset symbolizes against the same .so on both kernels (the
+        // image is identical) — names the samgr/FFRT call site without
+        // needing the guest's ASLR base.
+        u2v_ok: bool,
+        u2v_start: usize,
+        u2v_end: usize,
+        u2v_off: usize,
+        u2v_cls: u8,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -584,6 +596,11 @@ pub fn futex_stuck_census() {
                         uvma_voff: 0,
                         uret: [0; 4],
                         uret_n: 0,
+                        u2v_ok: false,
+                        u2v_start: 0,
+                        u2v_end: 0,
+                        u2v_off: 0,
+                        u2v_cls: b'-',
                     });
                 } else if total > 64 {
                     // Sample cap reached with clear headroom — stop the
@@ -782,6 +799,33 @@ pub fn futex_stuck_census() {
                                 va += 8;
                             }
                         }
+                        // (c) VMA decode of uret[1] (34th successor): the
+                        // strongest call-site candidate. File-backed ->
+                        // host symbolizes uret[1]-start+off against the
+                        // same .so from the (identical) system image.
+                        if s.uret_n > 1 {
+                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[1] as usize)) {
+                                s.u2v_ok = true;
+                                s.u2v_start = vma.start().as_usize();
+                                s.u2v_end = vma.end().as_usize();
+                                s.u2v_off = s.uret[1] as usize - s.u2v_start;
+                                let fl = vma.flags();
+                                s.u2v_cls = if fl.contains(
+                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                ) {
+                                    b'S'
+                                } else if s.u2v_start == aspace.start_brk() {
+                                    b'H'
+                                } else {
+                                    match vma.vma_type() {
+                                        VmaType::FileBacked => b'F',
+                                        VmaType::SharedMemory => b'M',
+                                        VmaType::Device => b'D',
+                                        VmaType::Anonymous => b'A',
+                                    }
+                                };
+                            }
+                        }
                     }
                 }
                 break;
@@ -873,6 +917,11 @@ pub fn futex_stuck_census() {
         rep_uvma_voff: usize,
         rep_uret: [u64; 4],
         rep_uret_n: usize,
+        rep_u2v_ok: bool,
+        rep_u2v_start: usize,
+        rep_u2v_end: usize,
+        rep_u2v_off: usize,
+        rep_u2v_cls: u8,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -917,6 +966,11 @@ pub fn futex_stuck_census() {
                         rep_uvma_voff: s.uvma_voff,
                         rep_uret: s.uret,
                         rep_uret_n: s.uret_n,
+                        rep_u2v_ok: s.u2v_ok,
+                        rep_u2v_start: s.u2v_start,
+                        rep_u2v_end: s.u2v_end,
+                        rep_u2v_off: s.u2v_off,
+                        rep_u2v_cls: s.u2v_cls,
                     });
                 }
             }
@@ -962,8 +1016,18 @@ pub fn futex_stuck_census() {
         if g.rep_fto_ok {
             let _ = write!(fto_s, "={}s+{}ns", g.rep_fto_sec, g.rep_fto_nsec);
         }
+        let mut u2v_s = alloc::string::String::new();
+        if g.rep_u2v_ok {
+            let _ = write!(
+                u2v_s,
+                " u2v={:#x}+{:#x}{}",
+                g.rep_u2v_start,
+                g.rep_u2v_off,
+                g.rep_u2v_cls as char
+            );
+        }
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
@@ -984,6 +1048,7 @@ pub fn futex_stuck_census() {
             g.rep_uvma_cls as char,
             g.rep_uvma_off,
             vmx,
+            u2v_s,
             uret_s,
             h.map(|h| h.run).unwrap_or(0),
             h.map(|h| h.futex).unwrap_or(0),
