@@ -4093,9 +4093,17 @@ Kernel: run/r41/bzImage-current = x86_64 debug @ 02e3c900.
   reservation together" (run/r41-maketest-x86-main.log, log line
   21256; tree was clean at 02e3c900). The riscv64 debug+test-cfg image
   now exceeds the 20MB boot window — the merge-gate riscv64 suite run
-  needs either the window extended or the test image slimmed. Gate for
-  this session follows the 39th's precedent: make test PLATFORM=x86_64
-  (building rootfs first; verdict appended below when done).
+  needs either the window extended or the test image slimmed.
+- x86_64 make test verdict (run/r41-maketest-x86.log): 1313 tests,
+  1312 PASS, 1 FAIL — and the 1 failure is a STALE CONFIG ASSERT on
+  main, not a functional failure: kernel/src/tests/config_test.rs:55
+  still asserts KERNEL_STACK_SIZE == 81920 (the interim 80KB packed
+  slab), but Kernel.toml kernel_stack_size_x86_64 = 131072 since the
+  nftw01 stack-overflow fix (2026-11-02; the Kernel.toml comment block
+  documents the 80KB->128KB move). The failing assert then trips the
+  harness panic at main.rs:1117 ("1 test(s) failed!"), which is what
+  the wrapper reports as suite failure. ONE-LINE FIX for whoever owns
+  it: update the assert to 131072. All 1312 functional tests green.
 - BWR-SNAP (pool health) rows are ZERO on main by construction: the
   bwr_snap probe (53d2c6e8) lives on biofix-fieldpoll and is NOT
   merged. Do not read 0 as "pool healthy" on main boots.
