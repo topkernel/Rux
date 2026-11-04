@@ -224,9 +224,32 @@ pub fn read_time() -> u64 {
         // wrapped to 4294967ms and aborted SA loads). A value behind the
         // last published time is clamped up to it — time briefly freezes
         // (never more than the residual noise) instead of stepping back.
+        // The publish is a CAS, not a store: two CPUs publishing at once
+        // must never let the older sample clobber the newer (kselftest
+        // threadtest caught exactly that — consecutive clock_gettime
+        // pairs stepping a few hundred ns backward when the load-store
+        // interleaved). A losing CAS retries against the new floor,
+        // which either lifts v (publication won) or clamps it.
         let last = TSC_LAST.load(Ordering::Relaxed);
         if v > last {
-            TSC_LAST.store(v, Ordering::Relaxed);
+            let mut cur = last;
+            loop {
+                match TSC_LAST.compare_exchange_weak(
+                    cur,
+                    v,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => {
+                        if observed >= v {
+                            v = observed;
+                            break;
+                        }
+                        cur = observed;
+                    }
+                }
+            }
         } else if v < last {
             v = last;
         }
