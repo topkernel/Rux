@@ -1,0 +1,25 @@
+inject: building rt-tests suite + qsrun into run/rootfs-qa.img
+rm: File not found by ext2_lookup while trying to resolve filename
+Allocated inode: 2114
+boot: class=r5-engines args=(file: run/r5-engines.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-engines.log
+=== verdict input (protocol lines + failure markers) ===
+QSRUN-BEGIN cmds=/test/qa/cmds.txt n=11
+QS-RUN 1/11 30 fio --name=sync --ioengine=sync --rw=write --bs=4k --size=256k --filename=/test/qa/e-sync.bin
+RES|fio|0|=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dropped=0
+QS-RUN 2/11 30 fio --name=psync --ioengine=psync --rw=write --bs=4k --size=256k --filename=/test/qa/e-psync.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 3/11 30 fio --name=vsync --ioengine=vsync --rw=write --bs=4k --size=256k --filename=/test/qa/e-vsync.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 4/11 30 fio --name=pvsync2 --ioengine=pvsync2 --rw=write --bs=4k --size=256k --filename=/test/qa/e-pvs2.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 5/11 30 fio --name=mmap --ioengine=mmap --rw=write --bs=4k --size=256k --filename=/test/qa/e-mmap.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 6/11 30 fio --name=splice --ioengine=splice --rw=write --bs=4k --size=256k --filename=/test/qa/e-spl.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 7/11 30 fio --name=posixaio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/e-paio.bin
+RES|fio|251|unreapable T=150s
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds

@@ -1,0 +1,19 @@
+=== r5 fio battery ===
+boot: class=r5-seqrw args=(file: run/r5-seqrw.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-seqrw.log
+RES|fio|0| 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dropped
+RES|fio|0|.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=64,0,0,0 short=0,0,0,0 dropped=0,0,0
+boot: class=r5-randrw args=(file: run/r5-randrw.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-randrw.log
+RES|fio|0|0.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=16384,0,0,0 short=0,0,0,0 dropped=0
+RES|fio|0|0.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,16384,0,0 short=0,0,0,0 dropped=0
+boot: class=r5-fsync args=(file: run/r5-fsync.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-fsync.log
+RES|fio|0|=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,2048,0,2047 short=0,0,0,0 dropped=0,0,0,
+boot: class=r5-mmaprwn args=(file: run/r5-mmaprwn.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-mmaprwn.log
+RES|fio|0|2=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=8160,8224,0,0 short=0,0,0,0 dropped=0,0,0,0      latency   : target=0, window=0, percentile=100.00%, depth=1  Run status group 0 (all jobs)
+boot: class=r5-direct args=(file: run/r5-direct.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-direct.log
+RES|fio|0|0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=16384,0,0,0 short=0,0,0,0 dropped=0,0,0,0  
+RES|fio|0|0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,16384,0,0 short=0,0,0,0 dropped=0,0,0,0  
+boot: class=r5-verify args=(file: run/r5-verify.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-verify.log
+RES|fio|0|0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=4096,4096,0,0 short=0,0,0,0 dropped=0,0,0,0      latency   : target=0, window=0, percentile=100.00%, depth=1  Run status group 0 (all jobs): 
+boot: class=r5-multi args=(file: run/r5-multi.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-multi.log
+RES|fio|0|, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,32,0,0 short=0,0,0,0 dropped=0,0,0,0      latency   : target=0, window=0, percentile=100.00%, depth=1  Run status group 0 (all jobs): 
+=== r5 fio battery done ===

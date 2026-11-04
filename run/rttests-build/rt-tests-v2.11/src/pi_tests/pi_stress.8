@@ -1,0 +1,104 @@
+.\" Process this file with
+.\" groff -man -Tascii pi_stress.8
+.\"
+.\"{{{}}}
+.\"{{{  Title
+.TH pi_stress 8 "Nov 27, 2006" "" "Linux System Administrator's Manual"
+# SPDX-License-Identifier: GPL-2.0-or-later
+.\"}}}
+.\"{{{ Name
+.SH NAME
+pi_stress \- a stress test for POSIX Priority Inheritance mutexes
+.\"}}}
+.\"{{{ Synopsis
+.\" Usage:  pi_stress [-d] [-D TIME] [-g N] [-h] [-i N ] [--json FILENAME ] [-m] [-p] [-q] [-r] [-s OPTS] [-u] [-v] [-V]
+.SH SYNOPSIS
+.B pi_stress
+.RB [ \-d|\-\-debug]
+.RB [ \-D|\-\-duration
+.iR TIME ]
+.RB [ \-g|\-\-groups
+.IR N ]
+.RB [ \-i|\-\-inversions
+.IR INV ]
+.RB [ \-\-json
+.IR FILENAME ]
+.RB [ \-m|\-\-mlockall ]
+.RB [ \-p|\-\-prompt ]
+.RB [ \-q|\-\-quiet ]
+.RB [ \-r|\-\-rr ]
+.RB [ \-s|\-\-sched
+.IR OPTS ]
+.RB [ \-u|\-\-uniprocessor ]
+.RB [ \-v|\-\-verbose ]
+.RB [ \-V|\-\-version ]
+.br
+.SH DESCRIPTION
+.B pi_stress
+is a program used to stress the
+.IR priority-inheritance
+code paths for POSIX mutexes, in both the Linux kernel and the C
+library. It runs as a realtime-priority task and launches
+.IR "inversion machine"
+thread groups. Each inversion group causes a
+.IR "priority inversion"
+condition that will deadlock if 
+.IR "priority inheritance"
+doesn't work.
+
+.SH OPTIONS
+.IP "\-d|\-\-debug"
+Run in debug mode; lots of extra prints
+.IP "\-D TIME, \-\-duration=TIME"
+Specify a length for the test run.
+.br
+Append 'm', 'h', or 'd' to specify minutes, hours or days.
+.IP "\-g N|\-\-groups=N"
+The number of inversion groups to run. Defaults to 10.
+.IP "\-h|\-\-help"
+Display a short help message and options.
+.IP "\-i N|\-\-inversions=N"
+.I N
+number of inversion conditions. This is the total number of inversions
+for all inversion groups. Default is \-1 for infinite.
+.IP "\-\-json=FILENAME"
+Write final results into
+.I FILENAME
+, JSON formatted.
+.IP "\-m|\-\-mlockall"
+Call mlockall to lock current and future memory allocations and
+prevent being paged out
+.IP "\-p|\-\-prompt"
+Prompt before actually starting the stress test
+.IP "\-q|\-\-quiet"
+Suppress running output
+.IP "\-r|\-\-rr"
+Run inversion group threads as SCHED_RR (round-robin). The default is
+to run the inversion threads as SCHED_FIFO.
+.IP "\-s OPTS|\-\-sched OPTS"
+scheduling options per thread type:
+.br
+id=[high|med|low],
+.br
+policy=[fifo,rr],priority=N,
+.br
+policy=deadline,runtime=N,deadline=N,period=N
+.IP "\-u|\-\-uniprocessor"
+Run all threads on one processor. The default is to run all inversion
+group threads on one processor and the admin threads (reporting
+thread, keyboard reader, etc.) on a different processor.
+.IP "\-v|\-\-verbose"
+Run with verbose messages
+.IP "\-V|\-\-version"
+Print version number
+.SH CAVEATS
+The pi_stress test threads run as SCHED_FIFO or SCHED_RR threads,
+which means that they can starve critical system threads. It is
+advisable to change the scheduling policy of critical system threads
+to be SCHED_FIFO prior to running pi_stress and use a priority of 10
+or higher, to prevent those threads from being starved by the stress
+test. 
+.SH BUGS
+No documented bugs. 
+.SH AUTHOR
+Clark Williams <williams@redhat.com>

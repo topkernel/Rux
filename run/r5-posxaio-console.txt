@@ -1,0 +1,12 @@
+inject: building rt-tests suite + qsrun into run/rootfs-qa.img
+
+Allocated inode: 2114
+boot: class=r5-posxaio-decode args=(file: run/r5-posxaio-decode.cmds) dfx=dfx=taskdump,watchdog syscost=1 extra= log=run/qa-runs-r5/r5-posxaio-decode.log
+=== verdict input (protocol lines + failure markers) ===
+dfx: runtime switch 'watchdog' enabled
+QSRUN-BEGIN cmds=/test/qa/cmds.txt n=1
+QS-RUN 1/1 30 fio --name=paio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/e-paio.bin
+RES|fio|0|00.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dropped=0,0
+QS-ALL-DONE
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds

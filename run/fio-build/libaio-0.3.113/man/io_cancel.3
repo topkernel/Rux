@@ -1,0 +1,72 @@
+.TH io_cancel 3 2019-07-23 "Linux" "Linux AIO"
+.SH NAME
+io_cancel \- Cancel io requests
+.SH SYNOPSIS
+.nf
+.B #include <errno.h>
+.sp
+.br
+.B #include <libaio.h>
+.sp
+.br
+.BI "int io_cancel(io_context_t " ctx ", struct iocb *" iocb ");"
+.br
+.sp
+struct iocb {
+	void		*data; /* Return in the io completion event */
+	unsigned	key;	/* For use in identifying io requests */
+	short		aio_lio_opcode;
+	short		aio_reqprio; 	/* Not used */
+	int		aio_fildes;
+};
+.fi
+.SH DESCRIPTION
+Attempts to cancel an
+.I iocb
+previously passed to
+.BR io_submit (3).
+If the operation is successfully cancelled, the resulting event is
+copied into the memory pointed to by result without being placed
+into the completion queue.
+.PP
+When one or more requests are asynchronously processed, it might be
+useful in some situations to cancel a selected operation, e.g., if it
+becomes obvious that the written data is no longer accurate and would
+have to be overwritten soon.  As an example, assume an application, which
+writes data in files in a situation where new incoming data would have
+to be written in a file which will be updated by an enqueued request.
+.SH "RETURN VALUES"
+\fI0\fP is returned on success, otherwise returns \fIerrno\fP.
+.SH ERRORS
+.TP
+.B EFAULT 
+If any of the data structures pointed to are invalid.
+.TP
+.B EINVAL 
+If
+.I aio_context
+specified by
+.I ctx
+is invalid.
+.TP
+.B EAGAIN
+If the
+.I iocb
+specified was not cancelled.
+.TP
+.B ENOSYS 
+If not implemented.
+.SH "SEE ALSO"
+.BR io (3),
+.BR io_fsync (3),
+.BR io_getevents (3),
+.BR io_prep_fsync (3),
+.BR io_prep_pread (3),
+.BR io_prep_pwrite (3),
+.BR io_queue_init (3),
+.BR io_queue_release (3),
+.BR io_queue_run (3),
+.BR io_queue_wait (3),
+.BR io_set_callback (3),
+.BR io_submit (3),
+.BR errno (3).

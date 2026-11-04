@@ -1,0 +1,50 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+
+# README-Dockerfile-rt-tests
+
+## Introduction
+This README provides detailed instructions for setting up an rt-tests container using Docker or Podman. This Dockerfile will pull a current copy of your code (plus all of your changes) and compile it into a container image for you to test with. This will give you an unambiguous way to test your changes, assuming you are running on a semi-modern host OS. The rt-tests container can be used to test any of the subpackages found under the rt-tests project, but is mainly intended for hwlatdetect and cyclictest.
+
+## Prerequisites
+- Docker or Podman installed on your system.
+
+## Installation
+### Prepare Your Environment
+- For EPEL systems (Fedora, CentOS, RHEL):
+  - Install Podman: `sudo dnf install podman -y`
+- For Debian-based systems (Ubuntu):
+  - Install Docker: `sudo apt-get update && sudo apt-get install docker.io -y`
+  - Alternatively, install Podman: `sudo apt-get update && sudo apt-get install podman -y`
+
+### Build the Container
+- Navigate to the root directory of 'rt-tests'
+- Build the container image named 'rt-tests-upstream':
+  - For Podman: `sudo podman build -t rt-tests-upstream .`
+  - For Docker: `sudo docker build -t rt-tests-upstream .`
+
+## Usage
+### Run the Container
+- Start the container in privileged mode:
+  - For Podman: `sudo podman run -it --privileged rt-tests-upstream`
+  - For Docker: `sudo docker run -it --privileged rt-tests-upstream`
+- This will create a long lasting container. In order to use it again (say after a reboot), you need to start and exec into the container to get yourself back into the shell:
+  - For Podman: 
+    - `sudo podman start rt-tests-upstream`
+    - `sudo podman exec -it rt-tests-upstream /bin/bash`
+  - For Docker: 
+    - `sudo docker start rt-tests-upstream`
+    - `sudo docker exec -it rt-tests-upstream /bin/bash`
+- And to clean up and remove your container so you can test a new one:
+  - For Podman: `sudo podman rm -f rt-tests-upstream`
+  - For Docker: `sudo docker rm -f rt-tests-upstream`
+- Please note that the above command does not cleanup the container when you are done. It can be useful to run a single use container when trying to only test a quick change and remove the container afterwards. To run a a single use container that removes itself immediately after you exit the shell, run the following commands with the `--rm` option:
+  - For Podman: `sudo podman run -it --rm --privileged rt-tests-upstream`
+  - For Docker: `sudo docker run -it --rm --privileged rt-tests-upstream`  
+
+### Test rt-tests Build
+- Inside the container, test one of the rt-tests packages you just built: 
+  - Command: `cyclictest -D 1s`
+  - Command: `hwlatdetect --duration 1`
+
+## Conclusion
+Follow these detailed steps for a successful rt-tests container setup using Docker or Podman.

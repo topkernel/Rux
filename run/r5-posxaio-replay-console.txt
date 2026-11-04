@@ -1,0 +1,25 @@
+inject: building rt-tests suite + qsrun into run/rootfs-qa.img
+
+Allocated inode: 2114
+boot: class=r5-posxaio-replay args=(file: run/r5-posxaio-replay.cmds) dfx=dfx=taskdump,watchdog syscost=1 extra= log=run/qa-runs-r5/r5-posxaio-replay.log
+=== verdict input (protocol lines + failure markers) ===
+dfx: runtime switch 'watchdog' enabled
+QSRUN-BEGIN cmds=/test/qa/cmds.txt n=7
+QS-RUN 1/7 30 fio --name=sync --ioengine=sync --rw=write --bs=4k --size=256k --filename=/test/qa/r-sync.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 2/7 30 fio --name=psync --ioengine=psync --rw=write --bs=4k --size=256k --filename=/test/qa/r-psync.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 3/7 30 fio --name=vsync --ioengine=vsync --rw=write --bs=4k --size=256k --filename=/test/qa/r-vsync.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 4/7 30 fio --name=pvsync2 --ioengine=pvsync2 --rw=write --bs=4k --size=256k --filename=/test/qa/r-pvs2.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 5/7 30 fio --name=mmap --ioengine=mmap --rw=write --bs=4k --size=256k --filename=/test/qa/r-mmap.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 6/7 30 fio --name=splice --ioengine=splice --rw=write --bs=4k --size=256k --filename=/test/qa/r-spl.bin
+RES|fio|0|.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dro
+QS-RUN 7/7 60 fio --name=paio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/r-paio.bin
+RES|fio|0|%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%      submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64
+QS-ALL-DONE
+INFO: task 306:306 blocked for more than 179 seconds
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds

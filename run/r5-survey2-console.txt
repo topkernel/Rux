@@ -1,0 +1,18 @@
+inject: building rt-tests suite + qsrun into run/rootfs-qa.img
+
+Allocated inode: 2114
+boot: class=r5-engines2 args=(file: run/r5-engines2.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-engines2.log
+=== verdict input (protocol lines + failure markers) ===
+dfx: runtime switch 'watchdog' enabled
+QSRUN-BEGIN cmds=/test/qa/cmds.txt n=4
+QS-RUN 1/4 30 fio --name=libaio --ioengine=libaio --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laio.bin
+RES|fio|1|libaio: (g=0): rw=write, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=8 fio-3.36 Starting 1 process libaio: Laying out IO file (1 file / 0MiB) fio: pid=309,
+QS-RUN 2/4 30 fio --name=iouring --ioengine=io_uring --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-uring.bin
+RES|fio|139|iouring: (g=0): rw=write, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=8 fio-3.36 Starting 1 process iouring: Laying out IO file (1 file / 0MiB) fio: pi
+QS-RUN 3/4 30 fio --name=syncd --ioengine=sync --direct=1 --rw=write --bs=4k --size=256k --filename=/test/qa/e-syncd.bin
+RES|fio|0|=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,64,0,0 short=0,0,0,0 dropped=0
+QS-RUN 4/4 30 fio --name=laiod --ioengine=libaio --direct=1 --rw=randwrite --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laiod.bin
+RES|fio|1|laiod: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=8 fio-3.36 Starting 1 process laiod: Laying out IO file (1 file / 0MiB) fio: pid=31
+QS-ALL-DONE
+INFO: task 306:306 blocked for more than 180 seconds
+INFO: task 306:306 blocked for more than 120 seconds

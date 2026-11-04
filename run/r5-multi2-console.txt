@@ -1,0 +1,15 @@
+inject: building rt-tests suite + qsrun into run/rootfs-qa.img
+
+Allocated inode: 2114
+boot: class=r5-multi2 args=(file: run/r5-multi2.cmds) dfx=dfx=taskdump,watchdog extra= log=run/qa-runs-r5/r5-multi2.log
+=== verdict input (protocol lines + failure markers) ===
+dfx: runtime switch 'watchdog' enabled
+QSRUN-BEGIN cmds=/test/qa/cmds.txt n=2
+QS-RUN 1/2 120 fio --name=prep --ioengine=psync --rw=write --bs=1M --size=32M --filename=/test/qa/s7.bin
+RES|fio|0|.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,32,0,0 short=0,0,0,0 dropped=0,0,0
+QS-RUN 2/2 240 fio --name=j1 --ioengine=psync --rw=randread --bs=4k --size=32M --filename=/test/qa/s7.bin --name=j2 --rw=randwrite --bs=4k --size=32M --filename=/test/qa/s7.bin --name=j3 --rw=randread
+RES|fio|0|, 32=0.0%, 64=0.0%, >=64=0.0%      issued rwts: total=0,32,0,0 short=0,0,0,0 dropped=0,0,0,0      latency   : target=0, window=0, percentile=100.00%, depth=1  Run status group 0 (all jobs): 
+QS-ALL-DONE
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds
+INFO: task 306:306 blocked for more than 120 seconds
