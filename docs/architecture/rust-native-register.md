@@ -329,6 +329,25 @@ numbers this register cites).
   ported with census A/B verified identical (commit feb54f0a).
   Source: dfx-trace lane TASK.md round-1 verification record
   (run/tr1-kvm-proof-serial.log).
+- **Reference-parity tracefs, event catalog 51** (kernel/src/trace/):
+  rounds 2-3 grew the table to 51 events across 16 groups — the sched
+  waking/wakeup sites and kmem wave (round 2), then the ext4: family
+  (sync_file_enter/exit, ext_map_blocks_enter/exit, da_write_begin/
+  end, free_blocks — reference ext4.h field rows and print fmts
+  verbatim), jbd2:start/end_commit at the journal commit funnel, and
+  the rux:epoll documented-divergence family (the reference has no
+  epoll events; epollscan/epolltrace bespoke switches alias here).
+  Cost discipline held at every wave: all 39 kernel sites verified
+  one-load (movzbl+test+jcc) in release disasm; ENABLED recording
+  13-19 ns/record (pure-write loop) and 28-35 ns/record (epoll
+  ping-pong), round-1's 18-19 ns class; events-off census A/B
+  identical (TERM-DESCHED 8/8, WAKE-REFUSED zero-class, 0 panics);
+  image price of round 3 +24,576 bytes (+0.182%). The bespoke dfx=
+  table stays frozen at 59 and arms reference events through the
+  alias arm (whose merge-lost consumer was found and restored in the
+  same round — dfx= boots had silently armed nothing).
+  Source: dfx-trace3 lane TASK.md round-2/3 verification records
+  (run/tr2-kvm-proof-serial.log, run/tr3 round-3 battery).
 - **Census + heal: the kernel adjudicates its own concurrency model
   against observed reality** (sched/preempt + interrupt, commits
   1854ec4d / bef10f42 / 8387c00b): every task carries per-field

@@ -362,3 +362,16 @@ absents stated plainly. Each absent names what closing looks like.
 - Round-3 (2026-11-03): §2.1 taxonomy v1 landed (33 adjudicated
   memory-corruption rows, residency split 23/10, corrected headline
   claim); §5 gaps register v1; §3 pairing sentences completed.
+- Observability wave 3 (2026-11-04, dfx-trace3 merge): event catalog
+  37 → 51 (ext4:/jbd2: reference families + rux:epoll); disabled-site
+  cost discipline held (39 kernel sites one-load, ASM-verified,
+  addresses in the lane record); enabled cost opt-in at 13-35
+  ns/record; events-off census A/B identical (TERM-DESCHED 8/8, 0
+  panics both sides). Real bug fixed in the same change: the round-2
+  alias CONSUMER (boot arming loop in DfxSwitch::set) was silently
+  dropped by a merge while its table survived — dfx= hunt boots had
+  armed nothing until restored. Lesson: table+consumer pairs
+  reconcile as one unit; keeping the table and losing the call site
+  is a silent observability outage, not a clean merge.
+  Source: dfx-trace3 TASK.md round-3 record (run/tr3-base-check.log,
+  census A/B logs in the lane worktree).
