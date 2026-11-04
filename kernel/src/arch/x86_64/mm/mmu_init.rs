@@ -1333,7 +1333,14 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
 /// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
 /// fake-OOM family notes in alloc_page_table).
-unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+///
+/// No-TLB-flush contract (fault-around batches): callers installing
+/// leaves into slots that were NOT PRESENT (verified by their own walk
+/// immediately before, under the PTE lock) need no invlpg — x86 never
+/// caches non-present translations, and every teardown path
+/// (munmap/mprotect) flushes what it zaps. Callers REPLACING a present
+/// leaf must flush that VA themselves.
+pub(crate) unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 

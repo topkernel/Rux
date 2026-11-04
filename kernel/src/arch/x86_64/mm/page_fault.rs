@@ -11,7 +11,7 @@
 //! walk depth are x86-specific.
 
 use super::memory_layout::*;
-use super::mmu_init::{map_page, get_page_table_virt, ROOT_PAGE_TABLE};
+use super::mmu_init::{map_page, map_page_noflush, get_page_table_virt, ROOT_PAGE_TABLE};
 use super::mm_ops::{alloc_user_phys_page, is_cow_page, check_pte_permissions, PageTableWalker};
 use super::pagetable::*;
 use crate::mm::page::PAGE_SIZE as PAGE_SIZE_USIZE;
@@ -271,6 +271,17 @@ fn try_expand_stack(
 /// unmapped (a later touch re-faults into the SIGBUS gate), and write
 /// faults opt out (Linux do_fault_around parity).
 const FAULT_AROUND_PAGES: usize = 16;
+
+/// SHARED read fault-around window (perf-gap-hunt 2026-11-04): pages
+/// prefetched per SHARED read fault, clamped by VMA end and EOF, and
+/// bounded to the CONTIGUOUS RESIDENT run (holes stop the batch — a cold
+/// or sparse mapping still faults page-by-page through the populate arm).
+/// 512 pages = 2 MiB per fault; sequential mappers re-fault once per 2 MiB,
+/// which is where the lat_pagefault amortization sits after the slot-batch
+/// walker removed the per-page walk cost.
+const SHARED_FAULT_AROUND_PAGES: usize = 512;
+/// Pin-run chunk for the SHARED fault-around (bounds the stack array).
+const SHARED_PIN_CHUNK: usize = 64;
 
 /// sc181: forward fault-around window (pages) for anonymous WRITE faults
 /// on large VMAs — the hilogd-ring family (see the anon batch in
@@ -854,6 +865,290 @@ pub fn handle_mm_fault(
                     crate::fs::ext4::file::is_ext4_file(f.as_ref())
                         || crate::fs::tmpfs::is_tmpfs_file(f.as_ref())
                 }) {
+                    // Fault-around for SHARED read faults (perf-gap-hunt
+                    // 2026-11-04): the reference's filemap_map_pages serves
+                    // SHARED read faults with the same batching as private
+                    // ones; the single-page arm below mapped exactly ONE
+                    // page per trap, which is the lat_pagefault 6.5x gap
+                    // (every touch of a MAP_SHARED read mapping trapped).
+                    // Warm path only: pin the contiguous RESIDENT run
+                    // starting at the faulting page in chunks
+                    // (get_range_into: one claim + one inode lock + one
+                    // BTreeMap range walk per chunk), map each chunk under
+                    // one verify + PTE-lock section with a SLOT-BATCHED
+                    // walker (one upper-level walk per 2 MB region; one
+                    // leaf load + one leaf store per page). A run of 0 on
+                    // the FIRST chunk (cold faulting page) falls through to
+                    // the single-page populate arm below, which warms it
+                    // for the next touch's batch. Write faults keep the
+                    // single-page arm (a write is the demand marker, not a
+                    // prefetch). Window: SHARED_FAULT_AROUND_PAGES — wide,
+                    // but only pages ALREADY RESIDENT in the page cache are
+                    // prefetched (a hole stops the run), so a cold sparse
+                    // mapping still faults one page at a time.
+                    if !is_write {
+                        let fault_page =
+                            page_virt_addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
+                        // Window bounds: VMA end (INV-VMA-4), then EOF — a
+                        // page whose file offset is >= effective_size stays
+                        // UNMAPPED so a later touch re-faults into the
+                        // SIGBUS gate above (mmap13 truncate semantics).
+                        let eof_limit =
+                            vma_start + effective_size.saturating_sub(vma_offset);
+                        let win_end = (fault_page
+                            + SHARED_FAULT_AROUND_PAGES * PAGE_SIZE_USIZE)
+                            .min(vma_end)
+                            .min(eof_limit);
+                        // fault_page < win_end always: the SIGBUS gate
+                        // above passed for the faulting page.
+                        let win_pages = ((win_end - fault_page
+                            + PAGE_SIZE_USIZE
+                            - 1)
+                            / PAGE_SIZE_USIZE)
+                            .min(SHARED_FAULT_AROUND_PAGES);
+                        let page_index = ((vma_offset + (fault_page - vma_start))
+                            / PAGE_SIZE_USIZE)
+                            as u64;
+                        let inode_ref = unsafe { &*file.inode.get() }.as_ref();
+                        if let Some(inode) = inode_ref {
+                            let cache = crate::fs::page_cache::get_page_cache();
+                            let (fs_id, ino) =
+                                (inode.fs_id, inode.ino as u64);
+                            let mut sp_flags = PageTableEntry::P
+                                | PageTableEntry::A
+                                | PageTableEntry::D
+                                | PageTableEntry::NX
+                                | PageTableEntry::U
+                                | super::mm_ops::cow_flags::PCACHE;
+                            let want_w = vma_flags.is_writable();
+                            if want_w {
+                                sp_flags |= PageTableEntry::W
+                                    | super::mm_ops::cow_flags::PCACHE_SHARED;
+                            }
+                            if vma_flags.is_executable() {
+                                sp_flags &= !PageTableEntry::NX;
+                            }
+                            let mut base_off = 0usize; // window pages consumed
+                            let mut mapped_total: u64 = 0;
+                            let mut fault_pg_failed = false;
+                            let mut verify_failed = false;
+                            // Chunk loop: pin a resident run, verify, map,
+                            // repeat while the run stayed contiguous.
+                            while base_off < win_pages {
+                                let want =
+                                    (win_pages - base_off).min(SHARED_PIN_CHUNK);
+                                let mut run: [(u64, *const u8); SHARED_PIN_CHUNK] =
+                                    [(0, core::ptr::null::<u8>()); SHARED_PIN_CHUNK];
+                                // Pin phase — NO locks held (the vma guard
+                                // is taken after; R73: never pin/IO under
+                                // the vma guard). Stops at the first hole.
+                                let n = cache.get_range_into(
+                                    fs_id,
+                                    ino,
+                                    page_index + base_off as u64,
+                                    &mut run[..want],
+                                );
+                                if n == 0 {
+                                    break; // cold page (first chunk) or hole
+                                }
+                                // Map-phase guard discipline (the PRIVATE
+                                // arm's twin, INV-LOCK-7 order vma -> pte):
+                                // re-verify the VMA snapshot under a read
+                                // guard held across this chunk's maps —
+                                // every mm-side mutator of the range needs
+                                // the write lock, so it cannot interleave
+                                // between verify and map.
+                                let vma_mgr2 = addr_space.vma_read();
+                                let snapshot_ok = vma_mgr2
+                                    .find(PageVirtAddr::new(fault_page))
+                                    .is_some_and(|v| {
+                                        v.start().as_usize() == vma_start
+                                            && v.end().as_usize() >= win_end
+                                            && v.offset() == vma_offset
+                                            && v.file_fd() == vma_file_fd
+                                            && v.flags() == vma_flags
+                                    });
+                                if !snapshot_ok {
+                                    drop(vma_mgr2);
+                                    // VMA changed under us: release this
+                                    // chunk's pins and retry — the fresh
+                                    // fault takes current VMA state. Pages
+                                    // mapped by EARLIER chunks were mapped
+                                    // under their own live verification.
+                                    cache.put_range(fs_id, ino, &run[..n]);
+                                    verify_failed = true;
+                                    break;
+                                }
+                                // One PTE-lock section for the chunk: a
+                                // concurrent fork COW walk cannot observe a
+                                // half-mapped window.
+                                let _pte_guard =
+                                    crate::arch::mm::mm_ops::pte_lock_for(addr_space)
+                                        .lock();
+                                // Slot-batched walk: the L1 (PT) table for
+                                // the current 2 MB region is resolved once
+                                // and reused; only the leaf load/store
+                                // remains per page. None (missing upper
+                                // level / huge leaf) falls back to
+                                // map_page_noflush for that page, which
+                                // allocates/demotes, then re-resolves.
+                                let mut l1: Option<(*mut PageTable, usize)> = None;
+                                for i in 0..n {
+                                    let va = fault_page
+                                        + (base_off + i) * PAGE_SIZE_USIZE;
+                                    let region = va & !0x1F_FFFF;
+                                    if l1.map_or(true, |(_t, b)| b != region) {
+                                        // SAFETY: root_ppn is the address
+                                        // space's valid root; read-only walk.
+                                        l1 = unsafe {
+                                            l1_table_for(
+                                                root_ppn,
+                                                VirtAddr::new(va as u64),
+                                            )
+                                        }
+                                        .map(|t| (t, region));
+                                    }
+                                    let mut installed = false;
+                                    match l1 {
+                                        Some((table, _)) => {
+                                            let slot = (va >> 12) & 0x1FF;
+                                            // SAFETY: table is the L1 for
+                                            // this verified region of this
+                                            // address space; slot < 512.
+                                            let bits =
+                                                unsafe { (*table).get(slot).bits() };
+                                            if bits != 0
+                                                && pte_counts_as_mapped(
+                                                    bits,
+                                                    va as u64,
+                                                )
+                                            {
+                                                // Lost the race to an
+                                                // identical mapping: the
+                                                // pin is surplus.
+                                                cache.put_range(
+                                                    fs_id,
+                                                    ino,
+                                                    &run[i..i + 1],
+                                                );
+                                                continue;
+                                            }
+                                            let phys_i = virt_to_phys(
+                                                VirtAddr::new(run[i].1 as u64),
+                                            );
+                                            // SAFETY: leaf slot verified
+                                            // non-present above, under the
+                                            // PTE lock; phys is the pinned
+                                            // cache frame. No invlpg —
+                                            // fresh installs are not TLB
+                                            // cached (map_page_noflush's
+                                            // contract).
+                                            unsafe {
+                                                (*table).set(
+                                                    slot,
+                                                    PageTableEntry::from_bits(
+                                                        phys_i.bits() | sp_flags,
+                                                    ),
+                                                );
+                                            }
+                                            installed = true;
+                                        }
+                                        None => {
+                                            // SAFETY: fallback with full
+                                            // allocation/demotion handling;
+                                            // same contract as the arms.
+                                            let ok = unsafe {
+                                                map_page_noflush(
+                                                    root_ppn,
+                                                    VirtAddr::new(va as u64),
+                                                    virt_to_phys(VirtAddr::new(
+                                                        run[i].1 as u64,
+                                                    )),
+                                                    sp_flags,
+                                                )
+                                            };
+                                            if ok {
+                                                installed = true;
+                                            } else {
+                                                // PT alloc failure: release
+                                                // this page's pin; the
+                                                // FAULTING page failing
+                                                // means OOM.
+                                                cache.put_range(
+                                                    fs_id,
+                                                    ino,
+                                                    &run[i..i + 1],
+                                                );
+                                                if base_off + i == 0 {
+                                                    fault_pg_failed = true;
+                                                }
+                                                l1 = None;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    if installed {
+                                        // One descriptor ref + mapcount per
+                                        // mapped leaf (dropped at unmap like
+                                        // every PCACHE mapping); no rmap —
+                                        // the frame's eviction keys belong
+                                        // to the page cache.
+                                        // SAFETY: pinned cache frame just
+                                        // mapped under the PTE lock.
+                                        unsafe {
+                                            filemap_bookkeep_mapped_cache_page(
+                                                virt_to_phys(VirtAddr::new(
+                                                    run[i].1 as u64,
+                                                ))
+                                                .bits(),
+                                            );
+                                        }
+                                        mapped_total += 1;
+                                    }
+                                }
+                                drop(_pte_guard);
+                                drop(vma_mgr2);
+                                base_off += n;
+                                if n < want {
+                                    break; // hole ended the resident run
+                                }
+                            }
+                            if verify_failed {
+                                return MmFaultResult::Handled;
+                            }
+                            if mapped_total > 0 {
+                                if want_w
+                                    && crate::fs::ext4::file::is_ext4_file(
+                                        file.as_ref(),
+                                    )
+                                {
+                                    // Conservative v1 dirty mark (the
+                                    // single-page arm's rule, applied to the
+                                    // prefetched window): a writable mapping
+                                    // MAY write; flushing an unwritten page
+                                    // is harmless I/O.
+                                    for idx in 0..base_off as u64 {
+                                        cache.mark_dirty(
+                                            fs_id,
+                                            ino,
+                                            page_index + idx,
+                                        );
+                                    }
+                                }
+                                addr_space.add_rss(mapped_total);
+                                if fault_pg_failed {
+                                    return MmFaultResult::OutOfMemory;
+                                }
+                                return MmFaultResult::Handled;
+                            }
+                            if fault_pg_failed {
+                                return MmFaultResult::OutOfMemory;
+                            }
+                            // mapped_total == 0: cold faulting page — the
+                            // single-page populate arm below warms it (and
+                            // the next touch in this window batches).
+                        }
+                    }
                     // tmpfs (LTP setup_ipc prefers /dev/shm for its shared
                     // results/checkpoint page): alias through the page
                     // cache via the fs-agnostic populate (bounce read of
@@ -1626,6 +1921,43 @@ pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
         if !pte2.is_valid() || pte2.is_leaf() { return; }
         let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
         (*table1).set(vpn1, super::pagetable::PageTableEntry::from_bits(bits));
+    }
+}
+
+/// Slot-batch helper (fault-around map phase, perf-gap-hunt): walk the
+/// upper three levels ONLY and return the level-1 (PT) table pointer
+/// covering `vaddr`'s 2 MB region. Returns None when an intermediate
+/// level is missing (caller falls back to `map_page_noflush`, which
+/// allocates) or is a huge leaf needing demotion (same fallback). The
+/// leaf slot itself is the CALLER's to read/write — this is the one-walk
+/// primitive that keeps a 512-page batch at one leaf load + one leaf
+/// store per page.
+///
+/// # SAFETY
+/// `root_ppn` is a valid root page-table PPN for the current address
+/// space. Read-only walk of paging structures.
+pub(crate) unsafe fn l1_table_for(root_ppn: u64, vaddr: VirtAddr) -> Option<*mut PageTable> {
+    let a = VirtAddr::new(vaddr.bits());
+    let vpn4 = a.pgd_index() as usize;
+    let vpn3 = a.pud_index() as usize;
+    let vpn2 = a.pmd_index() as usize;
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte4 = (*root_table).get(vpn4);
+        if !pte4.is_valid() {
+            return None;
+        }
+        let table3 = get_page_table_virt(pte4.ppn() << PAGE_SHIFT);
+        let pte3 = (*table3).get(vpn3);
+        if !pte3.is_valid() || pte3.is_leaf() {
+            return None;
+        }
+        let table2 = get_page_table_virt(pte3.ppn() << PAGE_SHIFT);
+        let pte2 = (*table2).get(vpn2);
+        if !pte2.is_valid() || pte2.is_leaf() {
+            return None;
+        }
+        Some(get_page_table_virt(pte2.ppn() << PAGE_SHIFT))
     }
 }
 

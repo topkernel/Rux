@@ -919,6 +919,50 @@ impl PageCache {
         drop(entry);
     }
 
+    /// Batched form of `put_by_key` for the unmap fast path
+    /// (perf-gap-hunt 2026-11-04): release the pins of every listed page
+    /// index under ONE claim + ONE inode lock, instead of a hash probe +
+    /// claim + lock + BTreeMap get PER PAGE (which measured ~40ns/page —
+    /// the dominant teardown cost of large PCACHE-mapped munmaps; the
+    /// fault-around windows make such runs the common shape). Same
+    /// release discipline as put_range, keyed by cache key like
+    /// put_by_key (the mm side only has the descriptor's mapping key).
+    pub fn put_range_by_key(&self, key: u64, pages: &[u64]) {
+        if pages.is_empty() {
+            return;
+        }
+        let Some(entry) = self.lookup_claimed(key) else {
+            return;
+        };
+        let emptied = {
+            let mut g = entry.lock.lock();
+            for &page_index in pages {
+                if let Some(page) = g.get_mut(&page_index) {
+                    let decremented = page.unpin_locked();
+                    if decremented
+                        && page.count_locked() == 0
+                        && page.invalidated
+                        && page.take_released_locked()
+                    {
+                        let pfn = page.pfn;
+                        g.remove(&page_index);
+                        let page_desc = pfn_to_page_mut(pfn);
+                        if !page_desc.is_null() {
+                            unsafe { lru::page_remove_lru(&*page_desc); }
+                        }
+                        release_page_frame(pfn);
+                        self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            g.is_empty()
+        };
+        if emptied {
+            self.remove_entry(key, &entry);
+        }
+        drop(entry);
+    }
+
     /// mm-side pin acquisition for a frame the page tables are about to
     /// share (fork's COW walk copying a cache-mapped PTE into the child).
     ///
