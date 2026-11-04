@@ -3490,3 +3490,62 @@ dfx=ams46,txnhunt negmemo=1) — rolling at write time
 - The 36th's parallel rolls on ITS OWN sameproc build
   (bzImage-cg36-sameproc-dbg) agree: lb424/425/426 all wedge in the
   same residual family.
+
+### 6. TWO MORE ROOT-CAUSE FIXES from the verification loop (the 36th's puzzles)
+
+**22fdd846 — the POOL-DRAIN fix (ERESTARTSYS parity).** OH's
+BinderInvoker::StartWorkLoop aborts the work loop on ANY
+TransactWithDriver error other than ECONNREFUSED/EBADF ("returned
+unexpected error, aborting") and the thread EXITS. Our BWR park path
+eagerly converted the wait_event_interruptible sentinel to -EINTR, so
+EVERY signal touch on a parked reader killed that worker (the 36th's
+"196 idle readers -> pool exhausted" puzzle: the readers were
+signal-aborted out of their loops). The reference propagates raw
+-ERESTARTSYS; its syscall exit RESTARTS the ioctl transparently (no
+handler: rewind rip + restore orig_rax) or converts to EINTR only when
+a handler frame is built. Our trap-exit machinery (signal.rs
+restart_syscall_no_handler + setup_frame) already implemented both arms
+for the other ERESTARTSYS users — the binder site just never fed it
+the sentinel. Fixed: return -512 raw. Cross-check: the reference's
+samgr pool PERSISTS (fuxref tscen fx8: 23-24 threads in EVERY 1s sweep
+31s-275s). The 36th confirmed post-fix: 17 OS_IPC workers + main
+persist at wedge.
+
+**The numExecuting_ probe question (36th's second suspect) — answered
+from source, no kernel bug.** GetMaxThreadNum = (16*2)/PROTO_NUM(=2) +
+1 = 17 (NOT small). The pool is created in
+IPCProcessSkeleton::GetCurrent() at INSTANCE CREATION (before samgr's
+main enters its work loop), so OH's only true leak shapes —
+LockForNumExecuting increments before its threadPool_==null return
+while UnlockForNumExecuting returns before the decrement (and both
+CHECK_INSTANCE_EXIT early-returns) — cannot fire in samgr's live
+config. The single increment/decrement pair around HandleCommands is
+unconditionally balanced. Therefore the probe parking forever means 17
+handlers GENUINELY stuck inside HandleCommands in userspace FFRT
+waits; the "15 idle readers" are sync-CLIENT parks. Residual wedge
+engine = FFRT-internal handler waits (the 25th's userspace-internal
+adjudication family; fuxstuck anywoken=0) — kernel levers: the per-op
+wall (perf lane) + the pid-1 monopolist face below.
+
+**ea7e4218 — the residual's instrument.** The OTHER residual face
+(cgf1-v1 boot): WAKE-STRANDED incumbent = PID 1 (init) holding
+pc=1/2/65537 for 345s+ from the SIGCHLD-reap moment (~40.6s), starving
+RCU grace (RCU-GP-BOUND flood, CPU0 qs counter pinned; fdreap close
+stalls snowball). Landed: one-shot dump_all_tasks("rcu-gp-frozen-cpu")
+after 32 consecutive failed grace rounds — the healthy-CPU waiter
+names the frozen CPU's incumbent stack on the next boot that hits this
+face.
+
+### 7. Verification state (bzImage-cgf3-dbg = all five fixes)
+- make test x86_64 ALL PASSED again on the final tree
+  (run/cgf3-maketest-x86.log); riscv64 + aarch64 builds rc=0.
+- Roll (run/cgf-roll.sh, fresh2 reflinks, SMP2 LOGLEVEL6
+  dfx=ams46,txnhunt negmemo=1): cgf1 SA=52 wedge@383s (load 9.56,
+  HEALTHY-noladder shape), cgf2 SA=60 wedge@383s (load 11.83, samgr
+  handlers in FFRT waits: softbus/foundation code-6 exec 358-367s,
+  RCU-GP sparse not frozen — no monopolist). Both boots show ZERO
+  same-proc txns, ZERO mirror crosswaits, pool persisting, guards
+  firing single digits. Roll continues to cgf8 — next agent reads
+  run/roll-logs/cgf-roll.log for the final rate table.
+- Host load 5.8-11.8 the whole evening (36th's rolls + other lanes) —
+  no quiet window; the dice numbers are load-inflated.
