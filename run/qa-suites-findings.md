@@ -90,3 +90,52 @@ v2.11 (use `-T`).
 ## Round 1 status
 - rt-tests: ONBOARDED (8 classes run, 6 PASS, 2 FAIL with named
   owners). Next: kselftest portable subset, then fio.
+
+## Round 2 — full battery rerun on main 0c8e4b79 (rebase; kernel net/
+sched/timer code unchanged vs round 1 — only a default-off dfx print
+probe in file.rs landed between). Rig identical, logs in
+run/qa-runs-r2/ (fresh-boot classes, one per boot).
+
+| class | round 1 (d08f8cd7) | round 2 (0c8e4b79) | verdict |
+|---|---|---|---|
+| hackbench socketpair `20 process` | PASS 0.811 s | PASS 0.791 s | PASS (steady) |
+| hackbench pipe `-p 20` | PASS 0.406 s | PASS 0.415 s | PASS (steady) |
+| hackbench threads `-T 20` | PASS 1.003 s | PASS 0.807 s | PASS (steady) |
+| hackbench scale `-g 40 -l 500` | PASS 22.978 s | PASS 22.303 s | PASS (steady) |
+| hackbench inet `-g 2 -f 10` | FAIL F-1 (EINPROGRESS, rc=1, T=0) | **TIMEOUT** — 40 tasks block >120 s until qsrun TERM (`TIMEOUT-TERM`, run/qa-runs-r2/hackbench-inet-g2.log) | **TIMEOUT = P0-class** (F-1 variant — see below) |
+| cyclictest SCHED_OTHER `-D 30 -i 1000 -m` | PASS 38 missed, avg 92, max 2602 | PASS 38 missed, avg 95, max 3149 | PASS (same class; timers domain steady) |
+| cyclictest SCHED_FIFO p98 | PASS 42 missed, avg 95, max 2132 | PASS 33 missed, avg 89, max 1142 | PASS (same class) |
+| pi_stress `-D 15 -g 2` | FAIL F-2 ENOSYS | FAIL F-2 ENOSYS (identical) | FAIL(gap), unchanged |
+
+### F-1 update (round 2): symptom is BOOT-STATE dependent — fresh boot HANGS instead of erroring
+- Round 1 ran inet classes sequentially in ONE boot: g=1 completed
+  first, then every larger shape failed instantly with
+  `connect (error: Operation in progress)` rc=1.
+- Round 2 ran `hackbench -i -g 2 -f 10` on a FRESH boot as the first
+  class: NO EINPROGRESS — all 20 server listens happen (tcp-listen
+  ports 32768..32810), every client handshake completes (SYN/SYN+ACK/
+  ACK traced), then only ONE pair ever carries data (12x repeated
+  PSH+ACK/ACK on 32769->32768, retransmit-shaped), the other 39 tasks
+  never make progress, and the boot sits blocked until the 120 s
+  qsrun TERM. hackbench's TERM handler longjmps out and exits rc=0 —
+  the RES rc=0 is a FALSE PASS; the `TIMEOUT-TERM` marker is the real
+  verdict (P0 house rule).
+- Conclusion for the owning hunt: the loopback TCP defect is not
+  (only) in connect — on a cold stack the handshake path works and the
+  DATA path stalls (single-pair retransmit loop); connect() inline
+  completion (EINPROGRESS surfacing) depends on warm boot state.
+- Repro (deterministic, 2 boots): fresh boot `hackbench -i -g 2 -f
+  10` → hang; same boot after `hackbench -i -g 1 -f 4` → instant
+  EINPROGRESS rc=1. Kernel net code identical in both rounds.
+- Owner unchanged: lmbench-fix / OH-net P0 loopback-TCP hunt —
+  handoff updated via coordinator (round 2).
+
+### Harness note (qsrun)
+- TIMEOUT-TERM classes must be read from the marker, not the RES rc:
+  upstream hackbench's SIGTERM handler longjmps and yields rc=0.
+
+## Round 2 status
+- rt-tests battery on main 0c8e4b79: 5 PASS, 1 TIMEOUT (P0-class
+  handoff, F-1 variant), 1 FAIL(gap) F-2, plus 1 FAIL-toolchain F-3
+  unchanged. Timers-domain probe (cyclictest) steady on new main.
+- Next: kselftest portable subset.
