@@ -1,0 +1,7 @@
+# idx|test|class|rc|tail
+0|pipe02|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s pipe02.c:77: TPASS: Child killed by SIGPIPE  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+1|pipe08|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s pipe08.c:37: TPASS: sigpipe_cnt == 1 (1)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+2|write05|PASS|0|ze) : EBADF (9) write05.c:62: TPASS: write(*tc->fd, *tc->buf, tc->size) : EFAULT (14) write05.c:62: TPASS: write(*tc->fd, *tc->buf, tc->size) : EPIPE (32)  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+3|writev01|PASS|0|ritev01.c:129: TPASS: NULL and zero length iovec, expected: 64, got: 64 writev01.c:124: TPASS: write to closed pipe, expected: -1 (EPIPE), got: -1 (EPIPE)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+4|execve03|PASS|0|ailed as expected: EFAULT (14) execve03.c:124: TPASS: execve failed as expected: EACCES (13) execve03.c:124: TPASS: execve failed as expected: ENOEXEC (8)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+5|access02|PASS|0|cess02.c:139: TPASS: access(symlink_x, X_OK) as root behaviour is correct. access02.c:139: TPASS: access(symlink_x, X_OK) as nobody behaviour is correct.  Summary: passed   16 failed   0 broken   0 skipped  0 warnings 0

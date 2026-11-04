@@ -1183,17 +1183,19 @@ impl FdTable {
 
         // R13-4/R14-5 (lock-free slots update): the removal — slot null
         // store + metadata — runs under the entry lock exactly as before;
-        // the removed Arc is PARKED for the fdreap reaper and the
-        // last-reference close decision runs POST-GRACE outside the lock.
-        // The grace period is where the count==1 decision is sound:
-        // lock-free readers do not pass through the entry lock, so the
-        // old "decision under the lock" argument does not hold against
-        // them — a completed grace period is what proves no in-flight
-        // get_file clone can bump the count. The close op still never
-        // executes with IRQs off under the entry lock (R14-5); it now
-        // runs in the reaper kthread a grace period after the close
-        // (µs on a standard boot — see fs/fdreap.rs for the timing
-        // implications for blocked peers).
+        // the removed Arc is parked for a POST-GRACE close decision
+        // outside the lock. The grace period is where the count==1
+        // decision is sound: lock-free readers do not pass through the
+        // entry lock, so the old "decision under the lock" argument does
+        // not hold against them — a completed grace period is what proves
+        // no in-flight get_file clone can bump the count. The close op
+        // still never executes with IRQs off under the entry lock
+        // (R14-5). REFERENCE PARITY (r26): retire_complete waits for the
+        // decisions to COMPLETE before close(2) returns — the reference
+        // runs the final fput in task work at return-to-userspace, and
+        // userspace must never observe a closed fd whose side effects
+        // (EPIPE on the pipe, lock release, IN_CLOSE_*) have not run
+        // (LTP pipe08/writev01/fcntl15/inotify01/execve03 family).
         let removed: Option<Arc<File>> = {
             let mut entry = self.entry.lock_irqsave();
             // SAFETY: the swap atomically takes the slot's reference; the
@@ -1219,20 +1221,23 @@ impl FdTable {
             Some(unsafe { Arc::from_raw(p) })
         };
         if let Some(file) = removed {
-            // Park for the post-grace drop in the fdreap reaper (the
-            // deferred-fput shape): the slot-null store precedes the
-            // park, and the reaper's grace period is what proves no
-            // lock-free reader is mid-clone for the count==1 decision.
-            crate::fs::fdreap::retire(file);
+            // Park for the post-grace close decision and COMPLETE it
+            // before returning (the deferred-fput shape with reference
+            // task_work timing — see fs/fdreap.rs): the slot-null store
+            // precedes the park, the grace period proves no lock-free
+            // reader is mid-clone for the count==1 decision, and the
+            // decision runs before userspace resumes.
+            crate::fs::fdreap::retire_complete(file);
         }
         Ok(())
     }
 
-    /// Park a removed slot occupant for the post-grace drop. Writers
+    /// Park a removed slot occupant for the post-grace close decision,
+    /// completed before returning (reference task_work timing). Writers
     /// call this AFTER releasing the entry lock (R14-5: nothing here
     /// may spin or run close ops under it).
     fn park_and_drain(&self, file: Arc<File>) {
-        crate::fs::fdreap::retire(file);
+        crate::fs::fdreap::retire_complete(file);
     }
 
     /// The last-reference close discipline shared by the retire reaper

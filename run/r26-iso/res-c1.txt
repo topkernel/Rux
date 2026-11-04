@@ -1,0 +1,4 @@
+# idx|test|class|rc|tail
+0|inotify01|FAIL|1|: get event: wd=1 mask=02 (expected 20) cookie=0 len=0 inotify01.c:134: TFAIL: didn't get event: mask=02 inotify01.c:134: TFAIL: didn't get event: mask=08  Summary: passed   3 failed   4 broken   0 skipped  0 warnings 0
+1|inotify02|FAIL|1|event: wd=1 mask=00000800 (expected 200) cookie=0     len=0  name="" (expected "test_file2") 116 inotify02.c:196: TFAIL: didn't get event: mask=00000800   Summary: passed   3 failed   6 broken   0 skipped  0 warnings 0
+2|inotify05|FAIL|1|NFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s inotify05.c:84: TFAIL: get event: wd=1 mask=8 cookie=0 (expected 0) len=0  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0

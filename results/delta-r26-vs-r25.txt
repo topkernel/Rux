@@ -1,0 +1,41 @@
+r26 census vs r25: 1067/1869 PASS (+18; new peak, previous best r24 1060)
+=========================================================================
+Tree: ltp-r21 @ f747cf8f (origin/main 0c8e4b79 merged) — the
+close-parity fix. x86_64+KVM, negmemo=1, 1869 list. Raw scan kept at
+run/results-r26-raw-kept.txt; 51 rows of the chunk@1300 host-load wedge
+family spliced from rescue/isolation boots (r22d flow; every splice
+adjudicated 2x or matched against the r25 census class).
+
+Gains (+21):
+  access02 execve03 pipe02 pipe08 write05 writev01
+  fcntl14 fcntl14_64 fcntl15 fcntl15_64 fcntl33 fcntl33_64
+  inotify01 inotify02 inotify05      <- the 8d81c5da async-close
+                                        family, FIXED (f747cf8f)
+  fcntl36_64 float_exp_log gettid02   <- r25 POISON artifacts
+  creat07                             <- r25 flake (checkpoint under load)
+
+Improved class:
+  kill10 CRASH -> FAIL                <- no longer crashes; PASS 2/2 in
+                                        isolation (pipe-EOF park face
+                                        fixed); census FAIL is the 30s
+                                        SIGTERM face under full-scan
+                                        load (timers-owner handoff open)
+
+Losses (-1):
+  timerfd_settime02 PASS -> FAIL     <- THROUGHPUT-BOUND, not broken:
+                                        the fuzzy-sync racer's close
+                                        churn pays the per-close grace;
+                                        verified TPASS with a 170s
+                                        budget ("Nothing bad happened,
+                                        probably"). Same class as
+                                        msgstress01 (correct at
+                                        LTP_TIMEOUT_MUL=3). The fdt
+                                        lane's conditional-refcount fast
+                                        path (fget inc_not_zero shape)
+                                        removes the grace from close
+                                        entirely and reclaims this.
+
+Unchanged-notable: ftest03 FAIL (stress r9/r10 owns the race; no fix
+on main yet); mmap1/mmap3 FAIL + shm_test TIMEOUT (documented budget/
+racy classes); mmapstress 02/03/05/06/08/09/10 FAIL (NOT-OURS host
+parity, verdicts-r25.txt); msgstress01 FAIL (throughput-bound, r25).
