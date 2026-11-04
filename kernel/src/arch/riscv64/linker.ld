@@ -72,10 +72,12 @@ SECTIONS
 
 	_end = .;
 
-	/* RUX-RISCV-LAYOUT-4: boot.S's early page tables (trampoline_pmd and
-	 * early_pmd) map a 10-PMD (20MB) image window: KERNEL_VIRT ..
-	 * KERNEL_VIRT + 0x1400000. (LAYOUT-3 grew it 14MB->18MB for kallsyms;
-	 * the LTP lane's syscall-contract batch then outgrew 18MB.) (RUX-RISCV-LAYOUT-2 grew it to 14MB;
+	/* RUX-RISCV-LAYOUT-5: boot.S's early page tables (trampoline_pmd and
+	 * early_pmd) map a 12-PMD (24MB) image window: KERNEL_VIRT ..
+	 * KERNEL_VIRT + 0x1800000. (LAYOUT-4 grew it 18MB->20MB for the LTP
+	 * syscall-contract batch; the LTP r27 session — pidfd subsystem,
+	 * ext4 file handles, portable mincore walk — then outgrew 20MB.)
+	 * (RUX-RISCV-LAYOUT-2 grew it to 14MB;
 	 * an intermediate branch bump to 16MB for the static buddy
 	 * BlockMeta/free-bitmap arrays was subsumed by the 14MB->18MB move.)
 	 * If the image (text+rodata+data+bss incl.
@@ -89,7 +91,7 @@ SECTIONS
 	 * RUX-RISCV-LAYOUT-3: 14MB->18MB so the full kernel symbol table
 	 * (~3.1MB .rodata: 2.4MB names + 0.7MB index) fits in the image
 	 * alongside the ~12.5MB image it annotates. */
-	ASSERT(_end <= 0xffffffff81400000, "kernel image outgrew the boot.S 20MB early window: extend the window (both PMD tables) and move heap+reservation together")
+	ASSERT(_end <= 0xffffffff81800000, "kernel image outgrew the boot.S 24MB early window: extend the window (both PMD tables) and move heap+reservation together")
 
 	/DISCARD/ :
 	{

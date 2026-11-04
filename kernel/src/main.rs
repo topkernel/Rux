@@ -1263,8 +1263,10 @@ use core::arch::global_asm;
 /// of .text — hot-path frames symbolized to '?'). Window/heap/reservation
 /// moved 14MB->18MB together (boot.S both PMD tables, linker.ld ASSERT,
 /// memory_layout.rs, buddy_allocator.rs).
+// RUX-RISCV-LAYOUT-5: image window 20MB->24MB; reserve 22MB->26MB
+// (0x81a00000 heap base - 0x80000000 RAM base), heap phys moved together.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x160_0000; // 22MB
+const KERNEL_RESERVE_SIZE: usize = 0x1A0_0000; // 26MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 #[cfg(feature = "aarch64")]
@@ -1279,7 +1281,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x8160_0000;
+const KERNEL_HEAP_PHYS: usize = 0x81a0_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 // aarch64: kernel window is [0x4008_0000, 0x4280_0000) (32MB; the
