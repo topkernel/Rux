@@ -6527,3 +6527,111 @@ system-lb5, dfx=ams46,txnhunt negmemo=1)
    roll poproll2b again if one appears.
 4. The 262337 extent-tail csum gap (entry point 3 of the 31st) is the
    remaining fs residual — visible again in every post-kill fsck here.
+
+## Round 13+14 (2026-11-04, stress-port @ 5b2711df) — the two-lost-
+## wake-channels DECODED: the lat_udp strand was a UDP checksum
+## zero-escape parity bug in udp_rcv (RFC 768 0xFFFF representation
+## silently dropped); fixed, 11-boot verified; alarm channel acquitted;
+## musl #GP marker is strand-associated
+
+Round 13 died on quota mid-work. Its uncommitted tree (inspected via
+git diff first, per charter): the pkt_drop/lo_xmit instrumentation WAS
+built and run (conviction boots r13o/r13p), the fix was written but
+never built or verified. Round 14 audited the fix against the reference
+semantics, extracted it into udp_csum_accepts() with an equivalence
+unit test, and ran the verification series.
+
+1. THE CONVICTION (r13 evidence, re-verified this round): ktrace boots
+   r13o/r13p show the stranding datagram's full journey —
+   net:lo_xmit len=46 skb=0x...856 ucsum=0xffff (checksum AS BUILT,
+   the RFC 768 zero escape of computed 0x0000), then
+   net:pkt_drop layer=2 reason=8 ucsum=0xffff computed=0x0 on
+   skb=0x...878 — the SAME buffer (0x22 = eth14+ip20 pulled between
+   xmit and udp_rcv), stated checksum byte-identical in flight. The
+   datagram died at the udp_rcv verification gate: a plain
+   `computed != stated` inequality on a transmitter-side checksum
+   function (udp_checksum returns !fold WITHOUT the escape, while both
+   TX builders udp_build_locked/udp_build_locked6 escape 0 -> 0xFFFF).
+   IPv6 RX (udp_rcv6) and TCP v4/v6 RX already verify by summation
+   (valid == 0 / fold==all-ones) which inherently accepts both
+   representations — only the IPv4 UDP gate diverged from the
+   reference. Payload content varies per datagram (ucsum walks,
+   r13o tail: ...0xcc, 0xcb), so each exchange rolls a 1-in-65536 die
+   on fold(S)==0xFFFF; at ~7 us/RTT the boot hits it within seconds.
+2. THE FIX (5b2711df): udp_csum_accepts(computed, stated) = equality
+   OR (computed==0 && stated==0xFFFF) — proven exactly equivalent to
+   the reference's summation test fold(S+T)==0xFFFF on every input
+   pair (case analysis: S+T==0xFFFF is T==computed; S+T==0x1FFFE's
+   only in-range solution is S==T==0xFFFF, the escape; stated==0 is
+   skipped earlier per RFC 768). Unit test test_udp_csum_zero_escape_
+   parity constructs a real zero-escape datagram (search finds
+   0xba96 for the test constants) and sweeps the predicate against
+   the summation form over all 65536 computed values x {identity,
+   complement, escape, zero}: zero mismatches.
+3. VERIFICATION (11 boots, release-opt KVM smp2, proper invocation
+   lat_udp,127.0.0.1): r14a2/a4/t1/t2/t3/t4/t5/b1/b2 CLEAN with
+   measurements (6.90-9.07 us; t1 wrote 10,096,976 trace events ~=
+   2M exchanges ~= ~30 escaped datagrams served per boot), ZERO
+   pkt_drop of any reason, ZERO "Recv timed out", ZERO #GP. r14a3/
+   r14t6 hit the in-guest 35 s budget: t6's ring tail shows LIVE
+   ping-pong at the kill (36.35 s, ucsum sequence walking, 7.2M
+   events over 36 s vs t1's 10M over 9.6 s = 5x-slower host) — the
+   known bogus-timeout-under-contention mode; budget=120 boots b1/b2
+   then completed cleanly. Pre-fix baseline: r13 k/l/m/n/o/p 6/6
+   strand (the a-j series was an invocation-error family — "Usage:
+   lat_udp -s", benchmark never ran, 0 udp-in prints; not clean
+   runs). NO boot ever printed a measurement pre-fix; 9/11 do
+   post-fix. The strand class is closed.
+4. CHANNEL 2 (alarm/SIGALRM) ACQUITTED: r13p's ring shows itimer_arm
+   for the bench tree and signal_generate sig=14 pid=310 at +14.57 s
+   after the park — the alarm fired on schedule and the case
+   recovered ("Recv timed out"). The m/o "watchdog never fires"
+   presentation is budget arithmetic, not a timer defect: r13o's
+   fatal drop was at 32.4 s into a 35 s budget — the runner's TERM
+   beat the alarm to it. No itimer defect to fix.
+5. CHANNEL 3 (musl malloc get_meta #GP rip=0x417e8b) — STRAND-
+   ASSOCIATED: every occurrence (r12 2/2, r13 m+o 2/2) is in the
+   TERM cleanup after a strand (SWI15 cascade, then #GP -> SIGDEATH
+   sig=11 in the ping child's exit/free path). Post-fix boots that
+   DID get TERM'd mid-benchmark (t6, a3, b1, b2 timeout/DONE paths)
+   show ZERO #GP/SIGDEATH. With the strand class dead there is no
+   known reproduction path; the shape (benchmp's setjmp/longjmp out
+   of SIGALRM while musl malloc is non-reentrant from handlers) is
+   userspace-family. Reopen condition: any #GP on a non-strand boot
+   -> canary probe around the recv buffer (kernel over-write hunt).
+6. SIDE OBSERVATION (writev lane): EFAULTTRAC nr=66 (writev) a0=2
+   a1=<stack iovec> fires exactly once per usage()-style fprintf on
+   the error path (r13a-j, r14a) — a valid stack iovec getting
+   -EFAULT once while the text still reaches the pipe. Only on the
+   guest's error paths, never in working runs. Worth a look next
+   time the ipc/writev path is open (guarded IPC domain).
+7. lmbench lat_udp release row (relay to coordinator): the row
+   previously could never complete (every properly-invoked boot
+   stranded); it now measures 6.90-7.07 us on a quiet host (9.07 us
+   under load). The r13-r14 boots are the first lat_udp numbers from
+   this rig.
+8. Boots r14a (no server arg) reproduced the a-j invocation-error
+   family — noted here so the next round does not miscount those as
+   clean runs: the runner requires lmbench=<bench>,<server-host>.
+
+R13+14 GATES AND CLOSE (round-14 final state): kernel commits 10c9ca12
+(instrumentation) -> 5b2711df (fix + udp_csum_accepts) -> 744dfd90
+(in-kernel suite row) -> 20c34d01 (cfg(test) duplicate dropped) ->
+a76075c3 (merge origin/main 072c4f76: CLOCK_BOOTTIME/TAI ad0d5cb4, my
+harvested tracepoints 98ecebd3, OH tooling; conflicts in trace/mod.rs,
+loopback.rs, lmbench_run.c all resolved to the branch side — mine is
+the strict evolution of the harvested base). Builds: x86_64 debug +
+release-opt rc=0, aarch64 rc=0 (dtb_blob.S restored), riscv64 via
+make test: 1306/1306 (pre-test-row tree, r14-maketest2.log) and
+1307/1307 with "udp csum zero-escape parity" PASS (r14-maketest3.log);
+one more suite run on the post-merge tree queued (r14-maketest4.log —
+the only kernel delta vs the 1307 run is main's time.rs, which was
+gated on main). docs/test/lmbench-report.md updated: lat_udp row
+un-blocked (6.90-7.07 us, 1.60x reference; 0/8 strand re-attributed
+from sched stale-claim to the checksum fix, with a caution note that
+a WAKE-HEAL-SKIP print on a stranded task is not by itself a sched
+conviction — bw_tcp/lat_connect keep their attribution until
+re-tested). ltplong long-horizon loops still carried (r10). Relay to
+coordinator: the lat_udp release row is closed by 5b2711df; the
+writev-EFAULT-on-stack-iovec lead (error paths only) is open for the
+ipc lane.
