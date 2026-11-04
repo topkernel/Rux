@@ -157,6 +157,12 @@ pub struct CgroupNode {
     /// memory.current: bytes charged to this cgroup (includes children —
     /// charges propagate up the chain).
     pub memory_usage_bytes: AtomicU64,
+    /// memory.stat anon class: anonymous-mapping charges (mmap
+    /// MAP_ANONYMOUS / brk / stack), children included.
+    pub memory_anon_bytes: AtomicU64,
+    /// memory.stat file class: page-cache charges (write() into the
+    /// page cache by this cgroup's tasks), children included.
+    pub memory_file_bytes: AtomicU64,
 
     /// Inode-number base for this node (cgroupfs). File inodes are
     /// `ino_base + file kind`, so the stride below must exceed the number
@@ -191,6 +197,8 @@ impl CgroupNode {
             nr_throttled: AtomicU64::new(0),
             throttled_ns: AtomicU64::new(0),
             memory_usage_bytes: AtomicU64::new(0),
+            memory_anon_bytes: AtomicU64::new(0),
+            memory_file_bytes: AtomicU64::new(0),
             ino_base: 1,
         }
     }
@@ -212,6 +220,8 @@ impl CgroupNode {
             nr_throttled: AtomicU64::new(0),
             throttled_ns: AtomicU64::new(0),
             memory_usage_bytes: AtomicU64::new(0),
+            memory_anon_bytes: AtomicU64::new(0),
+            memory_file_bytes: AtomicU64::new(0),
             ino_base,
         }
     }
@@ -519,13 +529,29 @@ pub fn attach_init_to_root(task: *mut Task) {
 /// relevant and fails the fork with EAGAIN. Returns Ok(()) when the child
 /// was attached.
 pub fn cgroup_on_fork(parent: *mut Task, child: *mut Task) -> Result<(), i32> {
-    let node = match task_cgroup(parent) {
-        Some(n) => n,
-        None => {
-            // Parent is an unattached (kernel) task: the child inherits the
-            // implicit-root status — nothing to check or record.
-            return Ok(());
-        }
+    cgroup_on_fork_into(parent, child, None)
+}
+
+/// fork hook with an explicit CLONE_INTO_CGROUP target (clone3, LTP
+/// clone303): when `target` is Some, the pids-limit walk runs along the
+/// TARGET's ancestor chain and the child attaches THERE — the parent's
+/// group is irrelevant for the child's membership. With None this is
+/// the plain inheritance path.
+pub fn cgroup_on_fork_into(
+    parent: *mut Task,
+    child: *mut Task,
+    target: Option<&CgroupNode>,
+) -> Result<(), i32> {
+    let node = match target {
+        Some(t) => t,
+        None => match task_cgroup(parent) {
+            Some(n) => n,
+            None => {
+                // Parent is an unattached (kernel) task: the child inherits the
+                // implicit-root status — nothing to check or record.
+                return Ok(());
+            }
+        },
     };
 
     // pids.max along the whole ancestor chain (self first).
@@ -759,6 +785,44 @@ fn charge_bytes(node: &CgroupNode, bytes: u64) -> bool {
     true
 }
 
+/// memory.stat class rows (v2 key names). The class counters ride the
+/// same charge sites as memory.current; they do NOT migrate with the
+/// task (recorded divergence: a migrated task's earlier charges stay on
+/// the old group's class rows — the total ledger still migrates).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MemClass {
+    /// Anonymous mappings (mmap MAP_ANONYMOUS / brk / stack).
+    Anon,
+    /// File-backed content (page cache written or mapped by the group).
+    File,
+}
+
+/// Class-aware charge: the same total accounting as charge_bytes plus
+/// the per-class row (children included — every level gets the row).
+fn charge_bytes_class(node: &CgroupNode, bytes: u64, class: MemClass) -> bool {
+    let ok = charge_bytes(node, bytes);
+    if ok {
+        node.for_each_ancestor(|n| match class {
+            MemClass::Anon => {
+                n.memory_anon_bytes.fetch_add(bytes, Ordering::AcqRel);
+            }
+            MemClass::File => {
+                n.memory_file_bytes.fetch_add(bytes, Ordering::AcqRel);
+            }
+        });
+    }
+    ok
+}
+
+/// Snapshot helpers for the memory.stat rows.
+pub fn node_memory_anon(node: &CgroupNode) -> u64 {
+    node.memory_anon_bytes.load(Ordering::Acquire)
+}
+
+pub fn node_memory_file(node: &CgroupNode) -> u64 {
+    node.memory_file_bytes.load(Ordering::Acquire)
+}
+
 /// Uncharge `bytes` from `node`'s ancestor chain (saturating at zero —
 /// defense in depth against any accounting imbalance).
 fn uncharge_bytes(node: &CgroupNode, bytes: u64) {
@@ -785,6 +849,12 @@ fn uncharge_bytes(node: &CgroupNode, bytes: u64) {
 /// Returns false when memory.max would be exceeded (caller fails with
 /// ENOMEM). Unattached tasks (kernel) are unlimited.
 pub fn cgroup_memory_charge(bytes: usize) -> bool {
+    cgroup_memory_charge_class(bytes, MemClass::Anon)
+}
+
+/// mmap hook with the memory.stat class (the mapping kind is known at
+/// the syscall layer).
+pub fn cgroup_memory_charge_class(bytes: usize, class: MemClass) -> bool {
     let current = match crate::sched::current() {
         Some(c) => c as *mut Task,
         None => return true,
@@ -792,7 +862,7 @@ pub fn cgroup_memory_charge(bytes: usize) -> bool {
     let bytes = bytes as u64;
     match task_cgroup(current) {
         Some(node) => {
-            if charge_bytes(node, bytes) {
+            if charge_bytes_class(node, bytes, class) {
                 // SAFETY: current is this CPU's running task.
                 unsafe { (*current).add_cgroup_mem_charged(bytes) };
                 true
@@ -802,6 +872,29 @@ pub fn cgroup_memory_charge(bytes: usize) -> bool {
         }
         None => true,
     }
+}
+
+/// Page-cache charge (file class) from the write path: charged per
+/// successful regular-file write by the writer's group chain.
+/// ROOT-CHAIN GATE (fs-hot-path guardian): root is the shared chain for
+/// every unattached task in the system — per-write atomic adds on the
+/// root node's counters would put a new cache-line bounce into the
+/// hottest fs path. The charge therefore applies only to non-root
+/// groups (root keeps the reference's "no limit" semantics; its
+/// memory.stat file row stays 0 — recorded divergence).
+pub fn cgroup_memory_charge_pagecache(bytes: usize) {
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return,
+    };
+    let node = match task_cgroup(current) {
+        Some(n) => n,
+        None => return,
+    };
+    if node.parent.is_none() {
+        return; // root chain: skip (hot-path gate, see doc)
+    }
+    let _ = charge_bytes_class(node, bytes as u64, MemClass::File);
 }
 
 /// mmap-failure / munmap hook: give `bytes` back to the current task's

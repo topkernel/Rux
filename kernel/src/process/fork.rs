@@ -58,6 +58,10 @@ pub struct CloneArgs {
     /// Signal the parent gets at child exit (low CSIGNAL byte of the
     /// legacy clone flags, or clone3's own field). 0 = none.
     pub exit_signal: u8,
+    /// clone3 CLONE_INTO_CGROUP target: the child joins THIS cgroup
+    /// instead of inheriting the parent's (LTP clone303). None =
+    /// inherit like every legacy clone path.
+    pub cgroup: Option<alloc::sync::Arc<crate::sched::cgroup::CgroupNode>>,
 }
 
 /// Create child process
@@ -72,6 +76,7 @@ pub fn do_fork() -> Option<Pid> {
         parent_tid: core::ptr::null_mut(),
         child_tid: core::ptr::null_mut(),
         tls: 0,
+        cgroup: None,
         exit_signal: 17, // SIGCHLD
     })
     .ok()
@@ -286,7 +291,9 @@ const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
     | CLONE_NEWUSER     // 0x10000000
     | CLONE_NEWPID      // 0x20000000
     | CLONE_NEWNET      // 0x40000000
-    | CLONE_IO;         // 0x80000000
+    | CLONE_IO          // 0x80000000
+    | CLONE_INTO_CGROUP; // 0x200000000 (clone3, LTP clone303)
+const CLONE_INTO_CGROUP: u64 = 0x0000_0002_0000_0000;
 const CLONE_PIDFD: u64 = 0x00001000;
 const CLONE_PTRACE: u64 = 0x00002000;
 const CLONE_PARENT: u64 = 0x00008000;
@@ -554,8 +561,15 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // cgroup v2 (U1b): the child joins the parent's cgroup. The pids
         // controller limit is checked here (every ancestor with a limit
-        // must have headroom — Linux fails fork with EAGAIN).
-        if let Err(e) = crate::sched::cgroup::cgroup_on_fork(current_ptr, task_ptr) {
+        // must have headroom — Linux fails fork with EAGAIN). clone3
+        // CLONE_INTO_CGROUP overrides the target: the child joins the
+        // args.cgroup node instead (LTP clone303; reference
+        // kernel/fork.c cgroup_can_fork walks the TARGET chain).
+        if let Err(e) = crate::sched::cgroup::cgroup_on_fork_into(
+            current_ptr,
+            task_ptr,
+            args.cgroup.as_deref(),
+        ) {
             return unwind(task_ptr, e);
         }
 

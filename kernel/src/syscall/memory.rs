@@ -756,7 +756,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // with ENOMEM, like Linux's memcg charge failure here.
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
-            if !crate::sched::cgroup::cgroup_memory_charge(actual_length) {
+            // The memory.stat class follows the mapping kind.
+            let cg_class = if map_flags & map::MAP_ANONYMOUS != 0 {
+                crate::sched::cgroup::MemClass::Anon
+            } else {
+                crate::sched::cgroup::MemClass::File
+            };
+            if !crate::sched::cgroup::cgroup_memory_charge_class(actual_length, cg_class) {
                 static NC: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {

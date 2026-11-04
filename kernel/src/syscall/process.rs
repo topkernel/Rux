@@ -202,6 +202,7 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        cgroup: None,
         exit_signal,
     };
 
@@ -6782,9 +6783,6 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     {
         return -(errno::EFAULT as i64);
     }
-    if size > 64 && buf[64..size].iter().any(|&b| b != 0) {
-        return -(errno::E2BIG as i64);
-    }
 
     let rd64 = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
     let flags = rd64(0);
@@ -6795,6 +6793,23 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     let stack = rd64(40);
     let stack_size = rd64(48);
     let tls = rd64(56);
+    // The 5.5/5.7 extension fields (CLONE_ARGS_SIZE_VER1 = 88):
+    // set_tid, set_tid_size, cgroup. copy_struct_from_user semantics:
+    // a caller passing more than we implement must keep the tail zero
+    // (E2BIG); bytes inside the KNOWN 88-byte struct are decoded, not
+    // treated as padding. LTP clone303 passes size 88 with cgroup set.
+    const CLONE_ARGS_SIZE_VER1: usize = 88;
+    if size > CLONE_ARGS_SIZE_VER1 && buf[CLONE_ARGS_SIZE_VER1..size].iter().any(|&b| b != 0) {
+        return -(errno::E2BIG as i64);
+    }
+    let set_tid_size = if size >= CLONE_ARGS_SIZE_VER1 { rd64(72) } else { 0 };
+    let cgroup_fd = if size >= CLONE_ARGS_SIZE_VER1 { rd64(80) } else { 0 };
+    // CLONE_SET_TID (restore-by-fork) is not implemented: a nonzero
+    // set_tid_size is EINVAL like the pre-5.5 kernels answer ENOSYS-
+    // adjacent shapes (no caller in the guest sets it today).
+    if set_tid_size != 0 {
+        return -(errno::EINVAL as i64);
+    }
 
     // clone3 keeps the exit signal in its own field; legacy CSIGNAL bits
     // in flags are rejected (kernel/fork.c clone3: "make the CSIGNAL bits
@@ -6846,6 +6861,20 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // a range we honor sp = stack + size like musl's gcompat handling.
     let sp = if stack_size > 0 { stack.wrapping_add(stack_size) } else { stack };
 
+    // CLONE_INTO_CGROUP (0x200000000, clone3 + cgroup fd, LTP clone303):
+    // resolve the target cgroup node now so a bad fd fails the syscall
+    // BEFORE a child is created (reference kernel/fork.c
+    // cgroup_css_set_fork: EBADF unknown fd, ENOTDIR non-dir).
+    const CLONE_INTO_CGROUP: u64 = 0x0000_0002_0000_0000;
+    let cgroup_target = if flags & CLONE_INTO_CGROUP != 0 {
+        match crate::fs::cgroup::cgroup_node_from_fd(cgroup_fd as usize) {
+            Ok(node) => Some(node),
+            Err(e) => return e as i64,
+        }
+    } else {
+        None
+    };
+
     // F12 heap-reserve gate — same rationale as sys_clone.
     if clone_heap_reserve_low() {
         return -(errno::ENOMEM as i64);
@@ -6857,6 +6886,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        cgroup: cgroup_target,
         exit_signal: exit_signal as u8,
     };
 
