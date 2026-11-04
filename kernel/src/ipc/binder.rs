@@ -3736,10 +3736,15 @@ pub fn txn_hang_audit() {
             // cg35: 0 doubles as "never fired" — with HZ=100 the bare
             // wrapping_sub(0) >= 60_000 gate suppressed the FIRST dump
             // until 600 s of uptime, so every wedge boot killed at
-            // 240-450 s (the whole lb4xx wedge era) produced no dump and
-            // the lock-holder thread stayed unnamed. First fire is now
-            // always eligible.
-            if last == 0 || now_j.wrapping_sub(last) >= 60_000
+            // 240-450 s (the whole lb4xx wedge era) crossed 20 s-exec
+            // txns but produced no dump and the lock-holder thread
+            // stayed unnamed. First fire is now always eligible.
+            // cg36: PARENTHESIZED — `a || b && c` short-circuits the
+            // CAS away when last==0, so the latch never armed and the
+            // dump fired EVERY 5 s audit burst instead of once per
+            // 600 s (lb416: 1019 task dumps, 49 MB serial, boot timing
+            // skewed by its own console flood).
+            if (last == 0 || now_j.wrapping_sub(last) >= 60_000)
                 && HANG_DUMP_AT
                     .compare_exchange(
                         last,
@@ -3996,8 +4001,15 @@ pub fn bwr_snap(_reason: &str) {
         looper: u32,
         wfpw: bool,
         todo: usize,
-        edges: [(u64, u32, bool, u32, u32, u32, u32, u32, u32); 4],
+        // cg36b: lb416's frozen stacks were 4+ deep with the visible
+        // window ending mid-cycle — the INNERMOST frame (who actually
+        // owes the next reply) was cut off. Collect up to 12 edges and
+        // the true depth; print the innermost tail with emphasis (the
+        // deepest edge is the live blocker; everything below it is the
+        // frozen unwind chain).
+        edges: [(u64, u32, bool, u32, u32, u32, u32, u32, u32); 12],
         nedges: usize,
+        depth: usize,
     }
     let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
     {
@@ -4019,11 +4031,12 @@ pub fn bwr_snap(_reason: &str) {
                         looper: th.looper,
                         wfpw: th.waiting_for_proc_work,
                         todo: th.todo.len(),
-                        edges: [(0, 0, false, 0, 0, 0, 0, 0, 0); 4],
+                        edges: [(0, 0, false, 0, 0, 0, 0, 0, 0); 12],
                         nedges: 0,
+                        depth: th.txn_stack.len(),
                     };
                     for x in &th.txn_stack {
-                        if s.nedges >= 4 {
+                        if s.nedges >= 12 {
                             break;
                         }
                         // SAFETY: to_tid/pick_j read under WORLD.
@@ -4122,16 +4135,28 @@ pub fn bwr_snap(_reason: &str) {
         edged += 1;
         let tk = unsafe { crate::sched::find_task_by_pid(s.tid) };
         let mut line = alloc::string::String::new();
+        let mut nexec = 0usize;
+        let mut nawait = 0usize;
+        for i in 0..s.nedges {
+            if s.edges[i].2 {
+                nexec += 1;
+            } else {
+                nawait += 1;
+            }
+        }
         let _ = write!(
             line,
-            "BWR-SNAP tid={} tgid={} comm={} fd={:#x} looper={:#x} wfpw={} todo={}",
+            "BWR-SNAP tid={} tgid={} comm={} fd={:#x} looper={:#x} wfpw={} todo={} depth={} exec={} await={}",
             s.tid,
             s.tgid,
             comm_of(tk),
             a0,
             s.looper,
             s.wfpw as u32,
-            s.todo
+            s.todo,
+            s.depth,
+            nexec,
+            nawait
         );
         for i in 0..s.nedges {
             let (id, code, own, to_pid, to_tid, from_pid, from_tid, pick_j, enq_j) = s.edges[i];
@@ -4141,9 +4166,13 @@ pub fn bwr_snap(_reason: &str) {
                 now.wrapping_sub(enq_j)
             }
             .saturating_mul(10);
+            // INNERMOST marker on the last collected edge: with a
+            // frozen interleave everything above the deepest EXEC is
+            // the unwind chain; the deepest frame names the blocker.
             let _ = write!(
                 line,
-                " | txn{} code{:#x} {} to pid{} tid{} from pid{} tid{} {}ms",
+                " | {}txn{} code{:#x} {} to pid{} tid{} from pid{} tid{} {}ms",
+                if i + 1 == s.nedges { "*INNER* " } else { "" },
                 id,
                 code,
                 if own { "EXEC" } else { "AWAIT-REPLY" },
