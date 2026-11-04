@@ -2611,6 +2611,19 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
     Ok(vfs_inode)
 }
 
+/// open_by_handle_at support: materialize the VFS inode for an
+/// arbitrary on-disk inode number of THIS filesystem (the reference's
+/// export_ops fh_to_dentry -> ext4_iget). The `base` inode only pins
+/// the Ext4FileSystem instance.
+///
+/// SAFETY: `base` must be an ext4 inode (EXT4_INODE_OPS).
+pub unsafe fn iget_by_ino(
+    base: &Inode,
+    ino: u64,
+) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
+    ext4_iget(base, b"", ino)
+}
+
 /// Wrapper for ext4_mkdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
