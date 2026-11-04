@@ -502,6 +502,34 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
+        // 33rd successor — wait-site map. Futex syscall args from the
+        // SAME entry frame (op/val/timeout) plus the user-space wait
+        // site: the uaddr's VMA decode (which mapping, offset inside
+        // it) and up to 4 user-stack words landing in EXECUTABLE VMAs
+        // (candidate return addresses naming the FFRT/samgr call site
+        // above the libc wrapper — the entry rip alone is the wrapper
+        // for every park and discriminates nothing).
+        fop: u64,
+        fval: u64,
+        fto: u64,
+        // 34th successor — the timespec VALUE at fto (tv_sec/tv_nsec
+        // read through the same foreign-mm walker). fto!=0 alone does
+        // not say the park has a deadline: FFRT-class waiters pass a
+        // non-NULL timeout whose value may be effectively infinite.
+        // A short value that never fires indicts the timeout arm; a
+        // huge value re-points at the missing wake event.
+        fto_ok: bool,
+        fto_sec: i64,
+        fto_nsec: i64,
+        uvma_ok: bool,
+        uvma_start: usize,
+        uvma_end: usize,
+        uvma_off: usize,
+        uvma_cls: u8, // 'A'non, 'F'ile, 'H'eap, 'S'tack, 'M'shm, 'D'ev
+        uvma_fd: i32,
+        uvma_voff: usize, // file offset when FileBacked (vma.offset + off)
+        uret: [u64; 4],
+        uret_n: usize,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -541,6 +569,21 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
+                        fop: 0,
+                        fval: 0,
+                        fto: 0,
+                        fto_ok: false,
+                        fto_sec: 0,
+                        fto_nsec: 0,
+                        uvma_ok: false,
+                        uvma_start: 0,
+                        uvma_end: 0,
+                        uvma_off: 0,
+                        uvma_cls: b'-',
+                        uvma_fd: -1,
+                        uvma_voff: 0,
+                        uret: [0; 4],
+                        uret_n: 0,
                     });
                 } else if total > 64 {
                     // Sample cap reached with clear headroom — stop the
@@ -606,6 +649,139 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.syscallno as u64;
                         s.epc = r.pc as u64;
+                        s.fop = r.regs[1];
+                        s.fval = r.regs[2];
+                        s.fto = r.regs[3];
+                        usp = r.sp;
+                    }
+                }
+                // Wait-site decode (33rd successor). The waiter is parked
+                // in this very syscall, so its user stack is frozen and
+                // its mm cannot vanish while the task is pinned here.
+                // VMA lookups under a TRY read lock (softirq context —
+                // skip the decode this burst rather than spin IF=0
+                // against an mmap/munmap writer).
+                if let Some(aspace) = tk.address_space() {
+                    if let Some(mgr) = aspace.vma_try_read() {
+                        use crate::mm::vma::{VirtAddr, VmaType};
+                        // (a) uaddr's mapping
+                        if let Some(vma) = mgr.find(VirtAddr::new(s.uaddr)) {
+                            s.uvma_ok = true;
+                            s.uvma_start = vma.start().as_usize();
+                            s.uvma_end = vma.end().as_usize();
+                            s.uvma_off = s.uaddr - s.uvma_start;
+                            s.uvma_voff = vma.offset() + s.uvma_off;
+                            let flags = vma.flags();
+                            s.uvma_cls = if flags.contains(
+                                crate::mm::vma::VmaFlags::GROWSDOWN,
+                            ) {
+                                b'S'
+                            } else if s.uvma_start == aspace.start_brk() {
+                                b'H'
+                            } else {
+                                match vma.vma_type() {
+                                    VmaType::FileBacked => {
+                                        s.uvma_fd = vma.file_fd();
+                                        b'F'
+                                    }
+                                    VmaType::SharedMemory => b'M',
+                                    VmaType::Device => b'D',
+                                    VmaType::Anonymous => b'A',
+                                }
+                            };
+                        }
+                        // (a2) the timespec at fto (34th successor): two
+                        // u64 words through the walker (the struct can
+                        // straddle a page boundary, so walk each word).
+                        // Only when fto is non-NULL and user-addressable;
+                        // misaligned/speculative pointers just skip the
+                        // decode (fto_ok stays false).
+                        if s.fto != 0
+                            && s.fto <= u64::MAX - 16
+                            && crate::arch::uaccess::access_ok(s.fto as usize, 16)
+                        {
+                            let root = aspace.root_ppn();
+                            let mut words = [0u64; 2];
+                            let mut ok = true;
+                            for wi in 0..2usize {
+                                let va = s.fto + 8 * (wi as u64);
+                                // SAFETY: read-only walk of the pinned
+                                // waiter's page tables; the timespec was
+                                // copied in by futex_parse_timeout before
+                                // the park, so the page is resident.
+                                match unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                                } {
+                                    Some((ppn, bits))
+                                        if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
+                                    {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word.
+                                        words[wi] = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                    }
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                s.fto_ok = true;
+                                s.fto_sec = words[0] as i64;
+                                s.fto_nsec = words[1] as i64;
+                            }
+                        }
+                        // (b) user-stack return-address candidates: scan
+                        // the 32 words above the entry sp; a word landing
+                        // inside an EXECUTABLE vma is a plausible return
+                        // address into userspace text (musl omits frame
+                        // pointers, so this is a filtered scan, not a
+                        // frame walk). Foreign-mm reads go through the
+                        // walker + linear map — no CR3 switch, page is
+                        // resident (the thread executed on it).
+                        if usp != 0 {
+                            let root = aspace.root_ppn();
+                            let mut va = (usp + 7) & !7u64;
+                            for _ in 0..32 {
+                                if s.uret_n >= 4 {
+                                    break;
+                                }
+                                // SAFETY: root_ppn of the pinned task's
+                                // live mm; walk is read-only.
+                                if let Some((ppn, bits)) = unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                        root, va,
+                                    )
+                                } {
+                                    if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word.
+                                        let w = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                        if let Some(vma) =
+                                            mgr.find(VirtAddr::new(w as usize))
+                                        {
+                                            if vma.flags().is_executable() {
+                                                s.uret[s.uret_n] = w;
+                                                s.uret_n += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                va += 8;
+                            }
+                        }
                     }
                 }
                 break;
@@ -682,6 +858,21 @@ pub fn futex_stuck_census() {
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
+        rep_fop: u64,
+        rep_fval: u64,
+        rep_fto: u64,
+        rep_fto_ok: bool,
+        rep_fto_sec: i64,
+        rep_fto_nsec: i64,
+        rep_uvma_ok: bool,
+        rep_uvma_start: usize,
+        rep_uvma_end: usize,
+        rep_uvma_off: usize,
+        rep_uvma_cls: u8,
+        rep_uvma_fd: i32,
+        rep_uvma_voff: usize,
+        rep_uret: [u64; 4],
+        rep_uret_n: usize,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -711,6 +902,21 @@ pub fn futex_stuck_census() {
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
+                        rep_fop: s.fop,
+                        rep_fval: s.fval,
+                        rep_fto: s.fto,
+                        rep_fto_ok: s.fto_ok,
+                        rep_fto_sec: s.fto_sec,
+                        rep_fto_nsec: s.fto_nsec,
+                        rep_uvma_ok: s.uvma_ok,
+                        rep_uvma_start: s.uvma_start,
+                        rep_uvma_end: s.uvma_end,
+                        rep_uvma_off: s.uvma_off,
+                        rep_uvma_cls: s.uvma_cls,
+                        rep_uvma_fd: s.uvma_fd,
+                        rep_uvma_voff: s.uvma_voff,
+                        rep_uret: s.uret,
+                        rep_uret_n: s.uret_n,
                     });
                 }
             }
@@ -743,6 +949,21 @@ pub fn futex_stuck_census() {
         // budget and the 1200-line LINES cap; never fires on a plain boot.
         crate::pr_warn!(
             "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
+        use core::fmt::Write as _;
+        let mut vmx = alloc::string::String::new();
+        if g.rep_uvma_ok && g.rep_uvma_cls == b'F' {
+            let _ = write!(vmx, " fd={} voff={:#x}", g.rep_uvma_fd, g.rep_uvma_voff);
+        }
+        let mut uret_s = alloc::string::String::new();
+        for i in 0..g.rep_uret_n {
+            let _ = write!(uret_s, "{:#x} ", g.rep_uret[i]);
+        }
+        let mut fto_s = alloc::string::String::new();
+        if g.rep_fto_ok {
+            let _ = write!(fto_s, "={}s+{}ns", g.rep_fto_sec, g.rep_fto_nsec);
+        }
+        crate::pr_warn!(
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
@@ -754,6 +975,16 @@ pub fn futex_stuck_census() {
             g.any_woken as u32,
             g.rep_sys,
             g.rep_epc,
+            g.rep_fop,
+            g.rep_fval,
+            g.rep_fto,
+            fto_s,
+            g.rep_uvma_start,
+            g.rep_uvma_end,
+            g.rep_uvma_cls as char,
+            g.rep_uvma_off,
+            vmx,
+            uret_s,
             h.map(|h| h.run).unwrap_or(0),
             h.map(|h| h.futex).unwrap_or(0),
             h.map(|h| h.int_other).unwrap_or(0),
