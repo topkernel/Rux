@@ -4233,3 +4233,14 @@ Kernel: run/r41/bzImage-current = x86_64 debug @ 02e3c900.
 - r41v1: SA 58/57@34.3s | ladder NONE (wedge pre-provisioning) | FUX
   180L/7tids/terminal tid348 fto-lost 831s | TXN 1390 {12:692} max
   865.9s | sched-burn 650k/s fdreap-paired | pixels 82f0a25f x6 | 12/12
+- r41v2 (02e3c900): SA 39/38@25.0s | ladder NONE (wedge pre-provisioning,
+  13/13) | traffic FLOWED whole boot (u2v8-style: recvmsg 7.77M by t=300,
+  idle still ticking at t=840) — boot 1's total-freeze face is one face of
+  the distribution, not systematic | FUX 179L/5tids | TXN 1401 {3:1047,
+  6:349} max 873s | pixels 82f0a25f.
+- KERNEL SWITCH at boot 3 (05:01): origin/main moved 02e3c900 -> b1c7fc4c
+  (ltp-r27 six fixes e23d3c3f, riscv64 early window 20->24MB d057f973 —
+  fixes the riscv64 make-test link failure banked above, bwr_park_audit
+  b1c7fc4c). Roller restarted on run/r41/bzImage-b1c7fc4c (branch sha
+  061e1519, kernel content == main b1c7fc4c). dfx=txnhunt was already
+  armed all session; TXN-HANG-BWR H1/H2/H3 decode lands from r41v3 on.

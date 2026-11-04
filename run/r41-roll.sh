@@ -9,6 +9,7 @@
 # Only PIDs/files matching the unique tag prefix r41v are ever killed.
 cd /home/william/rux-agents/oh-roll || exit 1
 MAX=${1:-100}
+START=${3:-1}
 KERNEL=${2:-run/r41/bzImage-current}
 FROZEN="82f0a25fd7feac19dd266da52b6b9afc 06b933b49b493ea86c5719c597ebedd9"
 mkdir -p run/r41
@@ -18,7 +19,7 @@ LEDGER=run/r41/ledger.csv
 KSHA=$(git rev-parse --short HEAD)
 echo "[roll] start $(date +%F\ %H:%M:%S) kernel=$KERN SHA=$KSHA" >> run/r41/roller.log
 
-for N in $(seq 1 $MAX); do
+for N in $(seq $START $MAX); do
   TAG="r41v$N"
   SER="run/oh-${TAG}-serial.log"
   # belt+braces: kill any leftover from a previous crash of THIS tag only
