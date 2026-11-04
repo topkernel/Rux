@@ -1532,6 +1532,10 @@ pub fn dump() {
     const US: u64 = 10;
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
 
+    // 39th: AF_UNIX hot-path phase anatomy rides the same dump cadence
+    // (no-op unless the unixrd=1 cmdline param is armed).
+    crate::dfx::unixrd::dump();
+
     // Tick modes: one line per dump.
     let mut line = alloc::string::String::from("SYSCOST t=");
     line.push_str(&secs.to_string());

@@ -871,6 +871,10 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket
         ) && iovcnt > 0
         {
+            // unixrd probe: outer bracket + outcome counts (libhilog's
+            // writev(header, tag, content) storm producer anatomy).
+            let ur_t0 = crate::dfx::unixrd::now();
+            crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_N);
             // Bound the gathered datagram like sys_sendmsg does (R7-D4
             // heap discipline; Linux answers an oversized message with
             // EMSGSIZE).
@@ -879,11 +883,13 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // Entries were whole-vector validated above; zero-length and
             // NULL-base entries contribute nothing (a total-0 dgram
             // writev is a no-op returning 0, like the reference).
+            let ur_t_gather = crate::dfx::unixrd::now();
             for i in 0..iovcnt {
                 // Read the iovec entry through the exception-table copy.
                 let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
                     iov_addr + i * core::mem::size_of::<Iovec>(),
                 ) else {
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
                 };
                 let base = iov.iov_base as usize;
@@ -892,6 +898,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                     continue;
                 }
                 if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EMSGSIZE as i64;
                 }
                 // perf-ipc: reserve + copy over the reserved window — the
@@ -899,10 +907,15 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                 // copy_in overwrote it (hilogd's writev(h28, tag, content)
                 // paid a full memset of the record per call).
                 if !crate::fs::file::gather_append_user(&mut gathered, base, len) {
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
                 }
             }
+            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
+            crate::dfx::unixrd::addb(&crate::dfx::unixrd::WV_GATHER_B, gathered.len() as u64);
             if gathered.is_empty() {
+                crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
                 return 0;
             }
             // Leg-52 lever A: write through the file resolved at the head
@@ -914,11 +927,25 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
                 & crate::fs::file::FileFlags::O_ACCMODE;
             if mode == crate::fs::file::FileFlags::O_RDONLY {
+                crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
                 return -errno::EBADF as i64;
             }
             // perf-ipc: hand the gathered buffer to the unix engine OWNED
             // (write_slice would re-copy it into the segment).
-            return crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
+            let ur_t_send = crate::dfx::unixrd::now();
+            let sent = crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
+            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_SEND_NS, ur_t_send);
+            if sent < 0 {
+                if sent == -11 {
+                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_EA_N);
+                } else {
+                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_ERR_N);
+                }
+            } else {
+                crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_OK_N);
+            }
+            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+            return sent;
         }
     }
 
