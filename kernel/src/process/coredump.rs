@@ -370,6 +370,11 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
 
     // ---- Pass 1: plan the dump ----
     // Snapshotted segments: (vaddr, size, p_flags) per readable VMA.
+    // Two gates (reference fs/coredump.c semantics, LTP madvise08):
+    //   - per-VMA VM_DUMPABLE (MADV_DONTDUMP/MADV_DODUMP toggles it),
+    //   - the mm's coredump_filter class bits (bit 0 anon private,
+    //     bit 1 anon shared, bit 2 file private, bit 3 file shared).
+    let filter = mm.core_filter();
     let mut segs: Vec<(u64, u64, u32)> = Vec::new();
     {
         let vma_mgr = mm.vma_read();
@@ -379,6 +384,33 @@ pub unsafe fn do_coredump(task: *mut Task, sig: i32) -> bool {
                 continue;
             }
             if vma.vma_type() == crate::mm::vma::VmaType::Device {
+                continue;
+            }
+            // MADV_DONTDUMP range (or any VMA with the bit cleared).
+            if !f.is_dumpable() {
+                continue;
+            }
+            // coredump_filter class check.
+            let shared = f.is_shared();
+            let class_bit = match vma.vma_type() {
+                crate::mm::vma::VmaType::Anonymous => {
+                    if shared {
+                        1 // anon shared
+                    } else {
+                        0 // anon private
+                    }
+                }
+                crate::mm::vma::VmaType::SharedMemory => 1, // anon/shared class
+                crate::mm::vma::VmaType::FileBacked => {
+                    if shared {
+                        3 // file shared
+                    } else {
+                        2 // file private
+                    }
+                }
+                crate::mm::vma::VmaType::Device => continue,
+            };
+            if filter & (1 << class_bit) == 0 {
                 continue;
             }
             let mut pf = crate::fs::elf::PF_R;
