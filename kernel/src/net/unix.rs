@@ -444,6 +444,33 @@ fn current_unix_cred() -> UnixCred {
     }
 }
 
+/// hilogtap=1 — arm the per-send hilog/param diagnostic tap (tri-state,
+/// cctx pattern). The tap scans every record for ~125 key/tag shapes;
+/// on the hilogd storm that is seconds of CPU per second inside the
+/// send path (the 39th's UNIXRD-WV send-phase measurement). OFF by
+/// default like every DFX probe; boot drivers that need the HILOG-AMS /
+/// slog / alog / ilog / PCTL evidence pass hilogtap=1.
+static HILOGTAP_ARMED: AtomicU8 = AtomicU8::new(0);
+fn hilogtap_on() -> bool {
+    match HILOGTAP_ARMED.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let v = match crate::cmdline::get_cmdline() {
+                None => false,
+                Some(_) => crate::cmdline::get_param("hilogtap").as_deref() == Some("1"),
+            };
+            HILOGTAP_ARMED.store(if v { 2 } else { 1 }, Ordering::Relaxed);
+            crate::pr_warn!(
+                "hilogtap: {} (cmdline hilogtap param = {:?})",
+                if v { "armed" } else { "off" },
+                crate::cmdline::get_param("hilogtap")
+            );
+            v
+        }
+    }
+}
+
 // ============================================================================
 // Global namespace
 // ============================================================================
@@ -1405,437 +1432,445 @@ pub fn unix_send(
         //                              client-side; {private} args arrive
         //                              as the literal "<private>"
         //
+        // 39th: the tap body below scans EVERY record for ~125 key/tag
+        // shapes (AMS/graphics/spawn/account/installd cohorts). On the
+        // hilogd storm (25k records/s) that is seconds of CPU per second
+        // inside the send path and part of the 90%-kernel-tick saturation
+        // face (UNIXRD-WV send phase 14.3 us/op, u2v7). It is a DIAGNOSTIC
+        // instrument, not kernel semantics — OFF by default like every
+        // DFX probe (filerd discipline); arm with hilogtap=1 when a boot
+        // needs the HILOG-AMS/slog/alog/ilog/PCTL evidence.
         // The first tap smeared the whole datagram through a printable
         // filter, mixing header bytes into the text and hiding the exact
         // EGL failure lines behind garbage ("EGLC0GL" etc). Decode the
         // header, then tag: content, and only fall back to the smear for
         // records that do not parse.
-        {
-            // leg-34: hilog/param listener classification cached in
-            // tap_class at bind time — previously a bound_name lock plus
-            // up to three ends_with scans on EVERY unix send.
-            let is_hilog = target.tap_class.load(Ordering::Acquire) & TAP_HILOG != 0;
-            // sc209 (leg 14): param-service control tap. sc208's crawl is
-            // samgr's on-demand loads timing out: "Start dynamic proc:
-            // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
-            // SystemSetParameter("ohos.ctl.start", ...) over this socket,
-            // returning PARAM_CODE_TIMEOUT(105) after 15 s, and the
-            // server-side "Handle set param" log NEVER shows the installs
-            // sets (the client's FIRST attempt even returned 0 in 0 ms
-            // with no server handling — a stale/instant reply). This tap
-            // prints every ParamMessage (u32 type, u32 msgSize, u32 id,
-            // char key[100] @12, ParamMsgContent @112) SENT to the
-            // paramservice listener, plus param-ish messages SENT BY pid
-            // 1 (server responses carry type MSG_SET_PARAM with the
-            // result i32 at off 112). Client-send vs server-arrival gap =
-            // socket/wake loss; a pid-1 response with no matching request
-            // = the duplicated-reply conviction.
-            if !data.is_empty() && data.len() >= 12 {
-                let is_param_listener =
-                    target.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0;
-                let sender_pid = crate::process::current_pid();
-                // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
-                // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
-                // msgSize == data.len() and key starts printable.
-                let mtype = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                let msize = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-                let mid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-                let looks_param = mtype <= 5
-                    && msize as usize == data.len()
-                    && data.len() > 12
-                    && data[12] >= b'a'
-                    && data[12] <= b'z';
-                if is_param_listener || (sender_pid == 1 && looks_param) {
-                    static PCTL_N: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    let n = PCTL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 300 {
-                        let mut kbuf = [0u8; 40];
-                        let kmax = core::cmp::min(40, data.len() - 12);
-                        let mut klen = 0usize;
-                        while klen < kmax && data[12 + klen] != 0 {
-                            kbuf[klen] = data[12 + klen];
-                            klen += 1;
-                        }
-                        let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
-                        let mut extra = alloc::string::String::new();
-                        if sender_pid == 1 {
-                            // Server response: result i32 at off 112.
-                            if data.len() >= 116 {
-                                let r = i32::from_le_bytes([
-                                    data[112], data[113], data[114], data[115],
-                                ]);
-                                extra = alloc::format!(" result={}", r);
+        if hilogtap_on() {
+                // leg-34: hilog/param listener classification cached in
+                // tap_class at bind time — previously a bound_name lock plus
+                // up to three ends_with scans on EVERY unix send.
+                let is_hilog = target.tap_class.load(Ordering::Acquire) & TAP_HILOG != 0;
+                // sc209 (leg 14): param-service control tap. sc208's crawl is
+                // samgr's on-demand loads timing out: "Start dynamic proc:
+                // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
+                // SystemSetParameter("ohos.ctl.start", ...) over this socket,
+                // returning PARAM_CODE_TIMEOUT(105) after 15 s, and the
+                // server-side "Handle set param" log NEVER shows the installs
+                // sets (the client's FIRST attempt even returned 0 in 0 ms
+                // with no server handling — a stale/instant reply). This tap
+                // prints every ParamMessage (u32 type, u32 msgSize, u32 id,
+                // char key[100] @12, ParamMsgContent @112) SENT to the
+                // paramservice listener, plus param-ish messages SENT BY pid
+                // 1 (server responses carry type MSG_SET_PARAM with the
+                // result i32 at off 112). Client-send vs server-arrival gap =
+                // socket/wake loss; a pid-1 response with no matching request
+                // = the duplicated-reply conviction.
+                if !data.is_empty() && data.len() >= 12 {
+                    let is_param_listener =
+                        target.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0;
+                    let sender_pid = crate::process::current_pid();
+                    // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
+                    // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
+                    // msgSize == data.len() and key starts printable.
+                    let mtype = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                    let msize = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                    let mid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+                    let looks_param = mtype <= 5
+                        && msize as usize == data.len()
+                        && data.len() > 12
+                        && data[12] >= b'a'
+                        && data[12] <= b'z';
+                    if is_param_listener || (sender_pid == 1 && looks_param) {
+                        static PCTL_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PCTL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            let mut kbuf = [0u8; 40];
+                            let kmax = core::cmp::min(40, data.len() - 12);
+                            let mut klen = 0usize;
+                            while klen < kmax && data[12 + klen] != 0 {
+                                kbuf[klen] = data[12 + klen];
+                                klen += 1;
                             }
-                        } else if data.len() >= 116 {
-                            // Client request: ParamMsgContent @112
-                            // (u8 type=1 PARAM_VALUE, u16 size) → string @116.
-                            let ctype = data[112];
-                            if ctype == 1 {
-                                let mut vbuf = [0u8; 48];
-                                let vmax = core::cmp::min(48, data.len() - 116);
-                                let mut vlen = 0usize;
-                                while vlen < vmax && data[116 + vlen] != 0 {
-                                    vbuf[vlen] = data[116 + vlen];
-                                    vlen += 1;
+                            let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                            let mut extra = alloc::string::String::new();
+                            if sender_pid == 1 {
+                                // Server response: result i32 at off 112.
+                                if data.len() >= 116 {
+                                    let r = i32::from_le_bytes([
+                                        data[112], data[113], data[114], data[115],
+                                    ]);
+                                    extra = alloc::format!(" result={}", r);
                                 }
-                                extra.push(' ');
-                                extra.push_str(core::str::from_utf8(&vbuf[..vlen]).unwrap_or("?"));
+                            } else if data.len() >= 116 {
+                                // Client request: ParamMsgContent @112
+                                // (u8 type=1 PARAM_VALUE, u16 size) → string @116.
+                                let ctype = data[112];
+                                if ctype == 1 {
+                                    let mut vbuf = [0u8; 48];
+                                    let vmax = core::cmp::min(48, data.len() - 116);
+                                    let mut vlen = 0usize;
+                                    while vlen < vmax && data[116 + vlen] != 0 {
+                                        vbuf[vlen] = data[116 + vlen];
+                                        vlen += 1;
+                                    }
+                                    extra.push(' ');
+                                    extra.push_str(core::str::from_utf8(&vbuf[..vlen]).unwrap_or("?"));
+                                }
                             }
+                            crate::pr_warn!(
+                                "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}",
+                                n,
+                                sender_pid,
+                                if is_param_listener { "paramservice" } else { "client" },
+                                data.len(),
+                                mtype,
+                                mid,
+                                key,
+                                extra
+                            );
                         }
-                        crate::pr_warn!(
-                            "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}",
-                            n,
-                            sender_pid,
-                            if is_param_listener { "paramservice" } else { "client" },
-                            data.len(),
-                            mtype,
-                            mid,
-                            key,
-                            extra
-                        );
                     }
                 }
-            }
-            if is_hilog && !data.is_empty() {
-                let mut text = [0u8; 160];
-                let mut k = 0usize;
-                let mut prefix = [0u8; 24];
-                let mut plen = 0usize;
-                let mut decoded = false;
-                if data.len() >= 28 {
-                    let mlen = u16::from_le_bytes([data[0], data[1]]) as usize;
-                    let bits = u16::from_le_bytes([data[2], data[3]]) as usize;
-                    let level = (bits >> 7) & 0x7;
-                    let tag_len = (bits >> 10) & 0x3f;
-                    let mut pid = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-                    if 28 + tag_len <= mlen && mlen <= data.len() {
-                        let lv = match level {
-                            3 => b'D',
-                            4 => b'I',
-                            5 => b'W',
-                            6 => b'E',
-                            7 => b'F',
-                            _ => b'?',
-                        };
-                        // "L<lv> <pid> " then "<tag>: <content>". OH builds
-                        // libhilog with __RECV_MSG_WITH_UCRED_: the header
-                        // pid stays 0 and the real sender rides
-                        // SCM_CREDENTIALS — stamp that pid on the tap line.
-                        if pid == 0 {
-                            if let Some(c) = cred.as_ref() {
-                                if c.pid > 0 {
-                                    pid = c.pid as u32;
+                if is_hilog && !data.is_empty() {
+                    let mut text = [0u8; 160];
+                    let mut k = 0usize;
+                    let mut prefix = [0u8; 24];
+                    let mut plen = 0usize;
+                    let mut decoded = false;
+                    if data.len() >= 28 {
+                        let mlen = u16::from_le_bytes([data[0], data[1]]) as usize;
+                        let bits = u16::from_le_bytes([data[2], data[3]]) as usize;
+                        let level = (bits >> 7) & 0x7;
+                        let tag_len = (bits >> 10) & 0x3f;
+                        let mut pid = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+                        if 28 + tag_len <= mlen && mlen <= data.len() {
+                            let lv = match level {
+                                3 => b'D',
+                                4 => b'I',
+                                5 => b'W',
+                                6 => b'E',
+                                7 => b'F',
+                                _ => b'?',
+                            };
+                            // "L<lv> <pid> " then "<tag>: <content>". OH builds
+                            // libhilog with __RECV_MSG_WITH_UCRED_: the header
+                            // pid stays 0 and the real sender rides
+                            // SCM_CREDENTIALS — stamp that pid on the tap line.
+                            if pid == 0 {
+                                if let Some(c) = cred.as_ref() {
+                                    if c.pid > 0 {
+                                        pid = c.pid as u32;
+                                    }
                                 }
                             }
-                        }
-                        let mut pfx: [u8; 16] = [0; 16];
-                        let mut n = 0usize;
-                        pfx[n] = lv;
-                        n += 1;
-                        let mut num = [0u8; 10];
-                        let mut nd = 0usize;
-                        let mut v = pid;
-                        loop {
-                            num[nd] = b'0' + (v % 10) as u8;
-                            nd += 1;
-                            v /= 10;
-                            if v == 0 {
-                                break;
-                            }
-                        }
-                        while nd > 0 {
-                            nd -= 1;
-                            pfx[n] = num[nd];
+                            let mut pfx: [u8; 16] = [0; 16];
+                            let mut n = 0usize;
+                            pfx[n] = lv;
                             n += 1;
-                        }
-                        pfx[n] = b' ';
-                        n += 1;
-                        plen = n;
-                        prefix[..n].copy_from_slice(&pfx[..n]);
-                        let tag = &data[28..28 + tag_len];
-                        let content = &data[28 + tag_len..mlen];
-                        let mut append = |src: &[u8], text: &mut [u8; 160], k: &mut usize| {
-                            for &b in src.iter() {
-                                if b == 0 {
+                            let mut num = [0u8; 10];
+                            let mut nd = 0usize;
+                            let mut v = pid;
+                            loop {
+                                num[nd] = b'0' + (v % 10) as u8;
+                                nd += 1;
+                                v /= 10;
+                                if v == 0 {
                                     break;
                                 }
-                                if b == b'\n' || b == b'\t' {
-                                    if *k < text.len() {
-                                        text[*k] = b' ';
+                            }
+                            while nd > 0 {
+                                nd -= 1;
+                                pfx[n] = num[nd];
+                                n += 1;
+                            }
+                            pfx[n] = b' ';
+                            n += 1;
+                            plen = n;
+                            prefix[..n].copy_from_slice(&pfx[..n]);
+                            let tag = &data[28..28 + tag_len];
+                            let content = &data[28 + tag_len..mlen];
+                            let mut append = |src: &[u8], text: &mut [u8; 160], k: &mut usize| {
+                                for &b in src.iter() {
+                                    if b == 0 {
+                                        break;
+                                    }
+                                    if b == b'\n' || b == b'\t' {
+                                        if *k < text.len() {
+                                            text[*k] = b' ';
+                                            *k += 1;
+                                        }
+                                        continue;
+                                    }
+                                    if b >= 0x20 && b < 0x7f && *k < text.len() {
+                                        text[*k] = b;
                                         *k += 1;
                                     }
-                                    continue;
                                 }
-                                if b >= 0x20 && b < 0x7f && *k < text.len() {
-                                    text[*k] = b;
-                                    *k += 1;
-                                }
+                            };
+                            append(tag, &mut text, &mut k);
+                            if k > 0 && k < text.len() {
+                                text[k] = b':';
+                                k += 1;
+                                text[k] = b' ';
+                                k += 1;
+                            } else if k < text.len() {
+                                text[k] = b':';
+                                k += 1;
                             }
-                        };
-                        append(tag, &mut text, &mut k);
-                        if k > 0 && k < text.len() {
-                            text[k] = b':';
-                            k += 1;
-                            text[k] = b' ';
-                            k += 1;
-                        } else if k < text.len() {
-                            text[k] = b':';
-                            k += 1;
+                            append(content, &mut text, &mut k);
+                            decoded = true;
                         }
-                        append(content, &mut text, &mut k);
-                        decoded = true;
                     }
-                }
-                if !decoded {
-                    for &b in data.iter() {
-                        if b >= 0x20 && b < 0x7f {
-                            text[k] = b;
-                            k += 1;
-                            if k == text.len() {
-                                break;
+                    if !decoded {
+                        for &b in data.iter() {
+                            if b >= 0x20 && b < 0x7f {
+                                text[k] = b;
+                                k += 1;
+                                if k == text.len() {
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                let s = core::str::from_utf8(&text[..k]).unwrap_or("");
-                // u17 lesson: "dri" matches "driver", "Render" matches
-                // the audio RenderRouters flood, "display" matches
-                // everything — keep the set tight and case-distinct.
-                // Tag allowlist first (decoded tags are exact, no
-                // substring risk): RS/bootanimation/composer cohort.
-                const TAGS: [&str; 12] = [
-                    "OHOS::RS", "BootAnimation", "Composer", "ComposerAgent",
-                    "ComposerManager", "2DGraphics", "FrameCollector",
-                    "FramePainter", "EGL", "OpenGLWrapper", "DISP", "MESA",
-                ];
-                const KEYS: [&str; 23] = [
-                    "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
-                    "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
-                    "composer", "Rosen", "rosen", "DISP", "gralloc", "Gralloc", "DRI2",
-                ];
-                // Mesa's egl_dri2 extension probe floods ~1200
-                // "[dri2_get_proc_address@...] procname = gl..." lines
-                // through the DISP tag right before the interesting
-                // window (screen create → llvmpipe init → verdict);
-                // skipping them keeps the budget for the verdict lines.
-                let flood = s.contains("procname = gl");
-                // leg-30B5: the StartUser/SwitchToUser user-start chain
-                // cohort at WARN (visible at loglevel 6, unlike the GL
-                // cohort's pr_debug): BMS's ImplicitQueryInfoByPriority
-                // verdicts ("user is not existed" = GetUserId rejected
-                // user 100; "can't find target AbilityInfo" = the isBoot
-                // retry ladder's spin reason), accountmgr's adapter
-                // results, and AMS's own handler narration. Rare lines
-                // concentrated in the post-unlock window — own budget.
-                const AMS_KEYS: [&str; 49] = [
-                    "SwitchToUser",
-                    "startUser in service",
-                    "highest priority ability",
-                    "user is not existed",
-                    "invalid userId",
-                    "userId not exist",
-                    "CreateNewUser user",
-                    "CreateNewUser end",
-                    "bundle size:",
-                    "wait complete",
-                    "AbilityManagerAdapter",
-                    "in call back",
-                    "StartUser current",
-                    "low-mem mode",
-                    "foregroundUserId:",
-                    "not supported!",
-                    "failed to get os account",
-                    "os account proxy",
-                    "Get samgr failed",
-                    "account iface_cast",
-                    "failed to get account",
-                    "can't find target",
-                    "IsOsAccountExists path",
-                    // lb47: the ipc-skeleton failure verdicts. The bare
-                    // "SendRequest" key matched the SA_CLIENT success flood
-                    // ("SubscribeSystemAbility SendRequest succeed!") and
-                    // ate the whole 600 budget by ~125 s on lb46 — dark for
-                    // the entire StartUser window. Tightened to the failure
-                    // shapes only: IPCObjectProxy's ZLOGE "failed, handle:"
-                    // (every SendRequest error verdict, includes the
-                    // ERR_DEAD_OBJECT class), the null-invoker ZLOGE, the
-                    // samgr stub-object error, the work-thread pool family,
-                    // and the measured-cost lines.
-                    "failed, handle:",
-                    "invoker is null",
-                    "Invalid samgr stub",
-                    "SendRequestInner cost",
-                    "SendRequest failed",
-                    "SendRequest fail",
-                    "work thread",
-                    "find target AbilityInfo",
-                    "create user:",
-                    "permission verification failed, not account",
-                    // lb48 (seventh successor): the death-mark verdicts.
-                    // A death-marked IPCObjectProxy answers every later
-                    // SendRequest locally with ERR_DEAD_OBJECT (ZLOGD
-                    // only) — the permanent fast-fail engine. These keys
-                    // name every path that marks, un-marks, or rejects
-                    // the mark: WaitForInit's self-heal ("init again"),
-                    // OnBinderDied's address-reject ("Invalid proxy
-                    // object"), the ioctl-level errno verdict ("fail,
-                    // result:" — the ONLY path whose value can be -32 ==
-                    // ERR_DEAD_OBJECT, since a kernel BR_DEAD_REPLY maps
-                    // to +0x7205 which SendRequestInner never compares),
-                    // the parcel-side write failure, and the obituary
-                    // refcount reject.
-                    "init again",
-                    "Invalid proxy object",
-                    "fail, result:",
-                    "WriteTransaction ERROR",
-                    "failed to increment strong reference count",
-                    // 27th session (lb362/366 decode): the BMS boot-scan
-                    // verdict cohort. The fresh-boot loss is the initial
-                    // user-0 preinstall stream never installing (0
-                    // SetBundleQuota lines vs 84 on the lb317 win), and
-                    // every branch verdict in OnBmsStarting is an I/E
-                    // hilog line this tap never forwarded. These keys
-                    // name the exact branch taken on the next roll:
-                    // BmsStartEvent start/end, the CheckInitialUser wait
-                    // ("Bms initial user"), the bail-outs ("no space",
-                    // "preInstall bundleInfos failed", "QueryAllData
-                    // failed", "persistent data is empty"), the branch
-                    // verdicts ("first boot", "ReInstall all haps",
-                    // "Guard against install infos lossed strategy"),
-                    // and the CreateNewUser empty-set verdict
-                    // ("GetAllPreInstallBundleInfos failed").
-                    // Once-per-boot or once-per-user lines; volume < 20
-                    // per boot against the 600-line budget.
-                    "BmsStartEvent",
-                    "Bms initial user",
-                    "OnBmsStarting",
-                    "no space",
-                    "preInstall bundleInfos failed",
-                    "QueryAllData failed",
-                    "persistent data is empty",
-                    "first boot",
-                    "ReInstall all haps",
-                    "Guard against install infos lossed strategy",
-                    "GetAllPreInstallBundleInfos failed",
-                ];
-                let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
-                if ams_family {
-                    static AMS_TAPS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let n = AMS_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 600 {
-                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_warn!("HILOG-AMS[{}] {}{}", n, p, s);
+                    let s = core::str::from_utf8(&text[..k]).unwrap_or("");
+                    // u17 lesson: "dri" matches "driver", "Render" matches
+                    // the audio RenderRouters flood, "display" matches
+                    // everything — keep the set tight and case-distinct.
+                    // Tag allowlist first (decoded tags are exact, no
+                    // substring risk): RS/bootanimation/composer cohort.
+                    const TAGS: [&str; 12] = [
+                        "OHOS::RS", "BootAnimation", "Composer", "ComposerAgent",
+                        "ComposerManager", "2DGraphics", "FrameCollector",
+                        "FramePainter", "EGL", "OpenGLWrapper", "DISP", "MESA",
+                    ];
+                    const KEYS: [&str; 23] = [
+                        "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
+                        "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
+                        "composer", "Rosen", "rosen", "DISP", "gralloc", "Gralloc", "DRI2",
+                    ];
+                    // Mesa's egl_dri2 extension probe floods ~1200
+                    // "[dri2_get_proc_address@...] procname = gl..." lines
+                    // through the DISP tag right before the interesting
+                    // window (screen create → llvmpipe init → verdict);
+                    // skipping them keeps the budget for the verdict lines.
+                    let flood = s.contains("procname = gl");
+                    // leg-30B5: the StartUser/SwitchToUser user-start chain
+                    // cohort at WARN (visible at loglevel 6, unlike the GL
+                    // cohort's pr_debug): BMS's ImplicitQueryInfoByPriority
+                    // verdicts ("user is not existed" = GetUserId rejected
+                    // user 100; "can't find target AbilityInfo" = the isBoot
+                    // retry ladder's spin reason), accountmgr's adapter
+                    // results, and AMS's own handler narration. Rare lines
+                    // concentrated in the post-unlock window — own budget.
+                    const AMS_KEYS: [&str; 49] = [
+                        "SwitchToUser",
+                        "startUser in service",
+                        "highest priority ability",
+                        "user is not existed",
+                        "invalid userId",
+                        "userId not exist",
+                        "CreateNewUser user",
+                        "CreateNewUser end",
+                        "bundle size:",
+                        "wait complete",
+                        "AbilityManagerAdapter",
+                        "in call back",
+                        "StartUser current",
+                        "low-mem mode",
+                        "foregroundUserId:",
+                        "not supported!",
+                        "failed to get os account",
+                        "os account proxy",
+                        "Get samgr failed",
+                        "account iface_cast",
+                        "failed to get account",
+                        "can't find target",
+                        "IsOsAccountExists path",
+                        // lb47: the ipc-skeleton failure verdicts. The bare
+                        // "SendRequest" key matched the SA_CLIENT success flood
+                        // ("SubscribeSystemAbility SendRequest succeed!") and
+                        // ate the whole 600 budget by ~125 s on lb46 — dark for
+                        // the entire StartUser window. Tightened to the failure
+                        // shapes only: IPCObjectProxy's ZLOGE "failed, handle:"
+                        // (every SendRequest error verdict, includes the
+                        // ERR_DEAD_OBJECT class), the null-invoker ZLOGE, the
+                        // samgr stub-object error, the work-thread pool family,
+                        // and the measured-cost lines.
+                        "failed, handle:",
+                        "invoker is null",
+                        "Invalid samgr stub",
+                        "SendRequestInner cost",
+                        "SendRequest failed",
+                        "SendRequest fail",
+                        "work thread",
+                        "find target AbilityInfo",
+                        "create user:",
+                        "permission verification failed, not account",
+                        // lb48 (seventh successor): the death-mark verdicts.
+                        // A death-marked IPCObjectProxy answers every later
+                        // SendRequest locally with ERR_DEAD_OBJECT (ZLOGD
+                        // only) — the permanent fast-fail engine. These keys
+                        // name every path that marks, un-marks, or rejects
+                        // the mark: WaitForInit's self-heal ("init again"),
+                        // OnBinderDied's address-reject ("Invalid proxy
+                        // object"), the ioctl-level errno verdict ("fail,
+                        // result:" — the ONLY path whose value can be -32 ==
+                        // ERR_DEAD_OBJECT, since a kernel BR_DEAD_REPLY maps
+                        // to +0x7205 which SendRequestInner never compares),
+                        // the parcel-side write failure, and the obituary
+                        // refcount reject.
+                        "init again",
+                        "Invalid proxy object",
+                        "fail, result:",
+                        "WriteTransaction ERROR",
+                        "failed to increment strong reference count",
+                        // 27th session (lb362/366 decode): the BMS boot-scan
+                        // verdict cohort. The fresh-boot loss is the initial
+                        // user-0 preinstall stream never installing (0
+                        // SetBundleQuota lines vs 84 on the lb317 win), and
+                        // every branch verdict in OnBmsStarting is an I/E
+                        // hilog line this tap never forwarded. These keys
+                        // name the exact branch taken on the next roll:
+                        // BmsStartEvent start/end, the CheckInitialUser wait
+                        // ("Bms initial user"), the bail-outs ("no space",
+                        // "preInstall bundleInfos failed", "QueryAllData
+                        // failed", "persistent data is empty"), the branch
+                        // verdicts ("first boot", "ReInstall all haps",
+                        // "Guard against install infos lossed strategy"),
+                        // and the CreateNewUser empty-set verdict
+                        // ("GetAllPreInstallBundleInfos failed").
+                        // Once-per-boot or once-per-user lines; volume < 20
+                        // per boot against the 600-line budget.
+                        "BmsStartEvent",
+                        "Bms initial user",
+                        "OnBmsStarting",
+                        "no space",
+                        "preInstall bundleInfos failed",
+                        "QueryAllData failed",
+                        "persistent data is empty",
+                        "first boot",
+                        "ReInstall all haps",
+                        "Guard against install infos lossed strategy",
+                        "GetAllPreInstallBundleInfos failed",
+                    ];
+                    let ams_family = AMS_KEYS.iter().any(|key| s.contains(key));
+                    if ams_family {
+                        static AMS_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = AMS_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 600 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_warn!("HILOG-AMS[{}] {}{}", n, p, s);
+                        }
                     }
-                }
-                // Decoded line is "<tag>: <content>" — prefix-match the
-                // tag so "OHOS::RS" (which contains ':') still works.
-                let interesting = TAGS.iter().any(|t| {
-                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
-                }) || KEYS.iter().any(|key| s.contains(key));
-                if !flood && interesting {
-                    static HILOG_TAPS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 3000 {
-                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_debug!("hilog[{}] {}{}", n, p, s);
+                    // Decoded line is "<tag>: <content>" — prefix-match the
+                    // tag so "OHOS::RS" (which contains ':') still works.
+                    let interesting = TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || KEYS.iter().any(|key| s.contains(key));
+                    if !flood && interesting {
+                        static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 3000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("hilog[{}] {}{}", n, p, s);
+                        }
                     }
-                }
-                // Spawn-chain tap (launcher hunt, b16): the appspawn ->
-                // fork -> exec/ArkTS-chain evidence lives in hilog under
-                // appspawn/ams/bms/ability-runtime tags, none of which the
-                // graphics filter above passes. b16 exhausted the 3000
-                // graphics taps before appspawn's single fork ever
-                // logged, so this cohort gets its own counter and budget.
-                // Exact tags first, then one substring set — "ppSpawn"
-                // spans AppSpawn/APPSPAWN/appspawn (the family of
-                // spellings OH actually emits) without matching unrelated
-                // words.
-                const SPAWN_TAGS: [&str; 10] = [
-                    "APPSPAWN", "AppSpawn", "Ams", "Bms", "BundleMgr",
-                    "AbilityRuntime", "AbilityManagerService", "CJAppspawn",
-                    "NativeService", "appspawn",
-                ];
-                const SPAWN_KEYS: [&str; 9] = [
-                    "ppSpawn", "StartAbility", "start ability", "bundleName",
-                    "AbilityManager", "appspawn", "OnForeground", "OnBackground",
-                    "AbilityScheduler",
-                ];
-                let spawn_hit = SPAWN_TAGS.iter().any(|t| {
-                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
-                }) || SPAWN_KEYS.iter().any(|key| s.contains(key));
-                if spawn_hit {
-                    static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    // b21 lesson: 3000 taps ran out mid-boot (slog[2999])
-                    // right at the spawn-section logs — the whole chain
-                    // (BMS dir creation, child runtime, OnForeground) went
-                    // dark exactly when it got interesting. 30000 covers a
-                    // full OH boot's spawn-cohort traffic (~4.5MB serial).
-                    if n < 30000 {
-                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_debug!("slog[{}] {}{}", n, p, s);
+                    // Spawn-chain tap (launcher hunt, b16): the appspawn ->
+                    // fork -> exec/ArkTS-chain evidence lives in hilog under
+                    // appspawn/ams/bms/ability-runtime tags, none of which the
+                    // graphics filter above passes. b16 exhausted the 3000
+                    // graphics taps before appspawn's single fork ever
+                    // logged, so this cohort gets its own counter and budget.
+                    // Exact tags first, then one substring set — "ppSpawn"
+                    // spans AppSpawn/APPSPAWN/appspawn (the family of
+                    // spellings OH actually emits) without matching unrelated
+                    // words.
+                    const SPAWN_TAGS: [&str; 10] = [
+                        "APPSPAWN", "AppSpawn", "Ams", "Bms", "BundleMgr",
+                        "AbilityRuntime", "AbilityManagerService", "CJAppspawn",
+                        "NativeService", "appspawn",
+                    ];
+                    const SPAWN_KEYS: [&str; 9] = [
+                        "ppSpawn", "StartAbility", "start ability", "bundleName",
+                        "AbilityManager", "appspawn", "OnForeground", "OnBackground",
+                        "AbilityScheduler",
+                    ];
+                    let spawn_hit = SPAWN_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || SPAWN_KEYS.iter().any(|key| s.contains(key));
+                    if spawn_hit {
+                        static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        // b21 lesson: 3000 taps ran out mid-boot (slog[2999])
+                        // right at the spawn-section logs — the whole chain
+                        // (BMS dir creation, child runtime, OnForeground) went
+                        // dark exactly when it got interesting. 30000 covers a
+                        // full OH boot's spawn-cohort traffic (~4.5MB serial).
+                        if n < 30000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("slog[{}] {}{}", n, p, s);
+                        }
                     }
-                }
-                // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
-                // — osaccount SendToStorageAccountStart -> UnlockUser ->
-                // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
-                // PublishCommonEvent(USER_UNLOCKED) -> BMS
-                // user_unlocked_event_subscriber creating the per-bundle
-                // el1/100/database dirs — is the one link that never fires on
-                // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
-                // AccountMgr/AccountFwk) was invisible to both cohorts above.
-                const ACCT_TAGS: [&str; 7] = [
-                    "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
-                    "AccountSA", "StorageManager", "StorageDaemon",
-                ];
-                const ACCT_KEYS: [&str; 8] = [
-                    "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
-                    "ActiveUserKey", "is unlocked", "user_unlocked",
-                    "need CreateBundleDataDir", "OsAccount",
-                ];
-                let acct_hit = ACCT_TAGS.iter().any(|t| {
-                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
-                }) || ACCT_KEYS.iter().any(|key| s.contains(key));
-                if acct_hit {
-                    static ACCT_TAPS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 6000 {
-                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_debug!("alog[{}] {}{}", n, p, s);
+                    // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
+                    // — osaccount SendToStorageAccountStart -> UnlockUser ->
+                    // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
+                    // PublishCommonEvent(USER_UNLOCKED) -> BMS
+                    // user_unlocked_event_subscriber creating the per-bundle
+                    // el1/100/database dirs — is the one link that never fires on
+                    // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
+                    // AccountMgr/AccountFwk) was invisible to both cohorts above.
+                    const ACCT_TAGS: [&str; 7] = [
+                        "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
+                        "AccountSA", "StorageManager", "StorageDaemon",
+                    ];
+                    const ACCT_KEYS: [&str; 8] = [
+                        "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
+                        "ActiveUserKey", "is unlocked", "user_unlocked",
+                        "need CreateBundleDataDir", "OsAccount",
+                    ];
+                    let acct_hit = ACCT_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || ACCT_KEYS.iter().any(|key| s.contains(key));
+                    if acct_hit {
+                        static ACCT_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 6000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("alog[{}] {}{}", n, p, s);
+                        }
                     }
-                }
-                // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
-                // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
-                // any el2 leaf on Rux, while the Linux reference creates
-                // all of them. The BMSInstalld tag (domain 0xD001122)
-                // logs every abort reason in CreateBundleDataDir
-                // ("Base directory does not existed",
-                // "HapFileRestorecon failed", "MkOwnerDir failed errno")
-                // but was invisible to every cohort above.
-                const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
-                const ILD_KEYS: [&str; 6] = [
-                    "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
-                    "MkOwnerDir", "does not existed", "installd permission",
-                ];
-                let ild_hit = ILD_TAGS.iter().any(|t| {
-                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
-                }) || ILD_KEYS.iter().any(|key| s.contains(key));
-                if ild_hit {
-                    static ILD_TAPS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 10000 {
-                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
-                        crate::pr_debug!("ilog[{}] {}{}", n, p, s);
+                    // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
+                    // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
+                    // any el2 leaf on Rux, while the Linux reference creates
+                    // all of them. The BMSInstalld tag (domain 0xD001122)
+                    // logs every abort reason in CreateBundleDataDir
+                    // ("Base directory does not existed",
+                    // "HapFileRestorecon failed", "MkOwnerDir failed errno")
+                    // but was invisible to every cohort above.
+                    const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
+                    const ILD_KEYS: [&str; 6] = [
+                        "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
+                        "MkOwnerDir", "does not existed", "installd permission",
+                    ];
+                    let ild_hit = ILD_TAGS.iter().any(|t| {
+                        s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                    }) || ILD_KEYS.iter().any(|key| s.contains(key));
+                    if ild_hit {
+                        static ILD_TAPS: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 10000 {
+                            let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                            crate::pr_debug!("ilog[{}] {}{}", n, p, s);
+                        }
                     }
                 }
             }
-        }
 
         // STREAM + zero-length payload: never enqueue an empty segment.
         // A byte stream has no record boundaries — ancillary data rides the

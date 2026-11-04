@@ -647,6 +647,51 @@ unsafe fn deliver_unix_cmsgs(
     if files.is_empty() && cred.is_none() {
         return Ok(0);
     }
+    // 39th (u2v7 profile): cred-only delivery is the hilogd storm's
+    // consumer-side hot shape (24k SCM_CREDENTIALS cmsgs/s, UNIXRD-RM
+    // cmsg phase 3.35 us/op = 68% of the per-op wall). The staged path
+    // below allocates three heap objects per call (new_fds Vec, the
+    // cmsg staging Vec with a grow, and a .concat() payload Vec) and
+    // touches the fd table — none of that is needed when there are no
+    // SCM_RIGHTS fds. The fast path writes the identical 32-byte chain
+    // (16-byte cmsg header + 12-byte struct ucred + 4 alignment pad,
+    // cmsg_len = 28) from the stack with one copy_to_user. Semantics
+    // match the staged path byte-for-byte: controllen = 32 on success;
+    // no room -> msg_controllen zeroed + Ok(0); EFAULT on a bad
+    // control buffer.
+    if files.is_empty() {
+        let c = match cred {
+            Some(c) => c,
+            None => return Ok(0),
+        };
+        let mut cmsg = [0u8; 32];
+        const CRED_CMSG_LEN: usize = 28; // hdr(16) + struct ucred(12)
+        cmsg[0..8].copy_from_slice(&CRED_CMSG_LEN.to_ne_bytes());
+        cmsg[8..12].copy_from_slice(&crate::net::unix::SOL_SOCKET.to_ne_bytes());
+        cmsg[12..16].copy_from_slice(&crate::net::unix::SCM_CREDENTIALS.to_ne_bytes());
+        cmsg[16..20].copy_from_slice(&c.pid.to_ne_bytes());
+        cmsg[20..24].copy_from_slice(&c.uid.to_ne_bytes());
+        cmsg[24..28].copy_from_slice(&c.gid.to_ne_bytes());
+        // SAFETY: msg_ptr was access_ok(64)-validated by the recvmsg entry.
+        let control = get_user::<usize>(msg_ptr.add(32) as *const usize).unwrap_or(0);
+        let controllen = get_user::<usize>(msg_ptr.add(40) as *const usize).unwrap_or(0);
+        if control == 0 || controllen < cmsg.len() {
+            // No control-buffer room: zero msg_controllen so the caller's
+            // CMSG walk never sees stale user-memory cmsg_len values.
+            let _ = put_user(msg_ptr.add(40) as *mut usize, 0);
+            return Ok(0);
+        }
+        if !access_ok(control, cmsg.len()) {
+            return Err(-(errno::EFAULT as i64));
+        }
+        // SAFETY: control/cmsg.len() validated with access_ok above.
+        if copy_to_user(control as *mut u8, cmsg.as_ptr(), cmsg.len()) != 0 {
+            return Err(-(errno::EFAULT as i64));
+        }
+        // SAFETY: msg_ptr validated by the caller.
+        let _ = put_user(msg_ptr.add(40) as *mut usize, cmsg.len());
+        return Ok(cmsg.len());
+    }
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(t) => t,
         None => return Err(-(errno::EBADF as i64)),
