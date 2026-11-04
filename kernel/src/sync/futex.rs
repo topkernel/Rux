@@ -502,6 +502,25 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
+        // 33rd successor — wait-site map. Futex syscall args from the
+        // SAME entry frame (op/val/timeout) plus the user-space wait
+        // site: the uaddr's VMA decode (which mapping, offset inside
+        // it) and up to 4 user-stack words landing in EXECUTABLE VMAs
+        // (candidate return addresses naming the FFRT/samgr call site
+        // above the libc wrapper — the entry rip alone is the wrapper
+        // for every park and discriminates nothing).
+        fop: u64,
+        fval: u64,
+        fto: u64,
+        uvma_ok: bool,
+        uvma_start: usize,
+        uvma_end: usize,
+        uvma_off: usize,
+        uvma_cls: u8, // 'A'non, 'F'ile, 'H'eap, 'S'tack, 'M'shm, 'D'ev
+        uvma_fd: i32,
+        uvma_voff: usize, // file offset when FileBacked (vma.offset + off)
+        uret: [u64; 4],
+        uret_n: usize,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -541,6 +560,18 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
+                        fop: 0,
+                        fval: 0,
+                        fto: 0,
+                        uvma_ok: false,
+                        uvma_start: 0,
+                        uvma_end: 0,
+                        uvma_off: 0,
+                        uvma_cls: b'-',
+                        uvma_fd: -1,
+                        uvma_voff: 0,
+                        uret: [0; 4],
+                        uret_n: 0,
                     });
                 } else if total > 64 {
                     // Sample cap reached with clear headroom — stop the
@@ -557,7 +588,8 @@ pub fn futex_stuck_census() {
         return;
     }
 
-    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
+    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc and
+    // the wait-site decode) ----
     // lb325 wedge: this census runs at the timer-softirq heartbeat (IF=0);
     // the BLOCKING task walk self-deadlocks against a pid-hash bucket held
     // by an interrupted task-context writer. Try-walk (skipped buckets just
@@ -573,6 +605,7 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
+                let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
                     {
@@ -584,6 +617,11 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.orig_rax as u64;
                         s.epc = r.rip as u64;
+                        // futex(uaddr, op, val, timeout, ...): rsi/rdx/r10.
+                        s.fop = r.rsi;
+                        s.fval = r.rdx;
+                        s.fto = r.r10;
+                        usp = r.rsp;
                     }
                     #[cfg(feature = "riscv64")]
                     {
@@ -595,6 +633,10 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.a7 as u64;
                         s.epc = r.epc as u64;
+                        s.fop = r.a1;
+                        s.fval = r.a2;
+                        s.fto = r.a3;
+                        usp = r.sp;
                     }
                     #[cfg(feature = "aarch64")]
                     {
@@ -606,6 +648,92 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.syscallno as u64;
                         s.epc = r.pc as u64;
+                        s.fop = r.regs[1];
+                        s.fval = r.regs[2];
+                        s.fto = r.regs[3];
+                        usp = r.sp;
+                    }
+                }
+                // Wait-site decode (33rd successor). The waiter is parked
+                // in this very syscall, so its user stack is frozen and
+                // its mm cannot vanish while the task is pinned here.
+                // VMA lookups under a TRY read lock (softirq context —
+                // skip the decode this burst rather than spin IF=0
+                // against an mmap/munmap writer).
+                if let Some(aspace) = tk.address_space() {
+                    if let Some(mgr) = aspace.vma_try_read() {
+                        use crate::mm::vma::{VirtAddr, VmaType};
+                        // (a) uaddr's mapping
+                        if let Some(vma) = mgr.find(VirtAddr::new(s.uaddr)) {
+                            s.uvma_ok = true;
+                            s.uvma_start = vma.start().as_usize();
+                            s.uvma_end = vma.end().as_usize();
+                            s.uvma_off = s.uaddr - s.uvma_start;
+                            s.uvma_voff = vma.offset() + s.uvma_off;
+                            let flags = vma.flags();
+                            s.uvma_cls = if flags.contains(
+                                crate::mm::vma::VmaFlags::GROWSDOWN,
+                            ) {
+                                b'S'
+                            } else if s.uvma_start == aspace.start_brk() {
+                                b'H'
+                            } else {
+                                match vma.vma_type() {
+                                    VmaType::FileBacked => {
+                                        s.uvma_fd = vma.file_fd();
+                                        b'F'
+                                    }
+                                    VmaType::SharedMemory => b'M',
+                                    VmaType::Device => b'D',
+                                    VmaType::Anonymous => b'A',
+                                }
+                            };
+                        }
+                        // (b) user-stack return-address candidates: scan
+                        // the 32 words above the entry sp; a word landing
+                        // inside an EXECUTABLE vma is a plausible return
+                        // address into userspace text (musl omits frame
+                        // pointers, so this is a filtered scan, not a
+                        // frame walk). Foreign-mm reads go through the
+                        // walker + linear map — no CR3 switch, page is
+                        // resident (the thread executed on it).
+                        if usp != 0 {
+                            let root = aspace.root_ppn();
+                            let mut va = (usp + 7) & !7u64;
+                            for _ in 0..32 {
+                                if s.uret_n >= 4 {
+                                    break;
+                                }
+                                // SAFETY: root_ppn of the pinned task's
+                                // live mm; walk is read-only.
+                                if let Some((ppn, bits)) = unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                        root, va,
+                                    )
+                                } {
+                                    if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word.
+                                        let w = unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        };
+                                        if let Some(vma) =
+                                            mgr.find(VirtAddr::new(w as usize))
+                                        {
+                                            if vma.flags().is_executable() {
+                                                s.uret[s.uret_n] = w;
+                                                s.uret_n += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                va += 8;
+                            }
+                        }
                     }
                 }
                 break;
@@ -682,6 +810,18 @@ pub fn futex_stuck_census() {
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
+        rep_fop: u64,
+        rep_fval: u64,
+        rep_fto: u64,
+        rep_uvma_ok: bool,
+        rep_uvma_start: usize,
+        rep_uvma_end: usize,
+        rep_uvma_off: usize,
+        rep_uvma_cls: u8,
+        rep_uvma_fd: i32,
+        rep_uvma_voff: usize,
+        rep_uret: [u64; 4],
+        rep_uret_n: usize,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -711,6 +851,18 @@ pub fn futex_stuck_census() {
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
+                        rep_fop: s.fop,
+                        rep_fval: s.fval,
+                        rep_fto: s.fto,
+                        rep_uvma_ok: s.uvma_ok,
+                        rep_uvma_start: s.uvma_start,
+                        rep_uvma_end: s.uvma_end,
+                        rep_uvma_off: s.uvma_off,
+                        rep_uvma_cls: s.uvma_cls,
+                        rep_uvma_fd: s.uvma_fd,
+                        rep_uvma_voff: s.uvma_voff,
+                        rep_uret: s.uret,
+                        rep_uret_n: s.uret_n,
                     });
                 }
             }
@@ -741,8 +893,17 @@ pub fn futex_stuck_census() {
         // HOTPATH-PRINT: fuxstuck census report — gated by
         // dfx=fuxstuck at futex_stuck_census() entry plus the 5s burst
         // budget and the 1200-line LINES cap; never fires on a plain boot.
+        use core::fmt::Write as _;
+        let mut vmx = alloc::string::String::new();
+        if g.rep_uvma_ok && g.rep_uvma_cls == b'F' {
+            let _ = write!(vmx, " fd={} voff={:#x}", g.rep_uvma_fd, g.rep_uvma_voff);
+        }
+        let mut uret_s = alloc::string::String::new();
+        for i in 0..g.rep_uret_n {
+            let _ = write!(uret_s, "{:#x} ", g.rep_uret[i]);
+        }
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x} uvma={:#x}-{:#x} {}+{:#x}{} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
@@ -754,6 +915,15 @@ pub fn futex_stuck_census() {
             g.any_woken as u32,
             g.rep_sys,
             g.rep_epc,
+            g.rep_fop,
+            g.rep_fval,
+            g.rep_fto,
+            g.rep_uvma_start,
+            g.rep_uvma_end,
+            g.rep_uvma_cls as char,
+            g.rep_uvma_off,
+            vmx,
+            uret_s,
             h.map(|h| h.run).unwrap_or(0),
             h.map(|h| h.futex).unwrap_or(0),
             h.map(|h| h.int_other).unwrap_or(0),
