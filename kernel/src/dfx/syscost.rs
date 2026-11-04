@@ -1517,6 +1517,15 @@ pub fn tick(now_jiffies: u64) {
     if !on() {
         return;
     }
+    // Phase-shift the dump OFF the 30s periodic-taskdump boundaries: both
+    // fired at 60s multiples and byte-interleaved on the console — every
+    // 60/120/180/240s SYSCOST table was lost to the doubled-console
+    // interleave (lb343/344, u2v1). Dumps now land at 45s modulo 60
+    // (105, 165, ...), clear of every other periodic dumper.
+    let secs = now_jiffies / crate::config::KERNEL_HZ as u64;
+    if secs % SYSCOST_DUMP_SECS != SYSCOST_DUMP_SECS - 15 {
+        return;
+    }
     if now_jiffies.saturating_sub(LAST_DUMP.load(Ordering::Relaxed))
         < SYSCOST_DUMP_SECS * crate::config::KERNEL_HZ as u64
     {
