@@ -1459,7 +1459,16 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                 })
                 .unwrap_or(false);
             let forced_kill = sig == Signal::SIGKILL as i32 && !same_ns_user_kill;
-            if !handled && !forced_kill {
+            // SIGNAL_UNKILLABLE protects only FATAL default actions
+            // (terminate/core). The group-stop family STOPS a pid-ns
+            // init and SIGCONT resumes it (reference get_signal():
+            // sig_kernel_stop -> do_group_stop with no UNKILLABLE
+            // consult; SIGCONT acts at send time in prepare_signal) —
+            // a container init honors SIGSTOP/SIGCONT even with no
+            // handler installed. kselftest memfd's nested-sysctl legs
+            // park their helper children exactly this way.
+            let stop_or_cont = matches!(sig, 18 | 19 | 20 | 21 | 22);
+            if !handled && !forced_kill && !stop_or_cont {
                 // Discard without running a disposition. No handler frame
                 // is built, so convert any syscall-restart sentinel now
                 // (else the raw -512 could leak to userspace as a bogus
