@@ -1,0 +1,7 @@
+30 fio --name=sync --ioengine=sync --rw=write --bs=4k --size=256k --filename=/test/qa/r-sync.bin
+30 fio --name=psync --ioengine=psync --rw=write --bs=4k --size=256k --filename=/test/qa/r-psync.bin
+30 fio --name=vsync --ioengine=vsync --rw=write --bs=4k --size=256k --filename=/test/qa/r-vsync.bin
+30 fio --name=pvsync2 --ioengine=pvsync2 --rw=write --bs=4k --size=256k --filename=/test/qa/r-pvs2.bin
+30 fio --name=mmap --ioengine=mmap --rw=write --bs=4k --size=256k --filename=/test/qa/r-mmap.bin
+30 fio --name=splice --ioengine=splice --rw=write --bs=4k --size=256k --filename=/test/qa/r-spl.bin
+60 fio --name=paio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/r-paio.bin

@@ -1,0 +1,1 @@
+240 fio --name=mm --ioengine=mmap --rw=randrw --bs=4k --size=64M --filename=/test/qa/s5.bin

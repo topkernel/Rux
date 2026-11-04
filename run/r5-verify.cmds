@@ -1,0 +1,1 @@
+300 fio --name=vw --ioengine=psync --rw=randwrite --bs=8k --size=32M --verify=crc32 --verify_state_save=0 --filename=/test/qa/s6.bin

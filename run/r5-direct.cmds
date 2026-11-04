@@ -1,0 +1,2 @@
+240 fio --name=drr --ioengine=psync --direct=1 --rw=randread --bs=4k --size=64M --filename=/test/qa/s9.bin
+240 fio --name=drw --ioengine=psync --direct=1 --rw=randwrite --bs=4k --size=64M --filename=/test/qa/s9.bin

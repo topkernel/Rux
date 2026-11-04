@@ -1,0 +1,1 @@
+30 fio --name=paio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/e-paio.bin

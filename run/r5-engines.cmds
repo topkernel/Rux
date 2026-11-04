@@ -1,0 +1,11 @@
+30 fio --name=sync --ioengine=sync --rw=write --bs=4k --size=256k --filename=/test/qa/e-sync.bin
+30 fio --name=psync --ioengine=psync --rw=write --bs=4k --size=256k --filename=/test/qa/e-psync.bin
+30 fio --name=vsync --ioengine=vsync --rw=write --bs=4k --size=256k --filename=/test/qa/e-vsync.bin
+30 fio --name=pvsync2 --ioengine=pvsync2 --rw=write --bs=4k --size=256k --filename=/test/qa/e-pvs2.bin
+30 fio --name=mmap --ioengine=mmap --rw=write --bs=4k --size=256k --filename=/test/qa/e-mmap.bin
+30 fio --name=splice --ioengine=splice --rw=write --bs=4k --size=256k --filename=/test/qa/e-spl.bin
+30 fio --name=posixaio --ioengine=posixaio --rw=write --bs=4k --size=256k --filename=/test/qa/e-paio.bin
+30 fio --name=libaio --ioengine=libaio --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laio.bin
+30 fio --name=iouring --ioengine=io_uring --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-uring.bin
+30 fio --name=syncd --ioengine=sync --direct=1 --rw=write --bs=4k --size=256k --filename=/test/qa/e-syncd.bin
+30 fio --name=laiod --ioengine=libaio --direct=1 --rw=randwrite --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laiod.bin

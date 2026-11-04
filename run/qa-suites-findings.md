@@ -406,3 +406,76 @@ gates. memfd: CREATE through DONE green, including all nested-sysctl
   during thread spawn/setup, not the measurement loop).
 - Gates: PLATFORM=x86_64 make build rc=0; PLATFORM=riscv64 rc=0;
   PLATFORM=aarch64 rc=0; `make test` ALL GREEN (1096/1096) on riscv64.
+
+## Round 5 — fio 3.36 first stress battery (block IO stress)
+
+Kernel: merge 9f2c1cc6 (origin/main 53fba4f6 + this branch; probes.tar.gz
+union). Vehicle unchanged (x86_64+KVM q35, 2G/2cpu, run/rootfs-qa.img,
+dfx=taskdump,watchdog; syscost=1 on the two posixaio decode boots).
+fio = run/fio-bin/fio (static musl, libaio engine builtin). One family
+per boot; logs run/qa-runs-r5/.
+
+### Engine survey (one tiny job per engine, sequential in one boot)
+
+| engine | verdict |
+|---|---|
+| sync / psync / vsync / pvsync2 / mmap / splice | PASS (rc=0 each) |
+| sync + direct=1 | PASS — O_DIRECT path works |
+| posixaio | **F-6: boot WEDGE (1 of 3 boots)** — see below |
+| libaio | GAP: io_setup/io_submit/... all return ENOSYS (syscall/memory.rs); fio exits 1 with err=38, clean failure, correct errno discipline |
+| io_uring | **F-7: user SIGSEGV in fio** — setup returns a real fd, ring mmap served by io_uring_mmap_handler, then fio derefs NULL+0x1e (rip=0x4729d1, pid 312; second SIGDEATH pid 310 + #GP in teardown). Partial io_uring semantics (ring content / enter contract) break the reference tool |
+
+### Stress classes (one family per boot)
+
+| class | load | verdict |
+|---|---|---|
+| seqrw | 1M write 64M + 1M read 64M | PASS (both rc=0) |
+| randrw | 4k randread 64M + randwrite 64M | PASS (both rc=0) |
+| fsync | randwrite 4k 8M fsync=1 (2048 durability points) | PASS (rc=0) |
+| mmaprwn | mmap engine randrw 4k 64M | PASS (rc=0; 8160 reads + 8224 writes issued) |
+| direct | 4k randread/randwrite 64M direct=1 | PASS (both rc=0) |
+| verify | randwrite 8k 32M + crc32 read-back | **PASS — 4096+4096 full matrix, ZERO verify errors** (no corruption; SP-2 neighborhood clean under fio) |
+| multi | 4-job same-file contention (2 randread + randwrite + seq write) | PASS (multi2 with prep line: group READ 64MiB @711MiB/s, WRITE 64MiB @688MiB/s, rc=0) |
+
+Zero KERNPANIC / DEADLOCK / ALLOCTHROW / KOT-KILL / PREEMPT-UNDERFLOW
+classes across all eleven boots.
+
+### F-6: posixaio engine intermittently wedges the boot (race family)
+
+- Survey boot #1: engines 1-6 PASS, then posixaio (job 7/11): fio child
+  `RES|fio|251|unreapable T=150s` — TERM(+30) and KILL(+60) both failed
+  to reap; hung-task reports pid 306 blocked >120 s; console floods
+  `fs: fdreap close completion stalled (grace budget exceeded 10752x)`
+  — retire_complete's RCU grace never passes (x86 GP budget 50 ms; the
+  stall counter crossed 10k = 8+ minutes of continuous grace failure).
+  Mechanism: fio exit's close path loops in fdreap::retire_complete
+  while some CPU never reports quiescent state (monopolist-window
+  family). The recorded HUNG-STK PCs are stale (context_switch).
+- Reproducibility: 1/3 — alone-boot PASS (syscost=1), 7-engine sequence
+  replay PASS (syscost=1). Not sequence-deterministic; load/timing race.
+- First move for the owner lane: N-boot repeat loop with syscost=1 +
+  taskdump until the wedge fires, then read the census for the
+  monopolist identity (candidates: musl aio worker's buffered pwrite in
+  the virtio poll path — the VW-POLLSTALL preempt-guard family — or a
+  self-starved polled-grace spin).
+
+### F-7: io_uring partial implementation segfaults the reference tool
+
+- fio-3.36 io_uring engine: io_uring_setup succeeds (fd returned), ring
+  mmap goes through io_uring_mmap_handler, then fio crashes at
+  fault addr 0x1e rip=0x4729d1 (NULL+0x1e, fio text 0x401000-0x495000).
+  Evidence: r5-engines2.log (pagefault + USEGV-FOR + 2x SIGDEATH sig=11).
+- Gap vs reference semantics: ring mmap/enter contract incomplete.
+  Owner: the io_uring module lane. Not a panic — kernel stays alive;
+  both fio threads die by SIGSEGV, teardown completes.
+
+### Rig notes
+
+- multi#1's group-issued line was a TAIL-TRUNCATION artifact (the RES
+  tail carries the last per-job section, not the group summary);
+  multi2 (prep line + group status visible) proves the contention class
+  clean. Design note: same-file readers need a prep writer line first.
+- Engine survey jobs are tiny (256k); they enumerate syscall-path
+  support, not throughput. Throughput coverage comes from the class
+  boots (aggregate 64MiB @ ~700MiB/s class in KVM, page-cache absorbed).
+- Tooling: run/r5-fio-battery.sh + run/r5-*.cmds (this round's boots).

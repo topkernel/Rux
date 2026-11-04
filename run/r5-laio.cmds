@@ -1,0 +1,1 @@
+240 fio --name=laio --ioengine=libaio --rw=randrw --bs=4k --size=64M --iodepth=32 --filename=/test/qa/s4.bin

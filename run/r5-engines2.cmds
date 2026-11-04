@@ -1,0 +1,4 @@
+30 fio --name=libaio --ioengine=libaio --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laio.bin
+30 fio --name=iouring --ioengine=io_uring --rw=write --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-uring.bin
+30 fio --name=syncd --ioengine=sync --direct=1 --rw=write --bs=4k --size=256k --filename=/test/qa/e-syncd.bin
+30 fio --name=laiod --ioengine=libaio --direct=1 --rw=randwrite --bs=4k --size=256k --iodepth=8 --filename=/test/qa/e-laiod.bin

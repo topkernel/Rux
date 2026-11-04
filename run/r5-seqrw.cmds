@@ -1,0 +1,2 @@
+120 fio --name=seqw --ioengine=psync --rw=write --bs=1M --size=64M --filename=/test/qa/s1.bin
+120 fio --name=seqr --ioengine=psync --rw=read --bs=1M --size=64M --filename=/test/qa/s1.bin

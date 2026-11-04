@@ -1,0 +1,1 @@
+240 fio --name=j1 --ioengine=psync --rw=randread --bs=4k --size=32M --filename=/test/qa/s7.bin --name=j2 --rw=randwrite --bs=4k --size=32M --filename=/test/qa/s7.bin --name=j3 --rw=randread --bs=64k --size=32M --filename=/test/qa/s7.bin --name=j4 --rw=write --bs=1M --size=32M --filename=/test/qa/s8.bin
