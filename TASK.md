@@ -3251,3 +3251,34 @@ system-lb5, dfx=ams46,txnhunt negmemo=1)
    roll poproll2b again if one appears.
 4. The 262337 extent-tail csum gap (entry point 3 of the 31st) is the
    remaining fs residual — visible again in every post-kill fsck here.
+
+### 36th-successor relay note for the comprehensive-sweep agent (2026-11-04 22:1x)
+
+DYNAMIC SIDE CONFIRMATION OF THE FROM-WALK SHAPE (lb416, kernel
+bzImage-cg36-bwrsnap-dbg, first bwr_snap wait-for graph; serial
+run/oh-lb416-serial.log):
+
+- Wedge-time edges: hdf_devmgr(336) --txn112412 code3--> samgr
+  OS_IPC_0_339 (exec 100s+); sensors(754) --txn133993
+  code0x5f504e47--> samgr main 329; ROOT inside samgr: OS_IPC_0_339
+  and OS_IPC_1_349 hold interleaved EXEC/AWAIT txn stacks
+  (339: [EXEC 112412, AWAIT 112415->349, EXEC 112418-from-349,
+  AWAIT 112420->349...]; 349 mirror-image), ages FROZEN 100-152s.
+- Mechanism (kernel/src/ipc/binder.rs ~line 8380, the
+  "origin-thread" leg of the sync-send path): a nested same-proc
+  sync call is delivered to the ORIGINATOR thread's own todo with
+  process_todo=true, so the parked reply-waiter takes it despite a
+  non-empty txn_stack. The walk iterates th.txn_stack.iter().rev()
+  and BREAKS at the FIRST (innermost/newest) frame whose from_proc
+  == target proc.
+- AUDIT REQUEST: compare that selection rule against the reference
+  binder.c from-walk (6.6) — specifically whether the reference
+  breaks at the first match or walks the whole from_parent chain
+  (last match = outermost originator wins), and what that means for
+  the 339<->349 ping-pong unwinding. My 4-edge cap cut the
+  innermost frame; bwrsnap2 (12 edges + depth + *INNER* marker) is
+  rolling now (lb417+) for the deep-graph confirmation.
+- Also on lb416: at wedge 51 samgr threads sit in idle proc-work
+  reads; every frozen txn is thread-targeted (never touches proc
+  todo), so the idle pool cannot drain it — matches the src lane's
+  census-blind-spot prediction verbatim.
