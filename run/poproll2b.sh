@@ -82,7 +82,7 @@ for i in $(seq 0 $((MAX-1))); do
     # so the park age must be matched record-bounded (no FUX-STUCK token
     # between the tgid=, park= and +0x800194 anchors) — python re.
     SAMPID=$(grep -ao "ServiceStart started info samgr(pid [0-9]*" "$SER" 2>/dev/null | head -1 | grep -o "[0-9]*$")
-    if [ -n "$SAMPID" ]; then
+    if [ -n "$SAMPID" ] && [ "${SIGKILL:-1}" = "1" ]; then
       SIGAGE=$(python3 -c '
 import re,sys
 pat=re.compile((r"tgid=%s(?:(?!FUX-STUCK).)*?park=(\d+)s(?:(?!FUX-STUCK).)*?A\+0x800194" % sys.argv[2]).encode(),re.S)
