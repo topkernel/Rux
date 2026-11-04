@@ -3618,3 +3618,137 @@ lane rebuilt on the tip (bzImage-cg36-poolfix-dbg) and verified:
    wall lever (timerfd_create storm caller STILL unnamed — entry
    point 3 of the 4th-successor notes) if the source lane confirms
    the FFRT-slowness adjudication.
+
+## 38TH SESSION (2026-11-05 00:19-.., branch biofix-fieldpoll @ 555ec7d3+)
+
+Mission: (1) complete+commit the 37th's uncommitted u2v2/u2v3 caller-chain
+decode; (2) THE SYSCALL-BUDGET EXPERIMENT — measure the wedged handler's
+syscall volume per class across its exec window, compare vs the fx8
+reference census, adjudicate retry-loop vs notify-chain.
+
+### 1. 37th's work completed and committed (x3 builds + make test green)
+555ec7d3 = u2v2/u2v3 caller-chain decode + wedge-full burst. The 37th died
+mid-compile: its diff compared u64 uret words against usize VMA fields
+unconstrained — completed the casts, verified x3 rc=0 + make test ALL
+PASSED, pushed. Also banked its run/u2vbank.py (record-bounded extractor).
+
+### 2. Boot u2v1 (kernel 555ec7d3) — the wedge face extracted
+Same substrate (system-lb5 + fresh2 userdata reflink, SMP2, KVM).
+DFX=txnhunt,fuxstuck,taskdump,periodic syscost=1; new driver run/u2v-boot.py
+(drives the uart-RX "DUMP!" magic via QEMU stdin — dumps fire from the RX
+IRQ, the only path guaranteed to run while everything is parked; DUMP!s at
+131.9/192.3/252.3/310.8s banked dump_all_tasks + binder_dfx_dump each).
+
+**RETRY-LOOP REFUTED for the wedged handler** (the mission's question):
+samgr tid 341 (OS_FFRT_2_0) executing code-6 from el5_filekey_man (txn40,
+read 5.783s, reply never): TXN-HANG posture at EVERY 5s sample for 300s =
+sys=202 futex_wait, stable uaddr (occasional 16B-neighbor alternation);
+fuxstuck park ages grow monotonically (294s..304s), anywoken=0 always; the
+uart DUMP! task series shows state=INTERRUPTIBLE(sleep) at all four dumps
+and lastsys FROZEN from 131s to 310s = ZERO syscalls in the last ~180s of
+its 300s exec. The handler parked ONCE and was never woken. Volume ≈
+reference (which completes the whole code-6 in ms). Mission branch (a)
+(RETRY LOOP as the engine) is DEAD for the parked handlers.
+
+**The wedge face is SYSTEM-WIDE FFRT-mutex waits.** u2v2 boot (below) with
+the caller chains names them: EVERY wedged handler park decodes as
+libc++ std::condition_variable::wait (u2v anchor +0x32e02) called from
+**ffrt::mutexPrivate::wait()** (u2v2 anchor libffrt LOAD 0x66000 +0x680c7
+= vaddr 0xce0c7, the return right after cv_.wait — objdump-verified in
+run/ohlibs/sweep/libffrt.so; source ffrt/src/sync/mutex.cpp:219-240,
+thread-park arm for task==nullptr || Block()==BLOCK_THREAD). 480/788
+continuation rows across ALL services are this class (u2v2). samgr at
+wedge: SEVEN parkers on SEVEN distinct stack-node uaddrs (each waiter
+parks on its OWN musl waiter-node barrier — per src-path.md the censused
+uaddr IS stack-local; the A+0x8006xx/7xx/8xx "arena offsets" are per-thread
+STACK tops of ~8MB anon thread stacks, NOT FFRT sync-arena slots), 15
+binder threads holding in-flight txns (binder-dfx stack=1), 26 queued,
+ALL sleeping except the periodic RefCountCollect (which legitimately
+cycles — vruntime grows every 30s window, not a strand).
+
+**Wake semantics**: mutexPrivate::wait waits on ctx->wn.cv; the waker is
+mutexPrivate::unlock() -> wake() (mutex.cpp:212-217) — a direct futex WAKE
+on the waiter's own node. anywoken=0 for 300s => the holder NEVER
+unlocked. The holders are themselves asleep (all samgr threads
+INTERRUPTIBLE(sleep) at the uart dumps) — holders parked mid-critical-
+section in the SAME mutexPrivate family, or invisible to fuxstuck (a
+BWR-parked holder is in ioctl, not futex — the census blind spot).
+
+### 3. The syscall-volume table (u2v2, clean after the phase-shift fix)
+syscost dumps were garbled on u2v1 (every dump collided with the 30s
+periodic task dump; only 2 garbled headers survived). Fix 8ccf6ed6
+phase-shifts the dump to 45s-mod-60 — u2v2 tables clean. Steady-state
+deltas (per 60s at the wedge, 105/165/225/285s):
+- recvmsg(45) +1.9M..+2.2M/60s (~35k/s, avg 28-58us = EAGAIN spin),
+  recvfrom(47) ~+2M/60s (~32k/s, avg 9us = pure EAGAIN spin),
+  writev(20) ~+2.3M/60s (~25k/s) — a ~90k/s socket-spin storm, STEADY
+  across the wedge window; eats ~93% of accounted kernel ticks
+  (ticks u/k/i 630/13464/244, 726/13464/509; softirq busy 10s/105s).
+- futex(202) +~2k/60s (the parked system barely futexes — no re-park
+  cycles, consistent with anywoken=0), ioctl/BWR(16) +~50/60s (binder
+  frozen), nanosleep(35) +~85/60s (a few holders sleep mid-handler —
+  txn545's server sys=35).
+- REFERENCE CONTRAST: fx8 tscen hilogd posture = futex_wait/do_sys_poll/
+  __skb_wait_for_more_packets (BLOCKING socket reads) / devkmsg_read —
+  NO spin posture. OURS spins recvmsg/recvfrom EAGAIN at 60-70k/s. THE
+  SOCKET-READ SEMANTICS DIVERGENCE (blocking on the reference, EAGAIN
+  spin on ours) is the one 10-100x-class volume diff found. The spinners
+  (task dumps: sysevent_source/os_ds_service/mmi_service RUNNING
+  constantly, plus hilogd) need naming: next boot arms dfx=sysring (the
+  hung-task path at 120s+ dumps the 2048-entry ring with (pid,nr,a0,ret)
+  — the spin's fd + EAGAIN return names the fd and the thread).
+
+### 4. Two kernel bugs found and fixed this round
+1. fd689f3d fix(x86_64): SCRIBBLE2-GUARD diagnostic printer overflowed on
+   a freed-task pid — (v >> 28) as u8 keeps bits 28-35 (not a nibble);
+   garbage pid digit made b'a'+n-10 overflow u8 and the guard's own
+   diagnostic PANICKED the context switch (u2v1 @316.1s during the
+   KOT-KILL storm: SWITCHIN-DEAD-TASK task=0xffff888040688000 interleaved
+   right before 'PANIC: attempt to add with overflow' context.rs:364).
+   A wedge converted into a kernel panic by a debug printer — the boot
+   died ~5s after DUMP!4.
+2. 8ccf6ed6 dfx(syscost): phase-shift the dump off the taskdump boundaries.
+3. 2a6358e0 dfx(futex): FUX-STUCK-U2V continuation row (the main row was
+   already at the 256-byte printk record ceiling — u2v2 anchors truncated
+   mid-field on u2v1) + sample cap 32->64 / walk cap 64->192 (u2v1's
+   blind spot: 357 FUX-STUCK-FULL rows for sharing_service, ZERO for
+   samgr tgid=329 — the samples filled with whichever buckets hashed
+   first).
+Gates: x3 builds rc=0, make test x86_64 ALL PASSED twice (pre- and
+post-64-sample tree), pushed through 2a6358e0.
+
+### 5. u2v2 boot (kernel 225d24f5 = 2a6358e0 tree) — chain extraction
+DFX=txnhunt,fuxstuck,taskdump,periodic syscost=1, DUMP!x8. SA stuck 26-27
+by 16.8s (early wedge), stuck_total=137 at 748s, hung-task fired 183.4s,
+rcu-gp-frozen-cpu fired once at 32.6s (CPU0 incumbent = accountmgr pid
+908 RUNNING — the monopolist face, transient here; gone by 60s).
+Pixels: every shot = frozen set 82f0a25f (no change).
+Park-chain classes across all services (continuation rows): 480x
+ffrt::mutexPrivate::wait, 79x ffrt WorkerIdleAction (+0x3b946, the
+timed deep-sleep), 88x lib+0x25b6e, 73x executables' own waits
+(0x555555558000+0x1b1b), 102x lib+0x26502, 88x lib+0x3579 — per-lib
+bases identified by matching the known anchors (libc++ LOAD 0x96000,
+libffrt LOAD 0x66000, libhicollie 0x12000+0x91b7).
+
+### 6. Next agent entry points (in order)
+1. **dfx=sysring boot (u2v3)**: name the socket-spin threads (fd + EAGAIN
+   + pid from the hung-task ring dump) and adjudicate the blocking-vs-
+   EAGAIN recvmsg divergence (reference blocks in __skb_wait_for_more_
+   packets; ours spins). Candidate kernel fork: O_NONBLOCK flag handling
+   or our sock-wait returning EAGAIN where the reference blocks. Fixing
+   the spin may also restore the CPU/kernel-tick budget the holders'
+   critical sections need.
+2. **The mutex holders**: samgr's 7 parkers wait on FFRT mutexes held by
+   asleep mid-critical-section threads. Sharpest lead: the code-6 path's
+   listenerMapLock_ critical section contains AddDeathRecipient = an
+   ioctl BWR INSIDE the lock (system_ability_manager.cpp:915-941); a
+   holder parked in that BWR is invisible to fuxstuck. TXN-HANG sys=16
+   rows (1 on u2v2: power_host->pid338 tid340, exec only 1.4s) — extend
+   TXN-HANG to print EVERY stack=1 thread's current syscall (not only
+   >20s txns) so the BWR-parked holders surface.
+3. The earliest-stuck-txn identification per boot (patient zero): u2v2's
+   first TXN-HANG = txn545 code64 (pid449 OS_IPC_2_484 -> pid382, server
+   sys=35 nanosleep). Diff our nr-35/16/45 semantics for the exact OH
+   usage if it recurs.
+4. accountmgr rcu-gp-frozen-cpu face fired once (32.6s, pid 908) — keep
+   the ea7e4218 dump armed; it self-cleared by 60s.
