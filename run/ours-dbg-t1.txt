@@ -1,0 +1,14 @@
+PBENCH p1_null n=1000000 med=5.257 p99=8.080 min=5.036 max=1022.740 avg=5.573 wall=5.650
+PBENCH p1_clock n=1000000 med=6.338 p99=9.332 min=6.088 max=5133.734 avg=6.607 wall=6.681
+PBENCH p2_ctxsw n=100000 med=13.207 p99=358.918 min=10.253 max=5431.778 avg=38.495 wall=38.813 aff=1
+PBENCH p5a_pipe n=100000 med=20.877 p99=33.994 min=20.176 max=10958.279 avg=44.699 wall=45.058
+PBENCH p5b_dgram_send n=20000 med=326.041 p99=464.219 min=30.189 max=13398.858 avg=331.340 wall=332.193
+PBENCH p5b_dgram_recv_peek n=20000 med=325.680 p99=466.442 min=48.973 max=9209.453 avg=327.304 wall=0.000 measured_by=child peek+consume
+PBENCH p5c_stream_write n=100000 med=277.408 p99=426.390 min=260.036 max=4502.900 avg=285.474 wall=286.387
+PBENCH p5c2_stream_send n=100000 med=275.185 p99=436.043 min=255.640 max=3667.462 avg=283.137 wall=284.046
+PBENCH p5c3_stream_wrecv n=100000 med=33.713 p99=974.317 min=30.199 max=5693.897 avg=79.753 wall=80.321
+PBENCH p5d_rt_read n=100000 med=49.674 p99=74.446 min=48.142 max=1148.252 avg=51.124 wall=51.453
+PBENCH p5d_rt_recv n=100000 med=57.845 p99=96.565 min=56.203 max=1128.676 avg=60.040 wall=60.409
+PBENCH p5e_stream_send n=100000 med=30.940 p99=54.450 min=29.128 max=20163.476 avg=64.747 wall=65.404
+PBENCH p5e_child_spin n=335 med=1575.433 p99=4234.644 min=343.033 max=10037.671 avg=1669.796 wall=0.000 measured_by=child spin-read eagain=201681
+PBENCH p5f_stream_dwait n=100000 med=273.843 p99=410.460 min=29.128 max=469748.325 avg=283.614 wall=284.679 attempts=100456 eagain=456 (0.5% spin)

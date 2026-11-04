@@ -1,0 +1,32 @@
+PBENCH START self=/test/pbench work=/test
+PBENCH CAL tsc_hz=4292112240
+PBENCH p1_null n=1000000 med=0.240 p99=0.391 min=0.220 max=642.709 avg=0.249 wall=0.273
+PBENCH p1_clock n=1000000 med=0.711 p99=1.052 min=0.661 max=183.276 avg=0.736 wall=0.760
+PBENCH p2_ctxsw n=100000 med=1.868 p99=17.763 min=1.187 max=1031.512 avg=3.113 wall=3.152 aff=1
+PBENCH p3a_fault_anon n=16384 med=5.710 p99=12.072 min=5.420 max=2566.959 avg=8.083 wall=8.122
+PBENCH p3b_fault_cow n=8192 med=7.894 p99=13.926 min=7.594 max=158.360 avg=8.471 wall=8.513 measured_by=child
+PBENCH p3c_fault_file n=4096 med=0.080 p99=8.536 min=0.060 max=293.048 avg=0.650 wall=0.717
+PBENCH p4_fork_exit n=1000 med=362.214 p99=682.712 min=326.008 max=1445.552 avg=391.931 wall=401.797
+PBENCH p4_fork_exec n=1000 med=858.385 p99=1324.710 min=774.921 max=2940.163 avg=875.474 wall=883.806 exec_target=self
+PBENCH p5a_pipe n=100000 med=2.875 p99=4.488 min=2.354 max=3882.151 avg=5.885 wall=5.938
+PBENCH p5b_dgram_send n=20000 med=2.394 p99=47.908 min=2.284 max=993.583 avg=8.879 wall=8.946
+PBENCH p5b_dgram_recv_peek n=20000 med=2.655 p99=49.671 min=2.495 max=902.045 avg=8.835 wall=0.000 measured_by=child peek+consume
+PBENCH p5c_stream_write n=100000 med=2.495 p99=51.665 min=2.354 max=676.601 avg=7.863 wall=7.942
+PBENCH p5c2_stream_send n=100000 med=1.914 p99=45.834 min=1.813 max=484.930 avg=6.298 wall=6.365
+PBENCH p5c3_stream_wrecv n=100000 med=1.914 p99=43.129 min=1.813 max=452.901 avg=6.350 wall=6.412
+PBENCH p5d_rt_read n=100000 med=4.308 p99=6.702 min=4.148 max=145.407 avg=4.444 wall=4.483
+PBENCH p5d_rt_recv n=100000 med=3.777 p99=5.640 min=3.667 max=57.225 avg=3.874 wall=3.905
+PBENCH p5e_stream_send n=100000 med=1.903 p99=5.240 min=1.813 max=2432.733 avg=5.644 wall=5.694
+PBENCH p5e_child_spin n=367 med=946.356 p99=1617.187 min=301.774 max=1662.219 avg=669.784 wall=0.000 measured_by=child spin-read eagain=211728
+PBENCH p5f_stream_dwait n=100000 med=1.914 p99=44.752 min=1.813 max=2001.301 avg=7.072 wall=10.200 attempts=367607 eagain=267607 (72.8% spin)
+PBENCH PREP tree=1000files wall_ms=93
+PBENCH p6_stat n=10000 med=3.847 p99=5.029 min=3.587 max=57.626 avg=3.958 wall=6.229
+PBENCH p6_openclose n=10000 med=6.181 p99=10.359 min=5.480 max=255.929 avg=6.753 wall=9.561
+PBENCH p6_getdents n=1000 med=783.968 p99=827.578 min=765.314 max=1403.785 avg=786.126 wall=824.511 per_sample=full_dir_sweep
+PBENCH p6_read_cached n=10000 med=11.491 p99=104.071 min=11.050 max=203.293 avg=13.700 wall=17.416 per_sample=open_read_close
+PBENCH p6_write_fsync n=1000 med=16887.708 p99=1783206.638 min=8744.450 max=6954762.317 avg=152228.494 wall=152234.588 per_sample=write4k_plus_fsync
+PBENCH p6_append n=1000 med=9.377 p99=34.794 min=9.177 max=129.798 avg=10.818 wall=10.869
+PBENCH p6_mkdrmdir n=1000 med=152.309 p99=336.868 min=117.876 max=2170.922 avg=165.761 wall=172.757 per_sample=mkdir_plus_rmdir
+PBENCH p6_unlink n=1000 med=35.415 p99=88.532 min=33.111 max=625.377 avg=38.727 wall=41.342
+PBENCH p7_sleep1ms n=10000 med=16.465 p99=28.550 min=15.097 max=596.671 avg=17.749 wall=1078.016 req=1ms val=overshoot
+PBENCH DONE rc=0
