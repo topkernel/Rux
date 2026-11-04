@@ -397,8 +397,16 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
 
     let ip_hdr = IpHdr::from_bytes(data).ok_or(())?;
 
+    // net:pkt_drop (r13 hunt): every silent early-return below is a
+    // candidate for the vanishing-datagram class — record the skb and
+    // the reason so a strand boot names the exact gate.
+    let drop = |reason: u8| {
+        crate::trace::trace_net_pkt_drop(skb.data as u64, 1, reason, 0, 0);
+    };
+
     let version = ip_hdr.version_ihl >> 4;
     if version != 4 {
+        drop(1);
         return Ok(());
     }
 
@@ -408,13 +416,16 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // options-bearing datagram was silently dropped at this gate.
     let ihl = ip_hdr.version_ihl & 0x0F;
     if ihl < 5 {
+        drop(2);
         return Ok(());
     }
     let hdr_len = (ihl as usize) * 4;
     if hdr_len > data.len() {
+        drop(3);
         return Ok(());
     }
     if checksum::ip_checksum(&data[..hdr_len]) != 0 {
+        drop(4);
         return Ok(());
     }
 
@@ -422,7 +433,8 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // skb_trim(skb, ntohs(iph->tot_len)))
     let ip_total_len = u16::from_be(ip_hdr.tot_len) as u32;
     if ip_total_len < 20 || ip_total_len > skb.len {
-        return Ok(()); // Invalid tot_len
+        drop(5); // Invalid tot_len
+        return Ok(());
     }
     skb.len = ip_total_len;
 
@@ -432,6 +444,7 @@ pub fn ip_rcv(skb: &mut SkBuff) -> Result<(), ()> {
     // Advance skb past IP header so upper layers see only the transport payload
     // Validate IHL against packet length (per the reference ip_rcv)
     if hdr_len > ip_total_len as usize {
+        drop(6);
         return Ok(());
     }
 
