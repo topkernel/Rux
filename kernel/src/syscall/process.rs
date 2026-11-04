@@ -202,6 +202,14 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        // Legacy CLONE_PIDFD reuses the parent_tid argument as the
+        // pidfd pointer (kernel_clone_args: pidfd = args->parent_tidptr
+        // when the flag is set; kernel/fork.c writes the fd there).
+        pidfd: if flags & 0x00001000 != 0 {
+            args[2] as *mut u32
+        } else {
+            core::ptr::null_mut()
+        },
         cgroup: None,
         exit_signal,
     };
@@ -6833,8 +6841,8 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     // CLONE_PIDFD: the pidfd field points at the user word that receives
     // the new pidfd. Probe it for writability now (before the child is
     // created): an unmapped/word address fails EFAULT (LTP clone302
-    // "invalid pidfd"). Writing the actual fd stays future work — only
-    // the fault probe is observable by current callers.
+    // "invalid pidfd"). The actual fd is installed and written by
+    // do_clone's CLONE_PIDFD block (the pointer rides CloneArgs.pidfd).
     if flags & 0x00001000 != 0 && !pidfd_ptr.is_null() {
         let root = crate::sched::current()
             .and_then(|t| t.address_space())
@@ -6886,6 +6894,7 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         parent_tid,
         child_tid,
         tls,
+        pidfd: pidfd_ptr,
         cgroup: cgroup_target,
         exit_signal: exit_signal as u8,
     };

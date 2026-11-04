@@ -58,6 +58,11 @@ pub struct CloneArgs {
     /// Signal the parent gets at child exit (low CSIGNAL byte of the
     /// legacy clone flags, or clone3's own field). 0 = none.
     pub exit_signal: u8,
+    /// CLONE_PIDFD target word (parent memory): legacy clone reuses the
+    /// parent_tid argument; clone3 has a dedicated field. Null = no
+    /// pidfd write (the flag without a pointer still installs nothing —
+    /// the reference treats a bad pointer as EFAULT after the probe).
+    pub pidfd: *mut u32,
     /// clone3 CLONE_INTO_CGROUP target: the child joins THIS cgroup
     /// instead of inheriting the parent's (LTP clone303). None =
     /// inherit like every legacy clone path.
@@ -76,6 +81,7 @@ pub fn do_fork() -> Option<Pid> {
         parent_tid: core::ptr::null_mut(),
         child_tid: core::ptr::null_mut(),
         tls: 0,
+        pidfd: core::ptr::null_mut(),
         cgroup: None,
         exit_signal: 17, // SIGCHLD
     })
@@ -271,7 +277,7 @@ const CLONE_KNOWN_FLAGS: u64 = CLONE_VM
     | CLONE_FS
     | CLONE_FILES
     | CLONE_SIGHAND
-    | CLONE_PIDFD       // 0x00001000 (accepted, no pidfd yet)
+    | CLONE_PIDFD       // 0x00001000 (installs the child's pidfd)
     | CLONE_PTRACE      // 0x00002000
     | CLONE_VFORK
     | CLONE_PARENT      // 0x00008000 (accepted; grandparent reparenting
@@ -312,6 +318,8 @@ fn einval() -> i32 { crate::errno::Errno::InvalidArgument.as_neg_i32() }
 fn eagain() -> i32 { crate::errno::Errno::TryAgain.as_neg_i32() }
 fn enomem() -> i32 { crate::errno::Errno::OutOfMemory.as_neg_i32() }
 fn efault() -> i32 { crate::errno::Errno::BadAddress.as_neg_i32() }
+fn esrch() -> i32 { crate::errno::Errno::NoSuchProcess.as_neg_i32() }
+fn emfile() -> i32 { crate::errno::Errno::TooManyOpenFiles.as_neg_i32() }
 
 /// Create child process/thread
 ///
@@ -979,6 +987,72 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // no_new_privs is inherited across fork and exec alike (prctl(2)
         // PR_SET_NO_NEW_PRIVS semantics).
         (*task_ptr).set_no_new_privs((*current_ptr).no_new_privs());
+
+        // === CLONE_PIDFD: install the child's pidfd in the PARENT's
+        // descriptor table and write the fd number to the caller's word
+        // (kernel/fork.c pidfd_prepare: O_CLOEXEC, before the child
+        // becomes visible so a racing exit cannot be missed). Legacy
+        // clone passes the pointer through parent_tid; clone3 through
+        // its pidfd field — sys_clone maps both into args.pidfd. LTP
+        // clone301 sends the child SIGUSR1 through this descriptor.
+        if args.flags & CLONE_PIDFD != 0 && !args.pidfd.is_null() {
+            // Fault probe BEFORE anything is allocated (the reference
+            // fails the fork on a bad pointer; probing first keeps every
+            // failure path free of half-built state).
+            let root = (*current_ptr)
+                .address_space()
+                .map(|a| a.root_ppn());
+            let ok = match root {
+                Some(root_ppn) => unsafe {
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                        root_ppn,
+                        args.pidfd as usize as u64 & !0xfff,
+                    )
+                    .map(|(_, pte)| {
+                        pte & crate::arch::mm::PageTableEntry::W != 0
+                            && pte & crate::arch::mm::PageTableEntry::U != 0
+                    })
+                    .unwrap_or(false)
+                },
+                None => false,
+            };
+            if !ok {
+                return unwind(task_ptr, efault());
+            }
+            let child_pid = (*task_ptr).pid();
+            let data = match crate::fs::pidfd::make_pidfd_data(child_pid) {
+                Some(d) => d,
+                None => return unwind(task_ptr, esrch()),
+            };
+            let file = alloc::sync::Arc::new(crate::fs::File::new(
+                crate::fs::file::FileFlags::new(
+                    crate::fs::file::FileFlags::O_RDWR,
+                ),
+            ));
+            file.set_ops(&crate::fs::pidfd::PIDFD_OPS);
+            crate::fs::pidfd::attach(&file, data);
+            let fdtable = match (*current_ptr).fdtable_arc() {
+                Some(ft) => ft,
+                None => return unwind(task_ptr, einval()),
+            };
+            let fd = match fdtable.alloc_fd() {
+                Some(fd) => fd,
+                None => return unwind(task_ptr, emfile()),
+            };
+            if fdtable.install_fd(fd, file).is_err() {
+                return unwind(task_ptr, emfile());
+            }
+            // FD_CLOEXEC is part of the pidfd contract (reference
+            // pidfd_prepare allocates O_CLOEXEC).
+            crate::fs::set_cloexec_fd(fd, true);
+            // SAFETY: args.pidfd is a parent-context user pointer, probed
+            // writable by sys_clone3's fault probe; sys_clone probes below.
+            if !unsafe {
+                crate::arch::uaccess::put_user(args.pidfd, fd as i32)
+            } {
+                return unwind(task_ptr, efault());
+            }
+        }
 
         // Handle CLONE_VFORK: block parent until child execs/exits.
         // The child shares parent's address space (CLONE_VM is expected
