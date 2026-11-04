@@ -378,6 +378,25 @@ pub fn is_init_pid_ns(ns: &Arc<PidNamespace>) -> bool {
     Arc::ptr_eq(ns, &init_pid_ns())
 }
 
+/// The pid of `task` as seen from `ns`: its own-ns pid (chain tip),
+/// an intermediate upid-chain entry, or None when the task has no pid
+/// in that namespace (reference task_pid_nr_ns — an ancestor-ns task
+/// is INVISIBLE in a descendant ns). The init-ns view is the global
+/// pid and is handled by the callers (they see `None` slot == init).
+fn upid_in_ns(task: &Task, ns: &Arc<PidNamespace>) -> Option<u32> {
+    if let Some(own) = task.ns_pid.as_ref() {
+        if Arc::ptr_eq(own, ns) {
+            return Some(task.ns_local_pid);
+        }
+    }
+    for (a, nr) in &task.ns_upids {
+        if Arc::ptr_eq(a, ns) {
+            return Some(*nr);
+        }
+    }
+    None
+}
+
 /// Reverse of [`translate_sender_pid_ns`]: resolve a pid NUMBER written
 /// by a caller living in `caller_ns` (e.g. fcntl F_SETOWN's argument) to
 /// the GLOBAL pid of the task it names. None when no task matches —
@@ -392,14 +411,7 @@ pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespa
             let mut found = None;
             crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
                 let t = &*task;
-                if found.is_none()
-                    && t
-                        .ns_pid
-                        .as_ref()
-                        .map(|a| Arc::ptr_eq(a, ns))
-                        .unwrap_or(false)
-                    && t.ns_local_pid == local
-                {
+                if found.is_none() && upid_in_ns(t, ns) == Some(local) {
                     found = Some(t.pid());
                 }
             });
@@ -411,13 +423,10 @@ pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespa
 /// Translate a sender's GLOBAL pid into the pid the RECEIVER sees:
 /// the sender's pid inside `receiver_ns`, or 0 when the sender has no
 /// pid there (reference task_pid_nr_ns — the pid the signal's siginfo
-/// must carry). Two namespaces have a shared view only when they are
-/// the same instance; a task in an ANCESTOR namespace (typically the
-/// init namespace, ns_pid == None) has no pid in a descendant, and a
-/// nested task's init-namespace pid is its global pid. Deeper than one
-/// level the per-level projections are not tracked; the global pid is
-/// reported for any strict-ancestor receiver (documented approximation
-/// — no LTP coverage goes deeper).
+/// must carry). Views: same ns → the own-ns pid; an ANCESTOR ns → the
+/// upid-chain entry that ns assigned the sender (init ns → the global
+/// pid); anything else (descendant or sibling ns) → 0 — the task is
+/// invisible there.
 pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<PidNamespace>>) -> u32 {
     // SAFETY: pinned lookup keeps the sender Task alive across the call.
     unsafe {
@@ -426,23 +435,12 @@ pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<
             return sender_global_pid;
         }
         let sender = &*sender_ptr;
-        let out = match (&sender.ns_pid, receiver_ns) {
-            (Some(sa), Some(rb)) => {
-                if Arc::ptr_eq(sa, rb) {
-                    sender.ns_local_pid
-                } else if rb.level < sa.level {
-                    // Receiver in an ancestor of the sender's namespace:
-                    // the sender's pid there (global == init-ns pid).
-                    sender.pid()
-                } else {
-                    0
-                }
-            }
-            // Sender in the init namespace: visible only to init-ns receivers.
-            (None, None) => sender.pid(),
-            (None, Some(_)) => 0,
-            // Nested sender, init-ns receiver: the global pid.
-            (Some(_), None) => sender.pid(),
+        let out = match receiver_ns {
+            // Init-ns receiver (None slot): every task's init view is
+            // its global pid.
+            None => sender.pid(),
+            Some(r) if is_init_pid_ns(r) => sender.pid(),
+            Some(r) => upid_in_ns(sender, r).unwrap_or(0),
         };
         crate::process::task::Task::task_put(sender_ptr);
         out
@@ -578,11 +576,35 @@ pub fn resolve_vpid(local: u32) -> Option<u32> {
                 return;
             }
             let task = &*t;
-            let same_ns = task
-                .ns_pid
-                .as_ref()
-                .map_or(false, |a| Arc::ptr_eq(a, &ns));
-            if same_ns && task.ns_local_pid == local && task.pid() == task.tgid() {
+            if upid_in_ns(task, &ns) == Some(local) && task.pid() == task.tgid() {
+                found = Some(task.pid());
+            }
+        });
+    }
+    found
+}
+
+/// Translate a caller-namespace TID into the global tid — the THREAD-level
+/// variant of resolve_vpid (any task in the caller's namespace matches, not
+/// just thread-group leaders). This is the reference's find_vpid(pid) as
+/// used by do_tgkill/do_send_specific: tgkill(2) takes caller-ns numbers
+/// (musl raise() passes getpid()/gettid() results, which are ns-local), so
+/// resolving them globally misfires inside a pid namespace.
+pub fn resolve_vtid(local: u32) -> Option<u32> {
+    let ns = current_pid_ns();
+    if is_init_pid_ns(&ns) {
+        return Some(local);
+    }
+    let mut found: Option<u32> = None;
+    // SAFETY: callback receives hash-table task pointers; we only read
+    // pid/ns fields that are immutable after fork-enqueue.
+    unsafe {
+        crate::process::pid_hash::pid_hash_for_each_task(|t| {
+            if found.is_some() || t.is_null() {
+                return;
+            }
+            let task = &*t;
+            if upid_in_ns(task, &ns) == Some(local) {
                 found = Some(task.pid());
             }
         });
@@ -591,21 +613,16 @@ pub fn resolve_vpid(local: u32) -> Option<u32> {
 }
 
 /// Global pid of a task as seen from the CURRENT task's pid namespace.
-/// Same-namespace tasks report their ns-local pid; everything else reports
-/// the global pid (single-level nesting boundary: ancestors above the
-/// caller's ns are not tracked).
+/// Same-ns and ancestor-ns views resolve through the own-ns pid / upid
+/// chain; the init-ns view is the global pid; a task has NO pid in a
+/// descendant or sibling ns (0), per reference task_pid_nr_ns.
 #[allow(dead_code)] // public API surface for upcoming net/ipc/user routing
 pub fn task_vpid(task: &Task) -> u32 {
     let ns = current_pid_ns();
-    let same_ns = task
-        .ns_pid
-        .as_ref()
-        .map_or(is_init_pid_ns(&ns), |a| Arc::ptr_eq(a, &ns));
-    if same_ns {
-        task.ns_local_pid
-    } else {
-        task.pid()
+    if is_init_pid_ns(&ns) {
+        return task.pid();
     }
+    upid_in_ns(task, &ns).unwrap_or(0)
 }
 
 /// True when two tasks share a pid namespace (both None == init ns).
@@ -626,17 +643,7 @@ pub fn wait_vpid(global_pid: u32) -> u32 {
         return global_pid;
     }
     match crate::process::find_task_by_pid(global_pid) {
-        Some(t) => {
-            let same = t
-                .ns_pid
-                .as_ref()
-                .map_or(false, |a| Arc::ptr_eq(a, &ns));
-            if same {
-                t.ns_local_pid
-            } else {
-                global_pid
-            }
-        }
+        Some(t) => upid_in_ns(&t, &ns).unwrap_or(global_pid),
         None => global_pid,
     }
 }
@@ -722,6 +729,21 @@ pub unsafe fn copy_namespaces(parent: *mut Task, child: *mut Task, flags: u64) -
         child.ns_pid = Some(ns.clone());
         // The namespace init: first local pid is 1.
         child.ns_local_pid = ns.alloc_local_pid();
+        // Reference alloc_pid: the task also gets a number in EVERY
+        // ancestor namespace. The init-ns number is the global pid
+        // (root view, by construction); intermediate levels go on the
+        // upid chain. Without the chain, a depth-2 task's clone(2)
+        // return (creator-ns view) and its wait/kill lookups mismatched
+        // — the kselftest memfd nested-sysctl child aborted with ECHILD
+        // (waitpid on its own just-spawned child).
+        let mut ancestor = ns.parent.clone();
+        while let Some(ans) = ancestor {
+            if is_init_pid_ns(&ans) {
+                break;
+            }
+            child.ns_upids.push((ans.clone(), ans.alloc_local_pid()));
+            ancestor = ans.parent.clone();
+        }
     } else {
         // Children land where the parent's ns_pid_for_children points
         // (unshare(CLONE_NEWPID) / setns(pid_ns_fd) semantics).
@@ -732,6 +754,16 @@ pub unsafe fn copy_namespaces(parent: *mut Task, child: *mut Task, flags: u64) -
         } else {
             child.ns_pid = Some(target.clone());
             child.ns_local_pid = target.alloc_local_pid();
+            // Same upid-chain build: the ancestors between the target
+            // ns and init each assign the child a number.
+            let mut ancestor = target.parent.clone();
+            while let Some(ans) = ancestor {
+                if is_init_pid_ns(&ans) {
+                    break;
+                }
+                child.ns_upids.push((ans.clone(), ans.alloc_local_pid()));
+                ancestor = ans.parent.clone();
+            }
         }
     }
 
