@@ -60,17 +60,17 @@
 //!   A false miss is always safe: the miss path re-reads the file and
 //!   `insert` dedups against the live entry.
 
+use crate::arch::mm::{phys_to_virt, PhysAddr};
+use crate::mm::lru;
+use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
+use crate::mm::page_desc::{pfn_to_page_mut, Page, PageFlag, PageType};
+use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
+use crate::mm::zone::{GfpFlags, ZoneType};
+use crate::mm::{pfn_to_phys, PAGE_SIZE};
+use crate::sync::spinlock::{Spinlock, SpinlockGuard};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use crate::sync::spinlock::{Spinlock, SpinlockGuard};
-use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
-use crate::mm::zone::{GfpFlags, ZoneType};
-use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut, Page};
-use crate::mm::lru;
-use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
-use crate::mm::{pfn_to_phys, PAGE_SIZE};
-use crate::arch::mm::{phys_to_virt, PhysAddr};
 
 /// Minimum cached pages across all inodes (8192 x 4KB = 32MB).
 ///
@@ -327,10 +327,7 @@ pub struct PageCache {
 /// pointer; rootfs/procfs/devfs: their FS_ID_* constants).
 #[inline]
 fn cache_key(fs_id: u64, ino: u64) -> u64 {
-    fs_id
-        .rotate_left(17)
-        .wrapping_add(0x9E3779B97F4A7C15)
-        ^ ino.wrapping_mul(0xC2B2AE3D27D4EB4F)
+    fs_id.rotate_left(17).wrapping_add(0x9E3779B97F4A7C15) ^ ino.wrapping_mul(0xC2B2AE3D27D4EB4F)
 }
 
 /// Convert a physical address to a kernel-virtual pointer via the linear mapping.
@@ -343,14 +340,10 @@ impl PageCache {
     /// Create a new empty page cache.
     pub const fn new() -> Self {
         Self {
-            slots: [const {
-                PcSlot(core::sync::atomic::AtomicPtr::new(
-                    core::ptr::null_mut(),
-                ))
-            }; PC_TABLE_CAP],
-            readers: [const {
-                PcReaderBank(core::sync::atomic::AtomicUsize::new(0))
-            }; PC_READER_BANKS],
+            slots: [const { PcSlot(core::sync::atomic::AtomicPtr::new(core::ptr::null_mut())) };
+                PC_TABLE_CAP],
+            readers: [const { PcReaderBank(core::sync::atomic::AtomicUsize::new(0)) };
+                PC_READER_BANKS],
             wlock: Spinlock::new(()),
             retired: Spinlock::new(alloc::vec::Vec::new()),
             slow_read: Spinlock::new(()),
@@ -799,6 +792,86 @@ impl PageCache {
         n
     }
 
+    /// Contiguous-run release fast path shared by `put_range` /
+    /// `put_range_by_key` (perf-gap-hunt, pagefault 2x push): both
+    /// callers' release lists are consecutive file indices in practice
+    /// (the fault arm's chunk tails release every page of the chunk;
+    /// the unmap pin batches walk a contiguous VA range of one inode),
+    /// so ONE BTreeMap range iterator in lockstep replaces a per-page
+    /// tree descent (get_mut, O(log n) each).
+    ///
+    /// Handles only pages that are NOT invalidated: an invalidated page
+    /// whose final pin drops here must also leave the map and free its
+    /// frame, which cannot happen while the iterator borrows the map.
+    /// The first invalidated page stops the fast path; the caller runs
+    /// its per-page fallback for the REST. (invalidated is only ever
+    /// set by invalidate_inode, under this same entry lock, for the
+    /// whole entry at once — the fast path's untouched-prefix contract
+    /// holds: every page it released was un-pinned exactly once and
+    /// needs no further action.)
+    ///
+    /// Returns None when every page was released, or Some(k) meaning
+    /// pages[k..] still need the per-page path.
+    #[inline]
+    fn unpin_contiguous_locked<T, F: Fn(&T) -> u64>(
+        g: &mut BTreeMap<u64, CachedPage>,
+        pages: &[T],
+        idx_of: F,
+    ) -> Option<usize> {
+        if pages.is_empty() {
+            return None;
+        }
+        // Contiguity gate (defensive: callers build consecutive runs,
+        // but a W-form chunk tail skips its installed leaves).
+        for w in pages.windows(2) {
+            if idx_of(&w[0]).wrapping_add(1) != idx_of(&w[1]) {
+                return Some(0);
+            }
+        }
+        let start = idx_of(&pages[0]);
+        let end = start + pages.len() as u64;
+        let mut it = g.range_mut(start..end);
+        let mut cur = it.next();
+        for (pi, p) in pages.iter().enumerate() {
+            let want = idx_of(p);
+            // Advance the iterator to the first entry >= want.
+            while let Some((idx, _)) = cur.as_ref() {
+                if **idx >= want {
+                    break;
+                }
+                cur = it.next();
+            }
+            match cur.take() {
+                Some(pair) => {
+                    if *pair.0 == want {
+                        let page = pair.1;
+                        if page.invalidated {
+                            // Hand this page and the rest to the
+                            // per-page path (its unpin may need remove
+                            // + free).
+                            return Some(pi);
+                        }
+                        page.unpin_locked();
+                        cur = it.next();
+                    } else {
+                        // Map hole at `want` (idx > want): unreachable
+                        // under the pin protocol, but hand the rest to
+                        // the per-page path rather than skip silently.
+                        drop(pair);
+                        return Some(pi);
+                    }
+                }
+                // Iterator exhausted before our last index: the pin
+                // protocol guarantees every pinned page has its map
+                // entry, so this cannot happen for a run WE pinned —
+                // treat as desync and hand the rest to the per-page
+                // path for safety.
+                None => return Some(pi),
+            }
+        }
+        None
+    }
+
     /// Release a run of pages pinned by `get_range` (one claim + one
     /// per-inode lock for all).
     pub fn put_range(&self, fs_id: u64, ino: u64, pages: &[(u64, *const u8)]) {
@@ -808,7 +881,15 @@ impl PageCache {
         };
         let emptied = {
             let mut g = entry.lock.lock();
-            for &(page_index, _) in pages {
+            // Contiguous-run fast path (perf-gap-hunt, pagefault 2x
+            // push): one range iterator instead of a per-page tree
+            // descent; the per-page loop below stays as the fallback
+            // for the non-contiguous / invalidated remainder.
+            let idx = match Self::unpin_contiguous_locked(&mut g, pages, |p| p.0) {
+                Some(k) => k,
+                None => pages.len(),
+            };
+            for &(page_index, _) in &pages[idx..] {
                 if let Some(page) = g.get_mut(&page_index) {
                     // Same release discipline as put(): only a put that
                     // actually decremented may release an invalidated
@@ -823,7 +904,9 @@ impl PageCache {
                         g.remove(&page_index);
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
-                            unsafe { lru::page_remove_lru(&*page_desc); }
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -867,7 +950,9 @@ impl PageCache {
                     g.remove(&page_index);
                     let page_desc = pfn_to_page_mut(pfn);
                     if !page_desc.is_null() {
-                        unsafe { lru::page_remove_lru(&*page_desc); }
+                        unsafe {
+                            lru::page_remove_lru(&*page_desc);
+                        }
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -905,7 +990,9 @@ impl PageCache {
                     g.remove(&page_index);
                     let page_desc = pfn_to_page_mut(pfn);
                     if !page_desc.is_null() {
-                        unsafe { lru::page_remove_lru(&*page_desc); }
+                        unsafe {
+                            lru::page_remove_lru(&*page_desc);
+                        }
                     }
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -936,7 +1023,13 @@ impl PageCache {
         };
         let emptied = {
             let mut g = entry.lock.lock();
-            for &page_index in pages {
+            // Contiguous-run fast path (same shape as put_range): the
+            // unmap pin batches are consecutive indices of one inode.
+            let idx = match Self::unpin_contiguous_locked(&mut g, pages, |p| *p) {
+                Some(k) => k,
+                None => pages.len(),
+            };
+            for &page_index in &pages[idx..] {
                 if let Some(page) = g.get_mut(&page_index) {
                     let decremented = page.unpin_locked();
                     if decremented
@@ -948,7 +1041,9 @@ impl PageCache {
                         g.remove(&page_index);
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
-                            unsafe { lru::page_remove_lru(&*page_desc); }
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1271,9 +1366,10 @@ impl PageCache {
             let g = entry.lock.lock();
             // BTreeMap iterates in key order: the LAST dirty entry has the
             // highest index.
-            let last = g.iter().rev().find(|(_, p)| {
-                !p.invalidated && p.dirty.load(Ordering::Acquire)
-            })?;
+            let last = g
+                .iter()
+                .rev()
+                .find(|(_, p)| !p.invalidated && p.dirty.load(Ordering::Acquire))?;
             Some((last.0 + 1) * PAGE_SIZE as u64)
         };
         drop(entry);
@@ -1291,9 +1387,10 @@ impl PageCache {
         let entry = self.lookup_claimed(key)?;
         let out = {
             let g = entry.lock.lock();
-            let last = g.iter().rev().find(|(_, p)| {
-                !p.invalidated && p.dirty.load(Ordering::Acquire)
-            })?;
+            let last = g
+                .iter()
+                .rev()
+                .find(|(_, p)| !p.invalidated && p.dirty.load(Ordering::Acquire))?;
             let extent = (last.0 + 1) * PAGE_SIZE as u64;
             Some(core::cmp::min(
                 entry.dirty_eof.load(Ordering::Acquire),
@@ -1359,9 +1456,8 @@ impl PageCache {
                     let entry = unsafe { &*p };
                     let has_dirty = {
                         let g = entry.lock.lock();
-                        g.iter().any(|(_, pg)| {
-                            !pg.invalidated && pg.dirty.load(Ordering::Acquire)
-                        })
+                        g.iter()
+                            .any(|(_, pg)| !pg.invalidated && pg.dirty.load(Ordering::Acquire))
                     };
                     if has_dirty {
                         work[n] = (entry.fs_id, entry.ino);
@@ -1439,8 +1535,7 @@ impl PageCache {
                     let mut clear_dirty = false;
                     let decremented = page.unpin_locked();
                     if decremented {
-                        clear_dirty =
-                            page.count_locked() == 0 && !page.invalidated && write_ok;
+                        clear_dirty = page.count_locked() == 0 && !page.invalidated && write_ok;
                     }
                     if clear_dirty {
                         page.dirty.store(false, Ordering::Release);
@@ -1454,7 +1549,9 @@ impl PageCache {
                         g.remove(&page_index);
                         let page_desc = pfn_to_page_mut(pfn);
                         if !page_desc.is_null() {
-                            unsafe { lru::page_remove_lru(&*page_desc); }
+                            unsafe {
+                                lru::page_remove_lru(&*page_desc);
+                            }
                         }
                         release_page_frame(pfn);
                         self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -1524,7 +1621,9 @@ impl PageCache {
                     g.remove(&idx);
                     let page_desc = pfn_to_page_mut(pfn);
                     if !page_desc.is_null() {
-                        unsafe { lru::page_remove_lru(&*page_desc); }
+                        unsafe {
+                            lru::page_remove_lru(&*page_desc);
+                        }
                     }
                     release_page_frame(pfn);
                 }
@@ -1683,13 +1782,16 @@ impl PageCache {
                         }
                     }
 
-                    g.insert(page_index, CachedPage {
-                        pfn,
-                        ref_count: AtomicU32::new(0),
-                        invalidated: false,
-                        released: core::sync::atomic::AtomicBool::new(false),
-                        dirty: core::sync::atomic::AtomicBool::new(dirty),
-                    });
+                    g.insert(
+                        page_index,
+                        CachedPage {
+                            pfn,
+                            ref_count: AtomicU32::new(0),
+                            invalidated: false,
+                            released: core::sync::atomic::AtomicBool::new(false),
+                            dirty: core::sync::atomic::AtomicBool::new(dirty),
+                        },
+                    );
                     self.total_pages.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1720,7 +1822,14 @@ impl PageCache {
     /// - direct per-page inserts into the pre-resolved entry. Duplicate
     ///   frames never leak: a key already cached (or invalidated-but-pinned,
     ///   R8-3) is skipped and its freshly popped frame released right away.
-    pub fn insert_batch(&self, fs_id: u64, ino: u64, first_index: u64, block_size: usize, buf: &[u8]) {
+    pub fn insert_batch(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        block_size: usize,
+        buf: &[u8],
+    ) {
         if block_size == 0 || buf.len() < block_size {
             return;
         }
@@ -1731,7 +1840,13 @@ impl PageCache {
             // per-page zero padding) — per-page inserts keep that layout.
             for k in 0..npages {
                 let end = core::cmp::min((k + 1) * block_size, buf.len());
-                self.insert(fs_id, ino, first_index + k as u64, 0, &buf[k * block_size..end]);
+                self.insert(
+                    fs_id,
+                    ino,
+                    first_index + k as u64,
+                    0,
+                    &buf[k * block_size..end],
+                );
             }
             return;
         }
@@ -1840,8 +1955,7 @@ impl PageCache {
                 // inode map directly. Order-0 deliberately: eviction frees
                 // page-cache frames one page at a time, higher-order buddy
                 // chunks failed expensively (reclaim + compaction slowpaths).
-                let mut lru_batch: [*mut Page; ALLOC_CHUNK] =
-                    [core::ptr::null_mut(); ALLOC_CHUNK];
+                let mut lru_batch: [*mut Page; ALLOC_CHUNK] = [core::ptr::null_mut(); ALLOC_CHUNK];
                 let mut lru_n: usize = 0;
                 {
                     let mut g = entry.lock.lock();
@@ -1984,8 +2098,7 @@ impl PageCache {
             // while it runs, or every write fails and the pages stay
             // dirty forever (the Linux dirty-threshold insight: writeback
             // starts far below the memory wall).
-            let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] =
-                [(0, 0, 0, 0); MAX_WB_INODES];
+            let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] = [(0, 0, 0, 0); MAX_WB_INODES];
             let mut n_work = 0usize;
             {
                 let _w = self.wlock.lock();
@@ -2085,11 +2198,7 @@ impl PageCache {
     /// wlock); the function refuses to evict when `parked` is full.
     ///
     /// Returns true when a page was actually evicted.
-    fn evict_one_locked(
-        &self,
-        _w: &SpinlockGuard<'_, ()>,
-        parked: &mut PcParkBatch,
-    ) -> bool {
+    fn evict_one_locked(&self, _w: &SpinlockGuard<'_, ()>, parked: &mut PcParkBatch) -> bool {
         const MAX_SCAN: usize = 64; // bound scan to limit latency
         const DEMOTE_BATCH: usize = 32;
 
@@ -2157,8 +2266,7 @@ impl PageCache {
                                         && !cached.dirty.load(Ordering::Acquire)
                                         && !{
                                             let pg_desc = pfn_to_page_mut(cached.pfn);
-                                            !pg_desc.is_null()
-                                                && (*pg_desc).is_mapped()
+                                            !pg_desc.is_null() && (*pg_desc).is_mapped()
                                         };
                                     if !evictable {
                                         Victim::Skip
@@ -2291,7 +2399,9 @@ impl PageCache {
                 drop(g);
                 let page_desc = pfn_to_page_mut(pfn);
                 if !page_desc.is_null() {
-                    unsafe { lru::page_remove_lru(&*page_desc); }
+                    unsafe {
+                        lru::page_remove_lru(&*page_desc);
+                    }
                 }
                 release_page_frame(pfn);
                 self.total_pages.fetch_sub(1, Ordering::Relaxed);
@@ -2394,8 +2504,11 @@ pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) ->
     }
     // SAFETY: bounce_phys is a freshly allocated page frame owned here.
     let bounce = unsafe {
-        core::ptr::write_bytes(phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8, 0,
-                               PAGE_SIZE);
+        core::ptr::write_bytes(
+            phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8,
+            0,
+            PAGE_SIZE,
+        );
         phys_to_virt(PhysAddr::new(bounce_phys as u64)).0 as *mut u8
     };
     // SAFETY: read_at validates its own file references; bounce is a full
@@ -2407,8 +2520,13 @@ pub fn shared_file_fault_page(file: &crate::fs::file::File, file_offset: u64) ->
     }
     // SAFETY: bounce holds PAGE_SIZE readable bytes (zero-filled tail).
     unsafe {
-        cache.insert(fs_id, ino, page_index, 0,
-                     core::slice::from_raw_parts(bounce, PAGE_SIZE));
+        cache.insert(
+            fs_id,
+            ino,
+            page_index,
+            0,
+            core::slice::from_raw_parts(bounce, PAGE_SIZE),
+        );
     }
     free_page(bounce_phys);
     cache.get_phys(fs_id, ino, page_index)
