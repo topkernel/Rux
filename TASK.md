@@ -3251,3 +3251,111 @@ system-lb5, dfx=ams46,txnhunt negmemo=1)
    roll poproll2b again if one appears.
 4. The 262337 extent-tail csum gap (entry point 3 of the 31st) is the
    remaining fs residual — visible again in every post-kill fsck here.
+
+## THIRTY-FOURTH-SUCCESSOR SESSION (2026-11-04 17:55-.., branch biofix-fieldpoll @ 9319afae+)
+
+Mission delivered: the 33rd's fuxstuck instrument was booted, enriched
+twice (timeout VALUE + call-site VMA decode), and — the round's main
+result — paired with a REFERENCE-KERNEL census of the same wait sites.
+The A/B verdict is in: the wedge-critical parks are OURS-ONLY; the
+futex/timer machinery itself is acquitted by the timeout data.
+
+### 1. The instrument chain (all committed)
+- 33rd's e54e6acb wait-site map verified live (lb435/436 serials had
+  449 records; comm names recovered from ServiceStart prints).
+- ftoval (39685796): reads the timespec AT fto through the same
+  foreign-mm walker. Print: fto=ADDR=SECs+NSns.
+- u2v (9319afae): VMA-decodes uret[1] (start, offset, class) and
+  prints it BEFORE the uret list (burst interleaving truncates tails).
+- x3 x86_64 builds rc=0 (u2v4 + gate2 + gate3); make test on private
+  rootfs-mine6 (run/cg34-maketest.log).
+
+### 2. What the timeout data proved (lb389/390, ftoval kernel)
+- The wedge-class parks are TIMEOUT-CYCLED IDLE POLLS, not stuck
+  deadline waits: samgr OS_IPC 59.99s cycles, worker queues 9.99s,
+  audio/resource_schedule 31535999s (FFRT "forever"), many NULL
+  (truly infinite: FFRT IOPoller class).
+- Parks NEVER exceed their printed deadline — the futex timeout arm
+  FIRES on schedule; the wedge is missing wake/work-arrival, NOT a
+  timer bug. (Kernel pick/wake was already acquitted by the 32nd;
+  this acquits the futex deadline path too.)
+
+### 3. The reference census rig (run/fuxref.py)
+- Boots the REFERENCE kernel (6.6.101 bzImage) on the SAME substrate
+  (system-lb5 + bms-ref userdata, snapshot=on) with slirp hostfwd to
+  the guest hdcd TCP port — the oh-robot emulator flow (55555) —
+  hdc tconn connects at ~31s, root shell works.
+- Census instruments: 1s-sweep /proc poller (all comms, futex(202)
+  parks with uaddr/op/val), fast poller (~10ms sweeps over the wedge
+  comms, pid cache in /data/local/tmp), /proc maps snapshots every
+  10s. NO futex tracepoints and NO kprobe_events in the reference
+  kernel config — the poller IS the reference instrument.
+- RIG TRAPS (all fixed in-tree): hdc selects targets with -t not -s;
+  Linux comm is TRUNCATED TO 15 CHARS (bluetooth_servi, mmi_uinput_
+  serv) — the first A/B pass misclassified every long-named service
+  as OURS-ONLY on that artifact alone; /tmp is read-only in-guest;
+  /proc/uptime cut -d. -f1-2 yields TWO tokens (uptime + idle).
+
+### 4. THE A/B VERDICT (fux-ab.py / fux-ab2.py; fx2-fx6 vs lb436/389)
+- COMMON (both kernels, long spans on the HEALTHY reference which
+  boots to GUI around them): memmgrservice +0x800674 (ref max 273s!),
+  bluetooth +0x800824/+0x800664, the universal +0x800714 60s/10s
+  worker cycle, hilogd +0x8008d4, telephony +0x8007c4, time/huks/
+  render/resource/inputmethod/etc — ALL idle FFRT cycles. Benign.
+- OURS-ONLY (reference never parks there at ANY resolution — 1s
+  sweeps AND the 10ms fast poller): samgr +0x800194 (x58, 251s),
+  telephony +0x8001a4 (x46), foundation +0x800b44 (x17; softbus
+  uses the same arena slot on other boots), mmi_uinput +0x8009c4
+  (x25; mmi has NO >=1s futex park on the reference at all).
+- VERDICT: DIFFERENT-ADDR class — userspace path divergence
+  (BMSSCAN-style): our samgr/foundation/telephony enter waits on
+  arena objects the reference never waits on in the same window.
+  Exact-offset matches on the common pairs prove the arena layout is
+  identical (same allocation history) — so the different offsets
+  name DIFFERENT wait objects, not layout drift.
+
+### 5. Call-site symbolization (u2v + host ELF work)
+- libffrt.so (/system/lib64/ndk/, exec VMA 0x8a000 — matches the
+  reference maps) hosts the wait callers:
+    +0x32e02 (NULL-timeout parks) -> ffrt::IOPoller::PollOnce+0x802
+    +0x3b807 (short cycles)       -> ffrt::SExecuteUnit::WorkerIdleAction+0x157
+    +0x91b7 (the universal 60s cycle) -> nearest export SaveTheBbox+0x1b7
+      (static fn between exports — anchor only)
+  libc (musl) +0xa1374 hosts another common caller.
+- samgr.bin: STRIPPED PIE (dynsym only) — deeper naming needs
+  disasm; libsamgr.dylib.so extracted (Rust symbols present).
+- Extracted to /tmp/ohlibs/ (host): samgr.bin, libsamgr.dylib.so,
+  ld-musl-x86_64.so.1, libffrt.so. Re-extract from run/system-lb5.img
+  with debugfs if /tmp is lost.
+
+### 6. Boots this round
+- Ours (poproll2b, DFX=ams46,txnhunt,fuxstuck): lb389-393 on
+  bzImage-cg34-ftoval-dbg (80ed652a), lb396+ on bzImage-cg34-u2v2-dbg
+  (77f4789c — u2v before uret). Verdicts: wedges at SA=0/20/34/56 —
+  wedge point varies per boot; softbus_server +0x800b44 park seen on
+  lb396 with u2v=+0xe998 (file-backed, in-libffrt class region).
+- Reference: fx1 (connectivity proof), fx2-fx6 (census; fx5/fx6 have
+  the fast poller; fx6 has the corrected comm list). Data under
+  run/fuxref-fx{2..6}/ (parks.tsv, fast.tsv, maps-*.txt).
+
+### 7. Successor entry points (35th, in order)
+1. samgr +0x800194 is THE wedge signature wait (58 bursts, 251s,
+   60s timeout cycles, ours-only at every resolution). Next: name
+   the code. samgr.bin is stripped — use the arena-object identity:
+   0x800194 is ~0x194 into the arena's last page region; u2v its
+   call site on a wedged boot (needs a boot where samgr actually
+   parks — lb396's wedge shape had NO samgr park; lb436's did; roll
+   more with KERNEL=run/bzImage-cg34-u2v2-dbg and grep for
+   'samgr.*800194.*u2v='). THEN: what should wake it — on the
+   reference, samgr's parks are ONLY the idle cycle words
+   (0x800714/0x7d4/0x7e4): find which upstream event our samgr is
+   waiting FOR (the 32nd's TXN-HANG txn2-from-hdf_devmgr shape) and
+   why the reference never enters that wait.
+2. The reference census rig is CHEAP now: one fuxref.py boot gives
+   parks+maps; reuse for any future userspace-path A/B (BMSSCAN
+   method generalizes: park-site sets are a path fingerprint).
+3. fto=0x0 (infinite) + IOPoller::PollOnce parks: huks +0x800884,
+   wifi +0x8007c4, foundation +0x8007c4 — these DO match reference
+   parks (BOTH class) — idle IO pollers; do not chase them.
+4. Uncommitted-at-close: none (all landed). Origin/main moved again
+   (072c4f76 docs); merge at next open.
