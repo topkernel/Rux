@@ -1,0 +1,5 @@
+# idx|test|class|rc|tail
+0|mincore01|PASS|0|ailed as expected: TEST_ERRNO=EFAULT(14): Bad address mincore01    3  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory mincore01    4  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory
+1|mincore02|FAIL|1|1617: TINFO: Timeout per run is 0h 00m 30s mincore02.c:56: TPASS: mincore(addr, size, vec) passed mincore02.c:63: TFAIL: locked_pages (0) != NUM_PAGES (4)  Summary: passed   1 failed   1 broken   0 skipped  0 warnings 0
+2|mincore03|FAIL|1|m 30s mincore03.c:66: TPASS: mincore() reports untouched pages are not resident mincore03.c:68: TFAIL: mincore reports resident pages as 0, but expected 3  Summary: passed   1 failed   1 broken   0 skipped  0 warnings 0
+3|mincore04|FAIL|1|0240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore04.c:102: TFAIL: mincore reports 0 pages resident but 3 pages locked by child process  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0

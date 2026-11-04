@@ -1645,8 +1645,62 @@ pub fn sys_waitid(args: SyscallArgs) -> i64 {
     let idtype = args[0] as i32;
     let id = args[1] as i32;
     let infop = args[2] as *mut u8;
-    let options = args[3] as i32;
+    let mut options = args[3] as i32;
     let _rusage = args[4] as *mut u8;
+
+    // P_PIDFD (idtype 3, since 5.3): `id` is a pidfd. Resolve it to the
+    // pinned process and wait as P_PID for that pid; a NONBLOCKING
+    // pidfd turns the no-event result into EAGAIN instead of blocking
+    // (reference kernel_waitid / pidfd_open04).
+    let _pidfd_arm: () = if idtype == 3 {
+        // infop validation precedes everything else (same rule as the
+        // other idtypes below).
+        if infop.is_null() {
+            return -(errno::EFAULT as i64);
+        }
+        if !crate::arch::uaccess::access_ok(infop as usize, 128) {
+            return -(errno::EFAULT as i64);
+        }
+        if id < 0 {
+            return -(errno::EBADF as i64);
+        }
+        let fdtable = match crate::sched::get_current_fdtable() {
+            Some(ft) => ft,
+            None => return -(errno::EBADF as i64),
+        };
+        let file = match fdtable.get_file(id as usize) {
+            Some(f) => f,
+            None => return -(errno::EBADF as i64),
+        };
+        let data = match unsafe { crate::fs::pidfd::data_of(&file) } {
+            Some(d) => d,
+            None => return -(errno::EINVAL as i64),
+        };
+        // ESRCH when the pinned process is gone — including the case
+        // where the pid was recycled (resolve_alive pin-checks it).
+        if crate::fs::pidfd::resolve_alive(data).is_none() {
+            return -(errno::ESRCH as i64);
+        }
+        let nonblock = file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+        if nonblock {
+            // The nonblocking contract: never sleep for the event; an
+            // absent event reports EAGAIN. do_waitid's no-event result
+            // is only produced under WNOHANG, so arm it here.
+            options |= 1; // WNOHANG
+        }
+        // Wait as P_PID for the pidfd's pid.
+        return match crate::process::exit::do_waitid(
+            1,
+            data.pid as i32,
+            infop,
+            options,
+        ) {
+            Ok(true) => 0,
+            Ok(false) if nonblock => -(errno::EAGAIN as i64),
+            Ok(false) => 0,
+            Err(e) => e as i32 as i64,
+        };
+    };
 
     // Validate idtype
     if idtype < 0 || idtype > 2 {
@@ -6563,8 +6617,115 @@ pub fn sys_kexec_file_load(_args: SyscallArgs) -> i64 {
 // ============================================================================
 
 /// sys_pidfd_send_signal - Send signal to process via pidfd (NR 424)
-pub fn sys_pidfd_send_signal(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// Reference semantics (kernel/signal.c): the pidfd may come from
+/// pidfd_open(2) OR from open("/proc/<pid>") — both carry the pinned
+/// process identity. Error contract: EBADF not a pidfd, EINVAL bad
+/// flags / sig out of range, ESRCH the pinned process is gone (exited,
+/// reaped, or its pid was reused), EPERM the caller may not signal the
+/// target or forged a kernel-sourced si_code, EFAULT bad info pointer.
+/// A NULL info sends an SI_USER-shaped signal; sig 0 is the existence
+/// probe; info.si_signo must equal sig (EINVAL otherwise).
+pub fn sys_pidfd_send_signal(args: SyscallArgs) -> i64 {
+    let pidfd = args[0] as i32;
+    let sig = args[1] as i32;
+    let uinfo = args[2] as *const u8;
+    let flags = args[3] as u32;
+
+    if flags != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+    let file = match fdtable.get_file(pidfd as usize) {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+    // Both pidfd shapes: pidfd_open files and /proc/<pid> dir fds.
+    let is_pidfd_shape = file
+        .get_ops()
+        .map(|ops| {
+            core::ptr::eq(ops as *const _, &crate::fs::pidfd::PIDFD_OPS as *const _)
+                || core::ptr::eq(
+                    ops as *const _,
+                    &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
+                )
+        })
+        .unwrap_or(false);
+    if !is_pidfd_shape {
+        return -(errno::EBADF as i64);
+    }
+    let data = match unsafe { crate::fs::pidfd::data_of(&file) } {
+        Some(d) => d,
+        None => return -(errno::EBADF as i64),
+    };
+    let target = match crate::fs::pidfd::resolve_alive(data) {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+    // kill permission (same credential matrix as the kill(2) family).
+    if !crate::security::can_send_signal(target.cred()) {
+        return -(errno::EPERM as i64);
+    }
+
+    // sig 0: existence/permission probe — no delivery.
+    if sig == 0 {
+        return 0;
+    }
+
+    // Build the kernel siginfo: user si_code must be NEGATIVE and not
+    // SI_TKILL (forged kernel-sourced signals are refused, the same rule
+    // rt_sigqueueinfo enforces); si_pid/si_uid are rebuilt from the
+    // SENDER (the kernel never trusts the user's values).
+    let (sender_pid, sender_uid) = match crate::sched::current() {
+        // SAFETY: current is the running task.
+        Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
+        None => (0, 0),
+    };
+    let info = if uinfo.is_null() {
+        crate::signal::SigInfo::new(sig, crate::signal::si_code::SI_USER, sender_pid, sender_uid)
+    } else {
+        if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
+            return -(errno::EFAULT as i64);
+        }
+        let mut buf = [0u8; 12]; // si_signo, si_errno, si_code
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), uinfo, 12)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let si_signo = i32::from_le_bytes(buf[0..4].try_into().unwrap());
+        let si_code = i32::from_le_bytes(buf[8..12].try_into().unwrap());
+        if si_signo != sig {
+            return -(errno::EINVAL as i64);
+        }
+        if si_code >= 0 || si_code == crate::signal::si_code::SI_TKILL {
+            return -(errno::EPERM as i64);
+        }
+        let mut payload = [0u8; 8]; // si_value at siginfo offset 24
+        if unsafe {
+            crate::arch::uaccess::copy_from_user(payload.as_mut_ptr(), uinfo.add(24), 8)
+        } != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        let mut info =
+            crate::signal::SigInfo::new(sig, si_code, sender_pid, sender_uid);
+        info.set_value_bytes(&payload);
+        info
+    };
+
+    match crate::signal::send_signal_with_info(data.pid, info) {
+        Ok(()) => 0,
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_io_uring_setup - Setup io_uring instance (NR 425)
@@ -6803,13 +6964,145 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
 }
 
 /// sys_pidfd_open - Get pidfd for process (NR 434)
-pub fn sys_pidfd_open(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// Reference semantics: flags accepts only 0 or PIDFD_NONBLOCK
+/// (O_NONBLOCK, since 5.10); pid <= 0 is EINVAL; a missing pid is ESRCH.
+/// The returned descriptor carries FD_CLOEXEC (the reference allocates
+/// it O_CLOEXEC) and, with PIDFD_NONBLOCK, the O_NONBLOCK file status
+/// flag (fcntl F_GETFL) that waitid(P_PIDFD) consults for its EAGAIN
+/// contract.
+pub fn sys_pidfd_open(args: SyscallArgs) -> i64 {
+    // pid is a pid_t in the ABI: negative or zero values are EINVAL
+    // (reference pidfd_prepare), not ESRCH.
+    let pid_s = args[0] as i32;
+    let flags = args[1] as u32;
+    const PIDFD_NONBLOCK: u32 = 0x800; // O_NONBLOCK
+
+    if pid_s <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let pid = pid_s as u32;
+    if flags != 0 && flags != PIDFD_NONBLOCK {
+        return -(errno::EINVAL as i64);
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+
+    let data = match crate::fs::pidfd::make_pidfd_data(pid) {
+        Some(d) => d,
+        None => return -(errno::ESRCH as i64),
+    };
+
+    let mut file_flags = crate::fs::file::FileFlags::O_RDWR;
+    if flags & PIDFD_NONBLOCK != 0 {
+        file_flags |= crate::fs::file::FileFlags::O_NONBLOCK;
+    }
+    let file = alloc::sync::Arc::new(crate::fs::File::new(
+        crate::fs::file::FileFlags::new(file_flags),
+    ));
+    file.set_ops(&crate::fs::pidfd::PIDFD_OPS);
+    crate::fs::pidfd::attach(&file, data);
+
+    let fd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => return -(errno::EMFILE as i64),
+    };
+    match fdtable.install_fd(fd, file) {
+        Ok(()) => {
+            // FD_CLOEXEC is part of the pidfd contract (reference
+            // allocates the descriptor O_CLOEXEC; LTP pidfd_open01).
+            crate::fs::set_cloexec_fd(fd, true);
+            fd as i64
+        }
+        Err(_) => -(errno::EMFILE as i64),
+    }
 }
 
 /// sys_pidfd_getfd - Get file descriptor from process via pidfd (NR 438)
-pub fn sys_pidfd_getfd(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// Reference semantics: steal `targetfd` from the pidfd's process into
+/// the CALLER's descriptor table as a fresh descriptor with FD_CLOEXEC
+/// set (the reference receive_fd path). Error contract: EBADF bad pidfd
+/// / bad targetfd, EINVAL flags != 0, EPERM the caller lacks
+/// ptrace-attach authority over the target (real-credential match or
+/// the root stand-in), ESRCH the pinned process is gone.
+pub fn sys_pidfd_getfd(args: SyscallArgs) -> i64 {
+    let pidfd = args[0] as i32;
+    let targetfd = args[1] as i32;
+    let flags = args[2] as u32;
+
+    if flags != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+    let file = match fdtable.get_file(pidfd as usize) {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+    let is_pidfd_shape = file
+        .get_ops()
+        .map(|ops| {
+            core::ptr::eq(ops as *const _, &crate::fs::pidfd::PIDFD_OPS as *const _)
+                || core::ptr::eq(
+                    ops as *const _,
+                    &crate::fs::procfs::PROC_PIDDIR_OPS as *const _,
+                )
+        })
+        .unwrap_or(false);
+    if !is_pidfd_shape {
+        return -(errno::EBADF as i64);
+    }
+    let data = match unsafe { crate::fs::pidfd::data_of(&file) } {
+        Some(d) => d,
+        None => return -(errno::EBADF as i64),
+    };
+    let target = match crate::fs::pidfd::resolve_alive(data) {
+        Some(t) => t,
+        None => return -(errno::ESRCH as i64),
+    };
+
+    // PTRACE_MODE_ATTACH_REALCREDS stand-in (same policy as kcmp): the
+    // caller must be root or share the target's credentials.
+    if let Some(cur) = crate::sched::current() {
+        // SAFETY: cur is the running task.
+        let cur_euid = unsafe { (*cur).cred().euid };
+        if cur_euid != 0 && cur_euid != target.cred().euid {
+            return -(errno::EPERM as i64);
+        }
+    }
+
+    if targetfd < 0 {
+        return -(errno::EBADF as i64);
+    }
+    let target_ft = match target.fdtable_arc() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+    let stolen = match target_ft.get_file(targetfd as usize) {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+
+    let newfd = match fdtable.alloc_fd() {
+        Some(fd) => fd,
+        None => return -(errno::EMFILE as i64),
+    };
+    match fdtable.install_fd(newfd, stolen) {
+        Ok(()) => {
+            // The stolen descriptor arrives close-on-exec (reference
+            // receive_fd discipline; LTP pidfd_getfd01 asserts it).
+            crate::fs::set_cloexec_fd(newfd, true);
+            newfd as i64
+        }
+        Err(_) => -(errno::EMFILE as i64),
+    }
 }
 
 /// sys_faccessat2 - Check file access permissions (extended) (NR 439)

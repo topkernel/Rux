@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|cl|PASS|0|main libc clone: rc=-1 errno=22 main raw syscall: rc=308 errno=0 main no-cleartid: rc=-1 errno=22 main no-sigchld: rc=-1 errno=22 pre-case: rc=310 errno=0 forked-child: rc=-1 errno=22

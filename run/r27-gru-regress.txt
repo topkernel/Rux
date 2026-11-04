@@ -1,0 +1,17 @@
+# idx|test|class|rc|tail
+0|wait01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s wait01.c:19: TPASS: wait(NULL) : ECHILD (10)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+1|wait02|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s wait02.c:41: TPASS: wait() succeeded  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+2|wait401|PASS|0|0h 00m 30s wait401.c:40: TPASS: wait4() returned correct pid 324 wait401.c:49: TPASS: WIFEXITED() is set in status wait401.c:54: TPASS: WEXITSTATUS() == 0  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+3|waitid01|PASS|0|01.c:30: TPASS: infop->si_status == 123 (123) waitid01.c:31: TPASS: infop->si_signo == SIGCHLD (17) waitid01.c:32: TPASS: infop->si_code == CLD_EXITED (1)  Summary: passed   5 failed   0 broken   0 skipped  0 warnings 0
+4|waitid02|PASS|0|3: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s waitid02.c:21: TPASS: waitid(P_ALL, 0, infop, WNOHANG) : EINVAL (22)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|waitid03|PASS|0|LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s waitid03.c:22: TPASS: waitid(P_ALL, 0, infop, WNOHANG | WEXITED) : ECHILD (10)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+6|wait401|PASS|0|0h 00m 30s wait401.c:40: TPASS: wait4() returned correct pid 324 wait401.c:49: TPASS: WIFEXITED() is set in status wait401.c:54: TPASS: WEXITSTATUS() == 0  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
+7|waitpid01|PASS|0|waitpid01.c:121: TPASS: WIFSIGNALED() set in status waitpid01.c:129: TPASS: WTERMSIG() == SIGXFSZ waitpid01.c:146: TPASS: Child dumped core as expected  Summary: passed   146 failed   0 broken   0 skipped  0 warnings 0
+8|waitpid02|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/waitpid02: No such file or directory
+9|waitpid03|PASS|0|out per run is 0h 00m 30s waitpid03.c:31: TPASS: waitpid(385) returned correct PID waitpid03.c:36: TPASS: waitpid(385) failed on reaped child: ECHILD (10)  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+10|wait402|PASS|0|FO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s wait402.c:25: TPASS: wait4(pid_max + 1, &status, 0, &rusage) : ECHILD (10)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+11|exit01|PASS|0|exit01      1  TPASS  :  exit() test PASSED
+12|fork03|PASS|0|524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s fork03.c:40: TINFO: process id in parent of child from fork: 404 fork03.c:53: TPASS: test PASSED  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+13|times01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s times01.c:25: TPASS: times(&mytimes) returned 268  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+14|getrusage01|PASS|0|00m 30s getrusage01.c:29: TPASS: getrusage(RUSAGE_SELF, 0x7ff000001ef0) passed getrusage01.c:29: TPASS: getrusage(RUSAGE_CHILDREN, 0x7ff000001ef0) passed  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+15|getrusage02|PASS|0|R_getrusage syscall getrusage02.c:64: TPASS: getrusage(-2, 0x445860) : EINVAL (22) getrusage02.c:64: TPASS: getrusage(0, 0xffffffffffffffff) : EFAULT (14)  Summary: passed   3 failed   0 broken   0 skipped  1 warnings 0

@@ -1,0 +1,16 @@
+# idx|test|class|rc|tail
+0|mmap08|FAIL|1|c:1617: TINFO: Timeout per run is 0h 00m 30s mmap08.c:30: TFAIL: mmap(NULL, page_sz, PROT_WRITE, MAP_FILE | MAP_SHARED, fd, 0) expected EBADF: EINVAL (22)  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0
+1|mmap12|FAIL|1|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap12.c:64: TFAIL: pen dev pagemap failed: ENOENT (2)  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0
+2|mmap13|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap13.c:60: TPASS: Received SIGBUS signal as expected  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+3|mmap14|PASS|0|mmap14      1  TPASS  :  Functionality of mmap() successful
+4|mmap15|PASS|0|733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap15.c:42: TPASS: mmap() failed with expected errno: EINVAL (22)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|mmap16|TCONF|32|tst_cmd.c:257: TCONF: Couldn't find 'mkfs.ext4' in $PATH
+6|mmap17|PASS|0|t_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap17.c:72: TPASS: mmap set errno to EEXIST as expected  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+7|mmap18|FAIL|2|nt processes tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+8|read01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s read01.c:24: TPASS: read(2) returned 512  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+9|readv02|PASS|0|ASS: readv(6, 0x445080, -1) : EINVAL (22) readv02.c:74: TPASS: readv(7, 0x445020, 1) : EISDIR (21) readv02.c:74: TPASS: readv(-1, 0x445020, 3) : EBADF (9)  Summary: passed   5 failed   0 broken   0 skipped  0 warnings 0
+10|madvise01|PASS|0|: TCONF: MADV_COLD is not supported madvise01.c:105: TCONF: MADV_PAGEOUT is not supported madvise01.c:94: TINFO: Umounting /tmp/LTP_maddEeaCC/tmp_madvise  Summary: passed   13 failed   0 broken   0 skipped  7 warnings 0
+11|msync04|TCONF|32|tfs does not exist tst_supported_fs_types.c:169: TINFO: Skipping tmpfs as requested by the test tst_test.c:1689: TCONF: There are no supported filesystems  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+12|msync05|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/msync05: No such file or directory
+13|fork07|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s fork07.c:48: TPASS: read the end of file correctly  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+14|munmap01|PASS|0|munmap01    1  TPASS  :  Functionality of munmap() successful

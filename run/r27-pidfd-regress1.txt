@@ -1,0 +1,15 @@
+# idx|test|class|rc|tail
+0|proc01|FAIL|2|proc01      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 307). proc01      2  TBROK  :  tst_sig.c:232: Remaining cases broken
+1|read_all|FAIL|2|.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 02m 10s read_all.c:551: TBROK: The directory argument (-d) is required  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+2|getrusage03|FAIL|3|mit/?id=1f10206cf8e9  HINT: You _MAY_ be missing kernel fixes:  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1f10206cf8e9  Summary: passed   3 failed   3 broken   1 skipped  0 warnings 0
+3|waitid01|PASS|0|01.c:30: TPASS: infop->si_status == 123 (123) waitid01.c:31: TPASS: infop->si_signo == SIGCHLD (17) waitid01.c:32: TPASS: infop->si_code == CLD_EXITED (1)  Summary: passed   5 failed   0 broken   0 skipped  0 warnings 0
+4|waitid02|PASS|0|3: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s waitid02.c:21: TPASS: waitid(P_ALL, 0, infop, WNOHANG) : EINVAL (22)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|waitid03|PASS|0|LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s waitid03.c:22: TPASS: waitid(P_ALL, 0, infop, WNOHANG | WEXITED) : ECHILD (10)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+6|kcmp01|PASS|0|6: TPASS: kcmp() returned the expected value kcmp01.c:86: TPASS: kcmp() returned the expected value kcmp01.c:86: TPASS: kcmp() returned the expected value  Summary: passed   5 failed   0 broken   0 skipped  0 warnings 0
+7|kcmp02|PASS|0|d value: EINVAL (22) kcmp02.c:83: TPASS: kcmp() returned the expected value: EINVAL (22) kcmp02.c:83: TPASS: kcmp() returned the expected value: EBADF (9)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
+8|kill10|CRASH|137|kill10      1  TBROK  :  tst_sig.c:232: unexpected signal SIGTERM(15) received (pid = 346).
+9|exit_group01|PASS|0|ect: exit_group() succeeded exit_group01.c:61: TINFO: Checking if threads are still running exit_group01.c:77: TINFO: Threads counters value didn't change  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+10|exit2|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/exit2: No such file or directory
+11|wait01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s wait01.c:19: TPASS: wait(NULL) : ECHILD (10)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+12|wait02|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s wait02.c:41: TPASS: wait() succeeded  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+13|wait401|PASS|0|0h 00m 30s wait401.c:40: TPASS: wait4() returned correct pid 382 wait401.c:49: TPASS: WIFEXITED() is set in status wait401.c:54: TPASS: WEXITSTATUS() == 0  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0

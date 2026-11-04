@@ -1,0 +1,11 @@
+# idx|test|class|rc|tail
+0|pty01|PASS|0|t4 pty01       2  TPASS  :  test2 pty01       3  TPASS  :  test3 pty01       4  TPASS  :  test4 pty01       2  TPASS  :  test2 pty01       3  TPASS  :  test3 pty01       4  TPASS  :  test4 pty01       5  TPASS  :  test5
+1|pty02|PASS|0|0h 00m 30s pty02.c:53: TINFO: Calling FIONREAD, this will hang in n_tty_ioctl() if the bug is present... pty02.c:59: TPASS: Got to the end without hanging  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+2|ioctl01|PASS|0|criptor is for a regular file (termios) : ENOTTY (25) ioctl01.c:62: TPASS: Termio is NULL : EFAULT (14) ioctl01.c:62: TPASS: Termios is NULL : EFAULT (14)  Summary: passed   9 failed   0 broken   0 skipped  0 warnings 0
+3|ioctl02|FAIL|2|733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s ioctl02.c:226: TBROK: You must specify a tty device with -d option  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+4|ioctl03|TCONF|32|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s ioctl03.c:76: TCONF: TUN support is missing?  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+5|ioctl05|FAIL|2|t.c:1617: TINFO: Timeout per run is 0h 00m 30s ioctl05.c:33: TBROK: ioctl(6,(( ((0U)<<30) | (((0x12))<<8) | ((96)) | ((0)<<16) )),...) failed: ENOTTY (25)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+6|ioctl06|FAIL|2|t.c:1617: TINFO: Timeout per run is 0h 00m 30s ioctl06.c:27: TBROK: ioctl(6,(( ((0U)<<30) | (((0x12))<<8) | ((99)) | ((0)<<16) )),...) failed: ENOTTY (25)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+7|ioctl07|FAIL|2|INFO: Timeout per run is 0h 00m 30s ioctl07.c:29: TBROK: ioctl(6,(( ((2U)<<30) | ((('R'))<<8) | ((0x00)) | ((sizeof(int))<<16) )),...) failed: ENOTTY (25)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
+8|ioctl08_01|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/ioctl08_01: No such file or directory
+9|ioctl08_02|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/ioctl08_02: No such file or directory

@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|kill10|PASS|0|309: All 10 children reported in 308: All 10 children reported in kill10      1  TPASS  :  All 2 pgrps received their signals

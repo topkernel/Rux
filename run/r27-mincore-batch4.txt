@@ -1,0 +1,12 @@
+# idx|test|class|rc|tail
+0|mincore01|PASS|0|ailed as expected: TEST_ERRNO=EFAULT(14): Bad address mincore01    3  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory mincore01    4  TPASS  :  failed as expected: TEST_ERRNO=ENOMEM(12): Out of memory
+1|mincore02|PASS|0|t.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore02.c:56: TPASS: mincore(addr, size, vec) passed mincore02.c:63: TPASS: locked_pages == NUM_PAGES (4)  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+2|mincore03|PASS|0|is 0h 00m 30s mincore03.c:66: TPASS: mincore() reports untouched pages are not resident mincore03.c:66: TPASS: mincore() reports locked pages are resident  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+3|mincore04|PASS|0|on: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mincore04.c:99: TPASS: mincore reports all 3 pages locked by child process are resident  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+4|mlock201|FAIL|1|ock2(1) locked 8 pages, expected 4 mlock201.c:124: TFAIL: mlock2(1) locked 8 pages, expected 1 mlock201.c:124: TFAIL: mlock2(1) locked 8 pages, expected 4  Summary: passed   1 failed   7 broken   0 skipped  0 warnings 0
+5|mlock05|PASS|0|524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mlock05.c:105: TPASS: Rss == MMAPLEN (1048576) mlock05.c:106: TPASS: Locked == MMAPLEN (1048576)  Summary: passed   2 failed   0 broken   0 skipped  0 warnings 0
+6|mlock01|PASS|0|TPASS: mlock(0x7ff0000010a0, 1048576) passed mlock01.c:34: TINFO: mlock 1024 * 1024 * 10 bytes mlock01.c:36: TPASS: mlock(0x7ff0000010b0, 10485760) passed  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+7|mlock202|PASS|0|ailed as expected: ENOMEM (12) mlock202.c:75: TPASS: mlock2() failed as expected: EPERM (1) mlock202.c:75: TPASS: mlock2() failed as expected: ENOMEM (12)  Summary: passed   4 failed   0 broken   0 skipped  0 warnings 0
+8|mlock203|PASS|0|: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mlock203.c:65: TPASS: Locking one memory again didn't increased VmLck  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+9|munlock02|PASS|0|33: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s munlock02.c:25: TPASS: munlock(0x7ff000003000, 32768) : ENOMEM (12)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+10|mlock2|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/mlock2: No such file or directory

@@ -1,0 +1,7 @@
+# idx|test|class|rc|tail
+0|sysctl01|TCONF|32|FO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysctl01.c:53: TCONF: syscall(156) __NR__sysctl not supported on your arch  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+1|sysctl03|TCONF|32|d on your arch sysctl03.c:55: TCONF: syscall(156) __NR__sysctl not supported on your arch tst_test.c:1665: TINFO: Killed the leftover descendant processes  Summary: passed   0 failed   0 broken   0 skipped  2 warnings 0
+2|sysctl04|TCONF|32|FO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s sysctl04.c:52: TCONF: syscall(156) __NR__sysctl not supported on your arch  Summary: passed   0 failed   0 broken   0 skipped  1 warnings 0
+3|getsid01|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s getsid01.c:41: TPASS: p_sid == c_sid (1)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+4|getsid02|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s getsid02.c:22: TPASS: getsid(unused_pid) : ESRCH (3)  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
+5|getsid03|EXECFAIL|127|exec-failed: /test/linux-ltp/testcases/bin/getsid03: No such file or directory

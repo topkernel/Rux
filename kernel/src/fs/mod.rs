@@ -41,6 +41,7 @@ pub mod vt;
 pub mod pty;
 pub mod xattr;
 pub mod memfd;
+pub mod pidfd;
 pub mod selinuxfs;
 pub mod fifo;
 pub mod cgroup;

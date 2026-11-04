@@ -222,6 +222,24 @@ _start:
     or t4, t4, t5
     sd t4, 72(t3)
 
+    // PMD[10]: VA -> PA eleventh 2MB (window 22MB; see early_pmd PMD[10],
+    // RUX-RISCV-LAYOUT-5)
+    li t4, KERNEL_PHYS
+    li t6, 0x1400000             // 20MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 80(t3)
+
+    // PMD[11]: VA -> PA twelfth 2MB (window 24MB; see early_pmd PMD[11],
+    // RUX-RISCV-LAYOUT-5)
+    li t4, KERNEL_PHYS
+    li t6, 0x1600000             // 22MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 88(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -359,6 +377,26 @@ _start:
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 72(t3)
+
+    // PMD[10]: VA 0xFFFFFFFF81400000 -> PA 0x81600000 (eleventh 2MB)
+    // PMD[11]: VA 0xFFFFFFFF81600000 -> PA 0x81800000 (twelfth 2MB)
+    // RUX-RISCV-LAYOUT-5: the LTP r27 session (pidfd subsystem, ext4
+    // file handles, portable mincore walk) pushed the debug image past
+    // the 20MB window (linker ASSERT). Window, heap, reservation and
+    // KERNEL_SIZE move 20MB->24MB together, same rule as LAYOUT-2/3/4.
+    li t4, KERNEL_PHYS
+    li t6, 0x1400000             // 20MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 80(t3)
+
+    li t4, KERNEL_PHYS
+    li t6, 0x1600000             // 22MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 88(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)

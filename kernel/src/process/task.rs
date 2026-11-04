@@ -2231,6 +2231,17 @@ impl Task {
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
+        // RUSAGE_CHILDREN maxrss pair (getrusage03): the same non-zeroing
+        // discipline — a recycled page's stale words surfaced as
+        // garbage-children readings.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cmaxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_maxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
         // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
         // discipline — /proc/[pid]/status reads them, so they must be
         // initialized here or they carry allocator garbage.
@@ -2874,6 +2885,16 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // RUSAGE_CHILDREN maxrss pair (getrusage03): recycled-page garbage
+        // surfaced as child.children readings (cmaxrss was missing here).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, cmaxrss_kb)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, exit_maxrss_kb)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
         // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing

@@ -325,6 +325,13 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             args = generic_args;
             generic_nr as i64
         }
+        // A hole in the reference's own x86_64 table: ENOSYS, never the
+        // same-numbered generic syscall (x86 156 _sysctl vs generic
+        // getsid — LTP sysctl01/03/04 read ESRCH instead of ENOSYS).
+        // Routed to the unmapped-number arm below, which answers ENOSYS.
+        None if crate::syscall::x86_compat::native_enosys_hole(syscall_no as u64) => {
+            u64::MAX as i64
+        }
         None => syscall_no as i64,
     };
 

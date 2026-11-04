@@ -1,0 +1,26 @@
+# idx|test|class|rc|tail
+0|prot_hsymlinks|CRASH|134|sh: useradd: No such file or directory prot_hsymlinks    1  TBROK  :  prot_hsymlinks.c:323: Failed to run cmd: useradd hsym sh: userdel: No such file or directory
+1|trace_sched|CRASH|255|ne. User MUST provide   -h Help!   -p Scheduling policy, choice: fifo, rr, other. Default: fifo   -t Number of threads to create.                Default: 100   -v Verbose out put, print ugly!.               Default: OFF
+2|cgroup_core01|CRASH|139|git/torvalds/linux.git/commit/?id=1756d7994ad8  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-4197  Summary: passed   0 failed   0 broken   18708 skipped  0 warnings 1
+3|cgroup_core02|CRASH|139|git/torvalds/linux.git/commit/?id=e57457641613  HINT: You _MAY_ be vulnerable to CVE(s):  https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-4197  Summary: passed   0 failed   0 broken   18708 skipped  0 warnings 1
+4|acct02_helper|CRASH|128|
+5|cpuctl_def_task01|CRASH|138|cpu_controller_tests    1  TBROK  :  cpuctl_def_task01.c:120: Invalid input parameters
+6|cpuctl_def_task02|CRASH|138|cpu_controller_test04    1  TBROK  :  cpuctl_def_task02.c:140: Invalid test number passed
+7|cpuctl_def_task03|CRASH|138|cpu_controller_test06    1  TBROK  :  cpuctl_def_task03.c:136: Invalid test number passed
+8|cpuctl_def_task04|CRASH|138|cpu_controller_test06    1  TBROK  :  cpuctl_def_task04.c:139: Invalid test number passed
+9|cpuctl_test01|CRASH|138|cpuctl_test01    1  TBROK  :  cpuctl_test01.c:120: Invalid input parameters
+10|cpuctl_test02|CRASH|138|cpuctl_test02    1  TBROK  :  cpuctl_test02.c:144: Invalid test number passed
+11|cpuctl_test03|CRASH|138|cpuctl_test03    1  TBROK  :  cpuctl_test03.c:139: Invalid test number passed
+12|cpuctl_test04|CRASH|138|cpuctl_test04    1  TBROK  :  cpuctl_test04.c:140: Invalid test number passed
+13|eject_check_tray|CRASH|255|
+14|frag|CRASH|255|Needs to pass two arguments..
+15|genexp_log|CRASH|134|ERROR: need the path to generation binaries
+16|genpower|CRASH|134|ERROR: need the path to generation binaries
+17|gentrigo|CRASH|134|ERROR: need the path to generation binaries
+18|memctl_test01|CRASH|138|memory_controller_test01-03    1  TBROK  :  memctl_test01.c:89: invalid parameters received from script
+19|pm_get_sched_values|CRASH|139|
+20|sched_driver|CRASH|255|le: sched_driver.c, line: 456] cannot open sch.measure: No such file or directory  start time    = Thu Jan  1 00:00:10 1970  host name     = rux user name     = root test duration = 1.00 (hours) test stress   = 50.00%%
+21|sched_tc0|CRASH|255|ERROR [file: sched_tc0.c, line: 110] environment variable KERNEL not set: No data available
+22|sched_tc1|CRASH|255|ERROR [file: sched_tc1.c, line: 106] environment variable KERNEL not set: No data available
+23|sched_tc6|CRASH|255|ERROR [file: sched_tc6.c, line: 149] environment variable KERNEL not set: No data available
+24|vma05_vdso|CRASH|139|

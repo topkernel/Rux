@@ -156,6 +156,10 @@ pub struct PtyPair {
     master_closed: AtomicBool,
     /// last slave description closed
     slave_closed: AtomicBool,
+    /// TTY_PTY_LOCK: a fresh ptmx pair is born LOCKED (reference
+    /// ptmx_open); the slave open fails EIO until TIOCSPTLCK 0
+    /// (unlockpt) clears it.
+    locked: AtomicBool,
 }
 
 impl PtyPair {
@@ -170,6 +174,7 @@ impl PtyPair {
             slave_refs: AtomicI32::new(0),
             master_closed: AtomicBool::new(false),
             slave_closed: AtomicBool::new(false),
+            locked: AtomicBool::new(true),
         }
     }
 
@@ -271,7 +276,10 @@ pub fn devfs_register() {
 /// "pts/N", not "/dev/pts/N".
 fn devfs_add_slave_node(index: u32) -> bool {
     let path = format!("pts/{}", index);
-    let mode = 0o666 | 0o020000; // S_IFCHR | rw-rw-rw-
+    // devpts defaults: slave nodes are crw--w---- (0620) — the group
+    // write bit carries TTY group access (devpts mode=0620 mount
+    // default; LTP pty01 asserts S_IFCHR|0600|0020 after grantpt()).
+    let mode = 0o620 | 0o020000;
     if crate::fs::devfs::mknod(&path, DevNo::new(PTY_SLAVE_MAJOR, index), mode).is_err() {
         return false;
     }
@@ -326,6 +334,11 @@ pub fn slave_open(file: &File, minor: u32) -> i32 {
         None => return crate::errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
     };
     if pair.master_closed.load(Ordering::Acquire) {
+        return crate::errno::Errno::IOError.as_neg_i32();
+    }
+    // TTY_PTY_LOCK parity: while the master still holds the lock the
+    // slave open fails EIO (LTP pty01's pre-unlockpt open must fail).
+    if pair.locked.load(Ordering::Acquire) {
         return crate::errno::Errno::IOError.as_neg_i32();
     }
     // Reopen after all previous slaves closed: clear the stale closed flag
@@ -522,15 +535,18 @@ fn pty_slave_read(file: &File, buf: &mut [u8]) -> isize {
 }
 
 fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
-    use crate::errno::constants::{EAGAIN, EBADF, EINTR, EPIPE};
+    use crate::errno::constants::{EAGAIN, EBADF, EINTR, EIO};
 
     let pair = match pair_of(file) {
         Some(p) => p,
         None => return -(EBADF as isize),
     };
+    // Master hangup: EIO, never SIGPIPE — PTYs are not pipes (the
+    // reference's tty_write fails hung-up ttys with -EIO; LTP pty01
+    // test2 closes the master first and expects the slave write to
+    // merely FAIL).
     if pair.master_closed.load(Ordering::Acquire) {
-        send_sigpipe();
-        return -(EPIPE as isize);
+        return -(EIO as isize);
     }
     if buf.is_empty() {
         return 0;
@@ -556,10 +572,9 @@ fn pty_slave_write(file: &File, buf: &[u8]) -> isize {
             continue;
         }
 
-        // Master buffer full.
+        // Master buffer full and master gone: EIO (same hangup rule).
         if pair.master_closed.load(Ordering::Acquire) {
-            send_sigpipe();
-            return if written > 0 { written as isize } else { -(EPIPE as isize) };
+            return if written > 0 { written as isize } else { -(EIO as isize) };
         }
         if nb {
             return if written > 0 { written as isize } else { -(EAGAIN as isize) };
@@ -818,6 +833,24 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
             TIOCSPTLCK => {
                 if arg != 0 && !access_ok(arg, 4) {
                     return Some(-(EFAULT as i64));
+                }
+                let mut v: [u8; 4] = [0; 4];
+                if arg != 0 {
+                    // SAFETY: length-checked copy_from_user into a local.
+                    if unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            v.as_mut_ptr(),
+                            arg as *const u8,
+                            4,
+                        )
+                    } != 0
+                    {
+                        return Some(-(EFAULT as i64));
+                    }
+                }
+                let lock = i32::from_le_bytes(v) != 0;
+                if let Some(pair) = pair_of(file) {
+                    pair.locked.store(lock, Ordering::Release);
                 }
                 Some(0)
             }
