@@ -613,6 +613,16 @@ fn has_writable_shared_mapping(file: &File) -> bool {
 pub fn add_seals(file: &File, seals: u32) -> Result<(), i32> {
     let inode = file_memfd_inode(file).ok_or(-(errno::constants::EINVAL as i32))?;
 
+    // The fd must be open for writing (reference memfd_add_seals:
+    // "if (!(file->f_mode & FMODE_WRITE)) return -EPERM") — an O_RDONLY
+    // reopen of the memfd cannot add seals (kselftest test_share_open).
+    if file
+        .flags()
+        .is_readonly()
+    {
+        return Err(-(errno::constants::EPERM as i32));
+    }
+
     // Unknown bits are EINVAL (Linux memfd_add_seals).
     if seals & !F_SEAL_KNOWN != 0 {
         return Err(-(errno::constants::EINVAL as i32));
