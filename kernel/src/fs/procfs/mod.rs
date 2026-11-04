@@ -705,6 +705,14 @@ impl ProcFSSuperBlock {
             sysctl::write_pid_max,
             self.alloc_ino(),
         )));
+        // ns_last_pid (CONFIG_CHECKPOINT_RESTORE): CRIU-style exact-pid
+        // control; LTP pidfd_send_signal03 forces a pid reuse through it.
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"ns_last_pid".to_vec(),
+            sysctl::generate_ns_last_pid,
+            sysctl::write_ns_last_pid,
+            self.alloc_ino(),
+        )));
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"ostype".to_vec(),
             sysctl::generate_ostype,
@@ -2102,6 +2110,28 @@ pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .close(procfs_file_close)
     .build();
 
+/// /proc/<pid> DIRECTORY operations. The open path attaches a pinned
+/// pidfd identity (`crate::fs::pidfd::PidFdData`) to the file, so these
+/// descriptors work as pidfds for pidfd_send_signal / pidfd_getfd and
+/// poll() as exit readiness — the pre-pidfd_open(2) mechanism the
+/// reference kernel still supports (open("/proc/<pid>") + pidfd ops).
+/// Directory behavior otherwise matches DIR_FILE_OPS (EISDIR read,
+/// entry-index lseek); close drops the pin.
+fn proc_piddir_close(file: &crate::fs::File) -> i32 {
+    crate::fs::pidfd::pidfd_dir_close(file)
+}
+
+fn proc_piddir_poll(file: &crate::fs::File, events: u16) -> u16 {
+    crate::fs::pidfd::pidfd_dir_poll(file, events)
+}
+
+pub static PROC_PIDDIR_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(crate::fs::file::dir_read_eisdir)
+    .lseek(crate::fs::file::dir_file_lseek)
+    .poll(proc_piddir_poll)
+    .close(proc_piddir_close)
+    .build();
+
 /// ProcFS get_file_ops: return ops based on inode type
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
@@ -2122,6 +2152,15 @@ unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
         }
         Some(&PROCFS_FILE_OPS)
     } else if inode.mode.is_directory() {
+        // /proc/<pid> directories carry pidfd identity (the reference
+        // supports them as pidfds for pidfd_send_signal/poll-exit).
+        // Same shape test as procfs_readdir: private_data None + a
+        // live-pid ino distinguishes them from the proc root (which
+        // carries its ProcFSNode) and from the offset-coded subdirs
+        // (fd/ns/task/attr, ino = pid*10000 + off).
+        if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
+            return Some(&PROC_PIDDIR_OPS);
+        }
         Some(&crate::fs::file::DIR_FILE_OPS)
     } else {
         None
@@ -2132,6 +2171,19 @@ unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file:
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     if !inode.mode.is_regular_file() {
+        // /proc/<pid> directories: attach the pinned pidfd identity at
+        // open (instance-checked; a later pid reuse under the same pid
+        // cannot be targeted through this fd — LTP pidfd_send_signal03).
+        if inode.mode.is_directory()
+            && inode.private_data.is_none()
+            && pid::is_valid_pid(inode.ino)
+        {
+            if let Some(data) =
+                crate::fs::pidfd::make_pidfd_data(inode.ino as u32)
+            {
+                crate::fs::pidfd::attach(file, data);
+            }
+        }
         return 0;
     }
     let node_ptr = match inode.private_data {

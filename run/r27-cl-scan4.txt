@@ -1,0 +1,2 @@
+# idx|test|class|rc|tail
+0|cl|PASS|0|main: rc=308 errno=0 pre-case: rc=310 errno=0 forked-child: rc=311 errno=0

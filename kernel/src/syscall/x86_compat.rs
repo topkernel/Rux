@@ -28,6 +28,19 @@ const CLONE_VFORK: u64 = 0x4000;
 /// O_WRONLY | O_CREAT | O_TRUNC (creat(2))
 const O_CREAT_WRONLY_TRUNC: u64 = 0x241;
 
+/// Native x86_64 syscall numbers that exist in the ABI numbering but
+/// have NO implementation on the reference kernel (the number is a
+/// HOLE in its x86_64 table). Unmapped numbers otherwise fall through
+/// to the same-numbered GENERIC syscall, which here would be a
+/// DIFFERENT call (156 hits the generic getsid and answered _sysctl
+/// probes with ESRCH). The dispatcher returns ENOSYS for these, the
+/// reference x86_64's answer.
+pub fn native_enosys_hole(nr: u64) -> bool {
+    // 156 = __NR__sysctl: removed from the x86_64 table; LTP's sysctl
+    // tests TCONF on the reference kernel with exactly this shape.
+    nr == 156
+}
+
 /// Translate an x86_64 syscall number (and ABI-shaped arguments) to the
 /// generic dispatch number. `None` marks an x86 syscall with no Rux
 /// handler — the caller reports it as unknown.

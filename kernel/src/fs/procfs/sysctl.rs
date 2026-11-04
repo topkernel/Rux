@@ -584,3 +584,28 @@ pub fn write_inotify_max_user_watches(input: &[u8]) -> i32 {
         Err(e) => e,
     }
 }
+
+/// /proc/sys/kernel/ns_last_pid — the last pid handed out (rw; writing V
+/// moves the allocator's scan cursor to V+1, the CHECKPOINT_RESTORE
+/// contract CRIU and LTP pidfd_send_signal03 use to force pid reuse).
+/// Root-only write (the reference handler is 0600-root).
+pub fn generate_ns_last_pid() -> Vec<u8> {
+    alloc::format!("{}\n", crate::process::pid::last_pid()).into_bytes()
+}
+
+pub fn write_ns_last_pid(input: &[u8]) -> i32 {
+    // Reference handler is gated on CAP_SYS_ADMIN (checkpoint-restore);
+    // the capability check is the root stand-in here.
+    if !crate::security::capable(21) {
+        return -(crate::errno::constants::EPERM as i32);
+    }
+    match parse_u64(input) {
+        Ok(v) => {
+            if v > u32::MAX as u64 || !crate::process::pid::set_last_pid(v as u32) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}

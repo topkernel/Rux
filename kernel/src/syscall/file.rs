@@ -5479,20 +5479,323 @@ pub fn sys_remap_file_pages(_args: SyscallArgs) -> i64 {
     0 // Deprecated, return success
 }
 
+/// Handle payload served by this kernel: a 12-byte
+/// [u32 generation][u64 inode number] pair — the same information the
+/// reference's FILEID_INO32_GEN ext4 handle carries (ino + generation;
+/// our generation is a constant, there is no inode-version counter to
+/// report). handle_type 1 mirrors FILEID_INO32_GEN.
+const HANDLE_BYTES: u32 = 12;
+const HANDLE_TYPE: i32 = 1;
+
 /// sys_name_to_handle_at - Get file handle (NR 264)
 ///
-/// Minimal stub (U2): EOPNOTSUPP instead of ENOSYS — file handles are
-/// not implemented, but callers probing support distinguish "unsupported
-/// here" from "syscall absent".
-pub fn sys_name_to_handle_at(_args: SyscallArgs) -> i64 {
-    -(errno::EOPNOTSUPP as i64)
+/// Reference semantics: a zero handle_bytes on entry is a SIZE PROBE —
+/// the required size is stored and EOVERFLOW returned; handle_bytes
+/// above MAX_HANDLE_SZ (128) is EINVAL; unknown flags EINVAL; an empty
+/// path without AT_EMPTY_PATH is ENOENT; with AT_EMPTY_PATH the dfd's
+/// own inode is handled; the final symlink is followed only under
+/// AT_SYMLINK_FOLLOW. Filesystems without export support (procfs,
+/// tmpfs, devfs here) return EOPNOTSUPP, like the reference's tmpfs.
+pub fn sys_name_to_handle_at(args: SyscallArgs) -> i64 {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_FOLLOW: u32 = 0x400; // uapi/fcntl.h
+    let dfd = args[0] as i32;
+    let path_ptr = args[1] as *const u8;
+    let handle_ptr = args[2] as *mut u8;
+    let mount_id_ptr = args[3] as *mut i32;
+    let flags = args[4] as u32;
+
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_FOLLOW) != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if !crate::arch::uaccess::access_ok(handle_ptr as usize, 8)
+        || !crate::arch::uaccess::access_ok(mount_id_ptr as usize, 4)
+    {
+        return -(errno::EFAULT as i64);
+    }
+
+    // Resolve the target inode.
+    let walked = if flags & AT_EMPTY_PATH != 0 {
+        // Empty path + AT_EMPTY_PATH: the dfd's own inode. An EMPTY
+        // pathname WITHOUT the flag is ENOENT (getname semantics).
+        let mut path_buf = [0u8; 4];
+        let empty = unsafe {
+            crate::arch::uaccess::copy_from_user(
+                path_buf.as_mut_ptr(),
+                path_ptr,
+                1,
+            ) != 0
+                || path_buf[0] == 0
+        };
+        if empty {
+            if dfd == -100 {
+                // AT_FDCWD + AT_EMPTY_PATH: the current directory itself.
+                let cwd = crate::fs::vfs::get_cwd_user();
+                match crate::fs::vfs::path_lookup(&cwd, crate::fs::vfs::LOOKUP_FOLLOW) {
+                    Ok(vp) => vp.inode.clone().ok_or(-(errno::ENOENT as i64)),
+                    Err(e) => return -(e as i64),
+                }
+            } else {
+                let fdtable = match crate::sched::get_current_fdtable() {
+                    Some(ft) => ft,
+                    None => return -(errno::EBADF as i64),
+                };
+                let file = match fdtable.get_file(dfd as usize) {
+                    Some(f) => f,
+                    None => return -(errno::EBADF as i64),
+                };
+                match unsafe { (*file.inode.get()).clone() } {
+                    Some(i) => Ok(i),
+                    None => return -(errno::EBADF as i64),
+                }
+            }
+        } else {
+            name_to_handle_walk(dfd, path_ptr, flags)
+        }
+    } else {
+        name_to_handle_walk(dfd, path_ptr, flags)
+    };
+    let inode: alloc::sync::Arc<crate::fs::inode::Inode> = match walked {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+
+    // Only ext4 serves exportable handles here.
+    let is_ext4 = unsafe {
+        inode
+            .ops
+            .map(|ops| core::ptr::eq(ops as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _))
+            .unwrap_or(false)
+    };
+    if !is_ext4 {
+        return -(errno::EOPNOTSUPP as i64);
+    }
+
+    // Reference order: copy handle_bytes FIRST (a bad handle pointer is
+    // EFAULT before any size decision), resolve, then write the mount id
+    // and handle_bytes back BEFORE returning EOVERFLOW on a size probe —
+    // a bad mount_id pointer is EFAULT even in the probe case.
+    let mut hb = [0u8; 4];
+    if unsafe {
+        crate::arch::uaccess::copy_from_user(hb.as_mut_ptr(), handle_ptr, 4)
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let handle_bytes = u32::from_le_bytes(hb);
+    if handle_bytes > 128 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // mount id + handle size go out in every non-fault outcome.
+    // mount_id is informational here (open_by_handle_at resolves the
+    // filesystem through its own mount fd, like the reference).
+    let mid = (inode.fs_id as u32 as i32).to_le_bytes();
+    let size_probe = handle_bytes < HANDLE_BYTES;
+    let out_size = if size_probe { HANDLE_BYTES } else { handle_bytes };
+    unsafe {
+        if crate::arch::uaccess::copy_to_user(
+            mount_id_ptr as *mut u8,
+            mid.as_ptr(),
+            4,
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        if crate::arch::uaccess::copy_to_user(
+            handle_ptr,
+            out_size.to_le_bytes().as_ptr(),
+            4,
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+    }
+    if size_probe {
+        return -(errno::EOVERFLOW as i64);
+    }
+
+    // f_handle payload: [u32 gen][u64 ino], then handle_type.
+    let mut payload = [0u8; HANDLE_BYTES as usize];
+    payload[..4].copy_from_slice(&1u32.to_le_bytes());
+    payload[4..].copy_from_slice(&(inode.ino as u64).to_le_bytes());
+    let mut scratch = [0u8; 8];
+    scratch[..4].copy_from_slice(&HANDLE_TYPE.to_le_bytes());
+    unsafe {
+        crate::arch::uaccess::copy_to_user(handle_ptr.add(4), scratch.as_ptr(), 4);
+        if crate::arch::uaccess::copy_to_user(
+            handle_ptr.add(8),
+            payload.as_ptr(),
+            HANDLE_BYTES as usize,
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+    }
+    0
+}
+
+/// Resolve the (dfd, path) walk for name_to_handle_at: NOFOLLOW final
+/// unless AT_SYMLINK_FOLLOW (the handle names the symlink itself
+/// otherwise — open_by_handle_at02's ELOOP case).
+fn name_to_handle_walk(
+    dfd: i32,
+    path_ptr: *const u8,
+    flags: u32,
+) -> Result<alloc::sync::Arc<crate::fs::inode::Inode>, i64> {
+    const AT_SYMLINK_FOLLOW: u32 = 0x400; // uapi/fcntl.h
+    let full = match super::file::resolve_user_path(dfd, path_ptr) {
+        Ok(p) => p,
+        // resolve_user_path returns the NEGATIVE errno encoded as u64.
+        Err(e) => return Err(e as i64),
+    };
+    let lookup_flags = if flags & AT_SYMLINK_FOLLOW != 0 {
+        crate::fs::vfs::LOOKUP_FOLLOW
+    } else {
+        crate::fs::vfs::LOOKUP_NOFOLLOW
+    };
+    match crate::fs::vfs::path_lookup(&full, lookup_flags) {
+        Ok(vp) => vp.inode.clone().ok_or(-(errno::ENOENT as i64)),
+        // path_lookup returns the negative errno as i32.
+        Err(e) => Err(e as i64),
+    }
 }
 
 /// sys_open_by_handle_at - Open by file handle (NR 265)
 ///
-/// Minimal stub (U2): EOPNOTSUPP — see sys_name_to_handle_at.
-pub fn sys_open_by_handle_at(_args: SyscallArgs) -> i64 {
-    -(errno::EOPNOTSUPP as i64)
+/// Reference semantics: requires CAP_DAC_READ_SEARCH (EPERM without);
+/// mount_fd locates the filesystem — a valid fd on a DIFFERENT
+/// filesystem than the handle's is ESTALE; handle_bytes 0 or > 128 is
+/// EINVAL; a handle this kernel cannot decode is ESTALE; a SYMLINK
+/// handle opened without O_PATH is ELOOP (the final link is never
+/// followed by handle, only by its own name).
+pub fn sys_open_by_handle_at(args: SyscallArgs) -> i64 {
+    let mount_fd = args[0] as i32;
+    let handle_ptr = args[1] as *mut u8;
+    let flags = args[2] as u32;
+
+    // CAP_DAC_READ_SEARCH (2).
+    if !crate::security::capable(2) {
+        return -(errno::EPERM as i64);
+    }
+    if !crate::arch::uaccess::access_ok(handle_ptr as usize, 8) {
+        return -(errno::EFAULT as i64);
+    }
+
+    let fdtable = match crate::sched::get_current_fdtable() {
+        Some(ft) => ft,
+        None => return -(errno::EBADF as i64),
+    };
+    let base_inode: alloc::sync::Arc<crate::fs::inode::Inode> = if mount_fd == -100 {
+        // AT_FDCWD: the current directory's filesystem (LTP passes
+        // AT_FDCWD while chdir'd into the target mount).
+        let cwd = crate::fs::vfs::get_cwd_user();
+        match crate::fs::vfs::path_lookup(&cwd, crate::fs::vfs::LOOKUP_FOLLOW) {
+            Ok(vp) => match vp.inode.clone() {
+                Some(i) => i,
+                None => return -(errno::EBADF as i64),
+            },
+            Err(e) => return -(e as i64),
+        }
+    } else {
+        let mount_file = match fdtable.get_file(mount_fd as usize) {
+            Some(f) => f,
+            None => return -(errno::EBADF as i64),
+        };
+        match unsafe { (*mount_file.inode.get()).clone() } {
+            Some(i) => i,
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let is_ext4 = unsafe {
+        base_inode
+            .ops
+            .map(|ops| core::ptr::eq(ops as *const _, &crate::fs::ext4::EXT4_INODE_OPS as *const _))
+            .unwrap_or(false)
+    };
+    if !is_ext4 {
+        // A valid fd, but not on a filesystem that serves this handle.
+        return -(errno::ESTALE as i64);
+    }
+
+    // Decode the handle. The header copy is fault-checked first: a bad
+    // handle pointer is EFAULT, not a size/shape EINVAL.
+    let mut hdr = [0u8; 8];
+    if unsafe {
+        crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), handle_ptr, 8)
+    } != 0
+    {
+        return -(errno::EFAULT as i64);
+    }
+    let handle_bytes = u32::from_le_bytes(hdr[..4].try_into().unwrap());
+    let handle_type = i32::from_le_bytes(hdr[4..].try_into().unwrap());
+    if handle_bytes == 0 || handle_bytes > 128 {
+        return -(errno::EINVAL as i64);
+    }
+    if handle_type != HANDLE_TYPE || handle_bytes != HANDLE_BYTES {
+        return -(errno::ESTALE as i64);
+    }
+    let mut payload = [0u8; HANDLE_BYTES as usize];
+    unsafe {
+        crate::arch::uaccess::copy_from_user(
+            payload.as_mut_ptr(),
+            handle_ptr.add(8),
+            HANDLE_BYTES as usize,
+        );
+    }
+    let ino = u64::from_le_bytes(payload[4..].try_into().unwrap());
+
+    // Materialize the inode from disk (export iget).
+    let inode = match unsafe { crate::fs::ext4::iget_by_ino(&base_inode, ino) } {
+        Ok(i) => i,
+        Err(_) => return -(errno::ESTALE as i64),
+    };
+
+    // The reference never follows the symlink a handle names: any open
+    // other than O_PATH fails ELOOP (open_by_handle_at02).
+    const O_PATH: u32 = 0x200000;
+    if inode.mode.is_symlink() && (flags & O_PATH) == 0 {
+        return -(errno::ELOOP as i64);
+    }
+
+    // Permission gate (MAY_READ / MAY_WRITE per open flags).
+    let want_r = flags & 0o3 != 0o1; // O_RDONLY or O_RDWR want read
+    let want_w = flags & 0o3 == 0o1 || flags & 0o2 != 0; // O_WRONLY/O_RDWR
+    if want_r
+        && !crate::fs::permission::inode_permission(
+            &inode,
+            crate::fs::permission::MAY_READ,
+        )
+    {
+        return -(errno::EACCES as i64);
+    }
+    if want_w
+        && !crate::fs::permission::inode_permission(
+            &inode,
+            crate::fs::permission::MAY_WRITE,
+        )
+    {
+        return -(errno::EACCES as i64);
+    }
+
+    // Build the file like file_opendir does (no path, inode direct).
+    let file_flags = crate::fs::file::FileFlags::new(flags);
+    let file = alloc::sync::Arc::new(crate::fs::File::new(file_flags));
+    file.set_inode(alloc::sync::Arc::clone(&inode));
+    // SAFETY: inode ops callbacks are well-defined for this Arc.
+    unsafe {
+        if let Some(ops) = inode.ops {
+            if let Some(get_file_ops_fn) = ops.get_file_ops {
+                if let Some(fops) = get_file_ops_fn(&*inode) {
+                    file.set_ops(fops);
+                }
+            }
+        }
+    }
+    match unsafe { crate::fs::file::get_file_fd_install(file) } {
+        Some(fd) => fd as i64,
+        None => -(errno::EMFILE as i64),
+    }
 }
 
 /// sys_copy_file_range - Copy data between files (NR 285)

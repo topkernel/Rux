@@ -70,6 +70,9 @@ struct PidAllocator {
     bitmap: [u64; PID_BITMAP_WORDS],
     /// Cursor: next PID to try on allocation.
     next: u32,
+    /// Most recently allocated PID (what ns_last_pid reports; differs
+    /// from `next` after a wrap).
+    last_pid: u32,
     /// Number of currently allocated PIDs.
     nr_allocated: u32,
 }
@@ -79,6 +82,7 @@ impl PidAllocator {
         Self {
             bitmap: [0u64; PID_BITMAP_WORDS],
             next: RESERVED_PIDS,
+            last_pid: 0,
             nr_allocated: 0,
         }
     }
@@ -167,6 +171,7 @@ pub fn alloc_pid() -> Option<u32> {
     } else {
         pid + 1
     };
+    alloc.last_pid = pid;
 
     Some(pid)
 }
@@ -195,4 +200,32 @@ pub fn free_pid(pid: u32) {
         alloc.bitmap[word_idx] &= !mask;
         alloc.nr_allocated -= 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// ns_last_pid (CONFIG_CHECKPOINT_RESTORE parity)
+// ---------------------------------------------------------------------------
+
+/// The last PID handed out (the value /proc/sys/kernel/ns_last_pid
+/// reports). Kept in the allocator state so reads and cursor moves are
+/// one critical section: `next` is the scan cursor, `last_pid` is the
+/// most recent ALLOCATION (they diverge after wrap).
+pub fn last_pid() -> u32 {
+    PID_ALLOCATOR.lock().last_pid
+}
+
+/// Set the next scan position (writing V to ns_last_pid means "the last
+/// pid handed out was V" — the next allocation scans from V+1). The
+/// reference (set_last_pid, CONFIG_CHECKPOINT_RESTORE) accepts ANY
+/// in-range value — CRIU restores exact pid sets by moving the cursor
+/// backward over freed pids; liveness is protected by the bitmap, not
+/// by the cursor (a scan never issues an allocated pid). Returns false
+/// (EINVAL at the sysctl layer) for out-of-range requests.
+pub fn set_last_pid(v: u32) -> bool {
+    if v < RESERVED_PIDS || v + 1 >= PID_MAX_DEFAULT {
+        return false;
+    }
+    let mut alloc = PID_ALLOCATOR.lock();
+    alloc.next = v + 1;
+    true
 }
