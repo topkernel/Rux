@@ -617,7 +617,8 @@ pub fn futex_stuck_census() {
         return;
     }
 
-    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc) ----
+    // ---- Phase B1: identify the stuck tasks (fill tgid/tid/sys/epc and
+    // the wait-site decode) ----
     // lb325 wedge: this census runs at the timer-softirq heartbeat (IF=0);
     // the BLOCKING task walk self-deadlocks against a pid-hash bucket held
     // by an interrupted task-context writer. Try-walk (skipped buckets just
@@ -633,6 +634,7 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
+                let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
                     {
@@ -644,6 +646,11 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.orig_rax as u64;
                         s.epc = r.rip as u64;
+                        // futex(uaddr, op, val, timeout, ...): rsi/rdx/r10.
+                        s.fop = r.rsi;
+                        s.fval = r.rdx;
+                        s.fto = r.r10;
+                        usp = r.rsp;
                     }
                     #[cfg(feature = "riscv64")]
                     {
@@ -655,6 +662,10 @@ pub fn futex_stuck_census() {
                         let r = unsafe { &*regs };
                         s.sys = r.a7 as u64;
                         s.epc = r.epc as u64;
+                        s.fop = r.a1;
+                        s.fval = r.a2;
+                        s.fto = r.a3;
+                        usp = r.sp;
                     }
                     #[cfg(feature = "aarch64")]
                     {
@@ -1001,8 +1012,6 @@ pub fn futex_stuck_census() {
         // HOTPATH-PRINT: fuxstuck census report — gated by
         // dfx=fuxstuck at futex_stuck_census() entry plus the 5s burst
         // budget and the 1200-line LINES cap; never fires on a plain boot.
-        crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} tgidthr[run={} futex={} int={} unint={}]",
         use core::fmt::Write as _;
         let mut vmx = alloc::string::String::new();
         if g.rep_uvma_ok && g.rep_uvma_cls == b'F' {
