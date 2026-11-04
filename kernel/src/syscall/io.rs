@@ -880,6 +880,28 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // EMSGSIZE).
             const GATHER_MAX_TOTAL: usize = RW_CHUNK.saturating_mul(4);
             let mut gathered: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            // 39th (u2v7 profile): pre-reserve the whole gathered length
+            // before the copy loop. The entries were whole-vector
+            // validated above; this pass only READS the iovec array
+            // again (no copies, no observable change). Without it the
+            // per-iov try_reserve_exact in gather_append_user re-grew
+            // the Vec per iovec — hilogd's writev(header, tag, content)
+            // paid three realloc+memcpy growth rounds per record
+            // (UNIXRD-WV gather phase 4.7 us/op).
+            for i in 0..iovcnt {
+                let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
+                    iov_addr + i * core::mem::size_of::<Iovec>(),
+                ) else {
+                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                    return -errno::EFAULT as i64;
+                };
+                if !iov.iov_base.is_null() && iov.iov_len != 0 {
+                    if gathered.try_reserve_exact(iov.iov_len).is_err() {
+                        crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                        return -errno::ENOMEM as i64;
+                    }
+                }
+            }
             // Entries were whole-vector validated above; zero-length and
             // NULL-base entries contribute nothing (a total-0 dgram
             // writev is a no-op returning 0, like the reference).
