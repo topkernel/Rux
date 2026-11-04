@@ -3388,3 +3388,105 @@ pixels unchanged (frozen md5 set — no PIXEL-CHANGE lines).
 3. The frozen BOTTOM of the recursion (why main's innermost EXEC never
    replies) stays unexplained — moot if the rejection fix lands, but
    the pre-fix serials (lb416/418/421) hold the evidence.
+
+## COMPREHENSIVE-FIX SESSION (2026-11-04 21:5x-.., branch biofix-fieldpoll @ 4f955ec2+)
+
+Mission (user directive "一次把所有问题搞定"): systematic one-pass audit of the
+whole divergence surface — syscall census diff, binder lifecycle side-by-side,
+fd readiness, timers/signals — fix everything as ONE batch, verify once.
+Static work only (the 36th rolled bwr_snap dynamically in parallel).
+
+### 1. THE ROOT DIVERGENCE (source-verified both sides, vmlinux-confirmed)
+The reference bzImage (OH 6.6.101, built from oh-robot tip 19bfc7552 —
+vmlinux strings verified present) REJECTS same-process binder transactions
+in TWO places our kernel left open:
+- Context-manager arm: "got transaction to context manager from process
+  owning it" -> BR_FAILED_REPLY. Our lb122-era removal was calibrated
+  against VANILLA mainline (no check there); the OH reference HAS it.
+- WARN_ON(proc == target_proc): "self transactions not allowed" ->
+  BR_FAILED_REPLY for any handle-targeted same-proc send (b85-era comment
+  claimed 5.10 parity; the reference is 6.6 with the check).
+Dynamic conviction: our wedge serials are FULL of exactly this traffic —
+samgr pid 329 workers executing ADD_SYSTEM_ABILITY handlers re-entering
+the registry in-process via SystemAbilityManagerClient's handle-0 proxy
+(codes 2/3/12/20/30, SLOW-TXN rows pid 329 -> 329; lb430 txn6307
+353->355 + txn781 355->353 = the mirror ping-pong). The from-walk then
+delivered each nested call to the parked originator, building the
+crosswait graph the 36th's bwr_snap caught (lb416: [EXEC from peer,
+AWAIT->peer]* mirror stacks, ages 100-152s). Reference: those sends die
+at the door; OH tolerates it (boots to GUI ~12s, zero WARN splats, zero
+PrintErrorDetailedInfo on refu8/9). The 0x5f504e47 oneway the lb122
+removal was blamed on is CROSS-PROC (lb421 SACMP pid 757/760/761->329)
+plus some same-proc sends (cgf1 printed BINDER-REJECT ctxmgr-own-process
+code=0x5f504e47 @5.4s) — on the reference BOTH shapes are refused at the
+door and the boot still succeeds.
+The from-walk selection rule itself was AUDITED PARITY (theirs: stack
+head=newest via from_parent, break at first match; ours: Vec tail=newest,
+.iter().rev() breaks at first match — both pick the NEWEST originator;
+the "deepest" hypothesis is refuted).
+
+### 2. Fixes landed (one batch, all committed on biofix-fieldpoll)
+1. 4f955ec2 fix(binder): reference-parity same-proc rejection — BOTH
+   doors restored (ctx-mgr-own-proc why=22, self-transaction why=23), in
+   reference order (before the sync-send guards), with tgid refinement
+   for the sc161 shared-proc model (a forked child is a fresh binder proc
+   on the reference: only sender-tgid == node reg_tgid counts as self;
+   replies exempt — a same-proc reply cannot exist on the reference).
+   ALSO ungated the two sync-send protocol guards (todo-head-txn,
+   stack-top-not-mine) — the reference rejects them unconditionally; the
+   lb304-era gating existed because the same-proc sends violated the
+   shape, and those now die earlier.
+2. 2daa78b3 dfx(binder): bounded (40/boot) BINDER-REJECT verdict prints
+   for why=22/23 so rolls can count the rejections.
+3. 94c48416 fix(epoll): eventfd poll_wait registration — the ONE fd
+   class missing from poll_wait_impls (unix/pipe/fifo/socket/inotify/
+   binder/evdev/timerfd/signalfd/perf all present). OH's FFRT worker
+   signaling rides eventfd+epoll; every wait fell back to the 10ms
+   re-check slice (latency + full fd-set rescan per waiter — the same
+   tax the 26th removed for binder).
+
+### 3. Audit coverage (the rest — verified parity, no fix needed)
+- Syscall surface: reference TSCEN census posture classes are
+  futex_wait/BWR/epoll_pwait(281)/poll(7)/nanosleep/recvmsg(45/47)/
+  devkmsg-read/rt_sigtimedwait(128). All implemented; rt_sigtimedwait's
+  consume+park+lost-wakeup guard+high-res deadline verified in source;
+  epoll_pwait sigmask swap LTP-covered; timerfd blocking read + poll_wait
+  wired; signalfd wired.
+- BC/BR command inventory matches; failed-send pushes ReturnError and
+  BREAKS the write loop (reference: return_error.cmd stops the loop);
+  BR_SPAWN_LOOPER gate mirrors done: (sc164 child handling documented);
+  BC_FREE_BUFFER parity incl. async-slot drain; BC_INCREFS-on-0 already
+  guards mgr.proc_id != proc.id; binder_close clears mgr_node on owner
+  death; BR constants bit-identical.
+- OH userspace BR_FAILED_REPLY handling verified in ipc source:
+  OnDeadOrFailedReply -> error return, NO retry loop, NO proxy
+  death-mark (only TF_STATUS_CODE 32 marks) — the rejection produces a
+  clean fast error exactly like on the reference.
+- NOT fixed (documented divergence): binder priority inheritance
+  (binder_set_nice on delivery/reply-restore) is absent — a fairness
+  feature, not a wedge producer (the crosswait cannot be broken by
+  priority; the 32nd acquitted our pick path). Candidate for a later
+  parity commit if wedge-throughput work wants it.
+
+### 4. Gates
+x3 builds rc=0 (x86_64/riscv64/aarch64, dtb clean); make test x86_64
+ALL PASSED (private rootfs test/rootfs-cgf1.img; rc=124 post-halt =
+normal wrapper shape — run/cgf1-maketest-x86.log). Roll kernel:
+run/bzImage-cgf1-dbg (md5 c72ed210).
+
+### 5. Verification (run/cgf-roll.sh, fresh2 reflinks, SMP2 LOGLEVEL6,
+dfx=ams46,txnhunt negmemo=1) — rolling at write time
+- cgf1 (manual verdict, v1 roller murdered cgf2/cgf3 at 15s on a
+  '/proc/sysrq-trigger' chown-noise false match — v2 fixed): WEDGE at
+  392s, SA frozen 53 since ~20s, TXN-HANG wifi->samgr OS_IPC_7 exec
+  369s (server parked userspace futex, reply deferred userspace-side).
+  **THE FACE IS CHANGED**: ZERO same-proc SLOW-TXN rows (was the
+  dominant class), no mirror stacks, no DEADLOCK, no PANIC — the
+  binder crosswait is dead on this kernel. Residual = the monopolist
+  face (RCU-GP-BOUND flood, CPU0 qs counter frozen = non-quiescent
+  CPU; fdreap grace stalls) + samgr FFRT-internal futex waits — the
+  25th/32nd userspace-internal adjudication family, pre-existing
+  (lb421 identical flood pre-fix).
+- The 36th's parallel rolls on ITS OWN sameproc build
+  (bzImage-cg36-sameproc-dbg) agree: lb424/425/426 all wedge in the
+  same residual family.
