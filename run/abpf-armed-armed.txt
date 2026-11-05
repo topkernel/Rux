@@ -1,0 +1,2 @@
+CASE[lat_syscall,stat] armed rep1 load=4.37 VAL=0.4076
+CASE[lat_syscall,stat] armed rep1 load=4.39 VAL=0.3997

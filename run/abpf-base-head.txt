@@ -1,0 +1,2 @@
+CASE[lat_pagefault] base rep1 load=18.05 VAL=NONE
+CASE[lat_pagefault] head rep1 load=20.15 VAL=NONE

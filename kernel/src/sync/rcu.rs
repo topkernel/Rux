@@ -425,7 +425,28 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             unsafe {
                 (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
             }
-            // Re-check AFTER marking sleeping: the one-shot may have
+            // Re-check QS AFTER marking sleeping: the last missing
+            // reporter typically reports in the microseconds between
+            // the failed check at the loop top and here (the fd-close
+            // completion loop yields through schedule(), which is a
+            // report site). Aborting the sleep when it lands converts
+            // what was otherwise a full 1-jiffy stall — measured
+            // 2026-11-05: one close(2) per 10 ms tick stalled up to
+            // 10 ms in fdreapd's sleepy wait (probe: open+close median
+            // 1.07 us but mean 2.45 us, every stall ending at a jiffy
+            // boundary) — back into the microsecond poll window.
+            if all_online_cpus_reported(gen) {
+                // SAFETY: current is this task's own pointer.
+                unsafe {
+                    (*current).set_state(TaskState::new(TaskState::RUNNING));
+                    // NEW-C2: a racing wake may have enqueued us while
+                    // still executing — take ourselves back off.
+                    crate::sched::dequeue_task(&*current);
+                }
+                crate::timer::del_timer(timer_id);
+                continue;
+            }
+            // Re-check the one-shot AFTER marking sleeping: it may have
             // fired between arming and set_state (khungtaskd lesson).
             if crate::drivers::timer::get_jiffies() >= target {
                 // SAFETY: current is this task's own pointer.

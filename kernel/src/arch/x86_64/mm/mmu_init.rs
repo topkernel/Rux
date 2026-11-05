@@ -1091,17 +1091,23 @@ pub unsafe fn free_user_page_tables(
                         crate::mm::rmap::page_remove_rmap(&*page);
                     }
 
-                    let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
-                    if new_ref == 0 {
-                        crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        free_pages(phys_addr as usize, 0);
-                    }
-                    // PCACHE leaf (filemap_fault private mapping): drop the
-                    // mapping's page-cache pin after the descriptor put
-                    // (same ordering as unmap_pages; the pin's release may
-                    // free an invalidated frame).
-                    if pte1.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
-                        super::mm_ops::release_cache_mapping_pin(pfn);
+                    // RO alias (cow_flags::PCACHE_RO): mapcount-only leaf —
+                    // no descriptor reference and no cache pin to drop; the
+                    // page_remove_rmap above (mapcount dec) is its whole
+                    // teardown.
+                    if pte1.bits() & super::mm_ops::cow_flags::PCACHE_RO == 0 {
+                        let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
+                        if new_ref == 0 {
+                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            free_pages(phys_addr as usize, 0);
+                        }
+                        // PCACHE leaf (filemap_fault private mapping): drop the
+                        // mapping's page-cache pin after the descriptor put
+                        // (same ordering as unmap_pages; the pin's release may
+                        // free an invalidated frame).
+                        if pte1.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                            super::mm_ops::release_cache_mapping_pin(pfn);
+                        }
                     }
                 }
                 // FORENSIC: census the PT table before freeing it.
@@ -1333,7 +1339,14 @@ fn pt_alloc_fail(level: &str, va: u64) {
 /// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
 /// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
 /// fake-OOM family notes in alloc_page_table).
-unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+///
+/// No-TLB-flush contract (fault-around batches): callers installing
+/// leaves into slots that were NOT PRESENT (verified by their own walk
+/// immediately before, under the PTE lock) need no invlpg — x86 never
+/// caches non-present translations, and every teardown path
+/// (munmap/mprotect) flushes what it zaps. Callers REPLACING a present
+/// leaf must flush that VA themselves.
+pub(crate) unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
