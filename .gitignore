@@ -77,7 +77,6 @@ build/.config.bak
 
 # Userspace compiled binaries
 userspace/toybox/toybox/toybox
-userspace/tests/smoke_test/dynamic_link_test
 test/disk.img
 
 # mrsh build artifacts (only track build script + source tarball)
@@ -166,7 +165,6 @@ toolchain/x86_64-rux-linux-musl/
 test/**/*.c
 run/*.c
 run/oh-x/
-userspace/tests/smoke_test/*.c
 
 # lmbench benchmark sources are tarball-packed, not tracked (2026-10-31)
 userspace/lmbench/src/
