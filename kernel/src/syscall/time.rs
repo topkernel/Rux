@@ -376,14 +376,14 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // ticktrap (r41v17): shadow the live deadline + registration id so
     // the 1 Hz heartbeat can adjudicate this sleeper if it parks (the
     // r41v15 power_host class: a timed sleep that outlives its deadline
-    // by minutes with no wake ever delivered).
-    let shadow = wake
-        .as_ref()
-        .and_then(|w| crate::timer::TimedSleepShadow::new(
-            crate::timer::TSLEEP_HRES,
-            hres_deadline,
-            w.id(),
-        ));
+    // by minutes with no wake ever delivered). UNCONDITIONAL — a
+    // pool-exhausted arm (timer_id 0) must still be visible: the
+    // heartbeat line then names the arm-failure branch directly.
+    let shadow = crate::timer::TimedSleepShadow::new(
+        crate::timer::TSLEEP_HRES,
+        hres_deadline,
+        wake.as_ref().map(|w| w.id()).unwrap_or(0),
+    );
 
     // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
     // The timer softirq's wake is ONE-SHOT: it fires wake_up_process exactly
@@ -505,7 +505,18 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
             // Timer registration failed (timer table full): an
             // INTERRUPTIBLE sleep would have NO waker — the task would
             // block forever (until a signal). Stay runnable and yield so
-            // the loop keeps re-checking jiffies.
+            // the loop keeps re-checking jiffies. r41v17: the state is
+            // FORCED RUNNING first — a stale INTERRUPTIBLE left by an
+            // earlier loop iteration (e.g. a mid-wait re-arm failure
+            // after (D) already ran) would turn this yield into an
+            // eternal park (the r41v15/v17 power_host shape: sys=35,
+            // INTERRUPTIBLE, no wheel entry, no shadow-visible id).
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(process::task::TaskState::new(
+                    process::task::TaskState::RUNNING
+                ));
+            }
             crate::sched::schedule();
         }
     }
