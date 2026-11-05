@@ -1930,15 +1930,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             let start = follow_mount(vfs_root.clone());
             if memo_armed {
                 memo_root = Some(start.clone());
+                // (perf-gap-hunt) creds fetched ONCE for the whole
+                // per-ancestor validation chain — the walk's per-
+                // component inode_permission re-fetches it each hop.
+                let cred = crate::sched::current()
+                    .map(|t| unsafe { (*t).cred() });
                 if let Some((dentry, inode)) = crate::fs::path_memo::lookup(
                     &start,
                     normalized.as_ref(),
-                    |ino| {
-                        crate::fs::permission::inode_permission(
-                            ino,
-                            crate::fs::permission::MAY_EXEC,
-                        )
-                    },
+                    cred,
                 ) {
                     // Trailing-slash demands a directory — the same
                     // expression the walk tail applies (LTP acct01

@@ -1,0 +1,154 @@
+===PB g5base rep1 20:13:14 load=4.31
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-g5base-1 accel=kvm smp=2 mem=2G foreign_qemus=5
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291962456
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.100 min=0.040 max=685.241 avg=0.051 wall=0.061
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.090 min=0.050 max=26.329 avg=0.061 wall=0.069
+[probe] PBENCH p2_ctxsw n=100000 med=0.125 p99=3.852 min=0.080 max=211.555 avg=0.383 wall=0.388 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=7.985 min=0.000 max=136.776 avg=0.399 wall=0.405
+[probe] PBENCH p3b_fault_cow n=8192 med=2.445 p99=3.617 min=2.204 max=45.725 avg=2.540 wall=2.548 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=67.095 p99=143.839 min=55.394 max=202.959 avg=66.739 wall=69.194
+[probe] PBENCH p4_fork_exec n=1000 med=84.718 p99=156.262 min=79.769 max=302.355 avg=86.568 wall=89.021 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.190 p99=0.220 min=0.160 max=20018.879 avg=0.391 wall=0.400
+[probe] PBENCH p5b_dgram_send n=20000 med=0.260 p99=0.311 min=0.210 max=176.540 avg=0.712 wall=0.721
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.431 p99=0.511 min=0.341 max=123.250 avg=0.722 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.230 p99=0.260 min=0.220 max=137.707 avg=0.275 wall=0.285
+[probe] PBENCH p5c2_stream_send n=100000 med=0.220 p99=0.250 min=0.200 max=22.452 avg=0.264 wall=0.272
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.220 p99=0.451 min=0.200 max=109.645 avg=0.278 wall=0.287
+[probe] PBENCH p5d_rt_read n=100000 med=0.371 p99=0.451 min=0.361 max=58.079 avg=0.379 wall=0.388
+[probe] PBENCH p5d_rt_recv n=100000 med=0.391 p99=0.461 min=0.380 max=40.906 avg=0.400 wall=0.409
+[probe] PBENCH p5e_child_spin n=323 med=13.145 p99=110.767 min=10.730 max=131.486 avg=19.127 wall=0.000 measured_by=child spin-read eagain=20910628
+[probe] PBENCH p5f_stream_dwait n=44872 med=0.210 p99=0.271 min=0.200 max=39.915 avg=0.225 wall=31.886 attempts=6400000 eagain=6355128 (99.3% spin)
+[probe] PBENCH PREP tree=1000files wall_ms=644
+[probe] PBENCH p6_stat n=10000 med=0.511 p99=0.591 min=0.381 max=18.996 avg=0.516 wall=0.753
+[probe] PBENCH p6_openclose n=10000 med=0.942 p99=1.052 min=0.812 max=20.047 avg=0.952 wall=1.229
+[probe] PBENCH p6_getdents n=1000 med=130.474 p99=152.014 min=128.320 max=224.910 avg=132.195 wall=153.243 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.272 p99=1.703 min=1.092 max=21.761 avg=1.320 wall=1.688 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.631 p99=2.054 min=0.561 max=9.458 avg=0.732 wall=0.730
+[probe] PBENCH p6_unlink n=1000 med=7.444 p99=8036.442 min=4.999 max=42800.142 avg=274.645 wall=274.931
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=57s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-g5base-1-serial.log
+===END g5base rep1 rc=0
+===PB pm2 rep1 20:14:14 load=5.84
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-pm2-1 accel=kvm smp=2 mem=2G foreign_qemus=5
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291979640
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.060 min=0.040 max=685.949 avg=0.051 wall=0.061
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.090 min=0.050 max=122.849 avg=0.062 wall=0.070
+[probe] PBENCH p2_ctxsw n=100000 med=0.120 p99=3.196 min=0.080 max=353.134 avg=0.314 wall=0.319 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=10.449 min=0.000 max=101.960 avg=0.443 wall=0.449
+[probe] PBENCH p3b_fault_cow n=8192 med=2.374 p99=3.587 min=2.214 max=43.802 avg=2.476 wall=2.483 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=58.710 p99=137.516 min=56.415 max=177.842 avg=62.430 wall=64.843
+[probe] PBENCH p4_fork_exec n=1000 med=84.257 p99=154.388 min=81.472 max=171.360 avg=86.693 wall=89.112 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.200 p99=0.621 min=0.170 max=24.065 avg=0.248 wall=0.258
+[probe] PBENCH p5b_dgram_send n=20000 med=0.230 p99=0.421 min=0.210 max=1910.784 avg=0.856 wall=0.865
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.371 p99=0.701 min=0.340 max=1685.123 avg=0.885 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.230 p99=0.271 min=0.220 max=30.487 avg=0.278 wall=0.287
+[probe] PBENCH p5c2_stream_send n=100000 med=0.210 p99=0.260 min=0.200 max=22.131 avg=0.263 wall=0.272
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.210 p99=0.260 min=0.200 max=35.085 avg=0.270 wall=0.278
+[probe] PBENCH p5d_rt_read n=100000 med=0.371 p99=0.451 min=0.361 max=34.384 avg=0.377 wall=0.386
+[probe] PBENCH p5d_rt_recv n=100000 med=0.391 p99=0.471 min=0.371 max=22.372 avg=0.395 wall=0.403
+[probe] PBENCH p5e_child_spin n=323 med=13.134 p99=108.993 min=9.939 max=117.179 avg=16.915 wall=0.000 measured_by=child spin-read eagain=20959958
+[probe] PBENCH PREP tree=1000files wall_ms=517
+[probe] PBENCH p6_stat n=10000 med=0.691 p99=0.922 min=0.551 max=8.275 avg=0.701 wall=0.970
+[probe] PBENCH p6_openclose n=10000 med=1.102 p99=1.403 min=0.972 max=20.097 avg=1.124 wall=1.420
+[probe] PBENCH p6_getdents n=1000 med=128.940 p99=157.213 min=125.875 max=210.503 avg=131.438 wall=152.444 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.473 p99=2.084 min=1.252 max=57.407 avg=1.541 wall=1.924 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.591 p99=1.904 min=0.501 max=16.871 avg=0.709 wall=0.706
+[probe] PBENCH p6_mkdrmdir n=1000 med=78.226 p99=24449.714 min=73.136 max=42674.146 avg=2193.645 wall=2194.591 per_sample=mkdir_plus_rmdir
+[probe] PBENCH p6_unlink n=1000 med=7.704 p99=8151.845 min=5.380 max=30191.934 avg=290.872 wall=291.149
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=57s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-pm2-1-serial.log
+===END pm2 rep1 rc=0
+===PB g5base rep2 20:15:15 load=6.21
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-g5base-2 accel=kvm smp=2 mem=2G foreign_qemus=5
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291916016
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.060 min=0.040 max=682.333 avg=0.050 wall=0.059
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.080 min=0.050 max=21.581 avg=0.060 wall=0.068
+[probe] PBENCH p2_ctxsw n=100000 med=0.115 p99=2.515 min=0.080 max=31.629 avg=0.287 wall=0.291 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=8.646 min=0.000 max=259.969 avg=0.423 wall=0.428
+[probe] PBENCH p3b_fault_cow n=8192 med=2.384 p99=3.757 min=2.134 max=252.084 avg=2.589 wall=2.596 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=58.740 p99=130.786 min=56.636 max=149.010 avg=62.441 wall=64.885
+[probe] PBENCH p4_fork_exec n=1000 med=86.042 p99=157.837 min=82.705 max=174.989 avg=90.312 wall=92.809 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.190 p99=0.371 min=0.160 max=20025.427 avg=0.502 wall=0.512
+[probe] PBENCH p5b_dgram_send n=20000 med=0.220 p99=0.260 min=0.210 max=129.443 avg=0.604 wall=0.613
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.361 p99=0.391 min=0.341 max=107.202 avg=0.609 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.230 p99=0.270 min=0.220 max=33.062 avg=0.277 wall=0.286
+[probe] PBENCH p5c2_stream_send n=100000 med=0.220 p99=0.250 min=0.200 max=21.701 avg=0.265 wall=0.274
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.220 p99=0.250 min=0.210 max=25.608 avg=0.271 wall=0.280
+[probe] PBENCH p5d_rt_read n=100000 med=0.371 p99=0.391 min=0.361 max=18.875 avg=0.377 wall=0.386
+[probe] PBENCH p5d_rt_recv n=100000 med=0.391 p99=0.411 min=0.380 max=17.944 avg=0.396 wall=0.405
+[probe] PBENCH p5e_child_spin n=323 med=13.125 p99=121.098 min=9.838 max=145.624 avg=18.690 wall=0.000 measured_by=child spin-read eagain=20549648
+[probe] PBENCH p5f_stream_dwait n=44872 med=0.220 p99=0.260 min=0.200 max=32.742 avg=0.226 wall=31.826 attempts=6400000 eagain=6355128 (99.3% spin)
+[probe] PBENCH p6_stat n=10000 med=0.511 p99=0.781 min=0.381 max=20.729 avg=0.532 wall=0.779
+[probe] PBENCH p6_openclose n=10000 med=0.932 p99=1.222 min=0.802 max=20.589 avg=0.952 wall=1.227
+[probe] PBENCH p6_getdents n=1000 med=129.273 p99=196.560 min=126.418 max=251.102 avg=133.855 wall=155.083 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.232 p99=2.014 min=1.072 max=25.207 avg=1.294 wall=1.665 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.611 p99=1.894 min=0.571 max=6.612 avg=0.696 wall=0.682
+[probe] PBENCH p6_unlink n=1000 med=6.993 p99=7837.705 min=4.919 max=32745.531 avg=297.095 wall=297.351
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=57s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-g5base-2-serial.log
+===END g5base rep2 rc=0
+===PB pm2 rep2 20:16:15 load=6.43
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-pm2-2 accel=kvm smp=2 mem=2G foreign_qemus=6
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291952980
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.060 min=0.040 max=20.398 avg=0.048 wall=0.058
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.080 min=0.050 max=30.347 avg=0.060 wall=0.068
+[probe] PBENCH p2_ctxsw n=100000 med=0.115 p99=3.251 min=0.080 max=11.822 avg=0.296 wall=0.301 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=9.317 min=0.000 max=116.498 avg=0.405 wall=0.411
+[probe] PBENCH p3b_fault_cow n=8192 med=2.374 p99=3.817 min=2.144 max=38.422 avg=2.508 wall=2.515 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=58.209 p99=127.408 min=55.834 max=132.067 avg=59.966 wall=62.350
+[probe] PBENCH p4_fork_exec n=1000 med=83.136 p99=150.271 min=80.681 max=168.596 avg=85.671 wall=88.095 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.190 p99=0.220 min=0.160 max=20014.505 avg=0.390 wall=0.399
+[probe] PBENCH p5b_dgram_send n=20000 med=0.220 p99=0.260 min=0.210 max=132.809 avg=0.598 wall=0.607
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.351 p99=0.401 min=0.340 max=110.567 avg=0.604 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c2_stream_send n=100000 med=0.220 p99=0.250 min=0.200 max=32.481 avg=0.266 wall=0.274
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.220 p99=0.250 min=0.200 max=33.022 avg=0.272 wall=0.280
+[probe] PBENCH p5d_rt_read n=100000 med=0.371 p99=0.421 min=0.361 max=18.394 avg=0.376 wall=0.385
+[probe] PBENCH p5d_rt_recv n=100000 med=0.390 p99=0.431 min=0.380 max=31.178 avg=0.395 wall=0.403
+[probe] PBENCH p5e_child_spin n=323 med=12.984 p99=104.435 min=9.518 max=107.631 avg=17.910 wall=0.000 measured_by=child spin-read eagain=20883898
+[probe] PBENCH p5f_stream_dwait n=44556 med=0.210 p99=0.250 min=0.200 max=30.197 avg=0.225 wall=31.868 attempts=6400000 eagain=6355444 (99.3% spin)
+[probe] PBENCH PREP tree=1000files wall_ms=507
+[probe] PBENCH p6_stat n=10000 med=0.681 p99=0.822 min=0.551 max=11.431 avg=0.687 wall=0.938
+[probe] PBENCH p6_openclose n=10000 med=1.102 p99=1.322 min=0.972 max=17.653 avg=1.116 wall=1.409
+[probe] PBENCH p6_getdents n=1000 med=127.939 p99=159.859 min=126.196 max=201.176 avg=129.964 wall=150.800 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.403 p99=1.813 min=1.252 max=24.907 avg=1.446 wall=1.825 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.581 p99=1.793 min=0.511 max=7.985 avg=0.682 wall=0.683
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=75s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-pm2-2-serial.log
+===END pm2 rep2 rc=0
+row                                g5base          pm2  delta%
+p1_clock                            0.060        0.060  +0.0% 
+p1_null                             0.050        0.050  +0.0% 
+p2_ctxsw                            0.120        0.117  -2.1% 
+p3a_fault_anon                      0.010        0.010  +0.0% 
+p3b_fault_cow                       2.414        2.374  -1.7% 
+p4_fork_exec                       85.380       83.697  -2.0% 
+p4_fork_exit                       62.918       58.460  -7.1% 
+p5a_pipe                            0.190        0.195  +2.6% 
+p5b_dgram_recv_peek                 0.396        0.361  -8.8% 
+p5b_dgram_send                      0.240        0.225  -6.2% 
+p5c2_stream_send                    0.220        0.215  -2.3% 
+p5c3_stream_wrecv                   0.220        0.215  -2.3% 
+p5c_stream_write                    0.230        0.230  +0.0% 
+p5d_rt_read                         0.371        0.371  +0.0% 
+p5d_rt_recv                         0.391        0.391  -0.1% 
+p5e_child_spin                     13.135       13.059  -0.6% 
+p5f_stream_dwait                    0.215        0.210  -2.3% 
+p6_append                           0.621        0.586  -5.6% 
+p6_getdents                       129.873      128.440  -1.1% 
+p6_mkdrmdir                  MISSING (0/1 reps)
+p6_openclose                        0.937        1.102  +17.6% 
+p6_read_cached                      1.252        1.438  +14.9% 
+p6_stat                             0.511        0.686  +34.2% REGRESS>20%
+p6_unlink                           7.219        7.704  +6.7% 

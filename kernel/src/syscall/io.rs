@@ -197,6 +197,36 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         }
         return n;
     }
+    // /dev/zero fast path: the fill is trivial (zeros), so the whole
+    // op collapses to zeroing the user window — no SMALL_STAGE buffer
+    // (its 256-byte zero-init dominated 1-byte reads, the lat_syscall
+    // read shape), no File::read re-classification. Error semantics
+    // match the generic staged path: a faulting user window after a
+    // partial fill returns the filled count, EFAULT only when nothing
+    // landed; IN_ACCESS still fires (the generic path's notify on
+    // data returned).
+    if ops.is_some_and(|o| core::ptr::eq(o as *const _, crate::fs::devfs::zerodev_ops() as *const _)) {
+        let mut z = [0u8; 64];
+        let mut p = buf;
+        let mut left = count;
+        let mut filled: usize = 0;
+        while left > 0 {
+            let chunk = left.min(z.len());
+            if crate::arch::uaccess_safe::copy_out(p, &z[..chunk]) > 0 {
+                if filled > 0 {
+                    crate::dfx::syscost::note_read_data(&file, filled, fd);
+                    return filled as i64;
+                }
+                return -errno::EFAULT as i64;
+            }
+            p = p.wrapping_add(chunk);
+            left -= chunk;
+            filled += chunk;
+        }
+        crate::fs::inotify::notify_file(&file, crate::fs::inotify::inotify_events::IN_ACCESS);
+        crate::dfx::syscost::note_read_data(&file, count, fd);
+        return count as i64;
+    }
     // Small-count stack staging (perf-r3): a 1-byte read (lat_syscall
     // read; every poller's probe read) paid a slab alloc + free pair
     // per call in the chunk loop below — the largest removable cost
@@ -675,6 +705,17 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
         && ops.is_some_and(|o| core::ptr::eq(o as *const _, &crate::net::unix::UNIX_SOCKET_OPS as *const _))
     {
         return crate::net::unix::unix_write_user(&file, buf as *const u8, count) as i64;
+    }
+    // Discard-device fast path (/dev/null, /dev/zero writes): the
+    // reference write_null returns count without ever touching the
+    // user buffer — no EFAULT for unmapped windows, no copy, no
+    // staging. IN_MODIFY still fires (the generic path's notify).
+    // /dev/full stays generic (ENOSPC contract).
+    if ops.is_some_and(|o| core::ptr::eq(o as *const _, crate::fs::devfs::nulldev_ops() as *const _))
+        || ops.is_some_and(|o| core::ptr::eq(o as *const _, crate::fs::devfs::zerodev_ops() as *const _))
+    {
+        crate::fs::inotify::notify_file(&file, crate::fs::inotify::inotify_events::IN_MODIFY);
+        return count as i64;
     }
     // Small-count stack staging (perf-r3): same lever as read_file_core —
     // a short write (1 byte to /dev/null, hilog-class records) paid a

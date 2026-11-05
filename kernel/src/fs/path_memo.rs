@@ -42,7 +42,7 @@ use crate::fs::dentry::Dentry;
 use crate::fs::inode::Inode;
 use alloc::string::String;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Max ancestors recorded (path depth cap for memoization).
 pub const MAX_CHAIN: usize = 8;
@@ -62,10 +62,75 @@ pub fn mount_gen_bump() {
 }
 
 /// DFX gauges (read by the fsw PC2 line, same shape as neghit/negstale).
-pub static HIT: AtomicUsize = AtomicUsize::new(0);
-pub static MISS: AtomicUsize = AtomicUsize::new(0);
-pub static INSERT: AtomicUsize = AtomicUsize::new(0);
-pub static INVAL: AtomicUsize = AtomicUsize::new(0);
+/// (perf-gap-hunt) inline fast-gate discipline (the irq_note precedent):
+/// the counters only tick when fsw instrumentation has armed them —
+/// steady-state lookups pay one Relaxed load instead of an RMW pair.
+pub static HIT: AtomicU64 = AtomicU64::new(0);
+pub static MISS: AtomicU64 = AtomicU64::new(0);
+pub static INSERT: AtomicU64 = AtomicU64::new(0);
+pub static INVAL: AtomicU64 = AtomicU64::new(0);
+static GAUGES_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Arm the DFX gauges (fsw boot).
+pub fn arm_gauges() {
+    GAUGES_ON.store(true, Ordering::Relaxed);
+}
+
+#[inline]
+fn note_hit() {
+    if GAUGES_ON.load(Ordering::Relaxed) {
+        HIT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn note_miss() {
+    if GAUGES_ON.load(Ordering::Relaxed) {
+        MISS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// (perf-gap-hunt) miss-storm backoff: a workload sweeping MANY distinct
+// paths with no reuse (build trees, pbench's 1000-file sweep) thrashes a
+// direct-mapped table — every lookup pays the miss probe and every walk
+// pays the insert (String alloc + slot overwrite). When a measurement
+// window comes back >75% miss, the memo goes pass-through (one Relaxed
+// load + decrement per lookup, inserts skipped) for BACKOFF_LOOKUPS
+// calls, then probes again. Hit-dominated shapes never arm it; the
+// extra hot-path cost is one fetch_add outside any lock.
+const WINDOW_LOOKUPS: u64 = 512;
+const WINDOW_MISS_FRAC: u64 = 3; // misses/window > 3/4 => storm
+const BACKOFF_LOOKUPS: i64 = 8192;
+static LOOKUPS: AtomicU64 = AtomicU64::new(0);
+static WINDOW_MISSES: AtomicU64 = AtomicU64::new(0);
+static BACKOFF: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+/// True while the memo is pass-through (miss storm in effect).
+#[inline]
+fn backing_off() -> bool {
+    let b = BACKOFF.load(Ordering::Relaxed);
+    if b > 0 {
+        // Consume one pass-through slot; multiple CPUs may overshoot
+        // below zero — the load above treats that as inactive.
+        BACKOFF.fetch_sub(1, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+#[inline]
+fn account(is_miss: bool) {
+    if is_miss {
+        WINDOW_MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    let n = LOOKUPS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % WINDOW_LOOKUPS == 0 {
+        let m = WINDOW_MISSES.swap(0, Ordering::Relaxed);
+        if m * 4 > WINDOW_LOOKUPS * WINDOW_MISS_FRAC {
+            BACKOFF.store(BACKOFF_LOOKUPS, Ordering::Relaxed);
+        }
+    }
+}
 
 struct Entry {
     /// Pins the root identity (ptr-reuse false positives impossible).
@@ -110,16 +175,22 @@ fn hash(root: *const Dentry, path: &str) -> usize {
 /// Try the memo. Returns the resolved (dentry, inode) for the
 /// follow-shape lookup of `path` from `root`, or None (caller walks).
 ///
-/// `may_exec_of` re-validates search permission per ancestor with the
-/// caller's credentials — the walk's own per-component check, repeated.
+/// `cred` re-validates search permission per ancestor with the
+/// caller's credentials — the walk's own per-component check, repeated
+/// (hoisted once here; the walk re-fetches it per component). `None`
+/// mirrors inode_permission's no-current-task rule (allowed).
 #[inline]
 pub fn lookup(
     root: &Arc<Dentry>,
     path: &str,
-    may_exec_of: impl Fn(&Inode) -> bool,
+    cred: Option<&crate::process::task::Cred>,
 ) -> Option<(Arc<Dentry>, Arc<Inode>)> {
+    if backing_off() {
+        return None;
+    }
     if path.len() > MAX_PATH {
-        MISS.fetch_add(1, Ordering::Relaxed);
+        note_miss();
+        account(true);
         return None;
     }
     let root_key: *const Dentry = Arc::as_ptr(root);
@@ -145,7 +216,20 @@ pub fn lookup(
             // while the previous generation check passed, and the
             // claim blocks a pending retire from freeing it under us.
             let ino: &Inode = unsafe { &*ino_ptr };
-            if ino.dir_mut_gen_load() != gen || !may_exec_of(ino) {
+            if ino.dir_mut_gen_load() != gen {
+                return None;
+            }
+            let search_ok = match cred {
+                Some(c) => crate::fs::permission::generic_permission(
+                    ino.mode.bits() as u16,
+                    ino.uid.load(Ordering::Relaxed),
+                    ino.gid.load(Ordering::Relaxed),
+                    crate::fs::permission::MAY_EXEC,
+                    c,
+                ),
+                None => true,
+            };
+            if !search_ok {
                 return None;
             }
         }
@@ -167,9 +251,11 @@ pub fn lookup(
     drop(guard);
     drop(claim);
     if hit.is_some() {
-        HIT.fetch_add(1, Ordering::Relaxed);
+        note_hit();
+        account(false);
     } else {
-        MISS.fetch_add(1, Ordering::Relaxed);
+        note_miss();
+        account(true);
     }
     hit
 }
@@ -184,6 +270,11 @@ pub fn insert(
     chain: &[(*const Inode, u64)],
 ) {
     if path.len() > MAX_PATH || chain.is_empty() || chain.len() > MAX_CHAIN {
+        return;
+    }
+    // Miss-storm backoff: populating the table during a sweep is the
+    // expensive half of the thrash (alloc + overwrite per walk).
+    if BACKOFF.load(Ordering::Relaxed) > 0 {
         return;
     }
     let root_key: *const Dentry = Arc::as_ptr(root);

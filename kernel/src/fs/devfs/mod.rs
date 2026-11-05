@@ -388,6 +388,18 @@ static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder
     .poll(zerodev_poll)
     .build();
 
+/// (perf-gap-hunt) runtime accessor for the read/write hot-path
+/// classification in syscall/io.rs — 1-byte /dev/zero reads are the
+/// lat_syscall read shape.
+pub(crate) fn zerodev_ops() -> &'static crate::fs::file::FileOps {
+    &ZERODEV_OPS
+}
+
+/// (perf-gap-hunt) /dev/null ops — the write-discard fast path shape.
+pub(crate) fn nulldev_ops() -> &'static crate::fs::file::FileOps {
+    &NULLDEV_OPS
+}
+
 /// /dev/full — reads return zeros, writes fail with ENOSPC.
 fn fulldev_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
     -(crate::errno::constants::ENOSPC as isize)

@@ -328,6 +328,9 @@ pub fn on() -> bool {
                 Some(_) => crate::cmdline::get_param("fsw").as_deref() == Some("1"),
             };
             ARMED8.store(if v { 2 } else { 1 }, Ordering::Relaxed);
+            if v {
+                crate::fs::path_memo::arm_gauges();
+            }
             crate::pr_warn!(
                 "fsw: {} (cmdline fsw param = {:?})",
                 if v { "armed" } else { "off" },
@@ -734,9 +737,11 @@ pub fn dump() {
         // probes), the bounded negative-memo verdicts, and the open
         // wall-vs-exec split (OPEN_EXEC_NS average = /OPEN_N; exec ~=
         // wall means real kernel CPU, exec << wall means waiting).
-        "PC2 t={}s miss={} misseo={} neghit={} negstale={} openwmax={}us openexec={} openexecavg={}ns openexecmax={}us",
+        "PC2 t={}s miss={} misseo={} neghit={} negstale={} pmhit={} pmmiss={} pmins={} openwmax={}us openexec={} openexecavg={}ns openexecmax={}us",
         secs,
         v(&WALK_MISSCOST_NS), v(&WALK_MISS_ENOENT), v(&NEGHIT), v(&NEGSTALE),
+        v(&crate::fs::path_memo::HIT), v(&crate::fs::path_memo::MISS),
+        v(&crate::fs::path_memo::INSERT),
         v(&OPEN_WALL_MAX_NS) / 1000, v(&OPEN_EXEC_NS),
         if OPEN_N.load(Ordering::Relaxed) > 0 {
             v(&OPEN_EXEC_NS) / v(&OPEN_N)

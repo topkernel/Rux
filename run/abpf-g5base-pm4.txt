@@ -1,0 +1,12 @@
+CASE[lat_syscall,read] g5base rep1 load=3.57 VAL=0.1028
+CASE[lat_syscall,read] pm4 rep1 load=4.20 VAL=0.0656
+CASE[lat_syscall,read] g5base rep2 load=4.20 VAL=0.1073
+CASE[lat_syscall,read] pm4 rep2 load=5.38 VAL=0.0639
+CASE[lat_syscall,read] g5base rep3 load=5.17 VAL=0.1034
+CASE[lat_syscall,read] pm4 rep3 load=5.08 VAL=0.0636
+CASE[lat_syscall,write] g5base rep1 load=4.99 VAL=0.0870
+CASE[lat_syscall,write] pm4 rep1 load=5.07 VAL=0.0626
+CASE[lat_syscall,write] g5base rep2 load=5.15 VAL=0.0880
+CASE[lat_syscall,write] pm4 rep2 load=5.05 VAL=0.0628
+CASE[lat_syscall,write] g5base rep3 load=5.05 VAL=0.0867
+CASE[lat_syscall,write] pm4 rep3 load=5.05 VAL=0.0628
