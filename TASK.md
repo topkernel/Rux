@@ -4999,3 +4999,65 @@ unaffected (their unmap_pages flushes locally per call).
   succeed; pixels 82f0a25f) — consistent with the storm being one of
   several wedge contributors (samgr 8.2s exit, FFRT mutex, spawn
   chain remain queued).
+
+## 51ST SESSION — appfwk.ready gate traced to the WAKE-RUN-LEAK strand family; futex keys exonerated; wakewatch instrument landed (2026-11-06 02:20-)
+
+Mission: what gates bootevent.appfwk.ready (queue 1), FXRS decode (2),
+usb_host family (3), storm-era rechecks (4).
+
+### 1. The appfwk chain on the storm-free kernel (ohc5-ohc9 logs)
+- ohc7 (best boot): distributeddata SA:1301 init 28,683ms (finished
+  42.5s; reference store serves ~1.4s after exec), foundation SA:401
+  23,310ms / SA:3299 23,318ms (both released at 47.5s when the store
+  landed), bms.scanning_apps.status at 47.49s. SA:180 (AMS) OpenSo at
+  30.657s — init NEVER finishes. No GenerateUserKeys/CreateOsAccount/
+  SetBundleQuota anywhere (accountmgr waits for storage+AMS+BMS).
+  bootevent.appfwk/lockscreen/launcher/bundles.ready warnings only on
+  ohc5 (foundation SIGKILLed by watchdog at 50.36s there).
+- The chain: store slow (28.7s vs 1.4s) -> everything piles -> the pile
+  releases at ~46-53s -> at THAT moment a mass strand of threads kills
+  the rest of the boot. ohc6 wedged even earlier: samgr pid 329
+  BC_TRANSACTION failing BR 0x7211 with GARBAGE code 1599098439 at 6.2s
+  (corrupted write-read parcel), 185 WAKE-RUN-LEAK lines, no SA init
+  lines at all.
+
+### 2. The strand census decoded (181s/241s blocks)
+- WAKE-RUN-LEAK victims: state=0x1 (INTERRUPTIBLE), cfs_linked=0,
+  on_rq=0, on_cpu=false, pick_state=1 (normal for any previously-run
+  task — R74 comment), ti_cpu=1, wok>=1 wno=0: kicks claim wake SUCCESS
+  (wait.rs wake_up counts only wake_up_process==true), yet the task
+  never runs again (binder hist: PARK then only REKICK markers, no
+  WAKE_RET; read_wait_since uninterrupted). ohc9 tid 716: wok 3->23
+  between the 121s and 181s censuses while age grew 86->146s — 23
+  "successful" locked enqueues vanished with ZERO pick-skip records
+  (schedtrace armed, 0 SKIP-DEEP), zero R41/R46/R49/R80/W2B heals.
+- never-woken face: census "q=1 woken=0" — work queued, kick claimed
+  ok, thread never drained it.
+- musl-lock face: samgr SERVER-OWING threads park in FUTEX_WAIT_PRIVATE
+  (sys=0xca, rip=ld-musl) on words =0x2 (musl lock state 2 = held with
+  waiters; the census's "owner tid 2" decode is wrong semantics — pid 2
+  never existed on these boots). Downstream: a frozen thread holding a
+  musl malloc/registry lock parks every peer that touches it.
+- The samgr server threads stuck owing replies (txn7407/7419/7425,
+  code 6, from foundation/accountmgr etc.) ARE the missing SA:180
+  completion: AMS's OnStart sync round-trips never return.
+
+### 3. Futex keys EXONERATED (ohc9, dfx=futextrace — first arming on
+   the storm-free kernel)
+- 26 futex-wake-miss lines, ALL cross-process ghosts: waiters of DEAD
+  processes still linked in buckets (hiview pid 337 exit 255 at 13.2s;
+  hilogd.rd_kmsg thread) — their wakes can never match (mm dead).
+  ZERO same-process mm mismatches. The wake/key protocol is correct;
+  the ghosts are an exit-cleanup leak (futex_cleanup residency-flag
+  gap?) worth a separate look, NOT the wedge.
+- 2 PICK-SKIP-ALL (early boot, benign why=1 pid 1 mid-switch-out).
+
+### 4. Wakewatch instrument (commit 8f7a7d50, this branch)
+Global 1024-entry ring (dfx=schedtrace-gated) recording wake-ok/refuse,
+cfs link, unlink by site (pick/self-sleep/dequeue/poison), pick-publish,
+switch-in affirm, all with jiffies; the binder WAKE-RUN-LEAK dump prints
+the victim's event tail. ohc10 booting with it — the next census names
+the stage that eats the wake.
+
+### 5. Wedge = OUR kernel (reference runs same image set to
+launcher.ready 11.7s; refu9 numbers in oh-roll ledger ~1390).
