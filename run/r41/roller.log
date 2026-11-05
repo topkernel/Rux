@@ -121,3 +121,8 @@
 [roll] boot 41/100 tag=r41v41 sha=518655f3 21:17:36
 [roll] r41v41 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  21:32:57
 [roll] boot 42/100 tag=r41v42 sha=518655f3 21:33:03
+[roll] start 2026-11-05 21:50:52 kernel= SHA=d6029424
+[roll] boot 43/100 tag=r41v43 sha=d6029424 21:50:53
+[roll] r41v42 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  (manual bank after roller death) 21:51:08
+[roll] r41v43 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  22:06:13
+[roll] boot 44/100 tag=r41v44 sha=d6029424 22:06:19
