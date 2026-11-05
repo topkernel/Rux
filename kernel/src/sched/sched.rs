@@ -2830,7 +2830,9 @@ unsafe fn __schedule() {
     if !prev_running && prev_pid != 0 {
         match prev_policy {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                grq_guard.cfs_rq.dequeue(prev);
+                if grq_guard.cfs_rq.dequeue(prev) {
+                    ww_record(prev, WW_EV_UNLINK_SCHED);
+                }
                 // R8-1: unconditional — see dequeue_task() fix.
                 if grq_guard.cfs_rq.get_curr() == prev {
                     grq_guard.cfs_rq.set_curr(core::ptr::null_mut());
@@ -2890,6 +2892,9 @@ unsafe fn __schedule() {
 
     // Update per-CPU current under lock
     this_cpu_mut().current = next;
+    if switching {
+        crate::sched::sched::ww_record(next, WW_EV_PICK_PUB);
+    }
     slot_tag_write(cpu_id, SLOT_W_SCHED_PICK, next);
     // r11: open this CPU's pick generation — retired when the picked
     // context actually resumes (post-context_switch / schedule_tail /
@@ -3869,6 +3874,101 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 /// Returns true if the task was transitioned and enqueued.
 pub fn wake_up_enqueue(task: *mut Task) -> bool {
     wake_up_enqueue_opt(task, None)
+}
+
+/// Wakewatch ring (dfx=schedtrace): the last WW_RING scheduler
+/// lifecycle events system-wide, each stamped with jiffies. The
+/// binder-stall WAKE-RUN-LEAK census prints a victim's tail of the
+/// ring, so a "kick claimed success yet the task never ran" capture
+/// names WHICH stage (wake-ok / link / unlink-pick / unlink-sched /
+/// unlink-deq / pick-publish / affirm) last touched the task and WHEN —
+/// the offline answer to "who unlinked a never-running task". Silent
+/// (one index swap + two relaxed stores) unless schedtrace is armed;
+/// every event is recorded from GRQ-held context, so the ring's
+/// ordering is the lock's ordering.
+pub const WW_RING: usize = 1024;
+pub const WW_EV_WAKE_OK: u32 = 1;
+pub const WW_EV_LINK: u32 = 2;
+pub const WW_EV_UNLINK_PICK: u32 = 3;
+pub const WW_EV_UNLINK_SCHED: u32 = 4;
+pub const WW_EV_UNLINK_DEQ: u32 = 5;
+pub const WW_EV_UNLINK_POISON: u32 = 6;
+pub const WW_EV_PICK_PUB: u32 = 7;
+pub const WW_EV_WAKE_REFUSED: u32 = 8;
+pub const WW_EV_AFFIRM: u32 = 9;
+static WW_TASK: [core::sync::atomic::AtomicUsize; WW_RING] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; WW_RING];
+static WW_DATA: [core::sync::atomic::AtomicU64; WW_RING] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; WW_RING];
+static WW_IX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+pub fn ww_record(task: *mut Task, code: u32) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        return;
+    }
+    let j = crate::drivers::timer::get_jiffies();
+    let ix = WW_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_RING;
+    WW_TASK[ix].store(task as usize, core::sync::atomic::Ordering::Relaxed);
+    WW_DATA[ix].store(
+        ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Append `task`'s last few ring events (oldest first) to `out` as one
+/// line of `code@jiffies-ago` tokens. Codes: W=wake_ok L=link
+/// P=unlink_pick S=unlink_sched D=unlink_deq X=unlink_poison
+/// K=pick_publish R=wake_refused A=affirm. Reader-side only; called
+/// from the binder-stall census (no GRQ held — the ring is atomics).
+pub fn ww_append_dump<W: core::fmt::Write>(out: &mut W, task: *mut Task, now: u64) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        return;
+    }
+    const TAGS: [(u32, char); 9] = [
+        (WW_EV_WAKE_OK, 'W'),
+        (WW_EV_LINK, 'L'),
+        (WW_EV_UNLINK_PICK, 'P'),
+        (WW_EV_UNLINK_SCHED, 'S'),
+        (WW_EV_UNLINK_DEQ, 'D'),
+        (WW_EV_UNLINK_POISON, 'X'),
+        (WW_EV_PICK_PUB, 'K'),
+        (WW_EV_WAKE_REFUSED, 'R'),
+        (WW_EV_AFFIRM, 'A'),
+    ];
+    let ix0 = WW_IX.load(core::sync::atomic::Ordering::Relaxed);
+    // Collect the NEWEST events for this task by walking the ring back.
+    let mut events: [(char, u64); 8] = [('-', 0); 8];
+    let mut n = 0usize;
+    for k in 0..WW_RING.min(ix0) {
+        let slot = (ix0.wrapping_sub(1 + k)) % WW_RING;
+        if WW_TASK[slot].load(core::sync::atomic::Ordering::Relaxed) != task as usize {
+            continue;
+        }
+        let d = WW_DATA[slot].load(core::sync::atomic::Ordering::Relaxed);
+        let code = (d >> 56) as u32;
+        let jif = d & 0x00FF_FFFF_FFFF_FFFF;
+        let tag = TAGS
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map(|(_, t)| *t)
+            .unwrap_or('?');
+        events[n] = (tag, now.saturating_sub(jif));
+        n += 1;
+        if n == 8 {
+            break;
+        }
+    }
+    // events[0..n) is newest-first; print oldest-first for readability.
+    let _ = write!(out, "binder-stall:  ww=[");
+    for i in (0..n).rev() {
+        let (t, ago) = events[i];
+        if i != n - 1 {
+            let _ = write!(out, " ");
+        }
+        let _ = write!(out, "{}@{}j", t, ago);
+    }
+    let _ = writeln!(out, "]");
 }
 
 /// r24 (kill10 wedge hunt): discriminator census for the W2
@@ -4916,6 +5016,9 @@ pub fn wake_up_enqueue_opt(
             }
             false
         };
+        // Wakewatch: the funnel's verdict for this task (W=linked and
+        // RUNNING, R=refused) with the jiffies stamp.
+        ww_record(task, if woken { WW_EV_WAKE_OK } else { WW_EV_WAKE_REFUSED });
         // r12 (LP-OUTCOME): for every wake whose lying-slot observation
         // printed above, name the FINAL outcome — the enqueue below is
         // the step the LP protocol analysis says cannot drop the wake;
@@ -5190,6 +5293,9 @@ pub fn dequeue_task(task: &Task) {
         }
         SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
             let dequeued = grq_guard.cfs_rq.dequeue(task_ptr);
+            if dequeued {
+                crate::sched::sched::ww_record(task_ptr, WW_EV_UNLINK_DEQ);
+            }
             // R8-1: clear curr UNCONDITIONALLY when it matches — the R7-2
             // version required `dequeued`, but a RUNNING task was already
             // picked off the tree (dequeue returns false), so the exit path

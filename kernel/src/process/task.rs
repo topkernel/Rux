@@ -4857,7 +4857,15 @@ impl Task {
             core::sync::atomic::Ordering::AcqRel,
             core::sync::atomic::Ordering::Acquire,
         ) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                // Wakewatch (dfx=schedtrace): the switch-in affirm — the
+                // pick materialized into a register restore.
+                crate::sched::sched::ww_record(
+                    self as *const Task as *mut Task,
+                    crate::sched::sched::WW_EV_AFFIRM,
+                );
+                Ok(())
+            }
             Err(observed) => Err(observed),
         }
     }

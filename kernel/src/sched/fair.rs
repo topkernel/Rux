@@ -911,6 +911,8 @@ impl CfsRunQueue {
             // Update minimum vruntime
             self.update_min_vruntime();
 
+            crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_LINK);
+
             true
         }
     }
@@ -1438,6 +1440,7 @@ impl CfsRunQueue {
                 self.timeline_remove(&key);
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
+                crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_POISON);
                 continue;
             }
 
@@ -1615,6 +1618,7 @@ impl CfsRunQueue {
                 }
 
                 result = Some(task);
+                crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_PICK);
                 break;
             }
 

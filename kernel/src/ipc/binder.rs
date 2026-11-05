@@ -5436,6 +5436,12 @@ pub fn stall_report() {
                                     t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed),
                                 );
                                 let _ = writeln!(out, "binder-stall:{}", slots);
+                                // Wakewatch tail: which scheduler stage last
+                                // touched the victim and when (W wake-ok,
+                                // L link, P unlink-pick, S unlink-sched,
+                                // D unlink-deq, K pick-publish, A affirm,
+                                // R refused; @jiffies-ago).
+                                crate::sched::sched::ww_append_dump(&mut out, task, now);
                             }
                         }
                         rekick.push(t.clone());
