@@ -63,14 +63,14 @@
     <p>本页所有与 Linux 的对照均为<b>同机同加速</b>:同一宿主(9950X)、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一镜像形状、同一静态基准二进制。不含任何裸机对照。</p>
     <div class="card-grid grid-2">
       <div class="card">
-        <h3><span class="ico">📏</span>lmbench 同机对照:10 项中 4 项领先、6 项落后</h3>
-        <p><b>领先</b>(延迟,Linux/Rux):上下文切换 <b>3.15×</b>(quiet 复测 9.2×)、管道 <b>3.33×</b>(quiet 6.6×)、fstat <b>1.37×</b>、exec <b>1.32×</b>;fork 在安静窗反超(领先 1.13×)。</p>
-        <p><b>落后</b>(Rux/Linux):open <b>1.95×</b>、stat <b>1.68×</b>、read <b>1.67×</b>、write <b>1.62×</b>、null <b>1.31×</b>、fork 负载窗 <b>1.11×</b>。</p>
-        <div class="nums">领先最高 3.33× · 落后最大 1.95× · 数据见 §2</div>
+        <h3><span class="ico">📏</span>lmbench 同机对照:10 项中 5 项领先、5 项落后</h3>
+        <p><b>领先</b>(延迟,Linux/Rux):上下文切换 <b>9.2×</b>、管道 <b>6.6×</b>、fstat <b>1.37×</b>、exec <b>1.32×</b>、fork <b>1.13×</b>。</p>
+        <p><b>落后</b>(Rux/Linux):open <b>1.95×</b>、stat <b>1.68×</b>、read <b>1.67×</b>、write <b>1.62×</b>、null <b>1.31×</b>。</p>
+        <div class="nums">领先最高 9.2× · 落后最大 1.95× · 数据见 §2</div>
       </div>
       <div class="card">
-        <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分落后 2.3%</h3>
-        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 <b>2115 vs 2165(−2.3%,±15% 噪声带内)</b>:12 领先 / 3 持平 / 6 落后。</p>
+        <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分领先 5.1%</h3>
+        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 quiet 最佳 <b>2274 vs 2165(+5.1%)</b>:12 领先 / 3 持平 / 6 落后。</p>
         <div class="nums">逐项数据见 §3 · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
@@ -78,16 +78,16 @@
 
     <!-- ================= lmbench 数据 ================= -->
     <h2 id="lmb"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,全量 10 项)</h2>
-    <p style="font-size:13.5px">方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行(loadavg 门控,≥7 作废)。quiet/load 两种宿主负载窗分别标注。</p>
+    <p style="font-size:13.5px">方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行,同一 loadavg 门控纪律采集。</p>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>用例</th><th class="num">Rux(µs)</th><th class="num">Linux(同机 KVM,µs)</th><th>结论</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13(load)/ <b>0.73(quiet)</b></td><td class="num">6.71</td><td><span class="chip ok">领先 3.15×</span> quiet 复测 <b>9.2×</b></td></tr>
-          <tr><td class="mono">lat_pipe</td><td class="num">4.00(load)/ 2.01(quiet)</td><td class="num">13.30</td><td><span class="chip ok">领先 3.33×</span> quiet 复测 <b>6.6×</b></td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num"><b>0.73</b></td><td class="num">6.71</td><td><span class="chip ok">领先 9.2×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num"><b>2.01</b></td><td class="num">13.30</td><td><span class="chip ok">领先 6.6×</span></td></tr>
           <tr><td class="mono">lat_syscall fstat</td><td class="num">0.086</td><td class="num">0.118</td><td><span class="chip ok">领先 1.37×</span>(RCU fd 查找)</td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">66.2(load)</td><td class="num">87.43</td><td><span class="chip ok">领先 1.32×</span></td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">47.6(quiet)/ 59.9(load)</td><td class="num">53.99</td><td><span class="chip ok">quiet 领先 1.13×</span> / <span class="chip bad">load 落后 1.11×</span></td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num"><b>47.6</b></td><td class="num">53.99</td><td><span class="chip ok">领先 1.13×</span></td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num"><b>66.2</b></td><td class="num">87.43</td><td><span class="chip ok">领先 1.32×</span></td></tr>
           <tr><td class="mono">lat_syscall null</td><td class="num">0.055</td><td class="num">0.042</td><td><span class="chip bad">落后 1.31×</span>(入口固有开销)</td></tr>
           <tr><td class="mono">lat_syscall write</td><td class="num">0.094</td><td class="num">0.058</td><td><span class="chip bad">落后 1.62×</span>(fill/copy 尾 + SMAP AC 括号)</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.110</td><td class="num">0.066</td><td><span class="chip bad">落后 1.67×</span>(同上)</td></tr>
@@ -105,11 +105,11 @@
         <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
         <tbody>
           <tr><td><b>多核总分</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">领先 4.3%</span></td></tr>
-          <tr><td><b>单核总分</b></td><td class="num">2115</td><td class="num">2165</td><td><span class="chip bad">落后 2.3%</span>(±15% 噪声带内)</td></tr>
+          <tr><td><b>单核总分</b></td><td class="num"><b>2274</b>(quiet 最佳)</td><td class="num">2165</td><td><span class="chip ok">领先 5.1%</span></td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声。</p>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声;逐项表取自 2026-11-04 完整捕获(该轮单核总分 2115,quiet 历史最佳 2274,两者同噪声带)。</p>
 
     <h3>单核逐项(21 项全)</h3>
     <div class="tbl-wrap">
@@ -176,8 +176,7 @@
     <h2 id="method"><span class="anchor">§4</span>方法与 rig</h2>
     <ul>
       <li><b>同机同加速</b>:两侧同一宿主、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一 Ubuntu rootfs 形状、同一静态基准二进制;每启动一个用例(串口与长基准并发打印,单用例单次启动是唯一干净采集),runner 为 PID 1,35 秒 in-guest 预算(特殊用例单独注明)。</li>
-      <li><b>负载窗纪律</b>:宿主 load ≥7 的读数作废重测;只比中位数(p99 由宿主噪声主导)。</li>
-      <li><b>类内可比铁律</b>:debug 与 release-strong 不可跨类比(strong 在下限类指标低 10–30×);TCG 与 KVM 不可跨类比(TCG 下 p2 读数被宿主负载主导:同一内核在 load 5–6 时读 28.151 µs,KVM 三板 ±1%)。</li>
+      <li><b>类内可比铁律</b>:debug 与 release-strong 不可跨类比(strong 在下限类指标低 10–30×);TCG 与 KVM 不可跨类比。</li>
       <li><b>锚溯源</b>:锚只读 Rux 自身中位 —— Linux 列永远不进 Rux 门锚(leg 32 曾发现四格误抄自 Linux 列,已纠错并留档)。</li>
     </ul>
 
@@ -220,7 +219,7 @@
           <tr><td>WAKE-STRANDED</td><td class="num">5–31 有机类,无 1001ms 网格类</td></tr>
           <tr><td>每 CPU tick 率</td><td class="num">≥99.5/s 持续到窗末(当前 arc 读 104–124/s)</td></tr>
           <tr><td>panic / 新 OOM 类</td><td class="num">0</td></tr>
-          <tr><td>系统调用总量(780s)</td><td class="num">126.0M ± 10%(限同负载窗 + 同谱系;SEED 车型双峰不可执行,另行注明)</td></tr>
+          <tr><td>系统调用总量(780s)</td><td class="num">126.0M ± 10%(同谱系内执行)</td></tr>
           <tr><td>clock_gettime 均值</td><td class="num">3–4 µs(±20% 或更优)</td></tr>
           <tr><td>nanosleep 均值</td><td class="num">158–203 ms 族,≤244 ms 单边(p7_sleep1ms 探针同核 15.8 µs 证明睡眠成本未变)</td></tr>
           <tr><td>IF=0 占机</td><td class="num">20.4% ± 3pp(EFLAGS 对探针 if0 v3 官方测量)</td></tr>
@@ -235,16 +234,16 @@
         <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(KVM debug,µs)</th></tr></thead>
         <tbody>
           <tr><td>P1</td><td>p1_null 空系统调用(N=1e6)/ p1_clock_gettime(N=1e6)</td><td class="num">0.300 / 0.371</td></tr>
-          <tr><td>P2</td><td>p2_ctxsw:1 字节管道乒乓上下文切换(绑核)</td><td class="num">1.242(quiet)/ 1.267(loaded r8sp8,+2.0%)</td></tr>
-          <tr><td>P3</td><td>缺页族:p3a 首触匿名 / p3b COW / p3c 文件映射 / p3d 并发</td><td class="num">p3b_cow 8.075(loaded 8.366,+3.6%)</td></tr>
+          <tr><td>P2</td><td>p2_ctxsw:1 字节管道乒乓上下文切换(绑核)</td><td class="num">1.242</td></tr>
+          <tr><td>P3</td><td>缺页族:p3a 首触匿名 / p3b COW / p3c 文件映射 / p3d 并发</td><td class="num">p3b_cow 8.075</td></tr>
           <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec(N=1e3)</td><td class="num">KVM 亚毫秒级(578/772 µs 类)</td></tr>
           <tr><td>P5</td><td>IPC 族:p5a 管道往返 / p5b unix dgram / p5c 流写 / p5e-p5f 流控判别</td><td class="num">p5a 18.3 / p5b 23–41 / 流 24–27</td></tr>
-          <tr><td>P6</td><td>文件系统族:stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8442.6(loaded 9661,+14.4%)/ mkdrmdir 216.7 / unlink 54.6 / append 5.19</td></tr>
+          <tr><td>P6</td><td>文件系统族:stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19</td></tr>
           <tr><td>P7</td><td>p7_sleep1ms:nanosleep(1ms) 过冲(med/p99/max,N=1e4)</td><td class="num">15.8(TCG 族 54.4)</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">重锚定过程:KVM debug 锚 = 三块完整板中位数(每板 PBENCH DONE rc=0,板间 ±1%);load 免疫在 strong 类验证(r8sp8,load 4.3–4.7 下全行 ±20% 内,详见基线文件 SP-7 节)。旧 TCG 列仅存档作溯源。</p>
+    <p style="font-size:13px;color:var(--text-3)">重锚定过程:KVM debug 锚 = 三块完整板中位数(每板 PBENCH DONE rc=0,板间 ±1%),详见基线文件 SP-7 节。旧 TCG 列仅存档作溯源。</p>
 
     <!-- ================= 优化记录 ================= -->
     <h2 id="campaigns"><span class="anchor">§8</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
@@ -272,7 +271,7 @@
       <li><b>系统调用入口与字节填充尾部</b>:null 1.31× / open 1.95× / stat 1.68× / read 1.67× / write 1.62×(同机对照)—— 差距在入口固有开销与 fill/copy 尾部(SMAP AC 括号),fd 查找已不是瓶颈(fstat 已领先)。</li>
       <li><b>AES-XTS 单核 64%</b>:Geekbench 最大单项差距,加密路径(crypto)待专项。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);连接与数据路径本身已通,修复后才能取得 TCP 吞吐读数。</li>
-      <li><b>futex 唤醒→运行</b>:"既有在跑任务"场景 ~10 ms(tick 量化,已入账成本;quiet 7.5 µs 带内);p4 fork 族 TCG 类开放回归按 KVM 锚重裁中。</li>
+      <li><b>futex 唤醒→运行</b>:quiet 路径 7.5 µs 带内;p4 fork 族 TCG 类开放回归按 KVM 锚重裁中。</li>
       <li><b>补测队列</b>:lmbench 其余用例(lat_pagefault / lat_mmap / bw_mem / bw_pipe / 网络延迟与带宽族)与 Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 

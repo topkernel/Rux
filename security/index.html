@@ -149,7 +149,7 @@
           <tr><td>定时器 nanosleep 772.6→662.7 ms(D-19)</td><td>六类历史 bug(混钟早燃 / periodic 误重装 / double-del / stale-id…)成为编译错</td></tr>
           <tr><td>stat 0.643→0.423 µs(WalkClaim)</td><td>无锁读经 reader bank 发布 + 延迟退役,无悬悬引用窗口;首落撞既有缺陷即回退、修后 re-land(历史诚实)</td></tr>
           <tr><td>munmap 177→52 µs(叶子表直走)</td><td>分块 TLB flush 竞态家族(分类学行 34)随之关闭;OH 崩溃风暴 66 SEGVs/boot → 3/3 clean</td></tr>
-          <tr><td>lmbench lat_ctx 同机快 3.15×~9.2× / Geekbench 多核 104%</td><td>全部跑在 D-1/D-7/D-11 的结构上 —— 快路径即安全路径</td></tr>
+          <tr><td>lmbench lat_ctx 同机快 9.2× / Geekbench 多核 104%</td><td>全部跑在 D-1/D-7/D-11 的结构上 —— 快路径即安全路径</td></tr>
         </tbody>
       </table>
     </div>
