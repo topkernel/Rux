@@ -5174,3 +5174,141 @@ that never returns while holding a service mutex.
 - Item 4: spawn-chain-never-execs and the 8.2s samgr thread exit are
   BOTH MOOT on the storm-free kernel (ohc12: normal one-shot exits
   only; zero samgr thread exits).
+
+## 52ND SESSION — monopolist engine NAMED and halved: trace kmem call-site classification + fdreap close ladder; percpu theory ACQUITTED (2026-11-06 03:30-06:0x, branch oh-crash @ 7e742e5f+)
+
+Mission (51st §11): name cpu1's non-quiescence producer. The 51st's
+prime suspect was arch::cpu_id()/percpu-base misdirection.
+
+### 1. The instruments landed (commit a69b1e36)
+- `dump_frozen_cpu_truth(stuck)` in dfx/taskdump.rs, called from
+  rcu.rs's grace-freeze one-shot at 4 consecutive failed rounds (was
+  32 — the rolling-monopoly face never survived to 32; a passing round
+  reset the counter):
+  (a) per-CPU timer-tick counts + last tick-entry RIP + tick-entry
+      preempt count (tick stalled = IRQ-off monopolist; tick alive +
+      frozen QS = preempt loop with IRQs on);
+  (b) bounded cross-CPU IPI probe (new smp_call_function_timeout in
+      arch/x86_64/ipi.rs; enqueue refactored into csd_fire) whose
+      callback runs ON the frozen CPU and reports the PERCPU CANARY
+      (gs cpu id + GS-base magic word + LAPIC id — hardware truth),
+      the interrupted RIP/RSP from the IPI's own PtRegs, and a live
+      kernel-stack scan;
+  (c) IF=0 fallback (probe silent): the stuck CPU's current task with
+      preempt count + a downward text-word scan of its kernel stack
+      from the saved switch-in sp.
+
+### 2. THE CANARY VERDICT: percpu misdirection ACQUITTED (ohc22/ohc23/ohc24)
+Every probe answer on the frozen CPU read e.g.
+`gs_cpu=1 gs_magic=5258525800000001 lapic=1` — GS-derived cpu, the
+RXRX magic with the cpu number embedded, and the LAPIC id all agree.
+cpu_id() and the percpu base are CORRECT in the wedge. The 51st's
+qs-frozen signature has a different producer (below). Also note: the
+frozen CPU ROTATES (ohc17 froze cpu0 with cpu1 reporting; most boots
+freeze cpu1) — it is whichever CPU the monopolist runs on, and the
+monopolist is usually init or a fresh init child.
+
+### 3. THE MONOPOLIST ENGINE #1 (THE find): trace kmem call-site
+   classification (commit 715d82f1)
+- ohc23's IPI probe caught the monopolist mid-loop:
+  `int_rip=<StrSearcher::new> stack: ... trace::alloc_call_site::is_plumbing
+  ... trace::alloc_call_site`; ohc21's tick RIP landed in
+  TwoWaySearcher::next, ohc22's in ksyms::name_at.
+- The chain: OH's tooling arms the kmem trace events through tracefs
+  (tracefs mounts ~3.5s; hiview-class tooling writes set_event). From
+  then on, EVERY kmalloc/kfree record paid, per frame of an 8-frame
+  walk: ksyms binary search + name extraction + 13 `.contains()`
+  substring searches (TwoWaySearcher). Under the boot's fork storms
+  (hundreds of allocations per second per CPU) the allocating CPUs
+  became rolling monopolists for hundreds of ms each — no schedule
+  point, no QS report; one IPI probe caught a >200ms IRQ-off window
+  (the victim was inside allocator lock sections behind the slow
+  classifications).
+- THE REFERENCE LINE: include/trace/events/kmem.h — trace_kmalloc
+  records `_RET_IP_`, ONE pointer, zero record-time symbol work.
+  Symbolization in ftrace happens at READ time.
+- Fix: 512-slot direct-mapped per-frame verdict cache in trace/mod.rs
+  (plumbing_verdict; key published last). Shims repeat on every
+  allocation → steady-state = two relaxed loads per frame; first sight
+  of a site pays the old classification once. Semantics unchanged.
+
+### 4. MONOPOLIST ENGINE #2: fdreap close ladder (commit 64762895)
+- 100% of grace-stall prints on every boot are
+  `RCU-GP-BOUND site=fdreap-close` (138/138 ohc22, 193/193+7 ohc19).
+  The 51st's 16-budget escape hatch still burned ~800ms per close
+  under any stalled round; hilogd-class log rotation died behind it.
+- Reference parity (fs/file_table.c): close(2) NEVER blocks on an RCU
+  grace — fput queues task_work at return-to-userspace; reclamation
+  runs as asynchronous call_rcu. New shape: one fast synchronous
+  window (µs on a healthy boot — stricter-than-Linux semantics kept
+  there), one 50ms budget on a stalled round, then hand the batch to
+  the reaper and return. Empty-batch arm (ours inside the reaper's
+  in-flight batch) yields at most 2 schedule() rounds.
+
+### 5. THE NUMBERS (same rig: system-lb5 + userdata-fresh2, SMP2 KVM,
+   LOGLEVEL7, dfx=fuxstuck,txnhunt[,leakhunt])
+- LEAK-ORIGIN/PREEMPT-LEAK lines: 379 (ohc20, leakhunt+wwcensus) → 0
+  (ohc24, leakhunt armed). The "preempt-count leak carriers" family
+  (pc=0x10001/0x100 held 30+s, acquire sites slab.rs:604/640,
+  unix.rs:2244, mm_struct.rs:987) DISAPPEARED with the trace fix —
+  those "leaks" were starved-task attribution artifacts of the same
+  monopolist windows (the acquire-site shadow records the last guard
+  the victim entered before being starved for seconds).
+- RCU-GP-BOUND prints: 200 (ohc19/23, print-capped) → 37 (ohc24).
+- SA OpenSo progress: last SA line 32.0s (ohc23) → 43.0s (ohc24).
+- Boots still wedge: pixels frozen (82f0a25f) — see §6.
+
+### 6. THE REMAINING PRODUCERS (named, evidence attached, handoff)
+a) hilogd main (pid 318) parks in mmap (lastsys=9) from ~7.4s in
+   EVERY boot including ohc24 — BEFORE any grace stall. It is a real
+   SLEEP (INTERRUPTIBLE, on_rq=0), not a spin. Its workers then park
+   on the musl mutex it holds → the socket-backpressure pandemic
+   (51st §7 chain) follows unchanged. What the mmap waits on is NOT
+   yet named (no memory-exhaustion prints; zone state looked fine).
+   Next instrument: park-side wait-queue name for S-state tasks
+   blocked in kernel syscalls (extend sleepsnap to print the inner
+   wait object, not just the syscall nr), OR catch it with the
+   FROZEN-CPU probe's victim-stack scan by triggering from khungtaskd
+   on hilogd's 120s HUNG line.
+b) The VMA rwlock is a pure spinner (sync/rwlock.rs write(): phase-1
+   pend + phase-2 drain, spin_loop only) and mm paths hold it across
+   slow work (pagefault COW under vma_read while page allocation
+   crawls; VmaManager::add under vma_write) — a slow reader +
+   pending-writer interlock monopolizes CPUs and blocks mmap writers
+   (mm_struct.rs:987 appeared as a leak-site in ohc20 for exactly
+   this). The reference's mmap_lock is a SLEEPABLE rw_semaphore;
+   writers wait in TASK_IDLE, never spin the CPU away. This is the
+   mm/sync lanes' redesign (adaptive/sleepable rwlock), not a
+   drive-by. Evidence: ohc24 probe caught a syscall-entry spin with
+   EVENT_KMALLOC/EVENT_SYS_EXIT addresses on the stack (the armed
+   events' record paths); GLOBAL_SEQ (one atomic for ALL records,
+   both CPUs, sys_enter+sys_exit+kmem armed) adds a global
+   serialization point the reference does not have (per-CPU ring
+   buffers with per-CPU ordering).
+c) cpu slots line in every dump: init or a fresh init child (fork
+   parent=1) is the monopolist when the terminal freeze happens —
+   the fork window (kstack alloc 256KB block alloc under churn,
+   stack_cache_alloc caught by the probe in ohc22) remains the
+   heaviest single allocation under the boot; the kstack slab grows
+   monotonically with peak thread count (blocks return only when
+   fully empty).
+
+### 7. Gates this session
+- x86_64 / riscv64 / aarch64 builds rc=0 (run/build-x86-7.log lineage,
+  run/build-rv52b.log, run/build-a64-52.log).
+- riscv64 make test: ALL PASSED (run/maketest-52.log).
+
+### 8. 53rd's entry points (in order)
+1. Name hilogd-mmap's wait object (§6a) — that is the pandemic's root
+   holder now. One instrumented boot: trigger the existing
+   dump_frozen_cpu_truth from khungtaskd's HUNG report for the
+   blocked-in-kernel task, plus park-side wait-queue naming.
+2. If (1) names the vma rwlock or the page allocator: hand to the
+   mm/sync lane with §6b evidence; the sleepable rwsem is the
+   reference shape.
+3. GLOBAL_SEQ → per-CPU sequence (cheap, self-contained): seq =
+   (cpu<<48)|local++ keeps the merge order at read time.
+4. Then re-run the appfwk ladder (SA:180 OnStart → accountmgr →
+   SetBundleQuota → launcher). Reference timings: oh-roll ledger
+   ~1390 (creation 8.3s, launcher.ready 11.7s).
+5. usb_host NULL family (51st §11.5) still queued.
