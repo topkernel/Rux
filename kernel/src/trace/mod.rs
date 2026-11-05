@@ -2464,54 +2464,34 @@ fn free_flags_text(flags: u32) -> String {
 /// the address the heap-leak hunt needs. Falls back to the first
 /// non-zero frame when nothing resolves (early boot, no table).
 pub fn alloc_call_site(frames: &[u64]) -> u64 {
-    /// Is a resolved name part of the allocation plumbing the walk must
-    /// climb past?
-    fn is_plumbing(name: &str) -> bool {
-        name.contains("mm::buddy_allocator")      // the GlobalAlloc impl + the trace helpers
-            || name.contains("mm::small_alloc")   // the packing layer
-            || name.contains("dfx::memwatch")     // the walker itself
-            || name.contains("dfx::backtrace")    // current_frame_pointer
-            // The compiler shims demangle inside the __rustc module
-            // namespace ("__rustc::__rust_alloc+0x.."): substring, not
-            // prefix, or the origin lands one frame too low.
-            || name.contains("__rust_alloc")
-            || name.contains("__rust_dealloc")
-            || name.contains("__rust_realloc")
-            // The WHOLE alloc crate is allocation machinery (raw_vec's
-            // grow/deallocate, vec's push/reserve, boxed's new — and
-            // their trait impls render as "<alloc::string::String as
-            // ...>", so a starts_with test misses them). No kernel
-            // allocating site lives there; stopping early would name
-            // the growth, not the caller.
-            || name.contains("alloc::alloc::")
-            || name.contains("alloc::raw_vec")
-            || name.contains("alloc::vec")
-            || name.contains("alloc::string")
-            || name.contains("alloc::boxed")
-            || name.contains("alloc::fmt")
-            || name.contains("alloc::collections")
-            || name.contains("alloc::sync")
-    }
-
     // One pass, two candidates: the best origin is a frame in the
     // kernel's own rux:: namespace (trait impls render as "<rux::...")
     // that is not itself plumbing — the GlobalAlloc impl IS a rux::
     // frame, so the plumbing test runs first. A non-rux frame that is
     // not plumbing (early boot, foreign code) serves as the fallback
     // when no kernel frame is within the walk.
+    //
+    // 52nd session (oh-crash) — the verdicts are CACHED per frame
+    // address. This classification used to run per EVENT: ksyms lookup
+    // + name extraction + 13 substring searches per frame, on every
+    // kmalloc/kfree record. That is the OH wedge's monopolist engine:
+    // OH's tooling arms the kmem events through tracefs, every
+    // allocation then paid 10-100+us of unpreemptible string matching
+    // inside the allocator path, and under the boot's fork storms the
+    // allocator CPUs became rolling monopolists (FROZEN-CPU TRUTH
+    // probes caught tasks mid-StrSearcher/TwoWaySearcher/ksyms::name_at
+    // with the RCU quiescent report frozen behind them — ohc21-ohc23).
+    // The reference's kmalloc tracepoint records _RET_IP_, one pointer
+    // with zero record-time symbol work; a per-frame verdict cache keeps
+    // our (shim-climbing) classification but pays the symbolization
+    // once per distinct site instead of once per allocation.
     let mut fallback = 0u64;
     for &f in frames {
         if f == 0 {
             break;
         }
-        let (name, is_rux) = match crate::dfx::ksyms::lookup(f) {
-            Some((name, _, _)) => {
-                let rux = name.starts_with("rux::") || name.starts_with("<rux::");
-                (name, rux)
-            }
-            None => ("", false),
-        };
-        if !name.is_empty() && is_plumbing(name) {
+        let (is_plumb, is_rux) = plumbing_verdict(f);
+        if is_plumb {
             continue;
         }
         if is_rux {
@@ -2525,6 +2505,66 @@ pub fn alloc_call_site(frames: &[u64]) -> u64 {
         return fallback;
     }
     frames.iter().copied().find(|&f| f != 0).unwrap_or(0)
+}
+
+/// Direct-mapped per-frame verdict cache for [`alloc_call_site`]:
+/// key = the frame address, value = (plumbing?, rux?). 512 slots alias
+/// by address bits — an alias recompute is correct, just cold. The
+/// shim frames repeat on every allocation, so steady-state hit rate is
+/// near 100% and the per-event cost drops to two relaxed loads per
+/// frame. Invalid entries carry key 0 (frame addresses are never 0 —
+/// the walk's own terminator).
+fn plumbing_verdict(f: u64) -> (bool, bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    const N: usize = 512;
+    static KEYS: [core::sync::atomic::AtomicU64; N] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; N];
+    static PLUMB: [core::sync::atomic::AtomicBool; N] =
+        [const { core::sync::atomic::AtomicBool::new(false) }; N];
+    static RUX: [core::sync::atomic::AtomicBool; N] =
+        [const { core::sync::atomic::AtomicBool::new(false) }; N];
+
+    let idx = ((f >> 4) as usize) & (N - 1);
+    if KEYS[idx].load(Relaxed) == f {
+        return (PLUMB[idx].load(Relaxed), RUX[idx].load(Relaxed));
+    }
+    // Cold path (first sight of this frame): resolve + classify once.
+    // SAFETY-free: ksyms::lookup is a plain sorted-table search.
+    let verdict = match crate::dfx::ksyms::lookup(f) {
+        Some((name, _, _)) => {
+            let is_rux = name.starts_with("rux::") || name.starts_with("<rux::");
+            let mut plumb = name.contains("mm::buddy_allocator")
+                || name.contains("mm::small_alloc")
+                || name.contains("dfx::memwatch")
+                || name.contains("dfx::backtrace")
+                || name.contains("__rust_alloc")
+                || name.contains("__rust_dealloc")
+                || name.contains("__rust_realloc")
+                || name.contains("alloc::alloc::")
+                || name.contains("alloc::raw_vec")
+                || name.contains("alloc::vec")
+                || name.contains("alloc::string")
+                || name.contains("alloc::boxed")
+                || name.contains("alloc::fmt")
+                || name.contains("alloc::collections")
+                || name.contains("alloc::sync");
+            // An unresolved name ("" — symbol table gap) is NOT
+            // plumbing; the caller treats it via the rux/fallback arms
+            // exactly as the pre-cache walk did.
+            if name.is_empty() {
+                plumb = false;
+            }
+            (plumb, is_rux)
+        }
+        None => (false, false),
+    };
+    // Publish key LAST (readers treat a stale key as miss and
+    // recompute; a key published before its values would be a
+    // correctness hole).
+    PLUMB[idx].store(verdict.0, Relaxed);
+    RUX[idx].store(verdict.1, Relaxed);
+    KEYS[idx].store(f, Relaxed);
+    verdict
 }
 
 /// Copy a `&'static str` (an IRQ action name) into the 16-byte comm
