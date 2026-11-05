@@ -4487,6 +4487,18 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
             crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_PEEK_N);
         }
         const UNIX_STAGE_MAX: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
+        // 53rd (reference parity, the ohc32 syscost 999,609-call EAGAIN
+        // spin): a NONBLOCKING receive on a queue that is empty, error-
+        // free and not-EOF fails with EAGAIN BEFORE the kernel stage
+        // buffer is reserved — the reference's unix_dgram_recvmsg
+        // skb_dequeue-NULL path allocates nothing. Advisory check; the
+        // engine under the wait registration remains authoritative for
+        // the blocking path.
+        let file_nonblock_fast = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        if file_nonblock_fast && usock.recv_not_ready_fast() {
+            crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_OUTER_NS, ur_t0);
+            return -errno::EAGAIN as i64;
+        }
         let stage = match usock.kind {
             crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket => {
                 len.min(UNIX_STAGE_MAX)

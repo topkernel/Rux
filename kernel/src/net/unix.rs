@@ -395,6 +395,16 @@ impl UnixSocket {
     }
 
     /// Would recv() return data / EOF (anything but EAGAIN)?
+    /// Fast-fail view of recv_ready for the syscall entry (53rd): a
+    /// nonblocking reader spinning on an empty queue — hilogd.server's
+    /// drain loop at 16.6k recvfrom/s — must learn "nothing to receive"
+    /// BEFORE any staging allocation (reference shape: skb_dequeue NULL
+    /// -> EAGAIN, zero allocation). Advisory only: the blocking engine's
+    /// own re-check under its wait registration stays authoritative.
+    pub fn recv_not_ready_fast(&self) -> bool {
+        !self.recv_ready()
+    }
+
     fn recv_ready(&self) -> bool {
         if !self.recv_queue.lock().segs.is_empty() {
             return true;
