@@ -3593,7 +3593,22 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             let _ = crate::arch::uaccess::put_user(msg_ptr.add(48) as *mut u32, out_flags);
         }
         crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
-        return r.len as i64;
+        // Reference return-value rule (af_unix.c __unix_dgram_recvmsg:
+        // err = (flags & MSG_TRUNC) ? skb->len - skip : size): a caller
+        // that passed MSG_TRUNC learns the FULL datagram size, not the
+        // delivered prefix — the standard how-big-was-it probe pattern.
+        // Streams keep the copied count (their skb is consumed whole).
+        let ret_len = if (flags & MSG_TRUNC) != 0
+            && matches!(
+                usock.kind,
+                crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket
+            )
+        {
+            r.orig_len
+        } else {
+            r.len
+        };
+        return ret_len as i64;
     }
 
     // Allocate receive buffer
