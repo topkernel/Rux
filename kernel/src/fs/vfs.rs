@@ -268,7 +268,18 @@ pub fn mount_flags_for_path(abs_path: &str) -> Option<crate::fs::mount::MntFlags
 }
 
 /// True when the absolute path lives on a mount currently flagged read-only.
+/// (perf-gap-hunt) Empty-registry fast gate: dentry vfsmount stamps and the
+/// mount registry are updated in lockstep at every mount/umount site, so an
+/// empty registry implies the component walk below could never cross a
+/// mount — its verdict is `None` (not readonly) by construction.  On
+/// mountless rigs (lmbench/pbench probes, single-rootfs boots) every write
+/// open / creat / mkdir / rmdir / unlink previously paid a full component
+/// dentry walk here just to learn there is no read-only mount; now they pay
+/// one registry probe.  Rigs with mounts keep the exact walk semantics.
 pub fn path_on_readonly_mount(abs_path: &str) -> bool {
+    if VFS_STATE.lock().mounts.is_empty() {
+        return false;
+    }
     mount_flags_for_path(abs_path)
         .map(|f| f.is_readonly())
         .unwrap_or(false)
@@ -4519,8 +4530,11 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
 
         // EROFS before any lookup/write attempt: a write-intent open
         // (O_WRONLY / O_RDWR / O_TRUNC) on a MS_RDONLY mount fails, as does
-        // O_CREAT on one (Linux may_open + mnt_want_write; LTP creat06 and
-        // the needs_rofs family).
+        // O_CREAT on one (reference may_open + mnt_want_write; LTP creat06
+        // and the needs_rofs family).  The per-open cost is one registry
+        // emptiness probe — the component walk inside
+        // path_on_readonly_mount only runs when mounts exist at all
+        // (perf-gap-hunt; see the note there).
         let write_intent =
             flags & (FileFlags::O_WRONLY | FileFlags::O_RDWR | FileFlags::O_TRUNC) != 0;
         if (write_intent || o_creat) && path_on_readonly_mount(filename) {
@@ -4710,6 +4724,21 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             Err(e) => return Err(e),
         };
+
+        // Directory -> redirect to opendir
+        if inode.mode.is_directory() {
+            // Linux: opening a directory for WRITING (O_RDWR/O_WRONLY)
+            // fails with EISDIR before anything else (LTP open08) — only
+            // O_RDONLY (optionally |O_DIRECTORY) is legal on a dir.
+            let accmode = flags & FileFlags::O_ACCMODE;
+            if accmode != FileFlags::O_RDONLY {
+                return Err(errno::Errno::IsADirectory.as_neg_i32());
+            }
+            return file_opendir(
+                filename,
+                flags | crate::fs::file::FileFlags::O_DIRECTORY,
+            );
+        }
 
         // Directory -> redirect to opendir
         if inode.mode.is_directory() {
