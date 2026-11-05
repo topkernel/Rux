@@ -4572,34 +4572,6 @@ pub fn bwr_park_audit() {
     }
 }
 
-/// BC command decoder for TXN-HANG-BWR (holder-chain lane): names the
-/// write-side sub-command of a parked BINDER_WRITE_READ, so a holder
-/// parked mid-critical-section is attributed to the exact binder
-/// operation it went to sleep on (e.g. BC_REQUEST_DEATH_NOTIFICATION —
-/// samgr's SubscribeSystemAbility holds listenerMapLock_ across
-/// AddDeathRecipient).
-fn bc_name(cmd: u32) -> &'static str {
-    match cmd {
-        BC_TRANSACTION => "BC_TRANSACTION",
-        BC_REPLY => "BC_REPLY",
-        BC_TRANSACTION_SG => "BC_TRANSACTION_SG",
-        BC_REPLY_SG => "BC_REPLY_SG",
-        BC_FREE_BUFFER => "BC_FREE_BUFFER",
-        BC_INCREFS => "BC_INCREFS",
-        BC_ACQUIRE => "BC_ACQUIRE",
-        BC_RELEASE => "BC_RELEASE",
-        BC_DECREFS => "BC_DECREFS",
-        BC_INCREFS_DONE => "BC_INCREFS_DONE",
-        BC_ACQUIRE_DONE => "BC_ACQUIRE_DONE",
-        BC_REGISTER_LOOPER => "BC_REGISTER_LOOPER",
-        BC_ENTER_LOOPER => "BC_ENTER_LOOPER",
-        BC_EXIT_LOOPER => "BC_EXIT_LOOPER",
-        BC_REQUEST_DEATH_NOTIFICATION => "BC_REQUEST_DEATH_NOTIFICATION",
-        BC_CLEAR_DEATH_NOTIFICATION => "BC_CLEAR_DEATH_NOTIFICATION",
-        BC_DEAD_BINDER_DONE => "BC_DEAD_BINDER_DONE",
-        _ => "BC_?",
-    }
-}
 /// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
 /// foundation process. Prints ONLY while there is pending work on the
 /// node/proc (async slot held, txns parked, or proc todo non-empty), so
