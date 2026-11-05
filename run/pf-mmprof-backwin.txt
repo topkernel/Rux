@@ -1,4 +1,0 @@
-MMPROF armed (cmdline mmprof=1)
-MMPROF-A t=12s mmap: tot=1/1176(n283394) lock=0/29(n283393) find=0/29(n283393) add=0/30(n283393)
-MMPROF-A t=60s mmap: tot=1/1176(n283394) lock=0/29(n283393) find=0/29(n283393) add=0/30(n283393)
-MMPROF-B t=120s munmap: body=11/218(n283392) surg=0/80(n4534212) walk=0/177(n4534212) tlb=0/13(n4534212) | fixed=1 hint=0 anon0=283393 unpg=90890276 unempty=0 munloops=4534212

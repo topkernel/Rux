@@ -1,6 +1,0 @@
-CASE[lat_pagefault,/tmp/lmbench.file] base rep1 load=8.24 VAL=0.4860
-CASE[lat_pagefault,/tmp/lmbench.file] backwin rep1 load=10.17 VAL=0.0312
-CASE[lat_pagefault,/tmp/lmbench.file] base rep2 load=6.05 VAL=0.4897
-CASE[lat_pagefault,/tmp/lmbench.file] backwin rep2 load=5.18 VAL=0.0293
-CASE[lat_pagefault,/tmp/lmbench.file] base rep3 load=2.87 VAL=0.4641
-CASE[lat_pagefault,/tmp/lmbench.file] backwin rep3 load=2.78 VAL=0.0287
