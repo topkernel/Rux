@@ -107,7 +107,7 @@ def main():
                 if not chunk:
                     break
                 out += chunk
-                if b"COWRACE2-DONE" in bytes(out):
+                if b"COWRACE2-PASS" in bytes(out):
                     # give the final print a moment, then stop the VM
                     time.sleep(1)
                     rc = "done"
@@ -136,7 +136,7 @@ def main():
     if fails:
         print(f"COWRACE2-FAIL probe reported {len(fails)} fail/detail lines ({rc})")
         return 1
-    if b"COWRACE2-DONE" not in bytes(out):
+    if b"COWRACE2-PASS" not in bytes(out):
         print(f"COWRACE2-FAIL-no-done-line ({rc})")
         return 3
     print(f"COWRACE2-PASS ({rc})")

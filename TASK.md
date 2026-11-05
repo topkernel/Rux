@@ -4888,3 +4888,114 @@ NOT ea88abfa-attributable. Do not flag as a regression class.
 6. Keep the roller rolling; bank v47+ (revert kernel stats needed:
    v46 showed n=528 with new '7'/'12' codes — one boot, variance until
    47+ repeat it).
+
+## 50TH SESSION ADDENDUM — crash-storm root cause: chunked-munmap vs mmap race (2026-11-05 23:00-00:30, branch oh-crash)
+
+Commits: fe4001a4 (USEGV mm-op ring + NOSPAWN-EXIT + 3 probes),
+743dfbd4 (probes tarball), fc304c13 (merge 5b4a4bc7, the parallel
+session's munmap detach-all-then-zap fix; binder.rs conflict was
+comment-only, kept our revert-evidence text).
+
+### 1. What I established independently before the fix landed
+- test/cowint (new): sequential COW/fork content integrity, P1-P5
+  (snapshot 16MiB/4096 pages exact verify both sides; parent-writes-
+  after-fork isolation; child-writes isolation; adversarial writer
+  thread during fork with tag-decode + double-read stability;
+  mallocng chunk forest 4096 chunks + child churn). PASSES clean on
+  oh-roll tip (x86_64 KVM SMP2) — plain lost-dirty-page COW bugs are
+  EXCLUDED as the crash-storm cause.
+- mallocng crash decoded to the exact mallocng source line: rip
+  vaddr 0xbb82f = alloc_group tail, `m->mem = p; m->mem->meta =
+  encode_ptr(m, ctx.secret)` (mallocng malloc.c:348-349 / donate.c:23
+  pattern; disassembly of the image's ld-musl R-E segment at file
+  0xba82f). The faulting write is the FIRST stamp of a FRESH group —
+  the group pointer p itself lands in a VMA hole.
+- ohc1 live capture (t=5.973): pid 344, a FRESH FFRT worker thread of
+  samgr (tgid 329; SIGDEATH later names it OS_FFRT_2_2 — comm was
+  still empty at fault time, naming happens after spawn), cr2
+  0x7ff00049a000 INSIDE the FFRT zone, vma(cr2)=NONE, registers
+  garbage-class, fails ring empty. Fresh FFRT workers mallocng-init
+  immediately: alloc_group -> mmap(0, needed) -> group stamp.
+- Root cause (code level, x86_64 mm_ops.rs): AddressSpace::munmap was
+  CHUNKED (256-page chunks, vma_write dropped at every boundary, hit
+  re-derived from the LIVE tree each chunk). A racing same-mm mmap's
+  atomic pick+insert that landed anywhere in [addr,end) — including
+  the JUST-FREED prefix, which lowest-fit find_free_area prefers —
+  was treated as an unprocessed piece of THIS munmap and deleted by a
+  later chunk. mmap had already returned the address; userspace's
+  next write dies into an unmapped hole. Linux holds mmap_lock (write)
+  across the whole do_mun_map, so the interleave is impossible in the
+  reference — the divergence is ours. FFRT pool teardown (multi-MB
+  munmaps) concurrent with fresh-worker mallocng group mmaps is the
+  exact interleaving; the image's ondemand->false spawn storm raised
+  the rate (matches the lb246 timeline).
+
+### 2. Convergence with the parallel session
+5b4a4bc7 "mm(x86_64): munmap detach-all-then-zap" fixes the same Face
+A plus Face B (deferred PTE zap clearing fresh PTEs under live VMAs —
+the garbage-chained metadata variant). Merged clean (comment-only
+conflict in binder.rs thread_has_work — both sides already carry the
+ea88abfa revert).
+
+### 3. Verification
+- test/munmap_race (new): direct repro — 3 keeper threads stamp every
+  page of fresh 4K-64K mmaps, 1 munmapper churns 4MB regions, SIGSEGV
+  catcher names the victim. HOST Linux control: PASS (15711 munmap
+  rounds, 1187465 kept mappings, 0 faults — no false positive).
+  Merged kernel (fc304c13): PASS (0 caught). [Red run on fe4001a4
+  pending if time allows — the parallel session's 4x3000-cycle repro
+  crashed 2/3 boots pre-fix.]
+- OH boots ohc3..ohc8 (fixed kernel, same recipe as r41): counting
+  rip=0x3fbf0bb82f (mallocng family) and rip=0x7ff082996bac (usb_host
+  family) per boot. ohc1 (pre-fix instrumented): mallocng hit at
+  t=5.97. ohc2 (pre-fix): no mallocng hit in 360s (the ~20% miss),
+  usb_host 6+ hits, wedge at ~t=270 (CPU#1 soft lockup, pid 340).
+
+### 4. 5b4a4bc7 REGRESSION found and fixed (the relay record needs this)
+5b4a4bc7 DROPPED munmap's final batched TLB flush: every unmap_pages
+call in the reworked munmap passes defer_tlb_flush=true and the removed
+tail block (flush_tlb_others + flush_tlb_all) was never replaced.
+Cleared PTEs were never shot down — stale present+writable TLB entries
+to FREED frames survived; after the allocator reused those frames,
+same-mm accesses through the stale entries silently read/wrote the new
+owner's pages. Deterministic on OH: ohc3/ohc4 both died t=1.1-1.2,
+pid 1 (init) trap #GP at rip=0x3fbf0ba256 = mallocng get_meta
+consistency check (decoded group->meta non-canonical — group header
+corrupted through a stale entry) during init's single-threaded dlopen
+ENOENT cascade, then powerdown. The churn probes missed it because
+read-back through the SAME stale entry is self-consistent. Fix:
+coordinator's c4a548d7 (cherry-picked here as f3d01d25) restores the
+one batched flush after the deferred-zap phase, both race closures
+intact. riscv64/aarch64 twins verified by the coordinator to be
+unaffected (their unmap_pages flushes locally per call).
+
+### 5. Verification battery on f3d01d25 (= 5b4a4bc7 + flush restore)
+- munmap_race probe: RED on pre-fix fe4001a4 (MUNMAP-RACE-BUG-CAUGHT,
+  the kernel ate a live mmap) -> GREEN on f3d01d25 (PASS, 0 caught in
+  8s of 4MB-churn + keeper stamping). Host Linux control: PASS
+  (15711 munmap rounds, 1187465 mappings, 0 faults).
+- cowint (sequential COW integrity): PASS on f3d01d25.
+- cowrace2 (fork-storm + writer race + PCACHE + bio pressure): PASS —
+  A 600-round fork-storm with mallocng chunk churn clean; B 200 forks
+  vs 3 concurrent writers tag-clean (1 legally-torn page); C 1024-page
+  PCACHE COW file mapping clean; D 3648 bio ops concurrent. (The
+  driver's first run mis-grepped DONE vs PASS — fixed in the driver.)
+- Gates: x86_64 build rc=0; riscv64 build rc=0; riscv64 make test ALL
+  TESTS PASSED; aarch64 build [appended below].
+- OH KVM boots (same recipe as r41, system-lb5 + userdata-fresh2,
+  360s window):
+    boot  kernel          mallocng(0x3fbf0bb82f)  usb_host(0x7ff082996bac)  segv
+    ohc1  fe4001a4(pre)   1 @ t=5.97              n/a (ring era)            -
+    ohc2  fe4001a4(pre)   0 (miss boot)           6+                         12
+    ohc3  fc304c13(brok)  init #GP t=1.2 powerdown (the dropped-flush bug)
+    ohc4  fc304c13(brok)  init #GP t=1.2 powerdown
+    ohc5  flush-restored  0                       18                         12
+    ohc6  f3d01d25        0                       0                          0
+    ohc7  f3d01d25        0                       30                         15
+    ohc8  f3d01d25        0                       24                         12
+  mallocng family: 0/4 flush-kernel boots vs ~80% hit rate pre-fix.
+  usb_host family unchanged (separate, pre-lb1 family, queued).
+  Wedge: still present (SA starts 94-113 vs 88 pre-fix, none
+  succeed; pixels 82f0a25f) — consistent with the storm being one of
+  several wedge contributors (samgr 8.2s exit, FFRT mutex, spawn
+  chain remain queued).
