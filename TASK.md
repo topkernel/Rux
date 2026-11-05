@@ -4623,3 +4623,55 @@ The FFRT wedge hunt should continue at the deadlock-cycle bottom
 (TXN-HANG-HLD on BWR-parked nested clients to name patient zero), per
 the coordinator's r41v26 analysis. REQUEUE is now reference-shaped and
 cleared of the drop-class races; do not re-audit it for wake delivery.
+
+## 46TH SESSION ADDENDUM 6 — futex merge reconciliation + v31-41: pixels still frozen, roll coordinated with main session (2026-11-05 21:35-)
+
+### Merge reconciliation at the boot-35 sync (origin/main 817b50b9)
+- Conflicts: kernel/src/sync/futex.rs (ours c0cdebc3 via oh-ffrt vs
+  main's ee4c823c — SAME five REQUEUE parity fixes implemented twice;
+  main's is the reviewed restructure: 5084-line futex.rs + new 904-line
+  futex_pi.rs, PI split out, WAKE_OP decode + R12-2 wake-under-guards
+  retained) and userspace/probes/probes.tar.gz (binary). Resolution:
+  took main's side for both — our branch contributes nothing unique to
+  futex.rs post-base (ticktrap/R32 already cherry-picked to main as
+  b552ff11/6f4ea70d). Merge 4d1b5549.
+- Follow-up fix 68cbdd97: the merge auto-staged a byte-identical
+  DUPLICATE fn bc_name in binder.rs (TXN-HANG-HLD landed on both sides:
+  our dbfe5879 merge of oh-ffrt AND main's bc48ae7c/d3faac1f) — E0428.
+  Dropped the second copy. x86_64 build rc=0, riscv64 build rc=0
+  (run/r41/riscv64-build-68cbdd97.log). Kernel shrank 18.88M -> 18.64M.
+- NOTE FOR MAIN: 6ef58cf9 deleted run/lb-boot.py from the tree without
+  a scripts/test/ replacement — every lb-boot-based lane breaks on
+  merge. Restored untracked here (byte-identical to oh-launcher's).
+
+### Boots v31-v41 (kernel column = git SHA per boot in ledger)
+- Pixels: ALL shots 82f0a25f across 11 boots / both kernel generations
+  (a7ef71cb, 68cbdd97, 518655f3). The 06b933b4 variant (v18, v26) did
+  not recur. No PIXEL-ALERT files.
+- SA ceiling: 27(ext-truncated)-59 band, inserts track ceiling, last
+  insert 27.5-40.2s — same fluctuation class as v21-30. No ladder.
+- FUX-STUCK: v39 anomaly-of-one: 3 tids / max_stuck 0 (lowest of the
+  campaign); v40 back to 18 tids / 65; v41 15 tids / 0. The futex
+  restructure did NOT visibly change the stuck census — v39 was
+  variance, not a structural improvement.
+- TXN-HANG: n 1374-1391 full-window boots; v39 showed a one-off code
+  mix ('6':692 + '3':692) that reverted to '6'-dominant on v40/v41.
+
+### External interference pattern (host-side, not kernel)
+Four truncations, all host-initiated, none kernel panics:
+- v32 @517s: SIGTERM from /bin/bash 72670 (main-session resume sweep
+  at ~19:33, misjudged our live QEMU as orphaned).
+- v37 @443s: silent kill (no QEMU stderr — SIGKILL class).
+- v38 @212s: roller itself killed at 20:46:30 with the boot; the main
+  session relaunched the roller at 20:46:33 (boot 39+, kernel
+  68cbdd97) — takeover, not a crash.
+- v30 @283s (previous session): quota kill of the agent tree.
+All cut boots still delivered SA + pixel data before the cut; rows
+banked with full-window rows unaffected. Serial logs end in normal
+instrument output (no KERNPANIC) on every truncated boot.
+
+### Coordination state
+From 20:46 the main session co-drives this worktree (roller PID 335111
+is its relaunch; FUX-GRAPH commit 518655f3 landed here at 21:17 with
+its own make-test green, roller picked it up at the boot-40 sync).
+This session keeps to: ledger banking, pixel watch, TASK.md, pushes.

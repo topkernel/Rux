@@ -101,3 +101,23 @@
 [roll] boot 34/100 tag=r41v34 sha=a7ef71cb 19:48:54
 [roll] r41v34 done: SA=55 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  20:03:54
 [roll] boot 35/100 tag=r41v35 sha=a7ef71cb 20:04:00
+[roll] r41v35 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  20:19:20
+[roll] sync check 20:19:25
+[roll] origin/main moved a7ef71cb -> 817b50b9, merging+rebuilding
+[roll] MERGE CONFLICT, staying on run/r41/bzImage-a7ef71cb (agent must reconcile)
+[roll] boot 36/100 tag=r41v36 sha=a7ef71cb 20:19:30
+[roll] r41v36 done: SA=55 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  20:34:50
+[roll] boot 37/100 tag=r41v37 sha=a7ef71cb 20:34:56
+[roll] r41v37 done: SA=53 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  20:42:37
+[roll] boot 38/100 tag=r41v38 sha=a7ef71cb 20:42:43
+[roll] start 2026-11-05 20:46:33 kernel= SHA=68cbdd97
+[roll] boot 39/100 tag=r41v39 sha=68cbdd97 20:46:34
+[roll] r41v39 done: SA=40 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  21:01:54
+[roll] boot 40/100 tag=r41v40 sha=68cbdd97 21:02:00
+[roll] r41v40 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  21:17:21
+[roll] sync check 21:17:26
+[roll] origin/main moved 68cbdd97 -> 817b50b9, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-518655f3 (518655f3)
+[roll] boot 41/100 tag=r41v41 sha=518655f3 21:17:36
+[roll] r41v41 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  21:32:57
+[roll] boot 42/100 tag=r41v42 sha=518655f3 21:33:03
