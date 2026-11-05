@@ -1175,8 +1175,12 @@ pub fn futex_stuck_census() {
         let comm_s = core::str::from_utf8(&g.rep_comm)
             .unwrap_or("")
             .trim_end_matches('\0');
+        // fval is the 32-bit syscall arg sign-extended into the saved
+        // u64 register slot — compare the low 32 bits only (a negative
+        // expected value, e.g. the musl requeue-stamped 0x80000010,
+        // otherwise reads as a false LIVE!=fval).
         let live_s = if g.rep_live_ok {
-            if g.rep_live == g.rep_fval && g.rep_fval != 0 {
+            if g.rep_live == (g.rep_fval & 0xffff_ffff) && g.rep_fval != 0 {
                 "live==fval"
             } else {
                 "LIVE!=fval"
@@ -1247,6 +1251,56 @@ pub fn futex_stuck_census() {
     if gn % 6 == 5 {
         use core::fmt::Write as _;
         let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
+
+        // ---- FUX-MAPS (48th session): dump the samgr process's
+        // executable file-backed VMAs ONCE (first graph burst). The
+        // wedge anchors (park epc, fault rips, uret candidates) decode
+        // against image .so files only with the guest's actual mapping
+        // geometry — vma start/end + file offset fingerprints each
+        // segment (readelf match offline), no path resolution needed.
+        static MAPS_DONE: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if MAPS_DONE
+            .compare_exchange(0, 1, Relaxed, Relaxed)
+            .is_ok()
+            && samgr_pid != 0
+        {
+            let mut maps_n = 0usize;
+            crate::sched::for_each_task_try(|task| {
+                // SAFETY: diagnostic reads under the for_each_task
+                // contract.
+                let tk = unsafe { &*task };
+                if tk.pid() != samgr_pid || maps_n >= 24 {
+                    return;
+                }
+                if let Some(aspace) = tk.address_space() {
+                    if let Some(mgr) = aspace.vma_try_read() {
+                        use crate::mm::vma::VmaType;
+                        for vma in mgr.iter() {
+                            if maps_n >= 24 {
+                                break;
+                            }
+                            if !vma.flags().is_executable() {
+                                continue;
+                            }
+                            if !matches!(vma.vma_type(), VmaType::FileBacked) {
+                                continue;
+                            }
+                            // HOTPATH-PRINT: one-shot fuxstuck maps dump.
+                            crate::pr_warn!(
+                                "FUX-MAPS pid={} {:x}-{:x} off={:#x} fd={}",
+                                samgr_pid,
+                                vma.start().as_usize(),
+                                vma.end().as_usize(),
+                                vma.offset(),
+                                vma.file_fd()
+                            );
+                            maps_n += 1;
+                        }
+                    }
+                }
+            });
+        }
         if samgr_pid != 0 {
             let mut graph_lines = 0usize;
             for g in groups.iter() {
@@ -1260,7 +1314,7 @@ pub fn futex_stuck_census() {
                     .unwrap_or("")
                     .trim_end_matches('\0');
                 let live_s = if g.rep_live_ok {
-                    if g.rep_live == g.rep_fval && g.rep_fval != 0 {
+                    if g.rep_live == (g.rep_fval & 0xffff_ffff) && g.rep_fval != 0 {
                         "live==fval"
                     } else {
                         "LIVE!=fval"
