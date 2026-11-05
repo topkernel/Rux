@@ -93,3 +93,11 @@
 [roll] RESTART by resumed agent 2026-11-05 19:09:13 kernel=a7ef71cb (merge of e8c395bd test-infra reorg; lb-boot.py restored untracked to run/)
 [roll] start 2026-11-05 19:09:13 kernel= SHA=a7ef71cb
 [roll] boot 31/100 tag=r41v31 sha=a7ef71cb 19:09:14
+[roll] r41v31 done: SA=57 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  19:24:35
+[roll] boot 32/100 tag=r41v32 sha=a7ef71cb 19:24:41
+[roll] r41v32 done: SA=27 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  19:33:21
+[roll] boot 33/100 tag=r41v33 sha=a7ef71cb 19:33:27
+[roll] r41v33 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  19:48:47
+[roll] boot 34/100 tag=r41v34 sha=a7ef71cb 19:48:54
+[roll] r41v34 done: SA=55 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  20:03:54
+[roll] boot 35/100 tag=r41v35 sha=a7ef71cb 20:04:00
