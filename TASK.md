@@ -4305,3 +4305,27 @@ too), NOT new to this branch.
   possibly the lost-timer-wake class r41v1 named), NOT binder: every
   binder-side observable matches the reference.
 - Roll resumed at r41v7 on 14f7dcf2 (audit fix + panic fix).
+
+### 46th addendum 3 — r41v7 verdict: BEST BOOT OF CAMPAIGN (panic fix verified live)
+
+r41v7 (14f7dcf2 = audit fix + context.rs panic fix, full 900s window,
+SMP2 KVM):
+- SURVIVED THE WINDOW (t=840s syscost row present; first full-window
+  boot since r41v3 — r41v4/v5/v6 all died at 262-346s on the printer
+  overflow panic). Zero overflow panics, zero SWITCHIN-DEAD-TASK fires.
+- SA ceiling 59 / 58 inserts @34.0s — NEW CAMPAIGN BEST (prior 58).
+- Traffic flowed the whole boot (RM 26.9M by t=840; RF peek outer
+  247us -> 27us as the storm sped; idle ticking at end) — the r41v1
+  "total freeze" face is confirmed as the panic, not a scheduler bug.
+- BWR-PARK rows 3758: H2-write-only **0** (valid instrument), H1 3161,
+  H3 595 — write-only-parked=0 held the entire boot. Two boots of
+  zero-H2 with the fixed audit: the reference-parity write-only BWR
+  claim stands verified.
+- Wedge class persists (samgr FFRT cascade: OS_FFRT_2_0 173,
+  softbus_server 172, distributeddata 169, OS_IPC_0_650 168 in TXN-HANG
+  comms; FUX 40 tids) — boots now LIVE THROUGH the wedge instead of
+  panicking.
+- Pixels: all 6 shots frozen 82f0a25f (no alert).
+- Gates: x3 builds rc=0, make test riscv64 ALL TESTS PASSED
+  (run/r41v7-maketest.log).
+Roll continues: boot 8 (r41v8) started 10:40:23 on 14f7dcf2.
