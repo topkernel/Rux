@@ -57,7 +57,12 @@ struct TrimQEntry {
     start: usize,
     end: usize,
     tick: u64,
+    /// PFN snapshots of the first TRIMQ_SNAP pages of the trimmed range,
+    /// taken BEFORE the munmap (0 = page had no PTE / beyond cap).
+    pfns: [u64; TRIMQ_SNAP],
 }
+
+const TRIMQ_SNAP: usize = 64;
 
 static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
     use crate::sync::spinlock::Spinlock;
@@ -86,18 +91,43 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
         return;
     }
     let tick = crate::drivers::timer::get_jiffies();
+    // Snapshot the present pages' PFNs before they are torn down: the
+    // TRIMQ-HIT report reads the frames' CURRENT content + descriptor
+    // state, which discriminates "frame recycled by another mapping"
+    // (aliasing) from "frame untouched, only the pointers were stale".
+    let mut pfns = [0u64; TRIMQ_SNAP];
+    {
+        let task = crate::sched::current();
+        if let Some(t) = task {
+            if let Some(aspace) = unsafe { (*t).address_space() } {
+                let root = aspace.root_ppn();
+                for (i, p) in pfns.iter_mut().enumerate() {
+                    let va = start + i * crate::mm::page::PAGE_SIZE;
+                    if va >= end {
+                        break;
+                    }
+                    if let Some((ppn, _)) = unsafe {
+                        crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)
+                    } {
+                        *p = ppn as u64;
+                    }
+                }
+            }
+        }
+    }
     let mut q = TRIMQ.lock_irqsave();
     let slot = q.iter_mut().enumerate().find(|(_, e)| e.is_none());
+    let entry = TrimQEntry { mm, start, end, tick, pfns };
     match slot {
         Some((_, e)) => {
-            *e = Some(TrimQEntry { mm, start, end, tick });
+            *e = Some(entry);
         }
         None => {
             // Full: drop the oldest (index 0) by shifting.
             for i in 0..15 {
                 q[i] = q[i + 1].take();
             }
-            q[15] = Some(TrimQEntry { mm, start, end, tick });
+            q[15] = Some(entry);
         }
     }
 }
@@ -125,6 +155,35 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
                     e.end,
                     tick.saturating_sub(e.tick)
                 );
+                // Frame forensics: what IS the page at the faulting
+                // address now? Its content + descriptor state tell
+                // whether the freed frame was recycled (by whom) or is
+                // still untouched.
+                let idx = (addr - e.start) / crate::mm::page::PAGE_SIZE;
+                if idx < TRIMQ_SNAP as usize {
+                    let pfn = e.pfns[idx];
+                    if pfn != 0 {
+                        let pd = crate::mm::page_desc::pfn_to_page(pfn as usize);
+                        let flags_desc = if pd.is_null() {
+                            "no-desc"
+                        } else if unsafe { (*pd).is_mapped() } {
+                            "mapped"
+                        } else {
+                            "free"
+                        };
+                        let kv = crate::arch::mm::phys_to_virt(
+                            crate::arch::mm::PhysAddr::new(pfn << 12),
+                        )
+                        .bits() as *const u64;
+                        let (w0, w1) = unsafe { (*kv, *kv.add(1)) };
+                        crate::pr_warn!(
+                            "TRIMQ-FRAME pfn={:#x} state={} w0={:#016x} w1={:#016x}",
+                            pfn, flags_desc, w0, w1
+                        );
+                    } else {
+                        crate::pr_warn!("TRIMQ-FRAME pfn=0 (page was not present at trim)");
+                    }
+                }
             }
             return true;
         }
