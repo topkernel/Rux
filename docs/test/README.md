@@ -18,6 +18,7 @@ code when that reads better, but the numbers land in this directory.
 | [formal-verification-report.md](formal-verification-report.md) | Kani / proptest / SPIN / Miri standing | 157 harnesses · 1104 proptests |
 | [test-coverage.md](test-coverage.md) | Coverage ledger (generated) | regenerated per change |
 | [ltp-tracking.md](ltp-tracking.md) | Live LTP tracker notes | per scan |
+| [gnome-regression-retrospective.md](gnome-regression-retrospective.md) | Desktop regression: root causes, gate gap, fixes | 2026-11-06 |
 
 ## Conventions
 
