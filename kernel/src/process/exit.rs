@@ -1075,6 +1075,9 @@ pub fn do_exit(exit_code: i32) -> ! {
 
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);
+        // PI futexes: release held locks (owner-died handoff to the top
+        // waiter) and leave every PI wait queue.
+        crate::sync::futex_pi::futex_pi_exit_cleanup(current);
 
         // ===== Clean up POSIX MQ fd entries =====
         crate::ipc::posix_mq::mq_fds_cleanup(current);

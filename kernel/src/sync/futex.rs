@@ -375,6 +375,15 @@ struct Waiter {
     bucket: usize,
     /// Next waiter in hash chain
     next: Option<usize>,
+    /// FUTEX_WAIT_REQUEUE_PI marker: the uaddr2 (PI lock word) this
+    /// waiter declared, 0 for a plain FUTEX_WAIT waiter. Read by the
+    /// plain requeue (EINVAL on mismatched ops) and by cmp_requeue_pi
+    /// pairing.
+    pi_rqp_uaddr2: usize,
+    /// After cmp_requeue_pi moved this sleeper onto uaddr2's PI queue:
+    /// the PiWaiter pool index representing it there. The slot stays
+    /// allocated as the sleeper's post-wake handle until its park ends.
+    pi_requeued_to: Option<usize>,
 }
 
 // SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
@@ -1418,6 +1427,8 @@ fn alloc_waiter() -> Option<usize> {
                 park_j: 0,
                 bucket: 0,
                 next: None,
+                pi_rqp_uaddr2: 0,
+                pi_requeued_to: None,
             });
             return Some(i);
         }
@@ -1481,7 +1492,7 @@ fn pool_full_backoff() {
 }
 
 /// Calculate futex hash value
-fn futex_hash(key: &FutexKey) -> usize {
+pub fn futex_hash(key: &FutexKey) -> usize {
     // Hash by the PHYSICAL word identity when resolved (both private and
     // shared keys), else by uaddr. matches() compares the physical word
     // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
@@ -1863,6 +1874,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
                 w.next = None;
+                w.pi_rqp_uaddr2 = 0;
+                w.pi_requeued_to = None;
             }
         }
         match *head {
@@ -2357,6 +2370,19 @@ pub fn futex_requeue(
                 continue;
             }
 
+            // Reference EINVAL BEFORE touching the queue: a plain-mode
+            // REQUEUE never processes a FUTEX_WAIT_REQUEUE_PI waiter —
+            // not even for its wake slot (only plain FUTEX_WAKE may end
+            // a phase-1 requeue_pi park).
+            {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                if let Some(ref w) = *slot {
+                    if w.pi_rqp_uaddr2 != 0 {
+                        return -(EINVAL as i64);
+                    }
+                }
+            }
+
             if woken < nr_wake {
                 let task = {
                     let slot = WAITER_POOL[idx].lock_irqsave();
@@ -2384,6 +2410,18 @@ pub fn futex_requeue(
                 cur = next;
             } else if (requeue_list.len() as i32) < nr_requeue
             {
+                // Mismatched ops (reference EINVAL): this requeue moves
+                // in the PLAIN mode, but the waiter parked with
+                // FUTEX_WAIT_REQUEUE_PI semantics. Waking it is legal
+                // (plain WAKE does), moving it is not.
+                {
+                    let slot = WAITER_POOL[idx].lock_irqsave();
+                    if let Some(ref w) = *slot {
+                        if w.pi_rqp_uaddr2 != 0 {
+                            return -(EINVAL as i64);
+                        }
+                    }
+                }
                 // Same bucket — just update the key (and keep the bucket
                 // field truthful), stay in chain. Count unchanged: the
                 // waiter never left this bucket.
@@ -2454,6 +2492,19 @@ pub fn futex_requeue(
                 continue;
             }
 
+            // Reference EINVAL BEFORE touching the queue: a plain-mode
+            // REQUEUE never processes a FUTEX_WAIT_REQUEUE_PI waiter —
+            // not even for its wake slot (only plain FUTEX_WAKE may end
+            // a phase-1 requeue_pi park).
+            {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                if let Some(ref w) = *slot {
+                    if w.pi_rqp_uaddr2 != 0 {
+                        return -(EINVAL as i64);
+                    }
+                }
+            }
+
             if woken < nr_wake {
                 let task = {
                     let slot = WAITER_POOL[idx].lock_irqsave();
@@ -2481,6 +2532,17 @@ pub fn futex_requeue(
                 cur = next;
             } else if (requeue_list.len() as i32) < nr_requeue
             {
+                // Mismatched ops (reference EINVAL): plain-mode requeue
+                // of a FUTEX_WAIT_REQUEUE_PI waiter is rejected; waking
+                // it above stays legal (plain WAKE does).
+                {
+                    let slot = WAITER_POOL[idx].lock_irqsave();
+                    if let Some(ref w) = *slot {
+                        if w.pi_rqp_uaddr2 != 0 {
+                            return -(EINVAL as i64);
+                        }
+                    }
+                }
                 // Unlink from source chain.
                 if prev.is_none() {
                     *head1_ref = next;
@@ -2764,6 +2826,511 @@ pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
     }
 }
 
+
+// ===========================================================================
+// FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI (requeue_pi pair)
+//
+// The waiter parks on uaddr1's PLAIN bucket with `pi_rqp_uaddr2` set, so a
+// plain FUTEX_WAKE on uaddr1 still ends its park (phase-1 wake, no lock
+// held). CMP_REQUEUE_PI then unlinks requeued sleepers from the plain
+// chain, attaches them to uaddr2's PI queue (futex_pi engine) WITHOUT
+// waking them, and leaves the plain slot allocated as the sleeper's
+// handle (`pi_requeued_to`). Ownership of uaddr2's PI lock later reaches
+// the sleeper through the engine's handoff; its park then ends holding
+// the lock. Lock order: plain bucket -> PI bucket (INV-LOCK family).
+// ===========================================================================
+
+/// Unlink waiter `idx` from bucket `bi`'s chain (scan by identity) and
+/// drop its waiter count. Returns true when it was linked.
+unsafe fn rqp_unlink_plain(bi: usize, idx: usize) -> bool {
+    let mut head = HASH_HEADS[bi].lock_irqsave();
+    let mut prev: Option<usize> = None;
+    let mut cur = *head;
+    while let Some(c) = cur {
+        let next = {
+            let slot = WAITER_POOL[c].lock_irqsave();
+            slot.as_ref().and_then(|w| w.next)
+        };
+        if c == idx {
+            match prev {
+                None => *head = next,
+                Some(p) => {
+                    let mut ps = WAITER_POOL[p].lock_irqsave();
+                    if let Some(ref mut pw) = *ps {
+                        pw.next = next;
+                    }
+                }
+            }
+            let mut slot = WAITER_POOL[idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.next = None;
+            }
+            hb_waiters_dec(bi);
+            return true;
+        }
+        prev = Some(c);
+        cur = next;
+    }
+    false
+}
+
+/// FUTEX_WAIT_REQUEUE_PI: block on uaddr1 (value-checked like
+/// FUTEX_WAIT) until either woken there (returns 0, owns nothing) or
+/// requeued by FUTEX_CMP_REQUEUE_PI onto uaddr2's PI lock and handed
+/// ownership (returns 0 OWNING the PI lock at uaddr2).
+pub fn futex_wait_requeue_pi(
+    uaddr1: usize,
+    val: u32,
+    uaddr2: usize,
+    deadline: Option<u64>,
+    shared: bool,
+) -> i64 {
+    use crate::syscall::errno::{EAGAIN, EFAULT, EINVAL, EINTR, ETIMEDOUT};
+    if uaddr1 == uaddr2 || uaddr1 & 0x3 != 0 || uaddr2 & 0x3 != 0 {
+        return -(EINVAL as i64);
+    }
+    if unsafe {
+        crate::arch::uaccess::get_user(uaddr2 as *const u32).is_none()
+    } {
+        return -(EFAULT as i64);
+    }
+    let Some(current) = crate::sched::current() else {
+        return -(EFAULT as i64);
+    };
+    let mm = task_futex_mm_id(current);
+    let kf = if shared { FLAGS_SHARED } else { 0 };
+    let key1 = FutexKey::new_user(uaddr1, mm, kf);
+    let key2 = FutexKey::new_user(uaddr2, mm, kf);
+    let b1 = futex_hash(&key1);
+
+    let mut requeued_to: Option<usize> = None;
+
+    loop {
+        // Phase 2 (already requeued): park on the PI side only.
+        if let Some(pi_idx) = requeued_to {
+            if crate::sync::futex_pi::pi_waiter_handed(pi_idx) {
+                crate::sync::futex_pi::pi_waiter_free(pi_idx);
+                return 0; // the uaddr2 word holds our TID
+            }
+            if deadline.is_some_and(|dl| {
+                crate::drivers::timer::get_jiffies() >= dl
+            }) {
+                unsafe {
+                    crate::sync::futex_pi::pi_requeue_detach(&key2, pi_idx)
+                };
+                return -(ETIMEDOUT as i64);
+            }
+            if crate::signal::signal_pending() {
+                unsafe {
+                    crate::sync::futex_pi::pi_requeue_detach(&key2, pi_idx)
+                };
+                return -(EINTR as i64);
+            }
+            unsafe {
+                (*current)
+                    .set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+            }
+            crate::arch::cpu::restore_irq(true);
+            let wake = deadline.map(|dl| {
+                crate::timer::WakeArmed::arm_jiffy(
+                    dl,
+                    crate::sched::get_current_pid(),
+                )
+            });
+            crate::sched::schedule();
+            drop(wake);
+            continue;
+        }
+
+        // Phase 1: plain park on uaddr1 with the requeue_pi marker.
+        hb_waiters_inc(b1);
+        let mut head = HASH_HEADS[b1].lock_irqsave();
+        let uval = match unsafe {
+            crate::arch::uaccess::get_user(uaddr1 as *const u32)
+        } {
+            Some(v) => v,
+            None => {
+                hb_waiters_dec(b1);
+                return -(EFAULT as i64);
+            }
+        };
+        if uval != val {
+            hb_waiters_dec(b1);
+            return -(EAGAIN as i64);
+        }
+        if let Some(dl) = deadline {
+            if crate::drivers::timer::get_jiffies() >= dl {
+                hb_waiters_dec(b1);
+                return -(ETIMEDOUT as i64);
+            }
+        }
+        let waiter_idx = match alloc_waiter() {
+            Some(i) => i,
+            None => {
+                drop(head);
+                hb_waiters_dec(b1);
+                pool_full_backoff();
+                continue;
+            }
+        };
+        {
+            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.key = key1;
+                w.task = current;
+                w.bitset = FUTEX_BITSET_MATCH_ANY;
+                w.woken = false;
+                w.park_j = crate::drivers::timer::get_jiffies();
+                w.bucket = b1;
+                w.next = None;
+                w.pi_rqp_uaddr2 = uaddr2;
+                w.pi_requeued_to = None;
+            }
+        }
+        match *head {
+            None => *head = Some(waiter_idx),
+            Some(first) => {
+                let mut tail = first;
+                loop {
+                    let next = {
+                        let slot = WAITER_POOL[tail].lock_irqsave();
+                        slot.as_ref().and_then(|w| w.next)
+                    };
+                    match next {
+                        None => break,
+                        Some(n) => tail = n,
+                    }
+                }
+                let mut ts = WAITER_POOL[tail].lock_irqsave();
+                if let Some(ref mut t) = *ts {
+                    t.next = Some(waiter_idx);
+                }
+            }
+        }
+        unsafe {
+            (*current)
+                .futex_wait_enqueued
+                .store(true, core::sync::atomic::Ordering::Release);
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        drop(head);
+        crate::arch::cpu::restore_irq(true);
+        let wake = deadline.map(|dl| {
+            crate::timer::WakeArmed::arm_jiffy(
+                dl,
+                crate::sched::get_current_pid(),
+            )
+        });
+        crate::sched::schedule();
+        drop(wake);
+
+        // Park ended: plain wake, requeue handoff, or interrupt.
+        let (woken, rq) = {
+            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
+            match slot.as_ref() {
+                Some(w) => (w.woken, w.pi_requeued_to),
+                None => (true, None), // freed by exit cleanup
+            }
+        };
+        if woken {
+            free_waiter(waiter_idx);
+            return 0; // woken on uaddr1: no lock acquired
+        }
+        if let Some(pi_idx) = rq {
+            requeued_to = Some(pi_idx);
+            free_waiter(waiter_idx);
+            // The PI engine recorded the handoff state; the plain slot's
+            // duty ends here (the sleeper tracks pi_idx locally).
+            continue;
+        }
+        // Neither woken nor requeued: timeout, signal, or spurious.
+        if deadline.is_some_and(|dl| {
+            crate::drivers::timer::get_jiffies() >= dl
+        }) {
+            unsafe { rqp_unlink_plain(b1, waiter_idx) };
+            free_waiter(waiter_idx);
+            return -(ETIMEDOUT as i64);
+        }
+        if crate::signal::signal_pending() {
+            unsafe { rqp_unlink_plain(b1, waiter_idx) };
+            free_waiter(waiter_idx);
+            return -(EINTR as i64);
+        }
+        // Spurious: leave the queue and re-run phase 1 (value re-check
+        // included, plain FUTEX_WAIT parity).
+        unsafe { rqp_unlink_plain(b1, waiter_idx) };
+        free_waiter(waiter_idx);
+    }
+}
+
+/// FUTEX_CMP_REQUEUE_PI (requeuer side). ABI slots: val = nr_wake
+/// (must be 1), args[3] = nr_requeue, val3 = the uaddr1 compare value.
+/// Wakes one uaddr1 waiter (sync wake, no requeue for it), moves up to
+/// nr_requeue FUTEX_WAIT_REQUEUE_PI waiters onto uaddr2's PI queue
+/// without waking them (the first may receive the lock directly when
+/// uaddr2 is uncontended — the proxy-trylock handoff). Returns the
+/// number of tasks woken or requeued.
+pub fn futex_cmp_requeue_pi(
+    uaddr1: usize,
+    nr_wake: i32,
+    uaddr2: usize,
+    nr_requeue: i32,
+    cmpval: u32,
+    shared: bool,
+) -> i64 {
+    use crate::syscall::errno::{
+        EAGAIN, EDEADLK, EFAULT, EINVAL,
+    };
+    if nr_wake != 1 {
+        return -(EINVAL as i64);
+    }
+    if uaddr1 == uaddr2
+        || uaddr1 & 0x3 != 0
+        || uaddr2 & 0x3 != 0
+        || nr_requeue < 0
+    {
+        return -(EINVAL as i64);
+    }
+    let word2 = match unsafe {
+        crate::arch::uaccess::get_user(uaddr2 as *const u32)
+    } {
+        Some(v) => v,
+        None => return -(EFAULT as i64),
+    };
+    let Some(current) = crate::sched::current() else {
+        return -(EFAULT as i64);
+    };
+    let mytid = unsafe { (*current).pid() } as u32;
+    // NOTE: the requeuer MAY hold uaddr2 (the canonical condvar->mutex
+    // broadcast locks the PI mutex, requeues the sleepers behind
+    // itself, then unlocks into the top waiter) — no caller-owns gate
+    // here; the reference has none either.
+
+    let mm = task_futex_mm_id(current);
+    let kf = if shared { FLAGS_SHARED } else { 0 };
+    let key1 = FutexKey::new_user(uaddr1, mm, kf);
+    let key2 = FutexKey::new_user(uaddr2, mm, kf);
+    let b1 = futex_hash(&key1);
+
+    // Fixed order: plain bucket -> PI bucket.
+    let mut head = HASH_HEADS[b1].lock_irqsave();
+    let mut pi_bkt = crate::sync::futex_pi::pi_bucket_lock(&key2);
+
+    // Compare under the lock (CMP semantics parity).
+    let uval = match unsafe {
+        crate::arch::uaccess::get_user(uaddr1 as *const u32)
+    } {
+        Some(v) => v,
+        None => return -(EFAULT as i64),
+    };
+    if uval != cmpval {
+        return -(EAGAIN as i64);
+    }
+
+    // Collect the move set: pi_rqp waiters targeting THIS uaddr2, in
+    // chain order. A plain waiter occupying the move set is the
+    // mismatched-ops EINVAL (reference futex_requeue pi pairing).
+    let mut move_set: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    let mut wake_idx: Option<usize> = None;
+    let mut saw_plain_in_set = false;
+    {
+        let mut cur = *head;
+        while let Some(idx) = cur {
+            let (rqp, next) = {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                match slot.as_ref() {
+                    Some(w) => (w.pi_rqp_uaddr2, w.next),
+                    None => (0, None),
+                }
+            };
+            if rqp == uaddr2 {
+                if wake_idx.is_none() {
+                    wake_idx = Some(idx); // sync-wake the first
+                } else if (move_set.len() as i32) < nr_requeue {
+                    move_set.push(idx);
+                } else {
+                    break;
+                }
+            } else if rqp == 0 && wake_idx.is_some() {
+                // plain waiter inside the move window
+                if (move_set.len() as i32) < nr_requeue {
+                    saw_plain_in_set = true;
+                    break;
+                }
+            }
+            cur = next;
+        }
+    }
+    if wake_idx.is_none() || saw_plain_in_set {
+        // Nothing to pair with (or mixed queue): reference EINVAL.
+        return -(EINVAL as i64);
+    }
+
+    let mut ret: i64 = 0;
+    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+
+    // 1. Sync-wake the first waiter on uaddr1 (it owns nothing).
+    if let Some(idx) = wake_idx {
+        let (task, next) = {
+            let slot = WAITER_POOL[idx].lock_irqsave();
+            match slot.as_ref() {
+                Some(w) => (w.task, w.next),
+                None => (core::ptr::null_mut(), None),
+            }
+        };
+        // unlink from chain
+        {
+            let mut prev: Option<usize> = None;
+            let mut cur = *head;
+            while let Some(c) = cur {
+                let n = {
+                    let slot = WAITER_POOL[c].lock_irqsave();
+                    slot.as_ref().and_then(|w| w.next)
+                };
+                if c == idx {
+                    match prev {
+                        None => *head = n,
+                        Some(p) => {
+                            let mut ps = WAITER_POOL[p].lock_irqsave();
+                            if let Some(ref mut pw) = *ps {
+                                pw.next = n;
+                            }
+                        }
+                    }
+                    break;
+                }
+                prev = Some(c);
+                cur = n;
+            }
+        }
+        {
+            let mut slot = WAITER_POOL[idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.woken = true;
+                w.next = None;
+                let _ = next;
+            }
+        }
+        hb_waiters_dec(b1);
+        if !task.is_null() {
+            wake_list.push(task);
+        }
+        ret += 1;
+    }
+
+    // 2. Move the rest onto uaddr2's PI queue without waking them.
+    let word2_now = unsafe {
+        crate::arch::uaccess::get_user(uaddr2 as *const u32)
+    };
+    let mut word2_free = matches!(word2_now, Some(v) if v & 0x3fff_ffff == 0);
+    for idx in move_set {
+        let task = {
+            let slot = WAITER_POOL[idx].lock_irqsave();
+            slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
+        };
+        if task.is_null() {
+            continue;
+        }
+        // Unlink from the plain chain.
+        {
+            let mut prev: Option<usize> = None;
+            let mut cur = *head;
+            while let Some(c) = cur {
+                let n = {
+                    let slot = WAITER_POOL[c].lock_irqsave();
+                    slot.as_ref().and_then(|w| w.next)
+                };
+                if c == idx {
+                    match prev {
+                        None => *head = n,
+                        Some(p) => {
+                            let mut ps = WAITER_POOL[p].lock_irqsave();
+                            if let Some(ref mut pw) = *ps {
+                                pw.next = n;
+                            }
+                        }
+                    }
+                    break;
+                }
+                prev = Some(c);
+                cur = n;
+            }
+        }
+        hb_waiters_dec(b1);
+
+        let tid = unsafe { (*task).pid() } as u32;
+        let mut handed_direct = false;
+        let owner_tid;
+        if word2_free {
+            // Proxy trylock: acquire uaddr2 FOR this waiter directly
+            // (reference futex_proxy_trylock_atomic shape).
+            let w2 = unsafe {
+                crate::arch::uaccess::get_user(uaddr2 as *const u32)
+            };
+            match w2 {
+                Some(v) if v & 0x3fff_ffff == 0 => {
+                    let ok = unsafe {
+                        crate::arch::uaccess::put_user(
+                            uaddr2 as *mut u32,
+                            tid,
+                        )
+                    };
+                    if ok {
+                        handed_direct = true;
+                        owner_tid = tid;
+                    } else {
+                        return -(EFAULT as i64);
+                    }
+                }
+                Some(v) => {
+                    word2_free = false;
+                    owner_tid = v & 0x3fff_ffff;
+                }
+                None => return -(EFAULT as i64),
+            }
+        } else {
+            owner_tid = word2_now
+                .map(|v| v & 0x3fff_ffff)
+                .unwrap_or(0);
+        }
+
+        let pi_idx = unsafe {
+            crate::sync::futex_pi::pi_requeue_attach(
+                &mut pi_bkt, &key2, owner_tid, task, handed_direct,
+            )
+        };
+        let Some(pi_idx) = pi_idx else {
+            // Pool exhausted: leave this waiter parked on uaddr1 — it
+            // stays a valid plain waiter; report the partial count.
+            break;
+        };
+        {
+            let mut slot = WAITER_POOL[idx].lock_irqsave();
+            if let Some(ref mut w) = *slot {
+                w.pi_requeued_to = Some(pi_idx);
+                w.next = None;
+            }
+        }
+        ret += 1;
+    }
+
+    drop(pi_bkt);
+    drop(head);
+    crate::arch::cpu::restore_irq(true);
+    // Woken-flag-before-wake ordering (C8): flags stored above under
+    // the locks; wake now that the locks are gone.
+    for task in wake_list {
+        if !task.is_null() {
+            let pid = unsafe { (*task).pid() };
+            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+            if fresh == task {
+                Task::wake_up(task);
+            }
+        }
+    }
+    ret
+}
+
 /// do_futex - main dispatch function
 pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _val2: u32, val3: u32) -> i64 {
     let flags = futex_to_flags(op as u32);
@@ -3030,10 +3597,49 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
-        _ => {
-            // PI-related operations not yet supported
-            -ENOSYS as i64
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
+            // PI timeouts are absolute (FUTEX_WAIT_BITSET convention).
+            match futex_parse_timeout(_timeout, true) {
+                Ok(dl) => crate::sync::futex_pi::futex_lock_pi(
+                    uaddr,
+                    dl,
+                    flags & FLAGS_SHARED != 0,
+                ),
+                Err(e) => -(e as i64),
+            }
         }
+        FUTEX_TRYLOCK_PI => crate::sync::futex_pi::futex_trylock_pi(
+            uaddr,
+            flags & FLAGS_SHARED != 0,
+        ),
+        FUTEX_UNLOCK_PI => crate::sync::futex_pi::futex_unlock_pi(
+            uaddr,
+            flags & FLAGS_SHARED != 0,
+        ),
+        FUTEX_WAIT_REQUEUE_PI => {
+            match futex_parse_timeout(_timeout, true) {
+                Ok(dl) => futex_wait_requeue_pi(
+                    uaddr,
+                    val,
+                    uaddr2 as usize,
+                    dl,
+                    flags & FLAGS_SHARED != 0,
+                ),
+                Err(e) => -(e as i64),
+            }
+        }
+        FUTEX_CMP_REQUEUE_PI => {
+            // ABI: val = nr_wake, args[3] = nr_requeue, val3 = cmpval.
+            futex_cmp_requeue_pi(
+                uaddr,
+                val as i32,
+                uaddr2 as usize,
+                _timeout as i32,
+                val3,
+                flags & FLAGS_SHARED != 0,
+            )
+        }
+        _ => -ENOSYS as i64,
     }
 }
 
