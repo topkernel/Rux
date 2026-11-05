@@ -4329,3 +4329,57 @@ SMP2 KVM):
 - Gates: x3 builds rc=0, make test riscv64 ALL TESTS PASSED
   (run/r41v7-maketest.log).
 Roll continues: boot 8 (r41v8) started 10:40:23 on 14f7dcf2.
+
+## 46TH SESSION ADDENDUM 4 — TIMER-EXPIRY DELIVERY: TWO REAL BUGS FOUND + FIXED (user correction, r41v15 power_host class)
+
+The user's correction was right: a sleeping task whose timeout never
+fires IS a kernel bug. Two distinct bugs found, both fixed, both
+verified live. Plus the ticktrap instrument family that adjudicates
+every parked timed sleeper at 1 Hz.
+
+### BUG 1 (futex class — the 44th's "60s fto never fired, parked 831s")
+futex_wait_timeout armed its wake as
+  deadline.map(|dl| arm_jiffy(dl, pid))
+which is Option<Option<WakeArmed>> — and the R32 pool-exhaustion guard
+'deadline.is_some() && wake.is_none()' tested the OUTER layer: a
+tautology, dead code since the arch-s5 typed-guard migration changed
+arm_jiffy's return from raw id (0=fail) to Option. On a full 1024-slot
+wheel pool the inner None was swallowed and schedule() parked the timed
+wait with NO waker at all. Fix (1caac2b0): flatten with and_then; R32
+now unlinks and returns -ENOMEM as designed. All other arm sites use
+the raw id contract (id==0 checked) — audited clean.
+
+### BUG 2 (nanosleep class — r41v15 power_host, 580+s park in sys=35)
+The sleep itself is a LEGITIMATE ~6s poll sleep inside the HDF
+GET_SYSTEM_ABILITY retry handler (dur now visible in the shadow). The
+eternal park came from nanosleep_impl's waker-less YIELD branch: its
+comment promised "stay runnable and yield", but a stale INTERRUPTIBLE
+state leaking into that schedule() turned the yield into an eternal
+park (sys=35 frame, INTERRUPTIBLE, no wheel entry, nothing to fire).
+Fix (d0684744): force state RUNNING immediately before the yield
+schedule() — the invariant the comment always claimed. VERIFIED LIVE:
+v17 (1caac2b0, no fix): power_host parked to t=602+. v18 (d0684744+):
+power_host's txn completes at 6.05s (SLOW-TXN final row); all sys=35
+TXN-HANG rows this boot are transient 1.6-1.9s handler sleeps. The
+exact leak path into the else branch is an open note for the sched lane
+(the empirical fix stands regardless: the yield can no longer park).
+
+### ticktrap instruments (r9 precedent: anomaly-gated, no new switch)
+- Task timed-sleep shadow (deadline/kind/timer_id/armed_j/dur_ms),
+  stamped UNCONDITIONALLY at arm (nanosleep hres + futex jiffy),
+  Drop-cleared, zeroed for fork children (R68a class).
+- 1 Hz TIMEDSLEEP-PARK: parked timed sleepers (hres >= 2 s, jiffy
+  >= 30 s) print duration + deadline past/future + wheel entry state.
+  Healthy population now visible: 10 s/295 s/2 h/16 h sleeps (userspace
+  durations, kernel honors them — the r41v15 "580s park" adjudication:
+  NOT a huge-duration case, it was BUG 2).
+- TIMEDSLEEP-GHOST: parked under a nanosleep-class entry frame with NO
+  shadow — frame/syscall mismatch class, with saved-sp kernel-text
+  words for offline symbolization (0 hits on the fixed kernels).
+- TIMER-WAKE-DROPPED: a delivered Action::Wake that did not stick,
+  anomaly states only (RUNNING-target drops are the benign
+  recheck-window class — r41v17 showed one phase per busy poller).
+
+Gates at every step: x3 builds rc=0, make test riscv64 ALL TESTS
+PASSED (r41v17/v19/v19b/v20b logs). Commits 1caac2b0, 972de9b0,
+d0684744, 4aa30767, d522e16f — all pushed. Roll continues on d522e16f.
