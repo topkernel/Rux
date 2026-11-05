@@ -591,32 +591,41 @@ impl MmStruct {
         let addr_us = addr.as_usize();
         let end_addr = addr_us + aligned_size;
 
-        // VMA-lock convoy bound (twin of the x86_64 fix; the OH
-        // service-graph crawl): the old shape collected the surgery for
-        // the WHOLE range and ran the entire PTE-zap walk under ONE
-        // vma_write() hold — a multi-MB unmap parked every same-mm VMA
-        // user (sys_brk above all: VMA-surgery only, so it waits on
-        // exactly this lock) for the full zap PLUS whatever scheduler
-        // starvation the holder suffered while holding (the 100s-class
-        // brk convoy). The reference kernel bounds its equivalent hold by
-        // detaching per-VMA and keeping its zap loops resched-friendly.
-        // Here the surgery is CHUNKED: each iteration removes at most
-        // MUNMAP_CHUNK_BYTES of ONE VMA — that piece's surgery AND its
-        // PTE zap still share ONE guard (mm-audit rule below) — then the
-        // guard is dropped and cond_resched() yields the CPU; the tree
-        // walk is RE-DERIVED from scratch each iteration because the
-        // tree can change under us between holds.
+        // Detach-ALL-then-zap (2026-11-05, twin of the x86_64 churn-race
+        // fix 5b4a4bc7): the old per-chunk shape re-derived the tree
+        // EVERY 256KB chunk (restarting from addr_us each time) and
+        // processed whatever VMA it found overlapping the range. Between
+        // chunk guards a racing same-mm mmap could legally land in the
+        // transient tree hole INSIDE this still-being-processed range —
+        // and the NEXT chunk's surgery then treated the FRESH VMA as an
+        // unprocessed piece of THIS munmap and DELETED it. The owner's
+        // first touch faulted with vma=NONE (x86_64 mmap-witness probes;
+        // the arena-churn / fontconfig crash family — malloc arenas are
+        // 64KB-1MB per call, exactly this churn class).
         //
-        // mm-audit (unchanged invariant): a racing mmap may only ever
-        // land in a FULLY-CONSISTENT hole. At every guard drop, every
-        // page in the munmap range is either (VMA present AND PTEs
-        // live) — the unprocessed piece — or (VMA gone AND PTEs
-        // cleared) — a processed chunk. Releasing the guard with live
-        // PTEs under a VMA-free hole let a racing mmap's demand-fault
-        // installs interleave with the zap walk (silently zeroed or
-        // half-torn fresh mappings); the per-chunk surgery+zap pairing
-        // keeps the two from ever parting. unmap_pages takes no VMA lock
-        // (PTE lock only, nested one-way), so the hold is safe.
+        // This pass detaches EVERY piece in [addr, end) under ONE
+        // vma_write() guard (the reference does its whole tree surgery
+        // under one mmap_lock hold); the tree is FINAL for the range
+        // when the guard drops, so a racing mmap lands in a permanent
+        // hole. The PTE zap runs INSIDE the same guard for ranges up to
+        // SINGLE_GUARD_ZAP_LIMIT (the whole malloc/arena churn class) —
+        // a racing fresh mapping can never install onto pages whose old
+        // PTEs are still pending there.
+        //
+        // Giant ranges (image teardown, 100MB-class) keep the chunked
+        // deferred path below: the write-lock hold stays O(surgery),
+        // never O(pages) — the VMA-lock convoy bound (the 100s-class
+        // brk-convoy lesson: sys_brk waits on exactly this lock for
+        // VMA-surgery only). Residual window, documented: for giant
+        // ranges a racing fresh mapping onto pages whose old PTEs are
+        // not yet zapped can have a fresh PTE cleared by the deferred
+        // zap; the fresh owner's demand fault re-fills the page (anon
+        // zero-fill / page-cache refill) — the same convergence the
+        // reference's batched TLB gather has at its boundaries.
+        //
+        // unmap_pages takes no VMA lock (PTE lock only, nested
+        // one-way), so the holds are safe; the write lock is never held
+        // across schedule().
         //
         // Pin-table discipline (vm_file semantics): a split FILE VMA's
         // tail starts at a new address, so the pin keyed at the original
@@ -624,84 +633,117 @@ impl MmStruct {
         // start and drop the original key (vm_file follows the VMA, not
         // the address).
         const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
+        const SINGLE_GUARD_ZAP_LIMIT: usize = 4 << 20;
 
-        loop {
+        let mut zap_pieces: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+        let mut total_zap_bytes = 0usize;
+        {
             let mut vma_mgr = self.vma_write();
 
-            // First VMA overlapping [addr_us, end_addr): the one
-            // CONTAINING addr, else the first starting inside the range.
-            // Re-derived every iteration — revalidation after the relock.
-            let hit = vma_mgr
-                .last_at_or_before(PageVirtAddr::new(addr_us))
-                .filter(|v| v.end().as_usize() > addr_us)
-                .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(addr_us)))
-                .filter(|v| v.start().as_usize() < end_addr);
-            let Some(vma) = hit else {
-                break;
-            };
+            let mut cur = addr_us;
+            while cur < end_addr {
+                // First VMA overlapping [cur, end_addr): the one
+                // CONTAINING cur, else the first one starting inside the
+                // remaining range.
+                let hit = vma_mgr
+                    .last_at_or_before(PageVirtAddr::new(cur))
+                    .filter(|v| v.end().as_usize() > cur)
+                    .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(cur)))
+                    .filter(|v| v.start().as_usize() < end_addr);
+                let vma = match hit {
+                    Some(v) => v,
+                    None => break,
+                };
 
-            let vkey = vma.start();
-            let vs = vma.start().as_usize();
-            let ve = vma.end().as_usize();
-            let vflags = vma.flags();
-            let vtype = vma.vma_type();
-            let vorigin = vma.origin();
-            let vfd = vma.file_fd();
-            let vfsz = vma.file_size();
-            let voff = vma.offset();
+                let vkey = vma.start();
+                let vs = vma.start().as_usize();
+                let ve = vma.end().as_usize();
+                let vflags = vma.flags();
+                let vtype = vma.vma_type();
+                let vorigin = vma.origin();
+                let vfd = vma.file_fd();
+                let vfsz = vma.file_size();
+                let voff = vma.offset();
 
-            let seg_start = vs.max(addr_us);
-            let seg_end = ve.min(end_addr);
-            let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
+                let seg_start = vs.max(addr_us);
+                let seg_end = ve.min(end_addr);
 
-            // The pages of this piece leave the mapping: release their
-            // virtual-size charge. Preserved pieces stay charged.
-            self.release_unmapped_pages(vs, ve, seg_start, chunk_end);
+                // The pages of this piece leave the mapping: release
+                // their virtual-size charge. Preserved pieces stay
+                // charged.
+                self.release_unmapped_pages(vs, ve, seg_start, seg_end);
 
-            let pinned = self.get_vma_file(vs);
-            let _ = vma_mgr.remove(vkey);
-            self.unpin_vma_file(vs);
-            if vs < seg_start {
-                let mut head = Vma::new(
-                    crate::mm::page::VirtAddr::new(vs),
-                    crate::mm::page::VirtAddr::new(seg_start),
-                    vflags,
-                );
-                head.set_type(vtype);
-                // Split-preserved piece: keep the original origin.
-                head.set_origin(vorigin);
-                head.set_file_fd(vfd);
-                head.set_file_size(vfsz);
-                head.set_offset(voff);
-                let _ = vma_mgr.add(head);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(vs, f);
+                let pinned = self.get_vma_file(vs);
+                let _ = vma_mgr.remove(vkey);
+                self.unpin_vma_file(vs);
+                if vs < seg_start {
+                    let mut head = Vma::new(
+                        crate::mm::page::VirtAddr::new(vs),
+                        crate::mm::page::VirtAddr::new(seg_start),
+                        vflags,
+                    );
+                    head.set_type(vtype);
+                    // Split-preserved piece: keep the original origin.
+                    head.set_origin(vorigin);
+                    head.set_file_fd(vfd);
+                    head.set_file_size(vfsz);
+                    head.set_offset(voff);
+                    let _ = vma_mgr.add(head);
+                    if let Some(f) = pinned.clone() {
+                        self.pin_vma_file(vs, f);
+                    }
                 }
-            }
-            if chunk_end < ve {
-                let mut tail = Vma::new(
-                    crate::mm::page::VirtAddr::new(chunk_end),
-                    crate::mm::page::VirtAddr::new(ve),
-                    vflags,
-                );
-                tail.set_type(vtype);
-                // Split-preserved piece: keep the original origin.
-                tail.set_origin(vorigin);
-                tail.set_file_fd(vfd);
-                tail.set_file_size(vfsz);
-                tail.set_offset(voff + (chunk_end - vs));
-                let _ = vma_mgr.add(tail);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(chunk_end, f);
+                if seg_end < ve {
+                    let mut tail = Vma::new(
+                        crate::mm::page::VirtAddr::new(seg_end),
+                        crate::mm::page::VirtAddr::new(ve),
+                        vflags,
+                    );
+                    tail.set_type(vtype);
+                    // Split-preserved piece: keep the original origin.
+                    tail.set_origin(vorigin);
+                    tail.set_file_fd(vfd);
+                    tail.set_file_size(vfsz);
+                    tail.set_offset(voff + (seg_end - vs));
+                    let _ = vma_mgr.add(tail);
+                    if let Some(f) = pinned.clone() {
+                        self.pin_vma_file(seg_end, f);
+                    }
                 }
+                zap_pieces.push((seg_start, seg_end));
+                total_zap_bytes += seg_end - seg_start;
+                cur = seg_end;
             }
 
-            self.unmap_pages(PageVirtAddr::new(seg_start), chunk_end - seg_start)?;
+            if total_zap_bytes <= SINGLE_GUARD_ZAP_LIMIT {
+                for (zs, ze) in zap_pieces.iter() {
+                    let mut z = *zs;
+                    while z < *ze {
+                        let chunk_end = z + MUNMAP_CHUNK_BYTES.min(*ze - z);
+                        self.unmap_pages(PageVirtAddr::new(z), chunk_end - z)?;
+                        z = chunk_end;
+                    }
+                }
+                zap_pieces.clear();
+            }
+            drop(vma_mgr); // the tree is FINAL for this range from here
+        }
 
-            // Drop the guard BEFORE yielding: the write lock must never
-            // be held across schedule().
-            drop(vma_mgr);
-            crate::sched::cond_resched();
+        // Deferred-zap phase (giant ranges only): no tree access, bounded
+        // chunks, handoffs between them. unmap_pages takes only the PTE
+        // lock (one-way nest).
+        for (zs, ze) in zap_pieces {
+            let mut z = zs;
+            while z < ze {
+                let chunk_end = z + MUNMAP_CHUNK_BYTES.min(ze - z);
+                self.unmap_pages(PageVirtAddr::new(z), chunk_end - z)?;
+                z = chunk_end;
+                // Same-mm racers keep the handoff the old per-chunk guard
+                // drop provided; the syscall-exit need_resched check
+                // covers preemption (lb339 lesson: no explicit yield
+                // while the PTE lock is held).
+                crate::sched::cond_resched();
+            }
         }
 
         Ok(())
