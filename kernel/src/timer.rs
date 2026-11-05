@@ -73,6 +73,7 @@ static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
 /// re-raises the vector through the interrupt path.
 pub fn timer_softirq_work_pending() -> bool {
     TIMER_EVER_ARMED.load(Ordering::Acquire)
+
         || HRES_NEXT.load(Ordering::Acquire) <= crate::drivers::timer::read_time()
         // perf events: an armed sampler needs this softirq every tick
         // to charge the IRQ-stashed samples (perf::softirq_tick). One
@@ -82,6 +83,67 @@ pub fn timer_softirq_work_pending() -> bool {
 
 fn mark_timer_armed() {
     TIMER_EVER_ARMED.store(true, Ordering::Release);
+}
+
+// ==================== Timed-sleep shadow (ticktrap, r41v17) ==============
+
+/// Timed-sleep shadow kinds (`Task::timed_sleep_kind`).
+pub const TSLEEP_NONE: u32 = 0;
+/// nanosleep/clock_nanosleep class: deadline is absolute time-CSR ticks,
+/// wheel registration is an hres one-shot.
+pub const TSLEEP_HRES: u32 = 1;
+/// futex/poll timeout class: deadline is absolute jiffies, wheel
+/// registration is a jiffy one-shot.
+pub const TSLEEP_JIFFY: u32 = 2;
+
+/// RAII shadow for a scoped timed wait: stamps the current task's
+/// timed-sleep fields at construction, clears them at scope exit (Drop
+/// runs on every early return). The 1 Hz heartbeat reads the shadow to
+/// adjudicate parked timed sleepers — deadline passed with no wheel
+/// entry is a lost fire/wake; deadline far future is a long (or
+/// garbage-duration) sleep; entry present and not due is healthy.
+pub struct TimedSleepShadow;
+
+impl TimedSleepShadow {
+    pub fn new(kind: u32, deadline: u64, timer_id: u64) -> Option<Self> {
+        let t = crate::sched::current()?;
+        // SAFETY: t is the currently running task (we are it).
+        unsafe {
+            (*t).timed_sleep_deadline.store(deadline, Ordering::Release);
+            (*t).timed_sleep_kind.store(kind, Ordering::Release);
+            (*t).timed_sleep_timer_id.store(timer_id, Ordering::Release);
+            (*t).timed_sleep_armed_j
+                .store(crate::drivers::timer::get_jiffies() as u32, Ordering::Release);
+        }
+        Some(TimedSleepShadow)
+    }
+
+    /// Refresh the live registration id after a re-arm (nanosleep's
+    /// belt-and-braces re-arm replaces the id mid-wait; the heartbeat
+    /// must name the LIVE entry).
+    pub fn refresh_id(&self, timer_id: u64) {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: t is the currently running task (we are it).
+            unsafe {
+                (*t).timed_sleep_timer_id.store(timer_id, Ordering::Release);
+            }
+        }
+    }
+}
+
+impl Drop for TimedSleepShadow {
+    fn drop(&mut self) {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: t is the currently running task (we are it). A
+            // drop on a task switch away cannot happen: the guard lives
+            // in the wait function's own frame, above schedule().
+            unsafe {
+                (*t).timed_sleep_kind.store(TSLEEP_NONE, Ordering::Release);
+                (*t).timed_sleep_deadline.store(0, Ordering::Release);
+                (*t).timed_sleep_timer_id.store(0, Ordering::Release);
+            }
+        }
+    }
 }
 
 /// Read the earliest outstanding high-resolution deadline (u64::MAX = none).
@@ -519,6 +581,110 @@ pub fn timer_softirq_handler(_nr: usize) {
                     }
                 }
             }
+            // r41v17 ticktrap: the OTHER branch of the r9 dichotomy —
+            // "absence + a parked waiter". Every task parked in a timed
+            // sleep (shadow kind set, state sleeping, age >= 2 s) gets
+            // one line naming its loss branch:
+            //   deadline PASSSED + wheel entry absent -> lost fire/wake
+            //     (the futex R32 class, or a wheel-side loss);
+            //   deadline in the FUTURE (entry absent or present) -> an
+            //     intended-or-garbage LONG sleep (r41v15 power_host
+            //     adjudication);
+            //   entry present + not due -> healthy.
+            // No user memory is read (the bwr_park_audit lesson). Same
+            // r9 precedent: anomaly-gated, unconditional, globally
+            // rate-limited 1/s, pid-deduped 60 s, max 4 lines/beat.
+            {
+                struct TtRow {
+                    pid: u32,
+                    kind: u32,
+                    armed_j: u32,
+                    deadline: u64,
+                    timer_id: u64,
+                }
+                let mut rows: [Option<TtRow>; 4] = [None, None, None, None];
+                let nfound = crate::sched::for_each_task_try(|t| {
+                    if t.is_null() {
+                        return;
+                    }
+                    // SAFETY: diagnostic reads of a live task pinned by
+                    // the pid-hash walk.
+                    let (kind, sleeping) = unsafe {
+                        (
+                            (*t).timed_sleep_kind.load(Ordering::Acquire),
+                            (*t).state().is_sleeping(),
+                        )
+                    };
+                    if kind == TSLEEP_NONE || !sleeping {
+                        return;
+                    }
+                    // SAFETY: same diagnostic-read contract.
+                    let (pid, armed_j, deadline, tid) = unsafe {
+                        (
+                            (*t).pid(),
+                            (*t).timed_sleep_armed_j.load(Ordering::Acquire),
+                            (*t).timed_sleep_deadline.load(Ordering::Acquire),
+                            (*t).timed_sleep_timer_id.load(Ordering::Acquire),
+                        )
+                    };
+                    if current.wrapping_sub(armed_j as u64) < 200 {
+                        return; // transient (< 2 s) timed waits: healthy
+                    }
+                    for r in rows.iter_mut() {
+                        if r.is_none() {
+                            *r = Some(TtRow { pid, kind, armed_j, deadline, timer_id: tid });
+                            break;
+                        }
+                    }
+                });
+                if nfound > 0 {
+                    let snaps = snapshot_timers();
+                    let mut printed = 0;
+                    for r in rows.iter().flatten() {
+                        if printed >= 4 || !ww_latefire_budget_ok() {
+                            break;
+                        }
+                        // Wheel state for this sleeper: the live
+                        // registration (by id) or any wake entry
+                        // targeting the pid.
+                        let mut wheel = "none";
+                        'w: for s in snaps.iter() {
+                            if (r.timer_id != 0 && s.id == r.timer_id)
+                                || (s.wake_pid == r.pid && s.wake_pid != 0)
+                            {
+                                wheel = "entry";
+                                break 'w;
+                            }
+                        }
+                        let (domain, passed) = if r.kind == TSLEEP_HRES {
+                            ("hres", now_time >= r.deadline)
+                        } else {
+                            ("jiffy", current >= r.deadline)
+                        };
+                        let (rel_ms, rel_txt) = if r.kind == TSLEEP_HRES {
+                            let d = now_time as i64 - r.deadline as i64;
+                            (
+                                d.abs() * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ as i64,
+                                if d >= 0 { "past" } else { "future" },
+                            )
+                        } else {
+                            let d = current as i64 - r.deadline as i64;
+                            (d.abs() * 1000 / crate::config::KERNEL_HZ as i64, if d >= 0 { "past" } else { "future" })
+                        };
+                        printed += 1;
+                        crate::pr_err!(
+                            "TIMEDSLEEP-PARK pid={} kind={} age_s={} deadline_{}ms_{} wheel={} timer_id={:#x}",
+                            r.pid,
+                            domain,
+                            current.wrapping_sub(r.armed_j as u64) / 100,
+                            rel_ms,
+                            rel_txt,
+                            wheel,
+                            r.timer_id
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -747,7 +913,32 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                 // last unpinned cross-CPU wake path.
                 let task = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
                 if !task.is_null() {
-                    crate::sched::wake_up_process(task);
+                    let ok = crate::sched::wake_up_process(task);
+                    // r41v17 ticktrap: a delivered timer wake that did not
+                    // stick — the fire happened, the entry left the wheel,
+                    // and the target did not end up woken. If the target
+                    // was RUNNING at delivery (the sleeper's own recheck
+                    // window) this drop is recoverable by the waiter's
+                    // protocol; if it was SLEEPING the wake was refused
+                    // and the sleeper may be stranded — the line names
+                    // which, live.
+                    if !ok && ww_latefire_budget_ok() {
+                        // SAFETY: diagnostic reads of the pinned task.
+                        let (st, on_rq, pk) = unsafe {
+                            (
+                                (*task).state().bits(),
+                                (*task).sched_entity().on_rq.load(Ordering::Relaxed),
+                                (*task).pick_state(),
+                            )
+                        };
+                        crate::pr_err!(
+                            "TIMER-WAKE-DROPPED pid={} state={:#x} on_rq={} pk={} (timer fired, wake did not stick)",
+                            pid,
+                            st,
+                            on_rq,
+                            pk
+                        );
+                    }
                     crate::process::task::Task::task_put(task);
                 } else if ww_latefire_budget_ok() {
                     WW_PIDMISS_N.fetch_add(1, Ordering::Relaxed);
