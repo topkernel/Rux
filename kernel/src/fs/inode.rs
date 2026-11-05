@@ -328,6 +328,15 @@ pub struct Inode {
     pub dir_mut_gen: AtomicU64,
     /// Inode state
     pub state: Spinlock<InodeState>,
+    /// (perf-gap-hunt) Live open file descriptions on this inode — the
+    /// i_readcount/i_writecount analogue as plain per-inode atomics.
+    /// The lease/lock bookkeeping used to consult a global BTreeMap
+    /// under one lock per open AND per File drop AND per execve
+    /// ETXTBSY check; the counts are per-inode by nature, so they live
+    /// here (updated from File::set_inode / File::drop) and the global
+    /// map now carries only the rare lease-breaker bookkeeping.
+    pub open_count: AtomicU32,
+    pub open_writers: AtomicU32,
 
     // ==================== Operations ====================
 
@@ -448,6 +457,8 @@ impl Inode {
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
             ioc_flags: AtomicU32::new(0),
+            open_count: AtomicU32::new(0),
+            open_writers: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }
@@ -472,6 +483,8 @@ impl Inode {
             data: Spinlock::new(None),
             xattrs: Spinlock::new(None),
             ioc_flags: AtomicU32::new(0),
+            open_count: AtomicU32::new(0),
+            open_writers: AtomicU32::new(0),
             ref_count: AtomicU64::new(1),
         }
     }
