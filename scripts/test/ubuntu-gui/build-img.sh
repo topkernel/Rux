@@ -6,7 +6,11 @@
 # Rux ext4 requirements: 4K blocks, no metadata_csum.
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../../.." && pwd)"  # scripts/test/ubuntu-gui -> repo root
+WT="$(cd "$(dirname "$0")" && pwd)"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 # SRC priority: explicit override -> legacy shared gate rootfs ->
 # auto-fetched ubuntu-base (scripts/fetch-ubuntu-rootfs.sh, works on any
 # dev machine).

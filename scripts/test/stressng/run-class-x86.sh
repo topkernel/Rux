@@ -10,7 +10,12 @@
 #   e.g. test/stressng/run-class-x86.sh --malloc 4 --timeout 120
 # Log: run/stress-runs/<class>.log
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 IMAGE="${IMAGE:-run/rootfs-stress.img}"
 KERNEL="${KERNEL:-target/x86_64-unknown-none/debug/bzImage}"

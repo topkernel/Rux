@@ -24,9 +24,10 @@ import select
 import subprocess
 import sys
 import time
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 IMG = os.path.join(WT, "work", "rootfs-brkseq.img")
 
 FAIL_LINE = re.compile(

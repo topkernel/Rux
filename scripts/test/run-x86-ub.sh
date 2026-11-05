@@ -23,7 +23,12 @@
 #   NOBUILD=1            skip the kernel build step
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."  # scripts/test -> repo root
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 MODE="${1:-console}"
 ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"

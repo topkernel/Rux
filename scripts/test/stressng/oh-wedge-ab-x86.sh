@@ -10,7 +10,12 @@
 # Logs land in the oh-launcher worktree run/ as oh-ab9cg-N-serial.log /
 # oh-ab9pw-N-serial.log (their rig's convention, visible to that lane).
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 SECS="${1:-1500}"
 OHRIG=/home/william/rux-agents/oh-launcher

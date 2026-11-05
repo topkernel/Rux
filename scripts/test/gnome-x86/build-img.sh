@@ -10,7 +10,11 @@
 #   ROOTFS=work/gnome-x86.img
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../../.." && pwd)"  # scripts/test/gnome-x86 -> repo root
+WT="$(cd "$(dirname "$0")" && pwd)"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 DL="$WT/work/downloads"
 WORK="$WT/work"
 ROOT="$WORK/gnome-root-x86"

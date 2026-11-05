@@ -25,9 +25,10 @@ import subprocess
 import sys
 import time
 import socket
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 QEMU = "qemu-system-x86_64"
 MKFS = "/usr/sbin/mkfs.ext4"
 BZIMAGE = os.path.join(WT, "target/x86_64-unknown-none/debug/bzImage")

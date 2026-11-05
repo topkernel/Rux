@@ -14,7 +14,11 @@
 # Boot: python3 test/ubuntu-gnome/fire.py (headless ignition driver).
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../.." && pwd)"
+WT="$(cd "$(dirname "$0")" && pwd)"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 DL="$WT/work/downloads"
 WORK="$WT/work"
 ROOT="$WORK/gnome-root-riscv64"
