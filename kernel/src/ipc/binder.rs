@@ -3802,6 +3802,53 @@ pub fn txn_hang_audit() {
             a0,
             a1
         );
+        // SRV-SCHED (51st session): scheduler truth for the hung server —
+        // state/linkage/ownership/slot/exec-clock. Discriminates the
+        // state=RUNNING hung shapes: linked-but-starved (linked=1,
+        // exec frozen), phantom (RUNNING unlinked slotless), a lying
+        // busy slot (slot names it, exec frozen), and a genuinely
+        // running server (exec advancing between 5s censuses).
+        if !srv.is_null() {
+            let tk = unsafe { &*srv };
+            let linked = crate::sched::sched::grq_diag_cfs_linked(srv);
+            let onrq = tk.sched_entity().is_on_rq();
+            let oncpu = tk.on_cpu();
+            let claim = tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+            let exec_ns = tk
+                .sched_entity()
+                .sum_exec_runtime
+                .load(core::sync::atomic::Ordering::Acquire);
+            let mut slot = -1i32;
+            let mut swout = -1i32;
+            for c in 0..crate::config::MAX_CPUS {
+                if crate::sched::sched::cpu_state(c).current == srv {
+                    slot = c as i32;
+                }
+                if crate::sched::sched::switching_out_mask(srv) & (1u32 << c) != 0 {
+                    swout = c as i32;
+                }
+            }
+            let _ = writeln!(
+                w,
+                "TXN-HANG-SRV txn{} tid{} st={:#x} linked={} on_rq={} on_cpu={} claim={} cpu={} slot={} swout={} pc={:#x} exec_ms={}",
+                h.id,
+                h.stid,
+                tk.state().bits(),
+                match linked {
+                    Some(true) => 1,
+                    Some(false) => 0,
+                    None => -1,
+                },
+                onrq as i32,
+                oncpu as i32,
+                claim,
+                tk.ti_cpu(),
+                slot,
+                swout,
+                tk.preempt_count() as u32,
+                exec_ns / 1_000_000,
+            );
+        }
         // leg-36B: kernel-vs-image discriminator for the hung server
         // thread (the sc331B txn14230 shape — picked a txn, parked in
         // BINDER_WRITE_READ, no nested txn visible). thtodo>0 while the
@@ -5436,12 +5483,42 @@ pub fn stall_report() {
                                     t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed),
                                 );
                                 let _ = writeln!(out, "binder-stall:{}", slots);
+                                // Watch this victim from now on — the ring
+                                // retains its events between censuses.
+                                crate::sched::sched::ww_watch_add(task);
                                 // Wakewatch tail: which scheduler stage last
                                 // touched the victim and when (W wake-ok,
                                 // L link, P unlink-pick, S unlink-sched,
                                 // D unlink-deq, K pick-publish, A affirm,
                                 // R refused; @jiffies-ago).
                                 crate::sched::sched::ww_append_dump(&mut out, task, now);
+                                // WW-PROBE: re-issue the wake RIGHT HERE and
+                                // read back linkage+state in the same breath.
+                                // If wake_up_process returns true while
+                                // linked stays 0, the enqueue lied; if it
+                                // links and the NEXT census still shows
+                                // unlinked+never-run, something unlinked a
+                                // parked task without running it.
+                                let pre_linked = crate::sched::sched::grq_diag_cfs_linked(task);
+                                let probe_ret = crate::sched::wake_up_process(task);
+                                let post_linked = crate::sched::sched::grq_diag_cfs_linked(task);
+                                let post_state = tk.state();
+                                let _ = writeln!(
+                                    out,
+                                    "binder-stall:  WW-PROBE ret={} linked {}->{} state={:#x}",
+                                    probe_ret,
+                                    match pre_linked {
+                                        Some(true) => "1",
+                                        Some(false) => "0",
+                                        None => "?",
+                                    },
+                                    match post_linked {
+                                        Some(true) => "1",
+                                        Some(false) => "0",
+                                        None => "?",
+                                    },
+                                    post_state.bits(),
+                                );
                             }
                         }
                         rekick.push(t.clone());

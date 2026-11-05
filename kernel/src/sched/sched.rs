@@ -3901,15 +3901,62 @@ static WW_TASK: [core::sync::atomic::AtomicUsize; WW_RING] =
 static WW_DATA: [core::sync::atomic::AtomicU64; WW_RING] =
     [const { core::sync::atomic::AtomicU64::new(0) }; WW_RING];
 static WW_IX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Census-populated watch list: once the binder-stall scan flags a
+/// WAKE-RUN-LEAK victim, its Task pointer lands here and ww_record
+/// retains its events — otherwise the system's timer churn (VSync
+/// 10 ms wait/wake pairs alone) rolls a 1024-entry global ring in
+/// seconds and the victim's unlink event is gone before the next
+/// census reads it.
+pub static WW_WATCH: [core::sync::atomic::AtomicUsize; 64] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+
+/// Census side: add a victim to the watch list (idempotent).
+pub fn ww_watch_add(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    let t = task as usize;
+    for w in WW_WATCH.iter() {
+        let cur = w.load(core::sync::atomic::Ordering::Relaxed);
+        if cur == t {
+            return;
+        }
+        if cur == 0
+            && w.compare_exchange(
+                0,
+                t,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
 
 #[inline]
 pub fn ww_record(task: *mut Task, code: u32) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
         return;
     }
+    // Watch-list filter: a 64-way cached-atomic scan per event is
+    // nothing next to the GRQ the caller already holds.
+    let t = task as usize;
+    let mut watched = false;
+    for w in WW_WATCH.iter() {
+        let cur = w.load(core::sync::atomic::Ordering::Relaxed);
+        if cur == t {
+            watched = true;
+            break;
+        }
+    }
+    if !watched {
+        return;
+    }
     let j = crate::drivers::timer::get_jiffies();
     let ix = WW_IX.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % WW_RING;
-    WW_TASK[ix].store(task as usize, core::sync::atomic::Ordering::Relaxed);
+    WW_TASK[ix].store(t, core::sync::atomic::Ordering::Relaxed);
     WW_DATA[ix].store(
         ((code as u64) << 56) | (j & 0x00FF_FFFF_FFFF_FFFF),
         core::sync::atomic::Ordering::Relaxed,
