@@ -4675,3 +4675,116 @@ From 20:46 the main session co-drives this worktree (roller PID 335111
 is its relaunch; FUX-GRAPH commit 518655f3 landed here at 21:17 with
 its own make-test green, roller picked it up at the boot-40 sync).
 This session keeps to: ledger banking, pixel watch, TASK.md, pushes.
+
+## 48TH SESSION — PATIENT ZERO NAMED; WEDGE ANATOMY COMPLETE; CRASH-LOOP DIVERGENCE IS THE NEW ROOT LEAD (2026-11-05 20:44-22:25, branch oh-roll)
+
+Session context: resumed after the 47th's quota death mid-boot-38.
+Main was already merged by the 47th (68cbdd97); the 47th's
+unvalidated 985-line futex WIP (hb->waiters fastpath + REQUEUE_PI +
+census uret decode) was STASHED (stash@{0}, "futex WIP from 47th
+session") — NOT lost, NOT tested, complete it separately.
+
+### Boots rolled this session (ledger rows v39-v44)
+v39/v40 68cbdd97 (clean merge baseline), v41/v42 518655f3, v43/v44
+d6029424 (= ea88abfa, landed by the concurrently-spawned 49th). SA
+40-60 band, pixels 82f0a25f on all six, ZERO pixel alerts.
+
+### Instruments landed (518655f3, af9201f4, 0e4bae90 — all pushed)
+1. FUX-GRAPH: every 6th census burst prints ALL stuck park groups of
+   the registered samgr pid (comm, ages, fval, live verdict, anchor,
+   uret). Sample cap raised 32->96, walk break 64->192, groups 24->48
+   (the old first-32 sample by bucket order MISSED the samgr parks
+   entirely when system-wide stuck > 64 — r41v41 showed 1 of 8).
+2. Live futex-word verdict on every FUX row: reads the word's CURRENT
+   value through the parked waiter's page tables. live==fval after a
+   long park = the userspace unlock never ran (upstream userspace
+   stall); LIVE!=fval while parked = slept through the value change
+   (kernel lost-wake). Compare fval's LOW 32 BITS ONLY (sign-extended
+   register arg otherwise falses the verdict).
+3. FUX-MAPS (0e4bae90): one-shot dump of samgr's exec file-backed
+   VMAs at the first graph burst. REQUIRED for anchor symbolization:
+   the image has NO libffrt.z.so (FFRT is statically linked into
+   something) and out/-tree .so offsets DO NOT match the guest
+   (verified: park epc symbolized nonsense against out/ libffrt).
+   NOTE: v43/v44 ran bzImage-d6029424 built BEFORE 0e4bae90's edits —
+   they have NO FUX-MAPS despite that commit's message; first
+   FUX-MAPS boot is the first one on a kernel built after 22:14.
+
+### Patient zero (mission item 2) — NAMED, every boot same shape
+r41v39: txn2225, telephony pid500 tid608 -> samgr tid365 code6
+(SUBSCRIBE_SYSTEM_ABILITY), handler futex-parked at t=20.115, stuck
+through the 900s window; 8 txns total stuck-at-end, ALL targeting
+samgr OS_IPC handler threads parked in futex. Later boots: identical
+(samgr pid 329 in v41+, patient zero = first code-6/code-3 into an
+OS_IPC thread at t~20-37).
+
+### Wedge anatomy (mission item 3) — the complete park graph
+FUX-GRAPH on r41v43 (t=339, all live==fval, anywoken=0 everywhere):
+- t~7:  UNNAMED samgr thread (v43 tid 362, v41-class "tid 342" in
+  older boots) parks contending a musl-protocol lock word
+  (fval 0x80000010 = OH-musl slowpath current|bit31, OH musl
+  pthread_mutex_timedlock.c:113-121 waits with t=r|0x80000000) in a
+  frame whose uret[1] decodes into the 0x3fbf077000 exec region
+  (HasTask-class per out/ symbolization — UNRELIABLE until FUX-MAPS
+  lands). Holder NEVER unlocks (live word unchanged 332s+).
+- t=8.135-8.608 EVERY BOOT: one samgr thread exits cleanly (v44 tid
+  359@8.135, v43 tid 363@8.140, v42 tid 365@8.347, v41 tid 362@8.232,
+  v39 tid 369@8.608). PRIME SUSPECT: exits holding the lock tid-362
+  contends (pthread_exit does NOT run C++ lock_guard destructors).
+- t~17: OS_FFRT_5_0 parks in mutexPrivate::wait (0xce0c7-class).
+- t~32: samgr main + OS_IPC_1 + OS_IPC_2 park in
+  BlockUntilThreadAvailable (ipc pool exhaustion, A+0x800194).
+- t~33.4: samgr's OWN OS_IPC_5_616 SEGVs servicing a txn (faults:
+  rip 0x3fbf0bb82f cr2 0x7ff000613000, then rip 0x3fbf08ad30 cr2
+  0x7ff0005f2000 PROTNONE) — same rip 0x3fbf0bb82f also faults in
+  render_service (pid 926) the same boot. Cross-process common-rip
+  SEGV into the 0x7ff000xxxxx small-stack/FFRT zone.
+- SA inserts stop at t~31; everything freezes; client services park
+  in BWR forever (the TXN-HANG face).
+
+### THE ROOT LEAD (mission item 4, in progress) — kernel-caused crash storm
+Reference-kernel boots of the SAME image (oh-launcher run/
+oh-refu2/6/7/8, bmsref): ZERO userspace segfaults through t=696.
+Ours: hdf_devhost (usb_host) NULL-deref crash-loops EVERY boot
+(t=18-25, rip 0x7ff082996bac cr2 0, 2 instances v39/v43/v44 +
+restart storm), samgr-internal SEGVs, render_service SEGVs. The
+devhost death storm precedes the wedge (death notices -> SA
+remove/add notify -> listenerMapLock_ / queue stress). The wedge is
+the VICTIM; hunt what feeds userspace garbage: the usb_host NULL
+deref (parcel data? mmap?) is the first domino. The ~8.2s samgr
+thread exit is the second (deterministic, pre-wedge).
+
+### ea88abfa (49th's thread_has_work fix) — assessment
+The 6.6 reference (oh-robot kernel/linux/linux-6.6/drivers/android/
+binder.c:586-593, verified locally) has NO bare thread-todo term:
+process_todo || looper_need_return || (do_proc_work && proc todo).
+The deferred tcomplete (binder.c:3683) AND the deferred node work
+(binder.c:879) RELY on todo-invisibility; ea88abfa's
+!th.todo.is_empty() un-defers both and re-opens the lb311 RSS shape
+our own 9015-9026 comment documents. Its claimed mechanism
+(from-walk item invisible with process_todo cleared) is unreachable
+in our code as written (audited: every non-deferred thread-todo push
+sets process_todo=true; the clear site (9796) only fires on empty
+drain, under WORLD). Data: v43/v44 wedge IDENTICALLY with it
+(SA 58/60, same patient-zero shape, same crash-loop). RECOMMEND:
+re-verify the r41v42 HLD evidence; if it does not reproduce,
+revert to reference shape per the reference-wins directive.
+
+### Futex wake delivery: EXONERATED for the wedge parks
+Every censused park in v41/v43 prints live==fval (word unchanged)
+=> the unlock/notify never RAN (userspace causal chain), not a
+kernel wake loss. Consistent with the 47th's REQUEUE reproducer.
+
+### Next steps (49th/50th)
+1. Roll the FUX-MAPS kernel (auto-picked-up at the roller's boot-45
+   sync boundary if the tree stays CLEAN — commit everything).
+2. Symbolize 0x3fbf116dea (park epc), 0x3fbf0bb82f (fault rip),
+   0x7ff082996bac (devhost fault rip, vs /vendor/bin devhost maps —
+   extend FUX-MAPS to the devhost pid too if needed).
+3. Chase the ~8.2s exit: WHY does one samgr thread exit cleanly
+   every boot (what syscall/code path — a THREAD-EXIT trace with
+   entry-frame rip for tgid==samgr would name it in one boot)?
+4. Chase the usb_host NULL deref root: what did hdf_devmgr hand it?
+   (txn data audit / SLRD dlen for the txn it was servicing.)
+5. The stashed 47th futex WIP (hb->waiters + REQUEUE_PI) still
+   awaits validation + landing.
