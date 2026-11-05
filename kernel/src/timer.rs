@@ -105,7 +105,7 @@ pub const TSLEEP_JIFFY: u32 = 2;
 pub struct TimedSleepShadow;
 
 impl TimedSleepShadow {
-    pub fn new(kind: u32, deadline: u64, timer_id: u64) -> Option<Self> {
+    pub fn new(kind: u32, deadline: u64, timer_id: u64, dur_ms: u32) -> Option<Self> {
         let t = crate::sched::current()?;
         // SAFETY: t is the currently running task (we are it).
         unsafe {
@@ -114,6 +114,7 @@ impl TimedSleepShadow {
             (*t).timed_sleep_timer_id.store(timer_id, Ordering::Release);
             (*t).timed_sleep_armed_j
                 .store(crate::drivers::timer::get_jiffies() as u32, Ordering::Release);
+            (*t).timed_sleep_dur_ms.store(dur_ms, Ordering::Release);
         }
         Some(TimedSleepShadow)
     }
@@ -601,8 +602,10 @@ pub fn timer_softirq_handler(_nr: usize) {
                     armed_j: u32,
                     deadline: u64,
                     timer_id: u64,
+                    dur_ms: u32,
                 }
-                let mut rows: [Option<TtRow>; 4] = [None, None, None, None];
+                let mut rows: [Option<TtRow>; 16] = [None, None, None, None, None, None, None,
+                    None, None, None, None, None, None, None, None, None];
                 let nfound = crate::sched::for_each_task_try(|t| {
                     if t.is_null() {
                         return;
@@ -618,30 +621,46 @@ pub fn timer_softirq_handler(_nr: usize) {
                     if kind == TSLEEP_NONE || !sleeping {
                         return;
                     }
+                    // Per-kind age gate: a parked hres (nanosleep) wait
+                    // >= 2 s is already unusual; FFRT's routine 60 s
+                    // futex timeouts would flood the print, so the jiffy
+                    // class reports only >= 30 s parks.
                     // SAFETY: same diagnostic-read contract.
-                    let (pid, armed_j, deadline, tid) = unsafe {
+                    let (pid, armed_j, deadline, tid, dur) = unsafe {
                         (
                             (*t).pid(),
                             (*t).timed_sleep_armed_j.load(Ordering::Acquire),
                             (*t).timed_sleep_deadline.load(Ordering::Acquire),
                             (*t).timed_sleep_timer_id.load(Ordering::Acquire),
+                            (*t).timed_sleep_dur_ms.load(Ordering::Acquire),
                         )
                     };
-                    if current.wrapping_sub(armed_j as u64) < 200 {
-                        return; // transient (< 2 s) timed waits: healthy
+                    let gate = if kind == TSLEEP_HRES { 200 } else { 3000 };
+                    if current.wrapping_sub(armed_j as u64) < gate {
+                        return;
                     }
                     for r in rows.iter_mut() {
                         if r.is_none() {
-                            *r = Some(TtRow { pid, kind, armed_j, deadline, timer_id: tid });
+                            *r = Some(TtRow { pid, kind, armed_j, deadline, timer_id: tid, dur_ms: dur });
                             break;
                         }
                     }
                 });
-                if nfound > 0 {
+                if nfound > 0 && rows.iter().any(|r| r.is_some()) {
+                    // Own 1/s budget — the WW family's shared gate must
+                    // not starve this print (r41v18: benign wake-drops
+                    // consumed every second, the ticktrap never fired).
+                    static TT_LAST: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    let tl = TT_LAST.load(Ordering::Relaxed);
+                    let tt_ok = current.wrapping_sub(tl) >= 100
+                        && TT_LAST
+                            .compare_exchange(tl, current, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok();
                     let snaps = snapshot_timers();
                     let mut printed = 0;
                     for r in rows.iter().flatten() {
-                        if printed >= 4 || !ww_latefire_budget_ok() {
+                        if printed >= 4 || !tt_ok {
                             break;
                         }
                         // Wheel state for this sleeper: the live
@@ -673,10 +692,11 @@ pub fn timer_softirq_handler(_nr: usize) {
                         };
                         printed += 1;
                         crate::pr_err!(
-                            "TIMEDSLEEP-PARK pid={} kind={} age_s={} deadline_{}ms_{} wheel={} timer_id={:#x}",
+                            "TIMEDSLEEP-PARK pid={} kind={} age_s={} dur_ms={} deadline_{}ms_{} wheel={} timer_id={:#x}",
                             r.pid,
                             domain,
                             current.wrapping_sub(r.armed_j as u64) / 100,
+                            r.dur_ms,
                             rel_ms,
                             rel_txt,
                             wheel,
@@ -922,7 +942,7 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                     // protocol; if it was SLEEPING the wake was refused
                     // and the sleeper may be stranded — the line names
                     // which, live.
-                    if !ok && ww_latefire_budget_ok() {
+                    if !ok {
                         // SAFETY: diagnostic reads of the pinned task.
                         let (st, on_rq, pk) = unsafe {
                             (
@@ -934,10 +954,13 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                         // A RUNNING target at delivery is the benign
                         // recheck-window class (r41v17 boots show one
                         // phase per busy poller, ~1/s each — not worth a
-                        // line). Anything else — a SLEEPING target whose
-                        // enqueue was refused, a dead/poisoned shape —
-                        // is the anomaly class: print only those.
-                        if st != 0 {
+                        // line, and NOT worth the shared 1/s budget
+                        // either: r41v18 proved a steady stream of these
+                        // starved the ticktrap print). Anything else — a
+                        // SLEEPING target whose enqueue was refused, a
+                        // dead/poisoned shape — is the anomaly class:
+                        // budget only for those.
+                        if st != 0 && ww_latefire_budget_ok() {
                             crate::pr_err!(
                                 "TIMER-WAKE-DROPPED pid={} state={:#x} on_rq={} pk={} (timer fired, wake did not stick)",
                                 pid,
