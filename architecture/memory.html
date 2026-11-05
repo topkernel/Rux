@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>内存管理 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -82,7 +82,7 @@
       <li><b>vmemmap</b>:每个物理页一个 64 字节、cache 行对齐的 <code>Page</code>(flags/mapcount/refcount/private/mapping/index/type/next_free),pfn↔page 转换 O(1)。引用计数语义:fork 共享 +1,COW 写页 +2;put 到 0 才真正释放。</li>
       <li><b>zone/buddy</b>:MAX_ORDER=10(最大 4MB 块),free list 挂在 <code>Page.next_free</code>,释放按 <code>buddy_pfn = pfn ^ (1&lt;&lt;order)</code> 逐级合并;Unmovable/Movable/Reclaimable 三迁移类型。</li>
       <li><b>PCP(per-CPU pageset)</b>:order-0 分配走 per-CPU 快路径,零 zone 锁;high/batch 水位成批回补。</li>
-      <li><b>kswapd / OOM</b>:WMARK_HIGH 唤醒,连续失败 16 次触发 OOM killer;LRU 双链 + referenced 旋转 + rmap + 压缩(双指针扫描 + 页迁移)一应俱全。</li>
+      <li><b>kswapd / OOM</b>:WMARK_HIGH 唤醒,连续失败 16 次触发 OOM killer;LRU 双链 + referenced 旋转 + rmap + 压缩(双指针扫描 + 页迁移)配套齐备。</li>
     </ul>
 
     <h2 id="kheap"><span class="anchor">§4</span>内核堆三级</h2>
@@ -96,7 +96,7 @@
       <li><b>per-CPU magazine(深 16)</b>:分配/释放走 magazine,类锁只在成批 refill/flush 时取一次 —— 这是"类锁分段 ≤25M/靴"门禁行的来源(实测 19.7M,最新板 6.0M)。</li>
       <li><b>free 位图路由 + tripwire</b>:每 slab 页一比特路由;清位先于还页 —— 陈旧指针落到 buddy 的 tripwire 上,而不是静默破坏。</li>
       <li><b>锁序</b>:类锁 → buddy 锁。</li>
-      <li><b>起源</b>:OH 首帧 ~21.3 万个 1B–1KB 净活对象(23.2M allocs/23.0M frees),每对象钉一个 4KiB buddy 块 = 852MB/992MB 窗口 —— 分配器死于首帧合成,magazine 为此而生。</li>
+      <li><b>起源</b>:OH 首帧 ~21.3 万个 1B–1KB 净活对象(23.2M allocs/23.0M frees),每对象独占一个 4KiB buddy 块 = 852MB/992MB 窗口 —— 分配器在首帧合成阶段耗尽,magazine 为此而生。</li>
     </ul>
     <h3>打包内核栈 slab(分歧 D-2,x86_64)</h3>
     <p>三个内核栈打包进一个 256KB order-6 块(80KB 槽)+ 旁表槽映射 + 空块回收:每栈 <b>85.3KB vs 128KB</b>(栈占 42% 的 904MB 底盘省 ~115MB),<b>99.9% 槽打包</b>,史上最深 <b>3445 活任务</b>零 canary 命中。未门控的架构编译期剔除(80KB 余量是 x86_64 实测数)。</p>
@@ -147,6 +147,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

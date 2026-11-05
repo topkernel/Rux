@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>命令速查 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -56,7 +56,7 @@
 
   <article class="doc-main">
     <h1>命令速查表</h1>
-    <div class="sub">一页纸 · 以根 Makefile 为准</div>
+    <div class="sub">以根 Makefile 为准</div>
 
     <h2 id="make"><span class="anchor">§1</span>make 目标</h2>
     <div class="tbl-wrap">
@@ -85,7 +85,7 @@ riscv64-linux-gnu-addr2line -e &lt;kernel&gt; -f -C &lt;addr&gt;
 <span class="c"># 离线提取 guest 日志(debugfs, 拷贝出的镜像)</span>
 debugfs -R &quot;cat /var/log/kmsg&quot; rootfs-copy.img
 
-<span class="c"># 死锁/挂死捕获(自动带持有者构建 + 轰炸 + 现场抓取)</span>
+<span class="c"># 死锁/挂死捕获(自动构建带持有者信息的内核 + 压力用例注入 + 现场抓取)</span>
 ./test/hunt-wedge.sh [rounds]
 
 <span class="c"># tracefs(统一 tracepoint)</span>
@@ -104,7 +104,7 @@ docs/architecture/lock-ordering.md   <span class="c"># 动锁嵌套前必读</sp
 docs/development/perf-gate-baseline.md  <span class="c"># 性能门基线</span>
 docs/test/README.md          <span class="c"># 测试报告总入口</span></code></pre>
 
-    <h2 id="rules"><span class="anchor">§4</span>纪律提醒</h2>
+    <h2 id="rules"><span class="anchor">§4</span>操作纪律</h2>
     <ul>
       <li>共享镜像启动一律 <code>-snapshot</code> + <code>file.locking=off</code>。</li>
       <li>只杀自己启动的 QEMU;测试默认 <code>-smp 2 -m 1G</code>。</li>
@@ -124,6 +124,6 @@ docs/test/README.md          <span class="c"># 测试报告总入口</span></cod
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

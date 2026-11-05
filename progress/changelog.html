@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>更新日志 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -80,15 +80,15 @@
     <h2 id="n1101"><span class="anchor">2026-11-01</span></h2>
     <ul>
       <li><b>GDM 登录界面达成</b>(x86_64+KVM,~4.5 s boot-to-login,45 分钟零 panic);x86_64+KVM 自此为标准测试机位。</li>
-      <li><b>fs 元数据族重银行</b>:stat −65%、openclose −70%、append −88%、mkdrmdir −88%(2026-11-01 板);内核套件 1267/1267 (riscv64)、1263/1263 (x86_64)。</li>
-      <li>IF=0 重银行 20.4%±3pp(机制:软中断出 IF=0 窗改 ksoftirqd)。</li>
+      <li><b>fs 元数据族重锚定</b>:stat −65%、openclose −70%、append −88%、mkdrmdir −88%(2026-11-01 板);内核套件 1267/1267 (riscv64)、1263/1263 (x86_64)。</li>
+      <li>IF=0 重锚定 20.4%±3pp(机制:软中断出 IF=0 窗改 ksoftirqd)。</li>
     </ul>
 
     <h2 id="n1030"><span class="anchor">2026-10-30/31</span></h2>
     <ul>
       <li><b>aarch64 并入 main</b>:三架构齐,交互 shell + 信号 + 套件 1119 全绿。</li>
       <li><b>OpenHarmony /data 挂载 + SystemUI 锁屏</b>:ext4 superblock 32 位校验修复;StartUser(100) 64 ms。</li>
-      <li>七棒解码翻案:OH watchdog 自杀实为纯性能墙,内核 binder 无责。</li>
+      <li>归因修正:OH watchdog 自杀实为纯性能墙,内核 binder 无责。</li>
     </ul>
 
     <h2 id="n1014"><span class="anchor">2026-10-07 ~ 10-28</span></h2>
@@ -116,6 +116,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

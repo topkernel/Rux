@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>架构移植指南 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -109,7 +109,7 @@ restore_fpu           <span class="c"># fs != OFF 才使能</span></code></pre>
     <ul>
       <li>1/9 boot flake(trap frame 恰过线性映射末端 —— 内核栈顶问题,排查中)。</li>
       <li>LTP-on-aarch64 未开始(cross-build + serial-fed smoke 子集已奠基)。</li>
-      <li>dfx= 启动旗标不可用(EL2 跳板在 cmdline 解析前毁 DTB 指针),退回编译期 feature 门控。</li>
+      <li>debug= 启动旗标不可用(EL2 跳板在 cmdline 解析前毁 DTB 指针),退回编译期 feature 门控。</li>
     </ul>
 
     <h2 id="newarch"><span class="anchor">§4</span>移植新架构的检查单</h2>
@@ -135,6 +135,6 @@ restore_fpu           <span class="c"># fs != OFF 才使能</span></code></pre>
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

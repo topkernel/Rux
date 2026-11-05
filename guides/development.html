@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>参与开发 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -58,7 +58,7 @@
     <h1>参与开发</h1>
     <div class="sub">工作流 · 合并门禁 · 调试工具箱 —— 绑定性规范见仓库 AGENTS.md</div>
 
-    <h2 id="how"><span class="anchor">§1</span>这个项目怎么工作</h2>
+    <h2 id="how"><span class="anchor">§1</span>开发组织与核心原则</h2>
     <p>Rux 由多个 AI 代理并行开发:每个任务在独立的工作树里进行,人类负责设定目标、评审与最终合并权。两条不可动摇的宪法级原则:</p>
     <ul>
       <li><b>外部 100% 兼容</b>:完整 POSIX 语义 + ABI 完全对齐(系统调用号、ELF/auxv、futex、ext4 在盘格式、procfs 布局)。任何上层软件不作修改即可运行,是每个设计决定的第一约束。</li>
@@ -82,7 +82,7 @@
       <li><b>双架构构建</b>:<code>PLATFORM=x86_64 make build</code>,再 <code>rm build/.config && make build</code>,两者 rc=0。</li>
       <li><b>riscv64 回归启动</b>:最小根文件系统脚本化串口(cd/proc,rc=0,零 panic)。</li>
       <li><b>全套件</b>:riscv64 <code>make test</code> 全绿。</li>
-      <li><b>性能门</b>:用树内 DFX 工具(syscost / census 探针 / pbench)对照 <code>docs/development/perf-gate-baseline.md</code> 基线。</li>
+      <li><b>性能门</b>:用树内 debug 工具(syscost / census 探针 / pbench)对照 <code>docs/development/perf-gate-baseline.md</code> 基线。</li>
     </ol>
     <h3>性能门分层</h3>
     <div class="tbl-wrap">
@@ -109,7 +109,7 @@
         </tbody>
       </table>
     </div>
-    <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁守护之下 —— 如果现有工具测不了它,<b>就为它新增一个 DFX 工具</b>(默认关闭)。"测量"是改动的一部分,不是事后补。基线只能由通过了自身层级的合并来更新。</div>
+    <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,<b>应为其新增 debug 观测工具</b>(默认关闭)。测量是变更的组成部分,而非事后补充。基线只能由通过了自身层级的合并来更新。</div>
 
     <h2 id="x86"><span class="anchor">§4</span>平台优先级:x86_64 + KVM 先行</h2>
     <p>宿主 x86 + KVM 是 x86 guest 的最快虚拟化(近原生)。自家同台 A/B:基线探针 <code>p1_null</code> 0.040 µs(KVM)vs 0.240 µs(TCG),<b>6 倍</b>;IO/定时器路径差距更大。因此:</p>
@@ -124,7 +124,7 @@
     <ul>
       <li><b>R 编号注释</b>:ext4 读写一致性、virtio 完成顺序、唤醒路径生命周期是历史上 bug 最密集的区域 —— 改前先读代码里的 R 编号注释。</li>
       <li><b>锁序</b>:触碰锁嵌套前必读 <code>docs/architecture/lock-ordering.md</code>(INV-LOCK-*)。</li>
-      <li><b>观测性政策</b>:新增内核观测一律走统一 trace-event 框架加 tracepoint(<code>kernel/src/trace/</code>,tracefs 挂载于 <code>/sys/kernel/tracing</code>);旧 <code>dfx=</code> 开关表已冻结为遗留,不得增长。</li>
+      <li><b>观测性政策</b>:新增内核观测一律走统一 trace-event 框架加 tracepoint(<code>kernel/src/trace/</code>,tracefs 挂载于 <code>/sys/kernel/tracing</code>);旧 <code>debug=</code> 开关表已冻结为遗留,不得增长。</li>
       <li><b>探针 tarball 政策</b>:guest 测试用例源码只以 <code>userspace/probes/probes.tar.gz</code> + 解压脚本形式归档,绝不提交散的 guest 源文件;宿主侧启动驱动(.py/.sh)留在 <code>test/</code> / <code>scripts/</code>。</li>
       <li><b>台账</b>:每轮合并落地的安全属性、性能数字、bug 类消除,同改动内记入 <code>docs/architecture/safety-and-performance.md</code>;架构优势带实测证据记入 <code>docs/architecture/rust-native-register.md</code>(无数字 = 占位符,不算条目)。</li>
       <li><b>主仓库根保持干净</b>:不落任何 scratch 脚本、驱动、日志、镜像(gitignored 的也不行);启动驱动与临时脚本放自己工作树的 <code>run/</code>。</li>
@@ -147,7 +147,7 @@
     </ul>
     <h3>运行时开关</h3>
     <ul>
-      <li><b>dfx= 启动旗标</b>(遗留但可用):<code>dfx=taskdump,watchdog</code> 周期任务转储 + 自旋锁死锁看门狗;<code>dfx=memwatch</code> 堆/页记账查泄漏。权威表在 <code>kernel/src/dfx/switches.rs</code>。</li>
+      <li><b>debug= 启动旗标</b>(遗留但可用):<code>debug=taskdump,watchdog</code> 周期任务转储 + 自旋锁死锁看门狗;<code>debug=memwatch</code> 堆/页记账查泄漏。权威表在 <code>kernel/src/debug/switches.rs</code>。</li>
       <li><b>统一 tracepoint(新标准)</b>:tracefs 文件树完整对齐 Linux 语义 —— <code>tracing_on</code>、<code>trace</code>、<code>trace_pipe</code>、<code>available_events</code>、<code>set_event</code>、<code>snapshot</code>、<code>events/&lt;group&gt;/&lt;event&gt;/enable</code> 等;两级门控,未武装站点只付一次 relaxed load。</li>
       <li><b>hunt-wedge</b>:<code>./test/hunt-wedge.sh</code> 死锁/挂死捕获(自动带持有者信息的构建 + 轰炸 + 现场抓取,配合 addr2line 定位)。</li>
       <li><b>GDB</b>:<code>make debug</code>。</li>
@@ -155,11 +155,11 @@
 
     <h2 id="first"><span class="anchor">§8</span>新手第一个任务</h2>
     <ol>
-      <li><b>跑起来</b>:按<a href="getting-started.html">快速入门</a>完成构建,在 mrsh shell 里逛一逛 <code>/proc</code>、<code>/dev</code>。</li>
-      <li><b>跑测试</b>:<code>make test</code> 看 1267 项断言全绿;挑一个域跑 LTP 快速集(<code>./run_quick.sh</code>)。</li>
-      <li><b>读一个模块</b>:推荐 <code>kernel/src/sched/</code>(11 个文件:调度类框架 stop/deadline/rt/fair/idle,主循环 <code>schedule()</code> → <code>__schedule()</code> → <code>context_switch()</code>),对照<a href="../architecture/design.html#sched">调度器设计页</a>。</li>
-      <li><b>写一个小探针</b>:仿照 <code>test/</code> 下现成 C 探针写一个系统调用探针,交叉编译后放进 rootfs 的 <code>/test/</code>,在 shell 里验证。</li>
-      <li><b>领一个小修复</b>:挑一个失败 LTP 用例或小 bug,在工作树里走完 §2/§3 流程,体验从分支到合并门禁的完整链路。</li>
+      <li><b>环境验证</b>:按<a href="getting-started.html">快速入门</a>完成构建,在 mrsh shell 里检查 <code>/proc</code>、<code>/dev</code>。</li>
+      <li><b>运行测试</b>:<code>make test</code> 看 1267 项断言全绿;挑一个域跑 LTP 快速集(<code>./run_quick.sh</code>)。</li>
+      <li><b>阅读一个模块</b>:推荐 <code>kernel/src/sched/</code>(11 个文件:调度类框架 stop/deadline/rt/fair/idle,主循环 <code>schedule()</code> → <code>__schedule()</code> → <code>context_switch()</code>),对照<a href="../architecture/design.html#sched">调度器设计页</a>。</li>
+      <li><b>实现一个小探针</b>:仿照 <code>test/</code> 下现成 C 探针写一个系统调用探针,交叉编译后放进 rootfs 的 <code>/test/</code>,在 shell 里验证。</li>
+      <li><b>认领一个小修复</b>:挑一个失败 LTP 用例或小 bug,在工作树里走完 §2/§3 流程,体验从分支到合并门禁的完整链路。</li>
     </ol>
 
     <h2 id="refs"><span class="anchor">§9</span>必读文档索引</h2>
@@ -184,6 +184,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>代码结构 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -65,7 +65,7 @@
         <tbody>
           <tr><td class="mono">fs/</td><td class="num">61,091</td><td class="num">19.1%</td><td>ext4(12 文件)、jbd2、VFS、dcache、page_cache、bio/buffer、procfs/sysfs/debugfs/tracefs/tmpfs、pipe、xattr、inotify、locks、io_uring、elf</td></tr>
           <tr><td class="mono">arch/</td><td class="num">43,440</td><td class="num">13.6%</td><td>riscv64 / x86_64 / aarch64:boot、trap、mm(page_fault)、cpu、uaccess、intc、SBI/MSR/寄存器</td></tr>
-          <tr><td class="mono">dfx/</td><td class="num">37,946</td><td class="num">11.9%</td><td>syscost、kallsyms、debugfs、taskdump、watchdog、memwatch、ledger(诊断层,单独统计 unsafe)</td></tr>
+          <tr><td class="mono">debug/</td><td class="num">37,946</td><td class="num">11.9%</td><td>syscost、kallsyms、debugfs、taskdump、watchdog、memwatch、ledger(诊断层,单独统计 unsafe)</td></tr>
           <tr><td class="mono">syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>系统调用分发表与实现(胶囊边界:校验/翻译用户指针,uaccess_safe 类型化 copy_in/out)</td></tr>
           <tr><td class="mono">drivers/</td><td class="num">23,247</td><td class="num">7.3%</td><td>virtio(blk/net/gpu/input,queue + PCI 传输层)、blkdev、intc、pci、gpu/drm、input、timer</td></tr>
           <tr><td class="mono">net/</td><td class="num">18,649</td><td class="num">5.8%</td><td>SkBuff、eth、arp、ipv4/ipv6、icmp、udp、tcp(4,841 行)、unix(3,707 行)、netlink、raw</td></tr>
@@ -120,6 +120,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

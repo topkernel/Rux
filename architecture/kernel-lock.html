@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>锁序与并发不变量 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -96,7 +96,7 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
     <ul>
       <li><b>SPIN 模型检查(4 个)</b>:futex_wait_wake / lock_ordering / interrupt_preempt / sched_enqueue_dequeue —— <code>make spin</code>。</li>
       <li><b>S-1 loom/Kani 镜像</b>:SleepMutex 状态机证 INV-M1..M5;启用头 90 秒抓到真实 pid-0 递归 bug。</li>
-      <li><b>自旋锁看门狗</b>(dfx=watchdog,遗留):死锁告警自动全任务快照;带 key 名输出。</li>
+      <li><b>自旋锁看门狗</b>(debug=watchdog,遗留):死锁告警自动全任务快照;带 key 名输出。</li>
       <li><b>census + heal</b>:每任务逐字段 tick 观测,幻影 preempt-count 200 tick 判定;model-vs-reality MISS=0(64.5k/52.1k heals 实测)。</li>
       <li><b>allocwatch</b>:跨 CPU 持锁者命名(等待者不能自报 —— 打印会分配,而它正停在分配器里)。</li>
     </ul>
@@ -116,6 +116,6 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>性能测试 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -93,7 +93,7 @@
         </tbody>
       </table>
     </div>
-    <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁守护之下 —— 如果现有工具测不了它,<b>就为它新增一个 DFX 工具</b>(默认关闭)。"测量"是改动的一部分,不是事后补。</div>
+    <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,<b>应为其新增 debug 观测工具</b>(默认关闭)。测量是变更的组成部分,而非事后补充。</div>
 
     <h2 id="t1"><span class="anchor">§3</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
     <div class="tbl-wrap">
@@ -114,7 +114,7 @@
       </table>
     </div>
 
-    <h2 id="t2"><span class="anchor">§4</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重银行)</h2>
+    <h2 id="t2"><span class="anchor">§4</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重锚定)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(KVM debug,µs)</th></tr></thead>
@@ -129,7 +129,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">重银行过程:KVM debug 锚 = 三块完整板中位数(板间 ±1%);load 免疫在 strong 类验证(r8sp8,load 4.3–4.7 下全行 ±20% 内,详见基线文件 SP-7 节)。旧 TCG 列仅存档作溯源。</p>
+    <p style="font-size:13px;color:var(--text-3)">重锚定过程:KVM debug 锚 = 三块完整板中位数(板间 ±1%);load 免疫在 strong 类验证(r8sp8,load 4.3–4.7 下全行 ±20% 内,详见基线文件 SP-7 节)。旧 TCG 列仅存档作溯源。</p>
 
     <h2 id="lmb"><span class="anchor">§5</span>lmbench 逐用例对照(同机同加速,9950X)</h2>
     <p style="font-size:13.5px">Rux 列:x86_64 内核进 KVM(<code>-accel kvm -cpu host</code>),共享 Ubuntu rootfs,lmbench 注入 /test。Linux 列:同一静态二进制 —— native(裸机)与同机 KVM 双口径。两个上游坏例(lat_fifo / bw_udp)双列都不可测,按上游缺陷剔除而非计为缺口。</p>
@@ -208,15 +208,15 @@
       </table></div>
     </details>
 
-    <h2 id="campaigns"><span class="anchor">§7</span>已落地的性能战役(同 rig A/B 战绩)</h2>
-    <p>性能不是调参调出来的,是一场场有归因的战役。每条都是同机同加速 A/B,收益与代价同表入账(详见 <code>docs/architecture/rust-native-register.md</code>):</p>
+    <h2 id="campaigns"><span class="anchor">§7</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
+    <p>以下优化均以同机同加速 A/B 测量归因,收益与代价同表记录(详见 <code>docs/architecture/rust-native-register.md</code>):</p>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>战役</th><th>手段</th><th>战果</th></tr></thead>
+        <thead><tr><th>优化项</th><th>手段</th><th>实测结果</th></tr></thead>
         <tbody>
           <tr><td>上下文切换</td><td>FSGSBASE(393 ns/切换)+ 惰性 FPU(xsaveopt 入 #NM)+ PCID 门控</td><td>lat_ctx 4.97→<b>2.07 µs(−58%)</b></td></tr>
           <tr><td>唤醒抢占门(D-14)</td><td>实测等待 ≥6 ms 才抢占,替代 vruntime 信用比较</td><td>74B unix 流"唤醒之舞" 275→~2.5 µs;p5 族 <b>10–18×</b></td></tr>
-          <tr><td>fs 元数据重银行</td><td>D-8 直写 jbd2 + D-12 读批填 + D-13 批量发布/释放即弃</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%;p6_mkdrmdir 中位 29,796→<b>2,107 µs</b></td></tr>
+          <tr><td>fs 元数据重锚定</td><td>D-8 直写 jbd2 + D-12 读批填 + D-13 批量发布/释放即弃</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%;p6_mkdrmdir 中位 29,796→<b>2,107 µs</b></td></tr>
           <tr><td>vm-op 族</td><td>叶子表直走 unmap(每页 walker 零分配)</td><td>mmap 72→27–32 µs、munmap 177→52 µs;OH 负载 <b>15→5 s/CPU-min</b></td></tr>
           <tr><td>匿名回收(SP-7)</td><td>回收检查路径重构</td><td>检查率 <b>35%→82–89%</b>,swap 写 +75%</td></tr>
           <tr><td>类型化定时器轮(D-19)</td><td>时钟域类型化 + 作用域守卫</td><td>arm 锁 924→697 ns;nanosleep 772.6→<b>662.7 ms</b>;p2_ctxsw 12.198 vs 15.400 µs</td></tr>
@@ -237,7 +237,7 @@
       <li><b>未测面</b>:页缓存命中率绝对值、PCP 水位、TCP 吞吐(bw_tcp 修复前无法测)、binder 吞吐/延迟专项、GRQ hold 分段分解对照。</li>
     </ul>
 
-    <h2 id="dfx"><span class="anchor">§9</span>DFX 测量工具链</h2>
+    <h2 id="tools"><span class="anchor">§9</span>debug 测量工具链</h2>
     <ul>
       <li><b>syscost</b>:启动普查(系统调用量、census 计数、tick 率、每操作均值)—— Tier 1 的采集器。</li>
       <li><b>pbench</b>(test/pbench.c):P1–P7 七组微基准探针 —— Tier 2 的采集器。</li>
@@ -260,6 +260,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

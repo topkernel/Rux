@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>架构与模块设计 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -66,7 +66,7 @@
         <tbody>
           <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">61,091</td><td class="num">19.1%</td><td>文件系统栈与缓存</td></tr>
           <tr><td>arch/(三架构移植层)</td><td class="num">43,440</td><td class="num">13.6%</td><td>启动/陷入/上下文切换/TLB</td></tr>
-          <tr><td>dfx/(syscost·kallsyms·看门狗)</td><td class="num">37,946</td><td class="num">11.9%</td><td>诊断与可观测性</td></tr>
+          <tr><td>debug/(syscost·kallsyms·看门狗)</td><td class="num">37,946</td><td class="num">11.9%</td><td>诊断与可观测性</td></tr>
           <tr><td>syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>系统调用边界(胶囊边界)</td></tr>
           <tr><td>drivers/(virtio·DRM·输入)</td><td class="num">23,247</td><td class="num">7.3%</td><td>设备驱动</td></tr>
           <tr><td>net/(TCP/IP·unix·netlink)</td><td class="num">18,649</td><td class="num">5.8%</td><td>网络协议栈</td></tr>
@@ -123,17 +123,17 @@
     <div class="mod-anchor" id="fs"></div>
     <h2><span class="anchor">§3</span>文件系统(kernel/src/fs/)</h2>
     <ul>
-      <li><b>FileOps 能力声明式 builder(D-6)</b>:每槽位一方法、重复安装即编译错;errno 映射收敛单点。付费事故:合法 epoll fd 上 read() 返 EBADF 曾让 OH 事件循环空转 155,991 次。</li>
-      <li><b>dcache 无锁读(WalkClaim reader bank)</b>:删掉每路径组件两对自旋锁,stat <b>0.643→0.423 µs</b>、open <b>1.128→0.889 µs</b>;负查找 memo 以父目录代盖印失效。</li>
+      <li><b>FileOps 能力声明式 builder(D-6)</b>:每槽位一方法、重复安装即编译错;errno 映射收敛单点。实际故障案例:合法 epoll fd 上 read() 返 EBADF 曾让 OH 事件循环空转 155,991 次。</li>
+      <li><b>dcache 无锁读(WalkClaim reader bank)</b>:消除每路径组件的两对自旋锁,stat <b>0.643→0.423 µs</b>、open <b>1.128→0.889 µs</b>;负查找 memo 以父目录代盖印失效。</li>
       <li><b>ext4(12 文件 ~13k 行)</b>:挂载特性门(未知 incompat 拒挂;ENCRYPT 是能力位、接受 —— 拒绝曾使 OH 原装 userdata 全挂);读路径窗口批填充(<a href="#d12">D-12</a>,≤64 块/128KiB 合并请求),写路径批量元数据发布 + 释放即弃(<a href="#d13">D-13</a>)。</li>
       <li><b>jbd2 直写 commit(D-8)</b>:commit 把事务 buffer 直写最终落盘位置并前推 log tail/head —— 完成的 commit 不留可重放物,每次 unlink/rmdir 的 8–12 次同步日志往返消失;磁盘格式与恢复(e2fsck)不变。</li>
       <li><b>bio/buffer cache</b>:buffer_head 五态 + LRU;写规划曾对全 pending 二次方重扫(3 轮上限 + 保守线性回退修复;一次 fsync 卡 1092 s 的 252 个样本定罪)。</li>
-      <li><b>procfile! 宏(D-4)</b>:/proc 格式化器从一个字段声明表派生,杀掉"格式漂移"类缺陷(vmstat/meminfo/status 逐字节对齐活主机)。</li>
+      <li><b>procfile! 宏(D-4)</b>:/proc 格式化器从一个字段声明表派生,消除"格式漂移"类缺陷(vmstat/meminfo/status 逐字节对齐活主机)。</li>
       <li><b>pipe</b>:容量 64 KiB、PIPE_BUF=4096 原子写(对齐 Linux 默认)。<b>io_uring</b>:5.1+ ABI(SQ/CQ 环 mmap),操作在 enter 上下文同步执行。</li>
     </ul>
     <h3>关键数字</h3>
     <ul>
-      <li>元数据族重银行(2026-11-01):stat 200.9→<b>71.1 µs</b>、openclose 512.9→<b>156.3 µs</b>、read_cached 546.8→<b>203.7 µs</b>、append 657.2→<b>77.4 µs</b>、mkdrmdir 22.8→<b>2.76 ms</b>、unlink 1,141→<b>808 µs</b>。</li>
+      <li>元数据族重锚定(2026-11-01):stat 200.9→<b>71.1 µs</b>、openclose 512.9→<b>156.3 µs</b>、read_cached 546.8→<b>203.7 µs</b>、append 657.2→<b>77.4 µs</b>、mkdrmdir 22.8→<b>2.76 ms</b>、unlink 1,141→<b>808 µs</b>。</li>
       <li>D-13 端到端:p6_mkdrmdir 中位 29,796→<b>2,107 µs</b>、p99 54→<b>16.4 ms</b>(对标 Linux 153 µs —— 差距归因共享系统调用/查找地板,非 fs 本身)。</li>
       <li>buffer cache 命中率 <b>99.1%</b>(门禁 ≥ 基线)。</li>
     </ul>
@@ -143,7 +143,7 @@
     <div class="mod-anchor" id="ipc"></div>
     <h2><span class="anchor">§4</span>IPC(kernel/src/ipc/)</h2>
     <ul>
-      <li><b>binder(10,425 行,最大单文件)</b>:OpenHarmony 服务网格的承重实现。misc 设备 <code>/dev/binder</code>;mmap 缓冲静默截断 4 MiB(同 Linux 行为);协议版本 8;BC_*/BR_* 全集、flat_binder_object 跨进程翻译、sync 事务延迟 TRANSACTION_COMPLETE。锁模型:单全局自旋锁,锁下不拷用户内存不睡眠。</li>
+      <li><b>binder(10,425 行,最大单文件)</b>:OpenHarmony 服务网格的核心实现。misc 设备 <code>/dev/binder</code>;mmap 缓冲静默截断 4 MiB(同 Linux 行为);协议版本 8;BC_*/BR_* 全集、flat_binder_object 跨进程翻译、sync 事务延迟 TRANSACTION_COMPLETE。锁模型:单全局自旋锁,锁下不拷用户内存不睡眠。</li>
       <li><b>access_token 注册表</b>:<code>/dev/access_token_id</code> + BINDER_GET_SENDER_INFO —— samgr 权限检查的依赖;缺失时 AddSystemAbility 拒绝曾导致 OH 显示阻塞(b98–b112 黑屏根因)。</li>
       <li><b>SysV 三件 + POSIX MQ</b>:结构体编译期断言对齐 Linux 布局(ShmidDsUapi 112B、MqAttr 64B);SysV 对象按 ipc_namespace 作用域。</li>
       <li>binder poll 唤醒与可用性修复一次 diff 收敛四个语义分歧(对齐 Linux binder_has_work_ilocked 的三个 OR 条件)。</li>
@@ -184,13 +184,13 @@
 
     <!-- ================= 可观测性 ================= -->
     <div class="mod-anchor" id="trace"></div>
-    <h2><span class="anchor">§7</span>可观测性(kernel/src/trace/ + dfx/)</h2>
+    <h2><span class="anchor">§7</span>可观测性(kernel/src/trace/ + debug/)</h2>
     <ul>
       <li><b>统一 trace-event 框架(D-15)</b>:单声明表一行 = 组/名/id/print fmt/字段/typed 记录函数;tracefs(<code>/sys/kernel/tracing</code>)文件树与字节格式逐字节对齐 Linux(tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…)。当前 <b>51 事件 / 16 组</b>(sched、kmem、raw_syscalls、block、binder、ext4 族、jbd2、rux:epoll)。</li>
       <li><b>门禁成本实测</b>:禁用点编译为一个 load+test+branch(release 反汇编逐点验证);启用后 <b>+13–19 ns/记录</b>;镜像价 +0.18%。</li>
       <li><b>kallsyms(D-3)</b>:编译期符号表入 .rodata(2.4MB 名 + 0.7MB 索引 @ ~22.6k 符号),零启动开销,/proc/kallsyms 标准行。</li>
       <li><b>census + heal</b>:每任务逐字段 tick 观测 + 幻影 preempt 判定 + 20 ms 饥饿界;IF=0 占机 <b>25.7%→20.4%</b>,最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>,WAKE-STRANDED 233→31。</li>
-      <li><b>dfx= 开关表冻结在 59 项</b>(遗留):新观测一律 tracepoint 化。</li>
+      <li><b>debug= 开关表冻结在 59 项</b>(遗留):新观测一律 tracepoint 化。</li>
     </ul>
 
     <!-- ================= 三架构 ================= -->
@@ -213,9 +213,9 @@
           <tr><td id="d1"><b>D-1</b></td><td><b>全局运行队列</b>:无 per-CPU 队列/无均衡器,调度序单一事实源,全部取证只推理一个结构。持锁实测 2786 ns(带 1200–7320)。代价:高核数争用上限 + 局部性损失(注册在案)。</td></tr>
           <tr><td><b>D-2</b></td><td><b>打包内核栈 slab</b>(x86_64):85.3KB/栈 vs 128KB、99.9% 槽打包、3445 活任务零 canary;未门控架构编译期剔除。代价:旁表锁 + 6.7% 尾浪费。</td></tr>
           <tr><td><b>D-3</b></td><td><b>编译期符号表入 .rodata</b>:零启动开销,2.4MB 名 + 0.7MB 索引 @22.6k 符号,共享 kallsyms/回溯/%ps。代价:镜像 +3.1MB。</td></tr>
-          <tr><td><b>D-4</b></td><td><b>procfile! 派生 /proc 格式化器</b>:一个声明表铸渲染器 + 形状测试,杀掉格式漂移类(vmstat/meminfo/status 逐字节对齐)。代价:~18 个手写文件残留。</td></tr>
+          <tr><td><b>D-4</b></td><td><b>procfile! 派生 /proc 格式化器</b>:一个声明表铸渲染器 + 形状测试,消除格式漂移类缺陷(vmstat/meminfo/status 逐字节对齐)。代价:~18 个手写文件残留。</td></tr>
           <tr><td><b>D-5</b></td><td><s>tracepoint! 声明宏</s> —— 已被 D-15 取代,保留历史。</td></tr>
-          <tr><td><b>D-6</b></td><td><b>能力检查式 file-ops 声明</b>:重复安装 = 编译错,errno 单点映射(付费事故:epoll fd EBADF 空转 15.6 万次)。迁移全部完成。</td></tr>
+          <tr><td><b>D-6</b></td><td><b>能力检查式 file-ops 声明</b>:重复安装 = 编译错,errno 单点映射(实际故障案例:epoll fd EBADF 空转 15.6 万次)。迁移全部完成。</td></tr>
           <tr><td><b>D-7</b></td><td><b>类型化 per-CPU CpuLocal&lt;T,N&gt;</b>:仅可经 with(f) 访问,guard 生命周期 = 关中断窗,越界 id 走存活臂。守卫:改动须 release-strong pbench boot。</td></tr>
           <tr><td><b>D-8</b></td><td><b>直写 jbd2 commit</b>(无重放窗/无 revoke-cancel):每 unlink/rmdir 的 8–12 次同步往返消失(p6_mkdrmdir 52–58 ms → 个位数 ms);磁盘格式未变,恢复 = e2fsck。</td></tr>
           <tr><td><b>D-9</b></td><td><b>secure-exec 的 LD_* 环境清洗</b>:AT_SECURE 下内核安装 envp 前删除全部 LD_*(libc 无关的纵深防御)。可见差异:/proc/&lt;pid&gt;/environ 不列 LD_*。</td></tr>
@@ -267,6 +267,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>

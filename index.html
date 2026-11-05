@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rux — 用 Rust 从零编写的 Linux ABI 兼容操作系统内核</title>
 <meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 33 万行 Rust,345+ 系统调用,三大架构。">
-<link rel="stylesheet" href="css/style.css?v=12">
+<link rel="stylesheet" href="css/style.css?v=13">
 </head>
 <body>
 
@@ -31,9 +31,9 @@
 <section class="hero">
   <div class="container hero-grid">
     <div>
-      <span class="chip acc"><span class="dot o"></span>全程由 AI 代理开发 · 人类主持合并</span>
+      <span class="chip acc"><span class="dot o"></span>开发全程由 AI 代理执行 · 人类负责评审与合并</span>
       <h1>用 Rust 从零编写的<br><span class="grad">Linux ABI 兼容内核</span></h1>
-      <p class="lede">Rux 的每一行代码 —— 调度器、内存管理、ext4、binder、网络栈、验证框架 —— 都由 AI 代理在人类主持下编写。<b>未经修改的 Ubuntu 22.04</b> 可以启动到 GNOME Shell 桌面,<b>未经修改的 OpenHarmony</b> 可以启动全部 135+ 服务:不打补丁、不重编、不改配置。</p>
+      <p class="lede">Rux 的全部子系统——调度器、内存管理、ext4、binder、网络栈与验证框架——均由 AI 代理实现,人类负责目标设定、评审与合并。<b>未修改的 Ubuntu 22.04</b> 用户态可启动至 GNOME Shell 桌面,<b>未修改的 OpenHarmony</b> 可启动全部 135+ 服务,无需补丁、重编译或配置变更。</p>
       <div class="hero-badges">
         <span class="chip">Rust no_std</span>
         <span class="chip">POSIX 兼容</span>
@@ -46,6 +46,7 @@
         <a class="btn btn-ghost" href="architecture/design.html">架构与模块设计</a>
         <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
       </div>
+      <a class="repo-addr" href="https://github.com/topkernel/Rux">git clone https://github.com/topkernel/Rux.git</a>
     </div>
     <div class="terminal">
       <div class="terminal-bar"><i></i><i></i><i></i><span>rux — zsh</span></div>
@@ -90,8 +91,8 @@
   <div class="container">
     <div class="sec-head">
       <span class="kicker">Boots · 实靴成果</span>
-      <h2>真正的内核,跑真正的发行版</h2>
-      <p>兼容性不是嘴上说说 —— 用未经修改的发行版镜像和未修改的上游用户态程序直接验证。以下截图全部来自 Rux 原生内核的串口/帧缓冲实拍。</p>
+      <h2>未修改发行版的实靴验证</h2>
+      <p>兼容性以未修改的发行版镜像与上游用户态程序直接验证,不依赖任何移植层适配。以下截图均来自 Rux 原生内核的帧缓冲/串口实拍。</p>
     </div>
     <div class="gallery">
       <figure class="shot">
@@ -166,12 +167,12 @@
       </div>
       <div class="card">
         <h3><span class="ico">🤖</span>AI 并行工程化</h3>
-        <p>多代理并行开发:每任务独立工作树、独立分支,主会话审阅合并。每日多轮合并,全量回归护航。</p>
+        <p>多代理并行开发:每任务独立工作树、独立分支,主会话审阅合并。每日多轮合并,全量回归验证。</p>
         <div class="nums">工作树 <b>130+</b> · 并发 5 线</div>
       </div>
       <div class="card">
         <h3><span class="ico">⚡</span>性能即门禁</h3>
-        <p>每次合并同时审查功能与性能:三层门禁 + 六大看护域(内存/调度/文件系统/中断/IPC/binder),没有数据不能合并。</p>
+        <p>每次合并同时审查功能与性能:三层门禁 + 六大看护域(内存/调度/文件系统/中断/IPC/binder),无测量数据不予合并。</p>
         <div class="nums">GRQ 持锁 <b>~2.8 µs</b> 实测</div>
         <a class="more" href="performance/index.html">性能栏目 →</a>
       </div>
@@ -185,7 +186,7 @@
     <div class="sec-head">
       <span class="kicker">Modules · 模块地图</span>
       <h2>内核由哪些部分组成</h2>
-      <p>每个子系统都有独立的设计文档页,包含机制、数据结构与实测数字。以下是一分钟导览。</p>
+      <p>每个子系统均有独立设计页,含机制、数据结构与实测数字。以下为要点摘要。</p>
     </div>
     <div class="card-grid grid-4">
       <div class="card">
@@ -202,7 +203,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>文件系统</h3>
-        <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率护航;pbench 文件路径中位数全部带内。</p>
+        <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率保障;pbench 文件路径中位数全部带内。</p>
         <div class="nums">buffer cache 命中率 <b>99.1%</b></div>
         <a class="more" href="architecture/design.html#fs">设计详情 →</a>
       </div>
@@ -226,7 +227,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔍</span>可观测性</h3>
-        <p>统一 trace-event 框架 + tracefs(对齐 Linux 语义),syscost 普查、kallsyms、任务转储、看门狗一应俱全。</p>
+        <p>统一 trace-event 框架 + tracefs(对齐 Linux 语义),syscost 普查、kallsyms、任务转储、看门狗配套齐备。</p>
         <div class="nums">新观测一律 <b>tracepoint</b> 化</div>
         <a class="more" href="architecture/design.html#trace">设计详情 →</a>
       </div>
@@ -245,13 +246,13 @@
   <div class="container">
     <div class="sec-head">
       <span class="kicker">Quality · 质量栏目</span>
-      <h2>数字说话</h2>
+      <h2>关键量化结果</h2>
       <p>四个独立栏目:测试(LTP / 稳定性 / 压力)、性能(门禁 + 基准面板 + 战役史)、安全(分类学 + 形式验证 + 缺口登记册),每一条都带 rig 与日期。</p>
     </div>
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP 兼容扫描</h3>
-        <p>1,869 项全量扫描从早期 35 项通过爬升到 1,084;每轮结果归档,新失败一律隔离复跑两次排除环境抖动后再定性。</p>
+        <p>1,869 项全量扫描从早期 35 项通过增至 1,084;每轮结果归档,新失败一律隔离复跑两次排除环境抖动后再定性。</p>
         <div class="nums">当前 <b>1084 / 1869</b> (r27)</div>
         <a class="more" href="testing/ltp.html">LTP 扫描 →</a>
       </div>
@@ -282,7 +283,7 @@
   <div class="container">
     <div class="sec-head">
       <span class="kicker">Quickstart · 快速开始</span>
-      <h2>三步跑起来</h2>
+      <h2>构建与运行</h2>
       <p>一台 Linux 主机 + QEMU 即可。详细环境要求、工具链安装与故障排查见<a href="guides/getting-started.html">快速入门</a>。</p>
     </div>
     <div class="card-grid grid-3">
@@ -313,7 +314,7 @@ make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME 桌面</span></code></p
   <div class="container">
     <div class="sec-head">
       <span class="kicker">Docs · 文档地图</span>
-      <h2>找到你想看的一切</h2>
+      <h2>文档索引</h2>
     </div>
     <div class="card-grid grid-4">
       <div class="card">
@@ -383,12 +384,12 @@ make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME 桌面</span></code></p
       </div>
     </div>
     <div class="foot-meta">
-      <span>Rux Kernel · MIT License</span>
+      <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
       <span>~330,000 lines of Rust · built by AI agents under human direction · 2026</span>
     </div>
   </div>
 </footer>
 
-<script src="js/main.js?v=12"></script>
+<script src="js/main.js?v=13"></script>
 </body>
 </html>

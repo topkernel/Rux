@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>安全与形式验证 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=12">
+<link rel="stylesheet" href="../css/style.css?v=13">
 </head>
 <body>
 
@@ -89,7 +89,7 @@
     <ul>
       <li><b>已枚举且带合同</b>:unsafe 行占全内核 <b>12.9%</b>;Framework 层 1,340 个 unsafe token(逐块 <code>// SAFETY:</code> 注释覆盖 3,207/5,009 = 64%)。</li>
       <li><b>service 层目标 100% forbid</b>:47 个文件编译期 <code>forbid(unsafe_code)</code>,另 56 个已无 unsafe;首个具名收缩目标 <code>syscall/io.rs</code> 69 个 token 已清零(typed entries + uaccess_safe 类型化 copy_in/copy_out)。</li>
-      <li><b>分层模型</b>(kernel-layers.md,最长前缀匹配,未匹配默认落最安全桶):Framework(arch/mm 原语/interrupt/virtio 核心/trace/perf)允许 unsafe;service 层 forbid;dfx/ 诊断层单独统计;trace 模块整体禁 unsafe。</li>
+      <li><b>分层模型</b>(kernel-layers.md,最长前缀匹配,未匹配默认落最安全桶):Framework(arch/mm 原语/interrupt/virtio 核心/trace/perf)允许 unsafe;service 层 forbid;debug/ 诊断层单独统计;trace 模块整体禁 unsafe。</li>
       <li><b>胶囊边界</b>:syscall 入口统一校验/翻译用户指针,内核其余部分不直接触用户内存。</li>
     </ul>
 
@@ -108,7 +108,7 @@
     <ul>
       <li><b>镜像同步纪律</b>:verify crate 手工镜像被证算法,<code>scripts/verify_sync_check.py</code> 强制镜像函数体与内核原文逐字节等价 —— 证明钉在被证代码上;不同步镜像副本的内核改动直接 fail make verify 与 CI 门。</li>
       <li><b>节奏</b>:per-push(镜像同步 + proptest 全量)→ nightly(Kani 全 harness / Miri / SPIN,装不进单提交预算)→ 手动(证明性改动落地前 <code>make verify && make kani</code>)。</li>
-      <li><b>战果</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器兜底。</li>
+      <li><b>已捕获缺陷</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器兜底。</li>
     </ul>
 
     <h2 id="runtime"><span class="anchor">§5</span>运行时强化清单(已具备)</h2>
@@ -123,7 +123,7 @@
 
     <h2 id="panic"><span class="anchor">§6</span>panic 面是设计面,不是潜伏面</h2>
     <ul>
-      <li>每一处出现的 panic 都以<b>回归测试消除</b>(十余条收据在案):UTF-8 打印机族(非 UTF-8 comm 曾在 t=209s 击穿 panic 打印机)、负备忘空解引用、mmprof 槽命名空间、dfx 开关表、memwatch PFN 界、binder dead-proc expect→有界告警、timer 同 CPU IRQ 重入、ext4 空索引根、aarch64 regs[31]。</li>
+      <li>每一处出现的 panic 都以<b>回归测试消除</b>(十余条收据在案):UTF-8 打印机族(非 UTF-8 comm 曾在 t=209s 击穿 panic 打印机)、负备忘空解引用、mmprof 槽命名空间、debug 开关表、memwatch PFN 界、binder dead-proc expect→有界告警、timer 同 CPU IRQ 重入、ext4 空索引根、aarch64 regs[31]。</li>
       <li>原则:<b>响而被捕获优于静默破坏</b> —— 边界检查把越界写拦成 panic,而不是让损坏继续走。</li>
     </ul>
 
@@ -134,7 +134,7 @@
         <thead><tr><th>状态</th><th>项</th></tr></thead>
         <tbody>
           <tr><td><span class="chip bad">缺</span></td><td>KASLR(字段与管道在、无 boot 熵源)、内核 text/rodata W^X 收紧(镜像 RWX/RW 无 NX、无 mark_rodata_ro)、编译器栈保护 / shadow-call-stack、硬化 usercopy(仅 access_ok)、模块签名(模块面=仅注册,无运行期代码加载)、KCSAN 类观察点、eBPF 类运行时缓解通道、kptr_restrict / kallsyms 掩蔽(/proc/kallsyms 对所有读者显示真地址)</td></tr>
-          <tr><td><span class="chip warn">部分</span></td><td>lockdep 类调试(键=编译事实 + census MISS=0;全树运行期持锁图缺)、refcount 硬化(页/帧引用是普通原子 —— 分类学行 24/25 正是 checked Refcount 该抓的类)、release 算术溢出检查关(一行 + 实测成本即闭)、KASAN 式毒化广度(dfx 门控;small_alloc 无 redzone)、LSM 面(hook 存在、selinuxfs permissive)、命名空间(PID/IPC 真;net/user/mount 桩)、能力执法广度(~18 门点 vs Linux ~120)</td></tr>
+          <tr><td><span class="chip warn">部分</span></td><td>lockdep 类调试(键=编译事实 + census MISS=0;全树运行期持锁图缺)、refcount 硬化(页/帧引用是普通原子 —— 分类学行 24/25 正是 checked Refcount 该抓的类)、release 算术溢出检查关(一行 + 实测成本即闭)、KASAN 式毒化广度(debug 门控;small_alloc 无 redzone)、LSM 面(hook 存在、selinuxfs permissive)、命名空间(PID/IPC 真;net/user/mount 桩)、能力执法广度(~18 门点 vs Linux ~120)</td></tr>
         </tbody>
       </table>
     </div>
@@ -167,6 +167,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=12"></script>
+<script src="../js/main.js?v=13"></script>
 </body>
 </html>
