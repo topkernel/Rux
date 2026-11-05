@@ -5061,3 +5061,43 @@ the stage that eats the wake.
 
 ### 5. Wedge = OUR kernel (reference runs same image set to
 launcher.ready 11.7s; refu9 numbers in oh-roll ledger ~1390).
+
+### 6. The wakewatch verdict (ohc13) — the scheduler is EXONERATED
+Every WAKE-RUN-LEAK "victim" resumes within jiffies of each kick:
+the ww tail reads `[L W P K A]` per 60s cycle (link+wake at kick,
+pick+publish+AFFIRM a few jiffies later). The task RUNS, finds no
+work (the rekick is a bare kick), and re-parks invisibly — the wait
+macro's internal loop re-parks without resetting read_wait_since, so
+the census's "age" grows forever on a HEALTHY idle thread. The
+WAKE-RUN-LEAK family as counted by the binder census is dominated by
+false positives; wake_up_process -> link -> pick -> switch-in all work.
+
+### 7. The REAL wedge: frozen musl-mutex holders (ohc9-ohc15)
+- FUX census: 115-193 threads per boot park in FUTEX_WAIT_PRIVATE on
+  words still =0x80000010 (WAITERS|EBUSY per OH's patched musl: a
+  NORMAL mutex fast-held with waiters) — i.e. every waiter's lock is
+  genuinely STILL HELD. Parks begin t=2-14s and never clear.
+- musl source (oh-robot, pthread_mutex_timedlock.c): fast path CAS
+  0->EBUSY(16); waiters park on r|0x80000000. The old "owner tid 2"
+  and "16 readers" decodes were both wrong — word=2 (recursive/
+  errorcheck owner-tid 2, tid never existed) and 0x80000010 are
+  HELD NORMAL MUTEXES.
+- RWFRZ-PARK dumps (ohc15, dfx=parkdump): samgr MAIN (t=5.9),
+  OS_DfxWatchdog, audio_server, bluetooth, huks, concurrent_task all
+  park on two lock families: libc .bss globals (0x3fbf13e6a8) and a
+  deterministic heap-arena lock at 0x7ff00002ec64 present in EVERY
+  safwk process (OH's libkccl_lockopt-era heap mutexes).
+- Holder chains: every exposed holder is itself futex-parked on
+  another lock (binder-stall holder lines: all sys=202 musl waits).
+  The ROOT holders are invisible to the current censuses.
+- ohc14 (RELEASE kernel, NO dfx): userspace goes SILENT at t=13.7s
+  with pixels frozen — the wedge is NOT a debug/instrument artifact;
+  both debug and release freeze within ~14s. (The 5th-successor era's
+  release boots reaching appfwk.ready 132-169s were the pre-storm-fix
+  kernel; current mainline descendants wedge earlier.)
+
+### 8. ohc16 (running): dfx=sleepsnap,fuxstuck,txnhunt — name the
+syscall EVERY S-state thread is parked in, to expose the ROOT holders
+(not futex-chained). Hypotheses: holder blocked in mmap/pagefault
+under the malloc lock (alloc_group under lock), or in an epoll/read
+that never returns while holding a service mutex.
