@@ -1,0 +1,8 @@
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=bisect7 accel=kvm smp=2 mem=2G foreign_qemus=2
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291937500
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.060 min=0.040 max=24.796 avg=0.047 wall=0.056
+[probe] PBENCH p1_clock n=1000000 med=0.050 p99=0.080 min=0.000 max=19.206 avg=0.036 wall=0.066
+[boot] no DONE within 1200s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-bisect7-serial.log

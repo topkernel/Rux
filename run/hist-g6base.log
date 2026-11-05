@@ -1,0 +1,31 @@
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=hist-g6base accel=kvm smp=2 mem=2G foreign_qemus=0
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291866120
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.050 min=0.040 max=18.144 avg=0.046 wall=0.055
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.070 min=0.050 max=17.543 avg=0.056 wall=0.064
+[probe] PBENCH p2_ctxsw n=100000 med=0.110 p99=2.405 min=0.075 max=11.627 avg=0.268 wall=0.272 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=6.222 min=0.000 max=108.084 avg=0.328 wall=0.335
+[probe] PBENCH p3b_fault_cow n=8192 med=2.244 p99=3.326 min=2.034 max=36.048 avg=2.333 wall=2.340 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=72.227 p99=145.936 min=68.480 max=160.393 avg=74.037 wall=77.025
+[probe] PBENCH p4_fork_exec n=1000 med=103.676 p99=176.143 min=100.821 max=192.474 avg=105.992 wall=109.020 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.240 p99=0.260 min=0.200 max=20019.309 avg=0.436 wall=0.448
+[probe] PBENCH p5b_dgram_send n=20000 med=0.271 p99=0.331 min=0.260 max=167.858 avg=0.753 wall=0.764
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.451 p99=0.491 min=0.421 max=122.923 avg=0.758 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.240 p99=0.301 min=0.210 max=24.216 avg=0.289 wall=0.298
+[probe] PBENCH p5c2_stream_send n=100000 med=0.200 p99=0.240 min=0.190 max=38.122 avg=0.248 wall=0.256
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.200 p99=0.240 min=0.190 max=30.177 avg=0.254 wall=0.262
+[probe] PBENCH p5d_rt_read n=100000 med=0.351 p99=0.371 min=0.341 max=17.202 avg=0.358 wall=0.366
+[probe] PBENCH p5d_rt_recv n=100000 med=0.371 p99=0.391 min=0.360 max=18.495 avg=0.376 wall=0.383
+[probe] PBENCH p5e_child_spin n=323 med=12.303 p99=100.951 min=9.217 max=101.943 avg=16.672 wall=0.000 measured_by=child spin-read eagain=22217973
+[probe] PBENCH p5f_stream_dwait n=42976 med=0.200 p99=0.250 min=0.200 max=31.890 avg=0.213 wall=31.609 attempts=6400000 eagain=6357024 (99.3% spin)
+[probe] PBENCH PREP tree=1000files wall_ms=495
+[probe] PBENCH p6_stat n=10000 med=0.491 p99=0.571 min=0.371 max=25.839 avg=0.502 wall=0.733
+[probe] PBENCH p6_openclose n=10000 med=0.912 p99=0.992 min=0.781 max=26.861 avg=0.922 wall=1.191
+[probe] PBENCH p6_getdents n=1000 med=125.217 p99=160.203 min=123.263 max=215.307 avg=127.211 wall=147.351 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.172 p99=1.443 min=1.032 max=19.988 avg=1.199 wall=1.550 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.701 p99=2.214 min=0.571 max=11.141 avg=0.820 wall=0.816
+[probe] PBENCH p6_unlink n=1000 med=9.728 p99=9915.276 min=6.192 max=35118.630 avg=347.643 wall=348.059
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=54s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-hist-g6base-serial.log
