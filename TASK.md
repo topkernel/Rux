@@ -4788,3 +4788,103 @@ kernel wake loss. Consistent with the 47th's REQUEUE reproducer.
    (txn data audit / SLRD dlen for the txn it was servicing.)
 5. The stashed 47th futex WIP (hb->waiters + REQUEUE_PI) still
    awaits validation + landing.
+
+## 49TH SESSION ADDENDUM — ea88abfa VERIFIED AGAINST 6.6 AND REVERTED; BOTH CRASH FAMILIES DECODED TO INSTRUCTION LEVEL (2026-11-05 21:46-23:10, branch oh-roll)
+
+Session: took over mid-boot-42 (main session's roller had started v42 on
+518655f3). Banked v42 as the old-kernel control, killed the roller bash
+(driver+v42 left to finish), merged origin/main (ea88abfa clean merge,
+d6029424; the two mm reverts net zero vs our base), built x86_64,
+relaunched the roller from boot 43. Commits this session (all pushed):
+d6029424 merge, 0e4bae90 (48th's FUX-MAPS work, was uncommitted — d6029424
+boots already carried it), 411583b2 ea88abfa REVERT, c2c8ab95 USEGV
+fails-ring printer, eb18b6e1 ledger.
+
+### 1. ea88abfa (thread_has_work bare-todo term) — DIVERGES FROM 6.6, REVERTED
+Local ground truth (oh-robot kernel/linux/linux-6.6/drivers/android/
+binder.c:586-593): process_todo || looper_need_return || (do_proc_work &&
+proc-todo-nonempty). NO bare thread-todo term. The deferred tcomplete
+(binder.c:3683, enqueue_deferred_thread_work — "Doesn't set the
+process_todo") and deferred node work (binder.c:879) RELY on
+todo-invisibility; ea88abfa un-defers both (re-opens the lb311 RSS shape
+our own 9013-9026 comment documents) and made read's wait disagree with
+our own poll site (2968). Its claimed mechanism is unreachable: every
+non-deferred push sets process_todo=true (13 sites), the sole clear
+(9796) fires only on EMPTY-todo drains. Revert commit 411583b2 carries
+the full evidence. DATA CORRECTION for the ledger era: v43/v44's
+todo=1-BWR-park drop 2175->175 is NOT a fix — those parks are
+correctly-parked deferred tcompletes per protocol; and the t=22s
+"HLD mutual pair" is TRANSIENT ON BOTH KERNELS (v42's txn1884 completed
+in 6090ms — SLOW-TXN print exists — same 6s class as v43's txn1829).
+The real full-window todo=1 parks (819s/865s, v42) are deferred
+tcompletes of txns whose upstream wedged — correct behavior.
+Wedge metrics identical either way: SA 58/60 vs 60, n 1387/1383 vs 1368,
+pixels 82f0a25f everywhere.
+
+### 2. The 0x3fbf region is ld-musl, and our kernel has NO ASLR
+FUX-MAPS (first firing: v46) + reference-maps geometry match: samgr's
+3fbf077000-3fbf138000 (size 0xc1000, off 0x76000) = /system/lib/
+ld-musl-x86_64.so.1 r-x (reference: same size/off at randomized
+0x7efe.../0x7f03... bases). OUR kernel loads it at the FIXED
+0x3fbf077000 every boot, PIE exes at 0x555555554000 — the reference
+randomizes both. Same crash rips across lb1->today's kernels prove the
+determinism. (Pixel md5 cross-boot stability is a consequence.)
+Symbol key for 0x3fbfXXXXXX: vaddr = rip - 0x3fbf000000 (R-E LOAD maps
+vaddr 0x77000 at file 0x76000).
+
+### 3. samgr mallocng crash — decoded
+v46 15.993 pid 337 (OS_IPC_0, samgr tgid 329): rip vaddr 0xbb82f =
+musl mallocng STATIC zone (between wcsxfrm and mallopt — malloc
+internals). Faulting insn (ripbytes): `mov [r13], r8` — chunk-metadata
+write to cr2=0x7ff0005ae000 which sits in an UNMAPPED HOLE between
+FFRT-zone mappings. Registers are garbage-class (rax=0xe96329ed4b72ac44,
+stack@rsp[0] unaligned 0xbc439d4e9d0097) = the chunk chain was read from
+garbage-content memory or corrupted. 20ms later the SAME thread forks a
+spawn chain: 337->588->589, 589 exits 0, 588 exits 512(=exit 2 enc),
+NO execve attempt at all (no exec print, no ENOENT print) — the on-demand
+feature spawn fails before exec. Same rip hit render_service (48th, v43).
+Present since at least lb246. NOT allocator aliasing: the b88
+free-while-mapped tripwire is silent on every r41 boot.
+
+### 4. usb_host crash — decoded; NOT preceded by any failing syscall
+rip 0x7ff082996bac in an r-x VMA (fd closed, off 0xe000, size 0x1b000)
+— NOT the image's libusb_proxy (its R-E PT_LOAD is off 0x19a34) — a
+memfd/removed file the 22nd already chased. Insn `mov rax,[rbx]` rbx=0:
+NULL list walk in UsbPnpManagerRegisterOrUnregisterDevice cleanup, with
+rax=-16 (EBUSY) pre-fault. NEW instrument (c2c8ab95): the faulting
+task's sc125 fails-ring prints at fault time — EMPTY in a dedicated 75s
+boot (r41u1) AND in v47: the crash thread made ZERO failing syscalls.
+The -EBUSY is userspace-internal or from ANOTHER thread (rings are
+per-task). Present since lb1.
+
+### 5. fdreap grace-stall prints — pre-existing bimodal variance
+v39:0 v40:1 v41:1260 v42:0 v43:1195 v44:0 — fires on both kernels,
+NOT ea88abfa-attributable. Do not flag as a regression class.
+
+### 6. Housekeeping
+- bzImage-411583b2 (the FILE) contains the c2c8ab95 printer build (my
+  cp raced the roller's filename after the rebuild): boots v47-v49 rows
+  say sha=411583b2 but include the additive print-path line; the boot-50
+  boundary rebuilds from HEAD (c2c8ab95) and attribution self-corrects.
+- r41u1 = dedicated 75s boot tag (artifacts run/oh-r41u1-*), kernel
+  bzImage-c2c8ab95, full DFX cmdline.
+- Reference baseline re-verified: oh-refu1/2/6/7/8 = 0 USEGV, 0 SEGV
+  lines through t=696 on the same image class.
+
+### 7. Next steps (50th)
+1. Process-wide fails dump at USEGV (all threads of faulting tgid) —
+   names usb_host's -EBUSY source thread if it exists.
+2. COW/fork content-integrity probe: parent checkerboard + fork + child
+   writes + parent verify (and mallocng stress under fork storm). The
+   mallocng hole-write through a garbage chain is either content
+   corruption (kernel) or a real userspace UAF (image) — a kernel-side
+   COW verify kills half the hypothesis space. The 337 crash sits 20ms
+   from a fork; fork/COW is the sharpest suspect.
+3. Why does 588's spawn chain never execve? Instrument the image side
+   (which binary, why exit 2) or execve-trace pid 588.
+4. The 8.2s samgr thread exit (48th item 3) still unexplained.
+5. ASLR: standing layout divergence (determinism is also what makes
+   pixel md5s stable) — decide deliberately before "fixing".
+6. Keep the roller rolling; bank v47+ (revert kernel stats needed:
+   v46 showed n=528 with new '7'/'12' codes — one boot, variance until
+   47+ repeat it).
