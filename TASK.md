@@ -5319,3 +5319,98 @@ c) cpu slots line in every dump: init or a fresh init child (fork
    SetBundleQuota → launcher). Reference timings: oh-roll ledger
    ~1390 (creation 8.3s, launcher.ready 11.7s).
 5. usb_host NULL family (51st §11.5) still queued.
+
+## 53RD SESSION — the wait-object instrument landed; hilogd's "mmap park" closed as a latch artifact; the wedge re-rooted to the store/log-flood cost mountain; recvfrom EAGAIN fast-fail landed (2026-11-06 06:0x-09:3x, branch oh-crash @ 70568e37+)
+
+Mission (52nd §6a/§8): name what hilogd's mmap blocks on.
+
+### 1. THE INSTRUMENTS (commit f4aa1e0e)
+- `parked_kstack_syms` (dfx/taskdump.rs): walks a sleeping task's
+  kernel stack UP from its saved switch sp (32 KiB window — stacks are
+  128 KiB) and symbolizes frames via ksyms. sleep_snapshot attaches one
+  parkstk line per S-state task (deduped per (tid,sp)); new 5s early
+  cadence for the first minute (timer.rs heartbeat slot). Three print
+  bugs found and fixed on the way: printk records cap at 256 bytes
+  (chunk at last newline ≤240), char-boundary-safe hard split (ohc28
+  PANICKED at 11s on a multi-byte task comm), 2KB walk window was 128x
+  too small.
+- pollfd decode: poll(7) parks print fd/events/timeout read from the
+  parker's own page tables.
+- `unix_park_audit` (net/unix.rs): S-state tasks parked in
+  recvfrom/recvmsg/sendto/writev print fd→socket name, recvq
+  segs/charge, wait-queue woken census.
+- `timerfd_wheel_audit` (syscall/misc.rs): every armed timerfd wheel
+  entry with expiry-vs-now, interval, waiter census.
+
+### 2. THE 52ND'S §6a QUESTION — SETTLED (ohc25-ohc31 evidence)
+- hilogd MAIN parks in poll(1 fd, timeout 3000ms) at rip 0x3fbf0fc650
+  (musl poll), NOT in mmap. The 52nd's lastsys=9(0x18,0x6ffffff9) was
+  the LASTSYS latch: a0/a1 are IDENTICAL across different processes
+  (hilogd tgid 318, OS_IPC_0_317 tgid 313, OS_DfxWatchdog) — ld.so
+  working constants (0x6ffffff9 = DT_RELACOUNT), i.e. a stale/parked
+  frame misread, not a real mmap(0x18, 1.8GB). Ground truth: the live
+  entry frame (sleepsnap) shows sys=7 with a coherent chain
+  (unix_poll_wait + timer), and ohc22's own vruntime (1028713028 →
+  4395855323 over 595s) shows the task RUNS — a 3s-timeout poll loop.
+- ZERO mm-syscall parks exist in ANY boot (sys 9/12/214 across every
+  5s snapshot of ohc25-ohc31): the malloc-arena-holder-inside-mmap
+  theory is DEAD. The 52nd's prime suspect (1) is closed.
+- The parkstk census decomposed the whole S-state population: binder
+  idle read (`pm::{closure#0}` — the 179 ioctl parks), futex (202 —
+  FUX's ground), epoll/timerfd/poll waits (all with LIVE timer arms),
+  recvfrom on EMPTY queues, kmsg_poll_sleep, one transient virtio
+  block wait (completed). NO kernel-side lost-wake park exists.
+- upark verdict: every parked socket receiver waits on an EMPTY queue
+  (segs=0) — the 51st's socket-backpressure chain is not the root in
+  this regime; senders froze before ever sending.
+- TCG watchpoint forensics (run/tcg-watch.py, ohc30 kernel, watch
+  0x7ff082b4c714 — the OS_DfxWatchdog word that freezes at ~6.0s in
+  EVERY boot): the "lock" is a musl CONDVAR WAITER NODE on a thread
+  stack (rbp-0x3c inside pthread_cond_timedwait; disassembled). The
+  DfxWatchdog threads futex-wait on their OWN stack node for a condvar
+  signal that never comes; FUX shows their timeouts are 60s (retry
+  loops) and 1-YEAR (31535999s) classes. All 20 samgr threads are
+  parked this way — a userspace dependency graph whose producers are
+  themselves parked. The kernel-side parks are ALL legitimate.
+
+### 3. THE RE-ROOTING: the wedge is the store's time-to-serve (oh-roll
+ledger ~1390 was right) + a log-flood per-op mountain, both measurable
+with the CURRENT kernel (ohc32, syscost=1 dfx=fuxstuck, t=60s):
+- hilogd.server: 999,609 recvfrom in 60s (16.6k/s nonblocking EAGAIN
+  spin) + 1,036,661 recvmsg avg 5µs — the image's drain loop; ours
+  paid a stage-Vec reservation per EAGAIN.
+- UART console tax at LOGLEVEL=7: if0 9986ms + if1 6687ms per 60s
+  (avg 427-806µs/write, 90-99% multi-poll; init alone printed 11,169
+  records/698KB). NOTE for the rig: the reference pays the same
+  emulated-baud physics for ITS prints; our extra = the default-on
+  diagnostic prints (pagefault:cow per-COW, exec/exit, o-path...).
+- rest-sites: percpu.rs:126 n=20.5M/4.3s, slab.rs:640 n=12M/3.5s,
+  file.rs:1123 n=7.4M/2.3s — allocator/percpu/fd-resolve traffic under
+  the spin+log storm.
+- SA ladder unchanged (store-gated): SA inits still land 20-100s.
+
+### 4. THE FIX LANDED (commit c77a6481): recvfrom EAGAIN fast-fail
+before the stage allocation (reference parity: unix_dgram_recvmsg
+skb_dequeue-NULL → EAGAIN allocates nothing). A/B ohc32→ohc33:
+kernel ticks c0 9331→8696 c1 8839→8273 (-6.4/-6.8%), UART tax
+16.7→14.5 CPU-s/min, drain spin throughput +42% (999,609→1,416,805).
+Gates: x3 builds rc=0, riscv64 make test ALL TESTS PASSED
+(run/maketest-53.log; rc=124 post-halt kill is the known wrapper
+shape).
+
+### 5. What the 54th should do (in order)
+1. The store's 28-100s init is THE lever (oh-roll ~1390 verdict
+   confirmed on the current kernel). The ohc32/33 syscost tables are
+   banked; the next cuts in cost order: (a) the console/printk path —
+   one 256B line costs 5-17ms of IF=0 (multi-poll UART); consider
+   batching/dropping level-7 diagnostics on OH boots, or fix the UART
+   driver's multi-poll (99% of if1 writes poll repeatedly);
+   (b) recvmsg avg 5µs × 1M/min — the direct-to-user cursor path
+   (unixrd phases) is next after recvfrom; (c) percpu.rs:126 20.5M
+   hits — preempt-count store/load pairs under the storm.
+2. The 1-year/60s condvar parks are USERSPACE victims; do not chase
+   them as kernel lost-wakes (this session's acquittal, §2).
+3. Still queued from the 52nd: GLOBAL_SEQ per-CPU sequence (§8.3),
+   usb_host NULL family (§8.5), RCU-GP-BOUND 37 prints.
+4. tcg-watch.py (run/) is reusable for any deterministic user-memory
+   word — the freeze VAs repeat across boots (0x7ff082b4c714 et al).
