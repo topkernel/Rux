@@ -1,0 +1,8 @@
+CASE[lat_syscall open] g7wip rep1 load=2.18 VAL=0.6935
+CASE[lat_syscall open] g7gates rep1 load=2.16 VAL=0.6558
+CASE[lat_syscall open] g7wip rep2 load=2.23 VAL=0.6749
+CASE[lat_syscall open] g7gates rep2 load=2.29 VAL=0.6481
+CASE[lat_syscall stat] g7wip rep1 load=2.35 VAL=0.3178
+CASE[lat_syscall stat] g7gates rep1 load=3.00 VAL=0.3202
+CASE[lat_syscall stat] g7wip rep2 load=3.47 VAL=0.3213
+CASE[lat_syscall stat] g7gates rep2 load=3.43 VAL=0.3220

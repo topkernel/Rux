@@ -1,0 +1,12 @@
+CASE[lat_syscall open] g7gates rep1 load=5.13 VAL=0.6509
+CASE[lat_syscall open] g8memo rep1 load=5.12 VAL=0.6298
+CASE[lat_syscall open] g7gates rep2 load=5.12 VAL=0.6483
+CASE[lat_syscall open] g8memo rep2 load=5.11 VAL=0.6296
+CASE[lat_syscall open] g7gates rep3 load=5.18 VAL=0.6500
+CASE[lat_syscall open] g8memo rep3 load=5.17 VAL=0.6355
+CASE[lat_syscall stat] g7gates rep1 load=5.31 VAL=0.3167
+CASE[lat_syscall stat] g8memo rep1 load=5.31 VAL=0.2994
+CASE[lat_syscall stat] g7gates rep2 load=5.37 VAL=0.3123
+CASE[lat_syscall stat] g8memo rep2 load=5.34 VAL=0.2990
+CASE[lat_syscall stat] g7gates rep3 load=5.31 VAL=0.3110
+CASE[lat_syscall stat] g8memo rep3 load=5.29 VAL=0.3013

@@ -1,0 +1,12 @@
+CASE[lat_syscall open] g6new rep1 load=1.36 VAL=0.7254
+CASE[lat_syscall open] g7wip rep1 load=1.42 VAL=0.6585
+CASE[lat_syscall open] g6new rep2 load=1.45 VAL=0.7207
+CASE[lat_syscall open] g7wip rep2 load=1.38 VAL=0.6537
+CASE[lat_syscall open] g6new rep3 load=1.48 VAL=0.7326
+CASE[lat_syscall open] g7wip rep3 load=1.48 VAL=0.6648
+CASE[lat_syscall stat] g6new rep1 load=1.91 VAL=0.3069
+CASE[lat_syscall stat] g7wip rep1 load=1.84 VAL=0.3041
+CASE[lat_syscall stat] g6new rep2 load=1.77 VAL=0.3049
+CASE[lat_syscall stat] g7wip rep2 load=2.42 VAL=0.3127
+CASE[lat_syscall stat] g6new rep3 load=2.63 VAL=0.3069
+CASE[lat_syscall stat] g7wip rep3 load=2.50 VAL=0.3080
