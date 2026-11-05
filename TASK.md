@@ -4389,3 +4389,41 @@ wcmd=0xffffffff] — the talkWithDriver read shape) and the census reads
 write-only-parked=0 through t=92s. The wedge face is unchanged
 (stack-holders 56 parked with SYNC-OUT tops — H1 remains the dominant
 face; that hunt continues per TASK entry points).
+
+### 46th addendum 1 — REAL PANIC FOUND + FIXED: switch-path guard printer overflow (r41v4/v5/v6 "hard freeze" face)
+
+r41v6 died at t=346.5s with `Kernel panic - not syncing: PANIC: attempt
+to add with overflow, Location: kernel/src/arch/x86_64/context.rs: 364`
+— and so did r41v4 AND r41v5 (grep: 1 hit each; r41v5's "frozen at 262s"
+face IS this panic with a half-dead panic printer, serial stops mid
+register-dump). This is a main-kernel bug (the 45th's kernel panicked
+too), NOT new to this branch.
+
+- Trigger: wifi_manager_se FFRT watchdog kill(0,SIGKILL) group storm ->
+  a switch-in hits a PF_EXITING/dead task -> the SWITCHIN-DEAD-TASK
+  report loop prints the pid -> the pid hex loop reads (v >> 28) as u8 =
+  EIGHT bits per iteration (copied shape from the >>60 pointer loops);
+  any read byte >= 0xA9 overflows u8 in the b'a'+n-10 arm -> debug
+  arithmetic panic FROM INSIDE x86_switch_publish -> box dead.
+- Fix (14f7dcf2): mask to one nibble (((v >> 28) as u8) & 0xF) in BOTH
+  copies (SWITCHIN-DEAD-TASK pid loop + R64-NOTOP-SKIP pid loop). The
+  pointer loops (>>60) are safe as-is.
+- NOTE for the sched lane: the guard FIRING (stale-link resume of an
+  exiting task during group-kill) is the pre-existing lead the guard
+  was built to report; with the printer fixed it now reports instead
+  of panicking.
+
+### 46th addendum 2 — r41v6 banked with the VALID instrument
+
+- SA 35/34@28.9s (short life: panicked at 346s) | pixels 82f0a25f
+  frozen | BWR rows 1517: H2-write-only **0** (vs 207 bogus in r41v5's
+  decode), H1-sync-out 435, H3-futex-stack 1073 | census
+  write-only-parked=0 sustained.
+- H3 chain proven with valid data: samgr OS_IPC_10_815 picked txn3507
+  (code 3) from sensors 739.746 at ~t=32s and sat futex-parked
+  (uaddr 0x7ff08d2ec1d4, word 0x2) mid-handler for 310s+ — client
+  waits forever for a reply the server never finishes. The wedge
+  bottom is userspace FFRT mutexPrivate territory (holders/waiters +
+  possibly the lost-timer-wake class r41v1 named), NOT binder: every
+  binder-side observable matches the reference.
+- Roll resumed at r41v7 on 14f7dcf2 (audit fix + panic fix).
