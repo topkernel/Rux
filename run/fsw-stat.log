@@ -85,7 +85,7 @@ sched:            PID allocator init                 [ok]
 sched:            idle task (PID 0)                  [ok]
 mm:               kswapd reclaim thread              [ok]
 DEFERFREE: engaged (first MmStruct free held back 1500ms)
-dfx:              diagnostic subsystem               [ok]
+debug:              diagnostic subsystem               [ok]
 printk:           persistent log /var/log/kmsg (kl   [ok]
 ipc:              System V + POSIX MQ                [ok]
 mm: PCID off (no CPUID PCID/INVPCID)
@@ -98,7 +98,7 @@ virtio-pci: first PCI INTx interrupt delivered
 smp:              IPI selftest 1/1 calls, 0 remote   [ok]
 cctx: off (cmdline cctx param = None)
 softirq:          ksoftirqd per-CPU threads          [ok]
-dfx:              khungtaskd hung-task detector      [ok]
+debug:              khungtaskd hung-task detector      [ok]
 fs: fdreapd retire reaper started
 fs:               fdreapd fd retire reaper           [ok]
 trap:             sie.SEIE enabled                   [ok]

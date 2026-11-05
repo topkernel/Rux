@@ -1,4 +1,4 @@
-CMD: qemu-system-riscv64 -M virt -accel tcg,thread=single -cpu rv64,zbb=true,zba=true,zbs=true -m 1G -smp 2 -nographic -snapshot -drive file=/home/william/rux-agents/perf-gap-hunt/test/rootfs.img,if=none,id=rootfs,format=raw,snapshot=on,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel target/riscv64gc-unknown-none-elf/release/rux -append root=/dev/vda rw init=/bin/sh console=ttyS0 dfx
+CMD: qemu-system-riscv64 -M virt -accel tcg,thread=single -cpu rv64,zbb=true,zba=true,zbs=true -m 1G -smp 2 -nographic -snapshot -drive file=/home/william/rux-agents/perf-gap-hunt/test/rootfs.img,if=none,id=rootfs,format=raw,snapshot=on,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel target/riscv64gc-unknown-none-elf/release/rux -append root=/dev/vda rw init=/bin/sh console=ttyS0 debug
 
 OpenSBI v1.8
    ____                    _____ ____ _____
@@ -128,14 +128,14 @@ sched:            PID allocator init                 [ok]
 sched:            idle task (PID 0)                  [ok]
 mm:               kswapd reclaim thread              [ok]
 DEFERFREE: engaged (first MmStruct free held back 1500ms)
-dfx:              diagnostic subsystem               [ok]
+debug:              diagnostic subsystem               [ok]
 printk:           persistent log /var/log/kmsg (kl   [ok]
 ipc:              System V + POSIX MQ                [ok]
 affinity: 7 of 7 task(s) default mask -> 0x3
 smp:              2 CPUs online (boot hart 0)        [ok]
 cctx: off (cmdline cctx param = None)
 softirq:          ksoftirqd per-CPU threads          [ok]
-dfx:              khungtaskd hung-task detector      [ok]
+debug:              khungtaskd hung-task detector      [ok]
 fs: fdreapd retire reaper started
 fs:               fdreapd fd retire reaper           [ok]
 trap:             sie.SEIE enabled                   [ok]
