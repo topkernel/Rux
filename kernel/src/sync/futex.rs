@@ -652,7 +652,15 @@ pub fn futex_stuck_census() {
             };
             if let Some((task, uaddr, mm, age, woken)) = entry {
                 total += 1;
-                if stuck.len() < 32 {
+                // 48th session: cap raised 32 -> 96 (and the early-break
+                // 64 -> 192 below) — on a wedged boot the system-wide
+                // stuck population is 65+, and the first-32 sample by
+                // bucket-walk order missed the samgr parks entirely
+                // (r41v41: FUX-GRAPH showed 1 of 8 wedge parks; the
+                // TXN-HANG rows named 8 futex-parked samgr handlers the
+                // census never reached). Prints stay bounded (8 + graph);
+                // this only widens the walk's collection window.
+                if stuck.len() < 96 {
                     stuck.push(Stuck {
                         task,
                         uaddr,
@@ -687,7 +695,7 @@ pub fn futex_stuck_census() {
                         u2v_off: 0,
                         u2v_cls: b'-',
                     });
-                } else if total > 64 {
+                } else if total > 192 {
                     // Sample cap reached with clear headroom — stop the
                     // walk (the SUM line carries the truncation).
                     drop(h);
@@ -1072,7 +1080,10 @@ pub fn futex_stuck_census() {
                 g.any_woken |= s.woken;
             }
             None => {
-                if groups.len() < 24 {
+                // 48th session: 24 -> 48 — a wedged boot carries ~16
+                // samgr park groups plus ~20 peripheral ones; the 24 cap
+                // could exclude the samgr tail from the FUX-GRAPH pass.
+                if groups.len() < 48 {
                     groups.push(Group {
                         tgid: s.tgid,
                         uaddr: s.uaddr,
@@ -1216,7 +1227,7 @@ pub fn futex_stuck_census() {
         crate::pr_warn!(
             "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
             total,
-            32
+            96
         );
     }
 
