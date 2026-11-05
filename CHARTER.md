@@ -15,11 +15,11 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 - lat_ctx 3.15x 反超（2.13 vs 6.71）· lat_pipe 3.33x 反超（4.00 vs 13.30）
 - lat_proc exec 1.32x 反超（66 vs 87.4）· fstat 1.37x 反超（0.086 vs 0.118）
 - lat_mmap 0.24x · bw_pipe 2.68x · bw_unix 1.88x · bw_mem 1.07-1.10x · usleep 0.99x
+- **lat_pagefault 2.26-2.45x 反超（0.0287-0.0312 vs 0.0702；2026-11-05 定妆，门禁六腿全绿待合 main）**
 
 ### 未达标（按差距排序 = 主攻顺序）
 | 行 | 我们 | 参考(KVM/原生) | 差距 |
 |---|---|---|---|
-| lat_pagefault | 0.456(11-04复测) | 0.0702 KVM | 6.50x **进行中** |
 | lat_syscall open | 0.70 | 0.36 | 1.95x（目标 ≤0.18） |
 | lat_sem | 0.800 | 0.444 原生 | 1.80x |
 | lat_syscall stat | 0.379 | 0.227 | 1.68x |
@@ -51,8 +51,7 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 
 ## 攻击队列（按预期 ROI 排序）
 
-1. **lat_pagefault 复测**（陈值 6.45x；若仍 >1x 分解：trap 入口+VMA 查找
-   +页分配(PCP)+PTE 写+TLB；dfx=memwatch / trace 框架 kernel/src/trace/）
+1. ~~lat_pagefault~~ **完成 2026-11-05**：0.0287-0.0312µs = 2.26-2.45x 反超（≤0.5x 达标），门禁六腿全绿，待主会话合 main
 2. **%gs 内核 per-cpu 基址**替代 CpuLocal::with 的 cli/sti+cpu_id（open/close
    -50ns，惠及全部分配密集路径；x86 专属：内核 GS base 指 per-cpu 区 +
    swapgs 纪律，内核态 %gs:offset 直接寻址）
@@ -63,7 +62,7 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 5. **fork retire 批量 park**（exit_group/cloexec 批量关闭一次锁往返）
 6. **lat_sem 0.800 vs 0.444**（semop 路径分解）
 7. **lat_unix 4.56 vs 3.01**（唤醒侧已到平台，查 socket 缓冲/唤醒队列路径）
-8. **D-1 runqueue 分片评估**（lock=102ns+唤醒排队——先写评估文档，不动手）
+8. ~~D-1 runqueue 分片评估~~ **完成 2026-11-05**（1475e1a9：保持关闭——最优省 164ns/切换=7.7% lat_ctx，动不到任何未达标行；触发器已记）
 
 ## 纪律（必须遵守）
 
@@ -101,3 +100,4 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 - 2026-11-05 04:15 | 额度复活 | — | 前任 00:26 额度阵亡（5h 上限），归档快照 18c62908 后工作树被清；04:13 会话恢复（额度 03:19 重置）重建工作树并派接替 agent | — | — | 接替起点：补 pagefault 门禁→攻 2x→队列推进；巡检 cron 仍按用户令暂停
 - 2026-11-05 04:5x | #1 门禁补完（接替 agent） | 基线对照=53fba4f6 独立工作树 | (a) 双架构构建 rc=0（x86_64 make build + rm build/.config 后 riscv64 make build）；(b) riscv90s 浸泡（release 内核）零 panic 零 WEDGE-DETECT，LOOP/CHURN 完整（PREEMPT-UNDERFLOW/R55-RESYNC-STALE 为基线已有的愈合打印，sched 域，本分支未触碰）；(c) make test 1316/1316 rc=0；(d) LTP mm 族 41 例：前任 HEAD 全量记录 vs 本轮 base 全量记录逐例相同（唯一差异 mremap01 base 侧 "?"=标记收获毛刺，非退出码差异）→ 零回归 | 门禁余项：pbench 同 rig A/B（Tier-2 mm 域）待静窗——04:4x 负载 14-20 两轮靴饿死（A/B lat_pagefault base/head 双 NONE@L18-20 已按纪律中止）；rig 修复：ltp_family_boot.py 每 0.5s 重喂导致 mmap11 重叠实例 KSIG9 风暴吃掉整个 deadline（加 8s 喂入间隔+45s 单例超时+deadline/log 环境变量）；run/ab-pf.sh、run/ab-pbench.sh 交错 A/B 脚本入库 | 4/5 腿绿 | 2x 攻击已备未测：反向窗（缺口向下扫描+先填下方空隙，随机序下整段未映射 run 一陷阱吃净→陷阱数近似减半）+ put_range/put_range_by_key 连续索引 range-iterator 快径（省每页 BTreeMap 下降）；双杠杆强核 work/bzImage-lm-backwin 已构建
 - 2026-11-05 12:31 | 二次复活 | — | 第二任 05:34 额度阵亡（窗口死于 04:13 边界）；12:30 会话恢复（09:13 重置已过），工作树完好，第三任接手 | — | — | 断点：ce3c934f backward-window WIP 待 A/B 定论；d1-sharding-eval.md 草稿在 run/；门禁大部分已绿（04:5x 行）
+- 2026-11-05 12:5x | #1 backward-window 定论 + 2x 达成（第三任） | (1) A/B 3:3 交错（run/abpf-base-backwin.txt，负载带 2.78-10.17 双侧同窗）：base 0.4641/0.4860/0.4897 vs backwin 0.0287/0.0293/0.0312µs——赢且大幅低于 2x 目标 0.0351；(2) mmprof 归因（run/pf-mmprof-backwin.txt，插桩靴 0.0322µs 自证同带）：mmap find/add ~29-30ns avg/调用，munmap walk avg 0 / max 177ns、body 11/218ns（n=4.53M 页迭代、unpg 90.9M 页）——安装/拆除两侧都进 ~10-20ns/页级（此前拆 51ns/页） | ce3c934f 保留为 HEAD（反向窗：缺页向下 advisory PTE 扫描先填下方空隙，随机序下含缺页的整段未映射 run 一陷阱吃净；+put_range/put_range_by_key 连续索引 range-iterator 快径，invalidated/desync 回退逐页路径）；D-1 评估 1475e1a9 落档 | backwin vs 51289ac2 0.043-0.047 再 -30%；vs 参考 0.0702 = **2.26-2.45x 反超，≤0.5x 达标** | 六腿全绿（HEAD 复验 12:3x-12:5x）：(a) 双架构 rc=0；(b) riscv 90s 浸泡 release 零 panic 零 WEDGE-DETECT，LOOP/CHURN/ARITH 完整（PREEMPT-UNDERFLOW/R55-RESYNC-STALE 同基线愈合打印；wedge_reported=True 为驱动器循环完成后的串口静默启发，同基线形）；(c) make test 1316/1316；(d) LTP mm 族 41 例逐例同 base；(e) pbench Tier-2 n=2 交错（run/abpb-base-backwin.txt）：全行带内，最差 p4_fork_exit +8.3% / p4_fork_exec +6.5%（机制：512 页窗扩大已映射集→fork PTE 拷贝/mapcount 随之——参考内核 16 页 fault-around 同类权衡；其余行 ≤±5%）；rig 修复入库：ab-pbench.sh mem 1G→2G（1G=已知 boot 期堆 panic，pbench_boot.py 注释在案）+ compare 解析 re.match→re.search（行带 "[probe] " 前缀）+ compare 结果 tee 进数据文件 | **#1 关闭，待主会话合 main**；余量观察：p4 两行 +6-8% 若后续 fork 战役要冲 2x，可评估窗宽自适应（VMA 小则缩窗）；转队列 #2 %gs per-cpu

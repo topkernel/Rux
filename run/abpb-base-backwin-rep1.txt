@@ -1,0 +1,66 @@
+===PB base rep1 12:35:16 load=3.33
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-base-1 accel=kvm smp=2 mem=2G foreign_qemus=2
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291958140
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.090 min=0.040 max=41.327 avg=0.050 wall=0.059
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.080 min=0.050 max=22.221 avg=0.065 wall=0.073
+[probe] PBENCH p2_ctxsw n=100000 med=0.120 p99=3.256 min=0.085 max=220.051 avg=0.305 wall=0.310 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=7.684 min=0.000 max=96.731 avg=0.383 wall=0.387
+[probe] PBENCH p3b_fault_cow n=8192 med=2.465 p99=3.757 min=2.224 max=42.690 avg=2.563 wall=2.570 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=61.395 p99=132.137 min=59.712 max=148.077 avg=65.093 wall=67.563
+[probe] PBENCH p4_fork_exec n=1000 med=87.644 p99=157.995 min=85.861 max=189.184 avg=91.872 wall=94.349 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.190 p99=0.260 min=0.170 max=20019.861 avg=0.495 wall=0.505
+[probe] PBENCH p5b_dgram_send n=20000 med=0.220 p99=0.260 min=0.210 max=146.724 avg=0.619 wall=0.627
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.371 p99=0.461 min=0.350 max=103.924 avg=0.625 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.230 p99=0.291 min=0.220 max=30.417 avg=0.287 wall=0.297
+[probe] PBENCH p5c2_stream_send n=100000 med=0.220 p99=0.280 min=0.210 max=23.704 avg=0.272 wall=0.280
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.220 p99=0.501 min=0.210 max=67.626 avg=0.305 wall=0.315
+[probe] PBENCH p5d_rt_read n=100000 med=0.381 p99=0.501 min=0.371 max=19.116 avg=0.393 wall=0.401
+[probe] PBENCH p5d_rt_recv n=100000 med=0.401 p99=0.451 min=0.390 max=18.314 avg=0.405 wall=0.413
+[probe] PBENCH p5e_child_spin n=323 med=13.054 p99=103.754 min=9.778 max=134.562 avg=18.420 wall=0.000 measured_by=child spin-read eagain=20211762
+[probe] PBENCH p5f_stream_dwait n=46136 med=0.220 p99=0.260 min=0.210 max=33.062 avg=0.226 wall=31.632 attempts=6400000 eagain=6353864 (99.3% spin)
+[probe] PBENCH PREP tree=1000files wall_ms=659
+[probe] PBENCH p6_stat n=10000 med=0.511 p99=0.591 min=0.391 max=16.551 avg=0.515 wall=0.739
+[probe] PBENCH p6_openclose n=10000 med=1.222 p99=10.860 min=1.052 max=18.815 avg=1.902 wall=11.859
+[probe] PBENCH p6_getdents n=1000 med=133.359 p99=151.173 min=130.464 max=214.130 avg=134.677 wall=161.770 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.513 p99=11.211 min=1.302 max=27.441 avg=2.136 wall=2.776 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.601 p99=1.773 min=0.461 max=2.675 avg=0.700 wall=0.686
+[probe] PBENCH p6_unlink n=1000 med=7.404 p99=7129.083 min=5.019 max=8840.273 avg=232.313 wall=232.596
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=60s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-base-1-serial.log
+===END base rep1 rc=0
+===PB backwin rep1 12:36:19 load=4.29
+[build] /home/william/rux-agents/perf-gap-hunt/work/pbench (79 KB)
+[boot] tag=abpb-backwin-1 accel=kvm smp=2 mem=2G foreign_qemus=2
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4291691556
+[probe] PBENCH p1_null n=1000000 med=0.050 p99=0.060 min=0.040 max=819.173 avg=0.052 wall=0.060
+[probe] PBENCH p1_clock n=1000000 med=0.060 p99=0.080 min=0.050 max=32.452 avg=0.065 wall=0.073
+[probe] PBENCH p2_ctxsw n=100000 med=0.115 p99=2.800 min=0.080 max=12.188 avg=0.271 wall=0.276 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.010 p99=7.825 min=0.000 max=95.615 avg=0.381 wall=0.387
+[probe] PBENCH p3b_fault_cow n=8192 med=2.465 p99=3.647 min=2.274 max=39.015 avg=2.565 wall=2.572 measured_by=child
+[probe] PBENCH p4_fork_exit n=1000 med=63.182 p99=134.530 min=57.902 max=183.595 avg=66.588 wall=69.077
+[probe] PBENCH p4_fork_exec n=1000 med=97.418 p99=161.893 min=86.156 max=183.505 avg=98.120 wall=100.662 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=0.190 p99=0.230 min=0.160 max=30015.696 avg=0.492 wall=0.503
+[probe] PBENCH p5b_dgram_send n=20000 med=0.220 p99=0.261 min=0.210 max=139.449 avg=0.616 wall=0.625
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=0.371 p99=0.401 min=0.351 max=104.181 avg=0.621 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=0.230 p99=0.291 min=0.220 max=22.534 avg=0.284 wall=0.293
+[probe] PBENCH p5c2_stream_send n=100000 med=0.220 p99=0.260 min=0.210 max=21.461 avg=0.268 wall=0.276
+[probe] PBENCH p5c3_stream_wrecv n=100000 med=0.220 p99=0.260 min=0.210 max=33.274 avg=0.275 wall=0.284
+[probe] PBENCH p5d_rt_read n=100000 med=0.381 p99=0.401 min=0.371 max=19.438 avg=0.384 wall=0.393
+[probe] PBENCH p5d_rt_recv n=100000 med=0.401 p99=0.411 min=0.391 max=16.452 avg=0.404 wall=0.413
+[probe] PBENCH p5e_child_spin n=323 med=13.015 p99=106.436 min=9.849 max=109.021 avg=16.145 wall=0.000 measured_by=child spin-read eagain=20064484
+[probe] PBENCH p5f_stream_dwait n=45820 med=0.220 p99=0.271 min=0.210 max=32.473 avg=0.237 wall=31.782 attempts=6400000 eagain=6354180 (99.3% spin)
+[probe] PBENCH p6_stat n=10000 med=0.511 p99=0.641 min=0.381 max=7.975 avg=0.517 wall=0.754
+[probe] PBENCH p6_openclose n=10000 med=1.222 p99=10.861 min=1.042 max=10015.883 avg=2.836 wall=6.308
+[probe] PBENCH p6_getdents n=1000 med=135.652 p99=169.207 min=133.748 max=208.232 avg=137.670 wall=164.740 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=1.563 p99=11.292 min=1.323 max=19.137 avg=2.180 wall=2.754 per_sample=open_read_close
+[probe] PBENCH p6_append n=1000 med=0.631 p99=1.713 min=0.591 max=8.065 avg=0.730 wall=0.719
+[probe] PBENCH p6_mkdrmdir n=1000 med=92.910 p99=14097.339 min=74.915 max=21639.191 avg=1922.674 wall=1923.544 per_sample=mkdir_plus_rmdir
+[probe] PBENCH p6_unlink n=1000 med=7.515 p99=7028.871 min=4.990 max=8625.677 avg=232.232 wall=232.515
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=51s
+[boot] serial log: /home/william/rux-agents/perf-gap-hunt/work/pbench-abpb-backwin-1-serial.log
+===END backwin rep1 rc=0

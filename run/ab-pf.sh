@@ -11,7 +11,7 @@ IMG="$WT/work/lmbench-x86.img"
 OUT="$WT/run/abpf-$LA-$LB.txt"
 : > "$OUT"
 boot() { # kernel case log
-    timeout 150 qemu-system-x86_64 -M q35 -accel kvm -cpu host \
+    timeout 280 qemu-system-x86_64 -M q35 -accel kvm -cpu host \
         -m 2G -smp 2 -display none -vga none -serial "file:$3" -monitor none \
         -kernel "$1" \
         -append "root=/dev/vda rw init=/test/lmbench_run lmbench=$(echo "$2" | tr ' ' ',') console=ttyS0 budget=120 ${EXTRA_CMD:-}" \
@@ -25,7 +25,7 @@ for case_spec in "$@"; do
         for side in A B; do
             k="$KA"; lbl="$LA"
             [ "$side" = B ] && { k="$KB"; lbl="$LB"; }
-            name="$(echo "$case_spec" | tr ' ,' '__')"
+            name="$(echo "$case_spec" | tr ' ,/' '___')"
             log="/tmp/abpf-$$-$name-$rep-$side.log"
             val="$(boot "$k" "$case_spec" "$log")"
             load="$(cut -d' ' -f1 /proc/loadavg)"

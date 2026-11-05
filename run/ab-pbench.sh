@@ -15,13 +15,15 @@ for rep in $(seq 1 "$REPS"); do
         k="$KA"; lbl="$LA"
         [ "$side" = B ] && { k="$KB"; lbl="$LB"; }
         echo "===PB $lbl rep$rep $(date +%H:%M:%S) load=$(cut -d' ' -f1 /proc/loadavg)" >> "$OUT"
+        # --mem 2G: 1G is a known panic (early kernel-heap alloc,
+        # see pbench_boot.py's own default note).
         python3 "$WT/test/pbench_boot.py" --bzimage "$k" --tag "abpb-$lbl-$rep" \
-            --accel kvm --smp 2 --mem 1G >> "$OUT" 2>&1
+            --accel kvm --smp 2 --mem 2G >> "$OUT" 2>&1
         echo "===END $lbl rep$rep rc=$?" >> "$OUT"
     done
 done
 # Median compare per row across reps (medians only; p99 is host noise).
-python3 - "$OUT" "$LA" "$LB" <<'EOF'
+python3 - "$OUT" "$LA" "$LB" <<'EOF' | tee -a "$OUT"
 import re, statistics, sys
 path, la, lb = sys.argv[1], sys.argv[2], sys.argv[3]
 rows = {}
@@ -30,7 +32,7 @@ for line in open(path, errors="replace"):
     m = re.match(r"===PB (\S+) rep(\d+)", line)
     if m:
         cur = m.group(1); continue
-    m = re.match(r"PBENCH (\S+) n=\d+ med=([0-9.]+)", line)
+    m = re.search(r"PBENCH (\S+) n=\d+ med=([0-9.]+)", line)  # search: rows carry a "[probe] " prefix
     if m and cur:
         rows.setdefault(m.group(1), {}).setdefault(cur, []).append(float(m.group(2)))
 print(f"{'row':28s} {la:>12s} {lb:>12s}  delta%")
@@ -44,3 +46,4 @@ for r in sorted(rows):
     print(f"{r:28s} {ma:12.3f} {mb:12.3f}  {d:+.1f}% {flag}")
 EOF
 echo "ab-pbench done -> $OUT"
+# keep the compare with the data (it went to stdout only before)
