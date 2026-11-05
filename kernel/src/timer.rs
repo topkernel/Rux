@@ -931,13 +931,21 @@ fn deliver_fired(expired: &[FiredToken], _ctx: SoftirqCtx) {
                                 (*task).pick_state(),
                             )
                         };
-                        crate::pr_err!(
-                            "TIMER-WAKE-DROPPED pid={} state={:#x} on_rq={} pk={} (timer fired, wake did not stick)",
-                            pid,
-                            st,
-                            on_rq,
-                            pk
-                        );
+                        // A RUNNING target at delivery is the benign
+                        // recheck-window class (r41v17 boots show one
+                        // phase per busy poller, ~1/s each — not worth a
+                        // line). Anything else — a SLEEPING target whose
+                        // enqueue was refused, a dead/poisoned shape —
+                        // is the anomaly class: print only those.
+                        if st != 0 {
+                            crate::pr_err!(
+                                "TIMER-WAKE-DROPPED pid={} state={:#x} on_rq={} pk={} (timer fired, wake did not stick)",
+                                pid,
+                                st,
+                                on_rq,
+                                pk
+                            );
+                        }
                     }
                     crate::process::task::Task::task_put(task);
                 } else if ww_latefire_budget_ok() {
