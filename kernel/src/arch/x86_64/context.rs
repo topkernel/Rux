@@ -360,7 +360,13 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 // SAFETY: header read of the task we refuse to resume.
                 let mut v = unsafe { (*next).pid() } as u64;
                 for _ in 0..8 {
-                    let n = (v >> 28) as u8;
+                    // One NIBBLE per iteration: (v >> 28) spans bits 28-35
+                    // of the u64, so the u8 cast grabs EIGHT bits — any pid
+                    // byte >= 0xA9 then overflow-panicked the 'a'+n-10 arm
+                    // from inside the context-switch path (r41v4/v5/v6:
+                    // "attempt to add with overflow" at this line, guest
+                    // dead). Mask to 4 bits like the >>60 pointer loops.
+                    let n = ((v >> 28) as u8) & 0xF;
                     putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                     v <<= 4;
                 }
@@ -525,7 +531,9 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
             }
             let mut v = (*task).pid() as u64;
             for _ in 0..8 {
-                let n = (v >> 28) as u8;
+                // Nibble mask — same overflow class as the dead-resume
+                // guard's pid loop (see the comment there).
+                let n = ((v >> 28) as u8) & 0xF;
                 putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
                 v <<= 4;
             }
