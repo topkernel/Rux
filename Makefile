@@ -6,7 +6,7 @@
 
 # ---- Ubuntu native desktop (udesk) ----
 # Image and kernel artifacts
-UBUNTU_IMG ?= work/ubuntu-gui.img
+UBUNTU_IMG ?= work/gnome-x86.img
 KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 # The distro QEMU build has the SDL display backend; the custom 10.2.2 in
 # /usr/local/bin is compiled without display backends (none/dbus only).
@@ -89,32 +89,24 @@ run:
 	@./scripts/test/run.sh console /bin/sh
 
 # ---- Ubuntu native desktop (udesk on Ubuntu 22.04 rootfs) ----
-# Build (or rebuild) the Ubuntu GUI disk image: work/ubuntu-gui.img.
-# Requires riscv64-linux-gnu-gcc and the shared Ubuntu rootfs (see
-# scripts/test/ubuntu-gui/build-img.sh, override with SRC=/path CC=...).
+# Build (or rebuild) the Ubuntu GNOME desktop image: work/gnome-x86.img
+# (x86_64 GNOME chain — Xorg-fbdev + dbus + gnome-session under a static
+# runit; native amd64 chroot-style assembly, no qemu-user). The udesk
+# variant stays available at scripts/test/ubuntu-gui/ (user directive
+# 2026-11-05: make ubuntu-run boots GNOME, not udesk).
 ubuntu-image:
-	@bash scripts/test/ubuntu-gui/build-img.sh
+	@bash scripts/test/gnome-x86/build-img.sh
 
-# Run the Ubuntu desktop in a native SDL window (via WSLg). Keyboard
-# works BOTH in the SDL window itself (virtio-keyboard -> /dev/input/
-# event0) and in this terminal (serial console). Login: root / rux.
-# Ctrl-S SysInfo, Ctrl-A About, Tab cycle focus, Ctrl-W close window.
-# NOTE: plain `-serial stdio` — NOT mon:stdio: the chardev mux would
-# swallow Ctrl-A as its monitor-escape key, but Ctrl-A opens About.
+# Boot the Ubuntu GNOME desktop (x86_64, KVM by default — ACCEL=tcg
+# to override). Native SDL window (WSLg); keyboard works in the window
+# AND in this terminal (serial). Login: root / rux.
 ubuntu-run: build $(UBUNTU_IMG)
-	@echo "Starting Ubuntu desktop (SDL window + keyboard in window or this terminal)..."
-	$(UBUNTU_QEMU) -M virt -accel tcg,thread=$(THREAD) -cpu rv64 -m 2G -smp $(SMP) \
-	  -snapshot -display sdl -serial stdio -monitor none \
-	  -device virtio-keyboard-pci -device virtio-tablet-pci \
-	  -drive file=$(UBUNTU_IMG),if=none,id=rootfs,format=raw \
-	  -device virtio-blk-pci,drive=rootfs \
-	  -device virtio-gpu-pci \
-	  -kernel $(KERNEL_BIN) \
-	  -append "root=/dev/vda rw init=/sbin/init console=ttyS0"
+	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
+	@ROOTFS=$(UBUNTU_IMG) NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):
-	@bash scripts/test/ubuntu-gui/build-img.sh
+	@bash scripts/test/gnome-x86/build-img.sh
 
 # Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
 # x86_64 run the suite under that arch's QEMU; see test/run.sh)

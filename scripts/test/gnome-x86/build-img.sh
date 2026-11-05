@@ -10,7 +10,7 @@
 #   ROOTFS=work/gnome-x86.img
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../.." && pwd)"
+WT="$(cd "$(dirname "$0")/../../.." && pwd)"  # scripts/test/gnome-x86 -> repo root
 DL="$WT/work/downloads"
 WORK="$WT/work"
 ROOT="$WORK/gnome-root-x86"
@@ -117,7 +117,7 @@ fi
 # clear stale X locks, both dbus daemons, Xorg on fbdev, then shell out so
 # the serial console stays usable for bring-up).
 # ---------------------------------------------------------------------------
-gcc -static -O2 -Wall -o "$ROOT/sbin/runit" "$WT/test/gnome-x86/runit.c"
+gcc -static -O2 -Wall -o "$ROOT/sbin/runit" "$WT/scripts/test/gnome-x86/runit.c"
 
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"
