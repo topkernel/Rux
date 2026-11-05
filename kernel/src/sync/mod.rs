@@ -13,6 +13,7 @@
 pub mod semaphore;
 pub mod condvar;
 pub mod futex;
+pub mod futex_pi;
 pub mod mutex;
 pub mod spinlock;
 pub mod rwlock;

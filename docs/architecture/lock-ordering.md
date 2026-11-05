@@ -295,5 +295,17 @@ Run: `make spin`
 
 ---
 
-**Document Version**: v1.0
-**Last Updated**: 2026-04-09
+### PI futex locks (2026-11-05, INV-LOCK-PI-1)
+
+The PI futex engine (kernel/src/sync/futex_pi.rs) adds one lock class:
+the per-hash PI bucket (PI_BUCKET_HEADS). Fixed order:
+
+  plain futex hash bucket -> PI bucket -> PI pool slot
+
+FUTEX_CMP_REQUEUE_PI is the only operation that holds a plain bucket
+while taking PI locks, and it always takes them in that order; the PI
+ops themselves take only PI bucket + pool slots. Task::wake_up runs
+under the PI bucket lock (the plain side's C8 invariant, same rule).
+
+**Document Version**: v1.1
+**Last Updated**: 2026-11-05
