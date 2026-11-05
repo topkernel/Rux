@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安全与形式验证 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=12">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a class="on" href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>安全与形式验证</h1>
+    <div class="sub">bug 分类学 · unsafe 表面台账 · 形式验证 · 运行时强化 · 诚实缺口登记册 —— 活文档 docs/architecture/safety-and-performance.md,每轮合并持续收证</div>
+
+    <h2 id="thesis"><span class="anchor">§1</span>核心命题</h2>
+    <div class="callout"><b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>C 内核里安全与速度互换;Rux 把重要检查前移到类型系统与构建期,让快路径上不再有它们。§8 给出逐条"性能数字 ← 携带的安全性质"配对。</div>
+
+    <h2 id="taxonomy"><span class="anchor">§2</span>bug 分类学 v1(全史逐条裁定)</h2>
+    <p>方法:全部 <b>3,358 个去重非合并 commit</b> 主题(2,702 个内核代码主题)+ 狩猎台账 + 修复 diff 逐条裁定(169 个候选),三轮清扫定稿(2026-11-03)。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>口径</th><th class="num">数量</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>记忆破坏类缺陷(全史)</td><td class="num"><b>34</b></td><td>逐条带修复 commit 与复现/回归证据</td></tr>
+          <tr><td>—— 位于显式 unsafe 块 / 架构汇编</td><td class="num">23</td><td>raw *mut Task 协议、UnsafeCell 分配器元数据等</td></tr>
+          <tr><td>—— 位于 safe 代码</td><td class="num">11</td><td>全部是安全 Rust 当今<b>不类型检查</b>的所有权/引用计数/锁协议/栈深决策,且经受信 unsafe 边界或无守护栈执行</td></tr>
+          <tr><td>指针表达式类(越界/迭代器失效/野指针运算/格式串)</td><td class="num"><b>0</b></td><td>统治 C 内核 CVE 史的类别在这里是<b>编译错误</b></td></tr>
+          <tr><td>boot 之前被代码评审捕获</td><td class="num">6 / 34</td><td>行 7/13/18/21/32/33</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>代表性行(节选)</h3>
+    <ul>
+      <li>kthread pt_regs 零化 168×168B 越界(d047afad);x86 DF 脏标志反转 rep movsb(e7070224)。</li>
+      <li>aarch64 ldp 错槽 + SPSR.M 采错(92799345);copy_kernel_mappings 双例(7a497838 / 963832a)。</li>
+      <li>buddy split 未标已分配 → 同块双发(016b3fa1);do_exit 先唤醒父(3b39b732)。</li>
+      <li>GRQ 键锁 guard 被裸语句丢弃 → 临界区未互斥(2b092c49;此后 keyed guard 全部 #[must_use])。</li>
+      <li>munmap 分块重构丢尾批 TLB flush(行 34,c4a548d7 修复;OH 电池数小时内抓到 —— 合成探针因读回同陈旧态而结构性失明,150-boot 串行日志时间线定 race)。</li>
+    </ul>
+    <p>safe 代码中唯一的"未遂越界写"(pcp refill 竞态)被边界检查拦下,以响亮 panic 收场("the len is 32 but the index is 32",165ee5fc)—— 响而被捕获,而非静默破坏。</p>
+
+    <h2 id="surface"><span class="anchor">§3</span>unsafe 表面与分层治理</h2>
+    <ul>
+      <li><b>已枚举且带合同</b>:unsafe 行占全内核 <b>12.9%</b>;Framework 层 1,340 个 unsafe token(逐块 <code>// SAFETY:</code> 注释覆盖 3,207/5,009 = 64%)。</li>
+      <li><b>service 层目标 100% forbid</b>:47 个文件编译期 <code>forbid(unsafe_code)</code>,另 56 个已无 unsafe;首个具名收缩目标 <code>syscall/io.rs</code> 69 个 token 已清零(typed entries + uaccess_safe 类型化 copy_in/copy_out)。</li>
+      <li><b>分层模型</b>(kernel-layers.md,最长前缀匹配,未匹配默认落最安全桶):Framework(arch/mm 原语/interrupt/virtio 核心/trace/perf)允许 unsafe;service 层 forbid;dfx/ 诊断层单独统计;trace 模块整体禁 unsafe。</li>
+      <li><b>胶囊边界</b>:syscall 入口统一校验/翻译用户指针,内核其余部分不直接触用户内存。</li>
+    </ul>
+
+    <h2 id="formal"><span class="anchor">§4</span>形式验证(参考内核没有的验证装置)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>层</th><th>验证对象</th><th class="num">规模</th><th>状态</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">make verify</td><td>同步检查 + property-based 测试</td><td class="num">1104 proptests</td><td><span class="chip ok">每次 push 绑定跑</span></td></tr>
+          <tr><td class="mono">make kani</td><td>Kani 符号执行 —— 对全输入证明核心 unsafe 代码</td><td class="num">157 harness</td><td><span class="chip cyan">nightly CI</span></td></tr>
+          <tr><td class="mono">make spin</td><td>SPIN 并发模型(futex / 锁序 / 中断抢占 / 调度入队出队)</td><td class="num">4 模型</td><td><span class="chip cyan">nightly CI</span></td></tr>
+          <tr><td class="mono">make miri</td><td>Miri UB 检测(verify 镜像 crate,含 loom 交错)</td><td class="num">nightly</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><b>镜像同步纪律</b>:verify crate 手工镜像被证算法,<code>scripts/verify_sync_check.py</code> 强制镜像函数体与内核原文逐字节等价 —— 证明钉在被证代码上;不同步镜像副本的内核改动直接 fail make verify 与 CI 门。</li>
+      <li><b>节奏</b>:per-push(镜像同步 + proptest 全量)→ nightly(Kani 全 harness / Miri / SPIN,装不进单提交预算)→ 手动(证明性改动落地前 <code>make verify && make kani</code>)。</li>
+      <li><b>战果</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器兜底。</li>
+    </ul>
+
+    <h2 id="runtime"><span class="anchor">§5</span>运行时强化清单(已具备)</h2>
+    <ul>
+      <li><b>用户/内核边界</b>:SMAP(EFLAGS.AC 括号启用,D-18,~55 ns/括号,规避 TCG 下 STAC/CLAC #UD)、CR0.WP 自最早 boot、无恒等 MMIO 窗(D-17,uaccess 无恒等洞)、PF-NOCTX/SMAP-VIOL 信标全 suite 零。</li>
+      <li><b>用户态</b>:W^X(NX 映射、PT_GNU_STACK、READ_IMPLIES_EXEC)、seccomp(STRICT/FILTER + NO_NEW_PRIVS)、能力模型(41 个 CAP_* UAPI 编号)。</li>
+      <li><b>内核栈护栏</b>:栈 canary、深度探针(KSTACK-HW)、释放后 0xC3 涂绘环。</li>
+      <li><b>延迟释放隔离</b>:MmStruct/Task 进 16384 项定时环,1500 ms 排水,回收与使用期严格分离。</li>
+      <li><b>失败纪律</b>:Oops/panic 参考报告形状(CSR + 全 GPR + 32 帧回溯)、panic_on_oops sysctl、panic= 重启、pstore console。</li>
+      <li><b>可观测的安全网</b>:统一 tracepoint(51 事件/16 组)、census/heal 自愈、看门狗、kallsyms 符号化回溯。</li>
+    </ul>
+
+    <h2 id="panic"><span class="anchor">§6</span>panic 面是设计面,不是潜伏面</h2>
+    <ul>
+      <li>每一处出现的 panic 都以<b>回归测试消除</b>(十余条收据在案):UTF-8 打印机族(非 UTF-8 comm 曾在 t=209s 击穿 panic 打印机)、负备忘空解引用、mmprof 槽命名空间、dfx 开关表、memwatch PFN 界、binder dead-proc expect→有界告警、timer 同 CPU IRQ 重入、ext4 空索引根、aarch64 regs[31]。</li>
+      <li>原则:<b>响而被捕获优于静默破坏</b> —— 边界检查把越界写拦成 panic,而不是让损坏继续走。</li>
+    </ul>
+
+    <h2 id="gaps"><span class="anchor">§7</span>诚实缺口登记册 v1</h2>
+    <p>直说缺什么、补齐长什么样(出处 safety-and-performance.md §5):</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>状态</th><th>项</th></tr></thead>
+        <tbody>
+          <tr><td><span class="chip bad">缺</span></td><td>KASLR(字段与管道在、无 boot 熵源)、内核 text/rodata W^X 收紧(镜像 RWX/RW 无 NX、无 mark_rodata_ro)、编译器栈保护 / shadow-call-stack、硬化 usercopy(仅 access_ok)、模块签名(模块面=仅注册,无运行期代码加载)、KCSAN 类观察点、eBPF 类运行时缓解通道、kptr_restrict / kallsyms 掩蔽(/proc/kallsyms 对所有读者显示真地址)</td></tr>
+          <tr><td><span class="chip warn">部分</span></td><td>lockdep 类调试(键=编译事实 + census MISS=0;全树运行期持锁图缺)、refcount 硬化(页/帧引用是普通原子 —— 分类学行 24/25 正是 checked Refcount 该抓的类)、release 算术溢出检查关(一行 + 实测成本即闭)、KASAN 式毒化广度(dfx 门控;small_alloc 无 redzone)、LSM 面(hook 存在、selinuxfs permissive)、命名空间(PID/IPC 真;net/user/mount 桩)、能力执法广度(~18 门点 vs Linux ~120)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="pairs"><span class="anchor">§8</span>安全 × 性能配对实证</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>性能结果(同 rig A/B)</th><th>携带的安全性质</th></tr></thead>
+        <tbody>
+          <tr><td>上下文切换 −58%(三杠杆)</td><td>切换路径携带类型化 per-CPU 存储(D-7:guard 生命周期 = 关中断窗)+ 键控锁(D-11:嵌套为编译事实)</td></tr>
+          <tr><td>GRQ 持锁 2786 ns @ 126M 系统调用</td><td>单一全局结构 = 取证可推理(D-1;OH 战役调度 bug 族实际靠它定位)+ census 每 boot 审判</td></tr>
+          <tr><td>定时器 nanosleep 772.6→662.7 ms(D-19)</td><td>六类历史 bug(混钟早燃 / periodic 误重装 / double-del / stale-id…)成为编译错</td></tr>
+          <tr><td>stat 0.643→0.423 µs(WalkClaim)</td><td>无锁读经 reader bank 发布 + 延迟退役,无悬悬引用窗口;首落撞既有缺陷即回退、修后 re-land(历史诚实)</td></tr>
+          <tr><td>munmap 177→52 µs(叶子表直走)</td><td>分块 TLB flush 竞态家族(分类学行 34)随之关闭;OH 崩溃风暴 66 SEGVs/boot → 3/3 clean</td></tr>
+          <tr><td>lmbench lat_ctx 同机快 3.15×~9.2× / Geekbench 多核 104%</td><td>全部跑在 D-1/D-7/D-11 的结构上 —— 快路径即安全路径</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">本栏目所有证据同改动记入 <code>docs/architecture/safety-and-performance.md</code>(活文档)与 <code>docs/architecture/rust-native-register.md</code>(带实测数字的架构优势登记簿,无数字 = 占位符)。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=12"></script>
+</body>
+</html>

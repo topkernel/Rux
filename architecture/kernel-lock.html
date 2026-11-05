@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>锁序与并发不变量 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=11">
+<link rel="stylesheet" href="../css/style.css?v=12">
 </head>
 <body>
 
@@ -13,9 +13,11 @@
     <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
     <div class="nav-links">
       <a href="../index.html">首页</a>
-      <a href="design.html">架构设计</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
       <a href="../guides/getting-started.html">快速入门</a>
-      <a href="../guides/testing.html">测试报告</a>
       <a href="../progress/roadmap.html">项目进展</a>
       <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
     </div>
@@ -24,19 +26,27 @@
 
 <main>
 <div class="container doc">
-  <aside class="doc-side">
+    <aside class="doc-side">
     <div class="grp">架构设计</div>
-    <a href="design.html">架构与模块设计</a>
-    <a href="structure.html">代码结构</a>
-    <a href="boot.html">启动流程</a>
-    <a href="memory.html">内存管理</a>
-    <a href="riscv64.html">架构移植指南</a>
-    <a class="on" href="kernel-lock.html">锁序不变量</a>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a class="on" href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
     <div class="grp">开发指南</div>
     <a href="../guides/getting-started.html">快速入门</a>
     <a href="../guides/development.html">参与开发</a>
-    <a href="../guides/testing.html">测试与质量报告</a>
-    <a href="../guides/ltp-full.html">LTP 全量用例</a>
     <a href="../guides/configuration.html">内核配置</a>
     <div class="grp">项目进展</div>
     <a href="../progress/roadmap.html">路线图</a>
@@ -92,7 +102,7 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
     </ul>
 
     <h2 id="semantics"><span class="anchor">§5</span>锁语义政策</h2>
-    <div class="callout"><b>锁/同步原语的语义完全参照参考内核,不自创。</b>"不可睡眠调用者持锁"一类问题在调用点重构(trylock/推迟),不给锁加路径。公平性设计争议(如"自旋 2 秒再强抢")已被裁决否决,相关实验分支永不合并。</div>
+    <div class="callout"><b>锁/同步原语的语义完全参照Linux 内核,不自创。</b>"不可睡眠调用者持锁"一类问题在调用点重构(trylock/推迟),不给锁加路径。公平性设计争议(如"自旋 2 秒再强抢")已被裁决否决,相关实验分支永不合并。</div>
   </article>
 </div>
 </main>
@@ -106,6 +116,6 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
   </div>
 </footer>
 
-<script src="../js/main.js?v=11"></script>
+<script src="../js/main.js?v=12"></script>
 </body>
 </html>

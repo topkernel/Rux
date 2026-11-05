@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>测试 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=12">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a class="on" href="../testing/index.html">测试总览</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>测试</h1>
+    <div class="sub">一个大栏目,四个子项:兼容扫描 / 全量用例 / 稳定性 / 压力 —— 数据截至 2026-11-06</div>
+
+    <h2 id="map"><span class="anchor">§1</span>栏目导航</h2>
+    <div class="card-grid grid-2">
+      <div class="card">
+        <h3><span class="ico">🧪</span>LTP 兼容扫描</h3>
+        <p>1,869 项 LTP 全量扫描:r27 = <b>1084/1869</b>(x86_64+KVM,58.0%)。分布表、十轮趋势、WEDGE 救援与 NOT-OURS 裁决方法学。</p>
+        <a class="more" href="ltp.html">进入子项 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📋</span>LTP 全量用例</h3>
+        <p><b>1,869 条逐用例结论</b>,按 838 个测试族分组、支持搜索过滤。每条带 idx / 用例名 / 结论 / rc。</p>
+        <a class="more" href="ltp-full.html">进入子项 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛡️</span>稳定性</h3>
+        <p>内核套件(riscv64 1267 / x86_64 1263 全绿)、形式验证常备、桌面会话时长门(2100s ×3、45 分钟零 panic)、census/heal 自愈记录。</p>
+        <a class="more" href="stability.html">进入子项 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔥</span>压力</h3>
+        <p>stress-fleet 常驻舰队(11 台 QEMU):LTP 腿 ×4 + 猴测 ×2 + 内存风暴 + fs 模糊 + 对照腿;已根因类、在观察类与舰队队列。</p>
+        <a class="more" href="stress.html">进入子项 →</a>
+      </div>
+    </div>
+    <div class="callout">姊妹栏目:<a href="../performance/index.html"><b>性能测试</b></a>(census 普查 / pbench 全锚 / lmbench 逐用例 / Geekbench / 优化队列)与<a href="../security/index.html"><b>安全与形式验证</b></a>(bug 分类学 / unsafe 台账 / Kani / 缺口登记册)各自独立成栏。</div>
+
+    <h2 id="reports"><span class="anchor">§2</span>报告总目录</h2>
+    <p>仓库 <code>docs/test/</code> 的常备报告(每份为带日期的实测快照,原始记录在仓库外 run/ 目录):</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>报告</th><th>测什么</th><th>最新</th></tr></thead>
+        <tbody>
+          <tr><td>unit-test-report.md</td><td>内核内 guest 套件(make test),逐架构</td><td class="mono">1267/1267 riscv64 · 1263/1263 x86_64 · 2026-11-01</td></tr>
+          <tr><td>integration-test-report.md</td><td>多腿无人值守舰队、探针、CI 冒烟门</td><td class="mono">2026-11-01</td></tr>
+          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP 兼容性,双机位(riscv64 TCG / x86_64 KVM)</td><td class="mono">r27 1084/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
+          <tr><td>lmbench-report.md</td><td>lmbench 逐用例:Rux vs Linux(同机同加速)</td><td class="mono">2026-11-04 基线 → 见性能栏目</td></tr>
+          <tr><td>geekbench-report.md</td><td>Geekbench 5:全部 21 项工作负载对照</td><td class="mono">MC 7332/7027 · SC 2115/2165 → 见性能栏目</td></tr>
+          <tr><td>stress-fleet.md</td><td>压测/稳定性/猴测/模糊舰队设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
+          <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri 常备状态</td><td class="mono">157 harness · 1104 proptests → 见安全栏目</td></tr>
+          <tr><td>test-coverage.md</td><td>覆盖台账(每次变更再生成)</td><td class="mono">滚动</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="forms"><span class="anchor">§3</span>测试形态总览</h2>
+    <ul>
+      <li><b>内核内套件(make test)</b>:73 个测试文件、八大门类(memory / process / fs / ipc / signal / network / driver / syscall);断言全部在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。CI 冒烟门(smoke.yml)每次 push 跑 riscv64 腿。</li>
+      <li><b>集成舰队</b>:多腿无人值守 + 探针矩阵(integration-test-report.md);GUI 有 23 项像素/串口检查门(<code>test/ubuntu-gui/verify.py</code>),两次独立启动逐像素一致性判定。</li>
+      <li><b>形式验证</b>:1104 proptest 每次 push 绑定跑;Kani(157 harness)/ SPIN / Miri nightly(详见<a href="../security/index.html#formal">安全栏目</a>)。</li>
+      <li><b>仓库测试总量 4,200+ 用例</b>(套件 + 探针 + 基准 + 验证)。</li>
+    </ul>
+
+    <h2 id="discipline"><span class="anchor">§4</span>方法与裁决纪律</h2>
+    <ul>
+      <li><b>每个数字带 rig</b>:架构、加速器、内核 profile、宿主负载纪律 —— 没有 rig 的数字不算结果。</li>
+      <li><b>报告追加式</b>:新一轮追加小节或刷新常设表并注明日期,不静默改写历史。</li>
+      <li><b>抖动隔离</b>:全量扫描新失败一律隔离复跑 2 次再定性为回归(已知抖动例:accept02、getrusage04、kill02、genfmod、rename/statfs 族)。</li>
+      <li><b>NOT-OURS 台账</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口。</li>
+      <li><b>仪器误诊也归档</b>:PTGUARD/FREEGUARD 误判(mapcount=−1 是哨兵)、首版 PT_LEDGER 假双自由 —— 带收据的阴性结果留在记录里。</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=12"></script>
+</body>
+</html>

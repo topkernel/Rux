@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTP 兼容扫描 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=12">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a class="on" href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>LTP 兼容性全量扫描</h1>
+    <div class="sub">1,869 项 · 双机位 · 逐用例结论见全量用例子页 —— 仓库报告 docs/test/ltp-report.md 与 ltp-tracking.md</div>
+
+    <p>对 1,869 项 LTP 测试清单(1,838 个官方二进制 musl 交叉编译,编译率 101%)做全量扫描。<b>最新一轮 r27(x86_64 + KVM,2026-11-05):PASS 1,084(58.0%)。</b>逐用例结论见<a href="ltp-full.html">LTP 全量用例</a>(1,869 条,支持搜索)。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>PASS</th><th>TCONF</th><th>FAIL</th><th>CRASH</th><th>EXECFAIL</th><th>TIMEOUT</th><th>WARN</th><th>WEDGE</th></tr></thead>
+        <tbody>
+          <tr><td class="num"><b>1084</b></td><td class="num">497</td><td class="num">228</td><td class="num">28</td><td class="num">17</td><td class="num">13</td><td class="num">1</td><td class="num">1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">TCONF 多为 hugemmap/fanotify/quotactl 等特性项(功能未实现,TCONF 不算失败);FAIL/CRASH/TIMEOUT 是当前主攻面。r27 相对 r26:+17(19 项转 PASS,2 项转 FAIL 后复裁)。</p>
+
+    <h2 id="trend"><span class="anchor">§1</span>趋势(历次全量扫描)</h2>
+    <div class="trend">
+      <div class="bar" style="height:3.2%"><span class="bv">35</span></div>
+      <div class="bar" style="height:48.3%"><span class="bv">524</span></div>
+      <div class="bar" style="height:60.8%"><span class="bv">659</span></div>
+      <div class="bar" style="height:73.9%"><span class="bv">801</span></div>
+      <div class="bar" style="height:87.2%"><span class="bv">945</span></div>
+      <div class="bar" style="height:92.7%"><span class="bv">1005</span></div>
+      <div class="bar" style="height:94.8%"><span class="bv">1028</span></div>
+      <div class="bar" style="height:93.2%"><span class="bv">1010</span></div>
+      <div class="bar" style="height:97.7%"><span class="bv">1059</span></div>
+      <div class="bar acc" style="height:100%"><span class="bv">1084</span></div>
+    </div>
+    <div class="trend-x">
+      <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-3)">r1–r10(riscv64·TCG,旧机)→ r14–r20(同机收官,r20=1028)→ r21 起 x86_64+KVM 标准机位(r21 首轮 1010 → r27 1084)。中间轮次回撤多为宿主负载噪声,经隔离复跑裁决回收。</p>
+
+    <h2 id="method"><span class="anchor">§2</span>方法学</h2>
+    <ul>
+      <li><b>抖动隔离政策</b>:全量扫描出现新失败时,先隔离重跑 2 次再定性为回归 —— 宿主负载会产生超时/精度抖动(已知例:accept02、getrusage04、kill02、genfmod、rename/statfs 族)。</li>
+      <li><b>NOT-OURS 台账</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口(verdicts-r27.txt 逐条解码)。</li>
+      <li><b>WEDGE 救援</b>:r27 原始扫描 51 个 WEDGE/POISON 行经隔离启动救援回填,6 个顽固行单启动单用例重跑;mmap1 按既有裁决保留 WEDGE。</li>
+      <li>每轮全量结果、delta 与裁决归档于 ltp-r27 车道 results/ 目录;TIMEOUT 类按最高优先级专线处理。</li>
+    </ul>
+
+    <h2 id="rigs"><span class="anchor">§3</span>机位</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>机位</th><th>最新</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>x86_64 + KVM(标准机位)</td><td class="num">r27 = 1084/1869</td><td>2026-11-01 起为标准测试机位;r21 首轮 1010</td></tr>
+          <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>2026-10-31 收官轮;r14=945 → r15=1005(do_exit 修复)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=12"></script>
+</body>
+</html>

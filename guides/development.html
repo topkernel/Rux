@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>参与开发 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=11">
+<link rel="stylesheet" href="../css/style.css?v=12">
 </head>
 <body>
 
@@ -14,8 +14,10 @@
     <div class="nav-links">
       <a href="../index.html">首页</a>
       <a href="../architecture/design.html">架构设计</a>
-      <a href="getting-started.html">快速入门</a>
-      <a href="testing.html">测试报告</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
       <a href="../progress/roadmap.html">项目进展</a>
       <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
     </div>
@@ -24,7 +26,7 @@
 
 <main>
 <div class="container doc">
-  <aside class="doc-side">
+    <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -32,12 +34,20 @@
     <a href="../architecture/memory.html">内存管理</a>
     <a href="../architecture/riscv64.html">架构移植指南</a>
     <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
     <div class="grp">开发指南</div>
-    <a href="getting-started.html">快速入门</a>
-    <a class="on" href="development.html">参与开发</a>
-    <a href="testing.html">测试与质量报告</a>
-    <a href="ltp-full.html">LTP 全量用例</a>
-    <a href="configuration.html">内核配置</a>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a class="on" href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
     <div class="grp">项目进展</div>
     <a href="../progress/roadmap.html">路线图</a>
     <a href="../progress/changelog.html">更新日志</a>
@@ -102,7 +112,7 @@
     <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁守护之下 —— 如果现有工具测不了它,<b>就为它新增一个 DFX 工具</b>(默认关闭)。"测量"是改动的一部分,不是事后补。基线只能由通过了自身层级的合并来更新。</div>
 
     <h2 id="x86"><span class="anchor">§4</span>平台优先级:x86_64 + KVM 先行</h2>
-    <p>宿主 x86 + KVM 是 x86 guest 的最快虚拟化(近原生)。自家同台 A/B:参考路径 <code>p1_null</code> 0.040 µs(KVM)vs 0.240 µs(TCG),<b>6 倍</b>;IO/定时器路径差距更大。因此:</p>
+    <p>宿主 x86 + KVM 是 x86 guest 的最快虚拟化(近原生)。自家同台 A/B:基线探针 <code>p1_null</code> 0.040 µs(KVM)vs 0.240 µs(TCG),<b>6 倍</b>;IO/定时器路径差距更大。因此:</p>
     <ul>
       <li>主要开发/测试/性能循环 = x86_64 + KVM;所有功能、性能、LTP、兼容性测试先跑 x86_64+KVM。</li>
       <li>riscv64 / aarch64 保留<b>三架构构建 + 套件回归门</b>(TCG 启动 —— KVM 无法在 x86 宿主上模拟它们),暂不承担性能/兼容性测试职责。</li>
@@ -131,14 +141,14 @@
     <h2 id="debug"><span class="anchor">§7</span>调试工具箱</h2>
     <h3>日志与 panic</h3>
     <ul>
-      <li><b>串口是首要日志</b>(<code>console=ttyS0</code>)。printk 级别 0–7 与参考内核一致;启动期全量打 UART,调度器起来后降为 emerg,用户态 <code>dmesg -n 7</code> 重开。全部消息进 1 MB kmsg 环形缓冲,可经 <code>/proc/kmsg</code>、<code>syslog(2)</code>、<code>dmesg</code> 读取。</li>
+      <li><b>串口是首要日志</b>(<code>console=ttyS0</code>)。printk 级别 0–7 与Linux 内核一致;启动期全量打 UART,调度器起来后降为 emerg,用户态 <code>dmesg -n 7</code> 重开。全部消息进 1 MB kmsg 环形缓冲,可经 <code>/proc/kmsg</code>、<code>syslog(2)</code>、<code>dmesg</code> 读取。</li>
       <li><b>Kernel panic</b> 输出 file:line、CSR(sstatus/scause/stval/sepc)、全部 31 个通用寄存器、按帧链回溯最多 32 帧的调用栈。符号化:<code>riscv64-linux-gnu-addr2line -e &lt;kernel&gt; &lt;addr&gt;</code>。</li>
       <li><b>离线取证</b>:对拷贝出来的磁盘镜像用 <code>debugfs</code> 抽取 guest 日志,不需要启动。</li>
     </ul>
     <h3>运行时开关</h3>
     <ul>
       <li><b>dfx= 启动旗标</b>(遗留但可用):<code>dfx=taskdump,watchdog</code> 周期任务转储 + 自旋锁死锁看门狗;<code>dfx=memwatch</code> 堆/页记账查泄漏。权威表在 <code>kernel/src/dfx/switches.rs</code>。</li>
-      <li><b>统一 tracepoint(新标准)</b>:tracefs 文件树完整对齐参考语义 —— <code>tracing_on</code>、<code>trace</code>、<code>trace_pipe</code>、<code>available_events</code>、<code>set_event</code>、<code>snapshot</code>、<code>events/&lt;group&gt;/&lt;event&gt;/enable</code> 等;两级门控,未武装站点只付一次 relaxed load。</li>
+      <li><b>统一 tracepoint(新标准)</b>:tracefs 文件树完整对齐 Linux 语义 —— <code>tracing_on</code>、<code>trace</code>、<code>trace_pipe</code>、<code>available_events</code>、<code>set_event</code>、<code>snapshot</code>、<code>events/&lt;group&gt;/&lt;event&gt;/enable</code> 等;两级门控,未武装站点只付一次 relaxed load。</li>
       <li><b>hunt-wedge</b>:<code>./test/hunt-wedge.sh</code> 死锁/挂死捕获(自动带持有者信息的构建 + 轰炸 + 现场抓取,配合 addr2line 定位)。</li>
       <li><b>GDB</b>:<code>make debug</code>。</li>
     </ul>
@@ -174,6 +184,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=11"></script>
+<script src="../js/main.js?v=12"></script>
 </body>
 </html>

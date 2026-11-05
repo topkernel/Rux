@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>启动流程 · Rux</title>
-<link rel="stylesheet" href="../css/style.css?v=11">
+<link rel="stylesheet" href="../css/style.css?v=12">
 </head>
 <body>
 
@@ -13,9 +13,11 @@
     <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
     <div class="nav-links">
       <a href="../index.html">首页</a>
-      <a href="design.html">架构设计</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="../testing/index.html">测试</a>
       <a href="../guides/getting-started.html">快速入门</a>
-      <a href="../guides/testing.html">测试报告</a>
       <a href="../progress/roadmap.html">项目进展</a>
       <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
     </div>
@@ -24,19 +26,27 @@
 
 <main>
 <div class="container doc">
-  <aside class="doc-side">
+    <aside class="doc-side">
     <div class="grp">架构设计</div>
-    <a href="design.html">架构与模块设计</a>
-    <a href="structure.html">代码结构</a>
-    <a class="on" href="boot.html">启动流程</a>
-    <a href="memory.html">内存管理</a>
-    <a href="riscv64.html">架构移植指南</a>
-    <a href="kernel-lock.html">锁序不变量</a>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a class="on" href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="../testing/index.html">测试总览</a>
+    <a href="../testing/ltp.html">LTP 兼容扫描</a>
+    <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/stability.html">稳定性</a>
+    <a href="../testing/stress.html">压力</a>
     <div class="grp">开发指南</div>
     <a href="../guides/getting-started.html">快速入门</a>
     <a href="../guides/development.html">参与开发</a>
-    <a href="../guides/testing.html">测试与质量报告</a>
-    <a href="../guides/ltp-full.html">LTP 全量用例</a>
     <a href="../guides/configuration.html">内核配置</a>
     <div class="grp">项目进展</div>
     <a href="../progress/roadmap.html">路线图</a>
@@ -67,7 +77,7 @@
 
     <h2 id="aa"><span class="anchor">§3</span>aarch64(QEMU virt)</h2>
     <pre><code>QEMU -M virt,gic-version=3 -kernel rux   <span class="c"># 裸 ELF,无引导协议</span>
-  └─ 内嵌完整 QEMU-virt DTB blob(build.rs 从参考机导出)
+  └─ 内嵌完整 QEMU-virt DTB blob(build.rs 从 QEMU 导出)
        ├─ EL2 → EL1h:HCR_EL2=RW、中断全路由 EL1、双定时器使能、CPACR_EL1.FPEN
        └─ 早期 TTBR0 恒等窗(phys [0,2GB))在 SMP 启动后拆除</code></pre>
     <div class="callout warn"><b>aarch64 必须带 <code>-M virt,gic-version=3</code></b>;cmdline 从内嵌 DTB 的 /chosen/bootargs 读取。</div>
@@ -94,6 +104,6 @@
   </div>
 </footer>
 
-<script src="../js/main.js?v=11"></script>
+<script src="../js/main.js?v=12"></script>
 </body>
 </html>
