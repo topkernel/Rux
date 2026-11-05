@@ -91,6 +91,14 @@ const GP_BUDGET_MS: u64 = 2500;
 #[cfg(not(any(feature = "riscv64", feature = "aarch64")))]
 const GP_BUDGET_MS: u64 = 50;
 
+/// 51st session: failed-grace budgets a close(2) tolerates before
+/// deferring its completion batch to the reaper (the frozen-cpu
+/// monopolist escape hatch — see the stall arm in retire_complete).
+/// 16 x 50 ms = 800 ms worst case per close on x86 (4 s on the
+/// slower-TCG arch budgets), then close(2) returns; a healthy boot
+/// never reaches this (grace passes in the microsecond window).
+const FDREAP_MAX_STALLS: usize = 16;
+
 /// Park a removed slot occupant and COMPLETE its close decision before
 /// returning — the reference task_work parity form for syscall-context
 /// displacement (close(2), dup2(2)/dup3 displacement). Writers call this
@@ -179,6 +187,37 @@ pub fn retire_complete(file: Arc<File>) {
                     "fs: fdreap close completion stalled (grace budget exceeded {}x)",
                     stalls
                 );
+            }
+            // 51st session — the monopolist escape hatch. The OH wedge
+            // chain (ohc10-ohc18 evidence): one CPU's quiescent
+            // generation froze permanently (RCU-GP-BOUND qs=N,M with M
+            // never advancing), and every close(2) then blocked HERE
+            // forever — hilogd's log rotation froze first (t~5s), its
+            // socket backpressure froze every service holding a lock,
+            // and the whole boot wedged (pixels 82f0a25f; debug AND
+            // release kernels, with or without instruments). The
+            // reference kernel's close(2) NEVER blocks on an RCU grace
+            // (fput defers to task_work at return-to-userspace), so
+            // unconditionally requiring a full grace in the closer's
+            // context is our divergence. After FDREAP_MAX_STALLS failed
+            // budgets, leave the batch to the reaper (it retries and
+            // completes the decisions whenever the grace finally
+            // passes) and RETURN — the user-visible close semantics
+            // (peer EOF etc.) lag by the monopolist's lifetime in
+            // exactly this pathological case, instead of the whole
+            // system freezing behind close(2).
+            if stalls >= FDREAP_MAX_STALLS {
+                crate::pr_warn!(
+                    "fs: fdreap close deferring completion after {} budgets (frozen-cpu monopolist) — reaper owns the batch",
+                    stalls
+                );
+                RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
+                {
+                    let mut q = RETIRED.lock_irqsave();
+                    q.extend(batch);
+                }
+                TICKET.up();
+                return;
             }
             RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
             {

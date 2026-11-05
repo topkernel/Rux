@@ -5101,3 +5101,76 @@ syscall EVERY S-state thread is parked in, to expose the ROOT holders
 (not futex-chained). Hypotheses: holder blocked in mmap/pagefault
 under the malloc lock (alloc_group under lock), or in an epoll/read
 that never returns while holding a service mutex.
+
+### 9. THE WEDGE ROOT-CHAIN COMPLETE (ohc10-ohc19 evidence)
+1. **cpu1's RCU quiescent generation FREEZES permanently** mid-boot:
+   `RCU-GP-BOUND site=fdreap-close ... qs=48860,48858,0,0` across 29+
+   consecutive rounds — cpu0 advances (even runs AHEAD of gen), cpu1
+   pinned at one value forever. Grace periods then NEVER complete.
+2. Every close(2) pays retire_complete's hard grace requirement —
+   fs/fdreap.rs stalls ("fdreap close completion stalled (grace budget
+   exceeded 5760x)" on clean release boot ohc14 too).
+3. hilogd (pid 318) rotates logs via open/close — its writer freezes
+   in close(); the earliest frozen thread in EVERY boot is hilogd's
+   (FUX tgid=318 parked t~5s).
+4. hilogd stops draining its unix sockets -> backpressure freezes every
+   service thread that logs while holding a mutex -> the per-process
+   frozen musl-mutex chains (word=2 / 0x80000010 with live==fval) ->
+   115-193 stuck threads, MAIN threads included (SA:180 never finishes,
+   appfwk chain dead, pixels frozen). Matches debug AND release, with
+   and without instruments (ohc14 silent at t=13.7s).
+5. fdreapd(306)/klogd(302)/kfbflush(307) show RUNNING+linked+ti_cpu=1
+   in the rcu-gp-frozen taskdump — queued-behind, consistent with cpu1
+   not making scheduling progress OR percpu misreporting.
+6. The frozen cpu1 qs with cpu0 OVER-advancing suggests cpu1's
+   rcu_note_context_switch stores land in RCU_QS_GEN[0] — i.e.
+   arch::cpu_id() resolving wrong on cpu1 (percpu-base/GS corruption,
+   the R49/R55/R85 divergence family), or a cpu1 kernel-context loop
+   with no schedule/trap-exit (true monopolist). The census "slots"
+   prints are SELF-observations (khungtaskd names its own cpu) — no
+   monopolist was directly observed.
+
+### 10. Landed this session (commits on oh-crash)
+- 8f7a7d50 wakewatch lifecycle ring (dfx=schedtrace-gated; no new switch)
+- beb92fa7 watch-list wakewatch + WW-PROBE + TXN-HANG-SRV scheduler truth
+- FXRS census-fed word watch (tgid-tagged) + FUTEX-WAKE-THEFT alarm
+  (zero hits: futex keys/cross-mm clean — EXONERATED)
+- fdreap monopolist escape hatch: close(2) defers completion to the
+  reaper after 16 failed budgets (806ms) instead of blocking forever.
+  ohc19 verdict: NECESSARY BUT NOT SUFFICIENT — each close still burns
+  ~800ms and the reaper cannot complete either (monopolist persists);
+  the boot still wedges. The real fix is cpu1's quiescent reporting.
+- Gates: x86_64/riscv64/aarch64 builds rc=0; riscv64 make test suite
+  verdict green.
+
+### 11. THE 52ND'S MISSION (in order)
+1. Name cpu1's non-quiescence producer: extend the rcu cgf1 one-shot
+   (kernel/src/sync/rcu.rs wait_qs_sleepy) to print the stuck CPU's
+   CURRENT slot task + its kernel RIP + a 16-word kernel-stack walk
+   (cross-CPU read; user_park_stack_dump has the machinery). Also add
+   a per-report canary: stamp arch::cpu_id() AND the per-CPU slot's
+   self-reported id side by side in RCU_QS reports for one boot — a
+   mismatch convicts the percpu-base/GS divergence directly.
+2. If cpu_id() misdirection is convicted: fix the percpu base on the
+   steer/migrate path (R49/R55 lineage); re-run ohc-class boots — the
+   prediction is the whole wedge chain (fdreap stalls, hilogd freeze,
+   frozen-mutex pandemic) disappears and SA:1301 lands in seconds.
+3. If a true monopolist is convicted: fix its loop (yield/grace).
+4. Then re-run the appfwk ladder: SA:180 OnStart, accountmgr creation,
+   SetBundleQuota, launcher pixels. Reference timings: oh-roll ledger
+   ~1390 (creation 8.3s, launcher.ready 11.7s).
+5. usb_host NULL family (rip 0x7ff082996bac, vma fd=5 off=0xe000,
+  file offset 0x15bac; extract the file from the image via debugfs to
+  symbolize — run/ohsrc/ has the ramdisk-extracted ld-musl already).
+6. The ohc14 release-kernel observation stands: wedge is not
+   debug-only; do not chase debug artifacts.
+
+### 12. Queue items closed this session
+- Item 2 (FXRS wake-all decode): the val=0x7fffffff wake-alls hit
+  FFRT's shared queue-count word (0x7ff00002aec0 class, 728 wakes,
+  ZERO waits in ohc17); workers cycle on short per-task timeouts
+  (VSync -110 pattern) instead of parking on the queue word, so the
+  broadcast legitimately finds no waiter. Not a lost-wake bug.
+- Item 4: spawn-chain-never-execs and the 8.2s samgr thread exit are
+  BOTH MOOT on the storm-free kernel (ohc12: normal one-shot exits
+  only; zero samgr thread exits).

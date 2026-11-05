@@ -82,6 +82,46 @@ pub fn fxdv_latch_devmgr(pid: u32) {
 // chain — the next hop is the worker's own wait lines).
 static FXRS_TGID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static FXRS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// 51st session: census-fed word watch list. When the FUX census prints a
+/// stuck group, its uaddr lands here and the FXRS tracer follows every
+/// futex op on that word from ANY process — the WAIT/WAKE lifecycle of
+/// the frozen lock decides "holder never releases" (no WAKE ever) from
+/// "kernel lost the wake" (WAKEs seen, waiter still parked).
+pub static FXRS_WORDS: [core::sync::atomic::AtomicUsize; 16] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 16];
+
+pub fn fxrs_word_add(uaddr: usize) {
+    if uaddr == 0 {
+        return;
+    }
+    for w in FXRS_WORDS.iter() {
+        let cur = w.load(core::sync::atomic::Ordering::Relaxed);
+        if cur == uaddr {
+            return;
+        }
+        if cur == 0
+            && w.compare_exchange(
+                0,
+                uaddr,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+#[inline]
+pub fn fxrs_word_watched(uaddr: usize) -> bool {
+    for w in FXRS_WORDS.iter() {
+        if w.load(core::sync::atomic::Ordering::Relaxed) == uaddr {
+            return true;
+        }
+    }
+    false
+}
 // sc209 postmortem: 600 ops died inside RS's own init (EGL/composer
 // setup is hundreds of condvar broadcasts), two dozen ops short of the
 // HGM window. 4000 ops (~8000 short lines, ~1 min of UART across a
@@ -1220,6 +1260,10 @@ pub fn futex_stuck_census() {
             h.map(|h| h.int_other).unwrap_or(0),
             h.map(|h| h.unint).unwrap_or(0),
         );
+        // 51st session: follow this word's futex lifecycle from here on
+        // (FXRS word watch — the WAIT/WAKE trace decides holder-never-
+        // releases from kernel-lost-wake).
+        fxrs_word_add(g.uaddr);
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
             break;
@@ -1556,6 +1600,37 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                 Some(ref waiter) => waiter.next,
                 None => break,
             };
+            // 51st session — cross-mm wake-theft alarm: a PRIVATE-keyed
+            // wake consuming a waiter whose key mm differs from the
+            // waker's is a key collision (phys-keyed bucketing feeding a
+            // shared-keyed waiter to a private waker, or worse). The
+            // stolen wake strands the true owner's waiter forever — the
+            // frozen-mutex wedge shape. Rate-limited to 32 prints.
+            if flags & FLAGS_SHARED == 0 && !woken_task.is_null() {
+                let waiter_mm = match *waiter_slot {
+                    Some(ref waiter) => waiter.key.mm,
+                    None => 0,
+                };
+                if waiter_mm != 0 && waiter_mm != mm {
+                    static THEFT_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let tn = THEFT_N
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if tn < 32 {
+                        // SAFETY: read-only comm/pid of a waiter still
+                        // linked in this bucket under our lock.
+                        unsafe {
+                            crate::pr_warn!(
+                                "FUTEX-WAKE-THEFT waker mm={:#x} consumed waiter mm={:#x} uaddr={:#x} waiter tid {}",
+                                mm,
+                                waiter_mm,
+                                uaddr,
+                                (*woken_task).pid(),
+                            );
+                        }
+                    }
+                }
+            }
 
             // Mark woken so futex_wait knows it was explicitly woken.
             if let Some(ref mut w) = *waiter_slot {
@@ -3592,7 +3667,8 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // wake-loss vs the FFRT worker never running the synced task.
     {
         let lt = FXRS_TGID.load(core::sync::atomic::Ordering::Relaxed);
-        if lt != 0
+        let word_hit = fxrs_word_watched(uaddr);
+        if (lt != 0 || word_hit)
             && matches!(
                 op & FUTEX_CMD_MASK,
                 FUTEX_WAIT
@@ -3605,11 +3681,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             let mine = crate::sched::current()
                 .map(|t| unsafe { (*t).tgid() == lt })
                 .unwrap_or(false);
-            if mine {
+            if mine || word_hit {
                 let n = FXRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n < FXRS_BUDGET {
                     let tid = crate::sched::current()
                         .map(|t| unsafe { (*t).pid() })
+                        .unwrap_or(0);
+                    let tgid = crate::sched::current()
+                        .map(|t| unsafe { (*t).tgid() })
                         .unwrap_or(0);
                     let comm = crate::sched::current()
                         .map(|t| unsafe { (*t).comm() })
@@ -3625,10 +3704,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         _ => "other",
                     };
                     crate::pr_debug!(
-                        "FXRS #{} {} tid {} comm='{}' uaddr={:#x} val={:#x} u2={:#x} v3={:#x} tmo={:#x}",
+                        "FXRS #{} {} tid {} tgid {} comm='{}' uaddr={:#x} val={:#x} u2={:#x} v3={:#x} tmo={:#x}",
                         n,
                         cmd,
                         tid,
+                        tgid,
                         comm,
                         uaddr,
                         val,
