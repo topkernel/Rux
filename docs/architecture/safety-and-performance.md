@@ -106,6 +106,7 @@ boundary — 10 rows:*
 | 31 | GRQ keyed-lock swap discarded the returned guard — the lock silently released at end-of-statement, every critical section ran unexcluded (CFS-timeline btree corruption panic family; convicted by 13-boot paired bisection) | safe API misuse; guards are `#[must_use]` since | 2b092c49, convicted b1fe066f/623c4736; mechanism corrected 75dbf637 |
 | 32 | recvmsg family re-fetched the user iovec array after validating it — a racing thread redirected scatter copies to unvalidated addresses (review-found) | safe TOCTOU protocol | 32fd359f |
 | 33 | PCACHE_SHARED defined as bit 10 — bit 10 is PPN[0] in Sv39, every shared mapping aliased a frame 4 KiB off the cache page (silent neighbour-page corruption; caught in snapshot review before any boot ran it) | safe constant at the unsafe PTE boundary | 6b49140ba1c6 |
+| 34 | chunked munmap rework (5b4a4bc7) passed `defer_tlb_flush=true` to every unmap_pages and DROPPED the tail flush block without replacement — cleared PTEs were never shot down; stale present+writable TLB entries to FREED frames survived, and after the allocator reused those frames same-mm accesses through the stale entries silently read/wrote the new owner's pages. Deterministic on the OH image: init #GP at t=1.2 via mallocng get_meta (group header corrupted through a stale entry), single-threaded. The adversarial churn probe missed it because read-back through the SAME stale entry is self-consistent (wrong frame, write+read agree). The riscv64/aarch64 twins are structurally immune (2-arg unmap_pages, no defer flag, full local flush + IPI on every call) | safe flush-protocol omission in a refactor; corruption through the arch translation boundary | drop: 5b4a4bc7; restore: c4a548d7 (found by the oh-crash lane's OH battery) |
 
 **Boundary rows — corruption-class consequences without a kernel
 memory-safety violation** (counted separately, not in the 33): wrong
@@ -116,7 +117,17 @@ corruption, canary clobber at +0x21000; 56fc7e8b760e); the R71
 file-position race on a shared `Arc<File>` (pages filled from the
 wrong offsets — .text containing .rodata; c17f6ec07d63); VMA surgery
 atomicity (MAP_FIXED piece drop, munmap zap window — thread stacks
-lost VMAs while PTEs stayed live; 56b2baebf6cf); ext4 stale extents
+lost VMAs while PTEs stayed live; 56b2baebf6cf); the munmap churn
+races (2026-11-05/06, fixed 5b4a4bc7 + ports 55a9cd14): the per-chunk
+rework re-derived the VMA tree from the range start every 256 KB
+chunk, so a racing same-mm mmap landing in the transient hole INSIDE
+the still-processed range was deleted as an unprocessed piece of THIS
+munmap (owner's first touch: vma=NONE — the samgr/FFRT arena hole on
+the OH image), and the deferred zap could clear a FRESH PTE under a
+live VMA (demand refill zeroed a page of live heap metadata —
+mallocng garbage chunk chains, the OH crash storm ~66 SEGVs/boot that
+the reference kernel does not produce; x86_64 mmap-witness probe 2/3
+boots crashed before, 3/3 clean after, 12,000 checks each); ext4 stale extents
 aliasing reallocated blocks + symlink inline string freed as bitmap
 bits + inode alloc off-by-one (on-disk corruption; 2f9763fc9e10,
 f4b67f669f0d F1).
@@ -125,10 +136,10 @@ f4b67f669f0d F1).
 "every memory-corruption-class bug found lived inside an
 explicitly-audited unsafe block; zero in safe code." The sweep
 falsifies the strict form and replaces it with the residency split:
-**33 memory-corruption-class bugs; 23 had the defect inside an
+**34 memory-corruption-class bugs; 23 had the defect inside an
 explicit unsafe block, arch assembly, or an unsafe interior (raw
-`*mut Task`/cgroup protocols, `UnsafeCell` allocator metadata); 10 had
-the defect in safe code — and every one of those ten is an
+`*mut Task`/cgroup protocols, `UnsafeCell` allocator metadata); 11 had
+the defect in safe code — and every one of those eleven is an
 ownership/refcount/lock-protocol/stack-depth decision that safe Rust
 does not type-check today, executed through a trusted unsafe boundary
 or an unguarded stack.** Zero pointer-expression defects (indexing
@@ -136,7 +147,7 @@ overrun, iterator invalidation, format-string, wild pointer
 arithmetic) ever appeared in safe code: the classic C expression-level
 classes are compile errors here. The one safe-code would-be
 out-of-bounds WRITE (the pcp refill race, below) was stopped by the
-bounds check and surfaced as a loud panic. Six of the 33 were caught
+bounds check and surfaced as a loud panic. Six of the 34 were caught
 by code review before any boot ran them (rows 7, 13, 18, 21, 32, 33).
 The honest reading: the language removed the C-class pointer bugs
 from 100% of the safe-code surface; the remaining safe-code risk is
@@ -375,3 +386,22 @@ absents stated plainly. Each absent names what closing looks like.
   is a silent observability outage, not a clean merge.
   Source: dfx-trace3 TASK.md round-3 record (run/tr3-base-check.log,
   census A/B logs in the lane worktree).
+- Round-4 (2026-11-06): the munmap churn-race family closed (row 34 +
+  boundary-row extension). Two independent discoveries converged: the
+  parallel session's mmap-witness churn probe (4 threads x 3000
+  mmap/memset/munmap — 2/3 boots crashed before, 3/3 clean after) and
+  the oh-crash lane's 150-boot serial-log timeline (mallocng SEGV
+  family absent before 11-02 lb246, ~80% hit rate after; same-kernel
+  same-data boots v39 clean vs v40 hit = race, not deterministic
+  corruption). The fix itself then INTRODUCED row 34 (dropped TLB
+  flush) — caught within hours by the same lane's OH battery
+  (deterministic init #GP), fixed c4a548d7, twins verified immune.
+  Lesson recorded: a refactor that defers an architectural side effect
+  (TLB shootdown) must re-derive its final barrier from the call graph,
+  not trust the old tail block to survive; and probes whose readback
+  goes through the same stale state are blind to that stale state —
+  the OH battery (real userspace, real allocator reuse) caught what
+  the synthetic probe structurally could not.
+  Source: main 2d3752a8 (merge), oh-crash lane ohc1-ohc8 battery
+  (mallocng 0x3fbf0bb82f: 7/7 boots zero after flush restore vs ~80%
+  hit before), /tmp/port-gate + perf-gate Tier1/2 record.
