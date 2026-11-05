@@ -53,6 +53,19 @@ static void make_scratch(void)
     close(fd);
 }
 
+/* Only the file-backed cases read SCRATCH. Everything else must NOT pay
+ * this boot-time 16 MiB write: its writeback/journal traffic overlaps
+ * the measurement window and inflated lat_syscall open from ~0.7us to
+ * 2.2-3.0us on BOTH kernels (perf-gap-hunt 2026-11-05: the base kernel
+ * that measured 0.70 with the pre-scratch runner read 2.6-3.0 with the
+ * rebuilt one — a rig artifact, not a kernel regression). */
+static int case_needs_scratch(const char *bench)
+{
+    return !strcmp(bench, "lat_pagefault") || !strcmp(bench, "lat_mmap") ||
+           !strcmp(bench, "bw_file_rd") || !strcmp(bench, "bw_mmap_rd") ||
+           !strcmp(bench, "lat_fs") || !strcmp(bench, "lat_dram_page");
+}
+
 static pid_t start_server(const char *bench)
 {
     char abs[192];
@@ -107,7 +120,6 @@ static int read_spec(char *out, size_t cap)
 int main(void)
 {
     chdir("/test");
-    make_scratch();
 
     char spec[160];
     if (read_spec(spec, sizeof(spec)) != 0 || spec[0] == 0) {
@@ -117,6 +129,8 @@ int main(void)
     }
 
     char *bench = strtok(spec, " ");
+    if (case_needs_scratch(bench))
+        make_scratch();
     char *bargs[8];
     int bn = 0;
     char *tok = strtok(NULL, " ");
