@@ -4222,3 +4222,48 @@ NEXT-AGENT ENTRY POINTS (in order):
 3. u2v15-class early-wedge boots waste 1100s; consider a verdict
    short-circuit in u2v-boot.py (SA frozen 120s + TXN-HANG present ->
    wedge verdict, kill VM).
+
+## 46TH SESSION — WRITE-ONLY BWR PARK: RESOLVED AS INSTRUMENT ARTIFACT (2026-11-05 10:00-, branch oh-roll @ 6be8c37e)
+
+The 45th's headline (r41v4/r41v5 "H2 > 0 first time", samgr/storage_daemon
+parked in write-only BWR with lastcmd=BC_FREE_BUFFER, w=garbage/rsz=0) is
+an INSTRUMENTATION ARTIFACT, not a kernel bug. Evidence chain:
+
+1. CONTEXT OF THE AUDIT: bwr_park_audit runs on the timer heartbeat
+   (timer.rs 1 Hz slot) — interrupt context of an ARBITRARY task. Its old
+   bwr decode did get_user_at::<u64>(a2, ...) on the AUDITED thread's user
+   bwr pointer — through the INTERRUPTED task's page tables:
+   - same-VA zero pages of an unrelated task -> "w=0/0 rsz=0" (false H2);
+   - unrelated mappings -> garbage w= words (0x3FC0000000 class);
+   - unmapped VAs -> "unreadable".
+   All three decode classes appear in r41v4/r41v5.
+2. PROOF BY KERNEL STATE: every "rsz=0" row carried rwait>0/wfpw=true or
+   a SYNC-OUT stack — kernel-side fields saying the thread is parked in
+   binder_thread_read's WAIT, which the code only enters when
+   bwr.read_size > 0. The decode was self-contradicting on its face.
+3. CODE AUDIT OF THE WRITE PATH (mission item 1): binder_ioctl_write_read
+   copies the 48-byte bwr (layout asserted), runs write_size>0 then
+   read_size>0 legs, returns — reference shape. binder_thread_write +
+   binder_transaction contain ZERO blocking calls (no wait_event/
+   schedule; all state mutated under the WORLD spinlock), so a
+   write-only or both-zero BWR cannot park. The reference
+   (binder_ioctl_write_read ~5300-5400) behaves identically (both legs
+   skipped, bwr copied back, return 0).
+4. FIX LANDED (6be8c37e): ThreadState::live_bwr shadow —
+   (write_size, write_consumed, read_size, first pending write cmd)
+   recorded at ioctl entry under WORLD, consumed advanced after the
+   write leg, cleared at every exit (clear_live_bwr). The audit prints
+   the shadow; user-memory decode deleted. r41-analyze.py H2 regex
+   fixed (invalid \1 group crashed every post-r41v4 summary).
+
+r41v5 (recovered from the 45th's quota death): guest HARD-FROZE at
+t=262s (serial silent 07:51->09:59, driver+QEMU orphaned, killed by
+PID — lane-owned). Banked: SA 58/57@34.1s, pixels 82f0a25f frozen,
+BWR rows 1089 with mix H2:207*/H1:358/H3:516 (*all H2 = artifact).
+
+ROLL RESUMED (boot 6+): kernel bzImage-r41v6 = 6be8c37e. FIRST-LIGHT
+DATA: audit rows now decode real values (bwr[w=68/68 rsz=256
+wcmd=0xffffffff] — the talkWithDriver read shape) and the census reads
+write-only-parked=0 through t=92s. The wedge face is unchanged
+(stack-holders 56 parked with SYNC-OUT tops — H1 remains the dominant
+face; that hunt continues per TASK entry points).
