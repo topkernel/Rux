@@ -570,6 +570,20 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
+        // 48th session (wedge holder hunt): comm of the parked task
+        // (OS_IPC_* vs OS_FFRT_* discriminates the samgr-internal park
+        // classes), plus the LIVE value of the futex word read through
+        // the pinned waiter's own page tables. fval is the ENTRY-time
+        // expected value (the wait argument); live==fval after a long
+        // park means the userspace event never fired (holder never ran
+        // unlock), live!=fval while still parked means the wake-side
+        // value change already happened and the waiter slept through
+        // it — the direct lost-wake discriminator the 47th's analysis
+        // (oh-src run/ffrt-park-analysis.md §2.2) said the census
+        // could not make.
+        comm: [u8; 16],
+        live: u64,
+        live_ok: bool,
         // 33rd successor — wait-site map. Futex syscall args from the
         // SAME entry frame (op/val/timeout) plus the user-space wait
         // site: the uaddr's VMA decode (which mapping, offset inside
@@ -649,6 +663,9 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
+                        comm: [0; 16],
+                        live: 0,
+                        live_ok: false,
                         fop: 0,
                         fval: 0,
                         fto: 0,
@@ -702,6 +719,7 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
+                s.comm.copy_from_slice(tk.comm());
                 let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
@@ -785,6 +803,39 @@ pub fn futex_stuck_census() {
                                     VmaType::Anonymous => b'A',
                                 }
                             };
+                        }
+                        // (a1) LIVE futex word (48th session): the word's
+                        // value NOW, through the same walker. 4-byte
+                        // read at the (4-aligned) uaddr; a misaligned or
+                        // unmapped uaddr just leaves live_ok=false.
+                        // Compare against fval (the entry-time expected
+                        // value): equal after a long park = the wake
+                        // event never fired; different while still
+                        // parked = the waiter slept through the value
+                        // change (lost-wake class).
+                        if s.uvma_ok && s.uaddr <= u64::MAX as usize - 4 {
+                            let root = aspace.root_ppn();
+                            if let Some((ppn, bits)) = unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                    root,
+                                    s.uaddr as u64,
+                                )
+                            } {
+                                if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 {
+                                    let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                        crate::arch::mm::memory_layout::PhysAddr::new(
+                                            (ppn << 12) | ((s.uaddr & 0xfff) as u64),
+                                        ),
+                                    );
+                                    // SAFETY: linear-mapped RAM word; the
+                                    // waiter parked on it this syscall.
+                                    let w32 = unsafe {
+                                        core::ptr::read_volatile(kv.as_usize() as *const u32)
+                                    };
+                                    s.live = w32 as u64;
+                                    s.live_ok = true;
+                                }
+                            }
                         }
                         // (a2) the timespec at fto (34th successor): two
                         // u64 words through the walker (the struct can
@@ -981,6 +1032,9 @@ pub fn futex_stuck_census() {
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
+        rep_comm: [u8; 16],
+        rep_live: u64,
+        rep_live_ok: bool,
         rep_fop: u64,
         rep_fval: u64,
         rep_fto: u64,
@@ -1030,6 +1084,9 @@ pub fn futex_stuck_census() {
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
+                        rep_comm: s.comm,
+                        rep_live: s.live,
+                        rep_live_ok: s.live_ok,
                         rep_fop: s.fop,
                         rep_fval: s.fval,
                         rep_fto: s.fto,
@@ -1103,11 +1160,25 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
+        // 48th session: comm + live-word verdict on the print.
+        let comm_s = core::str::from_utf8(&g.rep_comm)
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let live_s = if g.rep_live_ok {
+            if g.rep_live == g.rep_fval && g.rep_fval != 0 {
+                "live==fval"
+            } else {
+                "LIVE!=fval"
+            }
+        } else {
+            "live=?"
+        };
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            "FUX-STUCK{} tgid={} tid={} ({}) uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} {}={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
             if is_fresh { "-FRESH" } else { "" },
             g.tgid,
             g.rep_tid,
+            comm_s,
             g.uaddr,
             g.rep_mm,
             g.n,
@@ -1118,6 +1189,8 @@ pub fn futex_stuck_census() {
             g.rep_epc,
             g.rep_fop,
             g.rep_fval,
+            live_s,
+            g.rep_live,
             g.rep_fto,
             fto_s,
             g.rep_uvma_start,
@@ -1145,6 +1218,92 @@ pub fn futex_stuck_census() {
             total,
             32
         );
+    }
+
+    // ---- Phase D (48th session): FUX-GRAPH — the complete samgr park
+    // graph every 6th burst (~30 s). The 8-line sample above cannot name
+    // the listenerMapLock_ holder: the wedge's decisive parks (FFRT
+    // workers in the samgr pid, park classes WorkerIdleAction /
+    // mutexPrivate::wait / BlockUntilThreadAvailable) are drowned by
+    // peripheral parks. This pass prints EVERY stuck group whose tgid
+    // is the registered samgr pid, with comm and the live-word verdict,
+    // so the holder is identifiable by elimination (the parked thread
+    // that is NOT a waiter on the contested set). Volume: <= 24 lines
+    // per 30 s on a wedged boot, zero on a healthy one (samgr parks
+    // are sub-3s when healthy — the phase-A 3s bar filters them).
+    static GRAPH_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let gn = GRAPH_N.fetch_add(1, Relaxed);
+    if gn % 6 == 5 {
+        use core::fmt::Write as _;
+        let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
+        if samgr_pid != 0 {
+            let mut graph_lines = 0usize;
+            for g in groups.iter() {
+                if g.tgid != samgr_pid {
+                    continue;
+                }
+                if LINES.fetch_add(1, Relaxed) > 1200 {
+                    break;
+                }
+                let comm_s = core::str::from_utf8(&g.rep_comm)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let live_s = if g.rep_live_ok {
+                    if g.rep_live == g.rep_fval && g.rep_fval != 0 {
+                        "live==fval"
+                    } else {
+                        "LIVE!=fval"
+                    }
+                } else {
+                    "live=?"
+                };
+                let mut u2v_s = alloc::string::String::new();
+                if g.rep_u2v_ok {
+                    let _ = write!(
+                        u2v_s,
+                        "u2v={:#x}+{:#x}{}",
+                        g.rep_u2v_start,
+                        g.rep_u2v_off,
+                        g.rep_u2v_cls as char
+                    );
+                }
+                // HOTPATH-PRINT: fuxstuck graph row — same dfx=fuxstuck
+                // gate + 5s burst budget + LINES cap as FUX-STUCK.
+                crate::pr_warn!(
+                    "FUX-GRAPH tgid={} tid={} ({}) uaddr={:#x} n={} park={}s..{}s anywoken={} fval={:#x} {}={:#x} fto={:#x} A+{:#x} {} uret={}",
+                    g.tgid,
+                    g.rep_tid,
+                    comm_s,
+                    g.uaddr,
+                    g.n,
+                    g.min_age,
+                    g.max_age,
+                    g.any_woken as u32,
+                    g.rep_fval,
+                    live_s,
+                    g.rep_live,
+                    g.rep_fto,
+                    g.rep_uvma_off,
+                    u2v_s,
+                    {
+                        let mut s = alloc::string::String::new();
+                        for i in 0..g.rep_uret_n {
+                            let _ = write!(s, "{:#x} ", g.rep_uret[i]);
+                        }
+                        s
+                    }
+                );
+                graph_lines += 1;
+            }
+            if graph_lines > 0 {
+                crate::pr_warn!(
+                    "FUX-GRAPH-SUM samgr_pid={} groups={} (burst {})",
+                    samgr_pid,
+                    graph_lines,
+                    gn
+                );
+            }
+        }
     }
 }
 
