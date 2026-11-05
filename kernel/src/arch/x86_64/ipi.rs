@@ -283,38 +283,7 @@ pub fn smp_call_function(
         done: AtomicBool::new(false),
     });
 
-    // Enqueue on target CPU's callback queue.  irqsafe: the IPI handler
-    // on the target CPU dequeues with the same lock.
-    {
-        let _lock = CSD_LOCKS[target].lock_irqsave();
-        // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations to
-        // CSD_QUEUES[target]. The csd and queue pointers remain valid for the
-        // duration of the lock since csd is pinned by the Box below us.
-        unsafe {
-            csd.list.init();
-            if CSD_QUEUES[target].is_empty() {
-                // First entry — set up circular list
-                CSD_QUEUES[target].next = &mut csd.list as *mut _;
-                CSD_QUEUES[target].prev = &mut csd.list as *mut _;
-                csd.list.next = &mut CSD_QUEUES[target] as *mut _;
-                csd.list.prev = &mut CSD_QUEUES[target] as *mut _;
-            } else {
-                // Insert at tail
-                let tail = CSD_QUEUES[target].prev;
-                // SAFETY: tail was read from the queue under lock and points to a valid
-                // ListHead node in the queue. The lock prevents concurrent modification.
-                unsafe {
-                    (*tail).next = &mut csd.list as *mut _;
-                    csd.list.prev = tail;
-                    csd.list.next = &mut CSD_QUEUES[target] as *mut _;
-                    CSD_QUEUES[target].prev = &mut csd.list as *mut _;
-                }
-            }
-        }
-    }
-
-    // Send CallFunction IPI
-    send_ipi_type(target, IpiType::CallFunction);
+    csd_fire(target, &mut csd.list as *mut ListHead);
 
     // Wait for completion. Perf gate (2026-10-20): this used to be a
     // pure spin — and with no kernel preemption, a caller waiting on a
@@ -333,6 +302,99 @@ pub fn smp_call_function(
     // and detached the queue. The csd.list pointers may still reference
     // other nodes in the detached list, but ListHead has no Drop impl,
     // so dropping the Box simply deallocates the CallSingleData.
+}
+
+/// Enqueue a CSD on the target's queue and fire the CALL_FUNCTION IPI.
+///
+/// Shared by [`smp_call_function`] and the bounded diagnostic variant
+/// [`smp_call_function_timeout`]. `csd_list` must point at a stable
+/// (Box-pinned or leaked) CallSingleData's `list` field — the address
+/// the target's queue links; the container is recovered on the target
+/// by the list-offset back-adjustment in csd_flush_queue.
+fn csd_fire(target: usize, csd_list: *mut ListHead) {
+    // Enqueue on target CPU's callback queue.  irqsafe: the IPI handler
+    // on the target CPU dequeues with the same lock.
+    {
+        let _lock = CSD_LOCKS[target].lock_irqsave();
+        // SAFETY: We hold CSD_LOCKS[target], which serializes all mutations
+        // to CSD_QUEUES[target]. The csd_list pointer stays valid until
+        // `done` is set (caller contract, same as smp_call_function).
+        unsafe {
+            (*csd_list).init();
+            if CSD_QUEUES[target].is_empty() {
+                // First entry — set up circular list
+                CSD_QUEUES[target].next = csd_list;
+                CSD_QUEUES[target].prev = csd_list;
+                (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
+                (*csd_list).prev = &mut CSD_QUEUES[target] as *mut _;
+            } else {
+                // Insert at tail
+                let tail = CSD_QUEUES[target].prev;
+                // SAFETY: tail was read from the queue under lock and points to a valid
+                // ListHead node in the queue. The lock prevents concurrent modification.
+                unsafe {
+                    (*tail).next = csd_list;
+                    (*csd_list).prev = tail;
+                    (*csd_list).next = &mut CSD_QUEUES[target] as *mut _;
+                    CSD_QUEUES[target].prev = csd_list;
+                }
+            }
+        }
+    }
+    send_ipi_type(target, IpiType::CallFunction);
+}
+
+/// Bounded diagnostic cross-CPU call — the frozen-CPU truth probe form
+/// (52nd session, rcu-gp-frozen hunt). Same enqueue+IPI protocol as
+/// [`smp_call_function`], but the wait is bounded: a target monopolized
+/// with IRQs off (or wedged holding the CSD lock) cannot answer, and
+/// the CALLER must survive that. Returns whether the callback ran. On
+/// timeout the CSD stays linked and its memory is LEAKED —
+/// deliberately: the node must outlive a target that may drain its
+/// queue arbitrarily far in the future, and this is a one-shot-per-boot
+/// diagnostic (a few dozen bytes).
+pub fn smp_call_function_timeout(
+    target: usize,
+    func: fn(*mut core::ffi::c_void),
+    info: *mut core::ffi::c_void,
+    max_ms: u64,
+) -> bool {
+    if target >= MAX_CPUS {
+        return false;
+    }
+    let current_cpu = crate::arch::cpu_id() as usize;
+    if target == current_cpu {
+        func(info);
+        return true;
+    }
+    let csd = Box::into_raw(Box::new(CallSingleData {
+        func,
+        info,
+        list: ListHead::new(),
+        done: AtomicBool::new(false),
+    }));
+    // SAFETY: csd is a valid allocation we own; the list field's address
+    // is stable for the lifetime of the Box (leaked on timeout).
+    csd_fire(
+        target,
+        unsafe { &raw mut (*csd).list as *mut ListHead },
+    );
+
+    let hz = crate::drivers::timer::HZ as u64;
+    let deadline = crate::drivers::timer::get_jiffies() + max_ms * hz / 1000;
+    // SAFETY: csd is a valid allocation we own until done is observed;
+    // done is set only by the target after detaching the node.
+    while !unsafe { (*csd).done.load(Ordering::Acquire) } {
+        if crate::drivers::timer::get_jiffies() >= deadline {
+            return false; // node stays linked + leaked; see doc comment
+        }
+        crate::sched::cond_resched();
+        core::hint::spin_loop();
+    }
+    // SAFETY: done was observed; the target no longer touches the node
+    // (ListHead has no Drop; plain dealloc is correct).
+    unsafe { drop(Box::from_raw(csd)) };
+    true
 }
 
 /// Drain the per-CPU CSD queue (CALL_FUNCTION IPI handler).

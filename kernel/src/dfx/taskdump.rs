@@ -746,3 +746,239 @@ fn policy_name(t: &crate::process::task::Task) -> &'static str {
         SchedPolicy::Deadline => "DL",
     }
 }
+
+// ============================================================================
+// rcu-gp-frozen monopolist truth dump (52nd session, oh-crash lane)
+// ============================================================================
+
+/// Kernel-text window for the live stack scan (same bounds as
+/// bt_text_window's x86_64 arm, kept independent of the
+/// dfx-taskdump-bt feature so this probe builds in the stock kernel).
+#[cfg(feature = "x86_64")]
+const FROZEN_TEXT_LO: u64 = 0xffff_ffff_8020_0000;
+#[cfg(feature = "x86_64")]
+const FROZEN_TEXT_HI: u64 = 0xffff_ffff_8200_0000;
+
+/// Answer block filled by the IPI callback ON the frozen CPU. Static so
+/// the CSD callback (IRQ context) never touches the caller's stack.
+#[cfg(feature = "x86_64")]
+struct FrozenAnswer {
+    answered: core::sync::atomic::AtomicBool,
+    gs_cpu: core::sync::atomic::AtomicU32,
+    gs_magic: core::sync::atomic::AtomicU64,
+    lapic: core::sync::atomic::AtomicU32,
+    int_rip: core::sync::atomic::AtomicU64,
+    int_rsp: core::sync::atomic::AtomicU64,
+    stack: [core::sync::atomic::AtomicU64; 12],
+    stack_n: core::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "x86_64")]
+static FROZEN_ANSWER: FrozenAnswer = FrozenAnswer {
+    answered: core::sync::atomic::AtomicBool::new(false),
+    gs_cpu: core::sync::atomic::AtomicU32::new(u32::MAX),
+    gs_magic: core::sync::atomic::AtomicU64::new(0),
+    lapic: core::sync::atomic::AtomicU32::new(u32::MAX),
+    int_rip: core::sync::atomic::AtomicU64::new(0),
+    int_rsp: core::sync::atomic::AtomicU64::new(0),
+    stack: [const { core::sync::atomic::AtomicU64::new(0) }; 12],
+    stack_n: core::sync::atomic::AtomicUsize::new(0),
+};
+
+/// CSD callback: runs ON the frozen CPU, in CALL_FUNCTION IPI context.
+/// Reads ONLY per-CPU/own-stack state — no locks the monopolist could
+/// hold (CURRENT_PT_REGS is an atomic slot; the LAPIC id is an MSR/IO
+/// read; the stack scan reads the interrupted stack downward from the
+/// IPI frame — all mapped while the task runs).
+#[cfg(feature = "x86_64")]
+fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
+    use core::sync::atomic::Ordering;
+    let a = &FROZEN_ANSWER;
+
+    // (a) GS-derived cpu id + the GS-base magic word — the percpu
+    // misdirection canary (51st session's prime suspect: cpu1's
+    // cpu_id() resolving to 0 would land its QS reports in slot 0).
+    let gs_cpu = crate::arch::x86_64::smp::gs_cpu_id() as u32;
+    let gs_magic_q: u64;
+    // SAFETY: %gs:PC_MAGIC reads this CPU's PerCpu.magic — a plain data
+    // read of the active GS base, exactly what the trap stubs do.
+    unsafe {
+        core::arch::asm!(
+            "mov {0}, qword ptr gs:[{1}]",
+            out(reg) gs_magic_q,
+            const crate::arch::x86_64::smp::PC_MAGIC,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    a.gs_cpu.store(gs_cpu, Ordering::Relaxed);
+    a.gs_magic.store(gs_magic_q, Ordering::Relaxed);
+
+    // (b) LAPIC id — hardware CPU identity, completely independent of
+    // the GS base. gs_cpu vs lapic mismatch convicts misdirection.
+    a.lapic.store(crate::drivers::intc::apic::this_lapic_id(), Ordering::Relaxed);
+
+    // (c) The interrupted frame: CURRENT_PT_REGS[cpu] was swapped to
+    // THIS IPI's PtRegs by trap_handler before dispatch, so its rip/rsp
+    // are the monopolist loop's live instruction and stack pointer.
+    let pr = crate::arch::trap::current_pt_regs() as *const crate::arch::pt_regs::PtRegs;
+    if !pr.is_null() && (pr as u64) >= 0xffff_8000_0000_0000 {
+        // SAFETY: diagnostic read of the live IPI frame's fixed slots.
+        let (rip, rsp) = unsafe { ((*pr).rip, (*pr).rsp) };
+        a.int_rip.store(rip, Ordering::Relaxed);
+        a.int_rsp.store(rsp, Ordering::Relaxed);
+
+        // (d) Live stack scan: from the interrupted RSP upward (toward
+        // the frame's callers), keep kernel-text return addresses.
+        if rsp > 0x1000 && (rsp & 7) == 0 {
+            let mut n = 0usize;
+            for k in 0..64 {
+                // SAFETY: diagnostic read inside the running task's own
+                // kernel stack, which stays mapped while it monopolizes
+                // the CPU (worst case: a word beyond the live frames).
+                let v = unsafe {
+                    core::ptr::read_volatile((rsp + k * 8) as *const u64)
+                };
+                if v >= FROZEN_TEXT_LO && v < FROZEN_TEXT_HI && (v & 1) == 0 {
+                    a.stack[n].store(v, Ordering::Relaxed);
+                    n += 1;
+                    if n >= a.stack.len() {
+                        break;
+                    }
+                }
+            }
+            a.stack_n.store(n, Ordering::Relaxed);
+        }
+    }
+    a.answered.store(true, Ordering::Release);
+}
+
+/// One-shot cross-CPU truth dump for the frozen-CPU monopolist hunt.
+/// Called from rcu.rs's grace-freeze one-shot on the WAITING cpu:
+/// 1. prints every CPU's timer-tick count + last tick-entry RIP +
+///    tick-entry preempt count (a stalled tick count on the frozen CPU
+///    = IRQs off; an advancing count + frozen QS = a preempt-loop with
+///    IRQs on — and its last tick-entry RIP names the loop directly);
+/// 2. IPIs the stuck CPU with [`frozen_ipi_probe`], which answers with
+///    the percpu canary (gs cpu id + magic vs LAPIC id) and the
+///    interrupted RIP + live stack — or stays silent, which itself
+///    convicts an IRQ-off monopolist.
+/// Anomaly-gated one-shot per boot (caller latches); zero cost on a
+/// healthy boot.
+pub fn dump_frozen_cpu_truth(stuck: usize) {
+    #[cfg(feature = "x86_64")]
+    {
+        puts("\n=== FROZEN-CPU TRUTH (stuck=");
+        put_dec(stuck as u64);
+        puts(") ===\n");
+        for c in 0..crate::config::MAX_CPUS {
+            if !crate::sched::sched::cpu_online(c) {
+                continue;
+            }
+            puts("FROZEN-CPU ticks cpu");
+            put_dec(c as u64);
+            puts(": n=");
+            put_dec(crate::fs::procfs::interrupts::timer_count(c));
+            puts(" last_rip=");
+            put_hex(
+                crate::interrupt::preempt::TICK_ENTRY_RIP[c]
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            );
+            puts(" entry_pc=");
+            put_hex(
+                crate::interrupt::preempt::TICK_ENTRY_PC[c]
+                    .load(core::sync::atomic::Ordering::Relaxed) as u64,
+            );
+            putc(b'\n');
+        }
+
+        if stuck >= crate::config::MAX_CPUS
+            || !crate::sched::sched::cpu_online(stuck)
+        {
+            return;
+        }
+
+        FROZEN_ANSWER.answered.store(false, core::sync::atomic::Ordering::Release);
+        let ok = crate::arch::x86_64::ipi::smp_call_function_timeout(
+            stuck,
+            frozen_ipi_probe,
+            core::ptr::null_mut(),
+            200,
+        );
+        if !ok {
+            puts("FROZEN-CPU ipi: cpu");
+            put_dec(stuck as u64);
+            puts(" DID NOT ANSWER in 200ms — IRQs off or CSD-queue wedge (tick line above disambiguates)\n");
+            // IF=0 fallback: the stuck CPU's current task (sched slot) is
+            // the victim; its LIVE frames sit BELOW the sp saved at its
+            // last switch-in (t.thread().sp — the restore point; the task
+            // has only called deeper since). Scan downward and print
+            // kernel-text words: names the spin loop and, via the frames
+            // above it, the lock's owner path. Read-side only, from this
+            // CPU; races cost at worst a torn-but-bounded word.
+            let cur = crate::sched::sched::grq_diag_cpu_currents();
+            let t = cur[stuck].2 as *mut crate::process::task::Task;
+            if !t.is_null() {
+                // SAFETY: diagnostic read of stable fields on the
+                // per-CPU current Task (idle/static or heap-allocated;
+                // both stay valid while current).
+                let sp = unsafe { (*t).thread().sp };
+                puts("FROZEN-CPU victim pid=");
+                put_dec(unsafe { (*t).pid() } as u64);
+                puts(" preempt=");
+                put_dec(unsafe { (*t).preempt_count() } as u64);
+                puts(" saved_sp=");
+                put_hex(sp);
+                if (sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000 {
+                    puts(" stack:");
+                    let base = sp as *const u64;
+                    let mut shown = 0usize;
+                    for k in 0..96 {
+                        // SAFETY: diagnostic read within the victim's own
+                        // kernel stack pages (mapped while the Task exists).
+                        let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
+                        if v >= FROZEN_TEXT_LO && v < FROZEN_TEXT_HI && (v & 1) == 0 {
+                            putc(b' ');
+                            put_hex(v);
+                            shown += 1;
+                            if shown >= 16 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                putc(b'\n');
+            }
+            return;
+        }
+        use core::sync::atomic::Ordering;
+        let a = &FROZEN_ANSWER;
+        if !a.answered.load(Ordering::Acquire) {
+            // Defensive: completion without the answer flag is not
+            // reachable (callback sets both), but never wedge the dump.
+            return;
+        }
+        puts("FROZEN-CPU ipi cpu");
+        put_dec(stuck as u64);
+        puts(": gs_cpu=");
+        put_dec(a.gs_cpu.load(Ordering::Relaxed) as u64);
+        puts(" gs_magic=");
+        put_hex(a.gs_magic.load(Ordering::Relaxed));
+        puts(" lapic=");
+        put_hex(a.lapic.load(Ordering::Relaxed) as u64);
+        puts(" int_rip=");
+        put_hex(a.int_rip.load(Ordering::Relaxed));
+        puts(" int_rsp=");
+        put_hex(a.int_rsp.load(Ordering::Relaxed));
+        let n = a.stack_n.load(Ordering::Relaxed);
+        puts(" stack:");
+        for k in 0..n.min(a.stack.len()) {
+            putc(b' ');
+            put_hex(a.stack[k].load(Ordering::Relaxed));
+        }
+        putc(b'\n');
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        let _ = stuck;
+    }
+}

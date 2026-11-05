@@ -395,13 +395,41 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             // its own tick cannot fire, so every tick-side instrument is
             // blind to it; the 13th/25th cross-CPU-dump prescription).
             // This waiter runs on ANOTHER CPU in task (syscall) context,
-            // so it can walk the frozen CPU's tasks. One-shot per boot;
-            // fires only after 32 consecutive failed rounds (~1.6s+ of a
-            // frozen CPU at the 50ms fdreap budget) — never on a healthy
-            // boot (a passing grace resets the counter above).
-            if GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1 == 32
+            // so it can walk the frozen CPU's tasks.
+            //
+            // 52nd session (oh-crash): the trigger bar moved 32 -> 4
+            // consecutive failed rounds. The ohc10-19 frozen face took
+            // 32 rounds to arm because grace rounds kept passing BETWEEN
+            // rolling monopolies; ohc20 proved the pandemic forms with
+            // NO terminal freeze at all — rolling preempt/softirq-leak
+            // carriers (PREEMPT-LEAK pc=0x10001/0x100, LEAK-ORIGIN
+            // slab.rs/unix.rs sites) starve the box while each monopoly
+            // lasts only seconds. Four failed rounds (~200ms of a stuck
+            // CPU at the 50ms fdreap budget) catches a carrier
+            // mid-monopoly; a healthy boot never fails even one sleepy
+            // round. One-shot per boot (GP_DUMPED), same latch as the
+            // full dump below.
+            let consec = GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1;
+            if (consec == 4 || consec == 32)
                 && !GP_DUMPED.swap(true, Ordering::AcqRel)
             {
+                // FIRST name the stuck CPU's live producer — per-CPU
+                // tick counts + last tick-entry RIP, then an IPI probe
+                // whose callback answers with the percpu canary (gs cpu
+                // id + magic vs LAPIC id) and the interrupted RIP + live
+                // stack of whatever runs there (or stays silent =
+                // IRQ-off monopolist) — BEFORE the full task dump
+                // floods the log.
+                let mut stuck = usize::MAX;
+                for i in 0..MAX_CPUS {
+                    if crate::sched::sched::cpu_online(i) && !cpu_quiescent(i, gen) {
+                        stuck = i;
+                        break;
+                    }
+                }
+                if stuck != usize::MAX {
+                    crate::dfx::taskdump::dump_frozen_cpu_truth(stuck);
+                }
                 crate::dfx::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
             }
             return false;
