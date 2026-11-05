@@ -2154,6 +2154,46 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15
     );
 
+    // 49th (r41 crash-storm hunt): the faulting task's failing-syscall
+    // tail (sc125 ring, nr packed low-16 / errno high-16, newest first)
+    // plus the latched in-flight syscall. The usb_host NULL-deref fires
+    // in an error-cleanup list walk right after a call returned -EBUSY
+    // (rax pre-fault = -16); this names WHICH syscall returned it. Print
+    // path only, same decode format as the futex census park print.
+    if let Some(tk) = crate::sched::current() {
+        use core::fmt::Write;
+        use core::sync::atomic::Ordering::Relaxed;
+        let mut s = alloc::string::String::from("USEGV-FOR: fails:");
+        let cur = tk.last_fails_cur.load(Relaxed);
+        for k in 0..8 {
+            let i = (cur + 8 - 1 - k) % 8;
+            let v = tk.last_fails[i].load(Relaxed);
+            if v != 0 {
+                let a0 = tk.last_fails_a0[i].load(Relaxed);
+                let a1 = tk.last_fails_a1[i].load(Relaxed);
+                let _ = write!(
+                    s,
+                    " nr{}=-{} a0={:#x} a1={:#x}",
+                    v & 0xffff,
+                    v >> 16,
+                    a0,
+                    a1
+                );
+            }
+        }
+        if s.len() == "USEGV-FOR: fails:".len() {
+            s.push_str(" (none recorded)");
+        }
+        let _ = write!(
+            s,
+            " | insys nr={} a0={:#x} a1={:#x}",
+            tk.last_syscall_nr.load(Relaxed),
+            tk.last_syscall_a0.load(Relaxed),
+            tk.last_syscall_a1.load(Relaxed)
+        );
+        crate::pr_err!("{}", s);
+    }
+
     // VMA covering the faulting rip (which library / JIT region ran).
     let addr_space = crate::sched::current().and_then(|t| t.address_space());
     if let Some(aspace) = addr_space.as_ref() {
