@@ -17,9 +17,10 @@ import shutil
 import subprocess
 import sys
 import time
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 QEMU = "qemu-system-riscv64"
 MKFS = "/usr/sbin/mkfs.ext4"
 RVCC = "/usr/bin/riscv64-linux-gnu-gcc"

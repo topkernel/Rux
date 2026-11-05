@@ -375,15 +375,6 @@ struct Waiter {
     bucket: usize,
     /// Next waiter in hash chain
     next: Option<usize>,
-    /// FUTEX_WAIT_REQUEUE_PI marker: the uaddr2 (PI lock word) this
-    /// waiter declared, 0 for a plain FUTEX_WAIT waiter. Read by the
-    /// plain requeue (EINVAL on mismatched ops) and by cmp_requeue_pi
-    /// pairing.
-    pi_rqp_uaddr2: usize,
-    /// After cmp_requeue_pi moved this sleeper onto uaddr2's PI queue:
-    /// the PiWaiter pool index representing it there. The slot stays
-    /// allocated as the sleeper's post-wake handle until its park ends.
-    pi_requeued_to: Option<usize>,
 }
 
 // SAFETY: Waiter is only ever accessed while the per-slot Spinlock is held,
@@ -431,51 +422,6 @@ static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
     > = crate::sync::lockkey::KeyedSpinlock::new(None);
     [INIT; HASH_SIZE]
 };
-
-/// Per-bucket waiter count — the reference's `hb->waiters`
-/// (kernel/futex/futex.h futex_hb_waiters_inc/dec/pending). Two jobs:
-///
-/// 1. PARITY: `futex_wake` on a bucket with no waiters returns 0 WITHOUT
-///    taking the bucket lock (waitwake.c futex_wake's
-///    futex_hb_waiters_pending fast path). Every uncontended
-///    pthread_mutex_unlock is a FUTEX_WAKE; the OH hot path issues them
-///    at storm volume, and the bucket lock was pure overhead there.
-/// 2. ORDERING: the increment happens BEFORE the waiter takes the bucket
-///    lock (paired with a full fence), and the wake-side check does a
-///    full fence before reading — the reference's (A)/(B) barrier pair
-///    (waitwake.c's ordering comment): a waker that observes count==0 is
-///    guaranteed the waiter's value re-check sees the new user word, so
-///    the waiter returns EAGAIN instead of sleeping through a lost wake.
-///
-/// Accounting discipline: exactly one dec per inc. The waiter incs at the
-/// top of each wait round; the dec belongs to whichever side UNLINKS the
-/// entry (the waker in futex_wake_in_mm, the sleeper via remove_waiter,
-/// the requeue move's source bucket, futex_cleanup for dying tasks, or
-/// the wait round's own error backtrack before queueing).
-static HASH_WAITERS: [core::sync::atomic::AtomicI32; HASH_SIZE] = {
-    const W: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-    [W; HASH_SIZE]
-};
-
-/// Reference futex_hb_waiters_inc: count++, then full barrier (A).
-#[inline]
-fn hb_waiters_inc(bucket: usize) {
-    HASH_WAITERS[bucket].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-}
-
-/// Reference futex_hb_waiters_dec.
-#[inline]
-fn hb_waiters_dec(bucket: usize) {
-    HASH_WAITERS[bucket].fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-}
-
-/// Reference futex_hb_waiters_pending: full barrier (B), then read.
-#[inline]
-fn hb_waiters_pending(bucket: usize) -> bool {
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    HASH_WAITERS[bucket].load(core::sync::atomic::Ordering::Relaxed) != 0
-}
 
 /// Diagnostic (b133/b134 stall hunt): find the live futex-waiter entry of
 /// `task`, if any. Returns (uaddr, key.mm, woken). The binder stall report
@@ -624,13 +570,6 @@ pub fn futex_stuck_census() {
         tid: u32,
         sys: u64,
         epc: u64,
-        // 36th successor — comm of the parked task, filled by phase B
-        // from the same task pointer. Until now naming a park's owner
-        // needed host-side tgid->ServiceStart correlation; with the comm
-        // inline, one FUX-STUCK line names the owner directly (grep
-        // 'samgr.*800194.*u2v=' picks the wedge signature out of the
-        // burst without post-hoc pid correlation).
-        comm: [u8; 16],
         // 33rd successor — wait-site map. Futex syscall args from the
         // SAME entry frame (op/val/timeout) plus the user-space wait
         // site: the uaddr's VMA decode (which mapping, offset inside
@@ -671,19 +610,6 @@ pub fn futex_stuck_census() {
         u2v_end: usize,
         u2v_off: usize,
         u2v_cls: u8,
-        // 37th successor — caller-chain decode. uret[1] anchors inside
-        // the wait primitive itself (libc++ condition_variable::wait);
-        // uret[2]/uret[3] carry the CALLERS above it (libipc_single /
-        // libhicollie / the service's own binary). Decoding both the
-        // same way names the wait site without a guest-side unwinder.
-        u2v2_ok: bool,
-        u2v2_start: usize,
-        u2v2_off: usize,
-        u2v2_cls: u8,
-        u2v3_ok: bool,
-        u2v3_start: usize,
-        u2v3_off: usize,
-        u2v3_cls: u8,
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -712,15 +638,7 @@ pub fn futex_stuck_census() {
             };
             if let Some((task, uaddr, mm, age, woken)) = entry {
                 total += 1;
-                // u2v1 blind-spot fix: the old 32-sample cap filled with
-                // whichever buckets hashed FIRST (the benign-cycle waiters)
-                // — a wedged samgr's parks (the whole point of the census)
-                // sat in later buckets, below the cap, invisible to the
-                // wedge-full burst (u2v1: 357 FUX-STUCK-FULL rows for
-                // sharing_service, ZERO rows for samgr tgid=329). 64
-                // samples + a 192-walk cap still bound the 1 Hz cost while
-                // covering the wedge window's park map.
-                if stuck.len() < 64 {
+                if stuck.len() < 32 {
                     stuck.push(Stuck {
                         task,
                         uaddr,
@@ -731,7 +649,6 @@ pub fn futex_stuck_census() {
                         tid: 0,
                         sys: 0,
                         epc: 0,
-                        comm: [0; 16],
                         fop: 0,
                         fval: 0,
                         fto: 0,
@@ -752,17 +669,9 @@ pub fn futex_stuck_census() {
                         u2v_end: 0,
                         u2v_off: 0,
                         u2v_cls: b'-',
-                        u2v2_ok: false,
-                        u2v2_start: 0,
-                        u2v2_off: 0,
-                        u2v2_cls: b'-',
-                        u2v3_ok: false,
-                        u2v3_start: 0,
-                        u2v3_off: 0,
-                        u2v3_cls: b'-',
                     });
-                } else if total > 192 {
-                    // Walk cap reached with clear headroom — stop the
+                } else if total > 64 {
+                    // Sample cap reached with clear headroom — stop the
                     // walk (the SUM line carries the truncation).
                     drop(h);
                     break 'buckets;
@@ -793,7 +702,6 @@ pub fn futex_stuck_census() {
                 let tk = unsafe { &*task };
                 s.tgid = tk.tgid() as u32;
                 s.tid = tk.pid();
-                s.comm = *tk.comm();
                 let mut usp: u64 = 0;
                 if let Some(top) = tk.kernel_stack_top_checked() {
                     #[cfg(feature = "x86_64")]
@@ -997,65 +905,6 @@ pub fn futex_stuck_census() {
                                 };
                             }
                         }
-                        // (c2) caller-chain decode (37th successor): the
-                        // same VMA decode for uret[2] and uret[3]. Only the
-                        // start-relative offset is kept (the host has the
-                        // identical .so; base+off is what symbolizes). A
-                        // word landing in the SAME vma as uret[1] (still
-                        // inside the wait primitive) is skipped so the
-                        // fields carry the first DIFFERENT-library frames
-                        // above the anchor.
-                        for (ui, okf, startf, offf, clsf) in [
-                            (
-                                2usize,
-                                &mut s.u2v2_ok,
-                                &mut s.u2v2_start,
-                                &mut s.u2v2_off,
-                                &mut s.u2v2_cls,
-                            ),
-                            (
-                                3usize,
-                                &mut s.u2v3_ok,
-                                &mut s.u2v3_start,
-                                &mut s.u2v3_off,
-                                &mut s.u2v3_cls,
-                            ),
-                        ] {
-                            if s.uret_n <= ui || s.uret[ui] == 0 {
-                                continue;
-                            }
-                            // Same-VMA skip: uret words are u64, the VMA
-                            // fields usize — cast like the decode below
-                            // (64-bit platforms, lossless).
-                            if s.u2v_ok
-                                && (s.uret[ui] as usize) >= s.u2v_start
-                                && (s.uret[ui] as usize) < s.u2v_end
-                            {
-                                continue;
-                            }
-                            if let Some(vma) = mgr.find(VirtAddr::new(s.uret[ui] as usize)) {
-                                let start = vma.start().as_usize();
-                                let fl = vma.flags();
-                                let cls = if fl.contains(
-                                    crate::mm::vma::VmaFlags::GROWSDOWN,
-                                ) {
-                                    b'S'
-                                } else if start == aspace.start_brk() {
-                                    b'H'
-                                } else {
-                                    match vma.vma_type() {
-                                        VmaType::FileBacked => b'F',
-                                        VmaType::SharedMemory => b'M',
-                                        VmaType::Device => b'D',
-                                        VmaType::Anonymous => b'A',
-                                    }
-                                };
-                                *okf = true;
-                                *startf = start;
-                                *offf = s.uret[ui] as usize - start;
-                                *clsf = cls;
-                            }
-                        }
                     }
                 }
                 break;
@@ -1129,7 +978,6 @@ pub fn futex_stuck_census() {
         min_age: u32,
         any_woken: bool,
         rep_tid: u32,
-        rep_comm: [u8; 16],
         rep_mm: usize,
         rep_sys: u64,
         rep_epc: u64,
@@ -1153,14 +1001,6 @@ pub fn futex_stuck_census() {
         rep_u2v_end: usize,
         rep_u2v_off: usize,
         rep_u2v_cls: u8,
-        rep_u2v2_ok: bool,
-        rep_u2v2_start: usize,
-        rep_u2v2_off: usize,
-        rep_u2v2_cls: u8,
-        rep_u2v3_ok: bool,
-        rep_u2v3_start: usize,
-        rep_u2v3_off: usize,
-        rep_u2v3_cls: u8,
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -1187,7 +1027,6 @@ pub fn futex_stuck_census() {
                         min_age: s.age_s,
                         any_woken: s.woken,
                         rep_tid: s.tid,
-                        rep_comm: s.comm,
                         rep_mm: s.mm,
                         rep_sys: s.sys,
                         rep_epc: s.epc,
@@ -1211,14 +1050,6 @@ pub fn futex_stuck_census() {
                         rep_u2v_end: s.u2v_end,
                         rep_u2v_off: s.u2v_off,
                         rep_u2v_cls: s.u2v_cls,
-                        rep_u2v2_ok: s.u2v2_ok,
-                        rep_u2v2_start: s.u2v2_start,
-                        rep_u2v2_off: s.u2v2_off,
-                        rep_u2v2_cls: s.u2v2_cls,
-                        rep_u2v3_ok: s.u2v3_ok,
-                        rep_u2v3_start: s.u2v3_start,
-                        rep_u2v3_off: s.u2v3_off,
-                        rep_u2v3_cls: s.u2v3_cls,
                     });
                 }
             }
@@ -1226,11 +1057,10 @@ pub fn futex_stuck_census() {
     }
     let mut order: Vec<usize> = (0..groups.len()).collect();
     order.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
-    // Marker: 0 = old-anchor slot, 1 = fresh slot, 2 = wedge-full slot.
-    let mut chosen: Vec<(usize, u8)> = Vec::new(); // (group idx, marker)
+    let mut chosen: Vec<(usize, bool)> = Vec::new(); // (group idx, is_fresh)
     for (i, &gi) in order.iter().enumerate() {
         if i < 4 {
-            chosen.push((gi, 0));
+            chosen.push((gi, false));
         }
     }
     let mut fresh_order = order.clone();
@@ -1240,45 +1070,11 @@ pub fn futex_stuck_census() {
             break;
         }
         if !chosen.iter().any(|(c, _)| *c == gi) {
-            chosen.push((gi, 1));
-        }
-    }
-    // 37th successor — wedge-full burst: the 32-waiter sample hides most
-    // of a wedged process's park map (a stuck samgr shows 15+ DISTINCT
-    // uaddrs but the 8-line budget prints 2-3 of them). When ONE tgid
-    // owns >= 4 distinct stuck-uaddr groups this burst, print ALL its
-    // groups (cap 16 extra lines) so the complete map — one shared
-    // uaddr (a mutex hold-and-wait) vs scattered per-task condvars (a
-    // producer that never ran) — is legible in a single burst. The
-    // global 1200-line LINES cap still bounds the boot.
-    {
-        let mut per_tgid: Vec<(u32, usize)> = Vec::new();
-        for g in groups.iter() {
-            match per_tgid.iter_mut().find(|e| e.0 == g.tgid) {
-                Some(e) => e.1 += 1,
-                None => per_tgid.push((g.tgid, 1)),
-            }
-        }
-        per_tgid.sort_by(|a, b| b.1.cmp(&a.1));
-        if let Some(&(focus, n_distinct)) = per_tgid.first() {
-            if n_distinct >= 4 {
-                let mut added = 0usize;
-                for (gi, g) in groups.iter().enumerate() {
-                    if added >= 16 {
-                        break;
-                    }
-                    if g.tgid == focus
-                        && !chosen.iter().any(|(c, _)| *c == gi)
-                    {
-                        chosen.push((gi, 2));
-                        added += 1;
-                    }
-                }
-            }
+            chosen.push((gi, true));
         }
     }
     let mut printed = 0usize;
-    for (gi, marker) in chosen {
+    for (gi, is_fresh) in chosen {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
         // HOTPATH-PRINT: fuxstuck census report — gated by
@@ -1307,70 +1103,10 @@ pub fn futex_stuck_census() {
                 g.rep_u2v_cls as char
             );
         }
-        // 37th: caller-chain anchors — uret[2]/uret[3] decoded through the
-        // same VMA machinery (offset-only; the host has the identical
-        // .so). printk_ln truncates at RECORD_TEXT_SIZE (256) and the main
-        // row is already at the ceiling, so the new payload rides a
-        // CONTINUATION row (the TXN-HANG-STK pattern) instead of the main
-        // line. Emitted only when a caller frame actually decoded — the
-        // benign park classes (stack-top waits, no u2v) print nothing.
-        let mut u2v_cont = alloc::string::String::new();
-        if g.rep_u2v2_ok {
-            let _ = write!(
-                u2v_cont,
-                " u2v2={:#x}+{:#x}{}",
-                g.rep_u2v2_start,
-                g.rep_u2v2_off,
-                g.rep_u2v2_cls as char
-            );
-        }
-        if g.rep_u2v3_ok {
-            let _ = write!(
-                u2v_cont,
-                " u2v3={:#x}+{:#x}{}",
-                g.rep_u2v3_start,
-                g.rep_u2v3_off,
-                g.rep_u2v3_cls as char
-            );
-        }
-        if !u2v_cont.is_empty() || (g.rep_uret_n > 0 && g.rep_u2v_ok) {
-            // Same parser discipline as the main row: (tgid, tid, uaddr)
-            // key so host-side extractors can join the two records.
-            crate::pr_warn!(
-                "FUX-STUCK-U2V tgid={} tid={} uaddr={:#x}{}{}uret={} thr[run={} futex={} int={} unint={}]",
-                g.tgid,
-                g.rep_tid,
-                g.uaddr,
-                u2v_s,
-                u2v_cont,
-                uret_s,
-                h.map(|h| h.run).unwrap_or(0),
-                h.map(|h| h.futex).unwrap_or(0),
-                h.map(|h| h.int_other).unwrap_or(0),
-                h.map(|h| h.unint).unwrap_or(0),
-            );
-        }
-        // comm_str discipline (task.rs): arbitrary bytes, lossy-decode —
-        // never hand raw bytes to char-aware formatting.
-        let comm_len = g
-            .rep_comm
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(g.rep_comm.len());
-        let comm_s = alloc::string::String::from_utf8_lossy(&g.rep_comm[..comm_len]);
-        // Main row: parser contract fields only (u2vbank.py reads through
-        // "u2v= u2v=<value>"); the raw uret words + tgidthr counters ride
-        // the FUX-STUCK-U2V continuation above (the 256-byte printk record
-        // cannot hold the old tail plus the caller-chain anchors).
         crate::pr_warn!(
-            "FUX-STUCK{} tgid={} comm={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={}",
-            match marker {
-                1 => "-FRESH",
-                2 => "-FULL",
-                _ => "",
-            },
+            "FUX-STUCK{} tgid={} tid={} uaddr={:#x} mm={:#x} n={} park={}s..{}s anywoken={} sys={} epc={:#x} fop={:#x} fval={:#x} fto={:#x}{} uvma={:#x}-{:#x} {}+{:#x}{} u2v={} uret={}tgidthr[run={} futex={} int={} unint={}]",
+            if is_fresh { "-FRESH" } else { "" },
             g.tgid,
-            comm_s,
             g.rep_tid,
             g.uaddr,
             g.rep_mm,
@@ -1390,21 +1126,24 @@ pub fn futex_stuck_census() {
             g.rep_uvma_off,
             vmx,
             u2v_s,
+            uret_s,
+            h.map(|h| h.run).unwrap_or(0),
+            h.map(|h| h.futex).unwrap_or(0),
+            h.map(|h| h.int_other).unwrap_or(0),
+            h.map(|h| h.unint).unwrap_or(0),
         );
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
             break;
         }
     }
-    if total > printed {
+    if total > printed && printed == 8 {
         // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
-        // and 5s burst budget as the FUX-STUCK rows above (8 regular +
-        // up to 16 wedge-full per burst).
+        // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
         crate::pr_warn!(
-            "FUX-STUCK-SUM stuck_total={} printed={} (sampled {})",
+            "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
             total,
-            printed,
-            64
+            32
         );
     }
 }
@@ -1427,8 +1166,6 @@ fn alloc_waiter() -> Option<usize> {
                 park_j: 0,
                 bucket: 0,
                 next: None,
-                pi_rqp_uaddr2: 0,
-                pi_requeued_to: None,
             });
             return Some(i);
         }
@@ -1492,7 +1229,7 @@ fn pool_full_backoff() {
 }
 
 /// Calculate futex hash value
-pub fn futex_hash(key: &FutexKey) -> usize {
+pub(crate) fn futex_hash(key: &FutexKey) -> usize {
     // Hash by the PHYSICAL word identity when resolved (both private and
     // shared keys), else by uaddr. matches() compares the physical word
     // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
@@ -1559,16 +1296,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
 
-    // Reference fast path (waitwake.c futex_wake): with no waiters
-    // pending on the bucket, return 0 without taking the bucket lock.
-    // The barrier pair with hb_waiters_inc guarantees a waiter that
-    // queued concurrently with this check re-read the user word after
-    // its inc — it either saw the new value (EAGAIN) or is findable by
-    // the NEXT wake.
-    if !hb_waiters_pending(bucket_idx) {
-        return 0;
-    }
-
     let mut ret = 0i64;
     let mut prev_idx: Option<usize> = None;
     // Collect tasks to wake after releasing the bucket lock, like
@@ -1583,6 +1310,10 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 
     let mut current_idx = *head;
     while let Some(idx) = current_idx {
+        if ret >= nr_wake as i64 {
+            break;
+        }
+
         // Slot under the bucket guard — proof-checked (D-11 slice 3).
         let mut waiter_slot = WAITER_POOL[idx].lock_nested(&head.proof());
         let should_wake = match *waiter_slot {
@@ -1617,9 +1348,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
                     pw.next = next_idx;
                 }
             }
-            // The waker unlinked the entry — the waiter's count reference
-            // is consumed here (reference __futex_unqueue's dec).
-            hb_waiters_dec(bucket_idx);
 
             // Do NOT free the waiter slot here: the sleeping task still
             // inspects it after waking and frees it itself (review IPC-H4).
@@ -1629,13 +1357,6 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             }
 
             ret += 1;
-            // Reference budget shape (waitwake.c `if (++ret >= nr_wake)
-            // break`): the check runs AFTER waking an entry, so nr_wake
-            // <= 0 still wakes exactly one waiter — the documented ABI
-            // quirk (LTP's futex_wake with val=0 expects 1 woken).
-            if ret >= nr_wake as i64 {
-                break;
-            }
             current_idx = next_idx;
         } else {
             prev_idx = Some(idx);
@@ -1796,12 +1517,6 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
     // FUTEX_WAKEs) complete the wait early: the parent's wake found no
     // waiter and TBROK'd with ETIMEDOUT.
     loop {
-        // Reference waiter accounting (core.c futex_q_lock): count the
-        // waiter BEFORE taking the bucket lock, with the (A) fence. Every
-        // exit between here and the successful queue backtracks the inc;
-        // after queueing, the dec belongs to whichever side unlinks.
-        hb_waiters_inc(bucket_idx);
-
         // Lock the hash bucket.  All subsequent operations (value check,
         // waiter insertion, state change) happen under this lock.
         let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
@@ -1813,22 +1528,17 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             crate::arch::uaccess::get_user(uaddr_ptr as *const u32)
         } {
             Some(v) => v,
-            None => {
-                hb_waiters_dec(bucket_idx);
-                return -EFAULT as i64;
-            }
+            None => return -EFAULT as i64,
         };
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
         if uval != val {
-            hb_waiters_dec(bucket_idx);
             return -EAGAIN as i64;
         }
 
         // Deadline already passed while we were re-checking?
         if let Some(dl) = deadline {
             if crate::drivers::timer::get_jiffies() >= dl {
-                hb_waiters_dec(bucket_idx);
                 return -ETIMEDOUT as i64;
             }
         }
@@ -1852,18 +1562,13 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             Some(idx) => idx,
             None => {
                 drop(head);
-                hb_waiters_dec(bucket_idx);
                 pool_full_backoff();
                 continue;
             }
         };
 
-        // Initialize waiter slot and insert at the chain TAIL (reference
-        // parity: the bucket chain is a plist ordered by priority with
-        // FIFO order among equal priorities — core.c __futex_queue's
-        // plist_add. The old head-insert woke the NEWEST waiter first;
-        // under churn the oldest waiter could starve while late arrivals
-        // kept winning every wake).
+        // Initialize and insert waiter into hash chain (fill the placeholder
+        // reserved by alloc_waiter in place).
         {
             let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
             if let Some(ref mut w) = *slot {
@@ -1873,31 +1578,12 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.woken = false;
                 w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
-                w.next = None;
-                w.pi_rqp_uaddr2 = 0;
-                w.pi_requeued_to = None;
+                w.next = *head;
             }
         }
-        match *head {
-            None => *head = Some(waiter_idx),
-            Some(first) => {
-                let mut tail = first;
-                loop {
-                    let next = {
-                        let slot = WAITER_POOL[tail].lock_irqsave();
-                        slot.as_ref().and_then(|w| w.next)
-                    };
-                    match next {
-                        None => break,
-                        Some(n) => tail = n,
-                    }
-                }
-                let mut tail_slot = WAITER_POOL[tail].lock_irqsave();
-                if let Some(ref mut tw) = *tail_slot {
-                    tw.next = Some(waiter_idx);
-                }
-            }
-        }
+
+        // Update chain head.
+        *head = Some(waiter_idx);
 
         // Residency flag (see Task::futex_wait_enqueued): linked into the
         // chain here, cleared by every unlink/free path — do_exit's
@@ -1950,45 +1636,19 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // wait). Drop below cancels the registration after schedule()
         // returns — the old explicit del_timer, now unreachable to
         // forget.
-        // r41v17 FIX: `deadline.map(arm_jiffy)` produced
-        // Option<Option<WakeArmed>> and the R32 guard below tested
-        // is_none() on the OUTER layer — a tautology that could never
-        // fire, so a pool-exhausted arm (inner None) parked the timed
-        // wait FOREVER with no waker (the 44th's storage_daemon class:
-        // fto=59.99s, parked 831s past it). Flatten with and_then: wake
-        // is None exactly when a deadline was requested and the arm
-        // failed, which is what R32 always meant.
-        let wake = deadline.and_then(|dl| {
+        let wake = deadline.map(|dl| {
             crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid())
-        });
-        // ticktrap (r41v17): shadow the futex deadline (jiffy domain) so
-        // the heartbeat can adjudicate a parked timed waiter — the 44th's
-        // storage_daemon class (fto=59.99s, parked 831s past it).
-        let shadow = wake.as_ref().and_then(|w| {
-            deadline.map(|dl| {
-                let dur_ms = (dl.saturating_sub(
-                    crate::drivers::timer::get_jiffies(),
-                )).saturating_mul(1000 / crate::config::KERNEL_HZ as u64) as u32;
-                crate::timer::TimedSleepShadow::new(
-                    crate::timer::TSLEEP_JIFFY,
-                    dl,
-                    w.id(),
-                    dur_ms,
-                )
-            })
         });
         // R32 (NEW-3): if a deadline was requested but the timer pool is
         // exhausted (arm → None), schedule() below would sleep
         // FOREVER — nothing else wakes an un-signaled futex, so the timed
         // wait degenerated into an untimed hang. Unlink and fail instead.
-        // (r41v17: now actually reachable — see the flatten above.)
         if deadline.is_some() && wake.is_none() {
             remove_waiter(bucket_idx, waiter_idx);
             return -ENOMEM as i64;
         }
         crate::sched::schedule();
         drop(wake);
-        drop(shadow);
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 
@@ -2126,10 +1786,6 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                 n
             };
             *head = next;
-            // Sleeper-side unlink: consume the waiter's count reference
-            // (reference futex_unqueue's dec) on the LIVE bucket — the
-            // caller's bucket_idx may be stale after a requeue move.
-            hb_waiters_dec(b);
             free_waiter(target_idx);
             return;
         }
@@ -2162,7 +1818,6 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                         w.next = target_next;
                     }
                 }
-                hb_waiters_dec(b);
                 free_waiter(target_idx);
                 found = true;
                 break;
@@ -2182,7 +1837,6 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
         }
         return;
     }
-}
 }
 
 /// Clean up all futex waiters for a given task.
@@ -2235,9 +1889,6 @@ pub fn futex_cleanup(task: *mut Task) {
                         pw.next = next;
                     }
                 }
-                // Exit-side unlink: consume the dying task's count
-                // reference for this bucket.
-                hb_waiters_dec(bucket_idx);
                 free_waiter(idx);
                 current_idx = next;
             } else {
@@ -2357,30 +2008,12 @@ pub fn futex_to_flags(op: u32) -> u32 {
 ///   BOTH bucket locks — a requeued waiter is never observable in limbo;
 /// - requeued waiters are appended at the TAIL of the destination chain
 ///   (reference requeue_futex's plist_add: FIFO within the priority
-/// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE implementation.
-///
-/// Reference shape (kernel/futex/requeue.c futex_requeue, non-PI path):
-/// - the cmpval check reads `*uaddr` UNDER the bucket lock(s), so the
-///   "generation unchanged" verdict is atomic with the chain migration
-///   (EAGAIN is decided while holding the same locks the waiters queue
-///   under — our futex_wait also re-checks the value under its bucket
-///   lock, which is what makes the pair airtight); the degenerate paths
-///   (uaddr2 == 0, uaddr2 == uaddr, nr_requeue <= 0) do NOT skip it;
-/// - the scan wakes up to `nr_wake` matched waiters (unlink + flag under
-///   the locks) and requeues up to `nr_requeue` more by unlinking them
-///   from uaddr's chain and linking them into uaddr2's chain, all under
-///   BOTH bucket locks — a requeued waiter is never observable in limbo;
-/// - requeued waiters are appended at the TAIL of the destination chain
-///   (reference requeue_futex's plist_add: FIFO within the priority
 ///   class — a requeued waiter must not overtake waiters already queued
 ///   on uaddr2);
 /// - woken tasks are woken while the bucket guards are still held
 ///   (R12-2, same invariant as futex_wake_in_mm: the deferred
 ///   wake-after-unlock used to leave a UAF window where a signal-roused
-///   waiter returned, exited and was swept before Task::wake_up ran);
-/// - a FUTEX_WAIT_REQUEUE_PI waiter in the scanned chain is EINVAL for a
-///   plain-mode requeue (reference requeue.c's G1 handling) — it is not
-///   even eligible for the wake slot.
+///   waiter returned, exited and was swept before Task::wake_up ran).
 ///
 /// Returns the total number of waiters woken + requeued, or a negative errno.
 pub fn futex_requeue(
@@ -2465,19 +2098,6 @@ pub fn futex_requeue(
                 continue;
             }
 
-            // Reference EINVAL BEFORE touching the queue: a plain-mode
-            // REQUEUE never processes a FUTEX_WAIT_REQUEUE_PI waiter —
-            // not even for its wake slot (only plain FUTEX_WAKE may end
-            // a phase-1 requeue_pi park).
-            {
-                let slot = WAITER_POOL[idx].lock_irqsave();
-                if let Some(ref w) = *slot {
-                    if w.pi_rqp_uaddr2 != 0 {
-                        return -(EINVAL as i64);
-                    }
-                }
-            }
-
             if woken < nr_wake {
                 let task = {
                     let slot = WAITER_POOL[idx].lock_irqsave();
@@ -2493,9 +2113,7 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                // The woken waiter frees its own slot (see futex_wait);
-                // this unlink consumes its count reference.
-                hb_waiters_dec(bucket1);
+                // The woken waiter frees its own slot (see futex_wait).
 
                 if !task.is_null() {
                     wake_list.push(task);
@@ -2506,7 +2124,6 @@ pub fn futex_requeue(
             } else if requeued < nr_requeue {
                 // Same bucket: the reference's requeue_futex only updates
                 // the key when hb1 == hb2 — the node keeps its position.
-                // Count unchanged: the waiter never left this bucket.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
@@ -2592,18 +2209,6 @@ pub fn futex_requeue(
                 continue;
             }
 
-            // Reference EINVAL BEFORE touching the queue (see the
-            // same-bucket branch): a plain-mode REQUEUE never processes
-            // a FUTEX_WAIT_REQUEUE_PI waiter.
-            {
-                let slot = WAITER_POOL[idx].lock_irqsave();
-                if let Some(ref w) = *slot {
-                    if w.pi_rqp_uaddr2 != 0 {
-                        return -(EINVAL as i64);
-                    }
-                }
-            }
-
             if woken < nr_wake {
                 let task = {
                     let slot = WAITER_POOL[idx].lock_irqsave();
@@ -2619,9 +2224,7 @@ pub fn futex_requeue(
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot { w.woken = true; }
                 }
-                // The woken waiter frees its own slot (see futex_wait);
-                // this unlink consumes its count reference on bucket1.
-                hb_waiters_dec(bucket1);
+                // The woken waiter frees its own slot (see futex_wait).
 
                 if !task.is_null() {
                     wake_list.push(task);
@@ -2637,13 +2240,6 @@ pub fn futex_requeue(
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
                 }
-                // Count transfer BEFORE the destination link (reference
-                // requeue_futex order: del hb1, dec hb1, inc hb2, add
-                // hb2) — the wake fast path reads the count WITHOUT the
-                // bucket lock, so a linked-but-uncounted waiter would be
-                // invisible to a concurrent bucket2 wake.
-                hb_waiters_dec(bucket1);
-                hb_waiters_inc(bucket2);
                 // Relink at the TAIL of the destination chain and update
                 // the key + bucket bookkeeping under the same slot lock,
                 // so a concurrently-signalled sleeper reads a consistent
@@ -2709,6 +2305,20 @@ pub fn futex_requeue(
 
     ret
 }
+
+/// FUTEX_OP_OPARG_SHIFT (include/uapi/linux/futex.h): bit 3 of the op
+/// nibble makes oparg a SHIFT AMOUNT (oparg = 1 << oparg) instead of an
+/// immediate.
+pub const FUTEX_OP_OPARG_SHIFT: u32 = 1 << 3;
+
+/// The decoded FUTEX_WAKE_OP operand encoding.
+///
+/// Reference contract (kernel/futex/waitwake.c futex_atomic_op_inuser):
+/// - op nibble is 3 bits + the OPARG_SHIFT bit: `(encoded & 0x70000000) >> 28`
+///   selects the operation, bit 3 (`0x80000000`) turns oparg into a shift
+///   amount;
+/// - oparg and cmparg are 12-bit SIGNED fields (sign_extend32(..., 11)) —
+///   0xfff is -1, not 4095;
 /// - an op nibble 5-7 or a cmp nibble 6-15 is -ENOSYS, not -EINVAL.
 ///
 /// Split out so the in-kernel suite can pin the ABI decode (the old inline
@@ -2890,511 +2500,6 @@ pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
     if !RING_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
         dump_syscall_ring_for(parked_pid);
     }
-}
-
-
-// ===========================================================================
-// FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI (requeue_pi pair)
-//
-// The waiter parks on uaddr1's PLAIN bucket with `pi_rqp_uaddr2` set, so a
-// plain FUTEX_WAKE on uaddr1 still ends its park (phase-1 wake, no lock
-// held). CMP_REQUEUE_PI then unlinks requeued sleepers from the plain
-// chain, attaches them to uaddr2's PI queue (futex_pi engine) WITHOUT
-// waking them, and leaves the plain slot allocated as the sleeper's
-// handle (`pi_requeued_to`). Ownership of uaddr2's PI lock later reaches
-// the sleeper through the engine's handoff; its park then ends holding
-// the lock. Lock order: plain bucket -> PI bucket (INV-LOCK family).
-// ===========================================================================
-
-/// Unlink waiter `idx` from bucket `bi`'s chain (scan by identity) and
-/// drop its waiter count. Returns true when it was linked.
-unsafe fn rqp_unlink_plain(bi: usize, idx: usize) -> bool {
-    let mut head = HASH_HEADS[bi].lock_irqsave();
-    let mut prev: Option<usize> = None;
-    let mut cur = *head;
-    while let Some(c) = cur {
-        let next = {
-            let slot = WAITER_POOL[c].lock_irqsave();
-            slot.as_ref().and_then(|w| w.next)
-        };
-        if c == idx {
-            match prev {
-                None => *head = next,
-                Some(p) => {
-                    let mut ps = WAITER_POOL[p].lock_irqsave();
-                    if let Some(ref mut pw) = *ps {
-                        pw.next = next;
-                    }
-                }
-            }
-            let mut slot = WAITER_POOL[idx].lock_irqsave();
-            if let Some(ref mut w) = *slot {
-                w.next = None;
-            }
-            hb_waiters_dec(bi);
-            return true;
-        }
-        prev = Some(c);
-        cur = next;
-    }
-    false
-}
-
-/// FUTEX_WAIT_REQUEUE_PI: block on uaddr1 (value-checked like
-/// FUTEX_WAIT) until either woken there (returns 0, owns nothing) or
-/// requeued by FUTEX_CMP_REQUEUE_PI onto uaddr2's PI lock and handed
-/// ownership (returns 0 OWNING the PI lock at uaddr2).
-pub fn futex_wait_requeue_pi(
-    uaddr1: usize,
-    val: u32,
-    uaddr2: usize,
-    deadline: Option<u64>,
-    shared: bool,
-) -> i64 {
-    use crate::syscall::errno::{EAGAIN, EFAULT, EINVAL, EINTR, ETIMEDOUT};
-    if uaddr1 == uaddr2 || uaddr1 & 0x3 != 0 || uaddr2 & 0x3 != 0 {
-        return -(EINVAL as i64);
-    }
-    if unsafe {
-        crate::arch::uaccess::get_user(uaddr2 as *const u32).is_none()
-    } {
-        return -(EFAULT as i64);
-    }
-    let Some(current) = crate::sched::current() else {
-        return -(EFAULT as i64);
-    };
-    let mm = task_futex_mm_id(current);
-    let kf = if shared { FLAGS_SHARED } else { 0 };
-    let key1 = FutexKey::new_user(uaddr1, mm, kf);
-    let key2 = FutexKey::new_user(uaddr2, mm, kf);
-    let b1 = futex_hash(&key1);
-
-    let mut requeued_to: Option<usize> = None;
-
-    loop {
-        // Phase 2 (already requeued): park on the PI side only.
-        if let Some(pi_idx) = requeued_to {
-            if crate::sync::futex_pi::pi_waiter_handed(pi_idx) {
-                crate::sync::futex_pi::pi_waiter_free(pi_idx);
-                return 0; // the uaddr2 word holds our TID
-            }
-            if deadline.is_some_and(|dl| {
-                crate::drivers::timer::get_jiffies() >= dl
-            }) {
-                unsafe {
-                    crate::sync::futex_pi::pi_requeue_detach(&key2, pi_idx)
-                };
-                return -(ETIMEDOUT as i64);
-            }
-            if crate::signal::signal_pending() {
-                unsafe {
-                    crate::sync::futex_pi::pi_requeue_detach(&key2, pi_idx)
-                };
-                return -(EINTR as i64);
-            }
-            unsafe {
-                (*current)
-                    .set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-            }
-            crate::arch::cpu::restore_irq(true);
-            let wake = deadline.map(|dl| {
-                crate::timer::WakeArmed::arm_jiffy(
-                    dl,
-                    crate::sched::get_current_pid(),
-                )
-            });
-            crate::sched::schedule();
-            drop(wake);
-            continue;
-        }
-
-        // Phase 1: plain park on uaddr1 with the requeue_pi marker.
-        hb_waiters_inc(b1);
-        let mut head = HASH_HEADS[b1].lock_irqsave();
-        let uval = match unsafe {
-            crate::arch::uaccess::get_user(uaddr1 as *const u32)
-        } {
-            Some(v) => v,
-            None => {
-                hb_waiters_dec(b1);
-                return -(EFAULT as i64);
-            }
-        };
-        if uval != val {
-            hb_waiters_dec(b1);
-            return -(EAGAIN as i64);
-        }
-        if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
-                hb_waiters_dec(b1);
-                return -(ETIMEDOUT as i64);
-            }
-        }
-        let waiter_idx = match alloc_waiter() {
-            Some(i) => i,
-            None => {
-                drop(head);
-                hb_waiters_dec(b1);
-                pool_full_backoff();
-                continue;
-            }
-        };
-        {
-            let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
-            if let Some(ref mut w) = *slot {
-                w.key = key1;
-                w.task = current;
-                w.bitset = FUTEX_BITSET_MATCH_ANY;
-                w.woken = false;
-                w.park_j = crate::drivers::timer::get_jiffies();
-                w.bucket = b1;
-                w.next = None;
-                w.pi_rqp_uaddr2 = uaddr2;
-                w.pi_requeued_to = None;
-            }
-        }
-        match *head {
-            None => *head = Some(waiter_idx),
-            Some(first) => {
-                let mut tail = first;
-                loop {
-                    let next = {
-                        let slot = WAITER_POOL[tail].lock_irqsave();
-                        slot.as_ref().and_then(|w| w.next)
-                    };
-                    match next {
-                        None => break,
-                        Some(n) => tail = n,
-                    }
-                }
-                let mut ts = WAITER_POOL[tail].lock_irqsave();
-                if let Some(ref mut t) = *ts {
-                    t.next = Some(waiter_idx);
-                }
-            }
-        }
-        unsafe {
-            (*current)
-                .futex_wait_enqueued
-                .store(true, core::sync::atomic::Ordering::Release);
-            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
-        }
-        drop(head);
-        crate::arch::cpu::restore_irq(true);
-        let wake = deadline.map(|dl| {
-            crate::timer::WakeArmed::arm_jiffy(
-                dl,
-                crate::sched::get_current_pid(),
-            )
-        });
-        crate::sched::schedule();
-        drop(wake);
-
-        // Park ended: plain wake, requeue handoff, or interrupt.
-        let (woken, rq) = {
-            let slot = WAITER_POOL[waiter_idx].lock_irqsave();
-            match slot.as_ref() {
-                Some(w) => (w.woken, w.pi_requeued_to),
-                None => (true, None), // freed by exit cleanup
-            }
-        };
-        if woken {
-            free_waiter(waiter_idx);
-            return 0; // woken on uaddr1: no lock acquired
-        }
-        if let Some(pi_idx) = rq {
-            requeued_to = Some(pi_idx);
-            free_waiter(waiter_idx);
-            // The PI engine recorded the handoff state; the plain slot's
-            // duty ends here (the sleeper tracks pi_idx locally).
-            continue;
-        }
-        // Neither woken nor requeued: timeout, signal, or spurious.
-        if deadline.is_some_and(|dl| {
-            crate::drivers::timer::get_jiffies() >= dl
-        }) {
-            unsafe { rqp_unlink_plain(b1, waiter_idx) };
-            free_waiter(waiter_idx);
-            return -(ETIMEDOUT as i64);
-        }
-        if crate::signal::signal_pending() {
-            unsafe { rqp_unlink_plain(b1, waiter_idx) };
-            free_waiter(waiter_idx);
-            return -(EINTR as i64);
-        }
-        // Spurious: leave the queue and re-run phase 1 (value re-check
-        // included, plain FUTEX_WAIT parity).
-        unsafe { rqp_unlink_plain(b1, waiter_idx) };
-        free_waiter(waiter_idx);
-    }
-}
-
-/// FUTEX_CMP_REQUEUE_PI (requeuer side). ABI slots: val = nr_wake
-/// (must be 1), args[3] = nr_requeue, val3 = the uaddr1 compare value.
-/// Wakes one uaddr1 waiter (sync wake, no requeue for it), moves up to
-/// nr_requeue FUTEX_WAIT_REQUEUE_PI waiters onto uaddr2's PI queue
-/// without waking them (the first may receive the lock directly when
-/// uaddr2 is uncontended — the proxy-trylock handoff). Returns the
-/// number of tasks woken or requeued.
-pub fn futex_cmp_requeue_pi(
-    uaddr1: usize,
-    nr_wake: i32,
-    uaddr2: usize,
-    nr_requeue: i32,
-    cmpval: u32,
-    shared: bool,
-) -> i64 {
-    use crate::syscall::errno::{
-        EAGAIN, EDEADLK, EFAULT, EINVAL,
-    };
-    if nr_wake != 1 {
-        return -(EINVAL as i64);
-    }
-    if uaddr1 == uaddr2
-        || uaddr1 & 0x3 != 0
-        || uaddr2 & 0x3 != 0
-        || nr_requeue < 0
-    {
-        return -(EINVAL as i64);
-    }
-    let word2 = match unsafe {
-        crate::arch::uaccess::get_user(uaddr2 as *const u32)
-    } {
-        Some(v) => v,
-        None => return -(EFAULT as i64),
-    };
-    let Some(current) = crate::sched::current() else {
-        return -(EFAULT as i64);
-    };
-    let mytid = unsafe { (*current).pid() } as u32;
-    // NOTE: the requeuer MAY hold uaddr2 (the canonical condvar->mutex
-    // broadcast locks the PI mutex, requeues the sleepers behind
-    // itself, then unlocks into the top waiter) — no caller-owns gate
-    // here; the reference has none either.
-
-    let mm = task_futex_mm_id(current);
-    let kf = if shared { FLAGS_SHARED } else { 0 };
-    let key1 = FutexKey::new_user(uaddr1, mm, kf);
-    let key2 = FutexKey::new_user(uaddr2, mm, kf);
-    let b1 = futex_hash(&key1);
-
-    // Fixed order: plain bucket -> PI bucket.
-    let mut head = HASH_HEADS[b1].lock_irqsave();
-    let mut pi_bkt = crate::sync::futex_pi::pi_bucket_lock(&key2);
-
-    // Compare under the lock (CMP semantics parity).
-    let uval = match unsafe {
-        crate::arch::uaccess::get_user(uaddr1 as *const u32)
-    } {
-        Some(v) => v,
-        None => return -(EFAULT as i64),
-    };
-    if uval != cmpval {
-        return -(EAGAIN as i64);
-    }
-
-    // Collect the move set: pi_rqp waiters targeting THIS uaddr2, in
-    // chain order. A plain waiter occupying the move set is the
-    // mismatched-ops EINVAL (reference futex_requeue pi pairing).
-    let mut move_set: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
-    let mut wake_idx: Option<usize> = None;
-    let mut saw_plain_in_set = false;
-    {
-        let mut cur = *head;
-        while let Some(idx) = cur {
-            let (rqp, next) = {
-                let slot = WAITER_POOL[idx].lock_irqsave();
-                match slot.as_ref() {
-                    Some(w) => (w.pi_rqp_uaddr2, w.next),
-                    None => (0, None),
-                }
-            };
-            if rqp == uaddr2 {
-                if wake_idx.is_none() {
-                    wake_idx = Some(idx); // sync-wake the first
-                } else if (move_set.len() as i32) < nr_requeue {
-                    move_set.push(idx);
-                } else {
-                    break;
-                }
-            } else if rqp == 0 && wake_idx.is_some() {
-                // plain waiter inside the move window
-                if (move_set.len() as i32) < nr_requeue {
-                    saw_plain_in_set = true;
-                    break;
-                }
-            }
-            cur = next;
-        }
-    }
-    if wake_idx.is_none() || saw_plain_in_set {
-        // Nothing to pair with (or mixed queue): reference EINVAL.
-        return -(EINVAL as i64);
-    }
-
-    let mut ret: i64 = 0;
-    let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
-
-    // 1. Sync-wake the first waiter on uaddr1 (it owns nothing).
-    if let Some(idx) = wake_idx {
-        let (task, next) = {
-            let slot = WAITER_POOL[idx].lock_irqsave();
-            match slot.as_ref() {
-                Some(w) => (w.task, w.next),
-                None => (core::ptr::null_mut(), None),
-            }
-        };
-        // unlink from chain
-        {
-            let mut prev: Option<usize> = None;
-            let mut cur = *head;
-            while let Some(c) = cur {
-                let n = {
-                    let slot = WAITER_POOL[c].lock_irqsave();
-                    slot.as_ref().and_then(|w| w.next)
-                };
-                if c == idx {
-                    match prev {
-                        None => *head = n,
-                        Some(p) => {
-                            let mut ps = WAITER_POOL[p].lock_irqsave();
-                            if let Some(ref mut pw) = *ps {
-                                pw.next = n;
-                            }
-                        }
-                    }
-                    break;
-                }
-                prev = Some(c);
-                cur = n;
-            }
-        }
-        {
-            let mut slot = WAITER_POOL[idx].lock_irqsave();
-            if let Some(ref mut w) = *slot {
-                w.woken = true;
-                w.next = None;
-                let _ = next;
-            }
-        }
-        hb_waiters_dec(b1);
-        if !task.is_null() {
-            wake_list.push(task);
-        }
-        ret += 1;
-    }
-
-    // 2. Move the rest onto uaddr2's PI queue without waking them.
-    let word2_now = unsafe {
-        crate::arch::uaccess::get_user(uaddr2 as *const u32)
-    };
-    let mut word2_free = matches!(word2_now, Some(v) if v & 0x3fff_ffff == 0);
-    for idx in move_set {
-        let task = {
-            let slot = WAITER_POOL[idx].lock_irqsave();
-            slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
-        };
-        if task.is_null() {
-            continue;
-        }
-        // Unlink from the plain chain.
-        {
-            let mut prev: Option<usize> = None;
-            let mut cur = *head;
-            while let Some(c) = cur {
-                let n = {
-                    let slot = WAITER_POOL[c].lock_irqsave();
-                    slot.as_ref().and_then(|w| w.next)
-                };
-                if c == idx {
-                    match prev {
-                        None => *head = n,
-                        Some(p) => {
-                            let mut ps = WAITER_POOL[p].lock_irqsave();
-                            if let Some(ref mut pw) = *ps {
-                                pw.next = n;
-                            }
-                        }
-                    }
-                    break;
-                }
-                prev = Some(c);
-                cur = n;
-            }
-        }
-        hb_waiters_dec(b1);
-
-        let tid = unsafe { (*task).pid() } as u32;
-        let mut handed_direct = false;
-        let owner_tid;
-        if word2_free {
-            // Proxy trylock: acquire uaddr2 FOR this waiter directly
-            // (reference futex_proxy_trylock_atomic shape).
-            let w2 = unsafe {
-                crate::arch::uaccess::get_user(uaddr2 as *const u32)
-            };
-            match w2 {
-                Some(v) if v & 0x3fff_ffff == 0 => {
-                    let ok = unsafe {
-                        crate::arch::uaccess::put_user(
-                            uaddr2 as *mut u32,
-                            tid,
-                        )
-                    };
-                    if ok {
-                        handed_direct = true;
-                        owner_tid = tid;
-                    } else {
-                        return -(EFAULT as i64);
-                    }
-                }
-                Some(v) => {
-                    word2_free = false;
-                    owner_tid = v & 0x3fff_ffff;
-                }
-                None => return -(EFAULT as i64),
-            }
-        } else {
-            owner_tid = word2_now
-                .map(|v| v & 0x3fff_ffff)
-                .unwrap_or(0);
-        }
-
-        let pi_idx = unsafe {
-            crate::sync::futex_pi::pi_requeue_attach(
-                &mut pi_bkt, &key2, owner_tid, task, handed_direct,
-            )
-        };
-        let Some(pi_idx) = pi_idx else {
-            // Pool exhausted: leave this waiter parked on uaddr1 — it
-            // stays a valid plain waiter; report the partial count.
-            break;
-        };
-        {
-            let mut slot = WAITER_POOL[idx].lock_irqsave();
-            if let Some(ref mut w) = *slot {
-                w.pi_requeued_to = Some(pi_idx);
-                w.next = None;
-            }
-        }
-        ret += 1;
-    }
-
-    drop(pi_bkt);
-    drop(head);
-    crate::arch::cpu::restore_irq(true);
-    // Woken-flag-before-wake ordering (C8): flags stored above under
-    // the locks; wake now that the locks are gone.
-    for task in wake_list {
-        if !task.is_null() {
-            let pid = unsafe { (*task).pid() };
-            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
-            if fresh == task {
-                Task::wake_up(task);
-            }
-        }
-    }
-    ret
 }
 
 /// do_futex - main dispatch function
@@ -3666,49 +2771,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             }
             futex_wake_op(uaddr, flags, val as i32, _timeout as i32, uaddr2, val3)
         }
-        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
-            // PI timeouts are absolute (FUTEX_WAIT_BITSET convention).
-            match futex_parse_timeout(_timeout, true) {
-                Ok(dl) => crate::sync::futex_pi::futex_lock_pi(
-                    uaddr,
-                    dl,
-                    flags & FLAGS_SHARED != 0,
-                ),
-                Err(e) => -(e as i64),
-            }
+        _ => {
+            // PI-related operations not yet supported
+            -ENOSYS as i64
         }
-        FUTEX_TRYLOCK_PI => crate::sync::futex_pi::futex_trylock_pi(
-            uaddr,
-            flags & FLAGS_SHARED != 0,
-        ),
-        FUTEX_UNLOCK_PI => crate::sync::futex_pi::futex_unlock_pi(
-            uaddr,
-            flags & FLAGS_SHARED != 0,
-        ),
-        FUTEX_WAIT_REQUEUE_PI => {
-            match futex_parse_timeout(_timeout, true) {
-                Ok(dl) => futex_wait_requeue_pi(
-                    uaddr,
-                    val,
-                    uaddr2 as usize,
-                    dl,
-                    flags & FLAGS_SHARED != 0,
-                ),
-                Err(e) => -(e as i64),
-            }
-        }
-        FUTEX_CMP_REQUEUE_PI => {
-            // ABI: val = nr_wake, args[3] = nr_requeue, val3 = cmpval.
-            futex_cmp_requeue_pi(
-                uaddr,
-                val as i32,
-                uaddr2 as usize,
-                _timeout as i32,
-                val3,
-                flags & FLAGS_SHARED != 0,
-            )
-        }
-        _ => -ENOSYS as i64,
     }
 }
 

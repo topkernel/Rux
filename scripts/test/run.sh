@@ -16,7 +16,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 cd "$PROJECT_ROOT"
 
@@ -28,7 +28,7 @@ DEFAULT_INIT="/bin/sh"
 # build/current-platform.sh (build/.config, Kernel.toml, riscv64).
 PLATFORM="${PLATFORM:-}"
 if [ -z "$PLATFORM" ]; then
-    PLATFORM="$(bash "$SCRIPT_DIR/../build/current-platform.sh")" || exit 1
+    PLATFORM="$(bash "$SCRIPT_DIR/../../build/current-platform.sh")" || exit 1
 fi
 
 case "$PLATFORM" in

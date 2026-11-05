@@ -431,8 +431,28 @@ fn rest_site_open(cpu: usize, loc: usize) {
 ///   model closed + IF=1-> the normal open: REST segment at `loc`.
 ///   model closed + IF=0-> missed 0-edge (raw cli / unhooked path):
 ///                         open unattributed, count a miss.
-#[inline]
+///
+/// perf-gap-hunt (2026-11-05): the hook pair fires on EVERY cli/sti in
+/// the kernel (1331 inlined sites in the release-strong build), and the
+/// outlined call + frame was the dominant fixed cost of CpuLocal::with
+/// on unarmed boots. The wrapper below is `inline(always)` with a
+/// fast gate that skips ONLY the settled-unarmed state (ARMED == 1):
+/// ARMED == 0 (undetermined, pre-cmdline — pa15) and ARMED == 2 (armed)
+/// both still run the full body via the outlined twin, so the on()
+/// resolution semantics and the armed-boot accounting are unchanged.
+#[inline(always)]
 pub fn irq_note_off(loc: Option<&'static core::panic::Location<'static>>) {
+    if ARMED.load(Ordering::Relaxed) == 1 {
+        return;
+    }
+    irq_note_off_full(loc);
+}
+
+/// Outlined body of [`irq_note_off`] (see the wrapper comment for the
+/// gate contract).
+#[cold]
+#[inline(never)]
+fn irq_note_off_full(loc: Option<&'static core::panic::Location<'static>>) {
     if !on() {
         return;
     }
@@ -472,8 +492,22 @@ pub fn irq_note_off(loc: Option<&'static core::panic::Location<'static>>) {
 /// asm; restore_irq(true) funnels here). Model open + IF=0 = normal
 /// close; model open + IF=1 = the open was phantom (raw sti happened in
 /// between) — heal-close. Model closed = nothing (double-sti idiom).
-#[inline]
+///
+/// Same inline(always) fast gate as [`irq_note_off`] (see its comment):
+/// settled-unarmed boots skip with a load+branch; ARMED 0/2 run the
+/// outlined body, preserving the pa15 resolution semantics.
+#[inline(always)]
 pub fn irq_note_on() {
+    if ARMED.load(Ordering::Relaxed) == 1 {
+        return;
+    }
+    irq_note_on_full();
+}
+
+/// Outlined body of [`irq_note_on`].
+#[cold]
+#[inline(never)]
+fn irq_note_on_full() {
     if !on() {
         return;
     }

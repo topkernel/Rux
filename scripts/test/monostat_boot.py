@@ -27,9 +27,10 @@ import socket
 import subprocess
 import sys
 import time
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 QEMU = "qemu-system-x86_64"
 MKFS = "/usr/sbin/mkfs.ext4"
 MUSL = os.path.join(WT, "toolchain", "x86_64-rux-linux-musl")

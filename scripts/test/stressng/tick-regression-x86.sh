@@ -19,7 +19,12 @@
 #   SKIP  no OOM-FORENSIC dumps in the boot (the cascade did not fire —
 #         rerun; the face is deterministic on this class).
 set -u
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 LOG="${1:-run/stress-runs/tick-regression.log}"
 BUDGET="${BUDGET:-300}"

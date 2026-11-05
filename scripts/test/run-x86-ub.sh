@@ -6,7 +6,7 @@
 # (virtio-blk rootfs + virtio-gpu + virtio-keyboard/tablet + virtio-net),
 # serial console on ttyS0.
 #
-# Usage: ./test/run-x86-ub.sh [console|gui|debug]
+# Usage: ./scripts/test/run-x86-ub.sh [console|gui|debug]
 #   console - headless serial run, exits at kernel stop (default)
 #   gui     - native SDL window + serial in this terminal (login: root/rux)
 #   debug   - like console but -S -s (GDB attach line printed)
@@ -23,7 +23,12 @@
 #   NOBUILD=1            skip the kernel build step
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 MODE="${1:-console}"
 ROOTFS="${ROOTFS:-work/ubuntu-x86.img}"
@@ -35,7 +40,7 @@ BZIMAGE="target/x86_64-unknown-none/debug/bzImage"
 
 if [ ! -f "$ROOTFS" ]; then
     echo "rootfs image missing: $ROOTFS" >&2
-    echo "build it with: bash test/ubuntu-x86/build-img.sh" >&2
+    echo "build it with: bash scripts/test/ubuntu-x86/build-img.sh" >&2
     exit 1
 fi
 
@@ -82,7 +87,7 @@ esac
 # keyboard and tablet are polled through evdev like on riscv64.
 exec "$QEMU" \
     -M q35 -m "$MEM" -smp "$SMP" \
-    -accel tcg,thread=single \
+    -accel "${ACCEL:-kvm}" \
     -cpu max \
     -snapshot \
     "${DISPLAY_ARGS[@]}" \
@@ -96,4 +101,4 @@ exec "$QEMU" \
     -device virtio-keyboard-pci,disable-legacy=on \
     -device virtio-tablet-pci,disable-legacy=on \
     -kernel "$BZIMAGE" \
-    -append "root=/dev/vda rw init=/sbin/init console=ttyS0"
+    -append "root=/dev/vda rw init=${INIT:-/sbin/init} console=ttyS0"

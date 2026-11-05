@@ -11,7 +11,12 @@
 # (ldd-resolved) so SONAME versions always match.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 HERE="$ROOT/test/ohlite"
 OUT="$ROOT/work/ohlite"
 IMAGES="$OUT/images"

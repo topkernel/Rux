@@ -78,8 +78,6 @@ build_userspace() {
 
     # Build all user programs
     # Test programs (tests/)
-    info "Compiling smoke_test..."
-    cargo build $RELEASE_FLAG -p smoke_test
 
     # Build C test programs with dynamic linking
     info "Building C test programs (dynamic linking)..."

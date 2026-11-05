@@ -19,9 +19,10 @@ lane worktrees that never built `make sdk` themselves.
 
 import os
 import subprocess
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 CC = "riscv64-linux-gnu-gcc"
 MARCH = "rv64gc_zba_zbb_zbs"
 

@@ -11,7 +11,12 @@
 # copy — kill10 lives at /test/linux-ltp/testcases/bin/), init=/bin/sh.
 # Usage: k10-freeze-hunt-x86.sh <tag> <kill10_loops> [budget_secs]
 set -u
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 TAG="${1:?tag}"
 LOOPS="${2:-6}"

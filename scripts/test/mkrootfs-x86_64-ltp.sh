@@ -9,7 +9,7 @@
 # no soft-fp overlay (riscv64-only discipline).
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 MUSL_CC="$PROJECT_ROOT/toolchain/x86_64-rux-linux-musl/bin/musl-gcc"

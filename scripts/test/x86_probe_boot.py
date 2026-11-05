@@ -23,9 +23,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 QEMU = "qemu-system-x86_64"
 CC = "gcc"
 MKFS = "/usr/sbin/mkfs.ext4"

@@ -5,7 +5,12 @@
 # Usage: test/ltpscan/run1.sh [-t SECONDS] [-x "extra boot args"] test1,test2,...
 # Logs to .ltp/diag/<test1>.log
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")"
+WT="$PWD"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 
 TESTS="${@: -1}"
 TIMEOUT=120

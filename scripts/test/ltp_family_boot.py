@@ -9,9 +9,10 @@ import os
 import subprocess
 import sys
 import time
+from ruxroot import repo_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WT = os.path.dirname(HERE)
+WT = repo_root(__file__)
 IMG = os.path.join(WT, "work", "ltp-riscv64-rootfs.img")
 if not os.path.exists(IMG):
     subprocess.run(
@@ -33,12 +34,14 @@ cmd = [
 ]
 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, bufsize=0)
-log = open("/tmp/ltp-family-boot.log", "wb")
+log = open(os.environ.get("LTP_FAMILY_LOG", "/tmp/ltp-family-boot.log"), "wb")
 buf = bytearray()
-deadline = time.time() + 240
+deadline = time.time() + float(os.environ.get("LTP_FAMILY_DEADLINE", "240"))
 sent_setup = False
 idx = 0
 results = {}
+case_start = 0.0  # current case's first-feed time (feed-pacing rig fix)
+last_feed = 0.0
 
 def feed(line):
     proc.stdin.write(line.encode() + b"\n")
@@ -70,8 +73,23 @@ while time.time() < deadline:
         c = CASES[idx]
         marker = f"RC-{idx}".encode()
         if marker not in text:
-            feed(f"/test/linux-ltp/testcases/bin/{c} > /tmp/o 2>&1; "
-                 f"echo CASE-DONE:{c}:$?:RC-{idx}")
+            # Feed PACING (rig fix 2026-11-05): re-feeding a forking case
+            # every loop iteration starts OVERLAPPING instances that kill
+            # each other (the mmap11 KSIG9 storm) and wedge the family for
+            # the whole deadline. Feed once, then only after an 8s quiet
+            # gap; give up on the case after 45s and record "?".
+            if case_start == 0.0:
+                case_start = time.time()
+            if last_feed == 0.0 or time.time() - last_feed >= 8.0:
+                feed(f"/test/linux-ltp/testcases/bin/{c} > /tmp/o 2>&1; "
+                     f"echo CASE-DONE:{c}:$?:RC-{idx}")
+                last_feed = time.time()
+            if time.time() - case_start > 45.0:
+                results[c] = "?"
+                idx += 1
+                buf.clear()
+                case_start = 0.0
+                last_feed = 0.0
             time.sleep(0.5)
             pump()
             continue
@@ -83,6 +101,8 @@ while time.time() < deadline:
         results[c] = rc
         idx += 1
         buf.clear()
+        case_start = 0.0
+        last_feed = 0.0
         continue
     if sent_setup and idx >= len(CASES):
         break

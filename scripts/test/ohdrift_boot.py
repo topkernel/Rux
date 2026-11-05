@@ -21,8 +21,9 @@ import select
 import subprocess
 import sys
 import time
+from ruxroot import repo_root
 
-WT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WT = repo_root(__file__)
 IMGDIR = os.path.join(WT, "run", "oh-img")
 QEMU = "/usr/bin/qemu-system-x86_64"
 DEFAULT_KERNEL = os.path.join(

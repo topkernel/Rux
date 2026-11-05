@@ -6,7 +6,11 @@
 # Rux ext4 requirements: 4K blocks, no metadata_csum.
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../.." && pwd)"
+WT="$(cd "$(dirname "$0")" && pwd)"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 # SRC priority: explicit override -> legacy shared gate rootfs ->
 # auto-fetched ubuntu-base (scripts/fetch-ubuntu-rootfs.sh, works on any
 # dev machine).
@@ -17,13 +21,20 @@ IMG="$WORK/ubuntu-gui.img"
 # statically links the HOST glibc — Ubuntu 25.10 glibc assumes the RVA23
 # baseline (vector) and SIGILLs on QEMU rv64. musl avoids that.
 MUSL="$WT/toolchain/riscv64-rux-linux-musl"
-if [ -z "${CC:-}" ] && [ -f "$MUSL/lib/crt1.o" ]; then
+if [ -n "${CC:-}" ]; then
+    : # explicit override wins
+elif [ -f "$MUSL/lib/crt1.o" ]; then
     musl_cc() {
         riscv64-linux-gnu-gcc -static -march=rv64gc_zicsr -O2 -nostdinc -isystem /usr/lib/gcc-cross/riscv64-linux-gnu/13/include -isystem "$MUSL/include" -nostdlib "$MUSL/lib/crt1.o" -L"$MUSL/lib" -o "$1" "$2" -lc -lgcc
     }
     CC=musl_cc
 else
-    CC="${CC:-riscv64-linux-gnu-gcc}"
+    # The positional-arg musl_cc wrapper below has no plain-gcc
+    # equivalent, and a plain glibc-dynamic build SIGILLs on QEMU
+    # (RVA23 baseline) — fail loudly instead of producing a broken
+    # image through a misparsed command line.
+    echo "error: $MUSL/lib/crt1.o missing — run 'make sdk' first" >&2
+    exit 1
 fi
 
 command -v "$CC" >/dev/null || { echo "missing $CC" >&2; exit 1; }
@@ -41,12 +52,12 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT" "$WORK"
 cp -a "$SRC/." "$ROOT/"
 
-"$CC" "$ROOT/usr/bin/udesk" "$WT/test/ubuntu-gui/udesk.c"
-"$CC" "$ROOT/sbin/udesk-init" "$WT/test/ubuntu-gui/init.c"
-"$CC" "$ROOT/sbin/shutdown" "$WT/test/ubuntu-gui/shutdown.c"
+"$CC" "$ROOT/usr/bin/udesk" "$WT/scripts/test/ubuntu-gui/udesk.c"
+"$CC" "$ROOT/sbin/udesk-init" "$WT/scripts/test/ubuntu-gui/init.c"
+"$CC" "$ROOT/sbin/shutdown" "$WT/scripts/test/ubuntu-gui/shutdown.c"
 # Swap gate probe: touches >2 GiB of anonymous memory and survives only
 # when the swap tail carve is active (mm/swap.rs + vmscan reclaim).
-"$CC" "$ROOT/usr/bin/swap-probe" "$WT/test/ubuntu-gui/swap-probe.c"
+"$CC" "$ROOT/usr/bin/swap-probe" "$WT/scripts/test/ubuntu-gui/swap-probe.c"
 
 # preserve any pre-existing init exactly once (ubuntu-base ships none —
 # it is a container rootfs; udesk-init becomes PID 1 directly)

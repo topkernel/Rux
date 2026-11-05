@@ -8,7 +8,11 @@
 # Rux ext4 requirements: 4K blocks, no metadata_csum.
 set -euo pipefail
 
-WT="$(cd "$(dirname "$0")/../.." && pwd)"
+WT="$(cd "$(dirname "$0")" && pwd)"
+while [ ! -f "$WT/Cargo.toml" ] || [ ! -d "$WT/kernel" ]; do
+    WT="$(dirname "$WT")"
+done
+cd "$WT"
 DL="$WT/work/downloads"
 WORK="$WT/work"
 ROOT="$WORK/rootfs-x86"

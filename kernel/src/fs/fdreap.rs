@@ -122,7 +122,19 @@ pub fn retire_complete(file: Arc<File>) {
         PUSHED_SEQ.fetch_add(1, Ordering::AcqRel) + 1
     };
     RETIRED_DEPTH.fetch_add(1, Ordering::Relaxed);
-    TICKET.up();
+    // NOTE: no TICKET.up() on this happy path. The closer below drains
+    // the batch itself (one grace covers it), so an up here only wakes
+    // fdreapd to find an empty queue — one wakeup + IPI per close(2),
+    // and worse: a fdreapd that wins the take forces the CLOSER to wait
+    // on fdreapd's sleepy (1-jiffy poll) grace form, whose jiffy
+    // granularity turned a µs-scale report race into a full 10 ms
+    // close(2) stall once per tick (measured 2026-11-05: probe
+    // open+close median 1.07 µs, mean 2.45 µs; every stall in close(),
+    // tick-periodic, ending at a jiffy boundary; -smp 1 clean at
+    // mean 869 ns). With fdreapd asleep the secondary CPU stays halted
+    // — quiescent by construction — and the closer's polled grace
+    // completes in the microsecond window. fdreapd remains armed for
+    // the requeue path (grace-budget exhaustion), which still ups.
     // Completion loop: wait until the close decisions for everything
     // parked up to and including ours have run. Usually we win the race
     // ourselves and drain the batch here (one grace covers the batch).

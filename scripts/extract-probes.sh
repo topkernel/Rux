@@ -23,5 +23,5 @@ fi
 # Guest-side probe sources: test/*.c, run/*.c, userspace smoke tests
 if [ ! -f test/pbench.c ]; then
     echo "extract-probes: restoring C probe sources ..."
-    tar -xzf test/probes.tar.gz
+    tar -xzf userspace/probes/probes.tar.gz
 fi
