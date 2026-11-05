@@ -5269,7 +5269,14 @@ a) hilogd main (pid 318) parks in mmap (lastsys=9) from ~7.4s in
    blocked in kernel syscalls (extend sleepsnap to print the inner
    wait object, not just the syscall nr), OR catch it with the
    FROZEN-CPU probe's victim-stack scan by triggering from khungtaskd
-   on hilogd's 120s HUNG line.
+   on hilogd's 120s HUNG line. Ruled out at close: NOT an RCU grace
+   wait (ohc24's first RCU-GP-BOUND print is 33.5s, 26s AFTER the
+   park) and NOT memory exhaustion (no OOM/reclaim prints). Remaining
+   candidates: a file-backed fault-in read stuck in bio completion, or
+   an fs-internal SleepMutex under the mapping's file; the args
+   (a0=0x18 a1=0x6ffffff9) do not decode as a plain anonymous mmap —
+   get the real args from the pt_regs at park time (sleepsnap has the
+   frame).
 b) The VMA rwlock is a pure spinner (sync/rwlock.rs write(): phase-1
    pend + phase-2 drain, spin_loop only) and mm paths hold it across
    slow work (pagefault COW under vma_read while page allocation
