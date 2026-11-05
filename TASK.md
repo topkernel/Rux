@@ -5319,3 +5319,85 @@ c) cpu slots line in every dump: init or a fresh init child (fork
    SetBundleQuota → launcher). Reference timings: oh-roll ledger
    ~1390 (creation 8.3s, launcher.ready 11.7s).
 5. usb_host NULL family (51st §11.5) still queued.
+
+## 54TH SESSION — usb lane: usb_host NULL family CLOSED AS IMAGE-INHERITED; the reference kernel crashes identically (2026-11-06, branch oh-usb @ 70568e37)
+
+Mission (53rd item 5 / 51st §11.5): kill the rip 0x7ff082996bac family
+under the standing rule "reference boots the same image crash-free".
+
+### VERDICT: no divergence exists. The REFERENCE KERNEL'S usb_host
+### segfaults in the identical deterministic crash loop (sig-11 x12-16
+### per reference boot). "Reference = ZERO segfaults" was a census
+### artifact (kernel-side SEGV prints; stock Linux emits none per
+### userspace fault — the crashes are visible in init's SIGCHLD
+### WARNING lines, which the census grep missed).
+
+### 1. Symbolization complete (rip → instruction → source)
+- Faulting r-x VMA (0x7ff08298f000-0x7ff0829aa000, off 0xe000, size
+  0x1b000) = /vendor/lib64/libusb_pnp_manager.z.so (R-E LOAD file
+  0xe49c→vaddr 0xf49c filesz 0x1a464). Fault file offset 0x15bac →
+  ELF vaddr 0x16bac.
+- The code at 0x16b70-0x16bb2: OsalMutexLock(&g_ddkListenerList.
+  listMutex) [no-op, realMutex==NULL] → mov listenerList.next==NULL →
+  DListIsEmpty false → DLIST_FOR_EACH walk → `mov (%rbx),%rax` with
+  rbx=0. = DdkListenerMgrAdd (ddk_pnp_listener_mgr.c:152) with inlined
+  DdkListenerMgrIsExists. head rbp 0x7ff0829acef8 = bias 0x7ff082980000
+  + 0x2cef8 = &g_ddkListenerList.listenerList. pos=container_of(NULL)
+  =-0x10 explains rax=0xffff...fff0 (NOT an EBUSY). Confirmed by the
+  referenced rodata strings (usb_ddk_listener_mgr / add listener
+  repeatedly / DdkListenerMgrAdd).
+### 2. Why the list is never initialized — image determinism
+UsbPnpManagerInit → DdkDevMgrInit(path) must succeed BEFORE
+DdkListenerMgrInit DListHeadInits the list. The path comes from the hcb:
+usb_pnp_manager_device/device0 deviceMatchAttr is EMPTY and
+"gadget_state_path" exists nowhere in hdf_default.hcb (nor in the hcs
+source: vendor/edu/x86_64_virt/hdf_config/uhdf/device_info.hcs:74).
+GetString fails → path NULL → DdkDevMgrInit(NULL)=HDF_ERR_INVALID_PARAM
+→ Init returns before DdkListenerMgrInit → list stays .bss-zero → every
+later DdkListenerMgrAdd walks NULL. No kernel input can change this.
+Crashing caller = UsbDeviceImpl::UsbdEventHandle (usb_device_impl.cpp:342)
+from HdfUsbDeviceInterfaceDriverBind (device1, libusb_device_driver.z.so;
+its impl lib is a DT_NEEDED → Bind needs no dlopen; rsp[0]="true" is
+GetBoolParameter("const.SystemCapability.Driver.ExternalDevice")'s
+buffer). libusb_driver.z.so (usb_device device0) is MISSING from
+/vendor/lib64 — that Bind never runs on either kernel.
+### 3. Empirical confirmation on ours (temp USBTRACE instrument, removed)
+Boot usbh1 (same rig: system-lb5 + userdata-fresh2, KVM SMP2): usb_host
+did 6x faccessat(hcb)=0, 2x faccessat("/dev/hdf/")=-2, then ZERO
+openat/getdents64/socket until the crash — no opendir("/sys/bus/usb/
+devices") (ScanSysfs never ran; path was NULL), no uevent netlink
+socket (DdkUeventInit is ordered after DdkListenerMgrInit). Identical
+rip/rsp/rbp on every init restart — deterministic, not a race.
+(Also note: /dev/hdf/ ENOENT is NOT a divergence — plain Linux has no
+khdf either; the stack falls back and proceeds.)
+### 4. The decisive data (reference logs, oh-launcher/run/)
+- refu1: usb_host sig-11 from t=4.74s, crash→restart→crash ~350ms,
+  bursts of 4, re-triggered 245s/485s → 12/boot. refu2: 12, refu8: 12,
+  refu9: 16. EVERY signal-11 in every reference log is usb_host.
+- refu9: ServiceStart usb_host 4.218s → first sig-11 5.758s → retries
+  through 728s.
+- OURS: 4 SIGDEATH episodes/boot (ohc24/26/29) — FEWER than the
+  reference (our boots wedge before init's later retry bursts). The old
+  "12-18/boot" was rip-HIT counting (3 fault prints + N restarts per
+  episode).
+Same image, same deterministic crash, same loop shape → exact reference
+parity → under the campaign's own rule this is NOT an our-kernel bug,
+and fabricating inputs (e.g. /dev/hdf nodes or config values) to make
+UsbPnpManagerInit succeed would CREATE a divergence.
+### 5. Consequences
+1. Close the family (51st §11.5, 53rd item 5). The 49th's "first
+   domino" theory (usb_host storm feeding the wedge) is dead: the
+   reference carries the same storm and still reaches launcher.ready.
+2. Future reference crash censuses must grep "exit with signal : 11"
+   on the reference serial log, not kernel fault-print patterns.
+3. The devhost death storm feeds samgr load EQUALLY on both kernels;
+   eliminating it is an image-side fix (upstream OH bug:
+   DdkListenerMgrAdd reachable before DdkListenerMgrInit), out of
+   kernel-campaign scope.
+### 6. Housekeeping
+- Kernel source UNTOUCHED (hunt instrument added then removed; git diff
+  empty; no kernel commits, no push, no merge gates triggered).
+- run/: usb-boot.py, oh-usbh1-serial.log, vlib/ (extracted .so),
+  rd2/ (ramdisk), hdf_default.hcb, bzImage-usbhunt1 — gitignored,
+  kept to reproduce §1-§2 with readelf/objdump/debugfs.
+- No stray QEMU from this lane.
