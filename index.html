@@ -1,217 +1,374 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rux Kernel - 使用 Rust 编写的 Linux 兼容操作系统内核</title>
-    <link rel="stylesheet" href="css/style.css?v=3">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rux — 用 Rust 从零编写的 Linux ABI 兼容操作系统内核</title>
+<meta name="description" content="Rux 是一个完全用 Rust 编写的 Linux ABI 兼容操作系统内核:未经修改的 Ubuntu 22.04 可启动至 GNOME Shell 桌面,未经修改的 OpenHarmony 可启动全部 135+ 服务。约 33 万行 Rust,345+ 系统调用,三大架构。">
+<link rel="stylesheet" href="css/style.css?v=10">
 </head>
 <body>
-    <nav>
-        <div class="container">
-            <a href="index.html" class="logo">🦀 Rux Kernel</a>
-            <ul>
-                <li><a href="architecture/boot.html" class="active">架构设计</a></li>
-                <li><a href="guides/getting-started.html">开发指南</a></li>
-                <li><a href="progress/roadmap.html">开发路线</a></li>
-                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
-            </ul>
-        </div>
-    </nav>
 
-    <main>
-        <div class="container">
-            <section class="hero">
-                <h1>Rux Kernel</h1>
-                <p>一个使用 Rust 编写的 Linux 兼容操作系统内核，专注于 POSIX 兼容性和 Linux ABI 完全对齐</p>
-                <div class="badges">
-                    <span class="badge">RISC-V 64-bit</span>
-                    <span class="badge">Rust no_std</span>
-                    <span class="badge">POSIX 兼容</span>
-                    <span class="badge">Linux ABI</span>
-                </div>
-            </section>
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="index.html">首页</a>
+      <a href="architecture/design.html">架构设计</a>
+      <a href="guides/getting-started.html">快速入门</a>
+      <a href="guides/testing.html">测试报告</a>
+      <a href="progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
 
-            <section class="stats-bar">
-                <div class="stat">
-                    <div class="stat-value">222</div>
-                    <div class="stat-label">源文件</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">~74,800</div>
-                    <div class="stat-label">代码行数</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">53</div>
-                    <div class="stat-label">内核测试</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">1,913</div>
-                    <div class="stat-label">总测试数</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value">Phase 28</div>
-                    <div class="stat-label">当前阶段</div>
-                </div>
-            </section>
+<main>
 
-            <section class="card-grid">
-                <div class="card">
-                    <div class="card-icon">🏗️</div>
-                    <h3><a href="architecture/boot.html">启动流程</a></h3>
-                    <p>从 OpenSBI 到内核启动的完整流程，MMU 跳板、VMA/LMA 链接、PtRegs 等核心启动机制</p>
-                </div>
+<!-- ================= HERO ================= -->
+<section class="hero">
+  <div class="container hero-grid">
+    <div>
+      <span class="chip acc"><span class="dot o"></span>全程由 AI 代理开发 · 人类主持合并</span>
+      <h1>用 Rust 从零编写的<br><span class="grad">Linux ABI 兼容内核</span></h1>
+      <p class="lede">Rux 的每一行代码 —— 调度器、内存管理、ext4、binder、网络栈、验证框架 —— 都由 AI 代理在人类主持下编写。<b>未经修改的 Ubuntu 22.04</b> 可以启动到 GNOME Shell 桌面,<b>未经修改的 OpenHarmony</b> 可以启动全部 135+ 服务:不打补丁、不重编、不改配置。</p>
+      <div class="hero-badges">
+        <span class="chip">Rust no_std</span>
+        <span class="chip">POSIX 兼容</span>
+        <span class="chip">345+ 系统调用</span>
+        <span class="chip">x86_64 · riscv64 · aarch64</span>
+        <span class="chip">ext4 / binder / ELF</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="guides/getting-started.html">快速开始 →</a>
+        <a class="btn btn-ghost" href="architecture/design.html">架构与模块设计</a>
+        <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
+      </div>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar"><i></i><i></i><i></i><span>rux — zsh</span></div>
+      <div class="terminal-body"><div class="ln"><span class="c"># ① 未经修改的 Ubuntu 22.04 启动到 GNOME 桌面(x86_64 + KVM)</span></div>
+<div class="ln"><span class="p">$</span> make ubuntu-run</div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] smp: 4 vCPU online (q35)</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] virtio-blk: root mounted (ext4)</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">ubuntu</span> <span class="dim">] systemd 249 — user session up</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">gdm</span> <span class="dim">] greeter ready … login ok</span></div>
+<div class="ln"><span class="ok">[ gnome-shell ] frame on screen ✓</span></div>
+<div class="ln"> </div>
+<div class="ln"><span class="c"># ② 未经修改的 OpenHarmony 启动全部服务</span></div>
+<div class="ln"><span class="p">$</span> ./oh-boot.sh --accel kvm</div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] binder: global context ready</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">oh</span> <span class="dim">] servicemgr: 135+ services up</span></div>
+<div class="ln"><span class="ok">[ launcher ] 主屏渲染完成 ✓</span></div>
+<div class="ln"> </div>
+<div class="ln"><span class="c"># ③ 内核自带测试套件</span></div>
+<div class="ln"><span class="p">$</span> make test</div>
+<div class="ln"><span class="ok">1267 / 1267 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
+    </div>
+  </div>
+</section>
 
-                <div class="card">
-                    <div class="card-icon">💾</div>
-                    <h3><a href="architecture/memory.html">内存管理</a></h3>
-                    <p>Zone 分配器、vmemmap、PCP、memblock、Buddy 系统、写时复制、缺页处理、ASID 等完整内存管理子系统</p>
-                </div>
+<!-- ================= 数字条 ================= -->
+<section class="section-tight">
+  <div class="container">
+    <div class="stats">
+      <div class="stat"><div class="v">33<em>万+</em></div><div class="l">行 Rust 代码</div></div>
+      <div class="stat"><div class="v">345<em>+</em></div><div class="l">系统调用</div></div>
+      <div class="stat"><div class="v">4200<em>+</em></div><div class="l">测试用例</div></div>
+      <div class="stat"><div class="v">3</div><div class="l">架构移植</div></div>
+      <div class="stat"><div class="v">1084<em>/1869</em></div><div class="l">LTP 通过</div></div>
+      <div class="stat"><div class="v">19</div><div class="l">设计分歧(登记在册)</div></div>
+    </div>
+  </div>
+</section>
 
-                <div class="card">
-                    <div class="card-icon">🔧</div>
-                    <h3><a href="architecture/riscv64.html">RISC-V 实现</a></h3>
-                    <p>PtRegs 结构、Trap 入口/出口、上下文切换、FPU 管理、用户空间访问、SBI 接口、ASID/TLB 等 RISC-V 特有实现</p>
-                </div>
+<!-- ================= 成果墙 ================= -->
+<section class="section" id="milestones">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Boots · 实靴成果</span>
+      <h2>真正的内核,跑真正的发行版</h2>
+      <p>兼容性不是嘴上说说 —— 用未经修改的发行版镜像和未修改的上游用户态程序直接验证。以下截图全部来自 Rux 原生内核的串口/帧缓冲实拍。</p>
+    </div>
+    <div class="gallery">
+      <figure class="shot">
+        <img src="images/ubuntu-gnome-shell-frame-2026-10-27.png" alt="GNOME Shell 桌面" loading="lazy">
+        <figcaption class="cap"><div class="t">GNOME Shell 桌面完整成帧</div><div class="d">顶栏 / 终端 / 工作区缩略图 · 三次独立启动复现</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="images/gdm-greeter-login-2026-11-01.png" alt="GDM 登录界面" loading="lazy">
+        <figcaption class="cap"><div class="t">GDM 登录问候界面</div><div class="d">udevd → logind → gdm3 → PAM 全链路 · 2026-11-01</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="images/ubuntu-gnome-xterm-conversation-2026-10-28.png" alt="gnome-session 会话" loading="lazy">
+        <figcaption class="cap"><div class="t">GNOME 会话键入式终端对话</div><div class="d">键入 → 回显 → bash 应答 · 两次启动逐像素一致</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="images/oh-launcher-2026-10-31.png" alt="OpenHarmony launcher" loading="lazy">
+        <figcaption class="cap"><div class="t">OpenHarmony SystemUI 锁屏</div><div class="d">launcher 链路里程碑 · 2026-10-31</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="images/oh-bootanimation-2026-10-24.png" alt="OpenHarmony 开机动画" loading="lazy">
+        <figcaption class="cap"><div class="t">OpenHarmony 开机动画</div><div class="d">bootanimation → render_service 全链路 · 2026-10-24</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="images/ubuntu-desktop-riscv-2026-10-15.png" alt="Ubuntu 桌面 riscv64" loading="lazy">
+        <figcaption class="cap"><div class="t">Ubuntu 22.04 图形桌面(riscv64)</div><div class="d">udesk 帧缓冲桌面 · 2026-10-15</div></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
 
-                <div class="card">
-                    <div class="card-icon">📐</div>
-                    <h3><a href="architecture/design.html">设计原则</a></h3>
-                    <p>POSIX/ABI 兼容最高原则、Rust 优先、模块化设计、分层架构、渐进式实现等核心设计理念</p>
-                </div>
+<!-- ================= 平台矩阵 ================= -->
+<section class="section" id="platforms">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Platforms · 三架构</span>
+      <h2>一套内核,三种架构</h2>
+      <p>x86_64 是第一优先级开发与测试平台(KVM 近原生加速,所有功能/性能/LTP 测试都在它上面跑);riscv64 与 aarch64 保持三架构构建与回归门禁。</p>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>架构</th><th>QEMU 机型</th><th>加速</th><th>用户态</th><th>当前状态</th></tr></thead>
+        <tbody>
+          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM(主平台)</td><td>Ubuntu 22.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>GNOME 桌面实靴 · LTP/性能主战场</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1267/1267</span></td></tr>
+          <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>交互 shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / 信号 / 内核套件全绿</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
 
-                <div class="card">
-                    <div class="card-icon">📂</div>
-                    <h3><a href="architecture/structure.html">项目结构</a></h3>
-                    <p>222 个源文件、74,800 行代码的完整项目组织结构，包含各模块代码分布和文件说明</p>
-                </div>
+<!-- ================= 设计取向 ================= -->
+<section class="section" id="why">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Design · 设计取向</span>
+      <h2>ABI 是契约,内部是净室设计</h2>
+      <p>对外:系统调用号、语义、ELF/auxv、futex、procfs 布局,甚至 glibc 动态加载器读取的 <code>uname</code> 字符串,全部对齐参考实现。对内:不受历史包袱约束,用 Rust 写出更好的设计 —— 每一项内部分歧都登记在册并携带兼容性证据。</p>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">📜</span>兼容性即宪法</h3>
+        <p>以 POSIX 标准与参考内核 ABI 为最高准则:LTP 测试族逐族通过,发行版用户态零修改运行。</p>
+        <div class="nums">345+ 系统调用 · LTP <b>1084/1869</b></div>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛡️</span>Rust 安全,有台账</h3>
+        <p>全内核 Rust(no_std)。全史 34 个记忆破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,11 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
+        <div class="nums">unsafe 行占比 12.9% · Kani 157 proofs</div>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🤖</span>AI 并行工程化</h3>
+        <p>多代理并行开发:每任务独立工作树、独立分支,主会话审阅合并。每日多轮合并,全量回归护航。</p>
+        <div class="nums">工作树 <b>130+</b> · 并发 5 线</div>
+      </div>
+      <div class="card">
+        <h3><span class="ico">⚡</span>性能即门禁</h3>
+        <p>每次合并同时审查功能与性能:三层门禁 + 六大看护域(内存/调度/文件系统/中断/IPC/binder),没有数据不能合并。</p>
+        <div class="nums">GRQ 持锁 <b>~2.8 µs</b> 实测</div>
+      </div>
+    </div>
+  </div>
+</section>
 
-                <div class="card">
-                    <div class="card-icon">🔒</div>
-                    <h3><a href="architecture/kernel-lock.html">内核大锁</a></h3>
-                    <p>基于 RISC-V 原子指令的内核大锁实现，锁生命周期、睡眠/阻塞处理和锁拆分计划</p>
-                </div>
-            </section>
+<!-- ================= 模块地图 ================= -->
+<section class="section" id="modules">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Modules · 模块地图</span>
+      <h2>内核由哪些部分组成</h2>
+      <p>每个子系统都有独立的设计文档页,包含机制、数据结构与实测数字。以下是一分钟导览。</p>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">🧮</span>调度器</h3>
+        <p>单一全局运行队列(GRQ):在 2–4 vCPU 的目标场景下彻底消除负载迁移与任务窃取,唤醒路径直达。</p>
+        <div class="nums">持锁 <b>~2.8µs</b> · census 8/32 带内</div>
+        <a class="more" href="architecture/design.html#sched">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🧠</span>内存管理</h3>
+        <p>buddy 页分配器 + magazine 小对象分配、全局页缓存、每任务 VMA;munmap churn 竞态家族已全数关闭。</p>
+        <div class="nums">小分配类锁 <b>19.7M</b>/靴 · 门 ≤25M</div>
+        <a class="more" href="architecture/design.html#mm">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">💾</span>文件系统</h3>
+        <p>ext4(读写)+ 块层 bio 异步批量读 + buffer cache 命中率护航;pbench 文件路径中位数全部带内。</p>
+        <div class="nums">buffer cache 命中率 <b>99.1%</b></div>
+        <a class="more" href="architecture/design.html#fs">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📡</span>IPC 与 binder</h3>
+        <p>兼容 OpenHarmony 的完整 binder 实现、unix socket、pipe、SysV IPC;跨进程死锁家族已修复并回归。</p>
+        <div class="nums">pipe 往返 <b>µs 级</b> · OH 全服务互通</div>
+        <a class="more" href="architecture/design.html#ipc">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🌐</span>网络栈</h3>
+        <p>自研 TCP/IP 协议栈:socket API 语义对齐,回环与本机网络路径由 LTP 网络族与基准工具持续验证。</p>
+        <div class="nums">socket 族 LTP 持续扩容</div>
+        <a class="more" href="architecture/design.html#net">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔌</span>驱动</h3>
+        <p>virtio-blk(PCI/MMIO 双模、异步完成环)、串口控制台、输入设备;显示路径支撑 GNOME 与 OH 渲染。</p>
+        <div class="nums">完成路径历经多轮并发重构</div>
+        <a class="more" href="architecture/design.html#drivers">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔍</span>可观测性</h3>
+        <p>统一 trace-event 框架 + tracefs(对齐参考语义),syscost 普查、kallsyms、任务转储、看门狗一应俱全。</p>
+        <div class="nums">新观测一律 <b>tracepoint</b> 化</div>
+        <a class="more" href="architecture/design.html#trace">设计详情 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🧭</span>架构移植层</h3>
+        <p>启动协议(bzImage / 镜像头)、trap 入口、上下文切换、TLB 管理;90% 内核代码架构无关。</p>
+        <div class="nums">x86_64 / riscv64 / aarch64</div>
+        <a class="more" href="architecture/design.html#archs">设计详情 →</a>
+      </div>
+    </div>
+  </div>
+</section>
 
-            <!-- Architecture Docs -->
-            <div class="category-header">
-                <span class="category-icon">📖</span>
-                <h2>架构文档</h2>
-            </div>
-            <div class="doc-grid">
-                <a href="architecture/boot.html" class="doc-card">
-                    <div class="doc-card-icon">🚀</div>
-                    <div class="doc-card-text">
-                        <h4>启动流程</h4>
-                        <p>OpenSBI → MMU 跳板 → rust_main → 用户空间</p>
-                    </div>
-                </a>
-                <a href="architecture/memory.html" class="doc-card">
-                    <div class="doc-card-icon">💾</div>
-                    <div class="doc-card-text">
-                        <h4>内存管理</h4>
-                        <p>Zone/Buddy/vmemmap/PCP/COW/缺页处理</p>
-                    </div>
-                </a>
-                <a href="architecture/riscv64.html" class="doc-card">
-                    <div class="doc-card-icon">🔧</div>
-                    <div class="doc-card-text">
-                        <h4>RISC-V 64-bit 实现</h4>
-                        <p>PtRegs/Trap/上下文切换/FPU/ASID</p>
-                    </div>
-                </a>
-                <a href="architecture/design.html" class="doc-card">
-                    <div class="doc-card-icon">📐</div>
-                    <div class="doc-card-text">
-                        <h4>设计原则</h4>
-                        <p>POSIX/ABI 兼容、Rust 优先、模块化</p>
-                    </div>
-                </a>
-                <a href="architecture/structure.html" class="doc-card">
-                    <div class="doc-card-icon">📂</div>
-                    <div class="doc-card-text">
-                        <h4>项目结构</h4>
-                        <p>目录组织、模块分布、代码统计</p>
-                    </div>
-                </a>
-                <a href="architecture/kernel-lock.html" class="doc-card">
-                    <div class="doc-card-icon">🔒</div>
-                    <div class="doc-card-text">
-                        <h4>内核大锁</h4>
-                        <p>自旋锁实现、睡眠处理、拆分计划</p>
-                    </div>
-                </a>
-            </div>
+<!-- ================= 测试与质量 ================= -->
+<section class="section" id="quality">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Quality · 测试与质量</span>
+      <h2>数字说话</h2>
+      <p>三条持续运转的验证线:发行版实靴(能不能跑)、LTP 合规扫描(对不对)、性能普查(快不快)。</p>
+    </div>
+    <div class="card-grid grid-3">
+      <div class="card">
+        <h3><span class="ico">🧪</span>LTP 合规扫描</h3>
+        <p>对 1,869 项测试的全量扫描从项目早期 35 项通过一路爬升;每轮全量结果归档,新失败一律隔离复跑两次排除环境抖动后再定性。</p>
+        <div class="nums">当前 <b>1084 / 1869</b> (r27) · 趋势详见测试报告</div>
+        <a class="more" href="guides/testing.html">测试报告 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">✅</span>内核自带套件</h3>
+        <p>仓库内 4,200+ 用例:内核单元套件、用户态探针、基准工具,外加四层形式验证(同步检查 + proptest、Kani、SPIN、Miri)。合并门禁要求三架构构建 + 回归靴 + 全套件绿。</p>
+        <div class="nums">make test <b>1267/1267</b> (riscv64) · Kani 157 proofs</div>
+        <a class="more" href="guides/testing.html">如何跑测试 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📊</span>性能门禁</h3>
+        <p>内建 DFX 工具链(syscost 普查、pbench 基准、census 探针)定义基线:每次合并对照基线逐列核对,回归即阻塞。</p>
+        <div class="nums">三层门禁 · 六大看护域</div>
+        <a class="more" href="guides/testing.html#perf">性能基线 →</a>
+      </div>
+    </div>
+  </div>
+</section>
 
-            <!-- Guides -->
-            <div class="category-header">
-                <span class="category-icon">🛠️</span>
-                <h2>开发指南</h2>
-            </div>
-            <div class="doc-grid">
-                <a href="guides/getting-started.html" class="doc-card">
-                    <div class="doc-card-icon">🚀</div>
-                    <div class="doc-card-text">
-                        <h4>快速开始</h4>
-                        <p>5 分钟构建和运行 Rux 内核</p>
-                    </div>
-                </a>
-                <a href="guides/configuration.html" class="doc-card">
-                    <div class="doc-card-icon">⚙️</div>
-                    <div class="doc-card-text">
-                        <h4>配置系统</h4>
-                        <p>Kernel.toml 配置项和 menuconfig</p>
-                    </div>
-                </a>
-                <a href="guides/development.html" class="doc-card">
-                    <div class="doc-card-icon">📝</div>
-                    <div class="doc-card-text">
-                        <h4>开发工作流</h4>
-                        <p>代码编写、测试、提交的标准流程</p>
-                    </div>
-                </a>
-                <a href="guides/testing.html" class="doc-card">
-                    <div class="doc-card-icon">🧪</div>
-                    <div class="doc-card-text">
-                        <h4>测试指南</h4>
-                        <p>单元测试、mini-ltp、Linux LTP</p>
-                    </div>
-                </a>
-            </div>
+<!-- ================= 快速开始 ================= -->
+<section class="section" id="quickstart">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Quickstart · 快速开始</span>
+      <h2>三步跑起来</h2>
+      <p>一台 Linux 主机 + QEMU 即可。详细环境要求、工具链安装与故障排查见<a href="guides/getting-started.html">快速入门</a>。</p>
+    </div>
+    <div class="card-grid grid-3">
+      <div class="card">
+        <h3><span class="ico">①</span>克隆仓库</h3>
+        <pre><code>git clone https://github.com/topkernel/Rux
+cd Rux</code></pre>
+        <p>纯 Rust 工作区,无子模块、无外部依赖镜像。</p>
+      </div>
+      <div class="card">
+        <h3><span class="ico">②</span>构建内核</h3>
+        <pre><code>make build                 <span class="c"># riscv64(默认)</span>
+make build PLATFORM=x86_64 <span class="c"># x86_64</span></code></pre>
+        <p><code>Kernel.toml</code> 在构建期编译进 <code>kernel/src/config.rs</code>。</p>
+      </div>
+      <div class="card">
+        <h3><span class="ico">③</span>启动体验</h3>
+        <pre><code>make run        <span class="c"># musl 最小根文件系统 → shell</span>
+make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME 桌面</span></code></pre>
+        <p>串口(<code>ttyS0</code>)即主日志;GUI 镜像用 <code>-snapshot</code> 启动,不写坏共享盘。</p>
+      </div>
+    </div>
+  </div>
+</section>
 
-            <!-- Progress -->
-            <div class="category-header">
-                <span class="category-icon">📊</span>
-                <h2>项目进度</h2>
-            </div>
-            <div class="doc-grid">
-                <a href="progress/roadmap.html" class="doc-card">
-                    <div class="doc-card-icon">🗺️</div>
-                    <div class="doc-card-text">
-                        <h4>开发路线图</h4>
-                        <p>Phase 1-28 完整功能清单和实现状态</p>
-                    </div>
-                </a>
-                <a href="progress/changelog.html" class="doc-card">
-                    <div class="doc-card-icon">📋</div>
-                    <div class="doc-card-text">
-                        <h4>更新日志</h4>
-                        <p>版本更新记录和重要变更</p>
-                    </div>
-                </a>
-                <a href="progress/quickref.html" class="doc-card">
-                    <div class="doc-card-icon">📖</div>
-                    <div class="doc-card-text">
-                        <h4>快速参考</h4>
-                        <p>常用命令和项目结构速查</p>
-                    </div>
-                </a>
-            </div>
-        </div>
-    </main>
+<!-- ================= 文档导航 ================= -->
+<section class="section" id="docs">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Docs · 文档地图</span>
+      <h2>找到你想看的一切</h2>
+    </div>
+    <div class="card-grid grid-3">
+      <div class="card">
+        <h3><span class="ico">🏛️</span>架构设计</h3>
+        <a href="architecture/design.html">架构与模块设计(调度/mm/fs/IPC/网络/驱动/可观测性)</a>
+        <a href="architecture/structure.html">代码结构与模块地图</a>
+        <a href="architecture/boot.html">启动流程(bzImage / 镜像头 / 三架构)</a>
+        <a href="architecture/memory.html">内存管理专题</a>
+        <a href="architecture/riscv64.html">架构移植指南</a>
+        <a href="architecture/kernel-lock.html">锁序与并发不变量</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛠️</span>开发指南</h3>
+        <a href="guides/getting-started.html">快速入门:环境 → 构建 → 运行</a>
+        <a href="guides/development.html">参与开发:工作流 / 门禁 / 调试</a>
+        <a href="guides/testing.html">测试与质量报告</a>
+        <a href="guides/configuration.html">内核配置(Kernel.toml)</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📈</span>项目进展</h3>
+        <a href="progress/roadmap.html">里程碑与路线图</a>
+        <a href="progress/changelog.html">更新日志精选</a>
+        <a href="progress/quickref.html">命令速查表</a>
+      </div>
+    </div>
+  </div>
+</section>
 
-    <footer>
-        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
-    </footer>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="nav-logo" href="index.html"><span class="crab">🦀</span>Rux</a>
+        <p>用 Rust 从零编写的 Linux ABI 兼容操作系统内核。全程由 AI 代理开发,人类主持目标、评审与合并。</p>
+      </div>
+      <div>
+        <h5>架构设计</h5>
+        <a href="architecture/design.html">模块设计</a>
+        <a href="architecture/structure.html">代码结构</a>
+        <a href="architecture/boot.html">启动流程</a>
+        <a href="architecture/memory.html">内存管理</a>
+      </div>
+      <div>
+        <h5>开发指南</h5>
+        <a href="guides/getting-started.html">快速入门</a>
+        <a href="guides/development.html">参与开发</a>
+        <a href="guides/testing.html">测试报告</a>
+        <a href="guides/configuration.html">内核配置</a>
+      </div>
+      <div>
+        <h5>相关链接</h5>
+        <a href="https://github.com/topkernel/Rux">GitHub 仓库</a>
+        <a href="https://github.com/topkernel/Rux/issues">问题追踪</a>
+        <a href="progress/roadmap.html">路线图</a>
+        <a href="progress/quickref.html">命令速查</a>
+      </div>
+    </div>
+    <div class="foot-meta">
+      <span>Rux Kernel · MIT License</span>
+      <span>~330,000 lines of Rust · built by AI agents under human direction · 2026</span>
+    </div>
+  </div>
+</footer>
+
+<script src="js/main.js?v=10"></script>
 </body>
 </html>

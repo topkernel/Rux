@@ -1,365 +1,261 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rux Kernel - 设计原则</title>
-    <link rel="stylesheet" href="../css/style.css?v=3">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>架构与模块设计 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=10">
 </head>
 <body>
-    <nav>
-        <div class="container">
-            <a href="../index.html" class="logo">🦀 Rux Kernel</a>
-            <ul>
-                <li><a href="../architecture/boot.html" >架构设计</a></li>
-                <li><a href="../guides/getting-started.html" >开发指南</a></li>
-                <li><a href="../progress/roadmap.html" >开发路线</a></li>
-                <li><a href="https://github.com/topkernel/Rux">GitHub</a></li>
-            </ul>
-        </div>
-    </nav>
-
-    <main>
-        <div class="container">
-            <div class="with-sidebar">
-                <aside class="sidebar">
-                    <nav class="sidebar-nav">
-<h4>架构文档</h4>
-<ul>
-<li><a href="boot.html">启动流程</a></li>
-<li><a href="design.html">设计原则</a></li>
-<li><a href="kernel-lock.html">内核大锁</a></li>
-<li><a href="memory.html">内存管理</a></li>
-<li><a href="riscv64.html">RISC-V 实现</a></li>
-<li><a href="structure.html">项目结构</a></li>
-</ul>
-                    </nav>
-                </aside>
-                <div class="content">
-                    <div class="breadcrumb"><a href="../index.html">首页</a> / <a href="architecture/design.html">架构设计</a> / 设计原则</div>
-                    <article class="content-page md-content">
-<script type="text/markdown">
-# Rux 设计原则
-
-## 最高原则（绝对不可违反）
-
-### **0. 完整的 POSIX/ABI 兼容性**
-
-这是 Rux 内核开发的**最高指导原则**。所有设计和实现决策都必须遵循这一原则。
-
-- **核心要求**：
-  - **100% POSIX 兼容**：完全遵守 POSIX 标准（IEEE Std 1003.1）
-  - **完整的 Linux ABI 兼容性**：与 Linux 内核 ABI 二进制兼容
-  - **系统调用兼容性**：系统调用号、参数和返回值必须与 Linux 完全一致
-  - **文件系统兼容性**：支持 Linux 文件系统格式（ext4）
-  - **ELF 格式兼容性**：可执行文件格式与 Linux 完全相同
-
-- **设计理念**：
-  - **外部接口必须与 Linux 100% 兼容**（系统调用、数据结构、文件格式）
-  - **内部实现是一个黑盒**——可以使用任何设计方法、任何算法、任何数据结构
-  - 只要外部接口保持兼容，内部设计拥有完全的自由度
-
-- **实现方法**：
-  - 外部接口必须与 Linux 完全一致
-  - 内部实现可以使用任何方法——传统的、创新的或混合的
-  - 使用相同的系统调用号（用于 ABI 兼容性）
-  - 使用相同的结构体布局（用于用户-内核 ABI）
-  - 使用相同的文件系统格式（用于数据兼容性）
-
-- **参考资源**：
-  - Linux man 手册页（`man 2 syscall`）——用于接口规范
-  - POSIX 标准——用于 API 行为规范
-  - Linux ABI 文档——用于数据结构布局
-
-> **切记**：外部接口必须与 Linux 完全一致。内部实现完全自由——你可以使用最佳的设计方案，不受 Linux 内部架构的任何限制。
-
----
-
-## 项目目标
-
-Rux 是一个用 Rust 编写的**Linux 兼容操作系统内核**，旨在实现与 Linux 内核的**完全兼容**，包括：
-- 完整的 POSIX API 支持
-- Linux ABI 二进制兼容性
-- 能够运行原生 Linux 用户空间程序
-
-所有代码均使用 Rust 编写，除必要的平台特定汇编代码外。
-
----
-
-## 核心设计原则
-
-### 1. **Linux ABI 兼容性（最高优先级）**
-
-所有外部接口、系统调用和用户可见的数据结构必须与 Linux 完全一致。
-
-**检查清单**：
-- [ ] 系统调用号是否与 Linux 一致？
-- [ ] 数据结构布局是否与 Linux 一致（用于用户-内核 ABI）？
-- [ ] 是否遵循了 POSIX 标准？
-- [ ] 外部接口是否与 Linux 保持兼容？
-
-**注意**：内部实现完全自由——可以使用任何设计方法。
-
-### 2. **Rust 优先**
-
-- **原则**：所有内核代码使用 Rust 编写，除必要的平台特定汇编代码外
-- **理由**：
-  - 内存安全：Rust 的所有权系统在编译时防止内存错误
-  - 并发安全：类型系统防止数据竞争
-  - 现代工具链：包管理、文档生成、测试框架
-- **例外情况**：
-  - 启动代码（boot.S）
-  - 上下文切换（context.rs 中的裸函数）
-  - 中断入口（trap.S）
-  - 特权级切换
-
-**注意**：使用 Rust 能够实现更好的内部实现。外部接口必须与 Linux 匹配，但内部代码可以充分利用 Rust 的全部潜力。
-
-### 3. **平台抽象**
-
-- **原则**：平台特定代码隔离在 `arch/` 目录中
-- **结构**：
-  ```
-  kernel/src/arch/
-  └── riscv64/        # RISC-V 64 位（唯一支持的架构）
-  ```
-- **平台抽象层**：
-  - 统一的内存管理接口
-  - 统一的中断处理框架
-  - 统一的设备驱动接口
-
-**注意**：ARM64（aarch64）架构已被移除，不再维护。
-
-### 4. **模块化设计**
-
-- **原则**：清晰的模块边界，便于开发和测试
-- **模块划分**：
-  - `arch/`：平台特定代码
-  - `mm/`：内存管理
-  - `process/`：进程管理
-  - `fs/`：文件系统
-  - `net/`：网络协议栈
-  - `drivers/`：设备驱动
-  - `sync/`：同步原语
-  - `syscall/`：系统调用分发
-
-**注意**：模块组织以清晰为原则。每个模块的内部设计相互独立。
-
-### 5. **分层架构**
-
-```
-+-------------------------------------+
-|     用户空间                          |
-|     - Linux ELF 二进制文件             |
-|     - musl libc                     |
-+-------------------------------------+
-|     系统调用接口                       |
-|     - 100% Linux ABI 兼容           |
-+-------------------------------------+
-|     内核内部层                        |
-|     - 任意设计方案                    |
-|     - 针对 Rust 优化                  |
-+-------------------------------------+
-|     平台抽象层                        |
-|     - riscv64（唯一支持的架构）        |
-+-------------------------------------+
-|     硬件                             |
-+-------------------------------------+
-```
-
-**关键点**：外部接口必须与 Linux 匹配。内部层可以使用任何架构。
-
-### 6. **渐进式实现**
-
-- **原则**：从一个最小可运行内核开始，逐步添加功能
-- **优先级**：
-  1. 基础框架（启动、内存、中断）
-  2. 进程管理（调度、上下文切换）
-  3. 系统调用（用户/内核隔离）
-  4. 文件系统（VFS + ext4）
-  5. 网络协议栈
-  6. 高级功能（IPC、信号、实时调度）
-  7. GUI 支持
-
-### 7. **测试驱动**
-
-- **原则**：每个模块都应有对应的测试
-- **测试类型**：
-  - 内核单元测试（51 个测试文件）
-  - mini-ltp 测试（24 个内核兼容性测试）
-  - QEMU 集成测试
-- **测试命令**：
-  - `make test` - 运行内核单元测试
-  - `cd /test/mini-ltp && ./run_tests.sh` - 运行兼容性测试
-
-### 8. **完善的文档**
-
-- **原则**：保持代码与文档同步
-- **文档类型**：
-  - API 文档（rustdoc）
-  - 设计文档（本文件）
-  - 进度跟踪（roadmap.md）
-  - 用户文档（getting-started.md）
-  - 调试报告（fork-exec-debug-report.md）
-
----
-
-## POSIX/ABI 实现指南
-
-### 系统调用实现
-
-**必须**使用 Linux 系统调用号（RISC-V）：
-
-```rust
-// 直接使用 Linux RISC-V 系统调用号
-pub const __NR_read: usize = 63;
-pub const __NR_write: usize = 64;
-pub const __NR_openat: usize = 56;
-pub const __NR_close: usize = 57;
-pub const __NR_exit: usize = 93;
-pub const __NR_getpid: usize = 172;
-// ... 完全按照 Linux 定义
-```
-
-**禁止**：
-- 创建新的系统调用
-- 修改系统调用号
-- 更改系统调用参数
-
-### 结构体布局
-
-**必须**与 Linux 结构体完全一致：
-
-```rust
-// 必须与 Linux struct stat 完全一致
-#[repr(C)]
-pub struct Stat {
-    pub st_dev: u64,
-    pub st_ino: u64,
-    pub st_mode: u32,
-    pub st_nlink: u32,
-    pub st_uid: u32,
-    pub st_gid: u32,
-    pub st_rdev: u64,
-    pub __pad1: u64,
-    pub st_size: i64,
-    pub st_blksize: i32,
-    pub __pad2: i32,
-    pub st_blocks: i64,
-    // ... 字段顺序、大小、对齐都必须一致
-}
-```
-
-### 文件系统
-
-**必须**支持 Linux 文件系统格式：
-- ext4（已实现）
-- ramfs（已实现）
-- procfs（已实现）
-- devfs（已实现）
-
-**禁止**：
-- 创建新的文件系统格式
-- 修改现有格式（除非 Linux 也做了修改）
-
-### 设备接口
-
-**必须**使用 Linux 设备接口：
-- 字符设备（`/dev/xxx`）
-- 块设备（`/dev/vda`）
-- 输入设备（`/dev/input/event0`）
-
-**参考**：Linux `include/uapi/` 下的接口定义
-
----
-
-## 实现检查清单
-
-实现任何功能时，必须验证：
-
-- [ ] 系统调用号与 Linux 匹配（用于 ABI 兼容性）
-- [ ] 结构体布局与 Linux 匹配（用于用户-内核 ABI）
-- [ ] 文件格式与 Linux 匹配（用于数据兼容性）
-- [ ] 行为符合 POSIX 标准
-- [ ] 阅读相关的 Linux man 手册页了解接口规范
-- [ ] 外部接口与 Linux 保持兼容
-
-**切记**：外部接口必须与 Linux 完全一致。内部实现完全自由。
-
----
-
-## 技术约束
-
-### 编译器
-- Rust 版本：稳定版（Stable）
-- 目标平台：riscv64gc-unknown-none-elf（唯一支持）
-
-### 运行时
-- 无标准库（no_std）
-- 无运行时（手动实现 panic 处理）
-
-### 安全性
-- 尽可能将危险代码隔离在 unsafe 块中
-- 显式标记所有 unsafe 代码
-- 定期审查 unsafe 代码的正确性
-
----
-
-## 性能目标
-
-- **启动时间**：< 5 秒（QEMU virt）
-- **上下文切换**：< 1us
-- **中断延迟**：< 5us
-- **系统调用**：< 100ns
-
----
-
-## 贡献指南
-
-### 代码风格
-- 遵循官方 Rust 代码风格（rustfmt）
-- 使用有意义的变量和函数名
-- 适当的注释和文档
-
-### 提交规范
-- 遵循 [Conventional Commits](https://www.conventionalcommits.org/)
-- 清晰的提交信息
-- 单次提交只做一件事
-- 提交前通过所有测试
-
-### 审查流程
-- 必须通过代码审查
-- 所有测试必须通过
-- 文档必须更新
-
----
-
-## 参考资料
-
-- [POSIX 标准](https://pubs.opengroup.org/onlinepubs/9699919799/) - API 行为规范
-- [Linux man 手册页](https://man7.org/linux/man-pages/) - 系统调用接口文档
-- [RISC-V 架构参考手册](https://riscv.org/technical/specifications/) - 硬件规范
-
----
-
-**文档版本**：v3.0.0
-**最后更新**：2026-03-13
-</script>
-                    </article>
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <footer>
-        <p>&copy; 2026 Rux Kernel Project | <a href="https://github.com/topkernel/Rux">GitHub</a></p>
-    </footer>
-
-    <script src="../js/marked.min.js"></script>
-    <script>
-    document.querySelectorAll('article.md-content script[type="text/markdown"]').forEach(function(el) {
-        el.outerHTML = marked.parse(el.textContent);
-    });
-    </script>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="design.html">架构设计</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../guides/testing.html">测试报告</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a class="on" href="design.html">架构与模块设计</a>
+    <a href="structure.html">代码结构</a>
+    <a href="boot.html">启动流程</a>
+    <a href="memory.html">内存管理</a>
+    <a href="riscv64.html">架构移植指南</a>
+    <a href="kernel-lock.html">锁序不变量</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/testing.html">测试与质量报告</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>架构与模块设计</h1>
+    <div class="sub">每个子系统的机制、数据结构与实测数字 · 数字出处见各仓库文档,未测处如实标注</div>
+
+    <h2 id="overview"><span class="anchor">§0</span>总览</h2>
+    <p>Rux 是一份源码树服务三种架构(riscv64 / x86_64 / aarch64),约 90% 代码架构无关。对外以 345+ 系统调用对齐参考实现 ABI;对内是净室设计 —— 每一项与主流实现不同的内部决策都登记在<a href="#divergences">设计分歧登记表</a>并携带兼容性证据。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>子系统</th><th>代码量(行)</th><th>占比</th><th>一句话职责</th></tr></thead>
+        <tbody>
+          <tr><td>fs/(ext4·VFS·页缓存·jbd2)</td><td class="num">61,091</td><td class="num">19.1%</td><td>文件系统栈与缓存</td></tr>
+          <tr><td>arch/(三架构移植层)</td><td class="num">43,440</td><td class="num">13.6%</td><td>启动/陷入/上下文切换/TLB</td></tr>
+          <tr><td>dfx/(syscost·kallsyms·看门狗)</td><td class="num">37,946</td><td class="num">11.9%</td><td>诊断与可观测性</td></tr>
+          <tr><td>syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>系统调用边界(胶囊边界)</td></tr>
+          <tr><td>drivers/(virtio·DRM·输入)</td><td class="num">23,247</td><td class="num">7.3%</td><td>设备驱动</td></tr>
+          <tr><td>net/(TCP/IP·unix·netlink)</td><td class="num">18,649</td><td class="num">5.8%</td><td>网络协议栈</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">34,637</td><td class="num">10.9%</td><td>进程/调度/同步原语</td></tr>
+          <tr><td>mm/</td><td class="num">16,712</td><td class="num">5.2%</td><td>内存管理</td></tr>
+          <tr><td>ipc/(binder·SysV·MQ)</td><td class="num">14,559</td><td class="num">4.6%</td><td>进程间通信</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>分层模型(<code>docs/architecture/kernel-layers.md</code>):Framework 层(arch/mm 原语/interrupt/virtio 核心/trace)允许 <code>unsafe</code> 且逐块要求 <code>// SAFETY:</code> 注释;service 层目标 100% <code>forbid(unsafe_code)</code>(已 47 个文件编译期禁止,另 56 个已无 unsafe);syscall 入口是胶囊边界,统一校验并翻译用户指针。</p>
+
+    <!-- ================= 调度 ================= -->
+    <div class="mod-anchor" id="sched"></div>
+    <h2><span class="anchor">§1</span>调度器(kernel/src/sched/)</h2>
+    <p><b>单一全局运行队列 GRQ(分歧 <a href="#d1">D-1</a>)。</b>一颗 <code>GlobalRunQueue</code> 服务所有 CPU,内含三个按调度类的子队列:DL(BTreeMap,EDF)、RT(位图 + 按优先级链表)、CFS(BTreeMap 按 vruntime);<code>nr_running</code> 原子计数、<code>idle_cpus</code> 位图,per-CPU 只留 current/idle/stop 指针。<b>没有 per-CPU 队列,没有负载均衡器</b> —— 空闲 CPU 经 IPI 唤醒后按需取任务。</p>
+    <ul>
+      <li><b>CFS(fair.rs)</b>:vruntime = 实际运行时间 ×(NICE_0_LOAD/权重);<code>cfs_min_granularity_ns = 0.7 ms</code>(亦是唤醒粒度)、延迟窗 6 ms、tick 100 Hz;pick 时把本 CPU 不能跑的条目抬出 timeline 再插回,<code>min_vruntime</code> 取完整树最左(防止抹掉睡眠者信用)。</li>
+      <li><b>实测等待唤醒抢占门(D-14)</b>:唤醒无空闲 CPU 时,仅当被唤醒者的实测等待 ≥ 6 ms 窗口才抢占在跑任务 —— 替代参考内核的 vruntime 信用比较(后者会被 Rux 的 vruntime 调整骗过)。</li>
+      <li><b>wakewatch</b>:唤醒→运行延迟取证仪(1024 槽旁表 + pick-skip 原因旁表),是搁浅问题归因的常备工具。</li>
+      <li>GRQ 锁为类型化锁键保护(<a href="#d11">D-11</a>,嵌套关系是编译事实)。</li>
+    </ul>
+    <h3>关键数字</h3>
+    <ul>
+      <li>GRQ 平均持锁 <b>2786 ns</b>(n=6.3M,门禁带 1200–7320 ns);对 126.0M 系统调用的大 boot 持锁持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
+      <li>启动 census 每次合格静默 boot 精确一致:TERM-DESCHED <b>8</b>(带 8±2)、WAKE-REFUSED <b>32</b>(带 32±4)。</li>
+      <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>1.98 vs 6.71 µs(3.4×)</b>。</li>
+      <li>D-14 生效后:74 字节 unix 流记录的"唤醒/抢占/切换之舞" ~275 µs → 对标参考 ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
+    </ul>
+    <p><b>兼容性:</b>纯内部策略,无 ABI 面。守卫 = 性能门调度域(hold 带、census、P2 ±20%)。</p>
+
+    <!-- ================= 内存 ================= -->
+    <div class="mod-anchor" id="mm"></div>
+    <h2><span class="anchor">§2</span>内存管理(kernel/src/mm/)</h2>
+    <p>专题页见<a href="memory.html">内存管理</a>,此处为设计摘要。</p>
+    <ul>
+      <li><b>启动三段式</b>:memblock(双区表)→ fixmap → zone/buddy;Sv39 布局常量与参考一致(PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE)。</li>
+      <li><b>vmemmap 页描述符</b>:64 字节 cache 行对齐的 <code>Page</code>,pfn↔page O(1);buddy MAX_ORDER=10,order-0 走 per-CPU pageset(PCP)快路径零 zone 锁。</li>
+      <li><b>small_alloc(杂志架)</b>:8 个 2 幂类(8..1024B)+ per-CPU magazine(深 16),类锁只在成批 refill/flush 时取一次;每 slab 页一比特 free 路由,清位先于还页 —— 陈旧指针落 tripwire 而非静默破坏。起源:OH 首帧 ~21.3 万个净活小对象曾把分配器钉死(852MB/992MB 窗口)。</li>
+      <li><b>打包内核栈 slab(D-2,x86_64)</b>:80KB 槽/256KB 块 + 旁表,85.3KB/栈 vs 128KB,99.9% 槽打包,史上最深 3445 活任务零 canary 命中。</li>
+      <li><b>页缓存</b>:全局 slot 表无锁读 + 每 inode 自旋锁;容量下限 32MB、软上限 = 受管 RAM 一半(旧固定 32MB 上限曾使 OH 库加载每缺页 ~1.5s)。</li>
+      <li><b>延迟释放环(D-16)</b>:MmStruct/Task 释放进 16384 项环、1500 ms 墙钟排水 —— 回收延迟有界且与调度活动无关。</li>
+      <li><b>per-mm PTE 锁</b>:全局 epoch + 每 mm 自旋的 split 模式(取代曾让 fork-walk 独占全机的全局 PTE 锁);叶子表直走 unmap:mmap 平均 72 µs→27–32 µs、munmap 体 177→52 µs。</li>
+      <li><b>CpuLocal&lt;T,N&gt;(D-7)</b>:类型化 per-CPU 存储,"访问所依赖的关中断窗 = guard 生命周期"成为类型级事实。</li>
+    </ul>
+    <h3>关键数字</h3>
+    <ul>
+      <li>small_alloc 全局类锁分段/靴 <b>19.7M</b>(门 ≤25M;最新板 6.0M),REST 占机 <b>0.1–1.2%</b>(门 ≤10%)。</li>
+      <li>匿名页回收检查率 <b>35%→82–89%</b>(SP-7),swap 写 +75%。</li>
+      <li>负查找 memo oracle:475k 负命中、963k 陈旧归一化、<b>0</b> 陈旧负交付。</li>
+    </ul>
+    <p><b>兼容性:</b>/proc/meminfo、pagemap、mmap/munmap/mprotect/mremap/mlock/brk 语义逐条对齐(含 msync 回绕检查、mmap 偏移非页对齐拒绝 EINVAL)。</p>
+
+    <!-- ================= 文件系统 ================= -->
+    <div class="mod-anchor" id="fs"></div>
+    <h2><span class="anchor">§3</span>文件系统(kernel/src/fs/)</h2>
+    <ul>
+      <li><b>FileOps 能力声明式 builder(D-6)</b>:每槽位一方法、重复安装即编译错;errno 映射收敛单点。付费事故:合法 epoll fd 上 read() 返 EBADF 曾让 OH 事件循环空转 155,991 次。</li>
+      <li><b>dcache 无锁读(WalkClaim reader bank)</b>:删掉每路径组件两对自旋锁,stat <b>0.643→0.423 µs</b>、open <b>1.128→0.889 µs</b>;负查找 memo 以父目录代盖印失效。</li>
+      <li><b>ext4(12 文件 ~13k 行)</b>:挂载特性门(未知 incompat 拒挂;ENCRYPT 是能力位、接受 —— 拒绝曾使 OH 原装 userdata 全挂);读路径窗口批填充(<a href="#d12">D-12</a>,≤64 块/128KiB 合并请求),写路径批量元数据发布 + 释放即弃(<a href="#d13">D-13</a>)。</li>
+      <li><b>jbd2 直写 commit(D-8)</b>:commit 把事务 buffer 直写最终落盘位置并前推 log tail/head —— 完成的 commit 不留可重放物,每次 unlink/rmdir 的 8–12 次同步日志往返消失;磁盘格式与恢复(e2fsck)不变。</li>
+      <li><b>bio/buffer cache</b>:buffer_head 五态 + LRU;写规划曾对全 pending 二次方重扫(3 轮上限 + 保守线性回退修复;一次 fsync 卡 1092 s 的 252 个样本定罪)。</li>
+      <li><b>procfile! 宏(D-4)</b>:/proc 格式化器从一个字段声明表派生,杀掉"格式漂移"类缺陷(vmstat/meminfo/status 逐字节对齐活主机)。</li>
+      <li><b>pipe</b>:容量 64 KiB、PIPE_BUF=4096 原子写(对齐参考默认)。<b>io_uring</b>:5.1+ ABI(SQ/CQ 环 mmap),操作在 enter 上下文同步执行。</li>
+    </ul>
+    <h3>关键数字</h3>
+    <ul>
+      <li>元数据族重银行(2026-11-01):stat 200.9→<b>71.1 µs</b>、openclose 512.9→<b>156.3 µs</b>、read_cached 546.8→<b>203.7 µs</b>、append 657.2→<b>77.4 µs</b>、mkdrmdir 22.8→<b>2.76 ms</b>、unlink 1,141→<b>808 µs</b>。</li>
+      <li>D-13 端到端:p6_mkdrmdir 中位 29,796→<b>2,107 µs</b>、p99 54→<b>16.4 ms</b>(对标参考 153 µs —— 差距归因共享系统调用/查找地板,非 fs 本身)。</li>
+      <li>buffer cache 命中率 <b>99.1%</b>(门禁 ≥ 基线)。</li>
+    </ul>
+    <p><b>兼容性:</b>jbd2 磁盘格式未变,日志镜像挂载/恢复不变;POSIX 不承诺每操作目录持久(归 fsync(dirfd));LTP 变更族(creat/unlink/rmdir/rename/fsync)绿。</p>
+
+    <!-- ================= IPC ================= -->
+    <div class="mod-anchor" id="ipc"></div>
+    <h2><span class="anchor">§4</span>IPC(kernel/src/ipc/)</h2>
+    <ul>
+      <li><b>binder(10,425 行,最大单文件)</b>:OpenHarmony 服务网格的承重实现。misc 设备 <code>/dev/binder</code>;mmap 缓冲静默截断 4 MiB(同参考行为);协议版本 8;BC_*/BR_* 全集、flat_binder_object 跨进程翻译、sync 事务延迟 TRANSACTION_COMPLETE。锁模型:单全局自旋锁,锁下不拷用户内存不睡眠。</li>
+      <li><b>access_token 注册表</b>:<code>/dev/access_token_id</code> + BINDER_GET_SENDER_INFO —— samgr 权限检查的依赖;缺失时 AddSystemAbility 拒绝曾导致 OH 显示阻塞(b98–b112 黑屏根因)。</li>
+      <li><b>SysV 三件 + POSIX MQ</b>:结构体编译期断言对齐参考布局(ShmidDsUapi 112B、MqAttr 64B);SysV 对象按 ipc_namespace 作用域。</li>
+      <li>binder poll 唤醒与可用性修复一次 diff 收敛四个语义分歧(对齐参考 binder_has_work_ilocked 的三个 OR 条件)。</li>
+    </ul>
+    <h3>关键数字</h3>
+    <ul>
+      <li>/data 挂载服务网格 ~<b>89k txns/s</b> 时 binder 锁 REST 区 avg 9.2 µs(单事务最长 73 ms —— 已列为监视行,复跑未复现)。</li>
+      <li>pipe 往返 p5a <b>18.3 µs</b>、unix dgram p5b <b>23–41 µs</b>(D-14 前 318.6 µs,−93%)。</li>
+    </ul>
+    <p><b>兼容性:</b>UAPI 逐字节对齐参考 binder 头(_IOC 编码、packed 布局);LTP sem/msg/shm 族 + OH 全服务集为守卫。</p>
+
+    <!-- ================= 网络 ================= -->
+    <div class="mod-anchor" id="net"></div>
+    <h2><span class="anchor">§5</span>网络(kernel/src/net/,18 文件)</h2>
+    <ul>
+      <li>协议栈自底向上:SkBuff → ethernet → arp → ipv4 → icmp/udp/tcp(+ipv6);socket 层 SOCK_STREAM/DGRAM/RAW + unix + netlink。</li>
+      <li><b>TCP(4,841 行)</b>:ISN 四元组哈希 + jiffies;MSS 1460、窗口 65535、RTO 200 ms–120 s、DELACK 40 ms、零窗 persist 探测 5 s(对标参考初始值)。</li>
+      <li><b>AF_UNIX(3,707 行)</b>:STREAM/SEQPACKET/DGRAM、抽象命名空间、SCM_RIGHTS fd 传递、SCM_CREDENTIALS 内核填;对端双向 Weak(fd 是唯一强主,"对端关闭"= Weak::upgrade 失败,无引用环);单锁发送路径无 AB-BA。</li>
+      <li>netlink set 操作受 NET_ADMIN 门、raw/packet 受 NET_RAW 门(errno 优先级从参考源钉死)。</li>
+    </ul>
+    <h3>关键数字</h3>
+    <ul>
+      <li>lmbench 同机:lat_pipe <b>5.11 vs 13.30 µs(2.6×)</b>。</li>
+      <li>unix 流 p5c <b>24.9–26.8 µs</b>(前值 276.5 µs,−90%)。</li>
+      <li>TCP 吞吐/拥塞窗口行为基准:未测(如实标注,由 LTP socket 族 + nettest 覆盖)。</li>
+    </ul>
+
+    <!-- ================= 驱动 ================= -->
+    <div class="mod-anchor" id="drivers"></div>
+    <h2><span class="anchor">§6</span>驱动(kernel/src/drivers/)</h2>
+    <ul>
+      <li><b>virtio</b>:VirtIO 1.0 寄存器布局;VirtQueue(1,246 行)+ PCI 传输层(2,146 行,modern + transitional);blk 设备 ID 表曾有错移(保留基址误当设备 ID,曾致 disable-legacy 设备零匹配),回归守卫 = run.sh disable-legacy=on。</li>
+      <li><b>virtio-net 锁序(INV-LOCK-6)</b>:{rx|tx}_queue → stats 单向;曾有 poll 持 stats 跨 refill 的 AB-BA(看门狗双 CPU 互旋定罪)。</li>
+      <li><b>gpu/drm</b>:framebuffer 核心 + virtio-gpu + DRM/PRIME(GEM_CLOSE 共享 keep 语义修复);GNOME 与 OH 的显示路径由它承托。</li>
+      <li><b>intc</b>:PLIC/CLINT(riscv64)、APIC(x86_64)、GICv3(aarch64);<b>pci</b>:ECAM 枚举。</li>
+      <li><b>设备 MMIO 纪律(D-17)</b>:一切经内核半别名竞技场,bootstrap 恒等映射在 boot 栈切换后 UNLINK —— 运行期无低恒等窗,uaccess 无恒等洞。</li>
+    </ul>
+
+    <!-- ================= 可观测性 ================= -->
+    <div class="mod-anchor" id="trace"></div>
+    <h2><span class="anchor">§7</span>可观测性(kernel/src/trace/ + dfx/)</h2>
+    <ul>
+      <li><b>统一 trace-event 框架(D-15)</b>:单声明表一行 = 组/名/id/print fmt/字段/typed 记录函数;tracefs(<code>/sys/kernel/tracing</code>)文件树与字节格式逐字节对齐参考(tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…)。当前 <b>51 事件 / 16 组</b>(sched、kmem、raw_syscalls、block、binder、ext4 族、jbd2、rux:epoll)。</li>
+      <li><b>门禁成本实测</b>:禁用点编译为一个 load+test+branch(release 反汇编逐点验证);启用后 <b>+13–19 ns/记录</b>;镜像价 +0.18%。</li>
+      <li><b>kallsyms(D-3)</b>:编译期符号表入 .rodata(2.4MB 名 + 0.7MB 索引 @ ~22.6k 符号),零启动开销,/proc/kallsyms 标准行。</li>
+      <li><b>census + heal</b>:每任务逐字段 tick 观测 + 幻影 preempt 判定 + 20 ms 饥饿界;IF=0 占机 <b>25.7%→20.4%</b>,最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>,WAKE-STRANDED 233→31。</li>
+      <li><b>dfx= 开关表冻结在 59 项</b>(遗留):新观测一律 tracepoint 化。</li>
+    </ul>
+
+    <!-- ================= 三架构 ================= -->
+    <div class="mod-anchor" id="archs"></div>
+    <h2><span class="anchor">§8</span>三架构移植(kernel/src/arch/)</h2>
+    <p>详页见<a href="riscv64.html">架构移植指南</a>与<a href="boot.html">启动流程</a>。要点:</p>
+    <ul>
+      <li><b>riscv64</b>:OpenSBI M→S 模式,Sv39;PtRegs 288 字节(orig_a0 回滚);SUM 位 uaccess + 例外表;Sstc 直接写 stimecmp;9 位 ASID 原子位图分配。</li>
+      <li><b>x86_64</b>:multiboot1 + bzImage 引导协议;FSGSBASE/惰性 FPU/PCID 三杠杆(切换 −58%);SMAP 以 pushfq EFLAGS.AC 括号启用(<a href="#d18">D-18</a>,~55 ns,规避 TCG 下 STAC/CLAC #UD);用户态 W^X。</li>
+      <li><b>aarch64</b>:QEMU virt GICv3(必须 <code>-M virt,gic-version=3</code>);内嵌 DTB blob;TPIDR_EL0 即任务 TLS 态;EL0 FP 陷阱捕获 NEON 状态;TASK_SIZE 256GB、TCR IPS=44 位。</li>
+    </ul>
+
+    <!-- ================= 分歧登记表 ================= -->
+    <h2 id="divergences"><span class="anchor">§9</span>设计分歧登记表(19 项)</h2>
+    <p>出处:<code>docs/architecture/design-divergences.md</code>。每条须过三关 —— 外部兼容完好、LTP 受影响族绿、上层软件零破坏;永不删除,被取代者保留历史。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:90px">编号</th><th>设计 · 收益 · 关键数字 · 已知代价</th></tr></thead>
+        <tbody>
+          <tr><td id="d1"><b>D-1</b></td><td><b>全局运行队列</b>:无 per-CPU 队列/无均衡器,调度序单一事实源,全部取证只推理一个结构。持锁实测 2786 ns(带 1200–7320)。代价:高核数争用上限 + 局部性损失(注册在案)。</td></tr>
+          <tr><td><b>D-2</b></td><td><b>打包内核栈 slab</b>(x86_64):85.3KB/栈 vs 128KB、99.9% 槽打包、3445 活任务零 canary;未门控架构编译期剔除。代价:旁表锁 + 6.7% 尾浪费。</td></tr>
+          <tr><td><b>D-3</b></td><td><b>编译期符号表入 .rodata</b>:零启动开销,2.4MB 名 + 0.7MB 索引 @22.6k 符号,共享 kallsyms/回溯/%ps。代价:镜像 +3.1MB。</td></tr>
+          <tr><td><b>D-4</b></td><td><b>procfile! 派生 /proc 格式化器</b>:一个声明表铸渲染器 + 形状测试,杀掉格式漂移类(vmstat/meminfo/status 逐字节对齐)。代价:~18 个手写文件残留。</td></tr>
+          <tr><td><b>D-5</b></td><td><s>tracepoint! 声明宏</s> —— 已被 D-15 取代,保留历史。</td></tr>
+          <tr><td><b>D-6</b></td><td><b>能力检查式 file-ops 声明</b>:重复安装 = 编译错,errno 单点映射(付费事故:epoll fd EBADF 空转 15.6 万次)。迁移全部完成。</td></tr>
+          <tr><td><b>D-7</b></td><td><b>类型化 per-CPU CpuLocal&lt;T,N&gt;</b>:仅可经 with(f) 访问,guard 生命周期 = 关中断窗,越界 id 走存活臂。守卫:改动须 release-strong pbench boot。</td></tr>
+          <tr><td><b>D-8</b></td><td><b>直写 jbd2 commit</b>(无重放窗/无 revoke-cancel):每 unlink/rmdir 的 8–12 次同步往返消失(p6_mkdrmdir 52–58 ms → 个位数 ms);磁盘格式未变,恢复 = e2fsck。</td></tr>
+          <tr><td><b>D-9</b></td><td><b>secure-exec 的 LD_* 环境清洗</b>:AT_SECURE 下内核安装 envp 前删除全部 LD_*(libc 无关的纵深防御)。可见差异:/proc/&lt;pid&gt;/environ 不列 LD_*。</td></tr>
+          <tr><td><b>D-10</b></td><td><b>Result 型内部错误 API</b>(Errno 枚举,负 errno 每调用链恰一次):file-locks/xattr/VFS inode-op 表已转。</td></tr>
+          <tr><td><b>D-11</b></td><td><b>类型化锁键</b>:嵌套关系 = trait impl 表,反向获取不编译,零运行时。已用于 GRQ、futex 桶、等待槽。</td></tr>
+          <tr><td><b>D-12</b></td><td><b>ext4 读缺失窗口批填</b>:一次往返填整 miss 窗,连续段合并 ≤64 块/128KiB —— 桌面级镜像可启动的前提(TCG 每页同步提交曾 ~1.8 ms)。代价:miss 路径在 EXT4_BIG_LOCK 下(正确性优先)。</td></tr>
+          <tr><td><b>D-13</b></td><td><b>批量元数据发布 + 释放即弃</b>:PUB_BATCH=64 批排 + forget 死块 + 全块覆写免读。p6_mkdrmdir 29,796→2,107 µs、p99 54→16.4 ms。</td></tr>
+          <tr><td><b>D-14</b></td><td><b>实测等待唤醒抢占门</b>:≥6 ms 窗才 poke 忙 CPU。74B unix 流 275 µs→~2.5 µs,p5 族 10–18×。代价:亚 6ms 乒乓唤醒延迟受切片届期约束。</td></tr>
+          <tr><td><b>D-15</b></td><td><b>单声明 tracepoint 表</b>:一行 = 事件全貌,armed() 单分支禁用路径,typed 实参 = 编译错;tracefs 逐字节对齐。代价:10 u64 槽/记录上限。</td></tr>
+          <tr><td><b>D-16</b></td><td><b>延迟释放定时器环</b>:16384 项 + 1500 ms 墙钟排水(覆盖 QSBR 看不见的未记账借用)。重审条件:借用 RcuHead 化即删环。</td></tr>
+          <tr><td><b>D-17</b></td><td><b>内核半设备别名竞技场</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
+          <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对定罪);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
+          <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同 rig A/B:arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ================= Rust 原生登记 ================= -->
+    <h2 id="rust-native"><span class="anchor">§10</span>Rust 原生工程(登记表要点)</h2>
+    <p>命题:外部参照兼容,内部<b>不是 C→Rust 翻译</b> —— 正确性与速度来自类型系统、所有权或参考内核没有的内部架构。每条带本仓库仪器测得的数字(无实测证据的条目只是占位,单列 G 区)。</p>
+    <ul>
+      <li><b>类型系统使 bug 类 = 编译错</b>:D-19 六类误用被 rustc 捕获;S-1 并发原语模型检查(loom 交错 + Kani 证 INV-M1..M5)启用头 90 秒即抓到一个真实 pid-0 递归 bug;D-11 锁键、D-7 CpuLocal、WalkClaim 无锁 dcache(stat 0.643→0.423 µs)。</li>
+      <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 战役调度 bug 族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负查找 memo(oracle 475k/963k/0)。</li>
+      <li><b>语义分歧靠 diff 参考树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
+      <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>
+      <li><b>重设计落地的性能(同 rig A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7139(4-CPU 钉核)。</li>
+      <li><b>诚实占位(G 区)</b>:typed binder 事务 FSM、ext4/jbd2 宿主测试切片、内部完成环回写基底 —— 尚无 A/B 数字,离开占位区的唯一方式是交出实测行。</li>
+    </ul>
+
+    <!-- ================= 安全与性能 ================= -->
+    <h2 id="safety"><span class="anchor">§11</span>安全与性能双优(台账要点)</h2>
+    <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
+    <ul>
+      <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):34 个记忆破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>11 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。34 例中 6 例在任何 boot 前被评审抓到。</li>
+      <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 12.9%;47 个服务文件编译期 forbid(unsafe_code)、另 56 个已无 unsafe;SAFETY 注释覆盖 64%;157 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
+      <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与 census 审判结构同表入账;代价侧(futex 唤醒在跑任务时 ~10ms tick 量化)如实记录。</li>
+      <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=10"></script>
 </body>
 </html>
