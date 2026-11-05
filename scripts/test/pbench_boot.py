@@ -48,6 +48,12 @@ def foreign_qemus():
 def build_probe(out, src=None):
     if src is None:
         src = os.path.join(HERE, "pbench.c")
+        if not os.path.exists(src):
+            # The driver moved to scripts/test/ but the probe source
+            # stayed at test/pbench.c — fall back there.
+            alt = os.path.abspath(os.path.join(HERE, "..", "..", "test", "pbench.c"))
+            if os.path.exists(alt):
+                src = alt
     cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-pthread", "-o", out, src]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:

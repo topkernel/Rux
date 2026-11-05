@@ -1100,6 +1100,18 @@ struct OAsyncEntry {
 
 static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
     crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+/// (perf-gap-hunt) Live-registration mirror: stored under the PIPE_OASYNC
+/// lock at every mutation site, so 0 means no O_ASYNC registration exists
+/// anywhere and File::drop (oasync_unregister_file) skips the global lock
+/// entirely — the same empty-table fast gate as RECORD_LOCK_COUNT /
+/// WATCH_COUNT / FLOCK_COUNT.
+static OASYNC_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_oasync_len(reg: &alloc::vec::Vec<OAsyncEntry>) {
+    OASYNC_COUNT.store(reg.len(), core::sync::atomic::Ordering::Release);
+}
 
 /// Refresh (or remove) this description's O_ASYNC registration after an
 /// fcntl touched f_owner/f_signum/O_ASYNC. No-op for non-pipe files.
@@ -1138,12 +1150,20 @@ pub fn oasync_register_pipe(file: &File, fd: i32) {
             owner_fd: fd,
         });
     }
+    note_oasync_len(&reg);
 }
 
 /// Drop a dying description's registration (File::drop).
 pub fn oasync_unregister_file(file_id: u64) {
+    // closegap: empty-table fast path — see OASYNC_COUNT (RECORD_LOCK_COUNT
+    // precedent): the common close has no O_ASYNC registration, so it pays
+    // one Acquire load instead of the global lock + retain scan.
+    if OASYNC_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut reg = PIPE_OASYNC.lock();
     reg.retain(|e| e.file_id != file_id);
+    note_oasync_len(&reg);
 }
 
 /// Send the configured signal to an owner: process (1), process group

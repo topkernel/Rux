@@ -230,6 +230,18 @@ struct FlockEntry {
 
 /// Global flock table (design note in module header).
 static FILE_LOCK_TABLE: Spinlock<Vec<FlockEntry>> = Spinlock::new(Vec::new());
+/// (perf-gap-hunt) Live-flock mirror: stored under the FILE_LOCK_TABLE
+/// lock at every mutation site, so 0 means no flock exists anywhere and
+/// File::drop (flock_release_file) skips the global lock entirely —
+/// the same empty-table fast gate as RECORD_LOCK_COUNT / WATCH_COUNT.
+static FLOCK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_flock_len(table: &Vec<FlockEntry>) {
+    FLOCK_COUNT.store(table.len(), core::sync::atomic::Ordering::Release);
+}
+
 /// All flock waiters (wake-all-and-recheck on every release/conversion).
 static FLOCK_WAIT_QUEUE: WaitQueueHead = WaitQueueHead::new();
 
@@ -262,6 +274,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
             let before = table.len();
             table.retain(|e| !(e.key == key && e.file_id == file_id));
             if table.len() != before {
+                note_flock_len(&table);
                 drop(table);
                 FLOCK_WAIT_QUEUE.wake_up_all();
             }
@@ -285,6 +298,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
                             owner_pid,
                             exclusive,
                         });
+                        note_flock_len(&table);
                         true
                     }
                 };
@@ -330,10 +344,17 @@ fn flock_conflicts_locked(
 /// `File::drop` — the exact moment the last fd (possibly across fork
 /// copies and in-flight syscall clones) goes away.
 pub fn flock_release_file(file_id: u64) {
+    // closegap: empty-table fast path — see FLOCK_COUNT (RECORD_LOCK_COUNT
+    // precedent): the common close never used flock(2), so it pays one
+    // Acquire load instead of the global lock + retain scan.
+    if FLOCK_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut table = FILE_LOCK_TABLE.lock();
     let before = table.len();
     table.retain(|e| e.file_id != file_id);
     if table.len() != before {
+        note_flock_len(&table);
         drop(table);
         FLOCK_WAIT_QUEUE.wake_up_all();
     }
@@ -837,28 +858,42 @@ struct LeaseEntry {
 }
 
 static LEASE_TABLE: Spinlock<Vec<LeaseEntry>> = Spinlock::new(Vec::new());
+/// (perf-gap-hunt) Live-lease mirror: every mutation happens under the
+/// LEASE_TABLE lock, so storing table.len() inside the lock is exact.
+/// Readers use it as a lock-free gate — 0 means no lease exists
+/// anywhere, and break_lease/close skip the global lock entirely (the
+/// reference kernel's `inode->i_flctx == NULL` check). A lease being
+/// granted at the same instant as a conflicting open may be missed by
+/// the gate read — the same race window the reference's lockless
+/// i_flctx check has.
+static LEASE_LIVE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn lease_live_sync(table: &Vec<LeaseEntry>) {
+    LEASE_LIVE.store(table.len(), Ordering::Release);
+}
+
 /// Openers blocked in a lease break.
 static LEASE_WAIT: WaitQueueHead = WaitQueueHead::new();
 
-/// Live open-file-description counts per inode key: (total, write-open,
-/// breaking_total, breaking_writers) — the last two count openers BLOCKED
-/// in break_lease (so a lease holder cannot "downgrade" past a pending
-/// write breaker the way Linux's lease-break state machine prevents).
-/// Registered from File::set_inode, dropped from File::drop — this is
-/// our i_readcount/i_writecount analogue.
-type OpenCounts = (u32, u32, u32, u32);
-static INODE_OPENS: Spinlock<alloc::collections::BTreeMap<(u64, u64), OpenCounts>> =
+/// Openers BLOCKED in break_lease per inode key: (breaking_total,
+/// breaking_writers) — so a lease holder cannot "downgrade" past a
+/// pending write breaker the way the reference kernel's lease-break
+/// state machine prevents. The plain open counts (i_readcount /
+/// i_writecount analogue) live on the Inode as atomics (open_count /
+/// open_writers): they are per-inode by nature and were costing a
+/// global lock per open, per File drop, and per execve ETXTBSY check.
+static INODE_OPENS: Spinlock<alloc::collections::BTreeMap<(u64, u64), (u32, u32)>> =
     Spinlock::new(alloc::collections::BTreeMap::new());
 
 /// Register a new open file description on `inode` (File::set_inode).
 /// `write_access` is the description's access mode.
+#[inline]
 pub fn inode_open_register(inode: &Inode, write_access: bool) {
-    let key = inode_lock_key(inode);
-    let mut m = INODE_OPENS.lock();
-    let e = m.entry(key).or_insert((0, 0, 0, 0));
-    e.0 = e.0.saturating_add(1);
+    inode.open_count.fetch_add(1, Ordering::Relaxed);
     if write_access {
-        e.1 = e.1.saturating_add(1);
+        inode.open_writers.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -867,28 +902,26 @@ pub fn inode_open_register(inode: &Inode, write_access: bool) {
 pub fn inode_open_unregister(file: &File) {
     // SAFETY: inode is written once at open time; read-only access.
     let inode_opt = unsafe { &*file.inode.get() };
-    let key = match inode_opt.as_ref() {
-        Some(inode) => inode_lock_key(inode),
+    let inode = match inode_opt.as_ref() {
+        Some(inode) => inode,
         None => return,
     };
     // O_ACCMODE = 3; O_WRONLY(1) and O_RDWR(2) count as write access.
     let write_open = file.flags().bits() & 0o3 != 0;
-    {
-        let mut m = INODE_OPENS.lock();
-        if let Some(e) = m.get_mut(&key) {
-            e.0 = e.0.saturating_sub(1);
-            if write_open {
-                e.1 = e.1.saturating_sub(1);
-            }
-            if e.0 == 0 && e.2 == 0 {
-                m.remove(&key);
-            }
-        }
+    inode.open_count.fetch_sub(1, Ordering::Relaxed);
+    if write_open {
+        inode.open_writers.fetch_sub(1, Ordering::Relaxed);
+    }
+    if LEASE_LIVE.load(Ordering::Acquire) == 0 {
+        // No lease exists anywhere — the global lease lock would buy
+        // nothing (the common close path pays zero lease locks).
+        return;
     }
     // Release the dying description's lease and wake lease breakers.
     let mut table = LEASE_TABLE.lock();
     let before = table.len();
     table.retain(|e| e.file_id != file.file_id);
+    lease_live_sync(&table);
     let released = table.len() != before;
     drop(table);
     if released {
@@ -901,9 +934,9 @@ pub fn inode_open_unregister(file: &File) {
 /// (Linux deny_write_access in do_open_execat; LTP execve04): executing
 /// a file some open description still writes would alias the text
 /// against a concurrent writer's bytes.
+#[inline]
 pub fn inode_write_open_count(inode: &Inode) -> u32 {
-    let key = inode_lock_key(inode);
-    INODE_OPENS.lock().get(&key).map(|e| e.1).unwrap_or(0)
+    inode.open_writers.load(Ordering::Relaxed)
 }
 
 /// Live exec text holds per inode key — the NEGATIVE half of the
@@ -967,6 +1000,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
     if lease_type == flock_types_late::F_UNLCK {
         let mut table = LEASE_TABLE.lock();
         table.retain(|e| !(e.key == key && e.file_id == file_id));
+        lease_live_sync(&table);
         drop(table);
         // Wake blocked breakers: the conflict just disappeared.
         LEASE_WAIT.wake_up_all();
@@ -980,9 +1014,14 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
 
     // Grant checks under both tables (open counts + leases).
     {
-        let opens = INODE_OPENS.lock();
-        let (total, writers, breaking_total, breaking_writers) =
-            opens.get(&key).copied().unwrap_or((0, 0, 0, 0));
+        let (total, writers) = (
+            inode.open_count.load(Ordering::Relaxed),
+            inode.open_writers.load(Ordering::Relaxed),
+        );
+        let (breaking_total, breaking_writers) = {
+            let opens = INODE_OPENS.lock();
+            opens.get(&key).copied().unwrap_or((0, 0))
+        };
         if !exclusive {
             // Read lease: nobody (not even ourselves) may hold the file
             // open for write — Linux's i_writecount gate — and a WRITE
@@ -1000,7 +1039,6 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
                 return Err(crate::errno::Errno::TryAgain);
             }
         }
-        drop(opens);
         let table = LEASE_TABLE.lock();
         // Another description's lease blocks a new lease of either kind
         // when it would conflict (read+read coexist).
@@ -1022,6 +1060,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno
         owner_pid,
         exclusive,
     });
+    lease_live_sync(&table);
     drop(table);
     // A downgrade or replacement changes the conflict set — wake blocked
     // breakers so they re-evaluate (LTP fcntl33 OP_OPEN_RDONLY: the
@@ -1064,6 +1103,9 @@ pub fn get_lease(file: &File) -> i16 {
 /// conflicts with ANY new open, a read lease only with writers
 /// (and with truncate).
 pub fn lease_conflicts(inode: &Inode, writer: bool) -> bool {
+    if LEASE_LIVE.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     let key = inode_lock_key(inode);
     let table = LEASE_TABLE.lock();
     table
@@ -1100,10 +1142,10 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
     // lease that would strand it (see INODE_OPENS).
     {
         let mut m = INODE_OPENS.lock();
-        let e = m.entry(key).or_insert((0, 0, 0, 0));
-        e.2 = e.2.saturating_add(1);
+        let e = m.entry(key).or_insert((0, 0));
+        e.0 = e.0.saturating_add(1);
         if writer {
-            e.3 = e.3.saturating_add(1);
+            e.1 = e.1.saturating_add(1);
         }
     }
     let break_secs = LEASE_BREAK_TIME.load(Ordering::Relaxed);
@@ -1124,6 +1166,7 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
             // force (Linux break_lease → generic_break_lease).
             let mut table = LEASE_TABLE.lock();
             table.retain(|e| !(e.key == key && (e.exclusive || writer)));
+            lease_live_sync(&table);
             drop(table);
             LEASE_WAIT.wake_up_all();
             break Ok(());
@@ -1144,11 +1187,11 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errn
     {
         let mut m = INODE_OPENS.lock();
         if let Some(e) = m.get_mut(&key) {
-            e.2 = e.2.saturating_sub(1);
+            e.0 = e.0.saturating_sub(1);
             if writer {
-                e.3 = e.3.saturating_sub(1);
+                e.1 = e.1.saturating_sub(1);
             }
-            if e.0 == 0 && e.2 == 0 {
+            if e.0 == 0 && e.1 == 0 {
                 m.remove(&key);
             }
         }
