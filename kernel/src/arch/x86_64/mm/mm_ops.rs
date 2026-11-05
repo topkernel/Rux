@@ -774,120 +774,165 @@ impl MmStruct {
         let mp = crate::dfx::mmprof::on();
         let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
 
-        loop {
+        let mut zap_pieces: alloc::vec::Vec<(usize, usize)> =
+            alloc::vec::Vec::new();
+        let mut total_zap_bytes = 0usize;
+        {
             let mut vma_mgr = self.vma_write();
 
-            // First VMA overlapping [addr_us, end_addr): the one
-            // CONTAINING addr (its end reaches past addr), else the first
-            // one starting inside the range. Re-derived every iteration —
-            // revalidation after the relock (the tree may have changed).
-            let hit = vma_mgr
-                .last_at_or_before(PageVirtAddr::new(addr_us))
-                .filter(|v| v.end().as_usize() > addr_us)
-                .or_else(|| vma_mgr.find_vma_after(PageVirtAddr::new(addr_us)))
-                .filter(|v| v.start().as_usize() < end_addr);
-            let Some(vma) = hit else {
-                break;
-            };
+            // Detach-ALL-then-zap (2026-11-05, the churn-race fix): the
+            // old shape re-derived the tree EVERY 256KB chunk (restarting
+            // from addr_us each time) and processed whatever VMA it found
+            // overlapping the range. Between chunk guards a racing
+            // same-mm mmap could legally land in the transient tree hole
+            // INSIDE this still-being-processed range — and the NEXT
+            // chunk's surgery then treated the FRESH VMA as an
+            // unprocessed piece of THIS munmap and deleted it. The
+            // owner's first touch faulted with vma=NONE (mmap-witness
+            // probes; the arena-churn / fontconfig crash class).
+            //
+            // This pass detaches EVERY piece in [addr, end) under ONE
+            // guard (the reference does its whole tree surgery under one
+            // mmap_lock hold); the tree is FINAL for the range when the
+            // guard drops, so a racing mmap lands in a permanent hole.
+            // The PTE zap below still runs chunked WITHOUT the tree
+            // lock (the write-lock hold stays O(surgery), never
+            // O(pages) — the convoy bound). Residual window, documented:
+            // a racing fresh mapping onto pages whose OLD PTEs are not
+            // yet zapped can have a fresh PTE cleared by the deferred
+            // zap; the fresh owner's demand fault must then RE-FILL the
+            // page (anon zero-fill / page-cache refill). The fault
+            // path's covered-page refill makes that self-healing — the
+            // same convergence the reference's batched TLB gather has
+            // at its boundaries.
+            let mut cur = addr_us;
+            while cur < end_addr {
+                // First VMA overlapping [cur, end_addr): the one
+                // CONTAINING cur, else the first one starting inside the
+                // remaining range.
+                let hit = vma_mgr
+                    .last_at_or_before(PageVirtAddr::new(cur))
+                    .filter(|v| v.end().as_usize() > cur)
+                    .or_else(|| {
+                        vma_mgr.find_vma_after(PageVirtAddr::new(cur))
+                    })
+                    .filter(|v| v.start().as_usize() < end_addr);
+                let vma = match hit {
+                    Some(v) => v,
+                    None => break,
+                };
 
-            let vkey = vma.start();
-            let vs = vma.start().as_usize();
-            let ve = vma.end().as_usize();
-            let vflags = vma.flags();
-            let vtype = vma.vma_type();
-            let vorigin = vma.origin();
-            let vfd = vma.file_fd();
-            let vfsz = vma.file_size();
-            let voff = vma.offset();
+                let vkey = vma.start();
+                let vs = vma.start().as_usize();
+                let ve = vma.end().as_usize();
+                let vflags = vma.flags();
+                let vtype = vma.vma_type();
+                let vorigin = vma.origin();
+                let vfd = vma.file_fd();
+                let vfsz = vma.file_size();
+                let voff = vma.offset();
 
-            let seg_start = vs.max(addr_us);
-            let seg_end = ve.min(end_addr);
-            let chunk_end = seg_start + MUNMAP_CHUNK_BYTES.min(seg_end - seg_start);
+                let seg_start = vs.max(addr_us);
+                let seg_end = ve.min(end_addr);
 
-            // mmprof: chunk counter + surgery bracket (find+release+split).
-            let mp_t_surg = if mp { crate::dfx::mmprof::now() } else { 0 };
-            if mp {
-                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_MUNLOOPS, 1);
-            }
-
-            // The pages of this piece leave the mapping: release their
-            // virtual-size charge. The preserved head and tail pieces
-            // stay charged.
-            self.release_unmapped_pages(vs, ve, seg_start, chunk_end);
-
-            let pinned = self.get_vma_file(vs);
-            let _ = vma_mgr.remove(vkey);
-            self.unpin_vma_file(vs);
-            if vs < seg_start {
-                let mut head = Vma::new(
-                    crate::mm::page::VirtAddr::new(vs),
-                    crate::mm::page::VirtAddr::new(seg_start),
-                    vflags,
-                );
-                head.set_type(vtype);
-                // Split-preserved piece: keep the original origin.
-                head.set_origin(vorigin);
-                head.set_file_fd(vfd);
-                head.set_file_size(vfsz);
-                head.set_offset(voff);
-                let _ = vma_mgr.add(head);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(vs, f);
+                if mp {
+                    crate::dfx::mmprof::bump(
+                        crate::dfx::mmprof::S_MUNLOOPS,
+                        1,
+                    );
                 }
-            }
-            if chunk_end < ve {
-                let mut tail = Vma::new(
-                    crate::mm::page::VirtAddr::new(chunk_end),
-                    crate::mm::page::VirtAddr::new(ve),
-                    vflags,
-                );
-                tail.set_type(vtype);
-                // Split-preserved piece: keep the original origin.
-                tail.set_origin(vorigin);
-                tail.set_file_fd(vfd);
-                tail.set_file_size(vfsz);
-                tail.set_offset(voff + (chunk_end - vs));
-                let _ = vma_mgr.add(tail);
-                if let Some(f) = pinned.clone() {
-                    self.pin_vma_file(chunk_end, f);
+
+                // Pages of this piece leave the mapping: release their
+                // virtual-size charge (head/tail survivors stay charged).
+                self.release_unmapped_pages(vs, ve, seg_start, seg_end);
+
+                let pinned = self.get_vma_file(vs);
+                let _ = vma_mgr.remove(vkey);
+                self.unpin_vma_file(vs);
+                if vs < seg_start {
+                    let mut head = Vma::new(
+                        crate::mm::page::VirtAddr::new(vs),
+                        crate::mm::page::VirtAddr::new(seg_start),
+                        vflags,
+                    );
+                    head.set_type(vtype);
+                    head.set_origin(vorigin);
+                    head.set_file_fd(vfd);
+                    head.set_file_size(vfsz);
+                    head.set_offset(voff);
+                    let _ = vma_mgr.add(head);
+                    if let Some(f) = pinned.clone() {
+                        self.pin_vma_file(vs, f);
+                    }
                 }
+                if seg_end < ve {
+                    let mut tail = Vma::new(
+                        crate::mm::page::VirtAddr::new(seg_end),
+                        crate::mm::page::VirtAddr::new(ve),
+                        vflags,
+                    );
+                    tail.set_type(vtype);
+                    tail.set_origin(vorigin);
+                    tail.set_file_fd(vfd);
+                    tail.set_file_size(vfsz);
+                    tail.set_offset(voff + (seg_end - vs));
+                    let _ = vma_mgr.add(tail);
+                    if let Some(f) = pinned.clone() {
+                        self.pin_vma_file(seg_end, f);
+                    }
+                }
+                zap_pieces.push((seg_start, seg_end));
+                total_zap_bytes += seg_end - seg_start;
+                cur = seg_end;
             }
 
-            if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MU_SURG, mp_t_surg);
+            // Face-B closure (2026-11-05): for ranges up to this size the
+            // PTE zap runs INSIDE the same guard as the surgery, so a
+            // racing fresh mapping can never install onto pages whose
+            // old PTEs are still pending (that window let the deferred
+            // zap clear a FRESH PTE under a live VMA; the demand refill
+            // then zeroed a page of live heap metadata and malloc later
+            // walked a NULL freelist pointer — the gnome-shell NULL+8
+            // class). The bound keeps the write-lock hold O(small): the
+            // malloc/arena churn this guards is 64KB-1MB per call. Giant
+            // munmaps (image teardown, 100MB-class) take the chunked
+            // path below and keep the documented residual window.
+            const SINGLE_GUARD_ZAP_LIMIT: usize = 4 << 20;
+            if total_zap_bytes <= SINGLE_GUARD_ZAP_LIMIT {
+                for (zs, ze) in zap_pieces.iter() {
+                    let mut z = *zs;
+                    while z < *ze {
+                        let chunk_end =
+                            z + (MUNMAP_CHUNK_BYTES).min(*ze - z);
+                        self.unmap_pages(
+                            PageVirtAddr::new(z),
+                            chunk_end - z,
+                            true,
+                        )?;
+                        z = chunk_end;
+                    }
+                }
+                zap_pieces.clear();
             }
-            self.unmap_pages(
-                PageVirtAddr::new(seg_start),
-                chunk_end - seg_start,
-                true,
-            )?;
+            drop(vma_mgr); // the tree is FINAL for this range from here
 
-            // Drop the guard at every chunk boundary: the write lock must
-            // never be held across schedule(), and the boundary is the
-            // same-mm racer handoff point (mm-audit invariant).
-            drop(vma_mgr);
-            // NO cond_resched anywhere in this loop (lb339 lesson: with
-            // ~1.05 chunks per munmap call, moving the yield from
-            // per-chunk to end-of-call changed nothing — the call still
-            // scheduled every time at 132us because need_resched is
-            // ~always set under the OH churn, 1-2k munmap calls/s). The
-            // REFERENCE kernel never schedules inside munmap: preemption
-            // is handled at syscall exit (need_resched checked on the
-            // return path), and our syscalls return through the same
-            // check. The chunk boundaries drop vma_write, so same-mm
-            // racers keep their handoff points; the longest held window
-            // is one ~10us chunk after the leaf-table walk fix.
         }
 
-        // ONE TLB flush for the whole munmap (perf-gap-hunt): the chunked
-        // unmap_pages above deferred its flushes — a multi-MB munmap ran
-        // 16+ IPI broadcasts + CR3 reloads, one per 1 MiB chunk, which
-        // measured ~1 µs per chunk on the bench shape. Same-mm racers keep
-        // the per-chunk guard-drop handoff; cleared-range visibility for
-        // user mode is restored before the syscall returns (the reference
-        // batches its unmapped-range flushes the same way).
-        crate::arch::ipi::flush_tlb_others(addr_us as u64, end_addr as u64);
-        crate::arch::mm::asid::flush_tlb_all();
+        // Deferred-zap phase (giant ranges only): no tree access, bounded
+        // chunks, handoffs between them. unmap_pages takes only the PTE
+        // lock (one-way nest).
+        for (zs, ze) in zap_pieces {
+            let mut z = zs;
+            while z < ze {
+                let chunk_end = z + (MUNMAP_CHUNK_BYTES).min(ze - z);
+                self.unmap_pages(PageVirtAddr::new(z), chunk_end - z, true)?;
+                z = chunk_end;
+                // Same-mm racers keep the handoff the old per-chunk guard
+                // drop provided; the syscall-exit need_resched check
+                // covers preemption (lb339 lesson: no explicit yield).
+                crate::sched::cond_resched();
+            }
+        }
 
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);

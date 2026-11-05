@@ -9540,25 +9540,6 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    // Reference parity (binder_has_work_ilocked, 6.6, verified against
-    // oh-robot kernel/linux/linux-6.6/drivers/android/binder.c:586-593):
-    //   process_todo || looper_need_return ||
-    //   (do_proc_work && proc todo non-empty)
-    // There is NO bare thread-todo term — a non-empty todo alone does
-    // NOT make work visible to a PARKING read. This is what keeps a
-    // deferred sync-send TRANSACTION_COMPLETE invisible until the reply
-    // (or an error resolution) sets process_todo. Every non-deferred
-    // push site in this file sets process_todo=true, so only deferred
-    // tcompletes are affected. REVERT of ea88abfa: its unconditional
-    // `!todo.is_empty()` term un-deferred exactly those items (the
-    // lb311 RSS shape: the ioctl returns early, userspace retries
-    // LOAD_SYSTEM_ABILITY 1 ms later) and made read's wait condition
-    // diverge from our own poll site (binder_poll) and from the 6.6
-    // reference. Its claimed wake-miss mechanism (todo non-empty with
-    // process_todo cleared by a pop's drain) is unreachable: the clear
-    // site fires only on EMPTY-todo drains. looper_need_return has no
-    // counterpart in this codebase (BINDER_THREAD_EXIT handling takes
-    // another path); adding it is a separate parity project.
     if th.process_todo {
         return true;
     }
