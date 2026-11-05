@@ -56,7 +56,7 @@
 
   <article class="doc-main">
     <h1>测试</h1>
-    <div class="sub">本栏目含四个子页:兼容扫描 / 全量用例 / 稳定性 / 压力 —— 数据截至 2026-11-06</div>
+    <div class="sub">本栏目含五个子页:兼容扫描 / 全量用例 / 稳定性 / 压力 / 回溯报告 —— 数据截至 2026-11-06</div>
 
     <h2 id="map"><span class="anchor">§1</span>栏目导航</h2>
     <div class="card-grid grid-2">
@@ -77,8 +77,13 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔥</span>压力</h3>
-        <p>stress-fleet 常驻舰队(11 台 QEMU):LTP 腿 ×4 + 猴测 ×2 + 内存风暴 + fs 模糊 + 对照成员;已根因类、在观察类与舰队队列。</p>
+        <p>stress-fleet 常驻舰队(11 台 QEMU):LTP 成员 ×4 + 随机测试 ×2 + 内存风暴 + fs 模糊 + 对照成员;已根因类、在观察类与舰队队列。</p>
         <a class="more" href="stress.html">进入子项 →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔎</span>回溯报告</h3>
+        <p>GNOME 桌面回归回溯(2026-11-06):2,825 个提交的静默累积如何漏过全部门禁;munmap 竞态与页缓存投毒两个根因的修复,以及防复发的三项门禁改造。</p>
+        <a class="more" href="gnome-retrospective.html">进入子项 →</a>
       </div>
     </div>
     <div class="callout">相关栏目:<a href="../performance/index.html"><b>性能测试</b></a>(census 普查 / pbench 全锚 / lmbench 逐用例 / Geekbench / 优化队列)与<a href="../security/index.html"><b>安全与形式验证</b></a>(bug 分类学 / unsafe 台账 / Kani / 缺口登记册)各自独立成栏。</div>
@@ -97,6 +102,7 @@
           <tr><td>stress-fleet.md</td><td>压测/稳定性/猴测/模糊舰队设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri 常备状态</td><td class="mono">157 harness · 1104 proptests → 见安全栏目</td></tr>
           <tr><td>test-coverage.md</td><td>覆盖台账(每次变更再生成)</td><td class="mono">滚动</td></tr>
+          <tr><td>gnome-regression-retrospective.md</td><td>GNOME 桌面回归回溯:根因、门禁盲区与防复发改造</td><td class="mono">2026-11-06 → 见回溯报告子页</td></tr>
         </tbody>
       </table>
     </div>

@@ -63,6 +63,7 @@
     <ul>
       <li><b>munmap churn-race 家族关闭</b>(bug 分类学第 34 行):munmap"先全部摘链再 zapping"重构落地,分批丢尾 TLB flush 的竞态关闭;x86_64 修复(c4a548d7)回移植 riscv64/aarch64;OH 崩溃风暴 ~66 SEGVs/boot 的 race 由 mmap-witness 探针 3/3 clean 验证。</li>
       <li>安全台账 round-4:分类学 34 行 + 边界行扩记。</li>
+      <li><b>GNOME 桌面回归回溯报告</b>:munmap 分块竞态与 ext4 异步读填跨文件投毒两个根因修复;桌面启动门禁与字节级 mmap 校验探针转入常备。</li>
     </ul>
 
     <h2 id="n1105"><span class="anchor">2026-11-05</span></h2>
