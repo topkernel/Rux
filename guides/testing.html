@@ -149,7 +149,7 @@
     <p style="font-size:13.5px">方法:每靴一例(串口干净采集)、35 秒 in-guest 超时、runner 为 PID 1;参考列 = 同一静态二进制原生执行。两个上游坏例(lat_fifo / bw_udp)双列都不可测,按上游缺陷剔除而非计为缺口。</p>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>用例</th><th class="num">Rux (x86_64+KVM)</th><th class="num">参考内核</th><th class="num">对比</th></tr></thead>
+        <thead><tr><th>用例</th><th class="num">Rux (x86_64+KVM)</th><th class="num">参考(native / 同机 KVM)</th><th class="num">对比(口径)</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall null</td><td class="num">0.055 µs</td><td class="num">0.044 µs</td><td class="num">1.25×</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.110 µs</td><td class="num">0.069 µs</td><td class="num">1.59×</td></tr>
@@ -159,12 +159,12 @@
           <tr><td class="mono">lat_syscall open</td><td class="num">0.70 µs</td><td class="num">0.395 µs</td><td class="num">1.77×</td></tr>
           <tr><td class="mono">lat_pagefault</td><td class="num">0.449 µs</td><td class="num">0.07 µs</td><td class="num">6.45×</td></tr>
           <tr><td class="mono">lat_mmap 1m</td><td class="num">1.049 µs</td><td class="num">4.41 µs</td><td class="num"><b>0.24×(快)</b></td></tr>
-          <tr><td class="mono">lat_pipe</td><td class="num">4.00 µs</td><td class="num">2.745 µs(native)/ 13.296(KVM)</td><td class="num">KVM 对:<b>快 3.3×</b></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">4.00 µs(quiet 2.01)</td><td class="num">2.745 / 13.30</td><td class="num">同机对:<b>快 3.33×</b>(quiet 对 6.6×)</td></tr>
           <tr><td class="mono">lat_unix</td><td class="num">4.56 µs(load-6)</td><td class="num">3.011 µs</td><td class="num">1.52×</td></tr>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13 µs/切换</td><td class="num">0.91(native)/ KVM 对更快</td><td class="num">KVM 对:<b>快 3.2×</b></td></tr>
-          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">1.94 µs/切换(load-6)</td><td class="num">1.3 µs</td><td class="num">1.49×</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">59.9 µs(load-6)</td><td class="num">33.13 µs</td><td class="num">1.11×(KVM 对)</td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">66.2 µs(load-6)</td><td class="num">57.54 µs</td><td class="num"><b>快 1.3×</b>(KVM 对)</td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13(load)/ <b>0.73(quiet)</b></td><td class="num">0.91 / 6.71</td><td class="num">同机对:<b>快 3.15×(load)~ 9.2×(quiet)</b>;quiet 比参考裸机还快</td></tr>
+          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">1.05(quiet)/ 1.94(load)</td><td class="num">1.3 / —(未测)</td><td class="num">quiet <b>快 0.81×</b>(快于裸机参考);load 窗 1.49× 慢(native 口径)</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">47.6(quiet)/ 59.9(load)</td><td class="num">33.13 / 53.99</td><td class="num">同机对:quiet <b>快 0.88×</b>,load 窗 1.11× 慢</td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">66.2 µs(load-6)</td><td class="num">57.54 / 87.43</td><td class="num">同机对:<b>快 1.32×</b></td></tr>
           <tr><td class="mono">lat_sem</td><td class="num">0.800 µs(首落地,前为 TIMEOUT)</td><td class="num">0.444 µs</td><td class="num">1.80×</td></tr>
           <tr><td class="mono">lat_mem_rd 1m</td><td class="num">2.321 ns</td><td class="num">2.437 ns</td><td class="num"><b>0.95×(快)</b></td></tr>
           <tr><td class="mono">bw_mem 1m bcopy</td><td class="num">77,770 MB/s</td><td class="num">72,597 MB/s</td><td class="num"><b>1.07×(快)</b></td></tr>
@@ -181,6 +181,8 @@
         </tbody>
       </table>
     </div>
+
+    <p style="font-size:13px;color:var(--text-3)">公平对比规则:比较两侧必须同加速。参考列同时给出参考内核<b>裸机</b>(native,不付虚拟化税)与<b>同机 KVM</b> 两列;rig-divergent 行(lat_pipe / lat_ctx / lat_proc)以<b>同机 KVM 对为权威</b>,另有安静窗复测(Fair-rig 章节)。虚拟化税的分布本身就是结论:系统调用行几乎无税(0.88–1.06×,guest 自带 syscall 入口不 vmexit);税集中在跨 vCPU 唤醒 IPI(lat_pipe 4.85×、lat_ctx <b>7.37×</b>)与页表/TLB 工作(lat_proc 1.52–1.63×)。Rux 的单全局队列唤醒路径不制造跨核重调度风暴,几乎不吃这个税 —— quiet 窗 lat_ctx 0.73 µs 快于参考裸机的 0.91 µs。</p>
 
     <h3 id="perf-gb">Geekbench 5(4-CPU 钉核,同宿主)</h3>
     <div class="tbl-wrap">
