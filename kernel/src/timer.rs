@@ -603,9 +603,60 @@ pub fn timer_softirq_handler(_nr: usize) {
                     deadline: u64,
                     timer_id: u64,
                     dur_ms: u32,
+                    /// GHOST branch: parked with a nanosleep-class entry
+                    /// frame but NO shadow — the frame's syscall is not
+                    /// where the task sleeps. Carries stack words from
+                    /// the saved kernel sp for offline symbolization.
+                    ghost: bool,
+                    ghost_sys: u64,
+                    stk: [u64; 4],
                 }
+                // Per-arch nanosleep-class syscall numbers (entry-frame
+                // decode, same contract as the TXN-HANG sys= read).
+                #[cfg(feature = "x86_64")]
+                const NS_SYS: [u64; 2] = [35, 230]; // nanosleep, clock_nanosleep
+                #[cfg(feature = "riscv64")]
+                const NS_SYS: [u64; 2] = [35, 415]; // nanosleep, clock_nanosleep_time64
+                #[cfg(feature = "aarch64")]
+                const NS_SYS: [u64; 2] = [115, 115]; // clock_nanosleep
+                let entry_sys = |p: *mut crate::process::Task| -> u64 {
+                    if p.is_null() {
+                        return 0;
+                    }
+                    // SAFETY: entry-frame read of a live task's mapped
+                    // kernel stack (sleep_snapshot / TXN-HANG contract).
+                    unsafe {
+                        let tk = &*p;
+                        let top = match tk.kernel_stack_top_checked() {
+                            Some(t) => t,
+                            None => return 0,
+                        };
+                        #[cfg(feature = "x86_64")]
+                        {
+                            let regs = (top.wrapping_sub(
+                                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                            return (*regs).orig_rax;
+                        }
+                        #[cfg(feature = "riscv64")]
+                        {
+                            let regs = (top.wrapping_sub(
+                                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                            return (*regs).a7;
+                        }
+                        #[cfg(feature = "aarch64")]
+                        {
+                            let regs = (top.wrapping_sub(
+                                crate::arch::aarch64::pt_regs::PT_REGS_SIZE,
+                            )) as *const crate::arch::aarch64::pt_regs::PtRegs;
+                            return (*regs).syscallno;
+                        }
+                    }
+                };
                 let mut rows: [Option<TtRow>; 16] = [None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None, None, None];
+                let mut ghost_rows = 0usize;
                 let nfound = crate::sched::for_each_task_try(|t| {
                     if t.is_null() {
                         return;
@@ -618,7 +669,58 @@ pub fn timer_softirq_handler(_nr: usize) {
                             (*t).state().is_sleeping(),
                         )
                     };
-                    if kind == TSLEEP_NONE || !sleeping {
+                    if !sleeping {
+                        return;
+                    }
+                    if kind == TSLEEP_NONE {
+                        // GHOST hunt: parked under a nanosleep-class
+                        // entry frame with no live nanosleep — the
+                        // r41v15/v17/v18 power_host shape (sys=35,
+                        // INTERRUPTIBLE for minutes, shadow never set).
+                        // Cap ghosts at 4 rows.
+                        if ghost_rows < 4 {
+                            let sys = entry_sys(t);
+                            if NS_SYS.contains(&sys) {
+                                ghost_rows += 1;
+                                // Saved-sp words from the CONTEXT-SWITCH
+                                // saved sp (thread().sp — the live park
+                                // site), NOT ti_kernel_sp (creation-time
+                                // only). Same read contract as TXN-HANG-STK.
+                                let mut stk = [0u64; 4];
+                                unsafe {
+                                    let tk = &*t;
+                                    let sp = tk.thread().sp as usize;
+                                    let top = tk.kernel_stack_top_checked().unwrap_or(0);
+                                    let base = top.wrapping_sub(
+                                        crate::config::KERNEL_STACK_SIZE,
+                                    );
+                                    if sp >= base && sp + 8 * 4 <= top && (sp & 7) == 0 {
+                                        for (i, w) in stk.iter_mut().enumerate() {
+                                            *w = core::ptr::read_volatile(
+                                                (sp + i * 8) as *const u64,
+                                            );
+                                        }
+                                    }
+                                }
+                                let pid = unsafe { (*t).pid() };
+                                for r in rows.iter_mut() {
+                                    if r.is_none() {
+                                        *r = Some(TtRow {
+                                            pid,
+                                            kind: 0,
+                                            armed_j: 0,
+                                            deadline: 0,
+                                            timer_id: 0,
+                                            dur_ms: 0,
+                                            ghost: true,
+                                            ghost_sys: sys,
+                                            stk,
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         return;
                     }
                     // Per-kind age gate: a parked hres (nanosleep) wait
@@ -641,7 +743,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                     }
                     for r in rows.iter_mut() {
                         if r.is_none() {
-                            *r = Some(TtRow { pid, kind, armed_j, deadline, timer_id: tid, dur_ms: dur });
+                            *r = Some(TtRow { pid, kind, armed_j, deadline, timer_id: tid, dur_ms: dur, ghost: false, ghost_sys: 0, stk: [0; 4] });
                             break;
                         }
                     }
@@ -662,6 +764,19 @@ pub fn timer_softirq_handler(_nr: usize) {
                     for r in rows.iter().flatten() {
                         if printed >= 4 || !tt_ok {
                             break;
+                        }
+                        printed += 1;
+                        if r.ghost {
+                            crate::pr_err!(
+                                "TIMEDSLEEP-GHOST pid={} sys={} no-shadow stk={:#x} {:#x} {:#x} {:#x}",
+                                r.pid,
+                                r.ghost_sys,
+                                r.stk[0],
+                                r.stk[1],
+                                r.stk[2],
+                                r.stk[3]
+                            );
+                            continue;
                         }
                         // Wheel state for this sleeper: the live
                         // registration (by id) or any wake entry
@@ -690,7 +805,6 @@ pub fn timer_softirq_handler(_nr: usize) {
                             let d = current as i64 - r.deadline as i64;
                             (d.abs() * 1000 / crate::config::KERNEL_HZ as i64, if d >= 0 { "past" } else { "future" })
                         };
-                        printed += 1;
                         crate::pr_err!(
                             "TIMEDSLEEP-PARK pid={} kind={} age_s={} dur_ms={} deadline_{}ms_{} wheel={} timer_id={:#x}",
                             r.pid,
