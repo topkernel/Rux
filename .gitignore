@@ -178,4 +178,4 @@ run/
 results/
 
 # Old test scripts moved to scripts/ (user directive 2026-11-05)
-test/
+/test/
