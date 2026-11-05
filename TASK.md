@@ -4505,3 +4505,45 @@ exact leak path into the else branch is an open note for the sched lane
 Gates at every step: x3 builds rc=0, make test riscv64 ALL TESTS
 PASSED (r41v17/v19/v19b/v20b logs). Commits 1caac2b0, 972de9b0,
 d0684744, 4aa30767, d522e16f — all pushed. Roll continues on d522e16f.
+
+## 46TH SESSION ADDENDUM 5 — RESUME AFTER QUOTA KILL: r41v21-30 banked, roll continues on a7ef71cb (2026-11-05 19:05-)
+
+Session resumed after the 16:52 quota kill (roller died mid-boot-30,
+QEMU tree died with it; worktree intact, nothing to reconcile).
+
+### r41v30 salvage (partial boot, cut at 283.5s of 900s)
+- Serial ends in the KNOWN wedge class, not a new one: task 1052
+  exit + SWITCHIN-DEAD-TASK dead-resume aborted on both cpus,
+  R56-SWITCH-ABORTED (cpu=0 pid=320, cpu=1 pid=1), FOREIGN-ENTRY
+  vector=7 on the dead task's stack, RCU-GP-BOUND site=fdreap-close
+  with c0 quiescent stuck (gen 66972..66994, qs c0 pinned 66971),
+  grace budget exceeded 8x. Same signature family as v15/v18/v19/
+  v20/v26/v29 tails — frequency data point, not a new class.
+- Pixel (t=180 shot): 82f0a25f frozen. SA ceiling 61 / 60 inserts /
+  last 34.3s — full SA phase completed before the cut. Ledger row
+  banked (run/r41/r41v30-summary.txt, partial UNIXRD window t<=240s).
+
+### r41v21-30 summary (all on bd630d46 = 3736a868-era kernel)
+- SA ceiling band unchanged: 24-67 (v21 24, v22 25, v23 59, v24 43,
+  v25 26, v26 67, v27 64, v28 59, v29 61, v30 61) — ceiling set by
+  boot-to-boot variance, not by the timer fixes.
+- Pixels: 82f0a25f on 9/10; 06b933b4 on v26 (the second frozen
+  variant, previously seen v18). NO md5 outside the frozen pair.
+- TXN-HANG n stable 1347-1410, max_exec ~860s (end-of-window tail),
+  codes dominated by '6' with singleton '64'/'1'/'2' per boot.
+  FUX-STUCK 30-48 tids/boot, ffrt_parked=[] throughout.
+
+### origin/main sync at the v30 boundary
+- 4 new commits: 6ef58cf9..e8c395bd test-infra reorganization. No
+  kernel-source changes. Merged clean as a7ef71cb, x86_64 rebuild
+  rc=0 (identical kernel bytes expected; incremental).
+- REGRESSION ON MAIN for boot drivers: 6ef58cf9 deleted
+  run/lb-boot.py from the tree without restoring it under
+  scripts/test/ — every lane that boots via run/lb-boot.py breaks on
+  a fresh merge. Workaround here: restored from 6ef58cf9^ as an
+  untracked file in run/ (byte-identical to oh-launcher's copy).
+  Main should re-add it to scripts/test/ or restore run/lb-boot.py.
+- Roll restarted from boot 31 on bzImage-a7ef71cb (roller PID group
+  detached; same DFX cmdline, same images).
+
+Roll continues: boots 31+ on a7ef71cb, ledger at run/r41/ledger.csv.

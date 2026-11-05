@@ -1,0 +1,19 @@
+== r41v30 ==
+SA: ceiling=61 inserts=60 distinct_ids=60 last_insert_t=34.3s
+ladder: NONE (never reached provisioning markers)
+UNIXRD-RM [first t=60s] UNIXRD-RM t=60s n=259410 ok=259410 ea=0 err=0 peek=0 cred=259407 outer=2062ns iov=123ns alloc=0ns recv=1124ns cout=0ns cmsg=400ns addr=71ns allocb=0B
+UNIXRD-RM [~165s t=180s] UNIXRD-RM t=180s n=3394776 ok=3394776 ea=0 err=0 peek=0 cred=3394773 outer=1966ns iov=108ns alloc=0ns recv=1071ns cout=0ns cmsg=377ns addr=70ns allocb=0B
+UNIXRD-RM [last t=240s] UNIXRD-RM t=240s n=5355896 ok=5355896 ea=0 err=0 peek=0 cred=5355893 outer=1914ns iov=104ns alloc=0ns recv=1040ns cout=0ns cmsg=367ns addr=69ns allocb=0B
+UNIXRD-RF [first t=120s] UNIXRD-RF t=120s n=1708203 ok=1708200 ea=1 err=0 peek=1705685 outer=124112ns alloc=1010ns recv=122524ns cout=78ns allocb=2B
+UNIXRD-RF [~165s t=180s] UNIXRD-RF t=180s n=3399411 ok=3399407 ea=2 err=0 peek=3395090 outer=79301ns alloc=940ns recv=77802ns cout=75ns allocb=2B
+UNIXRD-RF [last t=240s] UNIXRD-RF t=240s n=5362138 ok=5362135 ea=2 err=0 peek=5356010 outer=57847ns alloc=819ns recv=56485ns cout=72ns allocb=2B
+UNIXRD-WV [first t=120s] UNIXRD-WV t=120s n=1837699 ok=1705686 ea=131844 err=169 outer=10534ns gather=3359ns send=5029ns gatherb=74B
+UNIXRD-WV [~165s t=180s] UNIXRD-WV t=180s n=3695725 ok=3395134 ea=300422 err=169 outer=10448ns gather=3386ns send=5004ns gatherb=73B
+UNIXRD-WV [last t=240s] UNIXRD-WV t=240s n=5881383 ok=5356125 ea=525089 err=169 outer=10354ns gather=3405ns send=4947ns gatherb=73B
+FUX-STUCK: lines=1054 distinct_tids=37 max_stuck_total=193
+FUX-STUCK: tids=['323', '331', '335', '341', '348', '352', '369', '382', '386', '388', '390', '391', '447', '456', '460', '463', '491', '544', '549', '589', '612', '613', '653', '655', '811', '835', '836', '837', '838', '844', '845', '848', '849', '852', '853', '854', '862'] ffrt_parked=[]
+TXN-HANG: n=401 codes={'64': 1, '1': 2, '6': 398} max_exec=247660ms comms={'OS_IPC_0_451': 1, 'power_host': 1, 'OS_IPC_0_340': 1, 'accountmgr': 50, 'time_service': 50, 'resource_schedu': 50, 'foundation': 50, 'softbus_server': 50, 'netmanager': 50, 'deviceprofile': 49, 'wifi_manager_se': 49}
+BWR-SNAP: lines=0 distinct_tids=0 (probe bwr_snap not on main; 0 expected)
+BWR-PARK: rows=1181 mix={'H1-sync-out': 564, 'IOCTL-BWR-other': 6, 'H3-futex-stack': 603}
+BWR-PARK: TXN-HANG-BWR-CENSUS procs=70 threads=321 printed=24 stack-holders=27 write-only-parked=0 futex-parked-stack=13 futex-waiters=68 idle=224
+ticks: SYSCOST t=240s ticks(u/k/i): c0=5575/41968/341 c1=6827/40607/447

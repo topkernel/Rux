@@ -1,0 +1,95 @@
+[roll] start 2026-11-05 04:30:13 kernel= SHA=02e3c900
+[roll] boot 1/100 tag=r41v1 sha=02e3c900 04:30:14
+[roll] r41v1 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  04:45:35
+[roll] boot 2/100 tag=r41v2 sha=02e3c900 04:45:41
+[roll] r41v2 done: SA=39 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  05:01:01
+[roll] boot 3/100 tag=r41v3 sha=02e3c900 05:01:07
+[roll] start 2026-11-05 05:01:57 kernel= SHA=061e1519
+[roll] boot 3/100 tag=r41v3 sha=061e1519 05:01:58
+[roll] r41v3 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  05:17:18
+[roll] boot 4/100 tag=r41v4 sha=061e1519 05:17:24
+[roll] start 2026-11-05 05:18:22 kernel= SHA=b0624458
+[roll] boot 4/100 tag=r41v4 sha=b0624458 05:18:23
+[roll] r41v4 done: SA= ladder='' pixels=82f0a25f  07:47:25
+[roll] boot 5/100 tag=r41v5 sha=b0624458 07:47:31
+[roll] start 2026-11-05 10:00:21 kernel= SHA=6be8c37e
+[roll] boot 6/100 tag=r41v6 sha=6be8c37e 10:00:22
+[roll] start 2026-11-05 10:23:20 kernel= SHA=14f7dcf2
+[roll] boot 7/100 tag=r41v7 sha=14f7dcf2 10:23:21
+[roll] r41v6 done: SA=35 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  10:23:23
+[roll] boot 7/100 tag=r41v7 sha=6be8c37e 10:23:29
+[roll] r41v7 done: SA=16 ladder='NONE (never reached provisioning markers)' pixels= 10:23:41
+[roll] boot 8/100 tag=r41v8 sha=14f7dcf2 10:23:47
+[roll] r41v7 done: SA=16 ladder='NONE (never reached provisioning markers)' pixels= 10:23:49
+[roll] boot 8/100 tag=r41v8 sha=6be8c37e 10:23:55
+[roll] start 2026-11-05 10:24:56 kernel= SHA=14f7dcf2
+[roll] boot 7/100 tag=r41v7 sha=14f7dcf2 10:24:57
+[roll] r41v7 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  10:40:17
+[roll] boot 8/100 tag=r41v8 sha=14f7dcf2 10:40:23
+[roll] r41v8 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  10:55:24
+[roll] boot 9/100 tag=r41v9 sha=14f7dcf2 10:55:30
+[roll] r41v9 done: SA=49 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  11:10:50
+[roll] boot 10/100 tag=r41v10 sha=14f7dcf2 11:10:56
+[roll] r41v10 done: SA=26 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  11:26:16
+[roll] sync check 11:26:21
+[roll] origin/main moved 14f7dcf2 -> bdb8d00d, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-7d3a888e (7d3a888e)
+[roll] boot 11/100 tag=r41v11 sha=7d3a888e 11:26:32
+[roll] r41v11 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  11:41:53
+[roll] boot 12/100 tag=r41v12 sha=7d3a888e 11:41:59
+[roll] r41v12 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  11:57:19
+[roll] boot 13/100 tag=r41v13 sha=7d3a888e 11:57:25
+[roll] r41v13 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  12:12:46
+[roll] boot 14/100 tag=r41v14 sha=7d3a888e 12:12:52
+[roll] r41v14 done: SA=26 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  12:28:12
+[roll] boot 15/100 tag=r41v15 sha=7d3a888e 12:28:18
+[roll] r41v15 done: SA=55 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  12:43:39
+[roll] sync check 12:43:44
+[roll] origin/main moved 7d3a888e -> bdb8d00d, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-7d3a888e (7d3a888e)
+[roll] boot 16/100 tag=r41v16 sha=7d3a888e 12:43:55
+[roll] r41v16 done: SA=19 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  12:59:16
+[roll] boot 17/100 tag=r41v17 sha=7d3a888e 12:59:22
+[roll] start 2026-11-05 13:04:28 kernel= SHA=1caac2b0
+[roll] boot 17/100 tag=r41v17 sha=1caac2b0 13:04:29
+[roll] r41v17 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  13:19:49
+[roll] boot 18/100 tag=r41v18 sha=1caac2b0 13:19:55
+[roll] start 2026-11-05 13:25:56 kernel= SHA=d0684744
+[roll] boot 18/100 tag=r41v18 sha=d0684744 13:25:57
+[roll] start 2026-11-05 13:32:51 kernel= SHA=4aa30767
+[roll] boot 18/100 tag=r41v18 sha=4aa30767 13:32:52
+[roll] start 2026-11-05 13:42:58 kernel= SHA=d522e16f
+[roll] boot 18/100 tag=r41v18 sha=d522e16f 13:42:59
+[roll] r41v18 done: SA=67 ladder='NONE (never reached provisioning markers)' pixels=06b933b4  13:58:20
+[roll] boot 19/100 tag=r41v19 sha=d522e16f 13:58:26
+[roll] r41v19 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  14:13:46
+[roll] boot 20/100 tag=r41v20 sha=d522e16f 14:13:52
+[roll] r41v20 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  14:29:13
+[roll] sync check 14:29:18
+[roll] origin/main moved d522e16f -> 3736a868, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-bd630d46 (bd630d46)
+[roll] boot 21/100 tag=r41v21 sha=bd630d46 14:29:32
+[roll] r41v21 done: SA=24 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  14:44:52
+[roll] boot 22/100 tag=r41v22 sha=bd630d46 14:44:58
+[roll] r41v22 done: SA=25 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  15:00:19
+[roll] boot 23/100 tag=r41v23 sha=bd630d46 15:00:25
+[roll] r41v23 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  15:15:25
+[roll] boot 24/100 tag=r41v24 sha=bd630d46 15:15:31
+[roll] r41v24 done: SA=43 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  15:30:52
+[roll] boot 25/100 tag=r41v25 sha=bd630d46 15:30:58
+[roll] r41v25 done: SA=26 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  15:45:58
+[roll] sync check 15:46:03
+[roll] origin/main moved bd630d46 -> 3736a868, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-bd630d46 (bd630d46)
+[roll] boot 26/100 tag=r41v26 sha=bd630d46 15:46:14
+[roll] r41v26 done: SA=67 ladder='NONE (never reached provisioning markers)' pixels=06b933b4  16:01:35
+[roll] boot 27/100 tag=r41v27 sha=bd630d46 16:01:41
+[roll] r41v27 done: SA=64 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  16:17:01
+[roll] boot 28/100 tag=r41v28 sha=bd630d46 16:17:07
+[roll] r41v28 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  16:32:08
+[roll] boot 29/100 tag=r41v29 sha=bd630d46 16:32:14
+[roll] r41v29 done: SA=61 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  16:47:34
+[roll] boot 30/100 tag=r41v30 sha=bd630d46 16:47:40
+[roll] RESTART by resumed agent 2026-11-05 19:09:13 kernel=a7ef71cb (merge of e8c395bd test-infra reorg; lb-boot.py restored untracked to run/)
+[roll] start 2026-11-05 19:09:13 kernel= SHA=a7ef71cb
+[roll] boot 31/100 tag=r41v31 sha=a7ef71cb 19:09:14
