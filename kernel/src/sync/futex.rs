@@ -1966,10 +1966,14 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // storage_daemon class (fto=59.99s, parked 831s past it).
         let shadow = wake.as_ref().and_then(|w| {
             deadline.map(|dl| {
+                let dur_ms = (dl.saturating_sub(
+                    crate::drivers::timer::get_jiffies(),
+                )).saturating_mul(1000 / crate::config::KERNEL_HZ as u64) as u32;
                 crate::timer::TimedSleepShadow::new(
                     crate::timer::TSLEEP_JIFFY,
                     dl,
                     w.id(),
+                    dur_ms,
                 )
             })
         });

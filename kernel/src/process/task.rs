@@ -947,6 +947,10 @@ pub struct Task {
     pub timed_sleep_timer_id: core::sync::atomic::AtomicU64,
     /// Jiffies stamp of the arm (age gate for the heartbeat print).
     pub timed_sleep_armed_j: core::sync::atomic::AtomicU32,
+    /// Requested duration (ms, capped) — the adjudicator between a
+    /// garbage-huge userspace sleep and a short sleep whose wake was
+    /// lost.
+    pub timed_sleep_dur_ms: core::sync::atomic::AtomicU32,
 
     /// R12-5: lookup pin count — pid_hash_lookup increments, task_put
     /// decrements and frees at zero. Closes the lookup->use window that
@@ -1667,6 +1671,7 @@ impl Task {
             timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
             timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_armed_j: core::sync::atomic::AtomicU32::new(0),
+            timed_sleep_dur_ms: core::sync::atomic::AtomicU32::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
@@ -1918,6 +1923,10 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_dur_ms)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(0),
         );
         // stress-port r1 (SP-1 follow-up, same R68a class): the four
@@ -2606,6 +2615,10 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_dur_ms)) as *mut core::sync::atomic::AtomicU32,
             core::sync::atomic::AtomicU32::new(0),
         );
         // stress-port r1 (SP-1 follow-up, same R68a class): the four

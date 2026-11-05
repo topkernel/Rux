@@ -383,6 +383,7 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         crate::timer::TSLEEP_HRES,
         hres_deadline,
         wake.as_ref().map(|w| w.id()).unwrap_or(0),
+        (total_nanos / 1_000_000).min(u32::MAX as i64) as u32,
     );
 
     // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
