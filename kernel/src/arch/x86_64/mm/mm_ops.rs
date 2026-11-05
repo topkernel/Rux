@@ -925,6 +925,21 @@ impl MmStruct {
             }
         }
 
+        // ONE TLB flush for the whole munmap (perf-gap-hunt; RESTORED
+        // 2026-11-06 — 5b4a4bc7 dropped this block and the deferred
+        // flushes were never shot down: stale present+writable entries
+        // to FREED frames survived, and after the allocator reused those
+        // frames same-mm accesses silently read/wrote the new owner's
+        // pages — deterministic init #GP on the OH image, mallocng
+        // get_meta consistency check, t=1.2). The chunked unmap_pages
+        // above deferred its flushes — a multi-MB munmap runs ONE IPI
+        // broadcast + CR3 reload instead of one per chunk (~1 µs/chunk
+        // on the bench shape). Cleared-range visibility for user mode is
+        // restored before the syscall returns (the reference batches its
+        // unmapped-range flushes the same way).
+        crate::arch::ipi::flush_tlb_others(addr_us as u64, end_addr as u64);
+        crate::arch::mm::asid::flush_tlb_all();
+
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
         }
