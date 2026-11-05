@@ -1229,7 +1229,7 @@ fn pool_full_backoff() {
 }
 
 /// Calculate futex hash value
-fn futex_hash(key: &FutexKey) -> usize {
+pub(crate) fn futex_hash(key: &FutexKey) -> usize {
     // Hash by the PHYSICAL word identity when resolved (both private and
     // shared keys), else by uaddr. matches() compares the physical word
     // for shared keys — a parent waiting on a MAP_SHARED page at vaddr A
