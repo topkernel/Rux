@@ -1334,6 +1334,17 @@ struct ThreadState {
     /// Transition ring (sc74 forensics); written under WORLD only.
     hist: [BinderEv; BHIST],
     hcur: usize,
+    /// Live BWR ioctl shadow (r41v6): (write_size, write_consumed,
+    /// read_size, first pending write cmd) of the binder_write_read this
+    /// thread is currently executing — recorded at ioctl entry, consumed
+    /// updated after the write leg, cleared on every exit. The
+    /// bwr_park_audit reads THIS, never user memory: the audit runs on
+    /// the timer heartbeat (interrupt context of an arbitrary task), so
+    /// dereferencing the audited thread's user bwr pointer through the
+    /// interrupted task's page tables produced the r41v4/r41v5 false-H2
+    /// rows (same-VA zero pages decoded as w=0/0 rsz=0 "write-only
+    /// parked"; unrelated mappings as garbage w= words).
+    live_bwr: Option<(u64, u64, u64, u32)>,
 }
 
 struct BinderThread {
@@ -1392,6 +1403,7 @@ impl BinderThread {
                 txn_stack: Vec::new(),
                 hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
                 hcur: 0,
+                live_bwr: None,
             }),
         }
     }
@@ -4153,7 +4165,12 @@ fn bc_name(cmd: u32) -> &'static str {
 /// whose park shape is anomalous, one TXN-HANG-BWR line carrying:
 ///   - the thread's CURRENT syscall + ioctl command + the decoded
 ///     write-side sub-command of the very BWR it is parked in
-///     (write_size/write_consumed/read_size + first pending BC cmd),
+///     (write_size/write_consumed/read_size + first pending BC cmd;
+///     r41v6: read from the kernel-side ThreadState::live_bwr shadow
+///     recorded at ioctl entry — the audit's timer-heartbeat context
+///     cannot dereference the audited thread's user bwr, and doing so
+///     through the interrupted task's page tables produced false H2
+///     rows on r41v4/r41v5),
 ///   - its transaction-stack top with the outgoing-sync tag — WHO the
 ///     nested call is TO (to pid/tid, code, queued-vs-exec, age).
 /// Holder shapes it discriminates:
@@ -4220,6 +4237,12 @@ pub fn bwr_park_audit() {
         /// write_size) — the last BWR the thread submitted, fallback
         /// attribution when the live user bwr cannot be read.
         last_bwr: Option<(u32, u32, u32)>,
+        /// Live BWR ioctl shadow (r41v6): (write_size, write_consumed,
+        /// read_size, first pending write cmd) recorded kernel-side at
+        /// ioctl entry — the timer-context user-memory decode it
+        /// replaced read through an arbitrary interrupted task's page
+        /// tables (false H2 rows on r41v4/r41v5).
+        live_bwr: Option<(u64, u64, u64, u32)>,
         /// Jiffies the thread entered its blocking read wait (0 = not
         /// waiting); atomic read, safe without WORLD.
         read_wait_since: u64,
@@ -4301,6 +4324,7 @@ pub fn bwr_park_audit() {
                         todo_head,
                         stack,
                         last_bwr,
+                        live_bwr: th.live_bwr,
                         read_wait_since: t.read_wait_since.load(Relaxed),
                     });
                 }
@@ -4384,7 +4408,7 @@ pub fn bwr_park_audit() {
             // SAFETY: diagnostic state read of a live task.
             unsafe { (*task).state().bits() }
         };
-        let (sys, a0, a1, a2) = match entry_regs(task) {
+        let (sys, a0, a1, _a2) = match entry_regs(task) {
             Some(r) => r,
             None => (0, 0, 0, 0),
         };
@@ -4392,41 +4416,41 @@ pub fn bwr_park_audit() {
         // shows 0xffffffffc0306201 vs the constant 0xc0306201) —
         // compare through u32 so the BWR decode path fires.
         let in_bwr_ioctl = sys == SYS_IOCTL && (a1 as u32 as u64) == BINDER_WRITE_READ as u64;
-        // Decode the live user BWR the thread is parked in (if any):
-        // 6 x u64 LP64 fields, read fault-safe one by one.
+        // Decode the live BWR the thread is parked in (if any) from the
+        // KERNEL-SIDE shadow recorded at ioctl entry (r41v6). The old
+        // decode dereferenced the audited thread's user bwr pointer
+        // through whatever page tables the timer heartbeat interrupted —
+        // same-VA zero pages of an unrelated task decoded as "w=0/0
+        // rsz=0" (false write-only/H2 rows), unrelated mappings as
+        // garbage w= words, unmapped VAs as "unreadable".
         let mut bwr_txt = alloc::string::String::new();
         let mut h2_write_only = false;
         if in_bwr_ioctl {
-            let f = |off: usize| get_user_at::<u64>(a2, off).unwrap_or(u64::MAX);
-            let (wsz, wcons, wbuf, rsz, _rcons) = (f(0), f(8), f(16), f(24), f(32));
-            if wsz != u64::MAX {
-                let pending = wsz.saturating_sub(wcons);
-                let mut first = 0xFFFF_FFFFu32;
-                if wsz > 0 && wcons < wsz && wbuf != 0 {
-                    first = get_user_at::<u32>(wbuf, 0).unwrap_or(0xFFFF_FFFF);
-                }
-                let _ = write!(
-                    bwr_txt,
-                    " bwr[w={}/{} rsz={} wcmd={:#x}{}]",
-                    wsz - pending,
-                    wsz,
-                    rsz,
-                    first,
-                    if first != 0xFFFF_FFFF {
-                        alloc::format!("({})", bc_name(first))
-                    } else {
-                        alloc::string::String::new()
+            match s.live_bwr {
+                Some((wsz, wcons, rsz, first)) => {
+                    let pending = wsz.saturating_sub(wcons);
+                    let _ = write!(
+                        bwr_txt,
+                        " bwr[w={}/{} rsz={} wcmd={:#x}{}]",
+                        wsz - pending,
+                        wsz,
+                        rsz,
+                        first,
+                        if first != 0xFFFF_FFFF {
+                            alloc::format!("({})", bc_name(first))
+                        } else {
+                            alloc::string::String::new()
+                        }
+                    );
+                    // H2 discriminator: write-only BWR, fully consumed
+                    // write, still parked — the reference kernel returns
+                    // from this ioctl without ever sleeping.
+                    h2_write_only = rsz == 0 && pending == 0;
+                    if h2_write_only {
+                        write_only_parked += 1;
                     }
-                );
-                // H2 discriminator: write-only BWR, fully consumed
-                // write, still parked — the reference kernel returns
-                // from this ioctl without ever sleeping.
-                h2_write_only = rsz == 0 && pending == 0;
-                if h2_write_only {
-                    write_only_parked += 1;
                 }
-            } else {
-                bwr_txt.push_str(" bwr[unreadable]");
+                None => bwr_txt.push_str(" bwr[none]"),
             }
         }
         // Last-BWR fallback attribution from the hist ring.
@@ -5907,6 +5931,23 @@ fn binder_ioctl_write_read(
         return -(EFAULT as i64);
     }
 
+    // r41v6: shadow the live BWR kernel-side for the bwr_park_audit (the
+    // audit's timer-heartbeat context cannot dereference THIS thread's
+    // user bwr — wrong address space; see ThreadState::live_bwr). Cleared
+    // at every exit below.
+    {
+        let first = if bwr.write_size > 0 {
+            get_user_at::<u32>(bwr.write_buffer, 0).unwrap_or(0xFFFF_FFFF)
+        } else {
+            0xFFFF_FFFF
+        };
+        let w = world_lock();
+        // SAFETY: under WORLD.
+        unsafe {
+            thread.st().live_bwr = Some((bwr.write_size, bwr.write_consumed, bwr.read_size, first))
+        };
+    }
+
     if bwr.write_size > 0 {
         // sc74 forensics: the first write command of every BWR — the wedged
         // server threads owed replies yet parked in a read, so their LAST
@@ -5925,6 +5966,24 @@ fn binder_ioctl_write_read(
             bwr.write_size as usize,
             &mut bwr.write_consumed,
         );
+        {
+            // r41v6: advance the shadow's consumed word (a fully consumed
+            // write has no pending cmd left; a partial one keeps the
+            // entry-time first cmd only as an approximation — the write
+            // path never sleeps, so the audit only ever observes fully
+            // consumed shadows on parked threads).
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe {
+                let th = thread.st();
+                if let Some(lb) = th.live_bwr.as_mut() {
+                    lb.1 = bwr.write_consumed;
+                    if lb.1 >= lb.0 {
+                        lb.3 = 0xFFFF_FFFF;
+                    }
+                }
+            }
+        }
         if ret < 0 {
             // lb48 WERR tap: a negative ioctl return reaches userspace as
             // -errno through WriteBinder; errno 32 (EPIPE) is exactly
@@ -5956,6 +6015,7 @@ fn binder_ioctl_write_read(
                     core::mem::size_of::<BinderWriteRead>(),
                 );
             }
+            clear_live_bwr(thread);
             return ret;
         }
     }
@@ -6067,6 +6127,7 @@ fn binder_ioctl_write_read(
                     core::mem::size_of::<BinderWriteRead>(),
                 );
             }
+            clear_live_bwr(thread);
             return ret;
         }
         // Reference parity (binder.c 5181-5184): after a read, if the
@@ -6100,10 +6161,20 @@ fn binder_ioctl_write_read(
             core::mem::size_of::<BinderWriteRead>(),
         ) != 0
         {
+            clear_live_bwr(thread);
             return -(EFAULT as i64);
         }
     }
+    clear_live_bwr(thread);
     0
+}
+
+/// Clear the live-BWR ioctl shadow (r41v6) — called at every exit of
+/// binder_ioctl_write_read so the audit never sees a stale shadow.
+fn clear_live_bwr(thread: &Arc<BinderThread>) {
+    let w = world_lock();
+    // SAFETY: under WORLD.
+    unsafe { thread.st().live_bwr = None };
 }
 
 // ============================================================================
