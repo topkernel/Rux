@@ -1,3 +1,0 @@
-fcntl14
-fcntl15
-fcntl33

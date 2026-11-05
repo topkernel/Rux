@@ -1,7 +1,0 @@
-# idx|test|class|rc|tail
-0|stat01|PASS|0|TPASS: stat_buf.st_size == FILE_SIZE (1024) stat01.c:48: TPASS: stat_buf.st_mode & MASK == tc->mode (146) stat01.c:49: TPASS: stat_buf.st_nlink == 1 (1)  Summary: passed   12 failed   0 broken   0 skipped  0 warnings 0
-1|stat01_64|PASS|0|TPASS: stat_buf.st_size == FILE_SIZE (1024) stat01.c:48: TPASS: stat_buf.st_mode & MASK == tc->mode (146) stat01.c:49: TPASS: stat_buf.st_nlink == 1 (1)  Summary: passed   12 failed   0 broken   0 skipped  0 warnings 0
-2|fstat02|PASS|0|: stat_buf.st_size == FILE_SIZE (1024) fstat02.c:34: TPASS: stat_buf.st_mode & 0777 == FILE_MODE (420) fstat02.c:35: TPASS: stat_buf.st_nlink == NLINK (2)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
-3|fstat02_64|PASS|0|: stat_buf.st_size == FILE_SIZE (1024) fstat02.c:34: TPASS: stat_buf.st_mode & 0777 == FILE_MODE (420) fstat02.c:35: TPASS: stat_buf.st_nlink == NLINK (2)  Summary: passed   6 failed   0 broken   0 skipped  0 warnings 0
-4|getpriority01|PASS|0|.c:49: TPASS: getpriority(0, 0) returned 0 getpriority01.c:49: TPASS: getpriority(1, 0) returned 0 getpriority01.c:49: TPASS: getpriority(2, 0) returned 0  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
-5|mmap02|PASS|0|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s mmap02.c:44: TPASS: mmap() functionality successful  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

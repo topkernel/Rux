@@ -1,9 +1,0 @@
-lat_sem
-lat_unix
-lat_pipe
-lat_ctx -s 64 2
-lat_ctx -s 64 8
-lat_syscall open
-lat_syscall null
-lat_syscall read
-lat_syscall write

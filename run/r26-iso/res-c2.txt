@@ -1,4 +1,0 @@
-# idx|test|class|rc|tail
-0|inotify01|PASS|0|wd=1 mask=20 cookie=0 len=0 inotify01.c:117: TPASS: get event: wd=1 mask=02 cookie=0 len=0 inotify01.c:117: TPASS: get event: wd=1 mask=08 cookie=0 len=0  Summary: passed   7 failed   0 broken   0 skipped  0 warnings 0
-1|inotify02|PASS|0|ASS: get event: wd=1 mask=00000200 cookie=0     len=12 name="test_file2" inotify02.c:165: TPASS: get event: wd=1 mask=00000800 cookie=0     len=0  name=""  Summary: passed   9 failed   0 broken   0 skipped  0 warnings 0
-2|inotify05|PASS|0|1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s inotify05.c:112: TPASS: get event: wd=-1 mask=4000 cookie=0 len=0  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

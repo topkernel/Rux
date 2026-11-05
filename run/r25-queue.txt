@@ -1,4 +1,0 @@
-ppoll01
-msgstress01
-shmat1
-ftest03

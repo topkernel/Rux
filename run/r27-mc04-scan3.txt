@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|mc04|PASS|0|child mlock rc=0 child mincore rc=0 vec=1 1 1 mincore rc=0 vec=0 0 0 fresh-map mincore rc=0 vec=0 0 0 after-touch mincore rc=0 vec=1 1 1

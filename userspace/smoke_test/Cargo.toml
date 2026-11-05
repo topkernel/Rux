@@ -1,0 +1,10 @@
+[package]
+name = "smoke_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "smoke_test"
+path = "src/main.rs"

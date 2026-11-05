@@ -1,9 +1,0 @@
-panics: 4
-shell: 0
-proc-cd: 37
-done-mark: 0
-task @0xffffffd601814000 pid=328 tgid=328 state=ZOMBIE ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x000000000000000
-task @0xffffffd601818000 pid=329 tgid=329 state=ZOMBIE ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x000000000000000
-task @0xffffffd60181c000 pid=330 tgid=330 state=ZOMBIE ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x000000000000000
-=== 12 tasks ===
-qemu-system-riscv64: terminating on signal 15 from pid 4112731 (timeout)

@@ -1,5 +1,0 @@
-rt_sigprocmask01
-rt_sigsuspend01
-waitid08
-setpgid03
-inotify01

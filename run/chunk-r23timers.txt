@@ -1,9 +1,0 @@
-epoll_wait02
-epoll_wait06
-epoll_pwait03
-timerfd_settime02
-epoll_pwait01
-epoll_pwait02
-ppoll01
-pselect01
-fcntl17

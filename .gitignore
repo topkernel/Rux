@@ -174,3 +174,10 @@ userspace/lmbench/src/
 # arch-s5 lane boot artifacts (kernels, logs, stop markers)
 run/s5-*
 !run/s5-boot.sh
+
+# Test results and scratch — never in git (user directive 2026-11-05)
+run/
+results/
+
+# Old test scripts moved to scripts/ (user directive 2026-11-05)
+test/

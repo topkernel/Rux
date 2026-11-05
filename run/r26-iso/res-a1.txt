@@ -1,7 +1,0 @@
-# idx|test|class|rc|tail
-0|pipe02|FAIL|1|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s pipe02.c:70: TFAIL: Child wasn't killed by signal  Summary: passed   0 failed   1 broken   0 skipped  0 warnings 0
-1|pipe08|FAIL|1|17: TINFO: Timeout per run is 0h 00m 30s pipe08.c:36: TFAIL: write(pipefd[1], wrbuf, sizeof(wrbuf)) succeeded pipe08.c:37: TFAIL: sigpipe_cnt (0) != 1 (1)  Summary: passed   0 failed   2 broken   0 skipped  0 warnings 0
-2|write05|FAIL|1|>size) : EBADF (9) write05.c:62: TPASS: write(*tc->fd, *tc->buf, tc->size) : EFAULT (14) write05.c:62: TFAIL: write(*tc->fd, *tc->buf, tc->size) succeeded  Summary: passed   2 failed   1 broken   0 skipped  0 warnings 0
-3|writev01|FAIL|1|tev01.c:129: TPASS: NULL and zero length iovec, expected: 64, got: 64 writev01.c:124: TFAIL: write to closed pipe, expected: -1 (EPIPE), got: 64 (SUCCESS)  Summary: passed   5 failed   1 broken   0 skipped  0 warnings 0
-4|execve03|FAIL|1|execve03.c:124: TPASS: execve failed as expected: EACCES (13) execve03.c:128: TFAIL: execve failed unexpectedly; expected Exec format error: ETXTBSY (26)  Summary: passed   5 failed   1 broken   0 skipped  0 warnings 0
-5|access02|FAIL|1|cess02.c:139: TPASS: access(symlink_x, X_OK) as root behaviour is correct. access02.c:139: TPASS: access(symlink_x, X_OK) as nobody behaviour is correct.  Summary: passed   15 failed   1 broken   0 skipped  0 warnings 0

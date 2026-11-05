@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|cl|PASS|0|main: rc=308 errno=0 forked-child: rc=310 errno=0
