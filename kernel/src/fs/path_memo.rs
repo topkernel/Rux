@@ -40,6 +40,7 @@
 
 use crate::fs::dentry::Dentry;
 use crate::fs::inode::Inode;
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -131,75 +132,32 @@ fn account(is_miss: bool) {
     }
 }
 
-/// (perf-gap-hunt v2) Plain (non-atomic) slot payload, read through the
-/// slot's seqlock — the sync::seqlock / ChildMemoSlot UnsafeCell
-/// discipline. All-inline: no heap dereference on the compare (the v1
-/// String indirection is gone), no per-slot lock on the read side.
-struct SlotData {
-    /// Post-follow root dentry identity (compare-only raw). The owning
-    /// Arc in the slot's `owner` pins it while any slot content still
-    /// references the pointer, so ptr-reuse false positives are
-    /// impossible (the v1 Entry.root pinning argument, unchanged).
-    root_key: *const Dentry,
-    /// Normalized path bytes, `path_len` valid.
-    path_len: u32,
-    path: [u8; MAX_PATH],
+struct Entry {
+    /// Pins the root identity (ptr-reuse false positives impossible).
+    root: Arc<Dentry>,
+    path: String,
+    final_dentry: Arc<Dentry>,
     /// (ancestor inode, dir_mut_gen at walk time), root first.
     chain: [(*const Inode, u64); MAX_CHAIN],
-    chain_n: u32,
-    /// Global mount generation at insert time.
+    chain_n: usize,
     mount_gen: u64,
-    /// Final dentry — cloned by readers under a WalkClaim; the owning
-    /// Arc in `owner` (and, after an overwrite, the retire-park path)
-    /// keeps it alive for claim holders.
-    final_raw: *const Dentry,
 }
 
-/// The owning strong references for one slot. Only writers touch it
-/// (under `wlock`); readers work from the raw pointers in `data`.
-struct SlotOwner {
-    root: Option<Arc<Dentry>>,
-    final_dentry: Option<Arc<Dentry>>,
-}
+// SAFETY: Entry is only reachable through its slot's spinlock; the raw
+// ancestor pointers are dereferenced exclusively under that lock and
+// the dentry reader-bank claim (see lookup), with the sequential
+// root->leaf validation discipline keeping them alive (module doc).
+unsafe impl Send for Entry {}
+unsafe impl Sync for Entry {}
 
-/// One memo slot. Readers: seqlock pair + plain field reads, no lock.
-/// Writers: `wlock` serializes (inserts are the cold path), then the
-/// RawSeqLock odd/even protocol publishes the payload.
-#[repr(align(64))]
 struct Slot {
-    seq: crate::sync::seqlock::RawSeqLock,
-    /// Serializes writers only; also owns the slot's strong references
-    /// between overwrites.
-    wlock: crate::sync::spinlock::Spinlock<SlotOwner>,
-    data: core::cell::UnsafeCell<SlotData>,
+    lock: crate::sync::spinlock::Spinlock<Option<Entry>>,
 }
-
-// SAFETY: `data` is accessed only through the seqlock protocol (readers
-// validate with read_begin/read_retry; writers hold `wlock` and flip the
-// sequence odd/even around plain writes). `owner` is only touched under
-// `wlock`. The raw pointers inside SlotData are dereferenced under the
-// dentry reader-bank claim with the sequential root->leaf validation
-// discipline (module doc).
-unsafe impl Sync for Slot {}
-unsafe impl Send for Slot {}
 
 static TABLE: [Slot; SLOTS] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const SLOT: Slot = Slot {
-        seq: crate::sync::seqlock::RawSeqLock::new(),
-        wlock: crate::sync::spinlock::Spinlock::new(SlotOwner {
-            root: None,
-            final_dentry: None,
-        }),
-        data: core::cell::UnsafeCell::new(SlotData {
-            root_key: core::ptr::null(),
-            path_len: 0,
-            path: [0; MAX_PATH],
-            chain: [(core::ptr::null(), 0); MAX_CHAIN],
-            chain_n: 0,
-            mount_gen: 0,
-            final_raw: core::ptr::null(),
-        }),
+        lock: crate::sync::spinlock::Spinlock::new(None),
     };
     [SLOT; SLOTS]
 };
@@ -216,11 +174,6 @@ fn hash(root: *const Dentry, path: &str) -> usize {
 
 /// Try the memo. Returns the resolved (dentry, inode) for the
 /// follow-shape lookup of `path` from `root`, or None (caller walks).
-///
-/// (perf-gap-hunt v2) Lock-free read side: one reader-bank claim + one
-/// seqlock pair + plain field reads. The v1 per-slot irqsave lock is
-/// gone; a racing insert just turns this lookup into a miss (the caller
-/// walks and the walk re-inserts).
 ///
 /// `cred` re-validates search permission per ancestor with the
 /// caller's credentials — the walk's own per-component check, repeated
@@ -242,104 +195,60 @@ pub fn lookup(
     }
     let root_key: *const Dentry = Arc::as_ptr(root);
     let slot = &TABLE[hash(root_key, path)];
-    // Reader claim: the validation derefs ancestor inodes and clones the
-    // final dentry from its raw pointer; the claim keeps a
-    // concurrently-retired object from draining mid-read (the dentry
-    // reader-bank protocol the walk itself relies on).
+    // Reader claim: the validation derefs ancestor inodes; the claim
+    // keeps a concurrently-retired ancestor from draining mid-read
+    // (the dentry reader-bank protocol the walk itself relies on).
     let claim = crate::fs::dentry::WalkClaim::acquire();
-    let path_bytes = path.as_bytes();
-    // Two attempts; a racing insert is the only source of a seq retry
-    // and inserts are rare — a persistent mismatch becomes a miss and
-    // the walk re-inserts.
-    let mut attempt = 0;
-    let hit = loop {
-        let s1 = slot.seq.read_begin();
-        if s1 & 1 == 0 {
-            // SAFETY: seqlock-protected read (validated by the re-read
-            // below; the sync::seqlock UnsafeCell discipline).
-            let d = unsafe { &*slot.data.get() };
-            let mut result: Option<(Arc<Dentry>, Arc<Inode>)> = None;
-            if d.root_key == root_key
-                && d.path_len as usize == path.len()
-                && d.path[..path.len()] == *path_bytes
-            {
-                // Topology moved -> everything below is suspect.
-                if d.mount_gen == MOUNT_GEN.load(Ordering::Acquire) {
-                    // Root -> leaf: generation + search permission per
-                    // ancestor.
-                    let mut ok = true;
-                    for &(ino_ptr, gen) in d.chain.iter().take(d.chain_n as usize) {
-                        // SAFETY: sequential-validation discipline (see
-                        // module doc): this inode is pinned by its
-                        // parent's child map while the previous
-                        // generation check passed, and the claim blocks
-                        // a pending retire from freeing it under us.
-                        let ino: &Inode = unsafe { &*ino_ptr };
-                        if ino.dir_mut_gen_load() != gen {
-                            ok = false;
-                            break;
-                        }
-                        let search_ok = match cred {
-                            Some(c) => crate::fs::permission::generic_permission(
-                                ino.mode.bits() as u16,
-                                ino.uid.load(Ordering::Relaxed),
-                                ino.gid.load(Ordering::Relaxed),
-                                crate::fs::permission::MAY_EXEC,
-                                c,
-                            ),
-                            None => true,
-                        };
-                        if !search_ok {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    if ok {
-                        // Final dentry: clone under the claim AFTER the
-                        // seq re-read below passes (an overwrite that
-                        // raced us retires the old Arc through the
-                        // claim-aware park path, so the raw pointer
-                        // cannot be freed while we hold the claim).
-                        let raw = d.final_raw;
-                        if !raw.is_null()
-                            && slot.seq.read_retry(s1) == false
-                        {
-                            // SAFETY: loaded from a memo slot under a
-                            // held claim; see dentry_arc_from_raw.
-                            let dentry =
-                                unsafe { crate::fs::dentry::dentry_arc_from_raw(raw) };
-                            if dentry.is_negative() {
-                                // A negative final can only be a torn
-                                // view (insert stores positives).
-                                result = None;
-                            } else {
-                                let ino_ptr = dentry.inode_ptr_walk(&claim);
-                                if ino_ptr.is_null() {
-                                    result = None;
-                                } else {
-                                    // SAFETY: protected by the claim
-                                    // (strong-count increment before
-                                    // the claim drops).
-                                    let inode = unsafe {
-                                        crate::fs::dentry::inode_arc_from_raw(ino_ptr)
-                                    };
-                                    result = Some((dentry, inode));
-                                }
-                            }
-                        }
-                    }
-                }
+    let guard = slot.lock.lock_irqsave();
+    let hit = (|| -> Option<(Arc<Dentry>, Arc<Inode>)> {
+        let entry = guard.as_ref()?;
+        if Arc::as_ptr(&entry.root) != root_key || entry.path != path {
+            return None;
+        }
+        // Topology moved -> everything below is suspect.
+        if entry.mount_gen != MOUNT_GEN.load(Ordering::Acquire) {
+            return None;
+        }
+        // Root -> leaf: generation + search permission per ancestor.
+        for &(ino_ptr, gen) in entry.chain.iter().take(entry.chain_n) {
+            // SAFETY: sequential-validation discipline (see module
+            // doc): this inode is pinned by its parent's child map
+            // while the previous generation check passed, and the
+            // claim blocks a pending retire from freeing it under us.
+            let ino: &Inode = unsafe { &*ino_ptr };
+            if ino.dir_mut_gen_load() != gen {
+                return None;
             }
-            if result.is_some() || slot.seq.read_retry(s1) == false {
-                break result;
+            let search_ok = match cred {
+                Some(c) => crate::fs::permission::generic_permission(
+                    ino.mode.bits() as u16,
+                    ino.uid.load(Ordering::Relaxed),
+                    ino.gid.load(Ordering::Relaxed),
+                    crate::fs::permission::MAY_EXEC,
+                    c,
+                ),
+                None => true,
+            };
+            if !search_ok {
+                return None;
             }
         }
-        attempt += 1;
-        if attempt >= 2 {
-            break None;
+        // Final dentry: pinned by the entry's own Arc; fetch its inode
+        // under the claim (same protocol as the walk tail).
+        let d = &entry.final_dentry;
+        if d.is_negative() {
+            return None;
         }
-        core::hint::spin_loop();
-    };
+        let ino_ptr = d.inode_ptr_walk(&claim);
+        if ino_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: protected by the claim (strong-count increment
+        // before the claim drops).
+        let inode = unsafe { crate::fs::dentry::inode_arc_from_raw(ino_ptr) };
+        Some((d.clone(), inode))
+    })();
+    drop(guard);
     drop(claim);
     if hit.is_some() {
         note_hit();
@@ -354,12 +263,6 @@ pub fn lookup(
 /// Record a successful follow-shape walk. `chain` is the ancestor
 /// (inode, dir_mut_gen) sequence in walk order, gens loaded under the
 /// walk's own claim.
-///
-/// (perf-gap-hunt v2) Writer side: the per-slot `wlock` serializes
-/// writers (inserts are the cold path — misses only), the RawSeqLock
-/// odd/even pair publishes the payload to lock-free readers, and the
-/// replaced final dentry's Arc retires through the claim-aware park
-/// path so a reader mid-clone can never see it freed.
 pub fn insert(
     root: &Arc<Dentry>,
     path: &str,
@@ -376,41 +279,17 @@ pub fn insert(
     }
     let root_key: *const Dentry = Arc::as_ptr(root);
     let slot = &TABLE[hash(root_key, path)];
-    let old;
-    {
-        let mut owner = slot.wlock.lock();
-        slot.seq.write_lock();
-        // SAFETY: wlock held — writers serialize here; racing readers
-        // are guarded by the seqlock pair.
-        let d = unsafe { &mut *slot.data.get() };
-        d.root_key = root_key;
-        d.path_len = path.len() as u32;
-        d.path[..path.len()].copy_from_slice(path.as_bytes());
-        d.chain = [(core::ptr::null(), 0); MAX_CHAIN];
-        d.chain[..chain.len()].copy_from_slice(chain);
-        d.chain_n = chain.len() as u32;
-        d.mount_gen = MOUNT_GEN.load(Ordering::Acquire);
-        d.final_raw = Arc::as_ptr(&final_dentry);
-        old = core::mem::replace(
-            &mut *owner,
-            SlotOwner {
-                root: Some(root.clone()),
-                final_dentry: Some(final_dentry),
-            },
-        );
-        slot.seq.write_unlock();
-    }
-    // The replaced final dentry's Arc drops here. A concurrent reader
-    // may have loaded its raw pointer from the previous slot content and
-    // still hold the claim — park it through the drain-aware retire path
-    // instead of a bare drop (the child-map mutator discipline).
-    if let Some(oldf) = old.final_dentry {
-        crate::fs::dentry::retire_arc_after_claim_readers(oldf);
-    }
-    // The replaced root Arc can drop plainly: readers never dereference
-    // the stored root (they compare raw pointers against their own
-    // pinned Arc), and any slot still keyed by that pointer holds its
-    // own pin via its owner Arc.
-    drop(old.root);
+    let mut e = Entry {
+        root: root.clone(),
+        path: String::from(path),
+        final_dentry,
+        chain: [(core::ptr::null(), 0); MAX_CHAIN],
+        chain_n: chain.len(),
+        mount_gen: MOUNT_GEN.load(Ordering::Acquire),
+    };
+    e.chain[..chain.len()].copy_from_slice(chain);
+    let mut guard = slot.lock.lock_irqsave();
+    *guard = Some(e);
+    drop(guard);
     INSERT.fetch_add(1, Ordering::Relaxed);
 }

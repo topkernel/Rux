@@ -17,7 +17,7 @@ for rep in $(seq 1 "$REPS"); do
         echo "===PB $lbl rep$rep $(date +%H:%M:%S) load=$(cut -d' ' -f1 /proc/loadavg)" >> "$OUT"
         # --mem 2G: 1G is a known panic (early kernel-heap alloc,
         # see pbench_boot.py's own default note).
-        python3 "$WT/scripts/test/pbench_boot.py" --bzimage "$k" --tag "abpb-$lbl-$rep" \
+        python3 "$WT/test/pbench_boot.py" --bzimage "$k" --tag "abpb-$lbl-$rep" \
             --accel kvm --smp 2 --mem 2G >> "$OUT" 2>&1
         echo "===END $lbl rep$rep rc=$?" >> "$OUT"
     done
