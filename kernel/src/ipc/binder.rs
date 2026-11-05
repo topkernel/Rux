@@ -9540,16 +9540,14 @@ unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
 
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
-    // Reference parity (binder_has_work_ilocked, 6.6): three independent
-    // OR conditions — process_todo, non-empty thread todo, or available
-    // for proc work with eligible proc todo. The old code missed the
-    // "non-empty thread todo" condition: a thread with a non-empty
-    // txn_stack (parked waiting for a reply) and a from-walk-delivered
-    // item on its own todo, but with process_todo cleared by a
-    // preceding pop's drain, was invisible — the AB-BA cross-process
-    // deadlock shape (samgr OS_IPC_0 ↔ power_host mutual
-    // GET_SYSTEM_ABILITY, r41v42 TXN-HANG-HLD).
-    if th.process_todo || !th.todo.is_empty() {
+    // Reference parity (binder_has_work_ilocked, 6.6): only process_todo
+    // (or looper_need_return / eligible proc work) makes work visible to
+    // a PARKING read — a non-empty todo alone does NOT. This is what
+    // keeps a deferred sync-send TRANSACTION_COMPLETE invisible until
+    // the reply (or an error resolution) sets process_todo. Every
+    // non-deferred push site in this file sets process_todo=true, so
+    // only deferred tcompletes are affected.
+    if th.process_todo {
         return true;
     }
     // Reference parity (binder_available_for_proc_work_ilocked, 6.6):
