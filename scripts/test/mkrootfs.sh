@@ -94,11 +94,16 @@ for app in desktop calculator clock vshell; do
 done
 
 # Copy test programs to /test/ directory
-fi
-fi
+# (the smoke_test install block was removed with the userspace/tests
+# member; probes come from userspace/probes/probes.tar.gz via the
+# extract hook — the orphaned `fi` pair left by that removal broke the
+# script's syntax)
 
-# Install dynamic linking test program
-if [ -f "$DYNAMIC_LINK_TEST" ]; then
+# Install dynamic linking test program (the source lived with the
+# removed smoke_test member; undefined variable under set -u was the
+# reorg's ninth miss — guard it off)
+DYNAMIC_LINK_TEST=""
+if [ -n "$DYNAMIC_LINK_TEST" ] && [ -f "$DYNAMIC_LINK_TEST" ]; then
     echo "Installing dynamic_link_test to /test/dynamic_link_test..."
     cp "$DYNAMIC_LINK_TEST" "$STAGING/test/dynamic_link_test"
     chmod +x "$STAGING/test/dynamic_link_test"

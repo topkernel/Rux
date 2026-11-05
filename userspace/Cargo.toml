@@ -14,7 +14,8 @@ members = [
     # GUI library
     # GUI applications -> /app/
     # User space test cases -> /test/
-    "tests/smoke_test",
+    # (tests/smoke_test removed with the test-infra move; smoke probes
+    # now build via scripts/test + userspace/probes/probes.tar.gz)
 ]
 
 # Common user program configuration
