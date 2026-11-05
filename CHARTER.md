@@ -20,15 +20,15 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 ### 未达标（按差距排序 = 主攻顺序）
 | 行 | 我们 | 参考(KVM/原生) | 差距 |
 |---|---|---|---|
-| lat_syscall open | 2.4→**0.8031**（11-05 close 停顿类修复 3bf07413；探针中位 801） | **0.3566（11-05 重锚复现，与冻结 0.36 一致）** | **2.25x**；原 3.4-8.4x 的大头是每 tick 一次的 10ms close() 停顿类（均值形基准吞掉）——已消灭；剩余=中位路径：walk ~500ns（memo 攻）+ open tail ~250ns + close 88ns + 入口 50ns |
+| lat_syscall open | 0.8031→**0.7412**（11-05 pm3：路径 memo+退避，A/B -6.8%） | **0.3566（11-05 重锚复现，与冻结 0.36 一致）** | **2.08x**；剩余=open tail ~250ns + close 88ns + 入口 50ns + memo 命中成本（槽锁+claim ~35ns，v2 攻：无锁读） |
 | lat_sem | 0.800 | 0.444 原生 | 1.80x |
-| lat_syscall stat | 0.379 | 0.2141（重锚）/0.227（冻结） | 1.64-1.77x |
-| lat_syscall read | 0.110→**0.1059**（11-05 栈） | 0.0596（重锚）/0.066（冻结） | 1.60-1.78x |
-| lat_syscall write | 0.094→**0.0915**（11-05 栈） | 0.0557（重锚）/0.058（冻结） | 1.53-1.64x |
 | lat_unix | 4.56 | 3.011 原生 | 1.52x |
+| lat_syscall stat | 0.379→**0.3105**（11-05 pm3：memo，A/B -14.6%） | 0.2141（重锚）/0.227（冻结） | **1.45x**；剩余=stat 尾 ~90ns + 入口 50ns + memo 命中成本 |
 | lat_syscall null | 0.055→**0.0505**（11-05 栈：钩子门×2） | 0.0418（重锚）/0.042（冻结） | 1.21x（入口地板，乘所有行；余量=inner call ~2ns+6 字参数拷贝 ~2-3ns+帧构建） |
-| lat_proc fork | 59.9→57.9（11-05 栈，噪声带 54.9-60.9） | 51.61（重锚）/53.99（冻结） | 1.07-1.12x |
 | lat_proc exec | 82-114（hello 真实形摆动）/86.5（失败形，base 88.4） | **84.80（hello 真实形重锚）** | 真实形带内~1.0-1.35x（待静窗细锚）；66 史值不可复现（谱系丢失） |
+| lat_proc fork | 59.9→57.9（11-05 栈，噪声带 54.9-60.9） | 51.61（重锚）/53.99（冻结） | 1.07-1.12x |
+| lat_syscall read | 0.1034→**0.0639**（11-05 pm4 /dev/zero 快臂，A/B -38.2%） | 0.0596（重锚）/0.066（冻结） | **1.07x（近平价；2x 需 ≤0.0298=入口+体全减半，入口地板结构性改）** |
+| lat_syscall write | 0.0870→**0.0628**（11-05 pm4 丢弃设备快臂，A/B -27.8%） | 0.0557（重锚）/0.058（冻结） | **1.13x（近平价；2x 需 ≤0.0279，同上）** |
 | Geekbench SC | 2115 | 2165(4CPU pinned) | 97.7%（次优先） |
 
 ## 已解剖结论（直接用，别重走弯路）
@@ -111,3 +111,4 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 - 2026-11-05 15:2x | 参考列恢复+全列重锚（第四任）| **vmlinuz 丢失之谜=权限**：宿主 /boot/vmlinuz-7.0.0-38-generic 为 root:600，QEMU 直接 "could not open kernel file: Permission denied"（前任"零串口输出"的真相）；agent 沙箱 NO_NEW_PRIVS 使 sudo 不可用 → docker 组成员资格可解：`docker run -v /boot:/boot:ro -v <dst>:/out <img> cp/chmod`（未来 agent 复用此法）。恢复后同 rig（q35+kvm+cpu host、ref2 图像、init_ref、loglevel=4，负载 4.15-4.22 好窗）跑 run-refkvm.sh 10 例全列（run/lmbench-refkvm2.txt）：null 0.0418 / read 0.0596 / write 0.0557 / stat 0.2141 / fstat 0.1129 / **open 0.3566** / fork 51.61 / exec 84.80（hello 真实形）/ pipe 13.02 / ctx 6.37 | — | — | **open 行重锚定论：参考 0.3566 与冻结列 0.36 一致复现——参考侧从未断**。第三任"基准断裂"结论修正为：参考列可复现，断裂的只是我方 0.70 旧值（旧图像谱系）；open 真实差距 = 我方 2.1-3.0µs（lmbench 形）/ 1.20µs（pbench p6 中位） vs 参考 0.3566 ≈ **3.4-8.4x，升回最大行**。exec 行同锚完成：参考 84.80 真实形 vs 我方 hello 形 82-114（待静窗 n≥3 细锚）；fork 参考 51.61（章程 53.99 同带）；pipe/ctx/fstat 参考值带内复现=冻结列可信
 - 2026-11-05 15:5x | open 行解剖→**10ms close 停顿类修复**（第四任，3bf07413）| 新探针 test/probe_open.c（同靴 rdtsc 分布+无采样纯墙环，双核同图像对比）：Rux open+close **中位 1072ns / 均值 2451ns**，p99≈10.4µs、top5 全 ~10ms——**每 10ms tick 恰一次 close() 停顿 0.7-10ms，全部落在 jiffy 边界结束**（open 恒 520-710ns）；-smp 1 干净（均值 869）=纯跨 CPU 宽限互锁非工作量；参考核同 rig：中位 351/均值 370/无此类。lmbench 的 2.4µs 即此尾巴的均值化（pbench rdtsc 中位免疫）。根因两条：(1) wait_qs_sleepy 标 INTERRUPTIBLE 后不复查 QS 即睡满 1 jiffy（缺失报告者通常 µs 级就补上——fd-close 完成环每轮 schedule() 都是报告点）；(2) retire_complete 每次 close TICKET.up 唤醒 fdreapd（closer 本会自排空批次，纯噪音；且 fdreapd 抢走批次时 closer 反而等 fdreapd 的 sleepy 宽限 jiffy 粒度）| rcu.rs：set_state 后加 QS 复查命中即撤定时器（check-flag-sleep 协议，NEW-C2 纪律照抄定时器超时路径）；fdreap.rs：快乐路径删 TICKET.up（fdreapd 静睡=次 CPU 保持 halt=构造性 quiescent，closer 的 polled 宽限 µs 窗口完成；requeue 路径仍 up）| 修复后同探针：open+close **中位 801/均值 831/墙 827**（无周期停顿，仅靴首瞬态 757µs）；中位还赚 ~270ns（省每 close 的唤醒 IPI+缓存行乒乓）。lmbench：**open 2.4→0.8031µs（vs 参考 0.3566 = 2.25x）**、fork 58.64（带内）、exec 97.76（hello 形带内）| 门禁启动中 | 台账教训：均值形基准（lmbench benchmp 墙钟）会吃周期尾巴类——中位形（pbench）看不见；今后可疑行先跑分布探针。剩余 2.25x=中位路径工作：walk memo+open tail（并入 #4 计划）
 - 2026-11-05 19:04 | 三次复活 | — | 第四任 16:21 额度阵亡（会话冻结至 19:02 苏醒）；死前战果=open 行 3x 削减（3bf07413 fdreap 每 tick 10ms close 停顿类修复）+#2 关门（LTP 68/68）+参考列重锚（open 0.3566 复现=真差距）；path_memo WIP 已归档提交 | — | — | 额度 19:47:40 重置，19:55 定时重派第五任
+- 2026-11-05 21:0x | GNOME 段错误 flake 裁定（主会话） | 3+3 靴矩阵：pre-campaign 内核（e8c395bd）segv=8/6/6，main-mmw-reverted segv=8/5/0——**GNOME-x86 用户态段错误为存量 flaky（0x555555a* 聚集，mode=user），与战役 mm 栈无关**；早前单靴"二分"是运气假阳性，mm 栈曾被冤枉回退后已恢复（main=cce72479）| — | — | 段错误本身移交 GNOME/x86 bring-up 线（靴可继续到 shell 段，疑似镜像侧 GNOME 组件自崩或存量内核 x86 路径 bug——两臂同率无法区分归属，需 GNOME 线以组件级归因接手）
