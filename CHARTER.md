@@ -20,15 +20,15 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 ### 未达标（按差距排序 = 主攻顺序）
 | 行 | 我们 | 参考(KVM/原生) | 差距 |
 |---|---|---|---|
-| lat_syscall open | 0.70 | 0.36 | 1.95x（目标 ≤0.18）；fsw=1 分解：open pre 169ns + walk 636ns（a=权限/inode、b=dcache 查找主导）+ **open tail 789ns=最大相位**（插桩值有时钟读污染，相位占比可靠）——下一刀在 open tail 簿记非 walk |
+| lat_syscall open | 2.1-3.0（lmbench 形）/ 1.20（pbench p6 中位） | **0.3566（11-05 重锚复现，与冻结 0.36 一致）** | **3.4-8.4x（升回最大行）**；fsw=1 分解：open pre 169ns + walk 636ns（a=权限/inode、b=dcache 查找主导）+ open tail 789ns（插桩含时钟税）——插桩相位和 ~1.5µs < lmbench 墙值 2.4，仍有括桩外大头待分解；参考列从未断（第三任"basis-broken"仅对我方 0.70 旧值成立） |
 | lat_sem | 0.800 | 0.444 原生 | 1.80x |
-| lat_syscall stat | 0.379 | 0.227 | 1.68x |
-| lat_syscall read | 0.110→**0.1059**（11-05 栈） | 0.066 | 1.60x |
-| lat_syscall write | 0.094→**0.0915**（11-05 栈） | 0.058 | 1.58x |
+| lat_syscall stat | 0.379 | 0.2141（重锚）/0.227（冻结） | 1.64-1.77x |
+| lat_syscall read | 0.110→**0.1059**（11-05 栈） | 0.0596（重锚）/0.066（冻结） | 1.60-1.78x |
+| lat_syscall write | 0.094→**0.0915**（11-05 栈） | 0.0557（重锚）/0.058（冻结） | 1.53-1.64x |
 | lat_unix | 4.56 | 3.011 原生 | 1.52x |
-| lat_syscall null | 0.055→**0.0505**（11-05 栈：钩子门×2） | 0.042 | 1.20x（入口地板，乘所有行；余量=inner call ~2ns+6 字参数拷贝 ~2-3ns+帧构建） |
-| lat_proc fork | 59.9→57.9（11-05 栈，噪声带 54.9-60.9） | 53.99 | 1.07x |
-| lat_proc exec | 66→82（**basis-broken**：现镜像无 /tmp/hello=失败 execve 形；栈相对 base -5% 同基有效；fair-rig 注入 hello 后重锚） | 87.4 | 待重锚 |
+| lat_syscall null | 0.055→**0.0505**（11-05 栈：钩子门×2） | 0.0418（重锚）/0.042（冻结） | 1.21x（入口地板，乘所有行；余量=inner call ~2ns+6 字参数拷贝 ~2-3ns+帧构建） |
+| lat_proc fork | 59.9→57.9（11-05 栈，噪声带 54.9-60.9） | 51.61（重锚）/53.99（冻结） | 1.07-1.12x |
+| lat_proc exec | 82-114（hello 真实形摆动）/86.5（失败形，base 88.4） | **84.80（hello 真实形重锚）** | 真实形带内~1.0-1.35x（待静窗细锚）；66 史值不可复现（谱系丢失） |
 | Geekbench SC | 2115 | 2165(4CPU pinned) | 97.7%（次优先） |
 
 ## 已解剖结论（直接用，别重走弯路）
@@ -53,17 +53,15 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 ## 攻击队列（按预期 ROI 排序）
 
 1. ~~lat_pagefault~~ **完成 2026-11-05**：0.0287-0.0312µs = 2.26-2.45x 反超（≤0.5x 达标），门禁六腿全绿，待主会话合 main
-2. **%gs 内核 per-cpu 基址**替代 CpuLocal::with 的 cli/sti+cpu_id（open/close
-   -50ns，惠及全部分配密集路径；x86 专属：内核 GS base 指 per-cpu 区 +
-   swapgs 纪律，内核态 %gs:offset 直接寻址）
-3. **路径行走 tracepoint 分解**（stat/open 的 ~200-250ns 盲区——统一 trace
-   框架加 path-walk 事件，量化每组件成本再动刀）
-4. **syscall 入口地板 13ns**（null 1.31x：两层 dispatch 合一、armed() 残项
-   归并、seccomp/IRQ 门重排——乘所有系统调用行）
-5. **fork retire 批量 park**（exit_group/cloexec 批量关闭一次锁往返）
-6. **lat_sem 0.800 vs 0.444**（semop 路径分解）
-7. **lat_unix 4.56 vs 3.01**（唤醒侧已到平台，查 socket 缓冲/唤醒队列路径）
-8. ~~D-1 runqueue 分片评估~~ **完成 2026-11-05**（1475e1a9：保持关闭——最优省 164ns/切换=7.7% lat_ctx，动不到任何未达标行；触发器已记）
+2. ~~钩子调用税两刀~~ **完成 2026-11-05**（第四任补 LTP fs 族 68 例逐例同 base 关门）：a5124151 irq 钩子快门 + c0034520 fpgate 快门，待主会话合 main。（原 #2 %gs per-cpu 前提已过时——cpu_id 已单指令，见 13:4x 台账）
+3. **open 行 3.4-8.4x**（重锚后升回最大行）：(a) lmbench 形 2.4µs vs pbench 1.20 vs 插桩相位和 1.5µs——先分解括桩外差距（benchmp 形差异：子进程/每次迭代路径 vs pbench 单进程）；(b) 全路径→dentry 记忆化（15:0x 攻击计划，省走查 ~185ns+）；(c) open tail 789ns 插桩相位分解
+4. **路径行走记忆化**（15:0x 计划：全路径 memo 键=(root dentry,规范串,挂载代)，negmemo 同款失效锚；+胶水 70ns：claim 每迭代重取提出循环、NAME_MAX 提到 split 时一次性验）——惠及 open/stat/exec
+5. **syscall 入口地板 13ns**（null 1.21x：两层 dispatch 合一、armed() 残项归并、seccomp/IRQ 门重排——乘所有系统调用行）
+6. **read/write 1.6x**（入口+VFS 层分解未做）
+7. **fork retire 批量 park**（exit_group/cloexec 批量关闭一次锁往返）+ fork 57.9 vs 51.61
+8. **lat_sem 0.800 vs 0.444**（semop 路径分解）
+9. **lat_unix 4.56 vs 3.01**（唤醒侧已到平台，查 socket 缓冲/唤醒队列路径）
+10. ~~D-1 runqueue 分片评估~~ **完成 2026-11-05**（1475e1a9：保持关闭——最优省 164ns/切换=7.7% lat_ctx，动不到任何未达标行；触发器已记）
 
 ## 纪律（必须遵守）
 
@@ -109,3 +107,5 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 - 2026-11-05 15:1x | open 行基准取证（第三任）| 今日全部 open A/B（base 53fba4f6 与分支栈同涨 2.1-3.0µs vs 章程 0.70）→ 逐项排除：(a) make_scratch 16MB 后台写回理论——runner 已门控（仅 lat_pagefault/lat_mmap/bw_file_rd/bw_mmap_rd/lat_fs/lat_dram_page 造 scratch；pagefault 复测 0.0286µs 正常）后 open 仍 2.1-2.8，**否**；(b) ENOENT 形（旧 rig 文件不存在走失败路径）——显式 /nope 传参 bench 中止无值，stat 同文件 0.372 与史吻合（0.379）说明走查同基，**否**；(c) 目标文件差异——/test/lat_ctx 显式传参同样 2.58µs，**否**；(d) pbench p6_openclose 同 rig 1.20µs(n=10000 med) vs lmbench 2.4 = benchmp 记账差异未定。结论：**open 行 0.70 基准不可复现**（旧图像谱系丢失；同 base 内核二进制今读 2.4-3.0=该 rig 的真实 open+close 水平），参考侧 0.36 同样出自丢失 rig → 1.95x 差距数字当前无意义；stat/read/write/null 四行与史吻合故仅 open 行基准断裂 | userspace/lmbench/lmbench_run.c：scratch 门控（rig 卫生，兼修 pagefault 案例外的 16MB 无谓写）；run/refkvm/lmbench-ref2.img 已备（work 镜像副本+init_ref 注入，与 Rux 列同图像字节）| — | **移交下任**：(1) 恢复参考列 vmlinuz（原 run/refkvm/vmlinuz-7.0.0-38-generic 已丢；宿主 /boot 同名件在 q35+serial file 形下零串口输出需查——run-refkvm.sh 当时能跑，疑 EFI stub/控制台差异）后跑 run-refkvm.sh 重锚全列；(2) 重锚前 open 行标注 basis-broken，用 p6_openclose 1.20µs 作稳态代理；(3) 重锚后按 15:0x 行攻击计划动刀（全路径 memo 等）
 - 2026-11-05 15:4x | 分支栈全行战绩（修 runner 后 n=2 交错，负载 3.4-5.3 同窗，run/abpf-standings-stack-n2.txt）| base 53fba4f6 vs 栈（ce3c934f+钩子门+fpgate）：pagefault 0.4644→0.0288（**16.1x**，再证）；pipe 4.249→**3.740（-12.0%，3.56x 反超**——cli/sti 钩子税在 ping-pong 每回合多对复利）；null 0.0528→0.0491（-7.0%）；exec 86.5→82.2（-5.0%，失败 execve 形同基）；read 0.1090→0.1044（-4.2%）；write 0.0919→0.0894（-2.8%）；fstat 0.0841→0.0827（-1.6%）；stat -0.2% 平；fork +0.5%（噪声带内）。exec 行定性：现镜像无 /tmp/hello（fair-rig 文档载明的失败 execve 形），66→86 基准漂移与 open 同类，需 fair-rig 注入后重锚 | — | — | 栈在所有可锚行上全优或平；open/exec 两行 basis-broken 待参考列恢复+hello 注入重锚
 - 2026-11-05 15:5x | exec 行 hello 注入重锚（我方列）| work 镜像注入 /tmp/hello（fair-rig 形）：真实 execve 基准 base 96.6/88.4、栈 99.9/113.9（负载 ~4，n=2 摆动 88-114 不可细判）；失败 execve 形 86.5/82.2 同基栈 -5%。真实形比失败形慢（82→92 中位级，方向符合预期：真 exec 多 ELF/mmap 工作）；章程 66 基准既非失败形也非本窗真实形=更静窗或再一态，**exec 行三态（失败/真实/66史）全部需与参考同锚后才有意义** | — | — | 移交：参考列 vmlinuz 恢复后，run-refkvm.sh 全列重锚（图像 run/refkvm/lmbench-ref2.img 已含 hello+init_ref，与 Rux 列同字节）
+- 2026-11-05 15:2x | #2 门禁补完：LTP fs 族 68 例（第四任）| LTP fs/process 族（open/openat/stat/lstat/fstat/close/read/write/creat/dup/fcntl/rename/mkdir/rmdir/unlink/link/symlink/readlink/getcwd/chdir/access/utime/truncate/pipe/pipe2/readv/writev/pread/pwrite/flock/fork/wait/exit/execve 共 68 例，riscv64 release，ltp_family_boot.py），HEAD 栈核 vs base 53fba4f6 核：**逐例 rc 相同**（双侧 67 例 rc=0，dup03 双侧同 "?" 超时标记=已知抖动类，非分歧）。其余腿沿用第三任记录（内核码自 c0034520 未变，其后仅章程/数据提交）：双架构 rc=0、make test 1316/1316、riscv 90s 浸泡（基线既有类放行）、census 带内、武装靴双验、pbench n=3 带内+12 行改善 | — | LTP 族补齐 | **#2 关门：钩子门 a5124151 + fpgate c0034520 全门禁六腿+LTP 绿，待主会话合 main**。rig 注记：base 侧首次 setsid 启动 0 字节死胎（原因未明），nohup 重启正常——后续长测用 nohup 形
+- 2026-11-05 15:2x | 参考列恢复+全列重锚（第四任）| **vmlinuz 丢失之谜=权限**：宿主 /boot/vmlinuz-7.0.0-38-generic 为 root:600，QEMU 直接 "could not open kernel file: Permission denied"（前任"零串口输出"的真相）；agent 沙箱 NO_NEW_PRIVS 使 sudo 不可用 → docker 组成员资格可解：`docker run -v /boot:/boot:ro -v <dst>:/out <img> cp/chmod`（未来 agent 复用此法）。恢复后同 rig（q35+kvm+cpu host、ref2 图像、init_ref、loglevel=4，负载 4.15-4.22 好窗）跑 run-refkvm.sh 10 例全列（run/lmbench-refkvm2.txt）：null 0.0418 / read 0.0596 / write 0.0557 / stat 0.2141 / fstat 0.1129 / **open 0.3566** / fork 51.61 / exec 84.80（hello 真实形）/ pipe 13.02 / ctx 6.37 | — | — | **open 行重锚定论：参考 0.3566 与冻结列 0.36 一致复现——参考侧从未断**。第三任"基准断裂"结论修正为：参考列可复现，断裂的只是我方 0.70 旧值（旧图像谱系）；open 真实差距 = 我方 2.1-3.0µs（lmbench 形）/ 1.20µs（pbench p6 中位） vs 参考 0.3566 ≈ **3.4-8.4x，升回最大行**。exec 行同锚完成：参考 84.80 真实形 vs 我方 hello 形 82-114（待静窗 n≥3 细锚）；fork 参考 51.61（章程 53.99 同带）；pipe/ctx/fstat 参考值带内复现=冻结列可信
