@@ -856,7 +856,11 @@ impl MmStruct {
             if mp {
                 crate::dfx::mmprof::add(crate::dfx::mmprof::MU_SURG, mp_t_surg);
             }
-            self.unmap_pages(PageVirtAddr::new(seg_start), chunk_end - seg_start)?;
+            self.unmap_pages(
+                PageVirtAddr::new(seg_start),
+                chunk_end - seg_start,
+                true,
+            )?;
 
             // Drop the guard at every chunk boundary: the write lock must
             // never be held across schedule(), and the boundary is the
@@ -874,6 +878,16 @@ impl MmStruct {
             // racers keep their handoff points; the longest held window
             // is one ~10us chunk after the leaf-table walk fix.
         }
+
+        // ONE TLB flush for the whole munmap (perf-gap-hunt): the chunked
+        // unmap_pages above deferred its flushes — a multi-MB munmap ran
+        // 16+ IPI broadcasts + CR3 reloads, one per 1 MiB chunk, which
+        // measured ~1 µs per chunk on the bench shape. Same-mm racers keep
+        // the per-chunk guard-drop handoff; cleared-range visibility for
+        // user mode is restored before the syscall returns (the reference
+        // batches its unmapped-range flushes the same way).
+        crate::arch::ipi::flush_tlb_others(addr_us as u64, end_addr as u64);
+        crate::arch::mm::asid::flush_tlb_all();
 
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
@@ -893,7 +907,7 @@ impl MmStruct {
         if start.as_usize().checked_add(aligned_size).is_none() {
             return Err(MapError::Invalid);
         }
-        self.unmap_pages(start, aligned_size)
+        self.unmap_pages(start, aligned_size, false)
     }
 
     /// Unmap physical pages in specified range
@@ -908,7 +922,12 @@ impl MmStruct {
     /// with the old body (same swap/kernel-window/foreign-frame/rmap/
     /// refcount/clear discipline); exotic shapes (an upper-level leaf in
     /// the user range) fall back to the per-page walk.
-    fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
+    fn unmap_pages(
+        &self,
+        start: PageVirtAddr,
+        size: usize,
+        defer_tlb_flush: bool,
+    ) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
         let mp = crate::dfx::mmprof::on();
@@ -933,6 +952,32 @@ impl MmStruct {
         // frame is re-checked with the same stale guard the walker used
         // before being handed to get_page_table_virt.
         let root_table = unsafe { get_page_table_virt(self.pgd << PAGE_SHIFT) };
+
+        // PCACHE pin-release batching (perf-gap-hunt 2026-11-04): the
+        // per-page release_cache_mapping_pin cost a hash probe + claim +
+        // inode lock + BTreeMap get PER PAGE (~40ns — the dominant cost
+        // of tearing down fault-around windows). Consecutive PCACHE
+        // leaves of one inode accumulate their cache indices here and
+        // flush through ONE put_range_by_key per (inode-change | 64
+        // pages | end). Ordering discipline unchanged: each page's
+        // descriptor put_page still happens BEFORE the flush that
+        // releases its pin ("the pin's release may free an invalidated
+        // frame — every reference must be gone by then": later is
+        // stricter than per-page, never earlier).
+        const PIN_BATCH: usize = 64;
+        let mut pin_key: u64 = u64::MAX;
+        let mut pin_batch: [u64; PIN_BATCH] = [0; PIN_BATCH];
+        let mut pin_n: usize = 0usize;
+        let mut rss_delta: u64 = 0u64;
+        macro_rules! flush_pin_batch {
+            () => {
+                if pin_n > 0 {
+                    crate::fs::page_cache::get_page_cache()
+                        .put_range_by_key(pin_key, &pin_batch[..pin_n]);
+                    pin_n = 0;
+                }
+            };
+        }
 
         while addr < end {
             let a = VirtAddr::new(addr as u64);
@@ -1076,56 +1121,94 @@ impl MmStruct {
                 // page.
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
+                let leaf_is_pcache = raw & cow_flags::PCACHE != 0;
+                // RO alias (PCACHE_RO): the leaf owns NEITHER a descriptor
+                // reference NOR a cache pin — only the mapcount. The
+                // mapcount drop (page_remove_rmap above) is its whole
+                // teardown.
+                let leaf_is_ro = raw & cow_flags::PCACHE_RO != 0;
                 if !page.is_null() {
                     // Multi-mapping bookkeeping: drop this (mm, vpn) from
-                    // the page's alternate rmap slots.
-                    unsafe {
-                        (*page).rmap_alt_remove(
-                            self as *const _ as usize,
-                            va / PAGE_SIZE_USIZE,
-                        );
+                    // the page's alternate rmap slots. PCACHE leaves never
+                    // record an rmap (the frame's mapping/index keys
+                    // belong to the page cache) — the alt-slot scan is a
+                    // guaranteed no-op for them, so skip it (perf-gap-hunt:
+                    // it costs a scan per page in fault-around teardown).
+                    if !leaf_is_pcache {
+                        unsafe {
+                            (*page).rmap_alt_remove(
+                                self as *const _ as usize,
+                                va / PAGE_SIZE_USIZE,
+                            );
+                        }
                     }
                     if unsafe { (*page).is_mapped() } {
                         // SAFETY: page is non-null (checked above) and points to a valid page
                         // descriptor for a mapped page in this address space.
                         crate::mm::rmap::page_remove_rmap(unsafe { &*page });
                     }
-                    // SAFETY: page descriptor for a page mapped by this address space.
-                    let new_ref =
-                        unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
-                    if new_ref == 0 {
-                        crate::mm::page_alloc::free_pages(
-                            (ppn_val as usize) << PAGE_SHIFT, 0,
-                        );
-                    }
-                    // PCACHE mapping (filemap_fault): drop this mapping's
-                    // page-cache pin AFTER the descriptor put (see
-                    // release_cache_mapping_pin). Order matters: the pin's
-                    // release may free an invalidated frame — every
-                    // reference must be gone by then.
-                    if raw & cow_flags::PCACHE != 0 {
-                        release_cache_mapping_pin(ppn_val as usize);
+                    if !leaf_is_ro {
+                        // SAFETY: page descriptor for a page mapped by this address space.
+                        let new_ref =
+                            unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                        if new_ref == 0 {
+                            crate::mm::page_alloc::free_pages(
+                                (ppn_val as usize) << PAGE_SHIFT, 0,
+                            );
+                        }
+                        // PCACHE mapping (filemap_fault): drop this mapping's
+                        // page-cache pin AFTER the descriptor put (see
+                        // release_cache_mapping_pin). Order matters: the pin's
+                        // release may free an invalidated frame — every
+                        // reference must be gone by then. Consecutive leaves
+                        // of one inode BATCH through put_range_by_key (one
+                        // claim + lock per 64 pages; per-page release only on
+                        // key change / batch full / end).
+                        if leaf_is_pcache {
+                            // SAFETY: page descriptor read of the cache keys
+                            // (mapping = inode hash key, index = file page
+                            // index); read-only.
+                            let key = unsafe { (*page).mapping() as u64 };
+                            let index = unsafe { (*page).index() as u64 };
+                            if pin_n == PIN_BATCH || (pin_n > 0 && key != pin_key) {
+                                flush_pin_batch!();
+                                pin_key = key;
+                            }
+                            pin_batch[pin_n] = index;
+                            pin_n += 1;
+                        }
                     }
                 }
                 unsafe { Self::unmap_clear_leaf(table1, idx, va) };
-                // RSS accounting: one resident page leaves this address space.
-                self.sub_rss(1);
+                // RSS accounting: one resident page leaves this address
+                // space (accumulated; one atomic for the whole range —
+                // perf-gap-hunt: the per-page fetch_add showed up in
+                // fault-around window teardown).
+                rss_delta += 1;
                 va += PAGE_SIZE_USIZE;
             }
             addr = block_end;
+        }
+
+        // Release the tail of the pin batch (the macro borrows the locals).
+        flush_pin_batch!();
+        if rss_delta > 0 {
+            self.sub_rss(rss_delta);
         }
 
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
         }
         let mp_tt = if mp { crate::dfx::mmprof::now() } else { 0 };
-        crate::arch::ipi::flush_tlb_others(
-            start.as_usize() as u64,
-            end as u64,
-        );
-        // Full TLB flush (CR3 reload); required after clearing PTEs so
-        // subsequent accesses use the updated page table.
-        crate::arch::mm::asid::flush_tlb_all();
+        if !defer_tlb_flush {
+            crate::arch::ipi::flush_tlb_others(
+                start.as_usize() as u64,
+                end as u64,
+            );
+            // Full TLB flush (CR3 reload); required after clearing PTEs so
+            // subsequent accesses use the updated page table.
+            crate::arch::mm::asid::flush_tlb_all();
+        }
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_TLB, mp_tt);
         }
@@ -1192,25 +1275,32 @@ impl MmStruct {
                 }
                 use crate::mm::page_desc::pfn_to_page_mut;
                 let page = pfn_to_page_mut(ppn_val as usize);
+                // RO alias: mapcount-only teardown (see unmap_pages fast
+                // path / cow_flags::PCACHE_RO).
+                let leaf_is_ro = pte_bits & cow_flags::PCACHE_RO != 0;
                 if !page.is_null() {
-                    unsafe {
-                        (*page).rmap_alt_remove(
-                            self as *const _ as usize,
-                            addr / PAGE_SIZE_USIZE,
-                        );
+                    if pte_bits & cow_flags::PCACHE == 0 {
+                        unsafe {
+                            (*page).rmap_alt_remove(
+                                self as *const _ as usize,
+                                addr / PAGE_SIZE_USIZE,
+                            );
+                        }
                     }
                     if unsafe { (*page).is_mapped() } {
                         crate::mm::rmap::page_remove_rmap(unsafe { &*page });
                     }
-                    let new_ref =
-                        unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
-                    if new_ref == 0 {
-                        crate::mm::page_alloc::free_pages(
-                            (ppn_val as usize) << PAGE_SHIFT, 0,
-                        );
-                    }
-                    if pte_bits & cow_flags::PCACHE != 0 {
-                        release_cache_mapping_pin(ppn_val as usize);
+                    if !leaf_is_ro {
+                        let new_ref =
+                            unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                        if new_ref == 0 {
+                            crate::mm::page_alloc::free_pages(
+                                (ppn_val as usize) << PAGE_SHIFT, 0,
+                            );
+                        }
+                        if pte_bits & cow_flags::PCACHE != 0 {
+                            release_cache_mapping_pin(ppn_val as usize);
+                        }
                     }
                 }
                 // SAFETY: addr is a valid, page-aligned virtual address in this address space,
@@ -1259,29 +1349,35 @@ impl MmStruct {
         }
         use crate::mm::page_desc::pfn_to_page_mut;
         let page = pfn_to_page_mut(ppn_val as usize);
+        // RO alias: mapcount-only teardown (cow_flags::PCACHE_RO).
+        let leaf_is_ro = pte_bits & cow_flags::PCACHE_RO != 0;
         if !page.is_null() {
-            // SAFETY: page is non-null (checked) and points to the page
-            // descriptor of the leaf frame mapped at `va`.
-            unsafe {
-                (*page).rmap_alt_remove(
-                    self as *const _ as usize,
-                    va / PAGE_SIZE_USIZE,
-                );
+            if pte_bits & cow_flags::PCACHE == 0 {
+                // SAFETY: page is non-null (checked) and points to the page
+                // descriptor of the leaf frame mapped at `va`.
+                unsafe {
+                    (*page).rmap_alt_remove(
+                        self as *const _ as usize,
+                        va / PAGE_SIZE_USIZE,
+                    );
+                }
             }
             if unsafe { (*page).is_mapped() } {
                 // SAFETY: page descriptor for a page mapped by this address space.
                 unsafe { crate::mm::rmap::page_remove_rmap(&*page) };
             }
-            // SAFETY: page descriptor for a page mapped by this address space.
-            let new_ref =
-                unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
-            if new_ref == 0 {
-                crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
-            }
-            // PCACHE mapping: drop the pin after the descriptor put (same
-            // ordering as unmap_pages).
-            if pte_bits & cow_flags::PCACHE != 0 {
-                release_cache_mapping_pin(ppn_val as usize);
+            if !leaf_is_ro {
+                // SAFETY: page descriptor for a page mapped by this address space.
+                let new_ref =
+                    unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                if new_ref == 0 {
+                    crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
+                }
+                // PCACHE mapping: drop the pin after the descriptor put (same
+                // ordering as unmap_pages).
+                if pte_bits & cow_flags::PCACHE != 0 {
+                    release_cache_mapping_pin(ppn_val as usize);
+                }
             }
         }
         // SAFETY: `va` was just verified as a mapped user leaf.
@@ -2311,6 +2407,23 @@ pub mod cow_flags {
     /// every other mapper. Carried (preserved) through PTE rewrites like
     /// PCACHE itself; fork's cow_exempt (SHARED VMAs) copies it as-is.
     pub const PCACHE_SHARED: u64 = 1 << 11;
+    /// Pin-free read-only alias of a page-cache frame (perf-gap-hunt
+    /// 2026-11-04): a PCACHE leaf created by the SHARED read fault-around
+    /// batch. It holds NEITHER a page-cache pin NOR a page-descriptor
+    /// reference — only the descriptor mapcount (inc at install, dec at
+    /// unmap). Eviction and write(2)-invalidation safety come from the
+    /// mapcount: page-cache reclaim skips frames whose mapcount > 0 (the
+    /// same shape as the reference kernel's page_mapped() check — one
+    /// atomic per PTE instead of a pin + refcount round trip, which is
+    /// what makes 512-page fault-around windows affordable). Always
+    /// carried TOGETHER with PCACHE (identity consumers key on PCACHE;
+    /// this bit selects the release discipline). mprotect rewrites
+    /// preserve it like PCACHE; a W-grant treats it like PCACHE_SHARED
+    /// (in-place W + dirty mark — the leaf is a SHARED-VMA form). Fork
+    /// copies it with inc_mapcount only (no pin, no get_page). Bit 52 is
+    /// above the 52-bit PHYS_MASK and below the swap-signature bits —
+    /// software-available on x86-64 paging for any MAXPHYADDR ≤ 52.
+    pub const PCACHE_RO: u64 = 1 << 52;
 }
 
 /// Drop the page-cache pin owned by ONE mapping of a cache-backed frame
@@ -2588,11 +2701,18 @@ pub unsafe fn copy_page_table_cow(
                         let page = pfn_to_page_mut(phys_ppn);
 
                         if !page.is_null() {
+                            // RO alias (cow_flags::PCACHE_RO): the child's
+                            // copy is mapcount-only TOO — no pin to
+                            // duplicate, no descriptor ref to take; the
+                            // inc_mapcount below is the child's whole
+                            // claim on the frame (eviction safety).
+                            let leaf_is_ro =
+                                pte1.bits() & cow_flags::PCACHE_RO != 0;
                             // PCACHE leaf (filemap_fault): the child's copy
                             // owns its own pin — without this, the parent's
                             // unmap would drop the LAST pin and eviction
                             // could free a frame the child still maps.
-                            if pte1.bits() & cow_flags::PCACHE != 0 {
+                            if !leaf_is_ro && pte1.bits() & cow_flags::PCACHE != 0 {
                                 let key = (*page).mapping() as u64;
                                 let index = (*page).index() as u64;
                                 if !crate::fs::page_cache::get_page_cache()
@@ -2608,7 +2728,9 @@ pub unsafe fn copy_page_table_cow(
                             }
 
                             // Increment refcount for shared user pages (one ref per sharer)
-                            (*page).get_page();
+                            if !leaf_is_ro {
+                                (*page).get_page();
+                            }
                             (*page).inc_mapcount();
 
                             if is_writable && !cow_exempt_leaf {
@@ -3082,12 +3204,13 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         // (restoring P) while preserving its PPN.
 
         let cow_bit = raw & cow_flags::COW;
-        // PCACHE/PCACHE_SHARED are mapping-ownership bits (this PTE owns a
-        // page-cache pin; a SHARED leaf maps the frame writable), not
-        // protection bits — they must survive protection rewrites exactly
-        // like the COW bit, or a later unmap/COW would leak the pin (frame
-        // unevictable forever).
-        let pcache_bit = raw & (cow_flags::PCACHE | cow_flags::PCACHE_SHARED);
+        // PCACHE/PCACHE_SHARED/PCACHE_RO are mapping-ownership bits (this
+        // PTE owns a page-cache pin — or, for PCACHE_RO, holds the
+        // mapcount-only read-only alias), not protection bits — they must
+        // survive protection rewrites exactly like the COW bit, or a later
+        // unmap/COW would leak the pin (frame unevictable forever).
+        let pcache_bit =
+            raw & (cow_flags::PCACHE | cow_flags::PCACHE_SHARED | cow_flags::PCACHE_RO);
         let mut new_bits = (raw & PageTableEntry::PHYS_MASK_PUBLIC) | base;
         if cow_bit != 0 {
             new_bits |= cow_bit;
@@ -3095,7 +3218,7 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         }
         if pcache_bit != 0 {
             new_bits |= pcache_bit;
-            if pcache_bit & cow_flags::PCACHE_SHARED != 0 {
+            if pcache_bit & (cow_flags::PCACHE_SHARED | cow_flags::PCACHE_RO) != 0 {
                 // SHARED cache leaf (session 25): W is granted IN PLACE —
                 // stores must land in the cache frame (every mapper + the
                 // writeback path observe them). A COW copy here would fork
