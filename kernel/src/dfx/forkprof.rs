@@ -161,8 +161,26 @@ static RING_CUR: AtomicU64 = AtomicU64::new(0);
 
 /// Trace armed separately: `forkprof=2` (phases + trace); `forkprof=1`
 /// is phases only.
-#[inline]
+///
+/// perf-gap-hunt (2026-11-05): the syscall entry path calls this on
+/// EVERY syscall (trap.rs handle_syscall), and the outlined call+frame
+/// was per-syscall tax even with the trace off. Same contract as the
+/// syscost irq_note gate: the wrapper skips inline unless ARMED == 2
+/// (the only state where `on()` can be true), so the undetermined
+/// state (0) and the settled-off state (1) both return false without
+/// a call, and the armed body runs only on forkprof boots.
+#[inline(always)]
 pub fn trace_on() -> bool {
+    if ARMED.load(Ordering::Relaxed) != 2 {
+        return false;
+    }
+    trace_on_armed()
+}
+
+/// Outlined body of [`trace_on`] (ARMED == 2 only).
+#[cold]
+#[inline(never)]
+fn trace_on_armed() -> bool {
     on() && crate::cmdline::get_param("forkprof").as_deref() == Some("2")
 }
 
