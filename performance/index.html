@@ -56,7 +56,7 @@
 
   <article class="doc-main">
     <h1>性能测试</h1>
-    <div class="sub">结论先行:与 Linux 同机同加速(QEMU q35 + KVM)对照计分 · 数据截至 2026-11-06 · 基线文件 docs/development/perf-gate-baseline.md</div>
+    <div class="sub">结论先行,数据随后:与 Linux 同机同加速(QEMU q35 + KVM)对照 · 数据截至 2026-11-06 · 基线文件 docs/development/perf-gate-baseline.md</div>
 
     <!-- ================= 结论 ================= -->
     <h2 id="verdict"><span class="anchor">§1</span>结论:与 Linux 相比领先多少、落后多少</h2>
@@ -66,18 +66,114 @@
         <h3><span class="ico">📏</span>lmbench 同机对照:10 项中 4 项领先、6 项落后</h3>
         <p><b>领先</b>(延迟,Linux/Rux):上下文切换 <b>3.15×</b>(quiet 复测 9.2×)、管道 <b>3.33×</b>(quiet 6.6×)、fstat <b>1.37×</b>、exec <b>1.32×</b>;fork 在安静窗反超(领先 1.13×)。</p>
         <p><b>落后</b>(Rux/Linux):open <b>1.95×</b>、stat <b>1.68×</b>、read <b>1.67×</b>、write <b>1.62×</b>、null <b>1.31×</b>、fork 负载窗 <b>1.11×</b>。</p>
-        <div class="nums">领先最高 3.33× · 落后最大 1.95× · 逐用例见 §6</div>
+        <div class="nums">领先最高 3.33× · 落后最大 1.95× · 数据见 §2</div>
       </div>
       <div class="card">
-        <h3><span class="ico">🏁</span>Geekbench 5:多核领先 4.3%、单核落后 2.3%</h3>
-        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>;单核总分 <b>2115 vs 2165(−2.3%)</b>(±15% 内属宿主噪声带)。21 项工作负载:<b>12 项领先、3 项持平(±2%)、6 项落后</b>;最强项光线追踪 133%,最弱项 AES-XTS 64%。</p>
-        <div class="nums">机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐);同机 KVM 对照在补测队列</div>
+        <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分落后 2.3%</h3>
+        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 <b>2115 vs 2165(−2.3%,±15% 噪声带内)</b>:12 领先 / 3 持平 / 6 落后。</p>
+        <div class="nums">逐项数据见 §3 · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
     <div class="callout"><b>差距结构:</b>同机对照下,领先的用例集中在调度/唤醒路径(上下文切换、管道)——Linux 的跨 vCPU 唤醒 IPI 在虚拟化下开销显著,而 Rux 的单全局运行队列不产生跨核重调度风暴;落后的用例集中在系统调用入口与字节填充尾部(open/stat/read/write/null 1.3–2.0×),是当前优化队列的主攻面。</div>
 
+    <!-- ================= lmbench 数据 ================= -->
+    <h2 id="lmb"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,全量 10 项)</h2>
+    <p style="font-size:13.5px">方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行(loadavg 门控,≥7 作废)。quiet/load 两种宿主负载窗分别标注。</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th class="num">Rux(µs)</th><th class="num">Linux(同机 KVM,µs)</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13(load)/ <b>0.73(quiet)</b></td><td class="num">6.71</td><td><span class="chip ok">领先 3.15×</span> quiet 复测 <b>9.2×</b></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">4.00(load)/ 2.01(quiet)</td><td class="num">13.30</td><td><span class="chip ok">领先 3.33×</span> quiet 复测 <b>6.6×</b></td></tr>
+          <tr><td class="mono">lat_syscall fstat</td><td class="num">0.086</td><td class="num">0.118</td><td><span class="chip ok">领先 1.37×</span>(RCU fd 查找)</td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">66.2(load)</td><td class="num">87.43</td><td><span class="chip ok">领先 1.32×</span></td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">47.6(quiet)/ 59.9(load)</td><td class="num">53.99</td><td><span class="chip ok">quiet 领先 1.13×</span> / <span class="chip bad">load 落后 1.11×</span></td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.055</td><td class="num">0.042</td><td><span class="chip bad">落后 1.31×</span>(入口固有开销)</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.094</td><td class="num">0.058</td><td><span class="chip bad">落后 1.62×</span>(fill/copy 尾 + SMAP AC 括号)</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.110</td><td class="num">0.066</td><td><span class="chip bad">落后 1.67×</span>(同上)</td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.382</td><td class="num">0.227</td><td><span class="chip bad">落后 1.68×</span>(路径快查已落地,余差在派发层)</td></tr>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.70</td><td class="num">0.360</td><td><span class="chip bad">落后 1.95×</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">机制注:领先的用例集中在调度/唤醒路径 —— Linux 的跨 vCPU 唤醒 IPI 在虚拟化下开销显著;Rux 的单全局运行队列不产生跨核重调度风暴。系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。</p>
+
+    <!-- ================= Geekbench 数据 ================= -->
+    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核,2026-11-04)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td><b>多核总分</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">领先 4.3%</span></td></tr>
+          <tr><td><b>单核总分</b></td><td class="num">2115</td><td class="num">2165</td><td><span class="chip bad">落后 2.3%</span>(±15% 噪声带内)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声。</p>
+
+    <h3>单核逐项(21 项全)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">4898</td><td class="num">7643</td><td class="num"><span class="chip bad">64%</span></td></tr>
+          <tr><td>整数</td><td>文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>整数</td><td>图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>整数</td><td>导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>整数</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>整数</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>整数</td><td>PDF 渲染</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>整数</td><td>文本渲染</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>整数</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>整数</td><td>相机</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>浮点</td><td>N 体物理</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>浮点</td><td>刚体物理</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点</td><td>高斯模糊</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>浮点</td><td>人脸检测</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>浮点</td><td>地平线检测</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点</td><td>图像修补</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>浮点</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>浮点</td><td>光线追踪</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>浮点</td><td>语音识别</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>浮点</td><td>机器学习</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>多核逐项(21 项全)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数</td><td>文本压缩</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>整数</td><td>图像压缩</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>整数</td><td>导航</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>整数</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>整数</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>整数</td><td>PDF 渲染</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>整数</td><td>文本渲染</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>整数</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>整数</td><td>相机</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>N 体物理</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>刚体物理</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>浮点</td><td>高斯模糊</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>浮点</td><td>人脸检测</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>浮点</td><td>地平线检测</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>浮点</td><td>图像修补</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>浮点</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>浮点</td><td>光线追踪</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>浮点</td><td>语音识别</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>浮点</td><td>机器学习</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;AES-XTS 单核 64% 是当前最大单项差距(crypto 路径),Clang/PDF 渲染落后同源(工具链型整数负载)。</p>
+
     <!-- ================= 方法 ================= -->
-    <h2 id="method"><span class="anchor">§2</span>方法与 rig</h2>
+    <h2 id="method"><span class="anchor">§4</span>方法与 rig</h2>
     <ul>
       <li><b>同机同加速</b>:两侧同一宿主、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一 Ubuntu rootfs 形状、同一静态基准二进制;每启动一个用例(串口与长基准并发打印,单用例单次启动是唯一干净采集),runner 为 PID 1,35 秒 in-guest 预算(特殊用例单独注明)。</li>
       <li><b>负载窗纪律</b>:宿主 load ≥7 的读数作废重测;只比中位数(p99 由宿主噪声主导)。</li>
@@ -86,7 +182,7 @@
     </ul>
 
     <!-- ================= 门禁 ================= -->
-    <h2 id="gate"><span class="anchor">§3</span>合并门性能维度(三层 + 六域)</h2>
+    <h2 id="gate"><span class="anchor">§5</span>合并门性能维度(三层 + 六域)</h2>
     <p>每次合并同时审查功能与性能;基线只能由通过了自身层级的合并更新,回归阻塞合并直至修复或带数字书面论证。流程细节见<a href="../guides/development.html#gate">参与开发 §3</a>。</p>
     <div class="tbl-wrap">
       <table>
@@ -114,7 +210,7 @@
     </div>
     <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,应为其新增 debug 观测工具(默认关闭)。测量是变更的组成部分,而非事后补充。</div>
 
-    <h2 id="t1"><span class="anchor">§4</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
+    <h2 id="t1"><span class="anchor">§6</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>指标</th><th>基线 / 带</th></tr></thead>
@@ -133,7 +229,7 @@
       </table>
     </div>
 
-    <h2 id="t2"><span class="anchor">§5</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重锚定)</h2>
+    <h2 id="t2"><span class="anchor">§7</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重锚定)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(KVM debug,µs)</th></tr></thead>
@@ -149,95 +245,6 @@
       </table>
     </div>
     <p style="font-size:13px;color:var(--text-3)">重锚定过程:KVM debug 锚 = 三块完整板中位数(每板 PBENCH DONE rc=0,板间 ±1%);load 免疫在 strong 类验证(r8sp8,load 4.3–4.7 下全行 ±20% 内,详见基线文件 SP-7 节)。旧 TCG 列仅存档作溯源。</p>
-
-    <!-- ================= lmbench ================= -->
-    <h2 id="lmb"><span class="anchor">§6</span>lmbench 同机对照(QEMU + KVM 两侧,全量)</h2>
-    <p style="font-size:13.5px">方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行(loadavg 门控,≥7 作废)。quiet/load 两种宿主负载窗分别标注。</p>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>用例</th><th class="num">Rux(µs)</th><th class="num">Linux(同机 KVM,µs)</th><th>结论</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13(load)/ <b>0.73(quiet)</b></td><td class="num">6.71</td><td><span class="chip ok">领先 3.15×</span> quiet 复测 <b>9.2×</b></td></tr>
-          <tr><td class="mono">lat_pipe</td><td class="num">4.00(load)/ 2.01(quiet)</td><td class="num">13.30</td><td><span class="chip ok">领先 3.33×</span> quiet 复测 <b>6.6×</b></td></tr>
-          <tr><td class="mono">lat_syscall fstat</td><td class="num">0.086</td><td class="num">0.118</td><td><span class="chip ok">领先 1.37×</span>(RCU fd 查找)</td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num">66.2(load)</td><td class="num">87.43</td><td><span class="chip ok">领先 1.32×</span></td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">47.6(quiet)/ 59.9(load)</td><td class="num">53.99</td><td><span class="chip ok">quiet 领先 1.13×</span> / <span class="chip bad">load 落后 1.11×</span></td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.055</td><td class="num">0.042</td><td><span class="chip bad">落后 1.31×</span>(入口固有开销)</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.094</td><td class="num">0.058</td><td><span class="chip bad">落后 1.62×</span>(fill/copy 尾 + SMAP AC 括号)</td></tr>
-          <tr><td class="mono">lat_syscall read</td><td class="num">0.110</td><td class="num">0.066</td><td><span class="chip bad">落后 1.67×</span>(同上)</td></tr>
-          <tr><td class="mono">lat_syscall stat</td><td class="num">0.382</td><td class="num">0.227</td><td><span class="chip bad">落后 1.68×</span>(路径快查已落地,余差在派发层)</td></tr>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.70</td><td class="num">0.360</td><td><span class="chip bad">落后 1.95×</span></td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">机制注:领先的用例集中在调度/唤醒路径 —— Linux 的跨 vCPU 唤醒 IPI 在虚拟化下开销显著;Rux 的单全局运行队列不产生跨核重调度风暴。系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。</p>
-
-    <h3>Rux 单侧实测(同机 Linux 对照尚未运行,列入补测;不构成对比)</h3>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th>用例</th><th class="num">Rux</th><th>备注</th></tr></thead>
-        <tbody>
-          <tr><td class="mono">lat_ctx -s64 8</td><td class="num">1.05(quiet)/ 1.94(load)</td><td>Linux 同机列未测</td></tr>
-          <tr><td class="mono">lat_unix</td><td class="num">4.56(load-6)</td><td>Linux 同机列未测</td></tr>
-          <tr><td class="mono">lat_sem</td><td class="num">0.800</td><td>首落地(此前 TIMEOUT)</td></tr>
-          <tr><td class="mono">lat_pagefault</td><td class="num">0.449</td><td>缺页路径为当前优化队列头部</td></tr>
-          <tr><td class="mono">lat_mmap 1m</td><td class="num">1.049</td><td>—</td></tr>
-          <tr><td class="mono">lat_usleep 1000</td><td class="num">1037.1</td><td>LAPIC 单次定时器</td></tr>
-          <tr><td class="mono">lat_mem_rd 1m</td><td class="num">2.321 ns</td><td>—</td></tr>
-          <tr><td class="mono">bw_mem 1m bcopy</td><td class="num">77,770 MB/s</td><td>—</td></tr>
-          <tr><td class="mono">bw_mem 4m bzero</td><td class="num">66,837 MB/s</td><td>—</td></tr>
-          <tr><td class="mono">bw_pipe</td><td class="num">28,030 MB/s</td><td>—</td></tr>
-          <tr><td class="mono">bw_unix</td><td class="num">42,885 MB/s</td><td>unix 暂存消除后</td></tr>
-          <tr><td class="mono">bw_file_rd 1m io_only</td><td class="num">≥32 GB/s</td><td>计时器分辨率下限</td></tr>
-          <tr><td class="mono">bw_mmap_rd 1m</td><td class="num">70,918 MB/s</td><td>—</td></tr>
-          <tr><td class="mono">lat_tcp 127.0.0.1</td><td class="num">7.75–8.03</td><td>3/3 次启动;AF_PACKET 锁 + TCP 表耗尽已修</td></tr>
-          <tr><td class="mono">lat_udp 127.0.0.1</td><td class="num">6.90–7.07</td><td>9/11 次启动;UDP 校验和零逃逸丢弃已修</td></tr>
-          <tr><td class="mono">lat_connect 127.0.0.1</td><td class="num">14.3–16.1 ms</td><td>3/4 次启动;调度 stale-claim 未清</td></tr>
-          <tr><td class="mono">bw_tcp 127.0.0.1</td><td class="num"><span class="chip bad">TIMEOUT</span></td><td>调度 stale-claim 拒绝 worker 唤醒 ×39</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- ================= Geekbench ================= -->
-    <h2 id="gb"><span class="anchor">§7</span>Geekbench 5(5.5.1,9950X,KVM q35 smp4/4G,strong 内核)</h2>
-    <div class="tbl-wrap">
-      <table>
-        <thead><tr><th></th><th class="num">Rux 11-04</th><th class="num">Linux(4-CPU 钉核)</th><th>结论</th></tr></thead>
-        <tbody>
-          <tr><td><b>多核</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">领先 4.3%</span></td></tr>
-          <tr><td><b>单核</b></td><td class="num">2115</td><td class="num">2165</td><td><span class="chip bad">落后 2.3%</span>(±15% 噪声带内)</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p style="font-size:13px;color:var(--text-3)">机位注明:Linux 侧为宿主裸机 <code>taskset -c 0-3</code> 钉核(与 guest 4 vCPU 拓扑对齐;同机 KVM Linux 对照在补测队列)。单核口径:两次裸机自跑即差 ~15%(2549 vs 2165),±15% 内视为噪声。21 项工作负载逐项:12 领先 / 3 持平(±2%)/ 6 落后。</p>
-    <details class="family"><summary>展开:21 项工作负载逐项对照(Rux 11-04 vs Linux 4-CPU 钉核)</summary>
-      <div class="bd"><table>
-        <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">比</th></tr></thead>
-        <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">4898</td><td class="num">7643</td><td class="num"><span class="chip bad">64%</span></td></tr>
-          <tr><td>整数</td><td>文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
-          <tr><td>整数</td><td>图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
-          <tr><td>整数</td><td>导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
-          <tr><td>整数</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
-          <tr><td>整数</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
-          <tr><td>整数</td><td>PDF 渲染</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
-          <tr><td>整数</td><td>文本渲染</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
-          <tr><td>整数</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
-          <tr><td>整数</td><td>相机</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
-          <tr><td>浮点</td><td>N 体物理</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
-          <tr><td>浮点</td><td>刚体物理</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>浮点</td><td>高斯模糊</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
-          <tr><td>浮点</td><td>人脸检测</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
-          <tr><td>浮点</td><td>地平线检测</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>浮点</td><td>图像修补</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
-          <tr><td>浮点</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
-          <tr><td>浮点</td><td>光线追踪</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
-          <tr><td>浮点</td><td>运动恢复结构</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
-          <tr><td>浮点</td><td>语音识别</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
-          <tr><td>浮点</td><td>机器学习</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
-        </tbody>
-      </table></div>
-    </details>
 
     <!-- ================= 优化记录 ================= -->
     <h2 id="campaigns"><span class="anchor">§8</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
@@ -262,11 +269,11 @@
 
     <h2 id="queue"><span class="anchor">§9</span>优化队列(开放差距,按优先序)</h2>
     <ul>
-      <li><b>系统调用入口与字节填充尾部</b>:null 1.31× / open 1.95× / stat 1.68× / read 1.67× / write 1.62× —— 差距在入口固有开销与 fill/copy 尾部(SMAP AC 括号),fd 查找已不是瓶颈(fstat 已领先)。</li>
-      <li><b>缺页路径</b>:lat_pagefault 0.449 µs,同机 Linux 对照未测,补测后归队定位。</li>
-      <li><b>bw_tcp TIMEOUT / lat_connect 14–16 ms</b>:同根,调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);连接与数据路径本身已通。</li>
+      <li><b>系统调用入口与字节填充尾部</b>:null 1.31× / open 1.95× / stat 1.68× / read 1.67× / write 1.62×(同机对照)—— 差距在入口固有开销与 fill/copy 尾部(SMAP AC 括号),fd 查找已不是瓶颈(fstat 已领先)。</li>
+      <li><b>AES-XTS 单核 64%</b>:Geekbench 最大单项差距,加密路径(crypto)待专项。</li>
+      <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);连接与数据路径本身已通,修复后才能取得 TCP 吞吐读数。</li>
       <li><b>futex 唤醒→运行</b>:"既有在跑任务"场景 ~10 ms(tick 量化,已入账成本;quiet 7.5 µs 带内);p4 fork 族 TCG 类开放回归按 KVM 锚重裁中。</li>
-      <li><b>未测面</b>:页缓存命中率绝对值、PCP 水位、TCP 吞吐(bw_tcp 修复前无法测)、binder 吞吐/延迟专项、GRQ 持锁分段分解对照;网络延迟/带宽族与 Geekbench 的同机 KVM Linux 对照。</li>
+      <li><b>补测队列</b>:lmbench 其余用例(lat_pagefault / lat_mmap / bw_mem / bw_pipe / 网络延迟与带宽族)与 Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§10</span>debug 测量工具链</h2>
