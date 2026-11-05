@@ -82,8 +82,14 @@ for raw in open(LOG, errors="replace"):
         if p == "FUTEX" and sn > 0:
             bwr_h_counts["H3-futex-stack"] += 1
         elif p == "IOCTL-BWR":
-            if "rsz=0" in line and re.search(r"bwr\[\w+/\1 ", line):
+            # r41v6+: bwr[w=<cons>/<wsz> rsz=<rsz> ...] comes from the
+            # kernel-side live_bwr shadow. H2 = read_size 0 AND write
+            # fully consumed while still parked in the ioctl.
+            mw = re.search(r"bwr\[w=(\d+)/(\d+) rsz=(\d+)", line)
+            if mw and int(mw.group(3)) == 0 and mw.group(1) == mw.group(2):
                 bwr_h_counts["H2-write-only"] += 1
+            elif "bwr[none]" in line:
+                bwr_h_counts["IOCTL-noshadow"] += 1
             elif sync_out:
                 bwr_h_counts["H1-sync-out"] += 1
             else:
