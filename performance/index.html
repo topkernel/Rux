@@ -70,7 +70,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分领先 5.1%</h3>
-        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 quiet 最佳 <b>2274 vs 2165(+5.1%)</b>:12 领先 / 3 持平 / 6 落后。</p>
+        <p>多核总分 <b>7332 vs 7027(+4.3%)</b>:21 项负载 8 领先 / 5 持平 / 8 落后。单核总分 quiet 最佳 <b>2274 vs 2165(+5.1%)</b>:12 领先 / 3 持平 / 6 落后(表内 AES-XTS 64% 为修复前残影,复测 105%)。</p>
         <div class="nums">逐项数据见 §3 · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
@@ -129,7 +129,7 @@
       <table>
         <thead><tr><th>类</th><th>工作负载</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
         <tbody>
-          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">4898</td><td class="num">7643</td><td class="num"><span class="chip bad">64%</span></td></tr>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">4898 *</td><td class="num">7643</td><td class="num"><span class="chip bad">64% *</span></td></tr>
           <tr><td>整数</td><td>文本压缩</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
           <tr><td>整数</td><td>图像压缩</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
           <tr><td>整数</td><td>导航</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
@@ -153,6 +153,8 @@
         </tbody>
       </table>
     </div>
+
+    <p style="font-size:13px;color:var(--text-3)">* AES-XTS 单核的 64% 是修复前残影:该行根因是内核串口打印税(每条诊断 ~0.4–0.7 ms 的轮询逐字节输出,把 0.009 s 的迭代撑到 0.026–0.082 s),修复后复测 <b>8047 / 8140(对参考 105%)</b>;AES-NI 本身经探针证实从未受损(_aesenc_ 吞吐 guest 1268 vs 原生 1244 M rounds/s)。11-04 捕获与复测矛盾,按抖动政策待隔离复跑定性。复测依据:docs/test/geekbench-report.md 2026-11-02 standing。</p>
 
     <h3>多核逐项(21 项全)</h3>
     <div class="tbl-wrap">
@@ -183,7 +185,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;AES-XTS 单核 64% 是当前最大单项差距(crypto 路径),Clang/PDF 渲染落后同源(工具链型整数负载)。</p>
+    <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;单核 AES-XTS 的 64% 已根因修复(串口打印税,复测 105%);Clang/PDF 渲染等单核余差与该轮宿主负载同批,待隔离复跑。</p>
 
     <!-- ================= 方法 ================= -->
     <h2 id="method"><span class="anchor">§4</span>方法与 rig</h2>
@@ -286,7 +288,7 @@
       <li><b>lat_syscall open 1.82× / stat 1.32×</b>:路径解析尾部分解(campaign 已落 open 累计 −15.2%、stat −4.6%,继续攻)。</li>
       <li><b>lat_proc fork 1.11×</b>:retire batch-park 在途。</li>
       <li><b>lat_syscall null 1.17× / write 1.10×</b>:入口地板与 fill/copy 尾;write 距持平 6 ns。</li>
-      <li><b>AES-XTS 单核 64%</b>:Geekbench 最大单项差距,加密路径专项。</li>
+      <li><b>Geekbench 单核余差复核</b>:AES-XTS 已根因修复(打印税,复测 105%);11-04 捕获的 4898 与复测矛盾,按抖动政策隔离复跑定性,Text Compression / Clang / PDF 等同批复核。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
       <li><b>pbench 主线堆雷</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 腿暂停直到缉获;lmbench 各行不受影响。</li>
       <li><b>补测队列</b>:Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
