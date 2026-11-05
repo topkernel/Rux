@@ -4029,3 +4029,79 @@ hold chain broken. Both are queued below.
 4. u2v7 artifacts: run/oh-u2v7-serial.log (probe tables at
    105/165/225/285/405/525/585/645/705/765s), run/bzImage-u2v7 source
    c33129a1. u2v8 verdicts append below.
+
+## 40TH SESSION (2026-11-05 evening, branch oh-ffrt @ e27da283+): FUTEX_REQUEUE audit vs the reference kernel
+
+### 1. The audit (kernel/src/sync/futex.rs vs linux-6.6 kernel/futex/requeue.c + core.c futex_unqueue)
+
+Five divergences, two of them drop-class:
+
+1. **Sleeper-side unqueue after a requeue (DROP-CLASS)**: the reference's
+   futex_unqueue re-reads q->lock_ptr UNDER the acquired bucket lock and
+   retries when it changed (core.c:583-615). Our remove_waiter walked
+   whatever bucket the caller supplied; a remove racing a requeue walked
+   the STALE chain, found nothing, silently returned — the waiter stayed
+   linked in the NEW (uaddr2/mutex-word) chain while its task returned
+   to userspace. The stale entry then consumed later FUTEX_WAKEs on the
+   requeue target: the mutex unlock's single wake was spent unlinking a
+   ghost. This is exactly the missed-wakeup shape the FFRT mutex-word
+   park census flagged (ffrt-park-analysis.md §4-5, dependency #3).
+2. **Deferred wake outside the guards (UAF-CLASS)**: requeue woke its
+   woken list AFTER dropping both bucket guards via plain Task::wake_up
+   with a racy pid revalidation — the exact pattern R12-2 removed from
+   futex_wake (wake under the guard). futex_wake_in_mm wakes under the
+   bucket lock; requeue now does too (wake_up_in_futex_bucket with a
+   bucket proof).
+3. **cmpval check unlocked**: the reference reads *uaddr1 under BOTH
+   bucket locks (futex_get_value_locked) and decides EAGAIN there; ours
+   read it at entry with no locks. Also our degenerate paths
+   (uaddr2==uaddr, nr_requeue<=0) skipped the check entirely and just
+   woke. Both now match the reference (check under the locks, EAGAIN
+   before any wake).
+4. **nr_wake < 0**: reference is EINVAL (requeue.c nr_wake<0 ||
+   nr_requeue<0); we only checked nr_requeue — a negative val silently
+   degraded to "requeue everything". Fixed at dispatch.
+5. **Head-insert relink (ORDER)**: reference requeue_futex inserts with
+   plist_add (FIFO within a priority class); our head-push let a
+   just-requeued condvar waiter overtake longer-blocked mutex waiters
+   for the unlock's single wake. Now tail-appended under both guards.
+
+Verified-matching (no change): dual-bucket lock ordering by bucket
+address, same-bucket single-lock + key-update-in-place, wake/requeue
+counting equivalence, return value (woken+requeued), bitset ignored by
+requeue, PI ops ENOSYS. The reference's futex_hb_waiters_inc(hb2)
+fast-path protection is N/A: our futex_wake has no lock-free fast path.
+
+### 2. Reproducer (test/futex_requeue_probe.c + test/futex_requeue_boot.py)
+
+Phase A replays the musl condvar protocol with RAW futex syscalls (8
+waiters on own stack barrier words; signaler wakes the oldest barrier;
+each woken waiter relocks the mutex word, stamps 0x80000000, stores 0 +
+FUTEX_REQUEUE(succ barrier -> mutex word, wake=0, requeue=1), unlocks
+with WAKE(mutex,1)) — exactly musl pthread_cond_timedwait.c:48-54,
+149-160. Miss = a waiter returning via ETIMEDOUT watchdog instead of
+the chain. Phase B: pthread_cond_broadcast churn (musl REQUEUE / glibc
+CMP_REQUEUE). Kicker thread rains SIGUSR1 to widen the signal-vs-
+requeue races. Host-validated (musl x86_64 static): PASS, 0 misses.
+
+### 3. Results
+
+- PRE-FIX riscv64 SMP2, 10000 rounds: PASS (70007 requeues, 0 misses)
+  — the races are latent, not deterministic; consistent with the
+  coordinator's finding that the FFRT wedge is a samgr-internal mutex
+  deadlock cycle, NOT a kernel wake-delivery failure.
+- PRE-FIX riscv64 SMP4 + dense kicker (20-100us): **KERNPANIC pfault**
+  (no stack survived the trap printer). Same storm POST-FIX: PASS
+  (70056 requeues, 0 misses, 0 stuck). Attribution is suggestive (the
+  old deferred-wake path was the only unbounded raw-Task deref in the
+  op), not proven — re-run if it recurs with a stack.
+- POST-FIX riscv64 SMP2: PASS (70019 requeues). x86_64 KVM SMP1: PASS
+  (70007 requeues).
+- Gates: riscv64 + x86_64 + aarch64 builds green; make test 1317/1317.
+
+### 4. Handoff note
+
+The FFRT wedge hunt should continue at the deadlock-cycle bottom
+(TXN-HANG-HLD on BWR-parked nested clients to name patient zero), per
+the coordinator's r41v26 analysis. REQUEUE is now reference-shaped and
+cleared of the drop-class races; do not re-audit it for wake delivery.
