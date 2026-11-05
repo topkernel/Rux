@@ -799,6 +799,60 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             if result < 0 { "error" } else { "ok" });
     }
 
+    // 50th (crash-storm hunt): latch first-execve (failed-spawn
+    // forensics — see Task::did_exec and the do_exit printer). One
+    // integer compare on the exec numbers only.
+    if syscall_no == 59 || syscall_no == 322 {
+        if let Some(cur) = crate::sched::current() {
+            unsafe {
+                (*cur)
+                    .did_exec
+                    .store(true, core::sync::atomic::Ordering::Relaxed)
+            };
+        }
+    }
+
+    // 50th (crash-storm hunt): per-task ring of address-space edits for
+    // the USEGV forensics (see Task::mm_ops for the encoding and the
+    // mallocng hole-write family it adjudicates). mmap(9)/mprotect(10)/
+    // munmap(11)/brk(12)/mremap(25) — same numbers on every 64-bit arch
+    // we ship (asm-generic table). Also ungated by design: a handful of
+    // Relaxed atomics on five syscalls; the fault printer must see
+    // these on quiet boots.
+    match syscall_no {
+        9 | 10 | 11 | 12 | 25 => {
+            if let Some(cur) = crate::sched::current() {
+                use core::sync::atomic::Ordering::Relaxed;
+                let op: u64 = match syscall_no {
+                    9 => 1,
+                    10 => 2,
+                    11 => 3,
+                    12 => 4,
+                    _ => 5,
+                };
+                let rc: u64 = if result < 0 && result > -4096 {
+                    ((-(result)) as u64) & 0xff
+                } else {
+                    0
+                };
+                // User addresses are < 2^48; hints above that are ignored
+                // by the kernel anyway, so truncation only loses evidence
+                // of an already-rejected request.
+                let w0 = ((args[0] & 0x0000_ffff_ffff_ffff) << 16) | (rc << 8) | op;
+                let prot: u64 = if syscall_no == 9 || syscall_no == 10 {
+                    args[2] & 0xff
+                } else {
+                    0
+                };
+                let w1 = (args[1] & 0x0000_ffff_ffff_ffff) | (prot << 48);
+                let idx = (*cur).mm_ops_cur.fetch_add(1, Relaxed) % 16;
+                (*cur).mm_ops[idx * 2].store(w0, Relaxed);
+                (*cur).mm_ops[idx * 2 + 1].store(w1, Relaxed);
+            }
+        }
+        _ => {}
+    }
+
     // (perf-syscall lane) Everything from here to the end of the
     // function — the FORENSIC ring exit record, the per-task
     // last_calls/init_calls/birth rings, the fail-tail ring and the
@@ -892,6 +946,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
+    // 50th (crash-storm hunt): latch first-execve — do_exit prints the
+    // birth syscall window of process leaders that die WITHOUT exec'ing
+    // (the failed-spawn family; see Task::did_exec). NOTE: this and the
+    // mm_ops ring below were moved BEFORE the sysforensic early-return
+    // (see the "(perf-syscall lane)" block further down): the fault
+    // printer and the exit printer must see them on QUIET boots too.
     // sc140 (Session Q): the parked child's retry loop runs ioctl x3-5
     // between dlopen attempts — name the FD and COMMAND (binder
     // BINDER_WRITE_READ? /dev/xpm? a param-area ioctl?). The fd set at

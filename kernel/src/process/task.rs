@@ -1023,6 +1023,33 @@ pub struct Task {
     pub last_fails_a0: [AtomicU64; 8],
     pub last_fails_a1: [AtomicU64; 8],
 
+    /// 50th (crash-storm hunt): ring of the last 16 address-space edits
+    /// (mmap/mprotect/munmap/brk/mremap) issued by THIS task. Two words
+    /// per event:
+    ///   w0 = op(bits 0..8: 1 mmap, 2 mprotect, 3 munmap, 4 brk,
+    ///         5 mremap) | rc(bits 8..16, 0 = ok else errno)
+    ///         | addr(bits 16..64)
+    ///   w1 = len(bits 0..48) | prot/arg2(bits 48..56)
+    /// The mallocng crash family stamps a freshly-allocated group
+    /// through a pointer whose page sits in a VMA HOLE with no covering
+    /// mapping. Printed at USEGV time, this ring answers — in one boot —
+    /// whether the kernel itself returned that address (mmap placement/
+    /// insertion bug), removed its covering VMA (munmap overreach), or
+    /// never saw the address at all (userspace stale chain from
+    /// corrupted allocator state). Same storage discipline as
+    /// last_fails: Relaxed stores at dispatch exit, read only by the
+    /// fault printer.
+    pub mm_ops: [AtomicU64; 32],
+    pub mm_ops_cur: core::sync::atomic::AtomicUsize,
+
+    /// 50th (crash-storm hunt): set the first time this task issues
+    /// execve/execveat. A process LEADER that exits without it is a
+    /// failed spawn (the OH 337->588->589 chain forked, never execve'd,
+    /// and exited 512/0); do_exit prints its birth syscall window so the
+    /// killing call names itself. Threads never exec by design and are
+    /// excluded at the print site.
+    pub did_exec: core::sync::atomic::AtomicBool,
+
     /// sc128 (Session P): ring of the last syscalls (nr only) for this
     /// task — the park decode needs the final SUCCESS sequence too (what
     /// the child does between the failed dlopen cascade and the cond
@@ -1692,6 +1719,9 @@ impl Task {
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
             last_fails_a0: [const { AtomicU64::new(0) }; 8],
             last_fails_a1: [const { AtomicU64::new(0) }; 8],
+            mm_ops: [const { AtomicU64::new(0) }; 32],
+            mm_ops_cur: core::sync::atomic::AtomicUsize::new(0),
+            did_exec: core::sync::atomic::AtomicBool::new(false),
             last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
             init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
@@ -2538,6 +2568,24 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_done))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
+        );
+        // 50th (crash-storm hunt): mm-op ring + first-exec latch — same
+        // clone-path init requirement as the sc130/sc138 fields above
+        // (recycled task memory otherwise decodes as garbage events at
+        // USEGV time — seen live in ohc1).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_ops)) as *mut [AtomicU64; 32],
+            [const { AtomicU64::new(0) }; 32],
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, mm_ops_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, did_exec))
                 as *mut core::sync::atomic::AtomicBool,
             core::sync::atomic::AtomicBool::new(false),
         );

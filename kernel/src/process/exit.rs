@@ -692,6 +692,43 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // 50th (crash-storm hunt): failed-spawn forensics — a process LEADER
+    // that exits without ever having execve'd forked and died pre-exec
+    // (the OH 337->588->589 chain: 588 exits 512/code 2, 589 exits 0,
+    // zero execve attempts anywhere in their rings). The birth window
+    // (first 64 syscalls of the task's life, latched at dispatch) names
+    // the killing call. Threads are skipped (they never exec); prints
+    // are bounded to 8 per boot — kernel-thread exits and subshell-style
+    // fork-and-exit children burn at most the budget, never the serial.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        static NOSPWN_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let is_leader = unsafe { (*current).pid() == (*current).tgid() };
+        let execd = unsafe { (*current).did_exec.load(Relaxed) };
+        if is_leader && !execd && NOSPWN_N.fetch_add(1, Relaxed) < 8 {
+            let comm = core::str::from_utf8(unsafe { (*current).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let mut line = alloc::string::String::from("NOSPAWN-EXIT pid=");
+            use core::fmt::Write;
+            let _ = write!(
+                line,
+                "{} comm='{}' code={} birth:",
+                dying_pid, comm, exit_code
+            );
+            for i in 0..crate::process::task::BIRTH_CALLS_LEN {
+                let nr = unsafe { (*current).birth_calls[i].load(Relaxed) };
+                if nr == 0 {
+                    break; // ring not filled past here
+                }
+                let a0 = unsafe { (*current).birth_a0[i].load(Relaxed) };
+                let _ = write!(line, " {}:{:#x}", nr & 0xffff, a0);
+            }
+            crate::pr_err!("{}", line);
+        }
+    }
+
     // forkprof (cmdline forkprof=1): leader-arm phase timings. The probe
     // rig's children are single-threaded, so the leader arm is the exit
     // cost lmbench attributes to fork+exit.

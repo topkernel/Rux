@@ -2194,6 +2194,74 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         crate::pr_err!("{}", s);
     }
 
+    // 50th (crash-storm hunt): the faulting task's address-space edit
+    // ring plus the rings of every sibling thread in the faulting tgid.
+    // The mallocng family writes a freshly-stamped group through a
+    // pointer that lands in a VMA hole; whether some thread's mmap
+    // RETURNED that address, some munmap REMOVED its covering VMA, or
+    // nobody ever touched it (userspace stale chain) names the culprit
+    // in one boot. Encoding in Task::mm_ops (dispatch.rs writer).
+    {
+        fn dump_mm_ops(tag: &str, t: *const crate::process::task::Task) {
+            use core::sync::atomic::Ordering::Relaxed;
+            const N: usize = 16;
+            let cur = unsafe { (*t).mm_ops_cur.load(Relaxed) };
+            let mut shown = 0usize;
+            for k in 0..N {
+                let i = (cur + N - 1 - k) % N;
+                let w0 = unsafe { (*t).mm_ops[i * 2].load(Relaxed) };
+                let w1 = unsafe { (*t).mm_ops[i * 2 + 1].load(Relaxed) };
+                let op = w0 & 0xff;
+                if op == 0 {
+                    continue; // slot never written
+                }
+                let rc = (w0 >> 8) & 0xff;
+                let addr = w0 >> 16;
+                let len = w1 & 0x0000_ffff_ffff_ffff;
+                let prot = (w1 >> 48) & 0xff;
+                let name = match op {
+                    1 => "mmap",
+                    2 => "mprotect",
+                    3 => "munmap",
+                    4 => "brk",
+                    _ => "mremap",
+                };
+                let pid = unsafe { (*t).pid() };
+                if shown < 12 {
+                    crate::pr_err!(
+                        "USEGV-FOR: mm[{tag} pid={}] {} addr={:#x} len={:#x} prot/arg2={:#x} rc={}",
+                        pid, name, addr, len, prot, rc
+                    );
+                }
+                shown += 1;
+            }
+            if shown > 12 {
+                crate::pr_err!("USEGV-FOR: mm[{tag}] ... {}/16 events (capped)", shown);
+            }
+        }
+        if let Some(tk) = crate::sched::current() {
+            dump_mm_ops("self", tk as *const _);
+            let tgid = tk.tgid();
+            let self_ptr = tk as *const crate::process::task::Task;
+            let mut sibs = 0usize;
+            let skipped = crate::sched::for_each_task_try(|t| {
+                let tp = t as *const crate::process::task::Task;
+                if unsafe { (*tp).tgid() } == tgid && tp != self_ptr {
+                    sibs += 1;
+                    if sibs <= 6 {
+                        dump_mm_ops("sib", tp);
+                    }
+                }
+            });
+            if sibs > 6 {
+                crate::pr_err!("USEGV-FOR: mm[sib] ... {}/{} siblings shown", 6, sibs);
+            }
+            if skipped > 0 {
+                crate::pr_err!("USEGV-FOR: mm[sib] {} pid-hash buckets skipped (try-walk)", skipped);
+            }
+        }
+    }
+
     // VMA covering the faulting rip (which library / JIT region ran).
     let addr_space = crate::sched::current().and_then(|t| t.address_space());
     if let Some(aspace) = addr_space.as_ref() {
