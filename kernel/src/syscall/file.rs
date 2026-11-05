@@ -417,7 +417,10 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // yields a namespace fd usable by setns(2). Handled before the generic
     // procfs read_file shortcut (which would follow the "uts:[N]" target).
     // (Global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 {
+    // (perf-gap-hunt) not_rooted reuse: the chroot verdict cannot change
+    // within one syscall — the re-probe here (sched::current + fs deref
+    // per call) ran on every open of every task.
+    if not_rooted && (flags & O_CREAT) == 0 {
         if let Some(rv) = crate::process::ns::try_open_ns_path(&full_path, flags) {
             return rv;
         }
@@ -426,7 +429,8 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     // Shortcut: /proc/[pid]/xxx paths go through procfs read_file
     // because VFS inode lookup doesn't support PID subdirectories.
     // (P1 chroot: global-namespace shortcut, non-chrooted tasks only.)
-    if !crate::fs::vfs::process_rooted() && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
+    // (perf-gap-hunt) not_rooted reuse — same verdict, no re-probe.
+    if not_rooted && (flags & O_CREAT) == 0 && (flags & O_DIRECTORY) == 0 {
         // ptrace_may_access gate for environ BEFORE generating content
         // (review 5.7): self or CAP_SYS_PTRACE.
         // (perf-syscall lane) starts_with gate FIRST — same reason as
