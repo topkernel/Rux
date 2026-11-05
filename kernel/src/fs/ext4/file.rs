@@ -240,13 +240,6 @@ fn ext4_file_read_cached_dst(
     let block_size_usize = fs.block_size as usize;
     let cache = page_cache::get_page_cache();
     let ino = inode.ino as u64;
-    {
-        static N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
-            crate::pr_warn!("RDKEY ino={} off={}", ino, offset);
-        }
-    }
     // Filesystem identity for the page-cache key (review 5.3: cross-FS key
     // collisions on small inode numbers).
     let fs_id = fs as *const crate::fs::ext4::Ext4FileSystem as u64;
@@ -695,18 +688,6 @@ fn fill_page_cache_batch(
                         unsafe {
                             if let Some(bh) = bio::bread(fs.device, block_nr + k) {
                                 let data = &(*bh).b_data;
-                                {
-                                    static NI: core::sync::atomic::AtomicUsize =
-                                        core::sync::atomic::AtomicUsize::new(0);
-                                    if NI.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
-                                        crate::pr_warn!(
-                                            "INS ino={} idx={} blk={} b0..8={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                                            ino, run_first + k, block_nr + k,
-                                            data[0], data[1], data[2], data[3],
-                                            data[4], data[5], data[6], data[7]
-                                        );
-                                    }
-                                }
                                 cache.insert(fs_id, ino, run_first + k, block_nr + k, &data);
                                 bio::brelse(bh);
                             } else {

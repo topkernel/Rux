@@ -43,28 +43,6 @@ fn round_up_pages_checked(len: usize) -> Option<usize> {
 ///
 /// - RISC-V: 214
 
-        fn brk_anomaly_check(task: &crate::process::task::Task, brk_val: u64, floor: u64) {
-            let Some(aspace) = task.address_space() else { return };
-            let g = aspace.vma_read();
-            let end = g
-                .last_at_or_before(crate::mm::page::VirtAddr::new(floor as usize))
-                .filter(|v| v.vma_type() == crate::mm::vma::VmaType::Anonymous)
-                .map(|v| v.end().as_usize() as u64);
-            let need = (brk_val + 0xFFF) & !0xFFF;
-            if let Some(e) = end {
-                if need > e {
-                    static NA: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if NA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                        crate::pr_warn!(
-                            "BRK-ANOMALY brk={:#x} needpage={:#x} heapvend={:#x}",
-                            brk_val, need, e
-                        );
-                    }
-                }
-            }
-        }
-
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
@@ -137,27 +115,6 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
-                {
-                    static NB: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if NB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10000 {
-                        let vend = current_task.address_space().and_then(|a| {
-                            let g = a.vma_read();
-                            g.last_at_or_before(crate::mm::page::VirtAddr::new(
-                                brk_floor as usize,
-                            ))
-                            .filter(|v| {
-                                v.vma_type() == crate::mm::vma::VmaType::Anonymous
-                            })
-                            .map(|v| v.end().as_usize())
-                        });
-                        crate::pr_warn!(
-                            "BRK-SHRINK cur={:#x} new={:#x} heapvend={:?}",
-                            current_brk, new_brk, vend
-                        );
-                    }
-                }
-                brk_anomaly_check(current_task, new_brk, brk_floor);
                 current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 return new_brk as i64;
@@ -237,15 +194,6 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
                             // Keep the old brk on failure (Linux parity:
                             // sys_brk returns mm->brk, not an error).
-                            static NR: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-                                crate::pr_warn!(
-                                    "BRK-REFUSE-NEIGHBOR cur={:#x} new={:#x} nextstart={:#x}",
-                                    current_brk, new_brk,
-                                    next.map(|v| v.start().as_usize()).unwrap_or(0)
-                                );
-                            }
                             return current_brk as i64;
                         }
                         let heap_vma = Vma::new(
@@ -275,27 +223,6 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
-                {
-                    static NE: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if NE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10000 {
-                        let vend = current_task.address_space().and_then(|a| {
-                            let g = a.vma_read();
-                            g.last_at_or_before(crate::mm::page::VirtAddr::new(
-                                brk_floor as usize,
-                            ))
-                            .filter(|v| {
-                                v.vma_type() == crate::mm::vma::VmaType::Anonymous
-                            })
-                            .map(|v| v.end().as_usize())
-                        });
-                        crate::pr_warn!(
-                            "BRK-GROW cur={:#x} new={:#x} heapvend={:?}",
-                            current_brk, new_brk, vend
-                        );
-                    }
-                }
-                brk_anomaly_check(current_task, new_brk, brk_floor);
                 current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 new_brk as i64

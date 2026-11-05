@@ -359,13 +359,6 @@ fn filemap_pin_cache_page(
     // SAFETY: inode cell written at open time, read-only afterwards.
     let inode = unsafe { &*file.inode.get() }.as_ref()?;
     let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
-    {
-        static N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
-            crate::pr_warn!("PINKEY ino={} idx={} fileptr={:#x}", ino, file_offset / PAGE_SIZE_USIZE, file as *const _ as usize);
-        }
-    }
     let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
     let cache = crate::fs::page_cache::get_page_cache();
     if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
@@ -392,8 +385,12 @@ fn filemap_pin_cache_page(
     }
     // SAFETY: same read-only inode resolution as above.
     let inode = unsafe { &*file.inode.get() }.as_ref()?;
-    static ZERO_PAGE: [u8; 4096] = [0; 4096];
-    cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
+    // Hole pages: insert with EMPTY data — insert_ext zero-fills the
+    // whole frame ("bytes past data.len() are zeroed"), which avoids
+    // reading the kernel .bss ZERO_PAGE static and never places a
+    // kernel-image frame in the cache (the cache's frames are its own
+    // buddy allocations; release_page_frame only frees those).
+    cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &[]);
     cache.get_phys(fs_id, ino, page_index)
 }
 
@@ -610,22 +607,7 @@ pub fn handle_mm_fault(
     // snapshot.
     let vma_end = vma.end().as_usize();
     let vm_file = if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
-        let f = addr_space.get_vma_file(vma_start);
-        {
-            static NV: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if NV.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
-                crate::pr_warn!(
-                    "VMFILE mm={:#x} vma_start={:#x} fd={} file={:#x}",
-                    addr_space as *const _ as usize,
-                    vma_start, vma_file_fd,
-                    f.as_ref()
-                        .map(|x| alloc::sync::Arc::as_ptr(x) as usize)
-                        .unwrap_or(0)
-                );
-            }
-        }
-        f
+        addr_space.get_vma_file(vma_start)
     } else {
         None
     };

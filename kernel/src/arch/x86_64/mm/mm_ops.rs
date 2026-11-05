@@ -433,27 +433,6 @@ impl MmStruct {
             // Paranoia (the occupied-address handout class): the chooser
             // must never select a range an existing VMA covers. Verify
             // BEFORE insert against the SAME locked tree.
-            {
-                let dup = vma_mgr
-                    .last_at_or_before(chosen)
-                    .filter(|v| v.end().as_usize() > chosen.as_usize())
-                    .is_some()
-                    || vma_mgr.iter().any(|v| {
-                        v.start().as_usize() < vend.as_usize()
-                            && v.start().as_usize() >= chosen.as_usize()
-                    });
-                if dup {
-                    static ND: core::sync::atomic::AtomicUsize =
-                        core::sync::atomic::AtomicUsize::new(0);
-                    if ND.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                        crate::pr_warn!(
-                            "ALLOC-OVERLAP chosen={:#x} len={:#x}",
-                            chosen.as_usize(),
-                            aligned_size
-                        );
-                    }
-                }
-            }
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
             vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
