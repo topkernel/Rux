@@ -1,0 +1,12 @@
+CASE[lat_syscall open] g6new rep1 load=7.32 VAL=0.7592
+CASE[lat_syscall open] g8memo rep1 load=7.54 VAL=0.6497
+CASE[lat_syscall open] g6new rep2 load=8.96 VAL=0.7662
+CASE[lat_syscall open] g8memo rep2 load=9.56 VAL=0.6713
+CASE[lat_syscall open] g6new rep3 load=9.21 VAL=0.7666
+CASE[lat_syscall open] g8memo rep3 load=8.94 VAL=0.6497
+CASE[lat_syscall stat] g6new rep1 load=8.95 VAL=0.3200
+CASE[lat_syscall stat] g8memo rep1 load=8.30 VAL=0.3081
+CASE[lat_syscall stat] g6new rep2 load=8.28 VAL=0.3239
+CASE[lat_syscall stat] g8memo rep2 load=8.17 VAL=0.3068
+CASE[lat_syscall stat] g6new rep3 load=8.08 VAL=0.3229
+CASE[lat_syscall stat] g8memo rep3 load=7.73 VAL=0.3102
