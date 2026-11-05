@@ -1937,19 +1937,41 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // wait). Drop below cancels the registration after schedule()
         // returns — the old explicit del_timer, now unreachable to
         // forget.
-        let wake = deadline.map(|dl| {
+        // r41v17 FIX: `deadline.map(arm_jiffy)` produced
+        // Option<Option<WakeArmed>> and the R32 guard below tested
+        // is_none() on the OUTER layer — a tautology that could never
+        // fire, so a pool-exhausted arm (inner None) parked the timed
+        // wait FOREVER with no waker (the 44th's storage_daemon class:
+        // fto=59.99s, parked 831s past it). Flatten with and_then: wake
+        // is None exactly when a deadline was requested and the arm
+        // failed, which is what R32 always meant.
+        let wake = deadline.and_then(|dl| {
             crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid())
+        });
+        // ticktrap (r41v17): shadow the futex deadline (jiffy domain) so
+        // the heartbeat can adjudicate a parked timed waiter — the 44th's
+        // storage_daemon class (fto=59.99s, parked 831s past it).
+        let shadow = wake.as_ref().and_then(|w| {
+            deadline.map(|dl| {
+                crate::timer::TimedSleepShadow::new(
+                    crate::timer::TSLEEP_JIFFY,
+                    dl,
+                    w.id(),
+                )
+            })
         });
         // R32 (NEW-3): if a deadline was requested but the timer pool is
         // exhausted (arm → None), schedule() below would sleep
         // FOREVER — nothing else wakes an un-signaled futex, so the timed
         // wait degenerated into an untimed hang. Unlink and fail instead.
+        // (r41v17: now actually reachable — see the flatten above.)
         if deadline.is_some() && wake.is_none() {
             remove_waiter(bucket_idx, waiter_idx);
             return -ENOMEM as i64;
         }
         crate::sched::schedule();
         drop(wake);
+        drop(shadow);
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 

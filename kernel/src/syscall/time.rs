@@ -373,6 +373,17 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // errors), the hart re-program for the precise deadline is baked
     // into the arm, and Drop cancels on every early return.
     let mut wake = crate::timer::WakeArmed::arm_hres(hres_deadline, my_pid);
+    // ticktrap (r41v17): shadow the live deadline + registration id so
+    // the 1 Hz heartbeat can adjudicate this sleeper if it parks (the
+    // r41v15 power_host class: a timed sleep that outlives its deadline
+    // by minutes with no wake ever delivered).
+    let shadow = wake
+        .as_ref()
+        .and_then(|w| crate::timer::TimedSleepShadow::new(
+            crate::timer::TSLEEP_HRES,
+            hres_deadline,
+            w.id(),
+        ));
 
     // R33 (B-family wedge — lost wakeup): state-first + re-check protocol.
     // The timer softirq's wake is ONE-SHOT: it fires wake_up_process exactly
@@ -447,6 +458,10 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         // waker-less. The None case stays None (the old id-0 code never
         // retried the arm either).
         wake = wake.and_then(|g| g.rearm_if_spent());
+        // ticktrap: the re-arm replaced the registration — refresh the id.
+        if let (Some(s), Some(w)) = (shadow.as_ref(), wake.as_ref()) {
+            s.refresh_id(w.id());
+        }
 
         if wake.is_some() {
             // Mark INTERRUPTIBLE BEFORE the final re-check (state-first).

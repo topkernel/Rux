@@ -928,6 +928,26 @@ pub struct Task {
     /// exceed MAX_TASKS, so the table silently skipped every real task.
     pub hung_task_since: core::sync::atomic::AtomicU64,
 
+    /// Timed-sleep shadow (ticktrap, r41v17): the deadline of the timed
+    /// wait this task is currently parked in, if any. Set by the wait
+    /// site at timer-arm time and cleared at scope exit (guard Drop);
+    /// the 1 Hz heartbeat reads it WITHOUT touching user memory (the
+    /// bwr_park_audit lesson: the heartbeat context cannot dereference
+    /// another task's user pointers) and names the loss branch for any
+    /// parked timed sleeper: deadline passed + no wheel entry = a lost
+    /// fire/wake; deadline far future = an intended-or-garbage long
+    /// sleep; entry present + not due = healthy.
+    /// 0 = not in a timed wait.
+    pub timed_sleep_deadline: core::sync::atomic::AtomicU64,
+    /// 0 = none, 1 = hres (nanosleep class, deadline in time-CSR ticks),
+    /// 2 = jiffy (futex/poll timeout class, deadline in jiffies).
+    pub timed_sleep_kind: core::sync::atomic::AtomicU32,
+    /// The wheel registration id of the armed wake timer (0 if arm
+    /// failed — the wait site then never parks waker-less).
+    pub timed_sleep_timer_id: core::sync::atomic::AtomicU64,
+    /// Jiffies stamp of the arm (age gate for the heartbeat print).
+    pub timed_sleep_armed_j: core::sync::atomic::AtomicU32,
+
     /// R12-5: lookup pin count — pid_hash_lookup increments, task_put
     /// decrements and frees at zero. Closes the lookup->use window that
     /// fed freed Task pointers into enqueue.
@@ -1643,6 +1663,10 @@ impl Task {
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
+            timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
+            timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
+            timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
+            timed_sleep_armed_j: core::sync::atomic::AtomicU32::new(0),
             ti_on_cpu: core::sync::atomic::AtomicBool::new(false),
             running_on_cpu: core::sync::atomic::AtomicI32::new(-1),
             ti_pick_state: core::sync::atomic::AtomicU32::new(PICK_PICKED),
@@ -1877,6 +1901,24 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // ticktrap shadow (same R68a recycled-page class): a fresh task
+        // must not inherit a stale timed-sleep shadow.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_deadline)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_kind)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_timer_id)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
         );
         // stress-port r1 (SP-1 follow-up, same R68a class): the four
         // per-field preempt-count liveness stamps were also missing —
@@ -2547,6 +2589,24 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // ticktrap shadow (same R68a recycled-page class): a fresh task
+        // must not inherit a stale timed-sleep shadow.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_deadline)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_kind)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_timer_id)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, timed_sleep_armed_j)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
         );
         // stress-port r1 (SP-1 follow-up, same R68a class): the four
         // per-field preempt-count liveness stamps were also missing —
