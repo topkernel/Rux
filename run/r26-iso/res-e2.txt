@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|inotify11|FAIL|2|t killed! (timeout?)  HINT: You _MAY_ be missing kernel fixes:  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=a37d9a17f099  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0

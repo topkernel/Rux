@@ -1,4 +1,0 @@
-# idx|test|class|rc|tail
-0|creat07|FAIL|3|nt processes tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   1 broken   1 skipped  0 warnings 0
-1|shm_test|TIMEOUT|143|ot shmat address = 0x7ff000425000 pid[311]: shmat_rd_wr(): shmget():success got segment id 1049279 pid[311]: do_shmat_shmadt(): got shmat address = 0x7ff000347000 pid[311]: shmat_rd_wr(): shmget():success got segment id
-2|mmap3|FAIL|2|B, iter    9 tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0

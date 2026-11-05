@@ -1,3 +1,0 @@
-inotify01
-inotify02
-inotify05

@@ -1,8 +1,0 @@
-ppoll01
-pselect01
-pselect01_64
-select02
-select02_64
-poll02
-epoll_pwait03
-rt_sigsuspend01

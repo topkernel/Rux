@@ -1,9 +1,0 @@
-msgstress01
-msgstress02
-msgstress03
-msgstress04
-msgget03
-msgget04
-shmget03
-shmctl03
-msgctl05

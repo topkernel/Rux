@@ -1,8 +1,0 @@
-waitid08
-waitid02
-waitid06
-waitid07
-kill10
-setpgid03
-ptrace01
-ptrace02

@@ -33,7 +33,7 @@ build-x86:
 # Boot x86_64 kernel in QEMU (q35, serial console)
 run-x86: build-x86
 	@echo "Starting QEMU (x86_64 q35)..."
-	@./test/run-x86.sh console
+	@./scripts/test/run-x86.sh console
 
 # Clean
 clean:
@@ -81,19 +81,19 @@ user: sdk probes
 # Create rootfs image (containing mrsh and toybox)
 rootfs: user toybox mrsh
 	@echo "Building rootfs image with mrsh and toybox..."
-	@./test/mkrootfs.sh
+	@./scripts/test/mkrootfs.sh
 
 # Run kernel (QEMU) - default to mrsh
 run:
 	@echo "Starting QEMU (mrsh)..."
-	@./test/run.sh console /bin/sh
+	@./scripts/test/run.sh console /bin/sh
 
 # ---- Ubuntu native desktop (udesk on Ubuntu 22.04 rootfs) ----
 # Build (or rebuild) the Ubuntu GUI disk image: work/ubuntu-gui.img.
 # Requires riscv64-linux-gnu-gcc and the shared Ubuntu rootfs (see
-# test/ubuntu-gui/build-img.sh, override with SRC=/path CC=...).
+# scripts/test/ubuntu-gui/build-img.sh, override with SRC=/path CC=...).
 ubuntu-image:
-	@bash test/ubuntu-gui/build-img.sh
+	@bash scripts/test/ubuntu-gui/build-img.sh
 
 # Run the Ubuntu desktop in a native SDL window (via WSLg). Keyboard
 # works BOTH in the SDL window itself (virtio-keyboard -> /dev/input/
@@ -114,12 +114,12 @@ ubuntu-run: build $(UBUNTU_IMG)
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):
-	@bash test/ubuntu-gui/build-img.sh
+	@bash scripts/test/ubuntu-gui/build-img.sh
 
 # Run kernel test script (PLATFORM=riscv64 default; PLATFORM=aarch64 /
 # x86_64 run the suite under that arch's QEMU; see test/run.sh)
 test: probes
-	@PLATFORM=$(PLATFORM) ./test/run.sh test
+	@PLATFORM=$(PLATFORM) ./scripts/test/run.sh test
 
 # Run formal verification (sync check + proptest)
 verify:
@@ -217,5 +217,5 @@ help:
 	@echo "  kernel/    - Kernel source code"
 	@echo "  userspace/ - User programs"
 	@echo "  build/     - Build and configuration tools"
-	@echo "  test/      - Test scripts"
+	@echo "  scripts/    - Host-side scripts"
 	@echo "  docs/      - Documentation"

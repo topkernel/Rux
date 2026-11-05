@@ -1,5 +1,0 @@
-# idx|test|class|rc|tail
-0|creat06|PASS|0|01: TPASS: got expected failure: EACCES (13) creat06.c:101: TPASS: got expected failure: ELOOP (40) creat06.c:101: TPASS: got expected failure: EROFS (30)  Summary: passed   8 failed   0 broken   0 skipped  0 warnings 0
-1|epoll_pwait03|PASS|0|: min 1000109us, max 1000185us, median 1000109us, trunc mean 1000109.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   14 failed   0 broken   0 skipped  0 warnings 0
-2|ftest03|FAIL|1|pected 0 exit. ftest03     4  TFAIL  :  ftest03.c:209:  Test{319} failed, expected 0 exit. ftest03     5  TFAIL  :  ftest03.c:209:  Test{320} failed, expected 0 exit. ftest03     6  TFAIL  :  ftest03.c:120: Test failed.
-3|getrusage04|PASS|0|:       10000us; stime:      170000us getrusage04    0  TINFO  :  utime:       10000us; stime:      180000us getrusage04    0  TINFO  :  utime:       10000us; stime:      190000us getrusage04    1  TPASS  :  Test Passed

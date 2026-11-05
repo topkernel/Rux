@@ -1,6 +1,0 @@
-# idx|test|class|rc|tail
-0|getpriority01|PASS|0|.c:49: TPASS: getpriority(0, 0) returned 0 getpriority01.c:49: TPASS: getpriority(1, 0) returned 0 getpriority01.c:49: TPASS: getpriority(2, 0) returned 0  Summary: passed   3 failed   0 broken   0 skipped  0 warnings 0
-1|pidns20|PASS|0|test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s pidns20.c:67: TPASS: Received SIGUSR1 signal after unblock  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0
-2|creat07|TIMEOUT|143|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s creat07.c:37: TFAIL: creat() succeeded unexpectedly Test timeouted, sending SIGKILL!
-3|shm_test|CRASH|255|exited with errors 983384 pid[318]: shmat_rd_wr(): shmget():success got segment id 1048921 pid[318]: do_shmat_shmadt(): got shmat address = 0x7ff00022f000 pid[318]: shmat_rd_wr(): shmget():success got segment id 1048922
-4|mmap3|FAIL|2|t process... tst_test.c:1671: TINFO: If you are running on slow machine, try exporting LTP_TIMEOUT_MUL > 1 tst_test.c:1673: TBROK: Test killed! (timeout?)  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0

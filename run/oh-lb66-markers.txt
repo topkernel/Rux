@@ -1,3 +1,0 @@
-    3.654 ServiceStart starting:appspawn
-   93.680 bootevent.bootanimation.ready
-  101.772 bootevent.bootanimation.finished

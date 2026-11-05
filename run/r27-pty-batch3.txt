@@ -1,3 +1,0 @@
-# idx|test|class|rc|tail
-0|pty01|PASS|0|t4 pty01       2  TPASS  :  test2 pty01       3  TPASS  :  test3 pty01       4  TPASS  :  test4 pty01       2  TPASS  :  test2 pty01       3  TPASS  :  test3 pty01       4  TPASS  :  test4 pty01       5  TPASS  :  test5
-1|pty02|PASS|0|0h 00m 30s pty02.c:53: TINFO: Calling FIONREAD, this will hang in n_tty_ioctl() if the bug is present... pty02.c:59: TPASS: Got to the end without hanging  Summary: passed   1 failed   0 broken   0 skipped  0 warnings 0

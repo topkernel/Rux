@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|pty01|CRASH|141|pty01       1  TPASS  :  test1

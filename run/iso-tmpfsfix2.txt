@@ -1,3 +1,0 @@
-# idx|test|class|rc|tail
-0|waitid08|CRASH|137|08.c:42: TINFO: filter child by WCONTINUED waitid08.c:26: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110) Sending SIGKILL to test process... Test timeouted, sending SIGKILL! Test timeouted, sending SIGKILL!
-1|epoll_wait02|FAIL|1|O: min 1000020us, max 1009022us, median 1000020us, trunc mean 1000020.00us (discarded 1) tst_timer_test.c:326: TPASS: Measured times are within thresholds  Summary: passed   1 failed   6 broken   0 skipped  0 warnings 0

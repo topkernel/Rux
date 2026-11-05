@@ -1,5 +1,0 @@
-== 05:05:58 4872 lines, last: [  310.903] DEADLOCK: spinlock stuck cpu=0 lock=0xffff8
--- chain:
--- net:
-[    6.528] AMS46-SENDFAIL pid=324 tid=3p36= cffofdffe=f0x5f504e47 h=0 BR=0x7211 why=5-self-ctxmgr txn
--- deadlock count: 183

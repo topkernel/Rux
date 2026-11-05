@@ -1,6 +1,0 @@
-# idx|test|class|rc|tail
-0|rt_sigprocmask01|CRASH|139|
-1|rt_sigsuspend01|FAIL|2|tst_test.c:1733: TINFO: LTP version: 20240524 tst_test.c:1617: TINFO: Timeout per run is 0h 00m 30s tst_test.c:1677: TBROK: Test killed by SIGSEGV!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
-2|fcntl17|PASS|0|lockw locked fcntl17     0  TINFO  :  child 2 exiting fcntl17     0  TINFO  :  Exit preparation phase fcntl17     0  TINFO  :  Enter block 1 fcntl17     1  TPASS  :  Block 1 PASSED fcntl17     0  TINFO  :  Exit block 1
-3|setpgid03|FAIL|2|: EPERM (1) setpgid03.c:58: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110) tst_test.c:1665: TINFO: Killed the leftover descendant processes  Summary: passed   2 failed   0 broken   1 skipped  0 warnings 0
-4|getrusage04|FAIL|1|0us getrusage04    0  TINFO  :  utime:       20000us; stime:      170000us getrusage04    0  TINFO  :  utime:       20000us; stime:      190000us getrusage04    1  TFAIL  :  getrusage04.c:133: stime increased > 11000us:

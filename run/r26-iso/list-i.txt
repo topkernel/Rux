@@ -1,2 +1,0 @@
-timerfd_settime02
-timerfd_settime01

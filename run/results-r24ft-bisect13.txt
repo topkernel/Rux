@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|ftest03|PASS|0|ftest03     1  TPASS  :  Test passed.

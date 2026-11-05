@@ -1,5 +1,0 @@
-# idx|test|class|rc|tail
-0|name_to_handle_at01|FAIL|1|VAL (22) name_to_handle_at01.c:88: TFAIL: name_to_handle_at() failed (25): EINVAL (22) name_to_handle_at01.c:102: TPASS: name_to_handle_at() passed (26)  Summary: passed   15 failed   12 broken   0 skipped  0 warnings 0
-1|name_to_handle_at02|FAIL|1|flags: name_to_handle_at() failed as expected: EINVAL (22) name_to_handle_at02.c:75: TPASS: empty-path: name_to_handle_at() failed as expected: ENOENT (2)  Summary: passed   7 failed   2 broken   0 skipped  0 warnings 0
-2|open_by_handle_at01|FAIL|1|pen_by_handle_at01.c:93: TFAIL: open_by_handle_at() failed (7): ESTALE (116) open_by_handle_at01.c:93: TFAIL: open_by_handle_at() failed (8): ESTALE (116)  Summary: passed   3 failed   7 broken   0 skipped  0 warnings 0
-3|open_by_handle_at02|FAIL|1|capability: open_by_handle_at() failed as expected: EPERM (1) open_by_handle_at02.c:98: TPASS: symlink: open_by_handle_at() failed as expected: ELOOP (40)  Summary: passed   6 failed   1 broken   0 skipped  0 warnings 0

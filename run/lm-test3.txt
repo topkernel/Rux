@@ -1,9 +1,0 @@
-===CASE lat_syscall null
-[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple syscall: 0.0906 microseconds
-===CASE lat_syscall read
-[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-LMBENCH TIMEOUT lat_syscall
-===CASE lat_syscall write
-[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
-Simple write: 0.1870 microseconds

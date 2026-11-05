@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|getrusage03|FAIL|3|mit/?id=1f10206cf8e9  HINT: You _MAY_ be missing kernel fixes:  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1f10206cf8e9  Summary: passed   4 failed   2 broken   1 skipped  0 warnings 0

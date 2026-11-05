@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|ftest03|FAIL|1|

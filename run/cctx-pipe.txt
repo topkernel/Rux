@@ -1,6 +1,0 @@
-Pipe latency: 10.7832 microseconds
-CCTX1 t=17s sch n=3290483 pre=37 lock=41 acct=42 deq=87 pick=207 pub=13 ctxsws=1412612
-CCTX2 t=17s csw n=1412612 fpusave=78 mm=195011900/138 (n=1412601, avg=138) msr=121 asm=146 fpurest=104
-CCTX3 t=17s wake n=1402679 sel=30 enq=193 disp=1134 ipi n=1355159 avg=1139
-CCTX4 t=17s sem n=0 pre=0 try n=0 avg=0 blk n=0 avg=0
-CCTX5 t=17s pipe w n=1400705 avg=1740 r n=1402435 avg=7308 unix w n=0 avg=0 r n=0 avg=0

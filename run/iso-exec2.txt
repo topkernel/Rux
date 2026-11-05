@@ -1,3 +1,0 @@
-# idx|test|class|rc|tail
-0|execl01|FAIL|2|test.c:1617: TINFO: Timeout per run is 0h 00m 30s execl01_child.c:20: TPASS: execl01_child executed tst_test.c:1449: TBROK: Test haven't reported results!  Summary: passed   0 failed   0 broken   1 skipped  0 warnings 0
-1|waitid08|CRASH|137|CONTINUED waitid08.c:26: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110) Test timeouted, sending SIGKILL! Sending SIGKILL to test process... Test timeouted, sending SIGKILL! Test timeouted, sending SIGKILL!

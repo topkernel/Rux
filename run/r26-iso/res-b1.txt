@@ -1,4 +1,0 @@
-# idx|test|class|rc|tail
-0|fcntl14|FAIL|1|TPASS  :  Test with negative whence locking PASSED fcntl14     0  TINFO  :  Exit block 3 fcntl14     0  TINFO  :  Enter block 4 fcntl14   100  TPASS  :  Test of locks on file PASSED fcntl14     0  TINFO  :  Exit block 4
-1|fcntl15|FAIL|1|arent fcntl15.c:102: TFAIL: Failed to lock now unlocked region one: EAGAIN/EWOULDBLOCK (11) fcntl15.c:110: TPASS: Failed to lock already locked region two  Summary: passed   7 failed   5 broken   0 skipped  0 warnings 0
-2|fcntl33|FAIL|1|FAIL: fcntl() failed to set lease: EAGAIN/EWOULDBLOCK (11) fcntl33.c:194: TPASS: truncate() conflicts with fcntl(F_SETLEASE, F_RDLCK), unblocked within 5s  Summary: passed   7 failed   7 broken   0 skipped  0 warnings 0

@@ -1,2 +1,0 @@
-# idx|test|class|rc|tail
-0|mc04|CRASH|139|
