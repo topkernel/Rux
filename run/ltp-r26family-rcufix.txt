@@ -1,0 +1,15 @@
+CASE:pipe02:0
+CASE:pipe08:0
+CASE:write05:0
+CASE:writev01:0
+CASE:fcntl14:?
+CASE:fcntl15:0
+CASE:fcntl33:0
+CASE:inotify01:0
+CASE:inotify02:0
+CASE:inotify05:0
+CASE:execve03:0
+CASE:close01:0
+CASE:close02:0
+CASE:dup03:0
+CASE:fork05:0

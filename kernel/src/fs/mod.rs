@@ -7,6 +7,7 @@
 
 pub mod file;
 pub mod fdreap;
+pub mod path_memo;
 pub mod inode;
 pub mod dentry;
 pub mod pipe;

@@ -1893,6 +1893,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     let vfs_root = get_vfs_root()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
 
+    // (perf-gap-hunt) Full-path memo: the follow-shape lookup of a
+    // clean absolute path can collapse the whole component walk into
+    // one validated table hit (fs/path_memo.rs). Armed only for the
+    // plain shape — not chrooted (rooted/fast_base both empty),
+    // already-normalized absolute path (the Cow::Borrowed arm), and
+    // follow-semantics flags.
+    let mut memo_armed = fast_base.is_none()
+        && !rooted
+        && pathname.starts_with('/')
+        && matches!(normalized, alloc::borrow::Cow::Borrowed(_))
+        && (flags & (LOOKUP_NOFOLLOW | lookup_flags::LOOKUP_NO_SYMLINKS)) == 0;
+    let mut memo_root: Option<alloc::sync::Arc<Dentry>> = None;
+
     // Start from root, follow mount. P1 chroot: also resolve the task's
     // root dentry (when chrooted) for the ".." clamp below and for absolute
     // symlink bases in follow_symlink.
@@ -1913,7 +1926,38 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // those arms materialize owned Arcs first.
     let mut current: Option<alloc::sync::Arc<Dentry>> = match fast_base {
         Some(ref rd) => Some(follow_mount(rd.clone())),
-        None => Some(follow_mount(vfs_root.clone())),
+        None => {
+            let start = follow_mount(vfs_root.clone());
+            if memo_armed {
+                memo_root = Some(start.clone());
+                if let Some((dentry, inode)) = crate::fs::path_memo::lookup(
+                    &start,
+                    normalized.as_ref(),
+                    |ino| {
+                        crate::fs::permission::inode_permission(
+                            ino,
+                            crate::fs::permission::MAY_EXEC,
+                        )
+                    },
+                ) {
+                    // Trailing-slash demands a directory — the same
+                    // expression the walk tail applies (LTP acct01
+                    // "./tmpfile/" shape).
+                    if pathname.ends_with('/')
+                        && pathname.len() > 1
+                        && !inode.mode.is_directory()
+                    {
+                        return Err(errno::Errno::NotADirectory.as_neg_i32());
+                    }
+                    return Ok(VfsPath {
+                        dentry: Some(dentry),
+                        mnt: None,
+                        inode: Some(inode),
+                    });
+                }
+            }
+            Some(start)
+        }
     };
     let mut current_raw: *const Dentry = core::ptr::null();
     let mut claim: Option<crate::fs::dentry::WalkClaim> = None;
@@ -1967,6 +2011,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // and the next iteration re-fetches through the mirror.
     let mut cur_inode_raw: *const crate::fs::inode::Inode = core::ptr::null();
 
+    // (perf-gap-hunt) full-path memo chain: (ancestor inode, dir_mut_gen)
+    // per walked position, gens loaded under the walk's own claim. ext4
+    // ancestors only (the negative-memo gate: dynamic filesystems never
+    // memo); depth-capped; any shape surprise disarms the collection.
+    let mut memo_chain: [(*const crate::fs::inode::Inode, u64);
+        crate::fs::path_memo::MAX_CHAIN] =
+        [(core::ptr::null(), 0); crate::fs::path_memo::MAX_CHAIN];
+    let mut memo_chain_n: usize = 0;
+
     crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_PRE_NS, pc_pre);
     let pc_loop = crate::dfx::fsw::pc_now();
 
@@ -2019,6 +2072,29 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             }
             if !crate::fs::permission::inode_permission(cur_inode, crate::fs::permission::MAY_EXEC) {
                 return Err(errno::Errno::PermissionDenied.as_neg_i32());
+            }
+        }
+        // (perf-gap-hunt) record this position for the full-path memo:
+        // ext4-gated (ops.lookup identity, the negmemo discipline),
+        // depth-capped, disarmed on any surprise.
+        if memo_armed {
+            if cur_inode_raw.is_null() {
+                memo_armed = false;
+            } else if memo_chain_n < crate::fs::path_memo::MAX_CHAIN {
+                // SAFETY: carried under the claim (see above).
+                let ci = unsafe { &*cur_inode_raw };
+                if ci
+                    .ops
+                    .as_ref()
+                    .map_or(false, |o| o.lookup == Some(crate::fs::ext4::ext4_lookup))
+                {
+                    memo_chain[memo_chain_n] = (cur_inode_raw, ci.dir_mut_gen_load());
+                    memo_chain_n += 1;
+                } else {
+                    memo_armed = false;
+                }
+            } else {
+                memo_armed = false;
             }
         }
         crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_A_NS, pc_a);
@@ -2477,6 +2553,23 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         return Err(errno::Errno::NotADirectory.as_neg_i32());
     }
     crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_TAIL_NS, pc_tail);
+
+    // (perf-gap-hunt) refill the full-path memo: follow-shape walks only
+    // (symlink_depth == 0 — a stored entry must mean the follow-shape
+    // resolution), chain complete (one record per component).
+    if memo_armed
+        && symlink_depth == 0
+        && memo_chain_n == components.len()
+    {
+        if let Some(ref root) = memo_root {
+            crate::fs::path_memo::insert(
+                root,
+                normalized.as_ref(),
+                dentry.clone(),
+                &memo_chain[..memo_chain_n],
+            );
+        }
+    }
 
     Ok(VfsPath {
         dentry: Some(dentry),

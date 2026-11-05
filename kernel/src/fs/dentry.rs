@@ -980,6 +980,7 @@ impl Dentry {
         if let Some(mnt) = mnt {
             mnt.root.clear_mountpoint_back();
         }
+        crate::fs::path_memo::mount_gen_bump();
     }
 
     /// (perf-path lane) Take the mount descriptor out and update the
@@ -988,6 +989,7 @@ impl Dentry {
     pub fn take_mount(&self) -> Option<Arc<VfsMountInternal>> {
         let mnt = self.vfsmount.lock().take();
         self.is_mountpoint.store(mnt.is_some(), Ordering::Release);
+        crate::fs::path_memo::mount_gen_bump();
         mnt
     }
 
@@ -995,6 +997,7 @@ impl Dentry {
     pub fn set_mount(&self, mount: Arc<VfsMountInternal>) {
         *self.vfsmount.lock() = Some(mount);
         self.is_mountpoint.store(true, Ordering::Release);
+        crate::fs::path_memo::mount_gen_bump();
     }
 
     /// Get the mount descriptor (if this is a mount point).
@@ -1015,6 +1018,7 @@ impl Dentry {
     /// mutate `vfsmount` under its own lock (see vfs_umount_object).
     pub fn set_mount_flag(&self, on: bool) {
         self.is_mountpoint.store(on, Ordering::Release);
+        crate::fs::path_memo::mount_gen_bump();
     }
 
     /// Record the mountpoint dentry on a mounted filesystem's ROOT dentry
