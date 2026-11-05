@@ -96,4 +96,4 @@ exec "$QEMU" \
     -device virtio-keyboard-pci,disable-legacy=on \
     -device virtio-tablet-pci,disable-legacy=on \
     -kernel "$BZIMAGE" \
-    -append "root=/dev/vda rw init=/sbin/init console=ttyS0"
+    -append "root=/dev/vda rw init=${INIT:-/sbin/init} console=ttyS0"

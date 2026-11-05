@@ -102,7 +102,7 @@ ubuntu-image:
 # AND in this terminal (serial). Login: root / rux.
 ubuntu-run: build $(UBUNTU_IMG)
 	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
-	@ROOTFS=$(UBUNTU_IMG) NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
+	@ROOTFS=$(UBUNTU_IMG) INIT=/sbin/runit NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):
