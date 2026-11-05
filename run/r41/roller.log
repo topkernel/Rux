@@ -126,3 +126,14 @@
 [roll] r41v42 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  (manual bank after roller death) 21:51:08
 [roll] r41v43 done: SA=58 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  22:06:13
 [roll] boot 44/100 tag=r41v44 sha=d6029424 22:06:19
+[roll] r41v44 done: SA=60 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  22:21:40
+[roll] boot 45/100 tag=r41v45 sha=d6029424 22:21:46
+[roll] r41v45 done: SA=56 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  22:37:06
+[roll] sync check 22:37:11
+[roll] origin/main moved d6029424 -> ea88abfa, merging+rebuilding
+[roll] new kernel live: run/r41/bzImage-411583b2 (411583b2)
+[roll] boot 46/100 tag=r41v46 sha=411583b2 22:37:24
+[roll] r41v46 done: SA=26 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  22:52:44
+[roll] boot 47/100 tag=r41v47 sha=411583b2 22:52:50
+[roll] r41v47 done: SA=59 ladder='NONE (never reached provisioning markers)' pixels=82f0a25f  23:07:51
+[roll] boot 48/100 tag=r41v48 sha=411583b2 23:07:57
