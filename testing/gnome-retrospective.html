@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>回溯报告:GNOME 桌面回归 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=15">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+  <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="index.html">测试总览</a>
+    <a href="ltp.html">LTP 兼容扫描</a>
+    <a href="ltp-full.html">LTP 全量用例</a>
+    <a href="stability.html">稳定性</a>
+    <a href="stress.html">压力</a>
+    <a class="on" href="gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>回溯报告:GNOME 桌面回归</h1>
+    <div class="sub">2026-11-06 · 范围:x86_64 GNOME 启动,main@4ed009ac(10-31 验收)→ main@264b6961(11-06)· 原文 docs/test/gnome-regression-retrospective.md(英文)</div>
+
+    <div class="callout"><b>结论状态:</b>三个根因中两个已修复并验证;一个深水项开放;猎捕期间又当场抓到一个同类新回归(§6)。</div>
+
+    <h2 id="accept"><span class="anchor">§1</span>"能跑"当时的验收口径</h2>
+    <p>x86 GNOME 里程碑(99% 非黑帧、17 分钟稳定会话)在 main@4ed009ac 由 gnome-x86 工作树验收:每次启动用该线的 fire.py 驱动做人工核验。那是<b>一次性战役验收,不是常设门禁</b> —— 该工作树收线后,常备测试面里没有任何一项再启动 GNOME 桌面。</p>
+
+    <h2 id="window"><span class="anchor">§2</span>回归窗口</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>指标</th><th class="num">数值</th></tr></thead>
+        <tbody>
+          <tr><td>窗口内提交总数</td><td class="num">2,825</td></tr>
+          <tr><td>触及性能/优化路径的提交(按标题匹配)</td><td class="num">~664</td></tr>
+          <tr><td>窗口内常备桌面启动测试次数</td><td class="num">0</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>桌面负载在它的工作树收线当天就退出了测试面。此后每一次落地都只对 LTP、make test、pbench、syscost 和 OH 镜像把关 —— 这些项没有一个会启动 gnome-shell。</p>
+
+    <h2 id="roots"><span class="anchor">§3</span>已确认根因(两个,均为性能改造引入)</h2>
+    <h3>3.1 munmap 分块手术 —— 两侧竞态</h3>
+    <ul>
+      <li><b>起源</b>:OH 战役的 132 µs munmap 车队修复,把单次 VMA 写锁持有替换为按 256KB 分块、每块放锁后重建 VMA 树。</li>
+      <li><b>洞</b>:在锁间隙里,同 mm 的并发 mmap 合法地落在仍处理区间的瞬时树洞中;下一个分块把新 VMA 当作当前 munmap 未处理的部分删除(vma=NONE 缺页),延迟 zap 又清掉新 PTE(B 侧)。</li>
+      <li><b>修复</b>(main@5b4a4bc7):<b>先全摘链再 zap</b> —— 一把锁内摘除全部片段;≤4 MB 区间(malloc/arena 全类)在锁内完成 zap。复现器:修复前 2/3 次启动崩溃 → 修复后 3/3 干净(每次启动 12,000 项检查)。</li>
+    </ul>
+    <h3>3.2 ext4 异步批量读填 —— 跨文件页缓存投毒</h3>
+    <ul>
+      <li><b>起源</b>:lmbench 读吞吐攻坚(bw_file_rd 50× 归因)把读路径改成异步批量 DMA,带 ReadDst::Discard 缓存预热。</li>
+      <li><b>洞</b>:完成/缓冲复用归属错位 —— 在新文件的缓存键下供出了上一个读请求的缓冲字节。实测:/bin/bzip2 的 mmap 页携带 /bin/bzexe 的脚本字节,而同一 fd 的 pread 返回正确数据。下游:ld.so 读到垃圾 .dynsym → "undefined symbol" 且符号名为空 → 惰性绑定 NULL+8 → gnome-shell 每次启动死在 fontconfig 初始化。</li>
+      <li><b>修复</b>(已入 main):临时门禁禁用异步提交 —— 同步逐块路径的归属是精确的。冷文件探针:3/3 次启动零错配。异步归属 bug 本身已单独立线(cache-poison 分支,完整证据包)。</li>
+    </ul>
+
+    <h2 id="gate"><span class="anchor">§4</span>合并门为什么两个都没拦住</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>门禁项</th><th>为什么看不见</th></tr></thead>
+        <tbody>
+          <tr><td>LTP 1,869 扫描</td><td>read(2) 用例不触碰 mmap fault-around;mmap 用例是小文件单线程;munmap 竞态需要同 mm 多线程churn</td></tr>
+          <tr><td>make test</td><td>内核内单元套件,无用户态文件系统负载</td></tr>
+          <tr><td>pbench / syscost</td><td>微基准量速度,不量内容正确性</td></tr>
+          <tr><td>OH 镜像启动</td><td>OHOS 用 musl(分配器行为不同);OH 线自己的镜像侧故障掩盖了 mm 类崩溃</td></tr>
+          <tr><td>GNOME 启动</td><td>战役专属;随工作树一起收线</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>根模式:</b>每一把被拆掉的锁、每一批被合并的 I/O 都对微基准和 LTP 验证过。唯一会行使 glibc 动态链接器、堆裁剪与 GObject 生命周期的负载 —— 一个真实桌面 —— 从常备测试面里消失了。回归不是一个事件;它是横跨 2,825 个提交的静默累积,在有人再次运行 <code>make ubuntu-run</code> 的第一时间暴露。</div>
+
+    <h2 id="factors"><span class="anchor">§5</span>叠加因素(诚实清单)</h2>
+    <ol>
+      <li><b>镜像资产丢失</b>:工作树清理带走了 gnome-x86 构建产物;中央镜像库只留了 riscv64 GNOME 盘。无法做旧镜像 + 新内核的 A/B,追猎从零开始。</li>
+      <li><b>两个变量同时变化</b>:重建的镜像拉取了当天的 jammy(733 个包;gjs/mutter 比已验证集合更新),必须先分离"内核回归 vs 版本漂移"才能开始内核追猎。</li>
+      <li><b>探针假阳性</b>(两处,当场纠正):一个取证打印解引用了 Arc 句柄而非 File(恒定"同一指针"伪影);一个探针的 CRC 覆盖范围与其校验器不一致(必然报假损坏)。教训入档:先把探针对着已知良好用例验证,再把它的输出当证据。</li>
+      <li><b>同窗口的组织性回归</b>:scripts/test 搬迁一次打断 37 个驱动脚本的仓库根锚点;一条未锚定的 <code>debug/</code> gitignore 规则让 36 个模块文件失联、origin 不可构建(由推送后克隆门禁捕获,main@484f2144)。同一种病:搬家/改名只做一半。</li>
+    </ol>
+
+    <h2 id="repeat"><span class="anchor">§6</span>追猎期间模式当场重演</h2>
+    <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前搁浅(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭猎捕诊断参数的判别启动同样搁浅 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
+
+    <h2 id="open"><span class="anchor">§7</span>开放项</h2>
+    <ol>
+      <li><b>trim 面(深水区)</b>:glibc systrim 收回一块内核也认为空闲的堆,随后活指针走进其中 —— 元数据在 trim 之前已被销毁。所有内核侧假说都被探针证据排除(分配器布局、brk/VMA 一致性、COW、mremap、真实压力下的 swap 往返、fault-around 纪律、madvise 边界、rmap/LRU)。trim 隔离区观测器(main@f8ffce15,启动参数 <code>trimq=1</code>)已捕获首次触碰及完整上下文:trim 后 0–2 jiffy 内 gobject 代码在 1.15 MB 收回区间内的两次 READ。下一步:命中点的帧内容转储(区分零填与别名)+ 用户态 malloc interposer。</li>
+      <li><b>第 7 轮早期启动搁浅</b>:对 GNOME 启动二分 perf-gap-hunt 第 7 轮合并。</li>
+      <li><b>fdreap close 停滞洪泛</b>:近期每次启动的晚段都有(55–129 行/启动);独立成线。</li>
+    </ol>
+
+    <h2 id="recs"><span class="anchor">§8</span>防复发建议</h2>
+    <ol>
+      <li>把<b>桌面启动门禁</b>加入常备合并层级:串口出现 "Running GNOME Shell" 且会话存活 60 秒 —— 与 LTP 扫描同级的常设项。</li>
+      <li>把<b>字节级 file-mmap 校验探针</b>(fmv/coldfile)加入常备探针 —— 这正是当天就能抓到投毒的传感器类。</li>
+      <li>要求拆锁或批量 I/O 的性能落地,在合并信息里写明 fault-around、brk-trim 与多线程 munmap 如何重新验证。</li>
+    </ol>
+
+    <div class="callout">证据:run/ 下探针源码(mmap_witness、arena_churn、coldfile、fmv、swaprt、mremap),各会话启动串口日志,内核提交 5b4a4bc7、10705570、f8ffce15、484f2144。</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=15"></script>
+</body>
+</html>
