@@ -982,3 +982,165 @@ pub fn dump_frozen_cpu_truth(stuck: usize) {
         let _ = stuck;
     }
 }
+
+/// 53rd session (52nd §6a): parked-kstack symbolizer for S-state tasks.
+///
+/// A task sleeping in the kernel parks with its full call chain intact
+/// between its saved switch sp (`t.thread().sp`, the restore point of
+/// the last context switch, set inside schedule()) and the entry frame
+/// at the stack top. Walking UPWARD from the saved sp and symbolizing
+/// every kernel-text word names the innermost wait function — wait
+/// queue, completion, SleepMutex, bio page wait — which the syscall
+/// number alone cannot (hilogd main parked `lastsys=9` for 600 s with
+/// no way to see what inside the kernel it sleeps on).
+///
+/// Dedup: a (pid, saved-sp) pair prints its line once; a parked task's
+/// stack is frozen while it sleeps, so repeats carry zero information.
+/// Bounded ring of 256 entries; allocation-free (raw atoms).
+///
+/// SAFETY contract: the caller holds no pid-hash bucket lock while the
+/// RETURNED STRING is printed (sc207); the walk itself only
+/// read_volatile's words inside the sleeping task's own kernel-stack
+/// pages, which the Task pins. A task that wakes mid-walk costs a torn
+/// word at worst.
+pub fn parked_kstack_syms(t: &crate::process::task::Task) -> alloc::string::String {
+    use core::fmt::Write as _;
+    use crate::process::task::Task;
+
+    // Kernel text window (same bounds discipline as the R76 HUNG-STK
+    // scan; the two arch linker scripts spell the bounds differently).
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+
+    let mut s = alloc::string::String::new();
+    let thsp = t.thread().sp;
+    // Guard: canonical kernel stack pointer, 8-aligned, inside the
+    // task's own stack window (checked against kernel_stack_bottom so
+    // the upward walk cannot leave the task's pages).
+    let bottom = t.kernel_stack_bottom();
+    if (thsp >> 48) != 0xffff || (thsp & 7) != 0 || thsp < 0x1000 {
+        return s;
+    }
+    if bottom != 0
+        && (thsp < bottom as u64
+            || thsp >= (bottom + crate::config::KERNEL_STACK_SIZE) as u64)
+    {
+        return s;
+    }
+    // Dedup ring: (pid, sp) already printed -> skip everything.
+    {
+        const N: usize = 256;
+        static SEEN_PID: [core::sync::atomic::AtomicU32; N] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; N];
+        static SEEN_SP: [core::sync::atomic::AtomicU64; N] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; N];
+        static CUR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        let pid = t.pid() as u32;
+        for i in 0..N {
+            if SEEN_PID[i].load(Ordering::Relaxed) == pid
+                && SEEN_SP[i].load(Ordering::Relaxed) == thsp
+            {
+                return s; // same park, already reported
+            }
+        }
+        let idx = CUR.fetch_add(1, Ordering::Relaxed) % N;
+        SEEN_PID[idx].store(pid, Ordering::Relaxed);
+        SEEN_SP[idx].store(thsp, Ordering::Relaxed);
+    }
+    let base = thsp as *const u64;
+    let mut shown = 0usize;
+    // Segment discipline: printk records cap at 256 bytes, and the
+    // sleepsnap emitter chunks on newline boundaries — so emit the walk
+    // as newline-separated segments of at most ~230 payload bytes each
+    // (header carries tid for reassembly). ohc25's unsegmented lines
+    // all died at the record cap mid-symbol.
+    let mut seg = alloc::string::String::new();
+    let mut seg_len = 0usize;
+    let _ = write!(seg, "parkstk: tid {} sp={:#x}:", t.pid(), thsp);
+    seg_len = seg.len();
+    let mut flush = |seg: &mut alloc::string::String, s: &mut alloc::string::String| {
+        seg.push('\n');
+        s.push_str(seg);
+        seg.clear();
+    };
+    // Walk upward: live caller frames of the parked chain, bounded by
+    // the task's own stack top.
+    // ohc27 lesson: kernel stacks are 128 KiB (config::KERNEL_STACK_SIZE)
+    // and the reference-parity wait site can sit many KiB above the saved
+    // switch sp — a 256-word (2 KiB) window found only the switch
+    // machinery. Walk to the stack top (up to 4096 words = 32 KiB).
+    let limit = if bottom != 0 {
+        (((bottom + crate::config::KERNEL_STACK_SIZE) as u64 - thsp) / 8).min(4096) as usize
+    } else {
+        4096
+    };
+    for k in 0..limit {
+        // SAFETY: diagnostic read inside the sleeping task's own kernel
+        // stack pages (pinned by the Task while it exists).
+        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        if v >= lo && v < hi && (v & 1) == 0 {
+            let sym = crate::dfx::ksyms::format_symbol(v);
+            if seg_len + sym.len() + 1 > 230 {
+                flush(&mut seg, &mut s);
+                let _ = write!(seg, "parkstk+: tid {}:", t.pid());
+                seg_len = seg.len();
+            }
+            let _ = write!(seg, " {}", sym);
+            seg_len += sym.len() + 1;
+            shown += 1;
+            if shown >= 16 {
+                break;
+            }
+        }
+    }
+    if shown > 0 {
+        flush(&mut seg, &mut s);
+    }
+    s
+}
+
+/// Early-cadence wrapper for the S-state sleep snapshot (53rd): the
+/// khungtaskd cadence (60 s) sees a 7.4 s park only at 61 s; this runs
+/// the same snapshot every ~5 s for the first ~60 s of boot so the
+/// park-time kernel stack is captured while the boot is still young.
+/// Self-gated on dfx=sleepsnap inside sleep_snapshot itself.
+pub fn sleep_snapshot_early() {
+    use core::sync::atomic::Ordering;
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let now = crate::drivers::timer::get_jiffies() as u64;
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 500 || N.load(Ordering::Relaxed) >= 12 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    N.fetch_add(1, Ordering::Relaxed);
+    crate::ipc::binder::sleep_snapshot();
+    // 53rd drain hunt: park-side AF_UNIX queue/wait census on the same
+    // cadence (self-gated on dfx=sleepsnap inside).
+    crate::net::unix::unix_park_audit();
+    // 53rd timer-drive hunt: armed timerfd wheel entries + waiter census
+    // (self-gated on dfx=sleepsnap inside).
+    crate::syscall::misc::timerfd_wheel_audit();
+}

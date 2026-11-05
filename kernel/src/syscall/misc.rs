@@ -4510,3 +4510,96 @@ pub fn epoll_purge_closed_fd(fd: usize) {
         }
     }
 }
+
+/// 53rd session (wedge chain: timer-driven event loops): timerfd wheel
+/// audit. One line per ARMED timerfd-backed kernel timer: expiry jiffies
+/// vs now (overdue ms), interval, wake pid, and the TimerFd wait-queue
+/// census (entries/woken). The OH boot's progress engine is FFRT delay
+/// queues + event runners driven by timerfd+epoll; a delay thread parked
+/// in timerfd_poll_wait while its wheel entry is long OVERDUE (or has
+/// vanished without delivering) is the lost-timer class — and the
+/// year-timeout condvar pandemic upstream of it (52nd §6a descent).
+/// Piggybacks on dfx=sleepsnap cadence (self-gated). Deduped on
+/// (tfd_addr, expires): each re-arm prints once; an unchanged overdue
+/// state prints once and stays named by its first line.
+pub fn timerfd_wheel_audit() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+        return;
+    }
+    use core::fmt::Write as _;
+    let now = crate::drivers::timer::get_jiffies();
+    let mut out = alloc::string::String::new();
+    for t in crate::timer::snapshot_timers() {
+        if t.tfd_addr == 0 {
+            continue;
+        }
+        // Dedup ring on (tfd_addr, expires).
+        {
+            const N: usize = 128;
+            static A: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static E: [core::sync::atomic::AtomicU64; N] =
+                [const { core::sync::atomic::AtomicU64::new(0) }; N];
+            static CUR: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let mut seen = false;
+            for i in 0..N {
+                if A[i].load(core::sync::atomic::Ordering::Relaxed) == t.tfd_addr
+                    && E[i].load(core::sync::atomic::Ordering::Relaxed) == t.expires
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if seen {
+                continue;
+            }
+            let idx = CUR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % N;
+            A[idx].store(t.tfd_addr, core::sync::atomic::Ordering::Relaxed);
+            E[idx].store(t.expires, core::sync::atomic::Ordering::Relaxed);
+        }
+        // SAFETY: tfd_addr is pinned by the timer's armed action (the
+        // disarming paths — settime/cancel — detach it first); read-only
+        // diagnostic access to the count atom and the wait queue.
+        let tfd = unsafe { &*(t.tfd_addr as *const TimerFd) };
+        let cnt = tfd.expiration_count.load(core::sync::atomic::Ordering::Acquire);
+        let (wq_total, wq_woken) = tfd.wait_queue.vw_queue_census();
+        let overdue_ms = if t.expires > now {
+            0
+        } else {
+            (now - t.expires) * 1000 / crate::config::KERNEL_HZ as u64
+        };
+        let _ = writeln!(
+            out,
+            "tfdw: tfd={:#x} expires={} now={} overdue={}ms ivl={} cnt={} wq={}/{} wake={}",
+            t.tfd_addr,
+            t.expires,
+            now,
+            overdue_ms,
+            t.interval_jiffies,
+            cnt,
+            wq_woken,
+            wq_total,
+            t.wake_pid
+        );
+    }
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(240);
+            if cut < rest.len() {
+                match rest[..cut].rfind('\n') {
+                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
+                    _ => {
+                        while cut > 0 && !rest.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                    }
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
+}

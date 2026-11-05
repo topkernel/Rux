@@ -3705,3 +3705,162 @@ mod tests {
         assert_eq!(addr.key, "/dev/log");
     }
 }
+
+/// 53rd session (hilogd drain hunt): park-side AF_UNIX wait-object audit.
+///
+/// For every S-state task parked in a socket syscall (recvfrom/recvmsg/
+/// sendto/writev), resolve the fd to its UnixSocket and print the
+/// socket's receive-queue depth (segments + charge) TOGETHER with the
+/// socket wait-queue census (entries + woken flags) at park time.
+///
+/// The discriminator this buys (reference: af_unix.c readers wait on
+/// sk->sk_wq and every enqueue wakes them — a parked reader with a
+/// NON-EMPTY recvq is a lost wake; a parked reader with an empty recvq
+/// and parked writers on the peer is a drain-side freeze):
+///   recvq=0 + peer writers parked      -> the DRAIN is the problem
+///   recvq>0 + reader asleep + woken=0  -> LOST WAKE (our bug)
+///   recvq>0 + reader asleep + woken=1  -> sticky-skip W1 class
+///
+/// Piggybacks on dfx=sleepsnap (same hunting boots; zero cost off).
+/// Deduped on (tid, sys, fd, segs, charge): a queue that GROWS while
+/// its reader sleeps reprints — that line is the smoking gun.
+pub fn unix_park_audit() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+        return;
+    }
+    use core::fmt::Write as _;
+    let mut out = alloc::string::String::new();
+    crate::sched::for_each_task(|task| {
+        // SAFETY: callback runs under the pid-hash bucket lock (same
+        // contract as sleep_snapshot); reads confined to the task's own
+        // fields, its entry frame, its fdtable and the socket objects.
+        unsafe {
+            let tk = &*task;
+            if tk.pid() == 0 {
+                return;
+            }
+            if !tk.state().contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+                return;
+            }
+            let Some(top) = tk.kernel_stack_top_checked() else {
+                return;
+            };
+            if top == 0 {
+                return;
+            }
+            #[cfg(feature = "x86_64")]
+            let (sys, a0) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's own entry frame.
+                ((*regs).orig_rax, (*regs).rdi)
+            };
+            #[cfg(feature = "riscv64")]
+            let (sys, a0) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                // SAFETY: same contract, riscv64.
+                ((*regs).a7, (*regs).a0)
+            };
+            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+            let (sys, a0) = (0u64, 0u64);
+            // x86_64: 45=recvfrom 47=recvmsg 44=sendto 20=writev.
+            // riscv: 207=recvfrom 211=recvmsg 206=sendto 66=writev.
+            #[cfg(feature = "x86_64")]
+            let wanted = matches!(sys, 45 | 47 | 44 | 20);
+            #[cfg(feature = "riscv64")]
+            let wanted = matches!(sys, 207 | 211 | 206 | 66);
+            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+            let wanted = false;
+            if !wanted {
+                return;
+            }
+            let fd = a0 as usize;
+            let Some(fdt) = tk.try_fdtable() else {
+                return;
+            };
+            let Some(file) = fdt.get_file(fd) else {
+                return;
+            };
+            let Some(sock) = unix_of_file_diag(&file) else {
+                return;
+            };
+            let (segs, charge) = {
+                let q = sock.recv_queue.lock();
+                (q.segs.len(), q.charge)
+            };
+            let (wq_total, wq_woken) = sock.wait_queue.vw_queue_census();
+            // Dedup ring: (tid, sys, fd, segs, charge).
+            {
+                const N: usize = 128;
+                static P: [core::sync::atomic::AtomicU64; N] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; N];
+                static C: [core::sync::atomic::AtomicU64; N] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; N];
+                static CUR: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let tid = tk.pid() as u64;
+                let packed = (tid << 32) | ((sys & 0xff) << 24) | ((fd as u64 & 0xff) << 16) | (segs as u64 & 0xffff);
+                for i in 0..N {
+                    if P[i].load(core::sync::atomic::Ordering::Relaxed) == packed
+                        && C[i].load(core::sync::atomic::Ordering::Relaxed) == charge as u64
+                    {
+                        return;
+                    }
+                }
+                let idx = CUR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % N;
+                P[idx].store(packed, core::sync::atomic::Ordering::Relaxed);
+                C[idx].store(charge as u64, core::sync::atomic::Ordering::Relaxed);
+            }
+            let name = sock
+                .bound_name
+                .lock()
+                .clone()
+                .unwrap_or_else(|| String::from("?"));
+            let peer = sock
+                .dgram_peer
+                .lock()
+                .clone()
+                .unwrap_or_else(|| String::from("-"));
+            let comm = tk.comm();
+            let name_s = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let _ = writeln!(
+                out,
+                "upark: tid {} {} sys={} fd={} name={} peer={} segs={} charge={} wq={}/{}",
+                tk.pid(),
+                name_s,
+                sys,
+                fd,
+                key_shown(&name),
+                key_shown(&peer),
+                segs,
+                charge,
+                wq_woken,
+                wq_total
+            );
+        }
+    });
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(240);
+            if cut < rest.len() {
+                match rest[..cut].rfind('\n') {
+                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
+                    _ => {
+                        while cut > 0 && !rest.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                    }
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
+}

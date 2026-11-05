@@ -538,6 +538,12 @@ pub fn timer_softirq_handler(_nr: usize) {
             // + rate-capped inside) — per-condvar producer-starvation
             // adjudication for the OH post-creation stall web.
             crate::sync::futex::futex_stuck_census();
+            // 53rd (52nd §6a): early-cadence S-state sleep snapshot
+            // (dfx=sleepsnap inside): every ~5 s for the first minute, so
+            // a 7.4 s park (hilogd main) is captured with its parked
+            // kernel stack while the boot is still young; the khungtaskd
+            // 60 s cadence continues afterward.
+            crate::dfx::taskdump::sleep_snapshot_early();
             // stress-port SP-5: direct-reclaim gate census — names the
             // holder's phase/wait-site when the gate has been held >=2 s
             // (self-gated: one atomic load when the gate is free; zero

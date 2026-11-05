@@ -3408,56 +3408,134 @@ pub fn sleep_snapshot() {
                 return;
             };
             #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1) = if top == 0 {
-                (0, 0, 0, 0)
+            let (rip, sys, a0, a1, a2) = if top == 0 {
+                (0, 0, 0, 0, 0)
             } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 // SAFETY: diagnostic read of this task's own entry frame;
                 // owns_kernel_stack checked above (sc261).
-                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi, (*regs).rdx) }
             };
             #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1) = if top == 0 {
-                (0, 0, 0, 0)
+            let (rip, sys, a0, a1, a2) = if top == 0 {
+                (0, 0, 0, 0, 0)
             } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
                 // SAFETY: same contract as the x86_64 twin above.
-                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1, (*regs).a2) }
             };
             #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+            let (rip, sys, a0, a1, a2) = (0u64, 0u64, 0u64, 0u64, 0u64);
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
             let _ = writeln!(
                 out,
-                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
+                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}",
                 name,
                 tk.pid(),
                 state.bits(),
                 sys,
                 rip,
                 a0,
-                a1
-            );        }
+                a1,
+                a2
+            );
+            // 53rd (52nd §6a): the inner wait-object naming — walk this
+            // S-state task's kernel stack from its saved switch sp and
+            // symbolize the frames; this names the innermost wait (wait
+            // queue, completion, SleepMutex, bio page wait) the syscall
+            // number alone cannot. Internally deduped: a parked task
+            // prints its parkstk line once per distinct park. Futex
+            // parks (202) are skipped: the FUX census already decodes
+            // them (uaddr/word/owner) in more detail than a stack walk.
+            if sys != 202 {
+                // poll(7): nfds<=4 — decode the pollfd array from user
+                // memory (fd + events per entry) plus the timeout. A
+                // parked poll's fd IS the wait object; without it the
+                // park names nothing (hilogd main polls ONE fd forever).
+                if sys == 7 && a1 >= 1 && a1 <= 4 {
+                    if let Some(aspace) = tk.address_space() {
+                        let root = aspace.root_ppn();
+                        let read_u64_at = |va: u64| -> Option<u64> {
+                            // SAFETY: read-only diagnostic walk of the
+                            // task's own page tables.
+                            let (ppn, _) = crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                root,
+                                va & !0xfff,
+                            )?;
+                            let pa = (ppn as usize) << 12;
+                            let kv = crate::arch::mm::phys_to_virt(
+                                crate::arch::mm::PhysAddr::new(pa as u64),
+                            )
+                            .bits() as usize
+                                + (va & 0xfff) as usize;
+                            if va & 0xfff > 0xff8 {
+                                return None;
+                            }
+                            // SAFETY: one volatile u64 in the task's own
+                            // mapped user page.
+                            Some(unsafe { core::ptr::read_volatile(kv as *const u64) })
+                        };
+                        let mut pfl = alloc::string::String::new();
+                        use core::fmt::Write as _;
+                        for i in 0..a1.min(4) {
+                            let base = a0 + i * 8;
+                            if let Some(w) = read_u64_at(base) {
+                                let fd = (w & 0xffff_ffff) as i64;
+                                let ev = (w >> 32) & 0xffff;
+                                let _ = write!(pfl, " fd{}={} ev={:#x}", i, fd, ev);
+                            }
+                        }
+                        if !pfl.is_empty() {
+                            let _ = writeln!(out, "pollfd: tid {}{} to={}", tk.pid(), pfl, a2 as i64);
+                        }
+                    }
+                }
+                let stk = crate::dfx::taskdump::parked_kstack_syms(tk);
+                if !stk.is_empty() {
+                    out.push_str(&stk);
+                }
+            }
+        }
     });
     // Emit with every pid-hash bucket released (see the sc207 note
-    // above). One printk for the whole snapshot: ring records have a
-    // length cap, so chunk on line boundaries at a size well under it.
+    // above). One printk per chunk: ring records have a length cap
+    // (LOG_LINE_MAX-class), so every chunk must stay UNDER it AND end on
+    // a line boundary. The old cut extended 1024 FORWARD to the next
+    // newline, so a chunk holding a sleepsnap line plus the head of its
+    // 53rd parkstk line exceeded the record cap and printk truncated the
+    // parkstk tail silently (ohc25: every parkstk line stopped at
+    // __schedule). Cut at the LAST newline at-or-before the cap instead;
+    // a single line longer than the cap still hard-splits (none is).
     if !out.is_empty() {
+        // One printk per LINE, and every line under the 256-byte record
+        // cap: printk's ring record is a fixed 256-byte text buffer and a
+        // longer format string is silently truncated there (ohc25/ohc26:
+        // every multi-line 1000-byte chunk died mid-parkstk, and other
+        // CPUs' records spliced into the hole). Individual parkstk
+        // segments are built <=230 bytes; the pollfd/sleepsnap lines are
+        // far shorter. A pathological >240-byte line still hard-splits.
         let mut rest = out.as_str();
         while !rest.is_empty() {
-            let mut cut = rest.len().min(1024);
+            let mut cut = rest.len().min(240);
             if cut < rest.len() {
-                // Extend to the next newline so lines stay whole.
-                match rest[cut..].find('\n') {
-                    Some(nl) => cut += nl,
-                    None => cut = rest.len(),
+                match rest[..cut].rfind('\n') {
+                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
+                    _ => {
+                        // No newline in range: back off to the nearest
+                        // UTF-8 char boundary (ohc28: a task comm carried
+                        // a multi-byte char and split_at(240) panicked the
+                        // kernel mid-census).
+                        while cut > 0 && !rest.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                    }
                 }
             }
             let (chunk, tail) = rest.split_at(cut);
