@@ -4572,6 +4572,439 @@ pub fn bwr_park_audit() {
     }
 }
 
+/// BC command decoder for TXN-HANG-BWR (holder-chain lane): names the
+/// write-side sub-command of a parked BINDER_WRITE_READ, so a holder
+/// parked mid-critical-section is attributed to the exact binder
+/// operation it went to sleep on (e.g. BC_REQUEST_DEATH_NOTIFICATION —
+/// samgr's SubscribeSystemAbility holds listenerMapLock_ across
+/// AddDeathRecipient).
+fn bc_name(cmd: u32) -> &'static str {
+    match cmd {
+        BC_TRANSACTION => "BC_TRANSACTION",
+        BC_REPLY => "BC_REPLY",
+        BC_TRANSACTION_SG => "BC_TRANSACTION_SG",
+        BC_REPLY_SG => "BC_REPLY_SG",
+        BC_FREE_BUFFER => "BC_FREE_BUFFER",
+        BC_INCREFS => "BC_INCREFS",
+        BC_ACQUIRE => "BC_ACQUIRE",
+        BC_RELEASE => "BC_RELEASE",
+        BC_DECREFS => "BC_DECREFS",
+        BC_INCREFS_DONE => "BC_INCREFS_DONE",
+        BC_ACQUIRE_DONE => "BC_ACQUIRE_DONE",
+        BC_REGISTER_LOOPER => "BC_REGISTER_LOOPER",
+        BC_ENTER_LOOPER => "BC_ENTER_LOOPER",
+        BC_EXIT_LOOPER => "BC_EXIT_LOOPER",
+        BC_REQUEST_DEATH_NOTIFICATION => "BC_REQUEST_DEATH_NOTIFICATION",
+        BC_CLEAR_DEATH_NOTIFICATION => "BC_CLEAR_DEATH_NOTIFICATION",
+        BC_DEAD_BINDER_DONE => "BC_DEAD_BINDER_DONE",
+        _ => "BC_?",
+    }
+}
+
+/// dfx=txnhunt extension (holder-chain lane): BWR-park audit. The FFRT
+/// mass-park wedge face (480 census rows in ffrt::mutexPrivate::wait,
+/// libffrt 0xce0c7) names the WAITERS, never the HOLDER — the holder is
+/// itself asleep mid-critical-section, and the two park sites it can be
+/// asleep at are (a) another mutexPrivate of the same family (visible
+/// to the futex census) or (b) a binder ioctl — invisible to the futex
+/// census, THE blind spot. This audit walks every binder thread at the
+/// ~1 Hz heartbeat (self-gated, one burst per 5 s) and prints, for
+/// every thread whose transaction stack is non-empty (age >= 1 s) or
+/// whose park shape is anomalous, one TXN-HANG-BWR line carrying:
+///   - the thread's CURRENT syscall + ioctl command + the decoded
+///     write-side sub-command of the very BWR it is parked in
+///     (write_size/write_consumed/read_size + first pending BC cmd),
+///   - its transaction-stack top with the outgoing-sync tag — WHO the
+///     nested call is TO (to pid/tid, code, queued-vs-exec, age).
+/// Holder shapes it discriminates:
+///   H1 park=IOCTL-BWR rsz>0 stack SYNC-OUT — holder parked waiting for
+///      the reply of its own nested sync call (target named inline);
+///   H2 park=IOCTL-BWR rsz=0 — WRITE-ONLY BWR parked: the reference
+///      kernel never blocks a write-only BWR (FlushCommands shape —
+///      AddDeathRecipient / one-way notify inside listenerMapLock_), so
+///      this shape is a kernel-side park bug until proven otherwise;
+///   H3 park=FUTEX (or other syscall) with a stacked txn — the holder
+///      is asleep in the SAME mutexPrivate family while owing a reply
+///      (cross-lock wait; the mutex it wants is named by the futex
+///      census, the reply it owes by the stack entry here);
+///   idle pool (empty stack, waiting-for-proc-work) — counted, not
+///      printed. Snapshot under WORLD (sc89: no task lookups / user
+///      reads / prints under the guard); task forensics + user BWR
+///      decode + prints happen after the guard drops (sc207). Bounded
+///     (24 lines + 1 census line); zero cost when dfx=txnhunt is off.
+pub fn bwr_park_audit() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // One burst per 5 s (500 jiffies at HZ=100), offset from the
+    // TXN-HANG burst by construction (they share the heartbeat slot but
+    // independent gates; worst case both fire in the same tick).
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Relaxed, Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    // Per-arch syscall numbers + entry-frame register slots for the
+    // current-syscall decode (same contract as the TXN-HANG sys= read).
+    #[cfg(feature = "x86_64")]
+    const SYS_IOCTL: u64 = 16;
+    #[cfg(feature = "riscv64")]
+    const SYS_IOCTL: u64 = 29;
+    #[cfg(feature = "aarch64")]
+    const SYS_IOCTL: u64 = 29;
+    #[cfg(feature = "x86_64")]
+    const SYS_FUTEX: u64 = 202;
+    #[cfg(any(feature = "riscv64", feature = "aarch64"))]
+    const SYS_FUTEX: u64 = 98;
+
+    struct Snap {
+        pid: u32,
+        tid: u32,
+        looper: u32,
+        wfpw: bool,
+        todo_len: usize,
+        todo_head: alloc::string::String,
+        /// (id, code, from_pid, from_tid, to_pid, to_tid, one_way,
+        /// outgoing_sync, pick_j, enq_j) per stacked txn.
+        stack: alloc::vec::Vec<(u64, u32, u32, u32, u32, u32, bool, bool, u32, u32)>,
+        /// Most recent EV_BWR ring entry (jiffies, first write cmd,
+        /// write_size) — the last BWR the thread submitted, fallback
+        /// attribution when the live user bwr cannot be read.
+        last_bwr: Option<(u32, u32, u32)>,
+        /// Jiffies the thread entered its blocking read wait (0 = not
+        /// waiting); atomic read, safe without WORLD.
+        read_wait_since: u64,
+    }
+    let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
+    let mut threads_n = 0usize;
+    let mut procs_n = 0usize;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD; POD copies and
+        // bounded Strings only (sc89 contract).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            for p in &world.procs {
+                let proc = pm(world, p);
+                procs_n += 1;
+                for t in &proc.im().threads {
+                    threads_n += 1;
+                    let th = t.st();
+                    let mut todo_head = alloc::string::String::new();
+                    if let Some(wk) = th.todo.front() {
+                        match wk {
+                            Work::Transaction(xt) => {
+                                use core::fmt::Write;
+                                let _ = write!(todo_head, "txn{} code{}", xt.id, xt.code);
+                            }
+                            Work::TransactionComplete => todo_head.push_str("txn-complete"),
+                            Work::ReturnError(..) => todo_head.push_str("return-error"),
+                            Work::Node(n) => {
+                                use core::fmt::Write;
+                                let _ = write!(todo_head, "node{}", n.id);
+                            }
+                            Work::DeadBinder { .. } => todo_head.push_str("dead-binder"),
+                            Work::ClearDeathDone { .. } => todo_head.push_str("clear-death-done"),
+                        }
+                    }
+                    let mut stack = alloc::vec::Vec::new();
+                    for x in &th.txn_stack {
+                        // SAFETY: to_tid read under WORLD.
+                        let to_tid = unsafe { x.to_tid() }.unwrap_or(0);
+                        let one_way = x.flags & TF_ONE_WAY != 0;
+                        let outgoing_sync = !one_way
+                            && x.from_tid == Some(t.tid)
+                            && x.from_proc.as_ref().map(|f| f.pid) == Some(proc.pid)
+                            && x.to_proc.pid != proc.pid;
+                        stack.push((
+                            x.id,
+                            x.code,
+                            x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0),
+                            x.from_tid.unwrap_or(0),
+                            x.to_proc.pid,
+                            to_tid,
+                            one_way,
+                            outgoing_sync,
+                            // SAFETY: pick_j read under WORLD.
+                            unsafe { *x.pick_j.get() },
+                            x.enq_j,
+                        ));
+                    }
+                    // Most recent EV_BWR ring entry (ring is written
+                    // under WORLD only; hcur is the next slot).
+                    let mut last_bwr = None;
+                    for k in 0..th.hist.len() {
+                        let e = &th.hist[(th.hcur + th.hist.len() - 1 - k) % th.hist.len()];
+                        if e.ev == EV_BWR && e.j != 0 {
+                            last_bwr = Some((e.j, e.a, e.b));
+                            break;
+                        }
+                    }
+                    snaps.push(Snap {
+                        pid: proc.pid,
+                        tid: t.tid,
+                        looper: th.looper,
+                        wfpw: th.waiting_for_proc_work,
+                        todo_len: th.todo.len(),
+                        todo_head,
+                        stack,
+                        last_bwr,
+                        read_wait_since: t.read_wait_since.load(Relaxed),
+                    });
+                }
+            }
+        }
+    }
+    // WORLD released — task forensics + user BWR decode + prints.
+    // (comm_of + entry-frame read contract: sleep_snapshot / TXN-HANG.)
+    let comm_of = |p: *mut crate::process::Task| -> &str {
+        if p.is_null() {
+            return "?";
+        }
+        // SAFETY: diagnostic comm read of a live task.
+        let c = unsafe { (*p).comm() };
+        core::str::from_utf8(&c[..])
+            .unwrap_or("?")
+            .trim_end_matches('\0')
+    };
+    // Entry-frame (syscall nr, a0, a1, a2) of a task, if its kernel
+    // stack is pinned and mapped.
+    let entry_regs = |p: *mut crate::process::Task| -> Option<(u64, u64, u64, u64)> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: diagnostic reads of the task's mapped kernel stack
+        // (same contract as TXN-HANG's sys= read).
+        let tk = unsafe { &*p };
+        let top = tk.kernel_stack_top_checked()?;
+        #[cfg(feature = "x86_64")]
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        #[cfg(feature = "x86_64")]
+        // SAFETY: entry-frame read of this task's own stack.
+        return Some(unsafe { ((*regs).orig_rax as u64, (*regs).rdi, (*regs).rsi, (*regs).rdx) });
+        #[cfg(feature = "riscv64")]
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        #[cfg(feature = "riscv64")]
+        // SAFETY: entry-frame read of this task's own stack.
+        return Some(unsafe { ((*regs).a7 as u64, (*regs).a0, (*regs).a1, (*regs).a2) });
+        #[cfg(feature = "aarch64")]
+        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::aarch64::pt_regs::PtRegs;
+        #[cfg(feature = "aarch64")]
+        // SAFETY: entry-frame read of this task's own stack.
+        return Some(unsafe {
+            ((*regs).syscallno as u64, (*regs).regs[0], (*regs).regs[1], (*regs).regs[2])
+        });
+    };
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    use core::fmt::Write as _;
+    let mut printed = 0usize;
+    let mut idle_readers = 0usize;
+    let mut write_only_parked = 0usize;
+    let mut stack_holders = 0usize;
+    let mut futex_parked_stack = 0usize;
+    // Empty-stack futex parkers: binder-registered threads asleep in a
+    // futex with nothing owed — the mutexPrivate WAITER face (already
+    // named by the userspace futex census; kept separate from idle).
+    let mut futex_waiters = 0usize;
+    for s in &snaps {
+        // Newest stack entry age (jiffies) — the >= 1 s gate shared
+        // with TXN-HANG pass 1, so transient in-flight sync calls do
+        // not spam.
+        let stack_age = |s: &Snap| -> u32 {
+            s.stack
+                .iter()
+                .map(|e| {
+                    let stamp = if e.8 != 0 { e.8 } else { e.9 };
+                    now.wrapping_sub(stamp)
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let task = unsafe { crate::sched::find_task_by_pid(s.tid) };
+        // State bits (RUNNING=0, INT=1, UNINT=2): a RUNNING thread
+        // caught mid-ioctl must not read as parked.
+        let st_bits = if task.is_null() {
+            0xFFFF_FFFFu32
+        } else {
+            // SAFETY: diagnostic state read of a live task.
+            unsafe { (*task).state().bits() }
+        };
+        let (sys, a0, a1, a2) = match entry_regs(task) {
+            Some(r) => r,
+            None => (0, 0, 0, 0),
+        };
+        let in_bwr_ioctl = sys == SYS_IOCTL && a1 == BINDER_WRITE_READ as u64;
+        // Decode the live user BWR the thread is parked in (if any):
+        // 6 x u64 LP64 fields, read fault-safe one by one.
+        let mut bwr_txt = alloc::string::String::new();
+        let mut h2_write_only = false;
+        if in_bwr_ioctl {
+            let f = |off: usize| get_user_at::<u64>(a2, off).unwrap_or(u64::MAX);
+            let (wsz, wcons, wbuf, rsz, _rcons) = (f(0), f(8), f(16), f(24), f(32));
+            if wsz != u64::MAX {
+                let pending = wsz.saturating_sub(wcons);
+                let mut first = 0xFFFF_FFFFu32;
+                if wsz > 0 && wcons < wsz && wbuf != 0 {
+                    first = get_user_at::<u32>(wbuf, 0).unwrap_or(0xFFFF_FFFF);
+                }
+                let _ = write!(
+                    bwr_txt,
+                    " bwr[w={}/{} rsz={} wcmd={:#x}{}]",
+                    wsz - pending,
+                    wsz,
+                    rsz,
+                    first,
+                    if first != 0xFFFF_FFFF {
+                        alloc::format!("({})", bc_name(first))
+                    } else {
+                        alloc::string::String::new()
+                    }
+                );
+                // H2 discriminator: write-only BWR, fully consumed
+                // write, still parked — the reference kernel returns
+                // from this ioctl without ever sleeping.
+                h2_write_only = rsz == 0 && pending == 0;
+                if h2_write_only {
+                    write_only_parked += 1;
+                }
+            } else {
+                bwr_txt.push_str(" bwr[unreadable]");
+            }
+        }
+        // Last-BWR fallback attribution from the hist ring.
+        let last_bwr_txt = match s.last_bwr {
+            Some((j, cmd, wsz)) => alloc::format!(
+                " lastbwr={}ms wcmd={:#x}({})",
+                now.wrapping_sub(j).saturating_mul(10),
+                cmd,
+                bc_name(cmd)
+            ),
+            None => alloc::string::String::new(),
+        };
+        let age = stack_age(s);
+        let stack_nonempty = !s.stack.is_empty();
+        let suspicious = (stack_nonempty && age >= 100)
+            || h2_write_only
+            || (in_bwr_ioctl && s.todo_len > 0);
+        // Bucket first, decide printing after.
+        if stack_nonempty && age >= 100 {
+            stack_holders += 1;
+            if !in_bwr_ioctl && sys == SYS_FUTEX {
+                futex_parked_stack += 1;
+            }
+        }
+        if !stack_nonempty && !in_bwr_ioctl {
+            if sys == SYS_FUTEX {
+                futex_waiters += 1;
+            } else {
+                idle_readers += 1;
+            }
+            continue;
+        }
+        if !suspicious {
+            idle_readers += 1;
+            continue;
+        }
+        if printed >= 24 {
+            continue;
+        }
+        printed += 1;
+        let park = if in_bwr_ioctl {
+            "IOCTL-BWR"
+        } else if sys == SYS_FUTEX {
+            "FUTEX"
+        } else if sys == 0 {
+            "NOFRAME"
+        } else {
+            "OTHER"
+        };
+        // Stack summary: top (last) entry first — the unresolved edge
+        // this thread is parked behind; tag SYNC-OUT (nested call it is
+        // waiting on, WHO it is TO), SYNC-IN (reply it owes), OWAY.
+        let mut stx = alloc::string::String::new();
+        for e in s.stack.iter().rev().take(2) {
+            let (id, code, fpid, ftid, tpid, ttid, one_way, out_sync, pick, enq) = *e;
+            let (mode, age_j) = if pick != 0 {
+                ("exec", now.wrapping_sub(pick))
+            } else {
+                ("queue", now.wrapping_sub(enq))
+            };
+            let tag = if out_sync {
+                "SYNC-OUT"
+            } else if one_way {
+                "OWAY"
+            } else if ttid == s.tid && tpid == s.pid {
+                "SYNC-IN"
+            } else {
+                "SYNC"
+            };
+            let _ = write!(
+                stx,
+                " [txn{} code{} {} {}.{}/{}.{}/{} {}ms]",
+                id, code, tag, fpid, ftid, tpid, ttid, mode, age_j.saturating_mul(10)
+            );
+        }
+        let rwait = if s.read_wait_since != 0 {
+            alloc::format!(
+                " rwait={}ms",
+                (now as u64)
+                    .wrapping_sub(s.read_wait_since)
+                    .saturating_mul(10)
+            )
+        } else {
+            alloc::string::String::new()
+        };
+        let head_txt = if s.todo_head.is_empty() {
+            alloc::string::String::new()
+        } else {
+            alloc::format!(" head=[{}]", s.todo_head)
+        };
+        let _ = writeln!(
+            w,
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}",
+            s.pid,
+            s.tid,
+            comm_of(task),
+            park,
+            st_bits,
+            sys,
+            a0,
+            a1,
+            bwr_txt,
+            last_bwr_txt,
+            s.looper,
+            s.wfpw,
+            s.todo_len,
+            head_txt,
+            rwait,
+            s.stack.len(),
+            stx
+        );
+    }
+    if printed > 0 {
+        let _ = writeln!(
+            w,
+            "TXN-HANG-BWR-CENSUS procs={} threads={} printed={} stack-holders={} write-only-parked={} futex-parked-stack={} futex-waiters={} idle={}",
+            procs_n, threads_n, printed, stack_holders, write_only_parked, futex_parked_stack, futex_waiters, idle_readers
+        );
+    }
+}
+
 /// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
 /// foundation process. Prints ONLY while there is pending work on the
 /// node/proc (async slot held, txns parked, or proc todo non-empty), so

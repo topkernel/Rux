@@ -2069,45 +2069,53 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
 }
 
 /// Remove waiter from hash chain.
+///
+/// Reference parity (kernel/futex/core.c futex_unqueue): the caller read
+/// `w.bucket` WITHOUT any bucket lock, and FUTEX_REQUEUE can relink a
+/// sleeping waiter into a different bucket's chain between that read and
+/// the lock acquisition here. Re-read the waiter's CURRENT bucket under
+/// the acquired bucket lock and retry with the fresh one. The invariant
+/// exploited: `w.bucket` names the chain that contains the node, the
+/// requeue updates both under BOTH bucket locks, and once we hold the
+/// lock named by a fresh read, no requeue can move the node before we
+/// unlink it (it would need the lock we hold).
+///
+/// Without this, a remove that raced a requeue walked the STALE chain,
+/// found nothing, and silently returned — leaving the waiter linked in
+/// the NEW chain while its task returned to userspace. The stale entry
+/// then ate later FUTEX_WAKEs on the requeue target (the missed-wakeup
+/// shape the FFRT mutex-word park census flagged): the wake's budget was
+/// consumed unlinking a ghost whose task was long gone.
 fn remove_waiter(bucket_idx: usize, target_idx: usize) {
-    let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
+    let mut b = bucket_idx;
+    loop {
+        let mut head = HASH_HEADS[b].lock_irqsave();
 
-    if *head == Some(target_idx) {
-        let next = {
+        // Revalidate under the bucket lock (futex_unqueue's lock_ptr
+        // recheck-retry). Slot lock serializes against requeue's relink
+        // writes to the same fields.
+        let live = {
             let slot = WAITER_POOL[target_idx].lock_irqsave();
-            let n = slot.as_ref().and_then(|w| w.next);
-            // Residency flag: this unlink takes the waiter out of every
-            // chain (see Task::futex_wait_enqueued).
-            if let Some(w) = slot.as_ref() {
-                if !w.task.is_null() {
-                    unsafe {
-                        (*w.task).futex_wait_enqueued
-                            .store(false, core::sync::atomic::Ordering::Release);
-                    }
-                }
+            match *slot {
+                Some(ref w) if !w.task.is_null() => w.bucket,
+                // Slot already freed or recycled underneath us: nothing
+                // to remove (reference: q->lock_ptr == NULL case).
+                _ => return,
             }
-            n
         };
-        *head = next;
-        // Sleeper-side unlink: consume the waiter's count reference
-        // (reference futex_unqueue's dec).
-        hb_waiters_dec(bucket_idx);
-        free_waiter(target_idx);
-        return;
-    }
+        if live != b {
+            drop(head);
+            b = live;
+            continue;
+        }
 
-    let mut current_idx = *head;
-    while let Some(idx) = current_idx {
-        let next = {
-            let slot = WAITER_POOL[idx].lock_irqsave();
-            slot.as_ref().and_then(|w| w.next)
-        };
-
-        if next == Some(target_idx) {
-            let target_next = {
-                let target_slot = WAITER_POOL[target_idx].lock_irqsave();
-                let n = target_slot.as_ref().and_then(|w| w.next);
-                if let Some(w) = target_slot.as_ref() {
+        if *head == Some(target_idx) {
+            let next = {
+                let slot = WAITER_POOL[target_idx].lock_irqsave();
+                let n = slot.as_ref().and_then(|w| w.next);
+                // Residency flag: this unlink takes the waiter out of every
+                // chain (see Task::futex_wait_enqueued).
+                if let Some(w) = slot.as_ref() {
                     if !w.task.is_null() {
                         unsafe {
                             (*w.task).futex_wait_enqueued
@@ -2117,19 +2125,64 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                 }
                 n
             };
-            {
-                let mut slot = WAITER_POOL[idx].lock_irqsave();
-                if let Some(ref mut w) = *slot {
-                    w.next = target_next;
-                }
-            }
-            hb_waiters_dec(bucket_idx);
+            *head = next;
+            // Sleeper-side unlink: consume the waiter's count reference
+            // (reference futex_unqueue's dec) on the LIVE bucket — the
+            // caller's bucket_idx may be stale after a requeue move.
+            hb_waiters_dec(b);
             free_waiter(target_idx);
             return;
         }
 
-        current_idx = next;
+        let mut current_idx = *head;
+        let mut found = false;
+        while let Some(idx) = current_idx {
+            let next = {
+                let slot = WAITER_POOL[idx].lock_irqsave();
+                slot.as_ref().and_then(|w| w.next)
+            };
+
+            if next == Some(target_idx) {
+                let target_next = {
+                    let target_slot = WAITER_POOL[target_idx].lock_irqsave();
+                    let n = target_slot.as_ref().and_then(|w| w.next);
+                    if let Some(w) = target_slot.as_ref() {
+                        if !w.task.is_null() {
+                            unsafe {
+                                (*w.task).futex_wait_enqueued
+                                    .store(false, core::sync::atomic::Ordering::Release);
+                            }
+                        }
+                    }
+                    n
+                };
+                {
+                    let mut slot = WAITER_POOL[idx].lock_irqsave();
+                    if let Some(ref mut w) = *slot {
+                        w.next = target_next;
+                    }
+                }
+                hb_waiters_dec(b);
+                free_waiter(target_idx);
+                found = true;
+                break;
+            }
+
+            current_idx = next;
+        }
+        if !found {
+            // Unreachable while the invariants hold (we held the bucket
+            // the waiter itself says it is linked into): surface it
+            // rather than silently leaking the slot, but do not spin.
+            crate::pr_warn!(
+                "futex-remove-miss: slot {} bucket {} not in chain",
+                target_idx,
+                b
+            );
+        }
+        return;
     }
+}
 }
 
 /// Clean up all futex waiters for a given task.
@@ -2292,9 +2345,42 @@ pub fn futex_to_flags(op: u32) -> u32 {
 
 /// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE implementation.
 ///
-/// Wakes up to `nr_wake` waiters on `uaddr`, then requeues up to `nr_requeue`
-/// remaining waiters from `uaddr` to `uaddr2`.  For CMP_REQUEUE, verifies
-/// `*uaddr == cmpval` first.
+/// Reference shape (kernel/futex/requeue.c futex_requeue, non-PI path):
+/// - the cmpval check reads `*uaddr` UNDER the bucket lock(s), so the
+///   "generation unchanged" verdict is atomic with the chain migration
+///   (EAGAIN is decided while holding the same locks the waiters queue
+///   under — our futex_wait also re-checks the value under its bucket
+///   lock, which is what makes the pair airtight);
+/// - the scan wakes up to `nr_wake` matched waiters (unlink + flag under
+///   the locks) and requeues up to `nr_requeue` more by unlinking them
+///   from uaddr's chain and linking them into uaddr2's chain, all under
+///   BOTH bucket locks — a requeued waiter is never observable in limbo;
+/// - requeued waiters are appended at the TAIL of the destination chain
+///   (reference requeue_futex's plist_add: FIFO within the priority
+/// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE implementation.
+///
+/// Reference shape (kernel/futex/requeue.c futex_requeue, non-PI path):
+/// - the cmpval check reads `*uaddr` UNDER the bucket lock(s), so the
+///   "generation unchanged" verdict is atomic with the chain migration
+///   (EAGAIN is decided while holding the same locks the waiters queue
+///   under — our futex_wait also re-checks the value under its bucket
+///   lock, which is what makes the pair airtight); the degenerate paths
+///   (uaddr2 == 0, uaddr2 == uaddr, nr_requeue <= 0) do NOT skip it;
+/// - the scan wakes up to `nr_wake` matched waiters (unlink + flag under
+///   the locks) and requeues up to `nr_requeue` more by unlinking them
+///   from uaddr's chain and linking them into uaddr2's chain, all under
+///   BOTH bucket locks — a requeued waiter is never observable in limbo;
+/// - requeued waiters are appended at the TAIL of the destination chain
+///   (reference requeue_futex's plist_add: FIFO within the priority
+///   class — a requeued waiter must not overtake waiters already queued
+///   on uaddr2);
+/// - woken tasks are woken while the bucket guards are still held
+///   (R12-2, same invariant as futex_wake_in_mm: the deferred
+///   wake-after-unlock used to leave a UAF window where a signal-roused
+///   waiter returned, exited and was swept before Task::wake_up ran);
+/// - a FUTEX_WAIT_REQUEUE_PI waiter in the scanned chain is EINVAL for a
+///   plain-mode requeue (reference requeue.c's G1 handling) — it is not
+///   even eligible for the wake slot.
 ///
 /// Returns the total number of waiters woken + requeued, or a negative errno.
 pub fn futex_requeue(
@@ -2310,8 +2396,22 @@ pub fn futex_requeue(
 
     let key1 = FutexKey::new_user(uaddr, mm, flags);
 
-    // No requeue target or same address → just wake
+    // Degenerate shapes (dispatch already rejects uaddr2 == 0, but this
+    // fn is reachable from other callers): same key or nothing to requeue
+    // still runs the cmpval check under the bucket lock first — the
+    // reference does not shortcut to futex_wake, so CMP_REQUEUE with a
+    // stale value must fail with EAGAIN instead of waking.
     if uaddr2 == 0 || uaddr2 == uaddr || nr_requeue <= 0 {
+        let mut head1 = HASH_HEADS[futex_hash(&key1)].lock_irqsave();
+        if is_cmp {
+            // SAFETY: exception-table protected read; unmapped → EFAULT.
+            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(uval) if uval == cmpval => {}
+                Some(_) => return -EAGAIN as i64,
+                None => return -EFAULT as i64,
+            }
+        }
+        drop(head1);
         return futex_wake(uaddr, flags, nr_wake, FUTEX_BITSET_MATCH_ANY);
     }
 
@@ -2321,34 +2421,29 @@ pub fn futex_requeue(
 
     let mut ret = 0i64;
     let mut woken = 0i32;
+    let mut requeued = 0i32;
 
-    // Collect tasks to wake and waiter indices to requeue. Dynamically
-    // sized: fixed 8/32-entry arrays silently stranded waiters past their
-    // capacity (pthread_cond_broadcast) — review IPC-C3/M7.
+    // Collect tasks to wake. Dynamically sized: fixed 8/32-entry arrays
+    // silently stranded waiters past their capacity (pthread_cond_broadcast)
+    // — review IPC-C3/M7.
     let mut wake_list: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
-    let mut requeue_list: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
     // Lock both buckets to prevent requeued entries from being in limbo.
-    // Use address ordering (lower index first) to avoid ABBA deadlock.
+    // Use index ordering (lower first) to avoid ABBA deadlock — same
+    // ordering as the reference's double_lock_hb on bucket address.
     if bucket1 == bucket2 {
-        // Same bucket — lock once.
+        // Same bucket — lock once (reference double_lock_hb takes hb1 only
+        // when hb1 == hb2).
         let mut head1 = HASH_HEADS[bucket1].lock_irqsave();
 
-        // For CMP_REQUEUE, verify *uaddr == cmpval UNDER the bucket lock
-        // (reference requeue.c: the compare runs after double_lock_hb, so
-        // a mismatched value aborts with EAGAIN before any waiter is
-        // touched — check-then-scan is atomic wrt other futex ops).
+        // CMP_REQUEUE: verify *uaddr == cmpval UNDER the bucket lock
+        // (reference futex_get_value_locked + EAGAIN at out_unlock).
         if is_cmp {
-            // SAFETY: exception-table protected read; unmapped address → EFAULT.
-            let uaddr_ptr = uaddr as *const u32;
-            let uval = match unsafe {
-                crate::arch::uaccess::get_user(uaddr_ptr)
-            } {
-                Some(v) => v,
+            // SAFETY: exception-table protected read; unmapped → EFAULT.
+            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(uval) if uval == cmpval => {}
+                Some(_) => return -EAGAIN as i64,
                 None => return -EFAULT as i64,
-            };
-            if uval != cmpval {
-                return -EAGAIN as i64;
             }
         }
 
@@ -2408,23 +2503,10 @@ pub fn futex_requeue(
                 woken += 1;
                 ret += 1;
                 cur = next;
-            } else if (requeue_list.len() as i32) < nr_requeue
-            {
-                // Mismatched ops (reference EINVAL): this requeue moves
-                // in the PLAIN mode, but the waiter parked with
-                // FUTEX_WAIT_REQUEUE_PI semantics. Waking it is legal
-                // (plain WAKE does), moving it is not.
-                {
-                    let slot = WAITER_POOL[idx].lock_irqsave();
-                    if let Some(ref w) = *slot {
-                        if w.pi_rqp_uaddr2 != 0 {
-                            return -(EINVAL as i64);
-                        }
-                    }
-                }
-                // Same bucket — just update the key (and keep the bucket
-                // field truthful), stay in chain. Count unchanged: the
-                // waiter never left this bucket.
+            } else if requeued < nr_requeue {
+                // Same bucket: the reference's requeue_futex only updates
+                // the key when hb1 == hb2 — the node keeps its position.
+                // Count unchanged: the waiter never left this bucket.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
@@ -2432,7 +2514,7 @@ pub fn futex_requeue(
                         w.bucket = bucket2;
                     }
                 }
-                requeue_list.push(idx);
+                requeued += 1;
                 ret += 1;
                 prev = Some(idx);
                 cur = next;
@@ -2440,6 +2522,24 @@ pub fn futex_requeue(
                 break;
             }
         }
+
+        // R12-2: wake while the bucket guard is still held — the
+        // flag-then-wake order (C8) is unchanged, but the Task deref is
+        // bounded by the guard exactly like futex_wake_in_mm. A
+        // signal-roused waiter that returned early cannot complete
+        // do_exit past futex_cleanup's acquire of this bucket before the
+        // wake below finishes; the pid revalidation stays as defense in
+        // depth for the residency-fastpath residue.
+        for task in &wake_list {
+            if !task.is_null() {
+                let pid = unsafe { (**task).pid() };
+                let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+                if fresh == *task {
+                    Task::wake_up_in_futex_bucket(*task, &head1.proof());
+                }
+            }
+        }
+        drop(head1);
     } else {
         // Different buckets — lock both with deadlock-avoidance ordering.
         let (lo, hi) = if bucket1 < bucket2 {
@@ -2458,24 +2558,24 @@ pub fn futex_requeue(
             (&mut *guard_hi, &mut *guard_lo)
         };
 
-        let mut prev: Option<usize> = None;
-        let mut cur = *head1_ref;
-
-        // CMP_REQUEUE compare under both bucket locks (reference parity —
-        // see the same-bucket branch above).
+        // CMP_REQUEUE: verify *uaddr == cmpval UNDER both bucket locks
+        // (reference futex_get_value_locked inside the double_lock_hb
+        // region). Our get_user goes through the exception table, so the
+        // in-lock read cannot sleep-block on an unmapped word: it returns
+        // None → EFAULT, where the reference drops the locks, faults the
+        // page in with get_user, and retries — private futex words are
+        // always resident here, so the observable contract matches.
         if is_cmp {
-            // SAFETY: exception-table protected read; unmapped address → EFAULT.
-            let uaddr_ptr = uaddr as *const u32;
-            let uval = match unsafe {
-                crate::arch::uaccess::get_user(uaddr_ptr)
-            } {
-                Some(v) => v,
+            // SAFETY: exception-table protected read; unmapped → EFAULT.
+            match unsafe { crate::arch::uaccess::get_user(uaddr as *const u32) } {
+                Some(uval) if uval == cmpval => {}
+                Some(_) => return -EAGAIN as i64,
                 None => return -EFAULT as i64,
-            };
-            if uval != cmpval {
-                return -EAGAIN as i64;
             }
         }
+
+        let mut prev: Option<usize> = None;
+        let mut cur = *head1_ref;
 
         while let Some(idx) = cur {
             let (matches, next) = {
@@ -2492,10 +2592,9 @@ pub fn futex_requeue(
                 continue;
             }
 
-            // Reference EINVAL BEFORE touching the queue: a plain-mode
-            // REQUEUE never processes a FUTEX_WAIT_REQUEUE_PI waiter —
-            // not even for its wake slot (only plain FUTEX_WAKE may end
-            // a phase-1 requeue_pi park).
+            // Reference EINVAL BEFORE touching the queue (see the
+            // same-bucket branch): a plain-mode REQUEUE never processes
+            // a FUTEX_WAIT_REQUEUE_PI waiter.
             {
                 let slot = WAITER_POOL[idx].lock_irqsave();
                 if let Some(ref w) = *slot {
@@ -2530,19 +2629,7 @@ pub fn futex_requeue(
                 woken += 1;
                 ret += 1;
                 cur = next;
-            } else if (requeue_list.len() as i32) < nr_requeue
-            {
-                // Mismatched ops (reference EINVAL): plain-mode requeue
-                // of a FUTEX_WAIT_REQUEUE_PI waiter is rejected; waking
-                // it above stays legal (plain WAKE does).
-                {
-                    let slot = WAITER_POOL[idx].lock_irqsave();
-                    if let Some(ref w) = *slot {
-                        if w.pi_rqp_uaddr2 != 0 {
-                            return -(EINVAL as i64);
-                        }
-                    }
-                }
+            } else if requeued < nr_requeue {
                 // Unlink from source chain.
                 if prev.is_none() {
                     *head1_ref = next;
@@ -2557,9 +2644,16 @@ pub fn futex_requeue(
                 // invisible to a concurrent bucket2 wake.
                 hb_waiters_dec(bucket1);
                 hb_waiters_inc(bucket2);
-                // Update key (incl. bucket bookkeeping) and insert into
-                // the destination chain TAIL (FIFO parity — see the wait
-                // path's tail insert).
+                // Relink at the TAIL of the destination chain and update
+                // the key + bucket bookkeeping under the same slot lock,
+                // so a concurrently-signalled sleeper reads a consistent
+                // (bucket, key, next) triple from its own slot. Tail
+                // append, not head push: reference requeue_futex inserts
+                // with plist_add (FIFO within a priority class), so this
+                // waiter must not overtake waiters already queued on
+                // uaddr2 — head insertion inverted that order, letting a
+                // just-requeued condvar waiter steal the mutex handoff
+                // wake from a longer-blocked mutex waiter.
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
                     if let Some(ref mut w) = *slot {
@@ -2568,81 +2662,53 @@ pub fn futex_requeue(
                         w.next = None;
                     }
                 }
-                match *head2_ref {
+                let mut tail = *head2_ref;
+                match tail {
                     None => *head2_ref = Some(idx),
-                    Some(first2) => {
-                        let mut tail = first2;
-                        loop {
-                            let next2 = {
-                                let slot = WAITER_POOL[tail].lock_irqsave();
-                                slot.as_ref().and_then(|w| w.next)
-                            };
-                            match next2 {
-                                None => break,
-                                Some(n) => tail = n,
-                            }
+                    Some(mut t) => loop {
+                        let n = {
+                            let slot = WAITER_POOL[t].lock_irqsave();
+                            slot.as_ref().and_then(|w| w.next)
+                        };
+                        match n {
+                            Some(n) => t = n,
+                            None => break,
                         }
-                        let mut tail_slot = WAITER_POOL[tail].lock_irqsave();
-                        if let Some(ref mut tw) = *tail_slot {
-                            tw.next = Some(idx);
-                        }
+                    },
+                }
+                if tail.is_some() {
+                    let mut slot = WAITER_POOL[tail.unwrap()].lock_irqsave();
+                    if let Some(ref mut w) = *slot {
+                        w.next = Some(idx);
                     }
                 }
 
-                requeue_list.push(idx);
+                requeued += 1;
                 ret += 1;
                 cur = next;
             } else {
                 break;
             }
         }
+
+        // R12-2: wake while BOTH bucket guards are still held (see the
+        // same-bucket branch above; the proof of either guard satisfies
+        // the nested GRQ acquire — INV-LOCK-5 class crossing).
+        for task in &wake_list {
+            if !task.is_null() {
+                let pid = unsafe { (**task).pid() };
+                let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
+                if fresh == *task {
+                    Task::wake_up_in_futex_bucket(*task, &guard_lo.proof());
+                }
+            }
+        }
         drop(guard_lo);
         drop(guard_hi);
     }
 
-    // R12-2: the waiters were unlinked from their chains under the bucket
-    // locks in the collecting pass; unlike futex_wake we are already past
-    // those critical sections, so the PID revalidation stays as defense
-    // in depth against the cross-CPU reap window.
-    //
-    // C8 wake-ordering invariant (waker side): every woken waiter had its
-    // `woken` flag set to true under the bucket lock during the pass
-    // above, strictly before these Task::wake_up calls — flag first, wake
-    // second. This is what makes waking outside the bucket lock safe for
-    // any wake source: a sleeper roused by a SIGNAL rather than by us
-    // re-acquires the slot lock, reads woken == true (our store already
-    // happened), and takes the success path instead of EINTR; a sleeper
-    // that has not run yet is woken by the calls below. Reordered
-    // (wake first, flag later) the signal-roused sleeper would read
-    // woken == false, exit with EINTR, and the later store would wake no
-    // one — the waiter's FUTEX_WAIT returns the wrong result or the
-    // requeued-to futex never completes.
-    for task in wake_list {
-        if !task.is_null() {
-            let pid = unsafe { (*task).pid() };
-            let fresh = crate::process::pid_hash::pid_hash_lookup(pid);
-            if fresh == task {
-                Task::wake_up(task);
-            }
-        }
-    }
-
     ret
 }
-
-/// FUTEX_OP_OPARG_SHIFT (include/uapi/linux/futex.h): bit 3 of the op
-/// nibble makes oparg a SHIFT AMOUNT (oparg = 1 << oparg) instead of an
-/// immediate.
-pub const FUTEX_OP_OPARG_SHIFT: u32 = 1 << 3;
-
-/// The decoded FUTEX_WAKE_OP operand encoding.
-///
-/// Reference contract (kernel/futex/waitwake.c futex_atomic_op_inuser):
-/// - op nibble is 3 bits + the OPARG_SHIFT bit: `(encoded & 0x70000000) >> 28`
-///   selects the operation, bit 3 (`0x80000000`) turns oparg into a shift
-///   amount;
-/// - oparg and cmparg are 12-bit SIGNED fields (sign_extend32(..., 11)) —
-///   0xfff is -1, not 4095;
 /// - an op nibble 5-7 or a cmp nibble 6-15 is -ENOSYS, not -EINVAL.
 ///
 /// Split out so the in-kernel suite can pin the ABI decode (the old inline
@@ -3571,8 +3637,11 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             // _timeout is repurposed as nr_requeue in the futex ABI.
             let nr_requeue = _timeout as i32;
-            // Linux: negative nr_requeue or missing/misaligned uaddr2 is EINVAL.
-            if nr_requeue < 0 {
+            // Linux: negative nr_wake OR negative nr_requeue is EINVAL
+            // (requeue.c: `if (nr_wake < 0 || nr_requeue < 0)`); a
+            // negative nr_wake used to silently degrade into
+            // "requeue everything" instead.
+            if nr_requeue < 0 || (val as i32) < 0 {
                 return -EINVAL as i64;
             }
             if uaddr2 == 0 || uaddr2 & 0x3 != 0 {
