@@ -97,7 +97,14 @@ const GP_BUDGET_MS: u64 = 50;
 /// 16 x 50 ms = 800 ms worst case per close on x86 (4 s on the
 /// slower-TCG arch budgets), then close(2) returns; a healthy boot
 /// never reaches this (grace passes in the microsecond window).
+///
+/// 52nd session (oh-crash): the ladder is REPLACED by one-attempt
+/// defer (reference parity: Linux's close never blocks on a grace —
+/// see the completion loop); this constant now bounds only the
+/// empty-batch yield rounds (ours inside the reaper's in-flight
+/// batch), where a couple of schedule() rounds is plenty.
 const FDREAP_MAX_STALLS: usize = 16;
+const FDREAP_YIELD_ROUNDS: usize = 2;
 
 /// Park a removed slot occupant and COMPLETE its close decision before
 /// returning — the reference task_work parity form for syscall-context
@@ -146,7 +153,28 @@ pub fn retire_complete(file: Arc<File>) {
     // Completion loop: wait until the close decisions for everything
     // parked up to and including ours have run. Usually we win the race
     // ourselves and drain the batch here (one grace covers the batch).
-    let mut stalls = 0usize;
+    //
+    // 52nd session (oh-crash): the retry ladder is GONE — one polled
+    // attempt, one budget, then defer. The 51st's 16-budget escape
+    // hatch proved necessary but not sufficient: every close(2) still
+    // burned ~800ms while any CPU's quiescent report stalled
+    // (ohc10-ohc22: RCU-GP-BOUND site=fdreap-close is 100% of the
+    // grace-stall prints), and the take-all-requeue-all ladder
+    // multiplied that cost. The monopolist family behind the stalls is
+    // the fork-window allocator monopolies (stack_cache_alloc / buddy
+    // under churn — IRQ-off lock sections for hundreds of ms, sometimes
+    // terminal) plus preempt-count leaks; both are cross-lane fixes.
+    // What close(2) itself must do is reference parity: Linux's close
+    // NEVER blocks on an RCU grace — fput queues task_work at the
+    // return-to-userspace boundary and the file's release runs there,
+    // with call_rcu doing any after-the-fact reclamation asynchronously
+    // (fs/file_table.c fput / file_free_rcu). Keeping one fast
+    // synchronous window preserves our stricter-than-Linux "decisions
+    // done before the syscall returns" behavior on a healthy system
+    // (the polled grace completes in microseconds); on a stalled one we
+    // now pay one budget (~50ms worst case) and hand the batch to the
+    // reaper instead of stacking sixteen budgets per close.
+    let mut yields = 0usize;
     while PROCESSED_SEQ.load(Ordering::Acquire) < my_ord {
         let batch = {
             let mut q = RETIRED.lock_irqsave();
@@ -154,9 +182,17 @@ pub fn retire_complete(file: Arc<File>) {
         };
         if batch.is_empty() {
             // Ours is inside the reaper's in-flight batch (between its
-            // take and its decisions). Yield: the context switch both
-            // lets the reaper run and reports our CPU's quiescent
-            // state, which is what its grace wait needs to finish.
+            // take and its decisions). Yield a bounded number of
+            // rounds: the context switch both lets the reaper run and
+            // reports our CPU's quiescent state, which is what its
+            // grace wait needs to finish. After the bound, return —
+            // the reaper owns the batch that contains our file and
+            // completes it; blocking the closer on the reaper's
+            // progress rebuilds the monopolist convoy one level up.
+            yields += 1;
+            if yields >= FDREAP_YIELD_ROUNDS {
+                return;
+            }
             crate::sched::schedule();
             continue;
         }
@@ -177,47 +213,23 @@ pub fn retire_complete(file: Arc<File>) {
             drop(batch);
             PROCESSED_SEQ.fetch_add(n, Ordering::AcqRel);
         } else {
-            // Grace did not pass (monopolist window): requeue — ours and
-            // the batch's — and retry. Correctness requires completion
-            // before return; the reaper retries in parallel.
+            // Grace did not pass (monopolist window): hand the batch to
+            // the reaper and RETURN. The reaper retries and completes
+            // the decisions whenever the grace finally passes (rolling
+            // monopolies drain between episodes); the closer stops
+            // stacking grace budgets behind a monopolized CPU.
+            // Correctness is unchanged: the batch is queued (never
+            // dropped), the reaper owns it, and the final table Drop
+            // re-runs any decision the reaper never reaches.
             GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
-            stalls += 1;
-            if stalls == 8 || stalls % 64 == 0 {
+            static DEFER_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let dn = DEFER_N.fetch_add(1, Ordering::Relaxed);
+            if dn == 0 || dn % 256 == 0 {
                 crate::pr_warn!(
-                    "fs: fdreap close completion stalled (grace budget exceeded {}x)",
-                    stalls
+                    "fs: fdreap close deferred to reaper ({}x: stalled quiescent round — monopolist window)",
+                    dn + 1
                 );
-            }
-            // 51st session — the monopolist escape hatch. The OH wedge
-            // chain (ohc10-ohc18 evidence): one CPU's quiescent
-            // generation froze permanently (RCU-GP-BOUND qs=N,M with M
-            // never advancing), and every close(2) then blocked HERE
-            // forever — hilogd's log rotation froze first (t~5s), its
-            // socket backpressure froze every service holding a lock,
-            // and the whole boot wedged (pixels 82f0a25f; debug AND
-            // release kernels, with or without instruments). The
-            // reference kernel's close(2) NEVER blocks on an RCU grace
-            // (fput defers to task_work at return-to-userspace), so
-            // unconditionally requiring a full grace in the closer's
-            // context is our divergence. After FDREAP_MAX_STALLS failed
-            // budgets, leave the batch to the reaper (it retries and
-            // completes the decisions whenever the grace finally
-            // passes) and RETURN — the user-visible close semantics
-            // (peer EOF etc.) lag by the monopolist's lifetime in
-            // exactly this pathological case, instead of the whole
-            // system freezing behind close(2).
-            if stalls >= FDREAP_MAX_STALLS {
-                crate::pr_warn!(
-                    "fs: fdreap close deferring completion after {} budgets (frozen-cpu monopolist) — reaper owns the batch",
-                    stalls
-                );
-                RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
-                {
-                    let mut q = RETIRED.lock_irqsave();
-                    q.extend(batch);
-                }
-                TICKET.up();
-                return;
             }
             RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
             {
@@ -225,6 +237,7 @@ pub fn retire_complete(file: Arc<File>) {
                 q.extend(batch);
             }
             TICKET.up();
+            return;
         }
     }
 }
