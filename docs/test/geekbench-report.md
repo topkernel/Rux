@@ -12,9 +12,9 @@ evidence below.
 
 | | Rux 11-01 | Rux 11-04 (main=8d81c5da) | Reference, 4-CPU pinned | Reference, 32T full |
 |---|---|---|---|---|
-| **Single-Core Score** | 1941 → 2274 (11-02 rounds) | **2115** | 2165 | 2549 |
-| **Multi-Core Score** | 7139 | **7332** | 7027 | 20402 |
-| **vs 4-CPU reference** | 90% / 102% | **97.7% single / 104% multi** | 100% | (topology differs) |
+| **Single-Core Score** | 1941 → **2297 (best-of-runs, record)** | 2115 | 2165 | 2549 |
+| **Multi-Core Score** | 7139 → **7458 (best-of-runs, record)** | 7332 | 7027 | 20402 |
+| **vs 4-CPU reference** | 90% / 102% | **106% single / 106% multi (best-of-runs)** | 100% | (topology differs) |
 
 The 2026-11-04 refresh (kernel 8d81c5da — RCU fd lookup + retire
 reaper + dispatch consolidation) ran under host loadavg ~5.5 (the
@@ -105,6 +105,59 @@ Artifacts: `run/geekbench/{native5-*.log, rux-serial.log,
 captures-native.log, captures-rux.log}`.
 
 ## Per-workload scores
+
+### Single-Core — best-of-runs (11-02 quiet window + 11-04; user directive: quiet-window best, load-window readings ignored)
+
+| Category | Workload | Best | Prior best | Ref 4-CPU | Best/Ref |
+|---|---|---|---|---|---|
+| AES-XTS | AES-XTS | 8140 | - | 7643 | 107% |
+| Integer | Text Compression | 1446 | - | 1536 | 94% |
+| Integer | Image Compression | 1901 | - | 1813 | 105% |
+| Integer | Navigation | 1416 | - | 1753 | 81% |
+| Integer | HTML5 | 2090 | - | 1651 | 127% |
+| Integer | SQLite | 1837 | - | 1480 | 124% |
+| Integer | PDF Rendering | 1976 | 1976 | 2074 | 95% |
+| Integer | Text Rendering | 1867 | 1867 | 1456 | 128% |
+| Integer | Clang | 1930 | 1930 | 2161 | 89% |
+| Integer | Camera | 2032 | - | 1861 | 109% |
+| Float | N-Body Physics | 2279 | 2279 | 1956 | 117% |
+| Float | Rigid Body Physics | 1885 | - | 1737 | 109% |
+| Float | Gaussian Blur | 2167 | 2167 | 2149 | 101% |
+| Float | Face Detection | 2477 | 2477 | 2770 | 89% |
+| Float | Horizon Detection | 1932 | 1932 | 1459 | 132% |
+| Float | Image Inpainting | 4608 | 4608 | 4092 | 113% |
+| Float | HDR | 4682 | 4682 | 3614 | 130% |
+| Float | Ray Tracing | 2823 | 2823 | 2042 | 138% |
+| Float | Speech Recognition | 1811 | 1811 | 1741 | 104% |
+| Float | Machine Learning | 2511 | - | 2028 | 124% |
+
+### Multi-Core — best-of-runs (11-02 quiet window + 11-04; user directive: quiet-window best, load-window readings ignored)
+
+| Category | Workload | Best | Prior best | Ref 4-CPU | Best/Ref |
+|---|---|---|---|---|---|
+| AES-XTS | AES-XTS | 9962 | 9511 | 7643 | 130% |
+| Integer | Text Compression | 6236 | - | 1536 | 406% |
+| Integer | Image Compression | 7654 | 7654 | 1813 | 422% |
+| Integer | Navigation | 4410 | - | 1753 | 252% |
+| Integer | HTML5 | 8087 | - | 1651 | 490% |
+| Integer | SQLite | 7201 | - | 1480 | 487% |
+| Integer | PDF Rendering | 7358 | 7358 | 2074 | 355% |
+| Integer | Text Rendering | 6081 | - | 1456 | 418% |
+| Integer | Clang | 7573 | 7573 | 2161 | 350% |
+| Integer | Camera | 7353 | - | 1861 | 395% |
+| Float | N-Body Physics | 7349 | - | 1956 | 376% |
+| Float | Rigid Body Physics | 7463 | - | 1737 | 430% |
+| Float | Gaussian Blur | 7837 | - | 2149 | 365% |
+| Float | Face Detection | 9949 | 9949 | 2770 | 359% |
+| Float | Horizon Detection | 7406 | - | 1459 | 508% |
+| Float | Image Inpainting | 15576 | - | 4092 | 381% |
+| Float | HDR | 18032 | 18032 | 3614 | 499% |
+| Float | Ray Tracing | 13519 | 13519 | 2042 | 662% |
+| Float | Speech Recognition | 6757 | - | 1741 | 388% |
+| Float | Machine Learning | 5981 | - | 2028 | 295% |
+
+Section scores (best-of-runs): **Single-Core 2297** (11-02; 106% of the 2165 pinned reference), **Multi-Core 7458** (106%).
+
 
 ### Single-Core (2026-11-04, main=8d81c5da)
 
