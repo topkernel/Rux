@@ -1,0 +1,10 @@
+60 futex_wait
+60 futex_wait_timeout
+60 futex_wait_wouldblock
+60 futex_wait_uninitialized_heap
+60 futex_wait_private_mapped_file
+60 futex_waitv
+90 futex_requeue
+90 futex_requeue_pi
+90 futex_requeue_pi_mismatched_ops
+90 futex_requeue_pi_signal_restart

@@ -532,3 +532,76 @@ correct, group IO numbers intact).
 
 ### Tooling
 - run/r5b-fio-battery.sh + run/r5b-*.cmds (this round's boots).
+
+## Round 6 — reference-kernel futex selftests onboarded + FFRT feasibility (user directive 2026-11-05)
+
+Driver: user directive — the ffrt/binder/futex pain points get OH-side
+test cases. Order: futex selftests (this round), FFRT core ut (feasible,
+next), binder_alloc_selftest-derived probe (queued). Vehicle unchanged;
+log run/qa-runs-r6/r6-futex.log (one boot, all 10 tests).
+
+### Onboarding (userspace/tests/futex-selftests/)
+
+Upstream futex/functional tree (kernel linux-6.6 selftests) + kselftest.h
+as an unmodified tarball; build-x86.sh does static-musl via the lane
+toolchain with three shims: stage-0 UAPI prefix from host linux-libc-dev
+(the fio pattern — provides linux/futex.h incl. struct futex_waitv),
+<error.h> (glibc-only, only futex_waitv.c), __NR_futex_waitv fallback,
+and -include libgen.h (musl keeps basename()'s prototype only there).
+10 binaries, host smoke 3/3 green before the guest boot.
+
+### Verdicts (10 tests, one boot)
+
+| test | verdict |
+|---|---|
+| futex_wait | PASS 3/3 (wake: private, shared anon, shared file-backed) |
+| futex_wait_timeout | PASS on all FUTEX_WAIT + FUTEX_WAIT_BITSET rows (rt+mono); 5 subtest fails all errno-38 (PI ops + waitv) — gap class, not logic |
+| futex_wait_wouldblock | PASS core (EWOULDBLOCK on mismatched value); fail = waitv errno-38 |
+| futex_wait_uninitialized_heap | PASS |
+| futex_wait_private_mapped_file | PASS |
+| futex_waitv | GAP: syscall 449 ENOSYS (clean fail-fast) |
+| futex_requeue | PASS 2/2 (requeue + cmp_requeue matrix) |
+| futex_requeue_pi | GAP: FUTEX_WAIT/CMP_REQUEUE_PI ENOSYS (F-2/pi_stress family, consistent) |
+| futex_requeue_pi_mismatched_ops | **F-9: HANG after ENOSYS** — see below |
+| futex_requeue_pi_signal_restart | GAP: ENOSYS (clean) |
+
+**Core futex semantics are green**: wait/wake across private+shared
+(anon+file-backed) mappings, timeout rows, bitset, EWOULDBLOCK, and the
+plain requeue matrix all pass. The failing rows are exactly the two
+known ABI gaps: futex_waitv(449) and the PI-futex family — both fail
+fast with clean errno 38, correct discipline.
+
+### F-9: unsupported-PI-op waiter never receives the failure (futex lane)
+
+futex_requeue_pi_mismatched_ops prints its own "ERROR: Function not
+implemented: futex_cmp_requeue_pi" (main thread's cmp_requeue_pi call
+returned ENOSYS fast) — then the boot blocks 120 s until qsrun's
+TIMEOUT-TERM (rc=143). The sibling PI tests exit cleanly on the same
+ENOSYS; the distinguishing shape here is the concurrent WAITER thread
+(futex_wait_requeue_pi on the same word). Reading: the caller-context
+ENOSYS check works, but a thread already parked in futex_wait on an
+unsupported PI op never gets the failure delivered — unsupported-op
+waiters block forever instead of failing fast. Reference behavior: the
+waiter returns ENOSYS immediately. Handoff: futex owner lane; first
+probe = park a thread on FUTEX_WAIT_REQUEUE_PI then time the return.
+
+### F-5/F-8 family: third domain occurrence
+
+pid 306 (qsrun forker) HUNG-CTX >120 s x3 after QS-ALL-DONE, plus the
+KOT-KILL teardown cascade after each multithreaded test (9-member
+futex_requeue group et al). Now seen on kselftest (r4), fio numjobs
+(r5b) AND futex selftests — any multithreaded test run through qsrun
+reproduces it. The sched handoff stands with three-domain evidence.
+
+### FFRT ut port feasibility (checked this round, port queued)
+
+Toolchain found: /home/william/ohos-cross/official-sdk-18/18/native —
+llvm/bin/x86_64-unknown-linux-ohos-clang++ + STATIC libc++
+(llvm/lib/x86_64-linux-ohos/libc++_static.a + libc++abi.a), target
+x86_64 OH-musl = matches the guest. A static ffrt_ut (core set:
+ut_core/ut_condition/ut_coroutine/ut_deadline/ut_dependency/ut_loop,
+googletest static) is buildable without any OH runtime on the guest.
+Expected-fail subsets: ut_cgroup_qos (cgroups), ut_rtg (RTG ioctls),
+ut_qos_convert/ut_cpu_boost (QoS interfaces). FFRT's sync layer is raw
+SYS_futex (src/sync/sync.cpp) — running its ut on Rux is exactly the
+wait/wake topology that wedges OH boots.
