@@ -90,11 +90,11 @@
   ├─ ≤1024 B  → small_alloc(SLUB 式小对象打包层)
   ├─ 8..4096  → slab.rs 十级(独立路径)
   └─ &gt;4 KB    → buddy(0–20 阶 standalone)</code></pre>
-    <h3>small_alloc:杂志架(magazine)</h3>
+    <h3>small_alloc:magazine 缓存层</h3>
     <ul>
       <li>8 个 2 幂类(8..1024B);slab 页 16 字节页头(magic 0x5142),<code>FIRST_OFF(S)=max(16,S)</code> 保证对象对齐。</li>
-      <li><b>per-CPU magazine(深 16)</b>:分配/释放走 magazine,类锁只在成批 refill/flush 时取一次 —— 这是"类锁分段 ≤25M/靴"门禁行的来源(实测 19.7M,最新板 6.0M)。</li>
-      <li><b>free 位图路由 + tripwire</b>:每 slab 页一比特路由;清位先于还页 —— 陈旧指针落到 buddy 的 tripwire 上,而不是静默破坏。</li>
+      <li><b>per-CPU magazine(深 16)</b>:分配/释放走 magazine,类锁只在成批 refill/flush 时取一次 —— 这是"类锁分段 ≤25M/次启动"门禁行的来源(实测 19.7M,最新板 6.0M)。</li>
+      <li><b>free 位图路由 + tripwire</b>:每 slab 页一比特路由;清位先于还页 —— 陈旧指针落到 buddy 的 哨兵上,而不是静默破坏。</li>
       <li><b>锁序</b>:类锁 → buddy 锁。</li>
       <li><b>起源</b>:OH 首帧 ~21.3 万个 1B–1KB 净活对象(23.2M allocs/23.0M frees),每对象独占一个 4KiB buddy 块 = 852MB/992MB 窗口 —— 分配器在首帧合成阶段耗尽,magazine 为此而生。</li>
     </ul>

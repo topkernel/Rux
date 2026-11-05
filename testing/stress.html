@@ -56,41 +56,41 @@
 
   <article class="doc-main">
     <h1>压力(stress-fleet 常驻舰队)</h1>
-    <div class="sub">以高负载与随机猴测跨并发 QEMU 舰队覆盖各异常类 —— 设计文档 docs/test/stress-fleet.md</div>
+    <div class="sub">以高负载与随机化测试(monkey)跨并发 QEMU 舰队覆盖各异常类 —— 设计文档 docs/test/stress-fleet.md</div>
 
-    <p>常驻压力舰队的目标异常类:野指针写(狩猎链上武装捕获)、panic/挂死、泄漏、fake-OOM 复发、调度病理、负载下性能漂移(对照 <code>docs/development/perf-gate-baseline.md</code>)、数据损坏。探针位于 <code>test/stressng</code>、<code>test/cowrace</code>。</p>
+    <p>常驻压力舰队的目标异常类:野指针写(捕获链武装哨兵)、panic/挂死、泄漏、fake-OOM 复发、调度病理、负载下性能漂移(对照 <code>docs/development/perf-gate-baseline.md</code>)、数据损坏。探针位于 <code>test/stressng</code>、<code>test/cowrace</code>。</p>
 
     <h2 id="roster"><span class="anchor">§1</span>舰队编成</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>成员</th><th>类型</th><th>负载内容</th></tr></thead>
         <tbody>
-          <tr><td>chain ×2</td><td>野写狩猎链</td><td>自推进狩猎内核 + 负载链(冻结、不重启,见 wildwrite-hunt.md)</td></tr>
-          <tr><td>ltp-a/b/c/d</td><td>LTP 扫描腿</td><td>riscv64 TCG smp2/2G,随机起点 LTP 全量扫</td></tr>
-          <tr><td>monkey-a/b</td><td>猴测腿</td><td>x86_64 KVM 4G,usbless OH 镜像 + 随机扰动(存储热插拔、hilog 洪泛/轮转、appspawn 杀重启、bm/hidumper/param 走查、sync)</td></tr>
+          <tr><td>chain ×2</td><td>野指针写捕获链</td><td>自推进狩猎内核 + 负载链(冻结、不重启,见 wildwrite-hunt.md)</td></tr>
+          <tr><td>ltp-a/b/c/d</td><td>LTP 扫描成员</td><td>riscv64 TCG smp2/2G,随机起点 LTP 全量扫</td></tr>
+          <tr><td>monkey-a/b</td><td>随机测试成员</td><td>x86_64 KVM 4G,usbless OH 镜像 + 随机扰动(存储热插拔、hilog 洪泛/轮转、appspawn 杀重启、bm/hidumper/param 走查、sync)</td></tr>
           <tr><td>memstorm</td><td>内存风暴</td><td>mmap/munmap/MAP_FIXED/mprotect/fork 风暴,debug=periodic,memwatch,watchdog</td></tr>
           <tr><td>fsfuzz</td><td>文件系统模糊</td><td>随机系统调用 fuzzer + 文件/管道/套接字/madvise/fork 序列</td></tr>
-          <tr><td>ltpm</td><td>对照腿</td><td>当前 main 内核上的 LTP 扫(工作树 vs 主线漂移对照)</td></tr>
+          <tr><td>ltpm</td><td>对照成员</td><td>当前 main 内核上的 LTP 扫(工作树 vs 主线漂移对照)</td></tr>
         </tbody>
       </table>
     </div>
     <ul>
-      <li><b>轮次机制</b>:每轮 1800 s,串口落盘,分类线(决定性 CRITICAL &gt; WARN &gt; WEDGE &gt; clean);<b>搁浅规则</b>:串口 ≥300 s 无增长 → 杀、标 WEDGE、留尾巴。</li>
+      <li><b>轮次机制</b>:每轮 1800 s,串口落盘,分类线(决定性 CRITICAL &gt; WARN &gt; WEDGE &gt; clean);<b>搁浅规则</b>:串口 ≥300 s 无增长 → 终止、标记 WEDGE、保留日志尾部。</li>
       <li><b>宿主预算纪律</b>:舰队规模自适应,下限约束 ≥10 GB 空闲内存(每步 launch/ramp 前 <code>free</code> 检查);QEMU nice +10;共享镜像只 <code>-snapshot</code>/<code>snapshot=on</code> + <code>file.locking=off</code>,可写盘用私有 reflink 拷贝。</li>
       <li><b>规模常态:2 链 + 9 成员 = 11 台 QEMU</b>,30 分钟中央巡检(sweeper)守护。</li>
     </ul>
 
     <h2 id="closed"><span class="anchor">§2</span>已根因闭合的类(已根因闭合的异常类)</h2>
     <ul>
-      <li><b>SIGILL 家族(内核 bug,已修)</b>:read_counter() 用写形式 <code>csrrw a0, time, zero</code> 读只读 CSR → 整条指令非法;mount 锤循环 ~100 s 内必现(与工具链 zcb 无关,双例定罪)。修复为规范读形式 <code>csrr</code>。</li>
+      <li><b>SIGILL 家族(内核 bug,已修)</b>:read_counter() 用写形式 <code>csrrw a0, time, zero</code> 读只读 CSR → 整条指令非法;mount 压力循环 ~100 s 内必现(与工具链 zcb 无关,双实例确证)。修复为规范读形式 <code>csrr</code>。</li>
       <li><b>七个用户态长度上取整溢出(已修)</b>:fsfuzz r172 以 madvise length=−1 触发 <code>attempt to add with overflow</code>(syscall/memory.rs);madvise/mprotect/msync/mremap/mincore/mlock/munlock 全部补上回绕检查(EINVAL,Linux end-wrap 语义);修复后确定性种子流 150 s+ 零 panic(v4 活不过 60 s)。</li>
       <li><b>零服务家族(排除)</b>:virtio/bio 完成路径重写前后,舰队 LTP 扫描逐轮一致(r18/r19 同为 1253/1254 TPASS;21 处 ENOENT 均为预期 errno 的 TPASS 行)—— 重写在该表面零成本。</li>
     </ul>
 
     <h2 id="watch"><span class="anchor">§3</span>在观察的已知类(当前台账)</h2>
     <ul>
-      <li><b>fsfuzz WATCHDOG 族</b>(perf 注册表 static+heap 锁对):r282 曾录零 DEADLOCK 打印(该巢首次,45,858 行),r283 复现 118 次 —— 同族同 ra、静态锁地址随新二进制移动;修复未上 main 前按已知瞬态类记账,闭合等 c5640ccc 类落地。</li>
-      <li><b>oom01 fake-OOM</b>(根因已锁定):直接回收腿已落(page_alloc 深末轮,39a515a5),但击杀来自 <b>kswapd 升级路径</b>(连续 16 次零回收 balance_pgdat → out_of_memory),该路径没有深排水。证据:OOM-FORENSIC 显示 in_direct_reclaim=1、zone 内 172 MB 干净页缓存一链之隔、全程零 OOM-DEEP-PASS 行;对照臂 r35 无改善亦无回退。s17 设计(kswapd 升级点单次深排 + 成功重置失败计数)待 mm/perf 线实现。</li>
+      <li><b>fsfuzz WATCHDOG 族</b>(perf 注册表 static+heap 锁对):r282 曾录零 DEADLOCK 打印(该类首次,45,858 行),r283 复现 118 次 —— 同族同 ra、静态锁地址随新二进制移动;修复未上 main 前按已知瞬态类记账,闭合等 c5640ccc 类落地。</li>
+      <li><b>oom01 fake-OOM</b>(根因已锁定):直接回收路径已合入(page_alloc 深末轮,39a515a5),但 OOM 击杀来自 <b>kswapd 升级路径</b>(连续 16 次零回收 balance_pgdat → out_of_memory),该路径没有深排水。证据:OOM-FORENSIC 显示 in_direct_reclaim=1、zone 内 172 MB 干净页缓存一链之隔、全程零 OOM-DEEP-PASS 行;对照臂 r35 无改善亦无回退。s17 设计(kswapd 升级点单次深排 + 成功重置失败计数)待 mm/perf 线实现。</li>
       <li><b>W3 搁浅族</b>:oom01 SIGKILL 送达后串口静默 —— s17 形状,归 W3/OH 线所有。</li>
       <li><b>monkey-b / memstorm 运行状态</b>:monkey-b x86 轮全 WARN、零 critical 旗标,r7–r10 余量增长 141–178 MB 属判据内;memstorm r34 PREEMPT-UNDERFLOW=8(trio 族带 6–10),beat 86 对带 91–97,连续观察后再定性。</li>
     </ul>
@@ -98,7 +98,7 @@
     <h2 id="queue"><span class="anchor">§4</span>舰队队列</h2>
     <ul>
       <li>fsfuzz 累积;修复类抵达 main 后跑闭合轮;</li>
-      <li>kswapd 深排水腿移交 mm/perf;</li>
+      <li>kswapd 深排水改造移交 mm/perf;</li>
       <li>census r20+ 逐轮稳定性 + monkey-b 大堆轮观察;</li>
       <li>memstorm beat 带在 r35/r36 裁决。</li>
     </ul>

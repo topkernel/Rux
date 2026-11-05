@@ -91,7 +91,7 @@
     <ul>
       <li><b>抖动隔离政策</b>:全量扫描出现新失败时,先隔离重跑 2 次再定性为回归 —— 宿主负载会产生超时/精度抖动(已知例:accept02、getrusage04、kill02、genfmod、rename/statfs 族)。</li>
       <li><b>NOT-OURS 台账</b>:同一 musl 版 LTP 二进制跑在宿主 Linux 内核上,判定一致的失败记为测试/环境问题而非内核缺口(verdicts-r27.txt 逐条解码)。</li>
-      <li><b>WEDGE 救援</b>:r27 原始扫描 51 个 WEDGE/POISON 行经隔离启动救援回填,6 个顽固行单启动单用例重跑;mmap1 按既有裁决保留 WEDGE。</li>
+      <li><b>WEDGE 恢复</b>:r27 原始扫描 51 个 WEDGE/POISON 行经隔离启动恢复回填,6 个顽固行单启动单用例重跑;mmap1 按既有裁决保留 WEDGE。</li>
       <li>每轮全量结果、delta 与裁决归档于 ltp-r27 车道 results/ 目录;TIMEOUT 类按最高优先级专线处理。</li>
     </ul>
 

@@ -67,7 +67,7 @@
       <table>
         <thead><tr><th>口径</th><th class="num">数量</th><th>说明</th></tr></thead>
         <tbody>
-          <tr><td>记忆破坏类缺陷(全史)</td><td class="num"><b>34</b></td><td>逐条带修复 commit 与复现/回归证据</td></tr>
+          <tr><td>内存破坏类缺陷(全史)</td><td class="num"><b>34</b></td><td>逐条带修复 commit 与复现/回归证据</td></tr>
           <tr><td>—— 位于显式 unsafe 块 / 架构汇编</td><td class="num">23</td><td>raw *mut Task 协议、UnsafeCell 分配器元数据等</td></tr>
           <tr><td>—— 位于 safe 代码</td><td class="num">11</td><td>全部是安全 Rust 当今<b>不类型检查</b>的所有权/引用计数/锁协议/栈深决策,且经受信 unsafe 边界或无守护栈执行</td></tr>
           <tr><td>指针表达式类(越界/迭代器失效/野指针运算/格式串)</td><td class="num"><b>0</b></td><td>统治 C 内核 CVE 史的类别在这里是<b>编译错误</b></td></tr>
@@ -81,9 +81,9 @@
       <li>aarch64 ldp 错槽 + SPSR.M 采错(92799345);copy_kernel_mappings 双例(7a497838 / 963832a)。</li>
       <li>buddy split 未标已分配 → 同块双发(016b3fa1);do_exit 先唤醒父(3b39b732)。</li>
       <li>GRQ 键锁 guard 被裸语句丢弃 → 临界区未互斥(2b092c49;此后 keyed guard 全部 #[must_use])。</li>
-      <li>munmap 分块重构丢尾批 TLB flush(行 34,c4a548d7 修复;OH 电池数小时内抓到 —— 合成探针因读回同陈旧态而结构性失明,150-boot 串行日志时间线定 race)。</li>
+      <li>munmap 分块重构丢尾批 TLB flush(行 34,c4a548d7 修复;OH 电池数小时内抓到 —— 合成探针因读回同陈旧态而结构性失明,150 次启动的串行日志时间线定 race)。</li>
     </ul>
-    <p>safe 代码中唯一的"未遂越界写"(pcp refill 竞态)被边界检查拦下,以响亮 panic 收场("the len is 32 but the index is 32",165ee5fc)—— 响而被捕获,而非静默破坏。</p>
+    <p>safe 代码中唯一的"未遂越界写"(pcp refill 竞态)被边界检查拦下,以显式 panic 终止("the len is 32 but the index is 32",165ee5fc)—— 宁可显式失败,不可静默破坏。</p>
 
     <h2 id="surface"><span class="anchor">§3</span>unsafe 表面与分层治理</h2>
     <ul>
@@ -108,7 +108,7 @@
     <ul>
       <li><b>镜像同步纪律</b>:verify crate 手工镜像被证算法,<code>scripts/verify_sync_check.py</code> 强制镜像函数体与内核原文逐字节等价 —— 证明钉在被证代码上;不同步镜像副本的内核改动直接 fail make verify 与 CI 门。</li>
       <li><b>节奏</b>:per-push(镜像同步 + proptest 全量)→ nightly(Kani 全 harness / Miri / SPIN,装不进单提交预算)→ 手动(证明性改动落地前 <code>make verify && make kani</code>)。</li>
-      <li><b>已捕获缺陷</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器兜底。</li>
+      <li><b>已捕获缺陷</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器保障。</li>
     </ul>
 
     <h2 id="runtime"><span class="anchor">§5</span>运行时强化清单(已具备)</h2>
@@ -123,7 +123,7 @@
 
     <h2 id="panic"><span class="anchor">§6</span>panic 面是设计面,不是潜伏面</h2>
     <ul>
-      <li>每一处出现的 panic 都以<b>回归测试消除</b>(十余条收据在案):UTF-8 打印机族(非 UTF-8 comm 曾在 t=209s 击穿 panic 打印机)、负备忘空解引用、mmprof 槽命名空间、debug 开关表、memwatch PFN 界、binder dead-proc expect→有界告警、timer 同 CPU IRQ 重入、ext4 空索引根、aarch64 regs[31]。</li>
+      <li>每一处出现的 panic 都以<b>回归测试消除</b>(十余条收据在案):UTF-8 打印机族(非 UTF-8 comm 曾在 t=209s 击穿 panic 打印机)、负向查找缓存空解引用、mmprof 槽命名空间、debug 开关表、memwatch PFN 界、binder dead-proc expect→有界告警、timer 同 CPU IRQ 重入、ext4 空索引根、aarch64 regs[31]。</li>
       <li>原则:<b>响而被捕获优于静默破坏</b> —— 边界检查把越界写拦成 panic,而不是让损坏继续走。</li>
     </ul>
 

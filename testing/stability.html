@@ -89,7 +89,7 @@
     <ul>
       <li>每任务逐字段 tick 观测 + 幻影 preempt-count 判定(200 连续 tick,合法括号是微秒级)+ 20 ms 饥饿界 + softirq 分派延迟门。</li>
       <li>实测:64.5k/52.1k 次 heal 共 605 ms,<b>model-vs-reality MISS=0</b>;IF=0 占机 25.7% → <b>20.4%</b>;最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>;WAKE-STRANDED <b>233 → 31</b>。</li>
-      <li>每次合格静默 boot 的 census 精确一致(TERM-DESCHED 8、WAKE-REFUSED 32)—— 稳定性本身是带门禁的常设指标。</li>
+      <li>每次合格静默启动 的 census 精确一致(TERM-DESCHED 8、WAKE-REFUSED 32)—— 稳定性本身是带门禁的常设指标。</li>
     </ul>
 
     <h2 id="policy"><span class="anchor">§4</span>裁决纪律</h2>
@@ -97,7 +97,7 @@
       <li><b>抖动隔离</b>:新失败隔离复跑 2× 再定性(宿主负载超时/精度抖动族:accept02、getrusage04、kill02、genfmod、rename/statfs);性能门同规则(先重跑一次再定回归)。</li>
       <li><b>NOT-OURS 台账</b>:同一二进制跑宿主 Linux 内核对照,一致的失败记为测试/环境问题。</li>
       <li><b>仪器误诊归档</b>:PTGUARD/FREEGUARD 误判(mapcount=−1 是 PAGE_MAPCOUNT_BIAS 哨兵)、首版 PT_LEDGER 假双自由 + 真帧泄漏、GRQ race 理论错误 —— 带收据的阴性结果留在记录里。</li>
-      <li><b>panic 面设计化</b>:每处 panic 实例收编 + 回归测试消除(UTF-8 打印族、负备忘 null-deref、mmprof 槽命名空间等十余条收据)—— 详见<a href="../security/index.html#panic">安全栏目 §6</a>。</li>
+      <li><b>panic 面设计化</b>:每处 panic 实例收编 + 回归测试消除(UTF-8 打印族、负向查找缓存空解引用、mmprof 槽命名空间等十余条收据)—— 详见<a href="../security/index.html#panic">安全栏目 §6</a>。</li>
     </ul>
   </article>
 </div>

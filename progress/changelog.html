@@ -66,14 +66,14 @@
 
     <h2 id="n1105"><span class="anchor">2026-11-05</span></h2>
     <ul>
-      <li><b>LTP r27 = 1084/1869</b>(x86_64+KVM):+17,pidfd 族全绿;51 个 WEDGE 行隔离救援回填。</li>
+      <li><b>LTP r27 = 1084/1869</b>(x86_64+KVM):+17,pidfd 族全绿;51 个 WEDGE 行隔离恢复回填。</li>
       <li><b>PI futex 全量入 main</b>:优先级继承 futex 完整落地(21 项查探针 2× 验证),futex 锁序新类 INV-LOCK-PI-1。</li>
     </ul>
 
     <h2 id="n1103"><span class="anchor">2026-11-03</span></h2>
     <ul>
       <li><b>安全与性能双优台账</b>(docs/architecture/safety-and-performance.md)与 <b>Rust 原生工程登记表</b>(rust-native-register.md)建立:每轮合并落地的安全属性/性能数字/bug 类消除同改动收证。</li>
-      <li><b>bug 分类学 v1</b>:全史 3,358 个去重提交逐条裁定,34 个记忆破坏类缺陷完成归因(23 unsafe/汇编、11 safe-但非指针表达式类)。</li>
+      <li><b>bug 分类学 v1</b>:全史 3,358 个去重提交逐条裁定,34 个内存破坏类缺陷完成归因(23 unsafe/汇编、11 safe-但非指针表达式类)。</li>
       <li>类型化定时器轮(D-19)A/B:nanosleep 772.6→662.7 ms,p2_ctxsw 12.198 vs 15.400 µs。</li>
     </ul>
 
@@ -95,7 +95,7 @@
     <ul>
       <li>x86_64 平台入 main(10-07);GNOME Shell 上屏(10-14)→ 完整成帧 ×3 boots(10-27)→ 键入式对话逐像素验证(10-28)。</li>
       <li>OpenHarmony bootanimation 上屏(10-24);LTP riscv64 线 801 → 945 → 1028(10-31 收官)。</li>
-      <li>调度搁浅终结:自旋前关抢占定罪为真凶,搁浅 233→31;census/heal 上线。</li>
+      <li>调度搁浅终结:自旋前关抢占确认为根因,搁浅 233→31;census/heal 上线。</li>
       <li>RVV 支持主线化:V 扩展惰性使能 + 每任务 vstate。</li>
     </ul>
 

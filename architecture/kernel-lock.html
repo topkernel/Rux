@@ -68,7 +68,7 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
     <ul>
       <li>同层各支(2a/2b/2c/2d)互不嵌套;纵向只能从低编号向高编号获取。</li>
       <li><b>SleepMutex 在层外</b>:<code>VFS_MUTATION_LOCK → EXT4_BIG_LOCK</code> 是唯一合法休眠锁序(INV-LOCK-8)。</li>
-      <li><b>virtio</b>:动任何 virtio 路径前先读本页与源内注释 —— net 的 <code>{rx|tx}_queue → stats</code> 单向序(INV-LOCK-6)曾被 AB-BA 互旋定罪。</li>
+      <li><b>virtio</b>:动任何 virtio 路径前先读本页与源内注释 —— net 的 <code>{rx|tx}_queue → stats</code> 单向序(INV-LOCK-6)曾被 AB-BA 互旋,确认为根因。</li>
     </ul>
 
     <h2 id="invs"><span class="anchor">§2</span>具名不变量(INV-LOCK-*)</h2>
@@ -88,7 +88,7 @@ Level 2b 进程树          Level 2c  inode          Level 2d  dcache</code></pr
     <ul>
       <li>零尺寸键类型(GrqKey / FutexBucketKey / NetQueueKey / WaiterSlotKey…);嵌套关系 = <code>CanNestInside</code> trait impl 表。</li>
       <li>外层 guard 铸造 <code>NestProof</code>,内层 <code>lock_nested(&amp;proof)</code> 消费它 —— <b>反向获取不编译,零运行时开销</b>。</li>
-      <li>警示案例:GRQ 首版协议包装曾因 <code>lock()</code> 返回的 guard 被裸语句丢弃,所有临界区未互斥 —— 13-boot 配对测量撤回;此后两类 keyed guard 标注 <code>#[must_use]</code>,协议方改用 <code>lock_claim()</code>。</li>
+      <li>警示案例:GRQ 首版协议包装曾因 <code>lock()</code> 返回的 guard 被裸语句丢弃,所有临界区未互斥 —— 13 次启动配对测量撤回;此后两类 keyed guard 标注 <code>#[must_use]</code>,协议方改用 <code>lock_claim()</code>。</li>
       <li>已采纳:GRQ 本体、futex HASH_HEADS 桶、WAITER_POOL 槽(futex_wake 唤醒链每跳索 proof)。</li>
     </ul>
 

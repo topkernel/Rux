@@ -50,7 +50,7 @@
     </div>
     <div class="terminal">
       <div class="terminal-bar"><i></i><i></i><i></i><span>rux — zsh</span></div>
-      <div class="terminal-body"><div class="ln"><span class="c"># ① 未经修改的 Ubuntu 22.04 启动到 GNOME 桌面(x86_64 + KVM)</span></div>
+      <div class="terminal-body"><div class="ln"><span class="c"># ① 未修改的 Ubuntu 22.04 启动到 GNOME 桌面(x86_64 + KVM)</span></div>
 <div class="ln"><span class="p">$</span> make ubuntu-run</div>
 <div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] smp: 4 vCPU online (q35)</span></div>
 <div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] virtio-blk: root mounted (ext4)</span></div>
@@ -90,8 +90,8 @@
 <section class="section" id="milestones">
   <div class="container">
     <div class="sec-head">
-      <span class="kicker">Boots · 实靴成果</span>
-      <h2>未修改发行版的实靴验证</h2>
+      <span class="kicker">Boots · 启动验证</span>
+      <h2>未修改发行版的实机启动验证</h2>
       <p>兼容性以未修改的发行版镜像与上游用户态程序直接验证,不依赖任何移植层适配。以下截图均来自 Rux 原生内核的帧缓冲/串口实拍。</p>
     </div>
     <div class="gallery">
@@ -135,7 +135,7 @@
       <table>
         <thead><tr><th>架构</th><th>QEMU 机型</th><th>加速</th><th>用户态</th><th>当前状态</th></tr></thead>
         <tbody>
-          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM(主平台)</td><td>Ubuntu 22.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>GNOME 桌面实靴 · LTP/性能主战场</span></td></tr>
+          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM(主平台)</td><td>Ubuntu 22.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>GNOME 桌面实机启动 · LTP/性能主战场</span></td></tr>
           <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG(MTTCG)</td><td>Ubuntu 22.04 (glibc) / musl 最小根文件系统</td><td><span class="chip ok"><span class="dot g"></span>桌面 + 内核套件 1267/1267</span></td></tr>
           <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>交互 shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / 信号 / 内核套件全绿</span></td></tr>
         </tbody>
@@ -161,7 +161,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust 安全,有台账</h3>
-        <p>全内核 Rust(no_std)。全史 34 个记忆破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,11 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
+        <p>全内核 Rust(no_std)。全史 34 个内存破坏类缺陷逐一归档:23 个位于被审计的 <code>unsafe</code>/汇编,11 个位于 safe 代码(全部是安全 Rust 尚不类型检查的所有权/锁协议类);统治 C 内核的指针表达式类(越界/野指针/格式串)在 safe 代码中为零。</p>
         <div class="nums">unsafe 行占比 12.9% · Kani 157 proofs</div>
         <a class="more" href="security/index.html">安全栏目 →</a>
       </div>
@@ -198,7 +198,7 @@
       <div class="card">
         <h3><span class="ico">🧠</span>内存管理</h3>
         <p>buddy 页分配器 + magazine 小对象分配、全局页缓存、每任务 VMA;munmap churn 竞态家族已全数关闭。</p>
-        <div class="nums">小分配类锁 <b>19.7M</b>/靴 · 门 ≤25M</div>
+        <div class="nums">小分配类锁 <b>19.7M</b>/次启动 · 门 ≤25M</div>
         <a class="more" href="architecture/design.html#mm">设计详情 →</a>
       </div>
       <div class="card">
@@ -303,7 +303,7 @@ make build PLATFORM=x86_64 <span class="c"># x86_64</span></code></pre>
         <h3><span class="ico">③</span>启动体验</h3>
         <pre><code>make run        <span class="c"># musl 最小根文件系统 → shell</span>
 make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME 桌面</span></code></pre>
-        <p>串口(<code>ttyS0</code>)即主日志;GUI 镜像用 <code>-snapshot</code> 启动,不写坏共享盘。</p>
+        <p>串口(<code>ttyS0</code>)即主日志;GUI 镜像用 <code>-snapshot</code> 启动,不写入共享镜像本体。</p>
       </div>
     </div>
   </div>

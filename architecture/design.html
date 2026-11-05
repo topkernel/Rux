@@ -90,10 +90,10 @@
     </ul>
     <h3>关键数字</h3>
     <ul>
-      <li>GRQ 平均持锁 <b>2786 ns</b>(n=6.3M,门禁带 1200–7320 ns);对 126.0M 系统调用的大 boot 持锁持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
-      <li>启动 census 每次合格静默 boot 精确一致:TERM-DESCHED <b>8</b>(带 8±2)、WAKE-REFUSED <b>32</b>(带 32±4)。</li>
+      <li>GRQ 平均持锁 <b>2786 ns</b>(n=6.3M,门禁带 1200–7320 ns);对 126.0M 系统调用的大规模启动 持锁持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
+      <li>启动 census 每次合格静默启动 精确一致:TERM-DESCHED <b>8</b>(带 8±2)、WAKE-REFUSED <b>32</b>(带 32±4)。</li>
       <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>1.98 vs 6.71 µs(3.4×)</b>。</li>
-      <li>D-14 生效后:74 字节 unix 流记录的"唤醒/抢占/切换之舞" ~275 µs → 对标 Linux ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
+      <li>D-14 生效后:74 字节 unix 流记录的"唤醒—抢占—切换"往返序列 ~275 µs → 对标 Linux ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
     </ul>
     <p><b>兼容性:</b>纯内部策略,无 ABI 面。守卫 = 性能门调度域(hold 带、census、P2 ±20%)。</p>
 
@@ -104,7 +104,7 @@
     <ul>
       <li><b>启动三段式</b>:memblock(双区表)→ fixmap → zone/buddy;Sv39 布局常量与 Linux 一致(PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE)。</li>
       <li><b>vmemmap 页描述符</b>:64 字节 cache 行对齐的 <code>Page</code>,pfn↔page O(1);buddy MAX_ORDER=10,order-0 走 per-CPU pageset(PCP)快路径零 zone 锁。</li>
-      <li><b>small_alloc(杂志架)</b>:8 个 2 幂类(8..1024B)+ per-CPU magazine(深 16),类锁只在成批 refill/flush 时取一次;每 slab 页一比特 free 路由,清位先于还页 —— 陈旧指针落 tripwire 而非静默破坏。起源:OH 首帧 ~21.3 万个净活小对象曾把分配器钉死(852MB/992MB 窗口)。</li>
+      <li><b>small_alloc(magazine 缓存)</b>:8 个 2 幂类(8..1024B)+ per-CPU magazine(深 16),类锁只在成批 refill/flush 时取一次;每 slab 页一比特 free 路由,清位先于还页 —— 陈旧指针落 tripwire 而非静默破坏。起源:OH 首帧 ~21.3 万个净活小对象曾把分配器钉死(852MB/992MB 窗口)。</li>
       <li><b>打包内核栈 slab(D-2,x86_64)</b>:80KB 槽/256KB 块 + 旁表,85.3KB/栈 vs 128KB,99.9% 槽打包,史上最深 3445 活任务零 canary 命中。</li>
       <li><b>页缓存</b>:全局 slot 表无锁读 + 每 inode 自旋锁;容量下限 32MB、软上限 = 受管 RAM 一半(旧固定 32MB 上限曾使 OH 库加载每缺页 ~1.5s)。</li>
       <li><b>延迟释放环(D-16)</b>:MmStruct/Task 释放进 16384 项环、1500 ms 墙钟排水 —— 回收延迟有界且与调度活动无关。</li>
@@ -113,9 +113,9 @@
     </ul>
     <h3>关键数字</h3>
     <ul>
-      <li>small_alloc 全局类锁分段/靴 <b>19.7M</b>(门 ≤25M;最新板 6.0M),REST 占机 <b>0.1–1.2%</b>(门 ≤10%)。</li>
+      <li>small_alloc 全局类锁分段/次启动 <b>19.7M</b>(门 ≤25M;最新板 6.0M),REST 占机 <b>0.1–1.2%</b>(门 ≤10%)。</li>
       <li>匿名页回收检查率 <b>35%→82–89%</b>(SP-7),swap 写 +75%。</li>
-      <li>负查找 memo oracle:475k 负命中、963k 陈旧归一化、<b>0</b> 陈旧负交付。</li>
+      <li>负向查找缓存(negative memo) oracle:475k 负命中、963k 陈旧归一化、<b>0</b> 陈旧负交付。</li>
     </ul>
     <p><b>兼容性:</b>/proc/meminfo、pagemap、mmap/munmap/mprotect/mremap/mlock/brk 语义逐条对齐(含 msync 回绕检查、mmap 偏移非页对齐拒绝 EINVAL)。</p>
 
@@ -124,17 +124,17 @@
     <h2><span class="anchor">§3</span>文件系统(kernel/src/fs/)</h2>
     <ul>
       <li><b>FileOps 能力声明式 builder(D-6)</b>:每槽位一方法、重复安装即编译错;errno 映射收敛单点。实际故障案例:合法 epoll fd 上 read() 返 EBADF 曾让 OH 事件循环空转 155,991 次。</li>
-      <li><b>dcache 无锁读(WalkClaim reader bank)</b>:消除每路径组件的两对自旋锁,stat <b>0.643→0.423 µs</b>、open <b>1.128→0.889 µs</b>;负查找 memo 以父目录代盖印失效。</li>
+      <li><b>dcache 无锁读(WalkClaim reader bank)</b>:消除每路径组件的两对自旋锁,stat <b>0.643→0.423 µs</b>、open <b>1.128→0.889 µs</b>;负向查找缓存(negative memo) 以父目录代际编号(generation)置失效。</li>
       <li><b>ext4(12 文件 ~13k 行)</b>:挂载特性门(未知 incompat 拒挂;ENCRYPT 是能力位、接受 —— 拒绝曾使 OH 原装 userdata 全挂);读路径窗口批填充(<a href="#d12">D-12</a>,≤64 块/128KiB 合并请求),写路径批量元数据发布 + 释放即弃(<a href="#d13">D-13</a>)。</li>
       <li><b>jbd2 直写 commit(D-8)</b>:commit 把事务 buffer 直写最终落盘位置并前推 log tail/head —— 完成的 commit 不留可重放物,每次 unlink/rmdir 的 8–12 次同步日志往返消失;磁盘格式与恢复(e2fsck)不变。</li>
-      <li><b>bio/buffer cache</b>:buffer_head 五态 + LRU;写规划曾对全 pending 二次方重扫(3 轮上限 + 保守线性回退修复;一次 fsync 卡 1092 s 的 252 个样本定罪)。</li>
+      <li><b>bio/buffer cache</b>:buffer_head 五态 + LRU;写规划曾对全 pending 二次方重扫(3 轮上限 + 保守线性回退修复;一次 fsync 卡 1092 s 的 252 个样本确证)。</li>
       <li><b>procfile! 宏(D-4)</b>:/proc 格式化器从一个字段声明表派生,消除"格式漂移"类缺陷(vmstat/meminfo/status 逐字节对齐活主机)。</li>
       <li><b>pipe</b>:容量 64 KiB、PIPE_BUF=4096 原子写(对齐 Linux 默认)。<b>io_uring</b>:5.1+ ABI(SQ/CQ 环 mmap),操作在 enter 上下文同步执行。</li>
     </ul>
     <h3>关键数字</h3>
     <ul>
       <li>元数据族重锚定(2026-11-01):stat 200.9→<b>71.1 µs</b>、openclose 512.9→<b>156.3 µs</b>、read_cached 546.8→<b>203.7 µs</b>、append 657.2→<b>77.4 µs</b>、mkdrmdir 22.8→<b>2.76 ms</b>、unlink 1,141→<b>808 µs</b>。</li>
-      <li>D-13 端到端:p6_mkdrmdir 中位 29,796→<b>2,107 µs</b>、p99 54→<b>16.4 ms</b>(对标 Linux 153 µs —— 差距归因共享系统调用/查找地板,非 fs 本身)。</li>
+      <li>D-13 端到端:p6_mkdrmdir 中位 29,796→<b>2,107 µs</b>、p99 54→<b>16.4 ms</b>(对标 Linux 153 µs —— 差距归因共享的系统调用与查找固定开销,而非 fs 本身)。</li>
       <li>buffer cache 命中率 <b>99.1%</b>(门禁 ≥ 基线)。</li>
     </ul>
     <p><b>兼容性:</b>jbd2 磁盘格式未变,日志镜像挂载/恢复不变;POSIX 不承诺每操作目录持久(归 fsync(dirfd));LTP 变更族(creat/unlink/rmdir/rename/fsync)绿。</p>
@@ -176,10 +176,10 @@
     <h2><span class="anchor">§6</span>驱动(kernel/src/drivers/)</h2>
     <ul>
       <li><b>virtio</b>:VirtIO 1.0 寄存器布局;VirtQueue(1,246 行)+ PCI 传输层(2,146 行,modern + transitional);blk 设备 ID 表曾有错移(保留基址误当设备 ID,曾致 disable-legacy 设备零匹配),回归守卫 = run.sh disable-legacy=on。</li>
-      <li><b>virtio-net 锁序(INV-LOCK-6)</b>:{rx|tx}_queue → stats 单向;曾有 poll 持 stats 跨 refill 的 AB-BA(看门狗双 CPU 互旋定罪)。</li>
+      <li><b>virtio-net 锁序(INV-LOCK-6)</b>:{rx|tx}_queue → stats 单向;曾有 poll 持 stats 跨 refill 的 AB-BA(看门狗双 CPU 互旋,确认为根因)。</li>
       <li><b>gpu/drm</b>:framebuffer 核心 + virtio-gpu + DRM/PRIME(GEM_CLOSE 共享 keep 语义修复);GNOME 与 OH 的显示路径由它承托。</li>
       <li><b>intc</b>:PLIC/CLINT(riscv64)、APIC(x86_64)、GICv3(aarch64);<b>pci</b>:ECAM 枚举。</li>
-      <li><b>设备 MMIO 纪律(D-17)</b>:一切经内核半别名竞技场,bootstrap 恒等映射在 boot 栈切换后 UNLINK —— 运行期无低恒等窗,uaccess 无恒等洞。</li>
+      <li><b>设备 MMIO 纪律(D-17)</b>:一切经内核侧 MMIO 别名区,bootstrap 恒等映射在 boot 栈切换后 UNLINK —— 运行期无低恒等窗,uaccess 无恒等洞。</li>
     </ul>
 
     <!-- ================= 可观测性 ================= -->
@@ -226,8 +226,8 @@
           <tr><td><b>D-14</b></td><td><b>实测等待唤醒抢占门</b>:≥6 ms 窗才 poke 忙 CPU。74B unix 流 275 µs→~2.5 µs,p5 族 10–18×。代价:亚 6ms 乒乓唤醒延迟受切片届期约束。</td></tr>
           <tr><td><b>D-15</b></td><td><b>单声明 tracepoint 表</b>:一行 = 事件全貌,armed() 单分支禁用路径,typed 实参 = 编译错;tracefs 逐字节对齐。代价:10 u64 槽/记录上限。</td></tr>
           <tr><td><b>D-16</b></td><td><b>延迟释放定时器环</b>:16384 项 + 1500 ms 墙钟排水(覆盖 QSBR 看不见的未记账借用)。重审条件:借用 RcuHead 化即删环。</td></tr>
-          <tr><td><b>D-17</b></td><td><b>内核半设备别名竞技场</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
-          <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对定罪);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
+          <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
+          <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
           <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同 rig A/B:arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
         </tbody>
       </table>
@@ -238,10 +238,10 @@
     <p>命题:外部参照兼容,内部<b>不是 C→Rust 翻译</b> —— 正确性与速度来自类型系统、所有权或Linux 内核没有的内部架构。每条带本仓库仪器测得的数字(无实测证据的条目只是占位,单列 G 区)。</p>
     <ul>
       <li><b>类型系统使 bug 类 = 编译错</b>:D-19 六类误用被 rustc 捕获;S-1 并发原语模型检查(loom 交错 + Kani 证 INV-M1..M5)启用头 90 秒即抓到一个真实 pid-0 递归 bug;D-11 锁键、D-7 CpuLocal、WalkClaim 无锁 dcache(stat 0.643→0.423 µs)。</li>
-      <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 战役调度 bug 族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负查找 memo(oracle 475k/963k/0)。</li>
+      <li><b>safe-by-construction 即优化</b>:D-1 单结构取证(OH 战役调度 bug 族实际靠它找到);叶子表直走 unmap(vm-op 族 15→5 s/CPU-min);负向查找缓存(negative memo)(oracle 475k/963k/0)。</li>
       <li><b>语义分歧靠 diff Linux 树发现、靠采纳其行为修复</b>(根因而非症状):execve ETXTBSY、SysV IPC 按 namespace、共享 futex 键解析到物理字、tmpfs MAP_SHARED 经页缓存一致、binder poll 三条件、O_DIRECT 读先冲脏页缓存、SYSRET TF|RF 回退、用户态可写字符串全查 UTF-8。</li>
       <li><b>安全性质(C 内核靠工具租的类)</b>:构造性内存安全 + SMAP/CR0.WP/无恒等窗/用户态 W^X/seccomp/能力模型 + panic 面设计化(每实例收编 + 回归测试)。</li>
-      <li><b>重设计落地的性能(同 rig A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7139(4-CPU 钉核)。</li>
+      <li><b>重设计落地的性能(同 rig A/B)</b>:lmbench 四行领先(lat_ctx 3.4×、lat_pipe 2.6×、exec 1.39×、fstat 1.19×)、切换 −58%、p5 族 −90~93%、fs 元数据族 −65~−88%;Geekbench 多核 7139(4-CPU 绑核)。</li>
       <li><b>诚实占位(G 区)</b>:typed binder 事务 FSM、ext4/jbd2 宿主测试切片、内部完成环回写基底 —— 尚无 A/B 数字,离开占位区的唯一方式是交出实测行。</li>
     </ul>
 
@@ -249,7 +249,7 @@
     <h2 id="safety"><span class="anchor">§11</span>安全与性能双优(台账要点)</h2>
     <p>核心主张:<b>安全检查在编译期发生、从快路径消失 —— 快的设计与安全的设计是同一个设计。</b>出处:<code>docs/architecture/safety-and-performance.md</code>。</p>
     <ul>
-      <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):34 个记忆破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>11 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。34 例中 6 例在任何 boot 前被评审抓到。</li>
+      <li><b>bug 分类学 v1</b>(全史 3,358 个去重提交逐条裁定):34 个内存破坏类缺陷中 <b>23 个位于显式 unsafe 块/架构汇编</b>,<b>11 个位于 safe 代码</b> —— 但全部是安全 Rust 当今不类型检查的所有权/引用计数/锁协议类;<b>零</b>指针表达式缺陷(越界/迭代器失效/野指针运算/格式串)出现在 safe 代码。34 例中 6 例在任何 boot 前被评审抓到。</li>
       <li><b>unsafe 表面已枚举且带合同</b>:unsafe 行占比 12.9%;47 个服务文件编译期 forbid(unsafe_code)、另 56 个已无 unsafe;SAFETY 注释覆盖 64%;157 个 Kani harness 对全输入证明核心 unsafe 代码。</li>
       <li><b>性能每条配对安全句</b>:如切换路径携带类型化 per-CPU 存储 + 键控锁;lmbench/Geekbench 数字与 census 审判结构同表入账;代价侧(futex 唤醒在跑任务时 ~10ms tick 量化)如实记录。</li>
       <li><b>诚实缺口登记册 v1</b>:缺 KASLR(无 boot 熵源)、内核 text/rodata W^X 收紧、编译器栈保护、KASAN 式毒化广度、KCSAN 观察点、kallsyms 掩蔽 —— 逐条写明"补齐长什么样"。</li>

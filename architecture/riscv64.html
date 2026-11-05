@@ -91,14 +91,14 @@ restore_fpu           <span class="c"># fs != OFF 才使能</span></code></pre>
     </ul>
     <h3>x86_64 专项细节</h3>
     <ul>
-      <li><b>SMAP(分歧 D-18)</b>:CR4.SMAP 使能;usercopy 用 <b>pushfq/orq/popfq AC 括号</b>而非 STAC/CLAC —— 后者在 QEMU TCG 下无条件 #UD(配对定罪);括号成本 ~55 ns;SMAP-VIOL 信标全 suite 零。</li>
+      <li><b>SMAP(分歧 D-18)</b>:CR4.SMAP 使能;usercopy 用 <b>pushfq/orq/popfq AC 括号</b>而非 STAC/CLAC —— 后者在 QEMU TCG 下无条件 #UD(配对实验确证);括号成本 ~55 ns;SMAP-VIOL 信标全 suite 零。</li>
       <li><b>syscall 面</b>:MSR 入口;SYSRET 适格性遇 TF|RF 回退 iret;EFLAGS.DF 脏入内核曾反转 rep movsb(已修);CR0.WP 自最早 boot 即设。</li>
       <li><b>用户态 W^X</b>:NX 映射、PT_GNU_STACK、READ_IMPLIES_EXEC。</li>
     </ul>
 
     <h2 id="aa-port"><span class="anchor">§3</span>aarch64:移植要点</h2>
     <ul>
-      <li><b>每任务状态</b>:<b>TPIDR_EL0 就是任务 TLS 态</b>(用户态直写,无 set-tls 系统调用;__switch_to 提交点保存/安装、fork 继承、exec 双清)—— 丢失它杀死了第一个 fork。</li>
+      <li><b>每任务状态</b>:<b>TPIDR_EL0 就是任务 TLS 态</b>(用户态直写,无 set-tls 系统调用;__switch_to 提交点保存/安装、fork 继承、exec 双清)—— 丢失它导致首次 fork 失败。</li>
       <li><b>FPSIMD</b>:预编译库的 NEON 会在系统调用中弄脏用户 FP —— EL0 向量陷入把活寄存器捕入 <code>thread.user_fpsimd</code>,eret 前重装;信号帧取自该缓冲。</li>
       <li><b>SVC 语义差</b>:SVC 后 ELR 指向<b>之后一条</b>(ecall 停在原处)—— 系统调用路径绝不前移 PC,ERESTARTSYS 回退 pc−=4。</li>
       <li><b>GICv3</b>:DS=1 下 GICD_CTLR bit1=Grp1NS;IGROUPR 在 0x0080;ICC_SGI1R 编码;虚拟定时器 PPI 11=INTID 27;PL011 RX 需武装 RX|接收超时双中断;解封两腿(GIC interface + PSTATE.DAIF.I)缺一不可。</li>
@@ -107,7 +107,7 @@ restore_fpu           <span class="c"># fs != OFF 才使能</span></code></pre>
     </ul>
     <h3>当前边界(如实)</h3>
     <ul>
-      <li>1/9 boot flake(trap frame 恰过线性映射末端 —— 内核栈顶问题,排查中)。</li>
+      <li>1/9 启动偶发失败(trap frame 恰过线性映射末端 —— 内核栈顶问题,排查中)。</li>
       <li>LTP-on-aarch64 未开始(cross-build + serial-fed smoke 子集已奠基)。</li>
       <li>debug= 启动旗标不可用(EL2 跳板在 cmdline 解析前毁 DTB 指针),退回编译期 feature 门控。</li>
     </ul>
@@ -120,7 +120,7 @@ restore_fpu           <span class="c"># fs != OFF 才使能</span></code></pre>
       <li>uaccess(SUM/AC 类机制 + 例外表)。</li>
       <li>中断控制器 + 时钟(Sstc/APIC 定时/GICv3 PPI)。</li>
       <li>per-CPU 区与 tp/TPIDR 类寄存器。</li>
-      <li>对接 INV-LOCK-7(per-mm PTE 锁)与 D-17(MMIO 竞技场,无恒等窗)。</li>
+      <li>对接 INV-LOCK-7(per-mm PTE 锁)与 D-17(MMIO 别名区,无恒等窗)。</li>
     </ol>
   </article>
 </div>

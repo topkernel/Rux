@@ -100,7 +100,7 @@
       <table>
         <thead><tr><th>域</th><th>守护指标</th></tr></thead>
         <tbody>
-          <tr><td>内存分配 / 回收</td><td>small_alloc 类锁分段 ≤ ~25M/靴、REST 墙 ≤10% 机器、无回收慢路径、zone 余量不变</td></tr>
+          <tr><td>内存分配 / 回收</td><td>small_alloc 类锁分段 ≤ ~25M/次启动、REST 占比 ≤10% 机器、无回收慢路径、zone 余量不变</td></tr>
           <tr><td>调度</td><td>GRQ 平均持锁门带 1200–7320 ns(实测 ~2.8 µs)、census 带内、唤醒→拾取与上下文切换成本在带内</td></tr>
           <tr><td>文件系统热路径</td><td>pbench fs 行(stat/mkdir+rmdir/unlink/write+fsync)在带内、无新同步写类、buffer cache 命中率 ≥ 基线</td></tr>
           <tr><td>中断 / IRQ 路径</td><td>IF=0 份额在带内(现行带 20.4%±3pp)、关中断段 3–7 ms 类、无新 IRQ-OFF 打印类</td></tr>
