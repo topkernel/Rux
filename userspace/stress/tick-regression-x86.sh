@@ -23,11 +23,11 @@ cd "$(dirname "$0")/../.."
 
 LOG="${1:-run/stress-runs/tick-regression.log}"
 BUDGET="${BUDGET:-300}"
-DFX="${DFX:-dfx=leakhunt,watchdog}"
+debug="${debug:-debug=leakhunt,watchdog}"
 
 echo "tick-regression: malloc 4x256M boot (budget ${BUDGET}s)"
 if [ "${VERDICT_ONLY:-0}" != 1 ] || [ ! -f "$LOG" ]; then
-    BUDGET="$BUDGET" DFX="$DFX" OUTDIR="$(dirname "$LOG")" \
+    BUDGET="$BUDGET" debug="$debug" OUTDIR="$(dirname "$LOG")" \
         test/stressng/run-class-x86.sh --malloc 4 --timeout 100 --vm-bytes 256M \
         > /dev/null 2>&1
     # run-class writes run/stress-runs/malloc.log; the caller may have set

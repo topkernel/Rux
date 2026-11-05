@@ -188,10 +188,10 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
     if sigsetsize != 8 {
         // OH bring-up: devhost services die right after an rt_sigaction
         // EINVAL — name the rejected call so the offending signum is
-        // visible on the console. Gated behind dfx=schedtrace: musl's
+        // visible on the console. Gated behind debug=schedtrace: musl's
         // spawn path probes rt_sigaction(SIGKILL/SIGSTOP) on every child,
         // so ungated this printed thousands of lines per soak.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace) {
             crate::pr_info!(
                 "rt_sigaction EINVAL: signum={} sigsetsize={} pid={}",
                 signum,
@@ -204,7 +204,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
 
     // Validate signal number
     if signum < 1 || signum > 64 {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace) {
             crate::pr_info!(
                 "rt_sigaction EINVAL: signum={} pid={}",
                 signum,
@@ -216,7 +216,7 @@ pub fn sys_rt_sigaction(args: SyscallArgs) -> i64 {
 
     // SIGKILL and SIGSTOP cannot be caught or ignored
     if signum == Signal::SIGKILL as i32 || signum == Signal::SIGSTOP as i32 {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace) {
             crate::pr_info!(
                 "rt_sigaction EINVAL: signum={} is SIGKILL/SIGSTOP, pid={}",
                 signum,

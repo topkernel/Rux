@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic B-form prober: drives the icount QEMU by its OUTPUT
 (prompt-synced), and when output stalls (the silent pipe hang), sends
-the DUMP! magic so the guest's RX-IRQ DFX trigger prints the task
+the DUMP! magic so the guest's RX-IRQ debug trigger prints the task
 snapshot. icount makes guest timing instruction-deterministic, so this
 script's waits cannot perturb reproduction."""
 import subprocess, sys, time, os, select
@@ -17,7 +17,7 @@ cmd = ["/usr/bin/qemu-system-riscv64", "-M", "virt", "-accel", "tcg,thread=singl
        "-drive", "file=/tmp/r32gate/rfs.img,if=none,id=rootfs,format=raw",
        "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
        "-kernel", KRN,
-       "-append", "root=/dev/vda rw init=/bin/sh console=ttyS0 dfx=watchdog,taskdump"]
+       "-append", "root=/dev/vda rw init=/bin/sh console=ttyS0 debug=watchdog,taskdump"]
 p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT)
 
@@ -77,7 +77,7 @@ for i in range(1, 11):
         print(">>> STALL detected — injecting DUMP! magic", flush=True)
         p.stdin.write(b"DUMP!\n"); p.stdin.flush()
         out = read_for(10)
-        if b"DFX TASK DUMP" in out:
+        if b"debug TASK DUMP" in out:
             print(">>> taskdump captured", flush=True)
         time.sleep(3)
         p.stdin.write(b"DUMP!\n"); p.stdin.flush()

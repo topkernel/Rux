@@ -340,7 +340,7 @@ _start:
 
     // PMD[7]: VA 0xFFFFFFFF80E00000 -> PA 0x81000000 (eighth 2MB)
     // PMD[8]: VA 0xFFFFFFFF81000000 -> PA 0x81200000 (ninth 2MB)
-    // RUX-RISCV-LAYOUT-3 (dfx): the kernel symbol table (ksyms, the
+    // RUX-RISCV-LAYOUT-3 (debug): the kernel symbol table (ksyms, the
     // backing store for /proc/kallsyms and symbolized stack traces)
     // became part of the default image: the full table is ~3.1MB of
     // .rodata (2.4MB names + 0.7MB index at ~22.6k text symbols), which

@@ -983,7 +983,7 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 }
 
 // ============================================================================
-// leg-30B: AMS46 — the Gate-1 arsenal (dfx=ams46).
+// leg-30B: AMS46 — the Gate-1 arsenal (debug=ams46).
 //
 // The wall (sc306/307/309/311B/312B/313B): accountmgr's
 // AbilityManagerAdapter::StartUser sends IAbilityManager code 46
@@ -1011,7 +1011,7 @@ pub(crate) fn binder_sareg_samgr_pid() -> u32 {
 //   AMS46 census — ~5 s node/proc state: async slot held, parked depth,
 //                  foundation proc todo depth, waiting readers
 //
-// All prints budget-capped; zero cost when dfx=ams46 is off.
+// All prints budget-capped; zero cost when debug=ams46 is off.
 // ============================================================================
 
 static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1036,7 +1036,7 @@ static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
 static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ams46_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+    crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Ams46)
 }
 
 // lb47 (sixth successor): failed-send reason shadow. The fast-fail decode
@@ -1090,7 +1090,7 @@ fn sendfail_reason_name(code: u64) -> &'static str {
 }
 
 // ============================================================================
-// POOL CENSUS (leg-33B, dfx=poolcensus) — reader-exhaustion adjudication
+// POOL CENSUS (leg-33B, debug=poolcensus) — reader-exhaustion adjudication
 //
 // One line per binder proc with queued todo: todo depth, max_threads,
 // requested_threads, and the worker-pool shape (looper-flag workers split
@@ -1105,7 +1105,7 @@ static POOL_SPAWN_EVENTS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 fn pool_census_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PoolCensus)
+    crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::PoolCensus)
 }
 
 fn ams46_txns_contains(id: u64) -> bool {
@@ -1900,14 +1900,14 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
-    // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
+    // debug=schb: record the new proc for the heartbeat's SC-PROC drain
     // (no-op unless the switch is armed; never any I/O on this path).
-    crate::dfx::schb::note_proc_open(pid);
+    crate::debug::schb::note_proc_open(pid);
     // Serial-cleanliness (print-audit lane, 2026-11): binder_open runs
     // once per binder-using process start — on OH boots that is nearly
     // every spawn, so these two lines were a fixed ~1 ms polled-UART tax
     // per process start (the EXITGRP class, e2717687). The info line is
-    // demoted to pr_debug; the sc157 open-probe joins the dfx=syscalltrace
+    // demoted to pr_debug; the sc157 open-probe joins the debug=syscalltrace
     // family (the sc156/sc157 hunts re-arm with the flag).
     crate::pr_debug!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
@@ -1915,7 +1915,7 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // children EVER open /dev/binder themselves (own proc, own pid) or
     // reuse the daemon's inherited fd (shared proc — the sc156 APPTXN
     // "from pid=330 comm='m.ohos.systemui'" shape).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
     {
         static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2031,7 +2031,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
                         printed = deaths.clone();
                     }
                     for (desc, cookie) in printed {
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -2238,7 +2238,7 @@ unsafe fn dead_reply_to_sender(
             // symbol) and wedged lb48/lb50/lb51. All death-event taps
             // that run under WORLD print through the lockless batched
             // ConsoleWriter instead (same discipline as SLOW-TXN).
-            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+            let mut w = crate::debug::backtrace::ConsoleWriter::new();
             use core::fmt::Write as _;
             let _ = writeln!(
                 w,
@@ -2748,9 +2748,9 @@ pub fn binder_mmap_handler(
     // Serial-cleanliness (print-audit lane, 2026-11): binder_mmap runs
     // once per binder-using process start — two lines per spawn through
     // the polled UART (the EXITGRP class, e2717687). The sc160 probe
-    // joins the dfx=syscalltrace family (the hunt re-arms with the
+    // joins the debug=syscalltrace family (the hunt re-arms with the
     // flag); the info line is demoted to pr_debug.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
     {
         static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2890,7 +2890,7 @@ pub fn binder_on_tgid_exit(tgid: u32) {
                                     if CNOTICE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                         < 120
                                     {
-                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                         use core::fmt::Write as _;
                                         let _ = writeln!(
                                             w,
@@ -3363,7 +3363,7 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 /// One report per wait episode. The first owing process gets a full
 /// per-thread dump (proc todo depth, looper/wait/stack state of every
 /// worker) so the next wedge names the exact thread that ate the wake.
-/// dfx=sleepsnap (b11 appspawn wedge hunt): one line per S-state task —
+/// debug=sleepsnap (b11 appspawn wedge hunt): one line per S-state task —
 /// comm/tid/state, the syscall number the thread is parked in, its rip
 /// and first two args, read from the fixed user entry frame at
 /// kernel_stack_top - PT_REGS_SIZE (same contract as the holder-task
@@ -3371,9 +3371,9 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 /// requests (write OK, reply never comes, no fork) while its kickdog
 /// thread lives: this names the exact syscall the server main thread is
 /// sleeping in, at khungtaskd cadence. Purely diagnostic; OFF unless
-/// dfx=sleepsnap is on the cmdline.
+/// debug=sleepsnap is on the cmdline.
 pub fn sleep_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SleepSnap) {
         return;
     }
     // sc207 (launcher leg 13): NEVER print inside the for_each_task
@@ -3467,7 +3467,7 @@ pub fn sleep_snapshot() {
     }
 }
 
-/// dfx=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
+/// debug=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
 /// ~1 Hz timer heartbeat. The 15 s samgr code-7 family (SLOW-TXN census,
 /// queue=0 exec=15020ms) only becomes visible at REPLY time — 15 s too
 /// late to see what the server was doing — and the 60 s khungtaskd
@@ -3483,9 +3483,9 @@ pub fn sleep_snapshot() {
 /// the hung servers' PROCESSES, printed as TXN-HANG-OUT lines — the
 /// synchronous fan-out chain the handler is stuck behind, named
 /// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
-/// zero cost when dfx=txnhunt is off.
+/// zero cost when debug=txnhunt is off.
 pub fn txn_hang_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::TxnHang) {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u32;
@@ -3741,7 +3741,7 @@ pub fn txn_hang_audit() {
             .unwrap_or("?")
             .trim_end_matches('\0')
     };
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     for h in &hung {
         let srv = unsafe { crate::sched::find_task_by_pid(h.stid) };
@@ -3850,7 +3850,7 @@ pub fn txn_hang_audit() {
                     )
                     .is_ok()
             {
-                crate::dfx::taskdump::dump_all_tasks("txn-hang-20s");
+                crate::debug::taskdump::dump_all_tasks("txn-hang-20s");
                 // lb66 installs hang (mkdir -> journal_stop -> blkdev_write
                 // -> wait_for_used_interruptible, 441 s): capture the
                 // virtio ring state at the hang moment — at_device vs
@@ -3874,38 +3874,38 @@ pub fn txn_hang_audit() {
         // entry frame mislabels the file (seen on sc314A wave-1).
         #[cfg(feature = "x86_64")]
         let fam = if matches!(sys, 2 | 257 | 437) {
-            Some(crate::dfx::pathstash::OP_OPEN)
+            Some(crate::debug::pathstash::OP_OPEN)
         } else if matches!(sys, 1 | 20) {
-            Some(crate::dfx::pathstash::OP_WRITE)
+            Some(crate::debug::pathstash::OP_WRITE)
         } else if matches!(sys, 74 | 75) {
-            Some(crate::dfx::pathstash::OP_SYNC)
+            Some(crate::debug::pathstash::OP_SYNC)
         } else if matches!(sys, 77 | 76) {
             // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
-            Some(crate::dfx::pathstash::OP_TRUNC)
+            Some(crate::debug::pathstash::OP_TRUNC)
         } else {
             None
         };
         #[cfg(any(feature = "riscv64", feature = "aarch64"))]
         let fam = if matches!(sys, 56 | 24) {
-            Some(crate::dfx::pathstash::OP_OPEN)
+            Some(crate::debug::pathstash::OP_OPEN)
         } else if matches!(sys, 64 | 66) {
-            Some(crate::dfx::pathstash::OP_WRITE)
+            Some(crate::debug::pathstash::OP_WRITE)
         } else if matches!(sys, 82 | 83) {
-            Some(crate::dfx::pathstash::OP_SYNC)
+            Some(crate::debug::pathstash::OP_SYNC)
         } else if matches!(sys, 46 | 45) {
             // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
-            Some(crate::dfx::pathstash::OP_TRUNC)
+            Some(crate::debug::pathstash::OP_TRUNC)
         } else {
             None
         };
         if let Some(want) = fam {
-            if let Some((op, p)) = crate::dfx::pathstash::lookup_file(h.stid) {
+            if let Some((op, p)) = crate::debug::pathstash::lookup_file(h.stid) {
                 if op == want {
                     let opn = match op {
-                        crate::dfx::pathstash::OP_OPEN => "open",
-                        crate::dfx::pathstash::OP_WRITE => "write",
-                        crate::dfx::pathstash::OP_SYNC => "sync",
-                        crate::dfx::pathstash::OP_TRUNC => "truncate",
+                        crate::debug::pathstash::OP_OPEN => "open",
+                        crate::debug::pathstash::OP_WRITE => "write",
+                        crate::debug::pathstash::OP_SYNC => "sync",
+                        crate::debug::pathstash::OP_TRUNC => "truncate",
                         _ => "?",
                     };
                     let _ = writeln!(
@@ -4153,7 +4153,7 @@ fn bc_name(cmd: u32) -> &'static str {
     }
 }
 
-/// dfx=txnhunt extension (holder-chain lane): BWR-park audit. The FFRT
+/// debug=txnhunt extension (holder-chain lane): BWR-park audit. The FFRT
 /// mass-park wedge face (480 census rows in ffrt::mutexPrivate::wait,
 /// libffrt 0xce0c7) names the WAITERS, never the HOLDER — the holder is
 /// itself asleep mid-critical-section, and the two park sites it can be
@@ -4188,9 +4188,9 @@ fn bc_name(cmd: u32) -> &'static str {
 ///      printed. Snapshot under WORLD (sc89: no task lookups / user
 ///      reads / prints under the guard); task forensics + user BWR
 ///      decode + prints happen after the guard drops (sc207). Bounded
-///     (24 lines + 1 census line); zero cost when dfx=txnhunt is off.
+///     (24 lines + 1 census line); zero cost when debug=txnhunt is off.
 pub fn bwr_park_audit() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::TxnHang) {
         return;
     }
     let now = crate::drivers::timer::get_jiffies() as u32;
@@ -4374,7 +4374,7 @@ pub fn bwr_park_audit() {
             ((*regs).syscallno as u64, (*regs).regs[0], (*regs).regs[1], (*regs).regs[2])
         });
     };
-    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    let mut w = crate::debug::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
     let mut printed = 0usize;
     let mut idle_readers = 0usize;
@@ -4572,7 +4572,7 @@ pub fn bwr_park_audit() {
     }
 }
 
-/// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
+/// debug=ams46 (leg-30B): ~5 s census of the latched AMS node + its
 /// foundation process. Prints ONLY while there is pending work on the
 /// node/proc (async slot held, txns parked, or proc todo non-empty), so
 /// a healthy quiesced draw costs zero lines. The census is the
@@ -4748,7 +4748,7 @@ pub fn ams46_audit() {
     }
 }
 
-/// POOL CENSUS (leg-33B, dfx=poolcensus): every ~5 s, one line per
+/// POOL CENSUS (leg-33B, debug=poolcensus): every ~5 s, one line per
 /// binder proc that has queued todo work — the reader-exhaustion
 /// adjudication backdrop (sc329B: foundation proc todo grew while every
 /// OS_IPC reader was parked as a client and the pool never grew).
@@ -5174,7 +5174,7 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
     s
 }
 
-/// dfx=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
+/// debug=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
 /// cheap per-beat binder summary — live proc count, threads parked in
 /// the blocking binder read, and waiters older than 15s (the rekick
 /// threshold; a healthy boot parks readers for 1-3s at most). Read-only
@@ -5209,7 +5209,7 @@ pub fn schb_beat() -> (usize, usize, usize) {
     (procs, waiters, waiters15)
 }
 
-/// dfx=schb wedge census: EVERY read-wait binder thread regardless of
+/// debug=schb wedge census: EVERY read-wait binder thread regardless of
 /// age. stall_report only prints waiters older than STALL_SECS (120s);
 /// the census fires at pid-plateau+60s where the wedge's waiters are
 /// younger. Formats under WORLD (no I/O); the caller emits the lines via
@@ -5815,12 +5815,12 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             // The calling thread's transaction stack top is the txn being
             // serviced (Linux thread->transaction_stack, OH reads the same).
             let (sender_pid, token, ftoken) = {
-                // dfx=syscalltrace: the GET_SENDER_INFO round-trip trace.
+                // debug=syscalltrace: the GET_SENDER_INFO round-trip trace.
                 // Ungated it prints twice per call — samgr-side polls make
                 // this the highest-rate binder ioctl of an OH boot, and
                 // hilogd.rd_kmsg then eats a vCPU copying it to /data.
-                let trace = crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::SyscallTrace,
+                let trace = crate::debug::switches::enabled(
+                    crate::debug::switches::DebugSwitch::SyscallTrace,
                 );
                 if trace {
                     crate::pr_info!("btx: GET_SENDER_INFO caller tid {}", current_tid());
@@ -6472,12 +6472,12 @@ fn binder_thread_write(
                         }
                     }
                 }
-                // dfx=bindertrace: payload head for small parcels — the
+                // debug=bindertrace: payload head for small parcels — the
                 // interface token ("ohos.system...." / hdf names) is ASCII
                 // at the head and names the target interface; replies carry
                 // the result int. Read BEFORE the world lock (uaccess).
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::BinderTrace,
+                if crate::debug::switches::enabled(
+                    crate::debug::switches::DebugSwitch::BinderTrace,
                 ) && tr.data_size > 0
                     && tr.data_size <= 160
                 {
@@ -7009,7 +7009,7 @@ fn binder_thread_write(
                                             .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                             .map(|q| q.pid)
                                             .unwrap_or(0);
-                                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                         use core::fmt::Write as _;
                                         let _ = writeln!(
                                             w,
@@ -7056,7 +7056,7 @@ fn binder_thread_write(
                                         .find(|q| q.id == pim.refs[ridx].node.proc_id)
                                         .map(|q| q.pid)
                                         .unwrap_or(0);
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     let _ = writeln!(
                                         w,
@@ -7271,7 +7271,7 @@ fn binder_transaction(
                     static M7_N: core::sync::atomic::AtomicUsize =
                         core::sync::atomic::AtomicUsize::new(0);
                     if M7_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
-                        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                        let mut w = crate::debug::backtrace::ConsoleWriter::new();
                         use core::fmt::Write as _;
                         let _ = writeln!(
                             w,
@@ -7349,7 +7349,7 @@ fn binder_transaction(
                                     .unwrap_or("?")
                                     .trim_end_matches('\0')
                             };
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
@@ -7653,7 +7653,7 @@ fn binder_transaction(
                         static GUARD_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if GUARD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
-                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            let mut w = crate::debug::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let depth = st.txn_stack.len();
                             // SAFETY: reads of the top txn under WORLD.
@@ -7738,11 +7738,11 @@ fn binder_transaction(
             txn_id = world.next_id;
             world.next_id += 1;
 
-            // dfx=bindertrace: one line per resolved transaction — the
+            // debug=bindertrace: one line per resolved transaction — the
             // HDF devmgr↔devhost handshake debugging needed the actual
             // conversation (who calls whom, which codes, oneway or not),
             // not just the failures.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::BinderTrace) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::BinderTrace) {
                 crate::pr_info!(
                     "btx: #{} pid {}{} -> pid {} h{} code {} {} ds {} os {}",
                     txn_id,
@@ -8366,7 +8366,7 @@ fn binder_transaction(
         }
     }
 
-    // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
+    // leg-30B (debug=ams46): Gate-1 arsenal ENQ hook. Match the
     // IAbilityManager interface token on the sender's parcel head,
     // latch the AMS node id + foundation pid on first sight, and ring
     // every code-46 (StartUser) send for read/free/retire correlation.
@@ -8422,7 +8422,7 @@ fn binder_transaction(
         }
     }
 
-    // leg-30B5 RIPPLE (dfx=ams46): inside the 120 s window after the
+    // leg-30B5 RIPPLE (debug=ams46): inside the 120 s window after the
     // traced code-46 was READ, print every transaction whose sender or
     // receiver is the foundation proc (AMS46_TPID) or the StartUser
     // sender proc (AMS46_SENDER). Budget 640; zero lines outside the
@@ -8788,7 +8788,7 @@ fn binder_transaction(
                                 if RP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
                                     < 20
                                 {
-                                    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                                    let mut w = crate::debug::backtrace::ConsoleWriter::new();
                                     use core::fmt::Write as _;
                                     // SAFETY: reads under WORLD.
                                     let top = rth.txn_stack.last();
@@ -9625,7 +9625,7 @@ fn binder_thread_read(
         stage_cmd!(BR_NOOP);
     }
 
-    // Pool-census note (dfx-gated, leg-33B): whether any iteration's
+    // Pool-census note (debug-gated, leg-33B): whether any iteration's
     // done:-shaped spawn emission fired, for the rate-capped POOL-SPAWN
     // proof print after the WORLD guard drops.
     let mut pool_spawn_fired = false;
@@ -9889,7 +9889,7 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
-                            // leg-30B (dfx=ams46): read-side trace — a
+                            // leg-30B (debug=ams46): read-side trace — a
                             // foundation thread picked up the traced
                             // code-46 StartUser. This line is the
                             // kernel-delivery-COMPLETE marker: everything
@@ -10224,7 +10224,7 @@ fn binder_thread_read(
         // (Linux "goto retry").
     }
 
-    // POOL-SPAWN proof print (dfx=poolcensus): one line per emission,
+    // POOL-SPAWN proof print (debug=poolcensus): one line per emission,
     // rate-capped, OUTSIDE the WORLD guard. Names the proc whose read
     // carried the BR_SPAWN_LOOPER request — the live counterpart of the
     // census lines.
@@ -10265,12 +10265,12 @@ impl BinderAlloc {
     }
 }
 
-/// DFX: one-line-per-proc binder world snapshot for the UART magic dump.
+/// debug: one-line-per-proc binder world snapshot for the UART magic dump.
 /// IRQ context: try-lock only — if WORLD is contended the binder state is
 /// mid-transition and the dump skips it (the task dump still runs).
-pub fn binder_dfx_dump() {
+pub fn binder_debug_dump() {
     let Some(mut g) = WORLD.try_lock_irqsave() else {
-        crate::pr_info!("binder-dfx: world busy, skipped");
+        crate::pr_info!("binder-debug: world busy, skipped");
         return;
     };
     let Some(world) = g.as_ref() else {
@@ -10281,7 +10281,7 @@ pub fn binder_dfx_dump() {
         for p in &world.procs {
             let pim = p.im();
             crate::pr_info!(
-                "binder-dfx: proc {} pid {} dead={} todo={} refs={} mgr={}",
+                "binder-debug: proc {} pid {} dead={} todo={} refs={} mgr={}",
                 p.id,
                 p.pid,
                 pim.is_dead,
@@ -10292,7 +10292,7 @@ pub fn binder_dfx_dump() {
             for t in &pim.threads {
                 let th = t.st();
                 crate::pr_info!(
-                    "binder-dfx:   tid {} looper={:#x} todo={} process_todo={} wfpw={} stack={} deathq={}",
+                    "binder-debug:   tid {} looper={:#x} todo={} process_todo={} wfpw={} stack={} deathq={}",
                     t.tid,
                     th.looper,
                     th.todo.len(),
@@ -10310,7 +10310,7 @@ pub fn binder_dfx_dump() {
                         Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
                         Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
                     };
-                    crate::pr_info!("binder-dfx:     thtodo[{}] {}", i, desc);
+                    crate::pr_info!("binder-debug:     thtodo[{}] {}", i, desc);
                 }
             }
             for (i, wk) in pim.todo.iter().enumerate() {
@@ -10322,7 +10322,7 @@ pub fn binder_dfx_dump() {
                     Work::DeadBinder { desc, cookie } => alloc::format!("dead d{} c{:#x}", desc, cookie),
                     Work::ClearDeathDone { cookie } => alloc::format!("cleardone c{:#x}", cookie),
                 };
-                crate::pr_info!("binder-dfx:     ptodo[{}] {}", i, desc);
+                crate::pr_info!("binder-debug:     ptodo[{}] {}", i, desc);
             }
         }
     }

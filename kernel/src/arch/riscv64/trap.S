@@ -282,7 +282,7 @@ trap_entry:
 .Lbadsp_park:
     // No task context: abandon this hart loudly (SBI console, no kernel
     // locks). Print sepc/tp then wfi forever. Other CPUs keep running and
-    // the DFX taskdump names the frozen hart.
+    // the debug taskdump names the frozen hart.
     csrr t0, sepc
     mv   t2, tp
     la   t4, .Lbadsp_msg

@@ -125,7 +125,7 @@ mod init;
 mod initrd;
 mod syscall;
 mod interrupt;
-mod dfx;
+mod debug;
 mod ipc;
 mod io_uring;
 mod timer;
@@ -164,7 +164,7 @@ mod tests;
 // itself still fall through to panic.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
 
     taskdump_raw_line(b"\nALLOCTHROW size=");
     taskdump_dec(layout.size() as u64);
@@ -200,8 +200,8 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // live-per-call-site table is the evidence that names the consumer.
     // Pure atomics and raw UART (see dump_heap_ledger): no allocator lock,
     // no allocation, safe to print while the heap is dead full.
-    if crate::dfx::memwatch::armed() {
-        crate::dfx::memwatch::dump_heap_ledger();
+    if crate::debug::memwatch::armed() {
+        crate::debug::memwatch::dump_heap_ledger();
     }
     // The packing layer's own census (object counts vs pages) — this is
     // the line that proves the 852MB of 4KB-per-object waste is packed.
@@ -214,14 +214,14 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     // simply ignored there). 16 frames cover syscall → vfs → driver → alloc.
     taskdump_raw_line(b" rawframes:");
     unsafe {
-        let mut fp = crate::dfx::backtrace::current_frame_pointer();
+        let mut fp = crate::debug::backtrace::current_frame_pointer();
         for _ in 0..16 {
             // plausible_fp: readable-kernel-memory only — a stale slot
             // holding a canonical-but-unmapped value (guard region) must
             // terminate the walk, not fault it (see memwatch::plausible_fp).
             if !(fp >= 0x8000_0000_0000_0000
                 && fp & 7 == 0
-                && crate::dfx::memwatch::plausible_fp(fp))
+                && crate::debug::memwatch::plausible_fp(fp))
             {
                 break;
             }
@@ -232,7 +232,7 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
             if !(next & 7 == 0
                 && next > fp
                 && next < 0xffff_ffff_ffff_f000
-                && crate::dfx::memwatch::plausible_fp(next))
+                && crate::debug::memwatch::plausible_fp(next))
             {
                 break;
             }
@@ -725,7 +725,7 @@ pub fn rust_main_tail() -> ! {
             // debugfs at /sys/kernel/debug (Linux layout). debugfs is
             // where the kernel exposes debug knobs that are deliberately
             // not part of the stable userspace ABI — Rux uses it for the
-            // DFX instrument switches (see dfx/mod.rs).
+            // debug instrument switches (see debug/mod.rs).
             {
                 let debugfs_init = fs::debugfs::init_debugfs();
                 let debugfs_mount = debugfs_init.and_then(|_| fs::debugfs::mount_debugfs());
@@ -914,10 +914,10 @@ pub fn rust_main_tail() -> ! {
             print_status("mm", "kswapd reclaim thread", true);
         }
 
-        // Initialize DFX subsystem (must be after sched::init)
+        // Initialize debug subsystem (must be after sched::init)
         {
-            dfx::init();
-            print_status("dfx", "diagnostic subsystem", true);
+            debug::init();
+            print_status("debug", "diagnostic subsystem", true);
         }
 
         // Persistent kernel log — /var/log/kmsg, the console tail on
@@ -975,11 +975,11 @@ pub fn rust_main_tail() -> ! {
 
         // Start the hung-task detector kthread here (late boot — after
         // secondaries are online, same context as ksoftirqd; the early
-        // dfx::init() slot runs BEFORE start_secondaries so its wake_up
+        // debug::init() slot runs BEFORE start_secondaries so its wake_up
         // IPIs could target offline CPUs). Its sleep loop is timer-driven.
         {
-            crate::dfx::hung_task::init();
-            print_status("dfx", "khungtaskd hung-task detector", true);
+            crate::debug::hung_task::init();
+            print_status("debug", "khungtaskd hung-task detector", true);
         }
 
         // fd-table retire reaper (fs/fdreap): every close/dup2
@@ -993,10 +993,10 @@ pub fn rust_main_tail() -> ! {
             print_status("fs", "fdreapd fd retire reaper", true);
         }
 
-        // sc-series soft-wedge heartbeat (dfx=schb): same late-boot slot
+        // sc-series soft-wedge heartbeat (debug=schb): same late-boot slot
         // as khungtaskd — its timer wakeups need secondaries online. The
         // switch gates everything; schbd prints its own armed line.
-        crate::dfx::schb::init();
+        crate::debug::schb::init();
 
         // Enable external interrupts
         {
@@ -1257,7 +1257,7 @@ use core::arch::global_asm;
 /// infinite trap_entry frame-push recursion). Window/heap/reservation
 /// moved 12MB->14MB together; riscv64 linker.ld now ASSERTs _end against
 /// the window so the next outgrowth fails the build.
-/// RUX-RISCV-LAYOUT-3 (dfx): the full kernel symbol table (~3.1MB of
+/// RUX-RISCV-LAYOUT-3 (debug): the full kernel symbol table (~3.1MB of
 /// .rodata) entered the default image and did not fit the 1.45MB left
 /// under the 14MB window (a 1MiB name cap covered only the first ~1.7MB
 /// of .text — hot-path frames symbolized to '?'). Window/heap/reservation
@@ -1563,7 +1563,7 @@ pub extern "C" fn rust_main() -> ! {
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
             if let Some((base, size)) =
-                dfx::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
+                debug::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
             {
                 mm::memblock_reserve(base, size).ok();
             }
@@ -1578,14 +1578,14 @@ pub extern "C" fn rust_main() -> ! {
         // KERNEL_RESERVE already keeps from the buddy; skipped when an
         // -initrd boot placed its image there (the zero page named the
         // range above). Design note: Tranche 5 in
-        // docs/development/dfx-linux-alignment-plan.md.
+        // docs/development/debug-linux-alignment-plan.md.
         #[cfg(feature = "x86_64")]
         {
             let base = arch::mm::kernel_image_phys_end() as usize;
             let overlaps_initrd = crate::initrd::region()
-                .is_some_and(|(s, e)| s < base + dfx::pstore::PSTORE_RAM_SIZE && e > base);
+                .is_some_and(|(s, e)| s < base + debug::pstore::PSTORE_RAM_SIZE && e > base);
             if !overlaps_initrd {
-                if let Some((base, size)) = dfx::pstore::reserve_at(base) {
+                if let Some((base, size)) = debug::pstore::reserve_at(base) {
                     mm::memblock_reserve(base, size).ok();
                 }
             }
@@ -1636,7 +1636,7 @@ pub extern "C" fn rust_main() -> ! {
     // record is remembered for sysfs to publish as
     // /sys/fs/pstore/{console,dmesg}-ramoops-0 and the magic is cleared
     // so a clean next boot does not re-expose it.
-    dfx::pstore::early_scan();
+    debug::pstore::early_scan();
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
     // 4MB heap-backed kernel stack. The whole init chain — including exec's
@@ -1791,7 +1791,7 @@ fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
     }
 }
 
-// Panic handler — uses dfx::backtrace for all output
+// Panic handler — uses debug::backtrace for all output
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     use core::fmt::Write;
@@ -1800,9 +1800,9 @@ fn panic(info: &PanicInfo) -> ! {
     // console byte the panic report prints is staged for the persistent
     // record (one relaxed load per byte on the disarmed path of every
     // other boot).
-    crate::dfx::pstore::arm_sink();
+    crate::debug::pstore::arm_sink();
 
-    let mut w = dfx::backtrace::ConsoleWriter::new();
+    let mut w = debug::backtrace::ConsoleWriter::new();
 
     // Header
     let _ = w.write_str("\n\nKernel panic - not syncing:\n\n");
@@ -1814,10 +1814,10 @@ fn panic(info: &PanicInfo) -> ! {
     // Separator
     let _ = w.write_str("\n---[ end Kernel panic - not syncing ]---\n\n");
 
-    // Dump CSRs, registers, and stack trace via dfx
-    dfx::backtrace::dump_csrs();
-    dfx::backtrace::dump_regs_inline();
-    dfx::backtrace::dump_stack();
+    // Dump CSRs, registers, and stack trace via debug
+    debug::backtrace::dump_csrs();
+    debug::backtrace::dump_regs_inline();
+    debug::backtrace::dump_stack();
 
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
@@ -1840,7 +1840,7 @@ fn panic(info: &PanicInfo) -> ! {
     // pstore-lite: write the record (staged sink + console tail) into
     // the reserved RAM region — after the report, before the `panic=`
     // policy fires, so the reboot still finds the bytes in place.
-    crate::dfx::pstore::panic_capture(info);
+    crate::debug::pstore::panic_capture(info);
 
     // What happens next is the `panic=` policy (the reference kernel):
     // halt by default, reboot after N seconds or immediately when the

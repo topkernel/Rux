@@ -824,7 +824,7 @@ pub fn cgroup_memory_uncharge(bytes: usize) {
 /// sc126 (Session P): one-line attribution when cgroup memory.max refuses
 /// an mmap charge — names the limiting level's usage vs max so the
 /// virtual-vs-RSS charge semantics question is decidable from the log.
-pub fn dfx_report_memory_refusal(comm: &str, len: usize) {
+pub fn debug_report_memory_refusal(comm: &str, len: usize) {
     let current = match crate::sched::current() {
         Some(c) => c as *mut Task,
         None => return,

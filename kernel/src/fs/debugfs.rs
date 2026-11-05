@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! /sys/kernel/debug/
-//! └── dfx/
+//! └── debug/
 //!     ├── taskdump      Y|N   (0644, writable)
 //!     └── ...
 //! ```
@@ -96,7 +96,7 @@ pub fn debugfs_root() -> Option<Arc<DebugFsNode>> {
 // ============================================================================
 
 /// Create a directory. `path` is absolute inside debugfs, e.g.
-/// `"/dfx"`. Intermediate directories are created on the way.
+/// `"/debug"`. Intermediate directories are created on the way.
 ///
 /// Returns false when the path already exists as a non-directory.
 pub fn create_dir(path: &str) -> bool {
@@ -135,7 +135,7 @@ pub fn create_dir(path: &str) -> bool {
 }
 
 /// Create a regular file with a read generator and an optional write
-/// handler. `path` is absolute inside debugfs, e.g. `"/dfx/taskdump"`.
+/// handler. `path` is absolute inside debugfs, e.g. `"/debug/taskdump"`.
 ///
 /// The generator runs on every `open()`, so the file always shows the
 /// live value. The store handler runs on `write()` and returns 0 on

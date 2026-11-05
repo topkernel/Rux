@@ -467,8 +467,8 @@ pub fn is_prime_import_request(request: u32) -> bool {
 /// error EGL_SUCCESS", zero kernel ioctls). io.rs calls this when it
 /// sees a prime-import request number on a non-DRM fd (or a dead fd).
 pub fn trace_foreign_prime_ioctl(request: u32, fd: i32, err: i32) {
-    // Hunt tap (known-gap 4): dfx=ohhunt gates it off the default path.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt) {
+    // Hunt tap (known-gap 4): debug=ohhunt gates it off the default path.
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt) {
         return;
     }
     if !is_prime_import_request(request) {
@@ -1846,9 +1846,9 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
     // content here means the client rendered; zero means its rendering
     // never reached the buffer. Hunt tap (known-gap 4): the probe walks
     // the WHOLE buffer (up to 3.7MB of volatile reads per import) —
-    // gated behind dfx=ohhunt so standard boots pay nothing.
+    // gated behind debug=ohhunt so standard boots pay nothing.
     static IMPORT_TRACE_N: AtomicU32 = AtomicU32::new(0);
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt) {
         let it = IMPORT_TRACE_N.fetch_add(1, Ordering::Relaxed);
         if it < 24 || it % 20 == 0 {
             let mut nz: usize = 0;

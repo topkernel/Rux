@@ -142,7 +142,7 @@ pub fn jbd2_journal_revoke(
     } else {
         insert_revoke_hash(&journal, blocknr, txn.t_tid)?;
     }
-    crate::dfx::fsw::note_j_revoke();
+    crate::debug::fsw::note_j_revoke();
 
     Ok(())
 }

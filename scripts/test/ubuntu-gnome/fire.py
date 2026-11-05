@@ -7,7 +7,7 @@ QEMU riscv64 virt with serial on a unix socket and QMP on another, then:
   - streams serial to runs/gnome-<tag>/serial.log
   - takes periodic QMP screendumps (PPM) and prints pixel stats
   - tracks chain milestones from the serial stream (runit prints, Xorg
-    banner, dfx taskdump comm listings, kernel panic signatures)
+    banner, debug taskdump comm listings, kernel panic signatures)
   - writes runs/gnome-<tag>/summary.txt + markers.json at exit
 
 Milestones (mirrors the old fire-r8x family):
@@ -19,7 +19,7 @@ Milestones (mirrors the old fire-r8x family):
 Usage:
   python3 test/ubuntu-gnome/fire.py [--tag T] [--seconds 2400]
          [--img work/gnome-riscv64.img] [--kernel target/.../debug/rux]
-         [--init /sbin/runit] [--mem 2G] [--smp 2] [--dfx "watchdog,taskdump"]
+         [--init /sbin/runit] [--mem 2G] [--smp 2] [--debug "watchdog,taskdump"]
 Ctrl-C or SIGTERM stops the VM cleanly (only the PID we started).
 """
 import argparse
@@ -45,7 +45,7 @@ p.add_argument("--init", default="/sbin/runit")
 p.add_argument("--mem", default="2G")
 p.add_argument("--smp", default="2")
 p.add_argument("--thread", default="multi", choices=["multi", "single"])
-p.add_argument("--dfx", default="")
+p.add_argument("--debug", default="")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=30)
 p.add_argument("--keyprobe", default="",
@@ -75,7 +75,7 @@ p.add_argument("--serial-cmd", default="",
                     "owns the ONLY live connection to the serial chardev; "
                     "a second external connect is silently queued by QEMU "
                     "and its bytes never reach the guest, so the kernel's "
-                    "dfx=taskdump 'DUMP!' magic (uart_rx_debug_magic) can "
+                    "debug=taskdump 'DUMP!' magic (uart_rx_debug_magic) can "
                     "only be triggered through this option")
 args = p.parse_args()
 
@@ -88,7 +88,7 @@ for s in (SER_SOCK, QMP_SOCK):
         os.unlink(s)
 
 append = (f"root=/dev/vda rw init={args.init} console=ttyS0 loglevel=3 "
-          + (f"dfx={args.dfx} " if args.dfx else "")
+          + (f"debug={args.debug} " if args.debug else "")
           + args.extra_append).strip()
 qemu_cmd = [
     "qemu-system-riscv64",
@@ -132,7 +132,7 @@ notify_burst = threading.Event()
 t0 = time.time()
 milestones = {}   # name -> (t_seconds, detail)
 markers = []      # (t, text) raw events of interest
-sigdeath = []     # (t, comm, sig) from dfx SIGDEATH lines
+sigdeath = []     # (t, comm, sig) from debug SIGDEATH lines
 
 
 def bye(signum, frame):
@@ -390,7 +390,7 @@ try:
         # --keyprobe 300,900[,1500:ret]: one keypress (press+release) via
         # QMP send-key at each listed elapsed second (default key 'a',
         # time:KEY overrides — 'ret' is the QAPI qcode for Enter).
-        # Deterministic positive control for dfx=inputtrace: the kernel
+        # Deterministic positive control for debug=inputtrace: the kernel
         # INPTRC lines MUST show exactly these events (kbd code 30 for
         # 'a', code 28 for 'ret') at these times; any other INPTRC line
         # in a hands-off window is a phantom event.
@@ -484,7 +484,7 @@ try:
                     print(f"[fire] t={ct}s click error: {e}", flush=True)
         # --serial-cmd TIME:STRING: raw bytes to the guest serial (this
         # driver's own chardev connection). Primary use: the kernel's
-        # dfx=taskdump "DUMP!" magic — dump_all_tasks on demand, e.g. to
+        # debug=taskdump "DUMP!" magic — dump_all_tasks on demand, e.g. to
         # name the wedged pids of a dark boot (r25val: an external
         # second connect was queued by QEMU and the magic never arrived).
         while serialcmd and el >= serialcmd[0][0]:

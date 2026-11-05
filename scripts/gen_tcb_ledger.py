@@ -12,7 +12,7 @@ Layers:
                comment (coverage is tracked below).
   service      Kernel services (fs, net, ipc, syscall wrappers, sched policy,
                driver logic, process management). Target state: 100% forbid.
-  diagnostics  dfx/ debug tooling that deliberately reads raw memory.
+  diagnostics  debug/ debug tooling that deliberately reads raw memory.
                Permitted-unsafe like framework, but reported separately so
                tool churn does not hide in the framework bucket.
   test         kernel/src/tests (unit-test feature only, not shipped).
@@ -59,7 +59,7 @@ RULES = [
     ("drivers/timer/", "framework"),
     ("drivers/pci/", "framework"),
     ("drivers/", "service"),
-    ("dfx/", "diagnostics"),
+    ("debug/", "diagnostics"),
     ("tests/", "test"),
     # root files tied to early boot / raw hardware
     ("console.rs", "framework"),

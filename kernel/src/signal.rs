@@ -1888,7 +1888,7 @@ unsafe fn setup_frame_aarch64(
     // frame boundary (arm64 ABI; the reference kernel zeroes x29 here).
     regs.regs[29] = 0;
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SigTrace) {
         crate::pr_info!(
             "SIGTRACE setup pid={} sig={} sp={:#x} frame={:#x} handler={:#x} restorer={:#x} ->pc={:#x}",
             (*task).pid(),
@@ -2230,7 +2230,7 @@ unsafe fn restore_sigcontext_aarch64(
     // Restore signal mask — SIGKILL/SIGSTOP can never be blocked
     (*task).sigmask = frame.uc.uc_sigmask & !((1u64 << 8) | (1u64 << 18));
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SigTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SigTrace) {
         crate::pr_info!(
             "SIGTRACE restore pid={} frame={:#x} copied={} ->pc={:#x} sp={:#x} x29={:#x} x0={:#x}",
             (*task).pid(),
@@ -2959,7 +2959,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
     // 4000 budgeted lines ≈ 2.4 s of polled-16550 serial per boot (the
     // EXITGRP class, e2717687). The SIGTRAP hunt is closed; the 9/15
     // filter is restored. The next every-signal hunt should use a
-    // dfx-switched tracepoint instead.
+    // debug-switched tracepoint instead.
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGTERM as i32 {
         static TK_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -2999,9 +2999,9 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             core::sync::atomic::AtomicU32::new(0);
         // oh-svc T1 abort-reason tap (known-gap 4): the dump walks the
         // exec-VMA map and scans the user stack — gated behind
-        // dfx=ohhunt so ordinary userspace aborts (glibc assertions in
+        // debug=ohhunt so ordinary userspace aborts (glibc assertions in
         // LTP runs included) cost nothing.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt)
             && ABORT_N.load(core::sync::atomic::Ordering::Relaxed) < 8
             && LAST_TGID.load(core::sync::atomic::Ordering::Relaxed) != tid
             && ABORT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8
@@ -3245,7 +3245,7 @@ unsafe fn send_signal_locked_info(
     });
 
     // sc93 launcher gate: a cross-process SIGKILL to a wedged launcher
-    // means the AMS lifecycle timeout fired AND the userspace DFX dumper
+    // means the AMS lifecycle timeout fired AND the userspace debug dumper
     // already failed on this process (every LIFECYCLE_TIMEOUT freeze
     // artifact reports "failed to fully dump due to timeout"). The
     // kernel dumps the wedged threads itself before they die — park
@@ -3388,10 +3388,10 @@ unsafe fn send_signal_locked_info(
     // send path — disposition, block state, pending-after. OH init blocks
     // SIGCHLD and reads it via signalfd; any silent drop here wedges the
     // whole service-restart machinery. Rate-limited. Serial-cleanliness:
-    // opt-in via dfx=sfddbg (every child exit reaches here on ordinary
+    // opt-in via debug=sfddbg (every child exit reaches here on ordinary
     // boots too).
     if task.pid() == 1
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SfdDbg)
     {
         static SFDDBG_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -3696,8 +3696,8 @@ fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
 #[no_mangle]
 pub extern "C" fn check_and_deliver_signals(regs: *mut crate::arch::pt_regs::PtRegs) {
     // forkprof trace: the trap-exit signal gate (every user return).
-    if crate::dfx::forkprof::trace_on() {
-        crate::dfx::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
+    if crate::debug::forkprof::trace_on() {
+        crate::debug::forkprof::trace(13, crate::sched::get_current_pid()); // T_SIGCHECK
     }
     use crate::sched;
 

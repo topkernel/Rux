@@ -131,7 +131,7 @@ docs/
 ├── guides/                # Development guides
 │   ├── getting-started.md # Getting started (refreshed 2026-11-01)
 │   ├── configuration.md   # Configuration system
-│   ├── debugging.md       # Debugging + the dfx= switch table
+│   ├── debugging.md       # Debugging + the debug= switch table
 │   └── ubuntu-image.md    # Ubuntu test image build
 ├── progress/              # Project progress
 │   ├── roadmap.md         # Development roadmap (kept per milestone)

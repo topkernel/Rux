@@ -98,7 +98,7 @@ def main():
            "-device", "virtio-tablet-pci",
            "-kernel", KERNEL,
            "-append", "root=/dev/vda rw init=/sbin/runit console=ttyS0 "
-                      "dfx=watchdog,periodic,taskdump,mmforensics"]
+                      "debug=watchdog,periodic,taskdump,mmforensics"]
     with open(os.path.join(out, "cmdline.txt"), "w") as f:
         f.write(" ".join(cmd) + "\n")
     log("qemu starting")
@@ -172,7 +172,7 @@ def main():
     data = bytes(buf).decode(errors="replace")
     # extract the forensic block(s)
     blocks = re.findall(
-        r"trap: user SIGILL.*?(?=\n(?:=== DFX|MEM heap|\Z))", data, re.S)
+        r"trap: user SIGILL.*?(?=\n(?:=== debug|MEM heap|\Z))", data, re.S)
     with open(os.path.join(out, "forensic.txt"), "w") as f:
         f.write("\n\n=====\n\n".join(blocks))
     sigill = "trap: user SIGILL" in data

@@ -7,7 +7,7 @@ per boot, `syscost=1 fsw=1`).
 
 ## 0. Measurement setup and the probe
 
-`dfx=fsw` (cmdline `fsw=1`, kernel/src/dfx/fsw.rs) counts the ext4/bio
+`debug=fsw` (cmdline `fsw=1`, kernel/src/debug/fsw.rs) counts the ext4/bio
 layer's volumes: block-cache breads / device reads / device writes /
 sync-dirty attempts / evictions / whole-cache drains, ext4 inode
 read-writes, directory lookups and blocks scanned, list_dir calls, inode

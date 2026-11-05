@@ -402,7 +402,7 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
             if GP_CONSEC_FAIL.fetch_add(1, Ordering::Relaxed) + 1 == 32
                 && !GP_DUMPED.swap(true, Ordering::AcqRel)
             {
-                crate::dfx::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
+                crate::debug::taskdump::dump_all_tasks("rcu-gp-frozen-cpu");
             }
             return false;
         }

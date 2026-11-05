@@ -292,19 +292,19 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
                 return None;
             }
 
-            // DFX memwatch: page-table frames bypass page_alloc::alloc_pages
+            // debug memwatch: page-table frames bypass page_alloc::alloc_pages
             // (direct zone.alloc_pages above) — feed them to the page-level
             // site table from THIS frame so the chain names the mapping path
             // (map_page / create_user_address_space / ...).
-            if crate::dfx::memwatch::armed() {
-                let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                    [0; crate::dfx::memwatch::SITE_FRAMES];
+            if crate::debug::memwatch::armed() {
+                let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                    [0; crate::debug::memwatch::SITE_FRAMES];
                 let mw_bp: u64;
                 unsafe {
                     core::arch::asm!("mov {}, rbp", out(reg) mw_bp, options(nomem, nostack));
-                    crate::dfx::memwatch::walk_fp_chain(mw_bp, &mut mw_frames);
+                    crate::debug::memwatch::walk_fp_chain(mw_bp, &mut mw_frames);
                 }
-                crate::dfx::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
+                crate::debug::memwatch::note_page_alloc(phys_addr as usize, 0, &mw_frames);
             }
 
             // FORENSIC ledger: stamp every Late-stage table allocation.
@@ -354,7 +354,7 @@ unsafe fn free_page_table_checked_rooted(phys_addr: u64, site: &str, root_ppn: u
                     // rather than wired into two live trees
         }
     }
-    crate::dfx::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_TABLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     free_page_table(phys_addr)
 }
 
@@ -827,8 +827,8 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     // Hot path (every user PTE install — a fork copies hundreds of them):
     // the ring writes are forensic-only and cost 4 emulated atomics per
-    // copied PTE under TCG. Behind the dfx=mmforensics runtime switch.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    // copied PTE under TCG. Behind the debug=mmforensics runtime switch.
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::MmForensics) {
         return;
     }
     let i = PTEI_CUR.fetch_add(1, Relaxed) % PTEI_RING.len();
@@ -854,12 +854,12 @@ pub unsafe fn free_user_page_tables(
     root_ppn: u64,
 ) {
     use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, free_pages};
-    crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
     // MmStructs ended up owning one page-table tree — the second walk
     // chases recycled frames full of foreign data. Behind the
-    // dfx=mmforensics runtime switch (see pte_install_log).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MmForensics) {
+    // debug=mmforensics runtime switch (see pte_install_log).
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::MmForensics) {
         use core::sync::atomic::Ordering::Relaxed;
         for k in 0..FUT_RING.len() {
             if FUT_RING[k].root.load(Relaxed) == root_ppn && root_ppn != 0 {
@@ -975,9 +975,9 @@ pub unsafe fn free_user_page_tables(
                         if (*page).is_mapped() {
                             crate::mm::rmap::page_remove_rmap(&*page);
                         }
-                        let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L3);
+                        let new_ref = (*page).put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L3);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             free_pages(phys_addr as usize, 0);
                         }
                     }
@@ -1031,9 +1031,9 @@ pub unsafe fn free_user_page_tables(
                         if (*page).is_mapped() {
                             crate::mm::rmap::page_remove_rmap(&*page);
                         }
-                        let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L2);
+                        let new_ref = (*page).put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L2);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             free_pages(phys_addr as usize, 0);
                         }
                     }
@@ -1096,9 +1096,9 @@ pub unsafe fn free_user_page_tables(
                     // page_remove_rmap above (mapcount dec) is its whole
                     // teardown.
                     if pte1.bits() & super::mm_ops::cow_flags::PCACHE_RO == 0 {
-                        let new_ref = (*page).put_page_site(crate::dfx::driftwatch::S_TEARDOWN_X86_L1);
+                        let new_ref = (*page).put_page_site(crate::debug::driftwatch::S_TEARDOWN_X86_L1);
                         if new_ref == 0 {
-                            crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            crate::debug::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             free_pages(phys_addr as usize, 0);
                         }
                         // PCACHE leaf (filemap_fault private mapping): drop the
@@ -1593,7 +1593,7 @@ pub(crate) unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysA
                 // which path is mapping now. The frame walk names the
                 // actual caller — b86 lost render_service to a 2-page
                 // heap overwrite at 0x1f000 whose ctx label was useless.
-                crate::dfx::backtrace::dump_stack();
+                crate::debug::backtrace::dump_stack();
             }
         }
     }

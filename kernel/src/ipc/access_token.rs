@@ -181,14 +181,14 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     let pid = crate::sched::current()
         .map(|t| unsafe { (*t).tgid() as u32 })
         .unwrap_or_else(crate::process::current_pid);
-    // dfx=syscalltrace: the per-ioctl trace. Ungated this is the
+    // debug=syscalltrace: the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
     // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
     // (24k+ lines in boot b139), and hilogd.rd_kmsg then copies every
     // line from /dev/kmsg into /data logs — each batch an ext4 write
     // under the BIGLOCK, feeding the very contention the poll waits on
     // (same failure shape as the binder GET_SENDER_INFO trace, b128).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
         crate::pr_info!("atid: pid {} ioctl {:#x}", pid, request);
     }
 
@@ -311,10 +311,10 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             if request == ACCESS_TOKENID_SET_PERMISSION {
                 // ioctl_set_get_perm_data.is_granted: bool at offset 8.
                 let granted = buf[8] != 0;
-                // dfx=syscalltrace forensics (b8): which opcode the
+                // debug=syscalltrace forensics (b8): which opcode the
                 // verifier's compiled g_permList computes vs the one
                 // ATM's pusher set.
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+                if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
                     crate::pr_info!(
                         "atid: pid {} SET_PERM token {:#x} op {} granted {}",
                         pid,
@@ -344,7 +344,7 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
                         None => return -61i64, // ENODATA -> userspace falls back to ATM
                     }
                 };
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+                if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
                     crate::pr_info!(
                         "atid: pid {} GET_PERM token {:#x} op {} -> granted {}",
                         pid,
@@ -360,10 +360,10 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
         }
         _ => {
-            // dfx=syscalltrace: same tight-loop economics as the entry
+            // debug=syscalltrace: same tight-loop economics as the entry
             // trace (4k+ of these per boot — hilogd probing TIOCGETD on
             // the device fd).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
                 crate::pr_info!("access_token_id: unhandled ioctl {:#x}", request);
             }
             enotty()

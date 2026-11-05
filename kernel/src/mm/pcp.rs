@@ -221,7 +221,7 @@ pub fn free_order0(pfn: usize, zone: &Zone) -> bool {
             // R15-3 stance. No printk from this path (free contexts hold
             // locks; floods wedge the console — sc83 discipline).
             PCP_DOUBLE_FREE.fetch_add(1, Ordering::Relaxed);
-            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
             return true;
         }
         // In use -> cached.

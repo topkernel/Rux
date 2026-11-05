@@ -132,7 +132,7 @@ and leak hygiene protect the boundary's enforcement machinery).
 - **State:** NOT enforced. riscv64: whole kernel image mapped V|R|W|X (both identity and virtual, mmu_init.rs kernel_flags). x86_64: image mapped P|RW without NX (executable by absence of NX bit). No post-boot RO/ROX tightening pass exists. No kernel module loader (no runtime text allocation). No JIT in-tree today (OH ArkTS runs in USERSPACE and manages its own W^X via mprotect).
 - **Reference:** Reference: mark_rodata_ro() at init, NX on data, CONFIG_STRICT_KERNEL_RWX.
 - **Gap class:** project
-- **Regression guard:** New tripwire: page-table walk asserting text pages RO after init (gated dfx knob), any W+X page print
+- **Regression guard:** New tripwire: page-table walk asserting text pages RO after init (gated debug knob), any W+X page print
 
 #### user-pointer struct copies with embedded pointers — PROJECT
 
@@ -175,7 +175,7 @@ and leak hygiene protect the boundary's enforcement machinery).
 
 #### kernel pointers in other /proc nodes — QUICK
 
-- **State:** NOT audited. /proc/[pid]/stat has kstkeip/kstkesp fields (pid.rs) — check they are 0; /proc/[pid]/wchan, stack (dfx) unaudited. DFX files under debugfs are root-gated by DAC only.
+- **State:** NOT audited. /proc/[pid]/stat has kstkeip/kstkesp fields (pid.rs) — check they are 0; /proc/[pid]/wchan, stack (debug) unaudited. debug files under debugfs are root-gated by DAC only.
 - **Reference:** Reference: kptr_restrict governs all of these.
 - **Gap class:** quick
 - **Regression guard:** audit pass over procfs/pid.rs generators in this lane
@@ -189,12 +189,12 @@ and leak hygiene protect the boundary's enforcement machinery).
 - **Gap class:** project
 - **Regression guard:** the per-syscall capability audit pass (privilege model row)
 
-#### debugfs/dfx exposure — OK
+#### debugfs/debug exposure — OK
 
-- **State:** debugfs mounted only when requested (dfx= cmdline gates the instruments themselves; debugfs.rs reviewed by the coverage lane). DFX switches default OFF. Root-only by DAC.
+- **State:** debugfs mounted only when requested (debug= cmdline gates the instruments themselves; debugfs.rs reviewed by the coverage lane). debug switches default OFF. Root-only by DAC.
 - **Reference:** Reference: debugfs root-only; lockdown limits in lockdown modes.
 - **Gap class:** ok
-- **Regression guard:** dfx switch table unit rows
+- **Regression guard:** debug switch table unit rows
 
 ## Session history
 

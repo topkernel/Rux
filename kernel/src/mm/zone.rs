@@ -564,8 +564,8 @@ impl Zone {
                 let mut frames: [u64; 10] = [0; 10];
                 // SAFETY: reads the frame-pointer chain of the current stack.
                 unsafe {
-                    let s0 = crate::dfx::backtrace::current_frame_pointer();
-                    crate::dfx::memwatch::walk_fp_chain(s0, &mut frames);
+                    let s0 = crate::debug::backtrace::current_frame_pointer();
+                    crate::debug::memwatch::walk_fp_chain(s0, &mut frames);
                 }
                 for f in frames.iter() {
                     if *f == 0 {
@@ -608,7 +608,7 @@ impl Zone {
                         // lock; raw putchar / printk here can wedge the
                         // console path (same discipline as the heap
                         // buddy's R43 tripwires).
-                        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+                        crate::debug::taint::add_taint(crate::debug::taint::TaintFlags::BAD_PAGE);
                         DOUBLE_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
                         return;
                     }

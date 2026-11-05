@@ -35,7 +35,7 @@ rows and stress coverage that apply.
 | arch-trap | 1 | - | 2/2 | trap paths: decode/cfi probes (cfi wired on riscv), oops-smoke; KERNPANIC printer |
 | binder | - | - | 3/3 | binder.rs: binder/binder2 probes (riscv), binder4 probe (x86 leg) — all wired |
 | boot | 1 | - | 0/0 | initrd/boot path: initrd suite (subdir) |
-| dfx | - | - | 2/2 | syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, dfx-x86 probe |
+| debug | - | - | 2/2 | syscost/trace/watchdog: debug-smoke, tracefs-smoke, kallsyms-smoke, debug-x86 probe |
 | drivers | 2 | 11 | 0/0 | virtio/block drivers |
 | drivers-gpu | - | - | 0/7 | drm/gpu/fb: drm/egl/gbm/fb probes (image-dependent) |
 | drivers-input | - | - | 0/1 | input: xinput_probe |
@@ -57,7 +57,7 @@ rows and stress coverage that apply.
 | smp | 1 | - | 0/0 | SMP bringup |
 | sync | 2 | 7 | 0/5 | futex/semaphore: unit tests + futex_min/futex_lost, pthread probes |
 | time | 1 | - | 2/4 | timers/clock: unit tests + timer_probe, sleep_probe (x86 driver), monostat |
-| x86-port | - | - | 0/0 | x86_64: pstore-x86, dfx-x86, binder4-x86, faultlat/2/3, tgsig, monostat, decode, subreap, exitwalk, watchdog, taskcomm, selinux-mmap, loader-vma, mmapfix, heapwatch-x86, ohlite-x86 legs (bzImage via PLATFORM=x86_64 make build; monkey-x86 also needs work/ubuntu-x86.img; several drivers need -mem 2G: the x86 heap starts at the 1GiB mark) |
+| x86-port | - | - | 0/0 | x86_64: pstore-x86, debug-x86, binder4-x86, faultlat/2/3, tgsig, monostat, decode, subreap, exitwalk, watchdog, taskcomm, selinux-mmap, loader-vma, mmapfix, heapwatch-x86, ohlite-x86 legs (bzImage via PLATFORM=x86_64 make build; monkey-x86 also needs work/ubuntu-x86.img; several drivers need -mem 2G: the x86 heap starts at the 1GiB mark) |
 
 ## Unattended suite legs (test/suite.sh)
 
@@ -99,7 +99,7 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | coredump_probe | process | - | yes | coredump-probe.sh | WIRED | coredump file production |
 | decode_probe | arch-trap | decode_probe_boot.py | - | decode-x86-probe.sh | WIRED | trap-decode of faulting instructions |
 | decshim | misc | - | - | - | UNWIRED | decode shim helper |
-| dfx_x86_probe | dfx | - | - | dfx-x86-probe.sh | WIRED | x86 DFX surfaces (needs x86 kernel) |
+| debug_x86_probe | debug | - | - | debug-x86-probe.sh | WIRED | x86 debug surfaces (needs x86 kernel) |
 | drm_probe | drivers-gpu | drm_probe_boot.py | - | - | UNWIRED | DRM device probe |
 | egl_painter | drivers-gpu | - | - | - | UNWIRED | EGL painting loop |
 | egl_probe | drivers-gpu | egl_probe_boot.py | - | - | UNWIRED | EGL initialization |
@@ -174,7 +174,7 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | unixwake | ipc | - | - | - | UNWIRED | unix socket wakeup |
 | vma_storm | mm | vma_storm_boot.py | - | vma-storm-probe.sh | WIRED | VMA churn storm |
 | vmsize_probe | misc | - | - | - | UNWIRED |  |
-| watchdog_probe | dfx | watchdog_probe_boot.py | - | watchdog-x86-probe.sh | WIRED | watchdog detector probe |
+| watchdog_probe | debug | watchdog_probe_boot.py | - | watchdog-x86-probe.sh | WIRED | watchdog detector probe |
 | writestorm | fs | - | - | - | UNWIRED | write storm |
 | xinput_probe | drivers-input | - | - | - | UNWIRED | xinput device probe |
 

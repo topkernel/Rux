@@ -316,22 +316,22 @@ fn gfp_migratetype(g: GfpFlags) -> i32 {
 
 /// Allocate 2^order contiguous physical pages
 ///
-/// DFX memwatch wrapper: captures the caller chain (frame-pointer walk,
-/// valid at -O0) and feeds the page-level site table in dfx::memwatch —
+/// debug memwatch wrapper: captures the caller chain (frame-pointer walk,
+/// valid at -O0) and feeds the page-level site table in debug::memwatch —
 /// net growth per call-site is the physical-page leak signature.
 pub fn alloc_pages(gfp_flags: GfpFlags, order: usize) -> usize {
-    let phys = if !crate::dfx::memwatch::armed() {
+    let phys = if !crate::debug::memwatch::armed() {
         alloc_pages_inner(gfp_flags, order)
     } else {
-        let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
+        let mw_s0: u64 = crate::debug::backtrace::current_frame_pointer();
         let phys = alloc_pages_inner(gfp_flags, order);
         if phys != 0 {
-            let mut mw_frames: [u64; crate::dfx::memwatch::SITE_FRAMES] =
-                [0; crate::dfx::memwatch::SITE_FRAMES];
+            let mut mw_frames: [u64; crate::debug::memwatch::SITE_FRAMES] =
+                [0; crate::debug::memwatch::SITE_FRAMES];
             unsafe {
-                crate::dfx::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
+                crate::debug::memwatch::walk_fp_chain(mw_s0, &mut mw_frames);
             }
-            crate::dfx::memwatch::note_page_alloc(phys, order, &mw_frames);
+            crate::debug::memwatch::note_page_alloc(phys, order, &mw_frames);
         }
         phys
     };
@@ -401,8 +401,8 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     super::kswapd::wakeup_kswapd(order as i32);
                 }
                 // Leg-15 pace: one tick per slowpath entry (zone fastpath
-                // failed), dfx=schb-gated counter only.
-                crate::dfx::schb::note_slow();
+                // failed), debug=schb-gated counter only.
+                crate::debug::schb::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
                 // waking kswapd alone loses the race — the faulting task
@@ -674,10 +674,10 @@ pub fn oom_forensic_dump(site: &str) {
         return;
     }
 
-    // Full accounting ledger first (dfx/ledger.rs): where every managed
+    // Full accounting ledger first (debug/ledger.rs): where every managed
     // page went at this moment — the census + counter reconciliation that
     // attributes the "out of memory" to a category (or to drift).
-    super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
+    super::super::debug::ledger::dump(&alloc::format!("oom: {}", site));
 
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
     crate::println!(
@@ -913,7 +913,7 @@ pub fn oom_forensic_dump(site: &str) {
                 }
             }
         }
-        crate::dfx::ledger::oomfx_line(
+        crate::debug::ledger::oomfx_line(
             zf as u64,
             zw as u64,
             zm as u64,
@@ -1037,7 +1037,7 @@ fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
-    use crate::dfx::driftwatch as dw;
+    use crate::debug::driftwatch as dw;
     if addr == 0 {
         dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
@@ -1074,7 +1074,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     unsafe { (*pd).mapcount() },
                     crate::process::current_pid()
                 );
-                crate::dfx::backtrace::dump_stack();
+                crate::debug::backtrace::dump_stack();
             }
             return;
         }
@@ -1155,7 +1155,7 @@ pub fn free_pages(addr: usize, order: usize) {
     //       from free contexts wedges the box).
     //   owner != dying pid : foreign free — the frame may still be mapped
     //       by a live process (its r-x text); recycling it is the SIGILL
-    //       mechanism. Under dfx=mmforensics refuse the free (leak) and
+    //       mechanism. Under debug=mmforensics refuse the free (leak) and
     //       print the evidence; with the switch off, clear the stamp and
     //       keep the historical allocator behavior.
     // The walk-path (exit/unmap) frees are adjudicated properly in
@@ -1184,8 +1184,8 @@ pub fn free_pages(addr: usize, order: usize) {
                 // perturbs timing enough to soft-lockup the box. The count
                 // is readable from the FOREIGN report below.
                 TEXT_OWN_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            } else if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::MmForensics,
+            } else if crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::MmForensics,
             ) {
                 crate::mm::page_desc::text_stamp_remove(pfn);
                 #[cfg(feature = "riscv64")]
@@ -1193,7 +1193,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     // Attribution: the dying context's page-table ROOT (to
                     // correlate with the FUT teardown ring / EARLY-ROOT-FREE
                     // witnesses) plus a symbolizable kernel backtrace via
-                    // the dfx unwinder (printk-free console writer, safe
+                    // the debug unwinder (printk-free console writer, safe
                     // under the locks this path can hold).
                     let root = crate::sched::current()
                         .and_then(|t| t.address_space().map(|mm| mm.root_ppn()))
@@ -1203,7 +1203,7 @@ pub fn free_pages(addr: usize, order: usize) {
                         pfn, order, owner_pid, owner_va, dying, root,
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
-                    crate::dfx::backtrace::dump_stack();
+                    crate::debug::backtrace::dump_stack();
                     dw::FREE_REFUSED_TEXT
                         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
@@ -1224,9 +1224,9 @@ pub fn free_pages(addr: usize, order: usize) {
         }
     }
 
-    // DFX memwatch: attribute the free back to the site that stamped this
-    // block (page-level leak accounting — see dfx::memwatch).
-    crate::dfx::memwatch::note_page_free(addr, order);
+    // debug memwatch: attribute the free back to the site that stamped this
+    // block (page-level leak accounting — see debug::memwatch).
+    crate::debug::memwatch::note_page_free(addr, order);
 
     let pfn = phys_to_pfn(addr);
 

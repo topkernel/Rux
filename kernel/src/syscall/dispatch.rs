@@ -80,7 +80,7 @@ fn syscall_set_return_value(regs: &mut PtRegs, value: i64) {
     regs.set_return_value(value);
 }
 
-/// dfx=strace1: one console line per loader-relevant syscall of PID 1.
+/// debug=strace1: one console line per loader-relevant syscall of PID 1.
 ///
 /// Numbers are the GENERIC (asm-generic) dispatch numbers — the x86_64
 /// native numbers were translated before the dispatch match.
@@ -157,20 +157,20 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 ///
 /// Called by trap.rs, dispatches to specific system call handlers.
 /// perf-audit wrapper: whole-syscall wall-time accounting
-/// (dfx/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
+/// (debug/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
 /// Diverging paths (do_exit on exit_group / fatal signals) skip the
 /// exit hook, so those calls are undercounted — acceptable for a
 /// ranking probe.
 /// Whether the per-task LASTSYS latch runs on every syscall (perf:
 /// 1 per-CPU load + 3 stores; the reference carries this in
 /// thread_info flags that are only set under ptrace/audit). Turned on
-/// by taskdump / dfx when a dump is requested; off = zero cost.
+/// by taskdump / debug when a dump is requested; off = zero cost.
 static LASTSYS_LATCH_ON: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
-    let sc_t0 = crate::dfx::syscost::enter();
+    let sc_t0 = crate::debug::syscost::enter();
     // The raw_syscalls:sys_enter / sys_exit tracepoints, recorded
     // through the generated typed call functions. (gap-net) The six-word
     // argument marshal is guarded by the armed check itself — the typed
@@ -193,7 +193,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     if crate::trace::EVENT_SYS_EXIT.armed() {
         crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
     }
-    crate::dfx::syscost::exit(sc_nr, sc_t0);
+    crate::debug::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
     // syscost off). x86_64 native nrs 47=recvmsg 45=recvfrom.
@@ -203,7 +203,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         // recvmsg(fd, msg, flags) -> flags at a[2]; recvfrom(fd, buf,
         // len, flags, ...) -> flags at a[3].
         let flags = if sc_nr == 47 { a[2] } else { a[3] } as i32;
-        crate::dfx::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
+        crate::debug::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
     }
 }
 
@@ -345,11 +345,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // lastsys= field reads the per-task latch.
     // (perf-syscall lane) Both the ring record and this SECOND latch
     // (post-translate numbers) are hunt instrumentation — 12 atomics
-    // per syscall — and now sit behind dfx=sysforensic. The
+    // per syscall — and now sit behind debug=sysforensic. The
     // pre-translate latch above stays always-on: it is what makes a
     // parked task's taskdump show the syscall it is parked IN, and it
     // costs 3 stores.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SysForensic) {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
         if let Some(cur) = crate::sched::current() {
@@ -776,12 +776,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         }
     }
 
-    // STRACE1 (loader hunts, dfx=strace1): one line per file/memory
+    // STRACE1 (loader hunts, debug=strace1): one line per file/memory
     // syscall of PID 1, with the pathname decoded for path-taking calls.
     // musl ld.so's "Error loading shared library" carries no errno — this
     // turns that into "which step failed" (search-open, fstat, mmap,
     // header read).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Strace1)
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Strace1)
         && crate::process::current_pid() == 1
     {
         strace1_line(syscall_no as u32, &args, result);
@@ -789,11 +789,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
 
     syscall_set_return_value(regs, result);
 
-    // STEPTRACE (dfx=steptrace): one line per syscall return. Left
+    // STEPTRACE (debug=steptrace): one line per syscall return. Left
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the
-    // switch catalog note in dfx/switches.rs.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    // switch catalog note in debug/switches.rs.
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Steptrace) {
         crate::pr_debug!("syscall: pid={}, nr={}, ret={:#x} ({})",
             crate::process::current_pid(), syscall_no, result,
             if result < 0 { "error" } else { "ok" });
@@ -804,15 +804,15 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     // last_calls/init_calls/birth rings, the fail-tail ring and the
     // sc-series comm-gated hooks (appioctl/applog/appconn/prctl-einval/
     // missstat/openmiss) — is hunt instrumentation costing ~15 atomics
-    // plus comm scans on EVERY syscall. Gated behind dfx=sysforensic;
+    // plus comm scans on EVERY syscall. Gated behind debug=sysforensic;
     // quiet boots pay one atomic load.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysForensic) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SysForensic) {
         return;
     }
 
     // FORENSIC ring: last N syscalls per boot (pid, nr, a0, a1, ret).
-    // Same dfx=sysring gate as the entry-side record — see above.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+    // Same debug=sysring gate as the entry-side record — see above.
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SysRing) {
         SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
             .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
     }
@@ -943,12 +943,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             || comm == "appspawn"
             || comm.contains("foundation")
             || comm.contains("sa_main");
-        // dfx=writetrace: the fd3 hilog writev capture settled the
+        // debug=writetrace: the fd3 hilog writev capture settled the
         // chain questions (sandbox narration, SA-501 attempts); in
         // milestone boots it only adds ~2.4k kernel lines for
         // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).
         if family
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WriteTrace)
+            && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WriteTrace)
         {
             // sc157: comm-based gating. The sc155/156 pid latch (first
             // family task to write fd3 = "the daemon") was fragile — in

@@ -5,7 +5,7 @@ the freelist drift accumulate (freelist-drift lane).
 Mirrors oh-display's oh-boot-tmp.sh (q35, six disks, patched ramdisk,
 userdata-tok) but:
   - serial is a pipe, so the driver can send the "LEDGER!" UART magic
-    periodically (dfx=ledger) and watch free_census vs zone_free_cnt over
+    periodically (debug=ledger) and watch free_census vs zone_free_cnt over
     the whole first-boot write storm;
   - the log is parsed for drift / driftwatch attribution lines and a
     compact trace is printed at the end.
@@ -47,7 +47,7 @@ def main():
     ap.add_argument("--accel", default="kvm",
                     help="kvm | tcg,thread=multi | tcg,thread=single")
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
-    ap.add_argument("--extra-append", default="dfx=ledger")
+    ap.add_argument("--extra-append", default="debug=ledger")
     ap.add_argument("--magic-every", type=float, default=120.0)
     ap.add_argument("--magic-at", type=float, default=45.0)
     ap.add_argument("--log", default=None)

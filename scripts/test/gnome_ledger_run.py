@@ -4,7 +4,7 @@ ledger armed (oom-accounting lane).
 
 Boots the shared Ubuntu GUI image read-only (-snapshot, file.locking=off),
 logs in over serial (root/rux), then keeps the session alive while:
-  - sending the "LEDGER!" UART magic every LEDGER_EVERY seconds (dfx=ledger
+  - sending the "LEDGER!" UART magic every LEDGER_EVERY seconds (debug=ledger
     census of where every managed page went), and
   - watching the serial for the fake-OOM signature family:
     pagefault OOM / PF-OOM / OOM-FORENSIC / MEMLEDGER / ALLOCTHROW /
@@ -53,7 +53,7 @@ def main():
     ap.add_argument("--secs", type=int, default=2400)
     ap.add_argument("--smp", default="4")
     ap.add_argument("--mem", default="2G")
-    ap.add_argument("--dfx", default="watchdog,taskdump,memwatch,ledger")
+    ap.add_argument("--debug", default="watchdog,taskdump,memwatch,ledger")
     ap.add_argument("--ledger-every", type=float, default=180.0)
     ap.add_argument("--login-at", type=float, default=None,
                     help="seconds to wait for the login screen "
@@ -75,7 +75,7 @@ def main():
            "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci",
            "-kernel", args.kernel,
            "-append", "root=/dev/vda rw init=/sbin/init console=ttyS0 "
-                      "dfx=%s" % args.dfx]
+                      "debug=%s" % args.debug]
     print("[qemu] %s" % " ".join(cmd[:9]) + " ...")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,

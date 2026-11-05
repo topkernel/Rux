@@ -89,7 +89,7 @@ def main():
            "-device", "virtio-blk-pci,drive=rootfs",
            "-kernel", args.kernel, "-append",
            "root=/dev/vda rw init=/sbin/runit console=ttyS0 "
-           "dfx=taskdump"]
+           "debug=taskdump"]
     with open(os.path.join(args.out, "cmdline.txt"), "w") as f:
         f.write(" ".join(cmd) + "\n")
     ser = open(ser_path, "wb")

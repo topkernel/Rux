@@ -707,22 +707,22 @@ unsafe fn deliver_unix_cmsgs(
         let fd = match fdtable.alloc_fd() {
             Some(f) => f,
             None => {
-                if crate::dfx::scmtap::enabled() {
-                    crate::dfx::scmtap::tap_rx_drop("EMFILE", files.len());
+                if crate::debug::scmtap::enabled() {
+                    crate::debug::scmtap::tap_rx_drop("EMFILE", files.len());
                 }
                 return Err(unwind(&mut new_fds, -(errno::EMFILE as i64)));
             }
         };
         if fdtable.install_fd(fd, f.clone()).is_err() {
-            if crate::dfx::scmtap::enabled() {
-                crate::dfx::scmtap::tap_rx_drop("EMFILE", files.len());
+            if crate::debug::scmtap::enabled() {
+                crate::debug::scmtap::tap_rx_drop("EMFILE", files.len());
             }
             return Err(unwind(&mut new_fds, -(errno::EMFILE as i64)));
         }
         new_fds.push(fd as i32);
     }
-    if crate::dfx::scmtap::enabled() {
-        crate::dfx::scmtap::tap_rx(&new_fds);
+    if crate::debug::scmtap::enabled() {
+        crate::debug::scmtap::tap_rx(&new_fds);
     }
 
     // SAFETY: msg_ptr was access_ok(64)-validated by the caller.
@@ -765,8 +765,8 @@ unsafe fn deliver_unix_cmsgs(
         // No control buffer room: the fds cannot be reported — close them
         // and zero msg_controllen (Linux semantics: the caller's CMSG walk
         // must not see stale user-memory cmsg_len values).
-        if crate::dfx::scmtap::enabled() {
-            crate::dfx::scmtap::tap_rx_drop("NOCTL", new_fds.len());
+        if crate::debug::scmtap::enabled() {
+            crate::debug::scmtap::tap_rx_drop("NOCTL", new_fds.len());
         }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
@@ -776,8 +776,8 @@ unsafe fn deliver_unix_cmsgs(
         return Ok(0);
     }
     if !access_ok(control, cmsg.len()) {
-        if crate::dfx::scmtap::enabled() {
-            crate::dfx::scmtap::tap_rx_drop("EFAULT", new_fds.len());
+        if crate::debug::scmtap::enabled() {
+            crate::debug::scmtap::tap_rx_drop("EFAULT", new_fds.len());
         }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
@@ -786,8 +786,8 @@ unsafe fn deliver_unix_cmsgs(
     }
     // SAFETY: control/cmsg.len() validated with access_ok above.
     if copy_to_user(control as *mut u8, cmsg.as_ptr(), cmsg.len()) != 0 {
-        if crate::dfx::scmtap::enabled() {
-            crate::dfx::scmtap::tap_rx_drop("EFAULT", new_fds.len());
+        if crate::debug::scmtap::enabled() {
+            crate::debug::scmtap::tap_rx_drop("EFAULT", new_fds.len());
         }
         for nfd in new_fds {
             let _ = fdtable.close_fd(nfd as usize);
@@ -3131,14 +3131,14 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         let (scm_files, want_cred) = match parse_unix_cmsgs(msg_ptr) {
             Ok(f) => f,
             Err(e) => {
-                if crate::dfx::scmtap::enabled() {
-                    crate::dfx::scmtap::tap_tx_err(e);
+                if crate::debug::scmtap::enabled() {
+                    crate::debug::scmtap::tap_tx_err(e);
                 }
                 return e;
             }
         };
-        if crate::dfx::scmtap::enabled() && !scm_files.is_empty() {
-            crate::dfx::scmtap::tap_tx(scm_files.len());
+        if crate::debug::scmtap::enabled() && !scm_files.is_empty() {
+            crate::debug::scmtap::tap_tx(scm_files.len());
         }
         // P2 SCM_CREDENTIALS: the kernel fills the sender's own
         // {pid,uid,gid} (Linux semantics — user-supplied values would be
@@ -3191,8 +3191,8 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         ) {
             Ok(n) => n as i64,
             Err(e) => {
-                if crate::dfx::scmtap::enabled() {
-                    crate::dfx::scmtap::tap_tx_err(e as i64);
+                if crate::debug::scmtap::enabled() {
+                    crate::debug::scmtap::tap_tx_err(e as i64);
                 }
                 e as i64
             }
@@ -3417,7 +3417,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // unixrd probe: the iovec snapshot loop is shared by every family;
     // the storm boot is unix-dominated so sum/AF_UNIX-count reads as an
     // upper bound on the per-op phase cost.
-    let ur_t_iov = crate::dfx::unixrd::now();
+    let ur_t_iov = crate::debug::unixrd::now();
     for i in 0..msg_iovlen {
         // SAFETY: iovec fields read from user memory at validated offset.
         let iov_base = unsafe { get_user_usize(msg_iov_ptr.wrapping_add(i * 16)) };
@@ -3433,7 +3433,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         }
         iovs.push((iov_base, iov_len));
     }
-    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_IOV_NS, ur_t_iov);
+    crate::debug::unixrd::add(&crate::debug::unixrd::RM_IOV_NS, ur_t_iov);
 
     if total_buf_len == 0 {
         zero_controllen();
@@ -3451,24 +3451,24 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         // unixrd probe: outer bracket + call-outcome counts (the hilogd
         // storm's per-op wall decomposition lives here).
-        let ur_t0 = crate::dfx::unixrd::now();
-        crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_N);
+        let ur_t0 = crate::debug::unixrd::now();
+        crate::debug::unixrd::bump(&crate::debug::unixrd::RM_N);
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = usock.rcvtimeo_deadline();
         let peek = (flags & MSG_PEEK) != 0;
         if peek {
-            crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_PEEK_N);
+            crate::debug::unixrd::bump(&crate::debug::unixrd::RM_PEEK_N);
         }
-        let ur_t_recv = crate::dfx::unixrd::now();
+        let ur_t_recv = crate::debug::unixrd::now();
         let r = if peek {
             // MSG_PEEK: staged receive (bounce + scatter — see below).
             let mut buf = alloc::vec![0u8; total_buf_len];
-            crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
+            crate::debug::unixrd::addb(&crate::debug::unixrd::RM_ALLOC_B, total_buf_len as u64);
             let rr = crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek);
             match rr {
                 Ok(rr) => {
                     // Scatter the peeked data to the iovecs.
-                    let ur_t_cout = crate::dfx::unixrd::now();
+                    let ur_t_cout = crate::debug::unixrd::now();
                     let mut offset = 0usize;
                     for &(iov_base, iov_len) in &iovs {
                         if offset >= rr.len {
@@ -3486,8 +3486,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                                 )
                             };
                             if uncopied > 0 {
-                                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
-                                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
+                                crate::debug::unixrd::add(&crate::debug::unixrd::RM_COUT_NS, ur_t_cout);
+                                crate::debug::unixrd::add(&crate::debug::unixrd::RM_OUTER_NS, ur_t0);
                                 return if offset > 0 {
                                     offset as i64
                                 } else {
@@ -3497,7 +3497,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                             offset += copy_len;
                         }
                     }
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_COUT_NS, ur_t_cout);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::RM_COUT_NS, ur_t_cout);
                     Ok(rr)
                 }
                 Err(e) => Err(e),
@@ -3512,25 +3512,25 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         let r = match r {
             Ok(rr) => rr,
             Err(e) => {
-                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_RECV_NS, ur_t_recv);
+                crate::debug::unixrd::add(&crate::debug::unixrd::RM_RECV_NS, ur_t_recv);
                 if e == -11 {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_EA_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::RM_EA_N);
                 } else {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_ERR_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::RM_ERR_N);
                 }
-                crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
+                crate::debug::unixrd::add(&crate::debug::unixrd::RM_OUTER_NS, ur_t0);
                 return e as i64;
             }
         };
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_RECV_NS, ur_t_recv);
-        crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_OK_N);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RM_RECV_NS, ur_t_recv);
+        crate::debug::unixrd::bump(&crate::debug::unixrd::RM_OK_N);
         // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
         // write the cmsg chain. Credentials are emitted only when the
         // RECEIVING socket has SO_PASSCRED — the reference gates the whole
         // cred emission on the receiver's flag (the sender-side snapshot is
         // unconditional; see the enqueue site in net::unix). hilogd's
         // stats-query path requires it.
-        let ur_t_cmsg = crate::dfx::unixrd::now();
+        let ur_t_cmsg = crate::debug::unixrd::now();
         let emit_cred = if usock.options.lock().passcred {
             r.cred
         } else {
@@ -3539,14 +3539,14 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         let mut cmsg_bytes = 0usize;
         if !r.files.is_empty() || emit_cred.is_some() {
             if emit_cred.is_some() {
-                crate::dfx::unixrd::bump(&crate::dfx::unixrd::RM_CRED_N);
+                crate::debug::unixrd::bump(&crate::debug::unixrd::RM_CRED_N);
             }
             // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
             match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, emit_cred) } {
                 Ok(n) => cmsg_bytes = n,
                 Err(e) => {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_CMSG_NS, ur_t_cmsg);
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::RM_CMSG_NS, ur_t_cmsg);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::RM_OUTER_NS, ur_t0);
                     return e;
                 }
             }
@@ -3555,9 +3555,9 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             // report 0 written bytes (see zero_controllen above).
             zero_controllen();
         }
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_CMSG_NS, ur_t_cmsg);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RM_CMSG_NS, ur_t_cmsg);
         // Source address.
-        let ur_t_addr = crate::dfx::unixrd::now();
+        let ur_t_addr = crate::debug::unixrd::now();
         if let Some(src) = r.src {
             if !msg_name_ptr.is_null() && !msg_namelen_ptr.is_null() {
                 if crate::arch::uaccess::access_ok(
@@ -3576,7 +3576,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                 }
             }
         }
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_ADDR_NS, ur_t_addr);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RM_ADDR_NS, ur_t_addr);
         // msg_flags (offset 48): MSG_TRUNC for truncated datagrams,
         // MSG_CTRUNC when the control buffer could not hold the cmsg
         // chain (the fds were dropped — caller only reaches here with
@@ -3592,7 +3592,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         unsafe {
             let _ = crate::arch::uaccess::put_user(msg_ptr.add(48) as *mut u32, out_flags);
         }
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_OUTER_NS, ur_t0);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RM_OUTER_NS, ur_t0);
         // Reference return-value rule (af_unix.c __unix_dgram_recvmsg:
         // err = (flags & MSG_TRUNC) ? skb->len - skip : size): a caller
         // that passed MSG_TRUNC learns the FULL datagram size, not the
@@ -3617,10 +3617,10 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // skb->user directly) — bracket it + count the byte request. Only the
     // non-unix families reach here now (the unix non-peek receive copies
     // direct-to-user; the unix peek allocates its own bounce above).
-    let ur_t_alloc = crate::dfx::unixrd::now();
+    let ur_t_alloc = crate::debug::unixrd::now();
     let mut buf = alloc::vec![0u8; total_buf_len];
-    crate::dfx::unixrd::add(&crate::dfx::unixrd::RM_ALLOC_NS, ur_t_alloc);
-    crate::dfx::unixrd::addb(&crate::dfx::unixrd::RM_ALLOC_B, total_buf_len as u64);
+    crate::debug::unixrd::add(&crate::debug::unixrd::RM_ALLOC_NS, ur_t_alloc);
+    crate::debug::unixrd::addb(&crate::debug::unixrd::RM_ALLOC_B, total_buf_len as u64);
 
     // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
     // source address = kernel sockaddr_nl.
@@ -4481,10 +4481,10 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         // unixrd probe: outer bracket + outcome counts (the hilogd 2-byte
         // length peek rides this entry).
-        let ur_t0 = crate::dfx::unixrd::now();
-        crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_N);
+        let ur_t0 = crate::debug::unixrd::now();
+        crate::debug::unixrd::bump(&crate::debug::unixrd::RF_N);
         if (flags & MSG_PEEK) != 0 {
-            crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_PEEK_N);
+            crate::debug::unixrd::bump(&crate::debug::unixrd::RF_PEEK_N);
         }
         const UNIX_STAGE_MAX: usize = crate::syscall::io::RW_CHUNK.saturating_mul(4);
         let stage = match usock.kind {
@@ -4493,7 +4493,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
             }
             _ => len.min(crate::syscall::io::RW_CHUNK),
         };
-        let ur_t_alloc = crate::dfx::unixrd::now();
+        let ur_t_alloc = crate::debug::unixrd::now();
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
             return -(errno::ENOMEM as i64);
@@ -4501,28 +4501,28 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         // SAFETY: capacity is exactly stage; the engine writes buf[..n]
         // before the caller reads kbuf[..r.len] (r.len <= n <= stage).
         unsafe { kbuf.set_len(stage); }
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_ALLOC_NS, ur_t_alloc);
-        crate::dfx::unixrd::addb(&crate::dfx::unixrd::RF_ALLOC_B, stage as u64);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RF_ALLOC_NS, ur_t_alloc);
+        crate::debug::unixrd::addb(&crate::debug::unixrd::RF_ALLOC_B, stage as u64);
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let peek = (flags & MSG_PEEK) != 0;
         let deadline = usock.rcvtimeo_deadline();
-        let ur_t_recv = crate::dfx::unixrd::now();
+        let ur_t_recv = crate::debug::unixrd::now();
         let rr = crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline, peek);
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_RECV_NS, ur_t_recv);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RF_RECV_NS, ur_t_recv);
         let out = match rr
         {
             Ok(r) => {
-                crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_OK_N);
+                crate::debug::unixrd::bump(&crate::debug::unixrd::RF_OK_N);
                 if r.len > 0 {
                     // SAFETY: buf_ptr validated with access_ok(len) above;
                     // r.len <= stage <= len.
-                    let ur_t_cout = crate::dfx::unixrd::now();
+                    let ur_t_cout = crate::debug::unixrd::now();
                     let cout_fail = unsafe {
                         crate::arch::uaccess::copy_to_user(buf_ptr, kbuf.as_ptr(), r.len)
                     } != 0;
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_COUT_NS, ur_t_cout);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::RF_COUT_NS, ur_t_cout);
                     if cout_fail {
-                        crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_OUTER_NS, ur_t0);
+                        crate::debug::unixrd::add(&crate::debug::unixrd::RF_OUTER_NS, ur_t0);
                         return -(errno::EFAULT as i64);
                     }
                 }
@@ -4548,14 +4548,14 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
             }
             Err(e) => {
                 if e == -11 {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_EA_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::RF_EA_N);
                 } else {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::RF_ERR_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::RF_ERR_N);
                 }
                 e as i64
             }
         };
-        crate::dfx::unixrd::add(&crate::dfx::unixrd::RF_OUTER_NS, ur_t0);
+        crate::debug::unixrd::add(&crate::debug::unixrd::RF_OUTER_NS, ur_t0);
         return out;
     }
 

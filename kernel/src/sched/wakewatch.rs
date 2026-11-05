@@ -67,7 +67,7 @@ struct WwSlot {
     /// mass); wtie= is that entry-time mass, and it is the field that
     /// separates deep-queue service latency (wtie ~ nr_running) from a
     /// walk defect (wtie ~ 1 with visits in the hundreds).
-    /// Computed at note_wake only under dfx=wwcensus (O(nr) walk).
+    /// Computed at note_wake only under debug=wwcensus (O(nr) walk).
     wtie: AtomicU64,
 }
 
@@ -135,7 +135,7 @@ pub fn note_wake(task: *mut crate::process::Task) {
         .store(super::fair::ww_pick_walks(), Ordering::Release);
     // s16: wake-time tie-mass, only on census boots (O(nr) timeline
     // walk; note_wake is hot).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WwCensus) {
         let vr = unsafe { (*task).sched_entity().get_vruntime() };
         slot.wtie.store(
             crate::sched::sched::ww_cfs_tie_mass_vr(vr),
@@ -268,8 +268,8 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             // identity (R55 family) — print what the ARCH tp slot says
             // this CPU is actually executing (tp=pid/pc), so a strand
             // incumbent with pc!=0 is attributed to the task that
-            // really holds the CPU. One line per report, dfx-gated.
-            if crate::dfx::leakorigin::ENABLED
+            // really holds the CPU. One line per report, debug-gated.
+            if crate::debug::leakorigin::ENABLED
                 .load(core::sync::atomic::Ordering::Relaxed)
             {
                 let tp = crate::arch::cpu::get_thread_id_of(c)
@@ -375,7 +375,7 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         ww_msg(b"\n");
         // s14: name WHY this victim sat unpicked through the whole
         // strand window — the fair-class refusal history accumulated by
-        // note_pick_skip (dfx=schedtrace). No-op when the history is
+        // note_pick_skip (debug=schedtrace). No-op when the history is
         // empty (skip reasons were never recorded / not armed).
         super::fair::print_skip_history(task);
     }
@@ -386,9 +386,9 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
 /// from timer.rs; printk, not direct console, so it cannot interleave
 /// with GRQ-held prints.
 pub fn heartbeat() {
-    // Serial-noise policy: hunt instrument, prints only on dfx=wwcensus
+    // Serial-noise policy: hunt instrument, prints only on debug=wwcensus
     // boots; ordinary boots keep a clean serial prompt.
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WwCensus) {
         return;
     }
     let wake_n = WAKE_N.load(Ordering::Relaxed);
@@ -406,7 +406,7 @@ pub fn heartbeat() {
             && wake_n == last
             && crate::sched::sched::GlobalRunQueue::grq_nr_running() == 0
         {
-            crate::dfx::lostpark::dump_once(b"frozen");
+            crate::debug::lostpark::dump_once(b"frozen");
         }
     }
     crate::pr_info!(

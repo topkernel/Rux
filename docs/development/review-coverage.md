@@ -62,7 +62,7 @@ when the tree gains a file the map does not know about.
 | `623c4736` | `kernel/src/sched/sched.rs, kernel/src/sync/lockkey.rs` | The 2b092c49 GRQ typed-lock-key swap (KeyedRawSpinlock<GrqKey> wrapping RawSpinlock as a pure delegate) is CONVICTED as the trigger of the d2a58ccb stochastic panic family by a 13-boot paired adjudication: identical tree differing only by the 3-line swap. WITH the swap: 6/6 x86 exitwalk boots panic in the CFS timeline btree walk (navigate.rs:552 next_unchecked unwrap; stack: pick_next_cpu -> Iter::next -> pick_next_task), and the riscv64 orphan-storm churn panics on a torn-context wild epc immediately after an R74-DOUBLE-SEED print (two harts executing one task). WITHOUT it (revert arm 3/3 + all pre-swap kernels 4/4): every boot runs the full churn clean on both arches. fdtable lever B (ac53dd6e), NJ deferred writes (306d7cf6), the exec one-path (2fbb5a64), mkdir-flush deletion (e3c1ec35) and the code-review round's fixes (b433fb13 family) are all EXONERATED - they are in the clean pre-swap midpoints. MECHANISM CORRECTED same day by the refactor lane (75dbf637): the initial 'latent GRQ race' theory was WRONG - KeyedRawSpinlock::lock() returns a guard while RawSpinlock::lock() returns (), and the swap kept the bare 'self.lock.lock();' statement, so the guard was DISCARDED at end-of-statement and its Drop released the GRQ lock immediately: every critical section ran unexcluded. The R74-DOUBLE-SEED shape was the expected downstream of a lock that never held; there is NO latent GRQ pick/ownership race and the protocol is exonerated. Guards are #[must_use] now (the discard class is dead) and protocol-wrapping subsystems use lock_claim(); the NRUN-DOUBLE-DEC/LWEIGHT/garbage tripwires stay as plain regression guards. The withdrawal itself stands until the corrected re-adoption passes its own paired adjudication. |
 | `4e1f6110` | `kernel/src/syscall/misc.rs` | sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: the old timer was cancelled BEFORE the itimerspec validation (the reference validates itimerspec64_valid() first, so an EINVAL call must leave the running timer armed — Rux silently disarmed it); old_value was copied out BEFORE the reprogramming (the reference reads the new value first, reprograms, then copies the old snapshot out — a faulting copy is EFAULT with the NEW timer already programmed); a disarm (it_value == 0) returned early keeping the OLD interval and the stale expiration count (timerfd_setup() sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the arming call ran even for total_nsec == 0, arming a dead timer slot. |
 | `a6b01fd9` | `kernel/src/fs/ext4/csum.rs, kernel/src/fs/ext4/namei.rs` | cr2 review of the review-sprint delta (82059759..40e925fd). Three metadata_csum WRITE-path divergences vs e2fsprogs, all e2fsck-proven with a host harness that compiles the kernel's own csum.rs against real mke2fs images: (1) s_checksum is the FULL 32-bit crc32c (le32 at 0x3FC) — we sealed only the low u16, leaving [1022..1024) stale; a u16 read passes on mkfs images, which hid it (e2fsck compares all 32 bits and refused the primary sb). (2) the dir tail is 12 bytes (0, rec_len=12, name_len=0xDE00, csum) over a blocksize-12 span with the seed crc32c(crc32c(seed,ino),generation) — we wrote an 8-byte markerless tail with an ino-only seed over blocksize-8; dir_block_seal now normalizes the dirent chain to end at blocksize-12 and the three entry-space sites reserve the tail. (3) write_group_descriptor serialized the whole in-memory (mount-time-view) Ext4GroupDesc over the disk descriptor, reverting freshly written bitmap checksums and counter updates — now a read-modify-write of the free-inode fields. Bitmap/inode/GD formulas verified correct as-is. |
-| `95094dd2` | `kernel/src/dfx/switches.rs, kernel/src/syscall/io.rs, kernel/src/syscall/memory.rs, kernel/src/drivers/drm/mod.rs, kernel/src/signal.rs` | Known-gap-4 sweep: the oh-lane hunt instruments (MAP_DUMB + failing-ioctl traces, drm mmap resolve/placement prints — one unbudgeted — the prime-import compose-content probe walking the whole GEM per import, and the SIGABRT first-raise dump) moved behind a new dfx=ohhunt switch, off by default; standard and perf-gate boots pay nothing. |
+| `95094dd2` | `kernel/src/debug/switches.rs, kernel/src/syscall/io.rs, kernel/src/syscall/memory.rs, kernel/src/drivers/drm/mod.rs, kernel/src/signal.rs` | Known-gap-4 sweep: the oh-lane hunt instruments (MAP_DUMB + failing-ioctl traces, drm mmap resolve/placement prints — one unbudgeted — the prime-import compose-content probe walking the whole GEM per import, and the SIGABRT first-raise dump) moved behind a new debug=ohhunt switch, off by default; standard and perf-gate boots pay nothing. |
 
 ## Per-file status
 
@@ -199,7 +199,7 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1836 | ⬜ |  |
 | `pagetable.rs` | 199 | ⬜ |  |
 
-### kernel/src/dfx (40868 lines)
+### kernel/src/debug (40868 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -215,12 +215,12 @@ when the tree gains a file the map does not know about.
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 137 | ✅🔁 | written by this review (symbol table); 主线已改动，需重读 |
 | `ksyms_generated.rs` | 24993 | ⬜ | generated |
-| `leakorigin.rs` | 1020 | ✅🔁 | cr3 closeout: read end to end — diagnostics-only (dfx=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS; 主线已改动，需重读 |
+| `leakorigin.rs` | 1020 | ✅🔁 | cr3 closeout: read end to end — diagnostics-only (debug=leakhunt), every entry point ENABLED-gated (note_acquire via preempt_count_add's caller check; note_release/check_user_return/report_* internal), prints budgeted (400/200/40) direct-console (GRQ/IRQ-laden discipline), outermost-acquire tap (88dd4b82) records base 0->1 stably across inner pairs; no failure-path semantics touched — PASS; 主线已改动，需重读 |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `lostpark.rs` | 94 | ⬜ |  |
 | `memwatch.rs` | 1127 | 🔶🔁 | heap census; 主线已改动，需重读 |
 | `metawatch.rs` | 161 | 🔶🔁 | buddy shadow scan; 主线已改动，需重读 |
-| `mmprof.rs` | 406 | ⬜ | new dfx probe (2026-11-03, lb332/333 lane: mmap/mprotect/munmap stage profiler, cmdline mmprof=1) - awaiting its owner lane's review |
+| `mmprof.rs` | 406 | ⬜ | new debug probe (2026-11-03, lb332/333 lane: mmap/mprotect/munmap stage profiler, cmdline mmprof=1) - awaiting its owner lane's review |
 | `mod.rs` | 346 | 🔶🔁 | init, debugfs knob registration; 主线已改动，需重读 |
 | `monowatch.rs` | 145 | 🔶🔁 | monotonic jump tripwire; 主线已改动，需重读 |
 | `oops.rs` | 250 | ⬜ |  |
@@ -229,7 +229,7 @@ when the tree gains a file the map does not know about.
 | `r83hunt.rs` | 583 | 🔶🔁 | task header audit; 主线已改动，需重读 |
 | `sbi_debug.rs` | 76 | 🔶 | raw SBI printers |
 | `schb.rs` | 645 | ⬜ |  |
-| `scmtap.rs` | 115 | 🔶🔁 | cr3: session-fifo hunt tap — every print budgeted, dfx=scmtap gated; no failure-path semantics touched; 主线已改动，需重读 |
+| `scmtap.rs` | 115 | 🔶🔁 | cr3: session-fifo hunt tap — every print budgeted, debug=scmtap gated; no failure-path semantics touched; 主线已改动，需重读 |
 | `scribble.rs` | 1658 | 🔶 | task scribble hunter |
 | `slowtask.rs` | 474 | ⬜ |  |
 | `softlockup.rs` | 222 | 🔶 | soft lockup detector |
@@ -459,7 +459,7 @@ when the tree gains a file the map does not know about.
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `access_token.rs` | 401 | ✅🔁 | read end to end (s2-a): registry keyed by tgid, synthetic native-token layout, perm-ioctl return-value ABI; all per-ioctl traces dfx-gated; 主线已改动，需重读 |
+| `access_token.rs` | 401 | ✅🔁 | read end to end (s2-a): registry keyed by tgid, synthetic native-token layout, perm-ioctl return-value ABI; all per-ioctl traces debug-gated; 主线已改动，需重读 |
 | `binder.rs` | 9170 | 🔧🔁 | read end to end (s2-a): WORLD-spinlock model audited (no user copies/sleeps under it; fd installs outside; SLOW-TXN ConsoleWriter discipline; wake paths WORLD->GRQ one-way only); alloc engine, BWR write/read loops, txn fixup/translation, death notifications, sweeps; FIXED 3 defects (0e96200e): offsets-entry wraparound OOB (obj_off/parent_off/rel+length now checked_add), sync-recycle blocks reset reply_done/txn (sweep_stale_async would reclaim an in-flight txn buffer; unit row test_binder_alloc_recycle), CLOSE probe budget fetch_sub underflow; perf filed: staged-Vec per read + hist WORLD acquire per BWR (see run/review-findings-s2a.md); 主线已改动，需重读 |
 | `mod.rs` | 31 | ✅ | re-export layer (s2-a) |
 | `posix_mq.rs` | 1325 | ✅🔁 | read end to end (s2-a): mq_open R36-B3 create race, timedsend/receive prepare_to_wait + R24 entry cleanup, mq_notify SIGEV_* family incl. netlink SIGEV_THREAD, absolute-timeout conversion; filed: mq_timedreceive copy_to_user ret ignored (success returned on partial copy); 主线已改动，需重读 |
@@ -571,14 +571,14 @@ when the tree gains a file the map does not know about.
 | `cgroup.rs` | 910 | ✅🔁 | cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented; 主线已改动，需重读 |
 | `class.rs` | 273 | ✅🔁 | sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI; 主线已改动，需重读 |
 | `deadline.rs` | 547 | ✅🔁 | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次；dl 计数已改 checked-sub 防回绕; 主线已改动，需重读 |
-| `fair.rs` | 2200 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）；cr3: claim_sweep (position-independent stale-claim/oncpu sweep, owner_live + 50-jiffy exec-frozen confirm, full-qword release matches __switch_to store, lying-slot shapes census-only) — PASS; 主线已改动，需重读 |
+| `fair.rs` | 2200 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（debug 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）；cr3: claim_sweep (position-independent stale-claim/oncpu sweep, owner_live + 50-jiffy exec-frozen confirm, full-qword release matches __switch_to store, lying-slot shapes census-only) — PASS; 主线已改动，需重读 |
 | `idle.rs` | 104 | ✅🔁 | 主线已改动，需重读 |
 | `mod.rs` | 134 | ✅🔁 | 纯 re-export 层; 主线已改动，需重读 |
 | `rt.rs` | 663 | ✅🔁 | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）；rt/rr 计数已改 checked-sub 防回绕; 主线已改动，需重读 |
 | `sched.rs` | 7656 | 🔧🔁 | 188d844d 全文读完（见前注）；cr3 (d608a9b7..5bf31528): WAKE-HEAL (wake_up_enqueue_opt, 3-skip adjudication vs sc265 conviction — preempt-discipline refusal + GRQ-release-before-switch make a parked nonzero count phantom 100%; full-zero correct for a no-CPU task), CLAIM-SWEEP hook (scheduler_tick -> fair::claim_sweep), claim_idle_cpu_for + preempt_check_wake (measured-wait CFS gate, D-14), PEREMPT-HEAL cumulative per-task window re-read — all three gates PASS; arch2 round: polling-idle 30us window + resched_cpu IPI-skip Dekker pairing verified (SeqCst fences both sides sandwich the store/load pairs; clear-fence-recheck on the idler, store-fence-load on the waker — at least one side always observes the other at ANY window width, so the pending 120us widening on feature/code-review-perf is safe too); lost-park/wake bookkeeping around WAKE-HEAL re-read — no new hazards;2b092c49 GRQ 锁交换已撤回（623c4736，13-boot 配对判决= d2a58ccb panic 家族触发器；机制为 codegen/时序揭示的潜在 GRQ 协议竞争，R74-DOUBLE-SEED 为线索，OPEN）; 主线已改动，需重读 |
 | `stats.rs` | 45 | ✅🔁 | sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致; 主线已改动，需重读 |
 | `stop_task.rs` | 98 | ✅🔁 | stop 类为 PerCpuState 直管的 stub，next_class 链正确; 主线已改动，需重读 |
-| `wakewatch.rs` | 649 | ✅🔁 | DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place; 主线已改动，需重读 |
+| `wakewatch.rs` | 649 | ✅🔁 | debug wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place; 主线已改动，需重读 |
 
 ### kernel/src/security (569 lines)
 
@@ -594,7 +594,7 @@ when the tree gains a file the map does not know about.
 | file | lines | status | note |
 |---|---:|---|---|
 | `condvar.rs` | 264 | ⬜ |  |
-| `futex.rs` | 4584 | 🔶🔁 | s2c: wait/wake cores, hash (uaddr-only bucketing + Fibonacci spread), waiter pool alloc/free, pool-full backoff, R12-2 compile-checked wake-under-bucket; requeue/PI arms not re-read this round; arch2 round: the two fuxstuck census pr_warn sites (FUX-STUCK row + FUX-STUCK-SUM) got HOTPATH-PRINT annotations naming the dfx=fuxstuck gate + 5s burst + 1200-line budget — hotpath_print_check green again (grew 68->70 unannotated on main); 主线已改动，需重读 |
+| `futex.rs` | 4584 | 🔶🔁 | s2c: wait/wake cores, hash (uaddr-only bucketing + Fibonacci spread), waiter pool alloc/free, pool-full backoff, R12-2 compile-checked wake-under-bucket; requeue/PI arms not re-read this round; arch2 round: the two fuxstuck census pr_warn sites (FUX-STUCK row + FUX-STUCK-SUM) got HOTPATH-PRINT annotations naming the debug=fuxstuck gate + 5s burst + 1200-line budget — hotpath_print_check green again (grew 68->70 unannotated on main); 主线已改动，需重读 |
 | `lockkey.rs` | 348 | ⬜ | typed lock keys (D-11, refactor lane 2026-10-28) |
 | `mod.rs` | 35 | ⬜ |  |
 | `mutex.rs` | 694 | ⬜ | sync lane owns (SleepMutex) |

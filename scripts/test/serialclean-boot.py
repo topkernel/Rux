@@ -14,7 +14,7 @@ Environment:
   RUX_ROOTFS     rootfs image (default: test/rootfs.img if present, else
                  the main repo's shared copy)
   RUX_TRANSPORT  "pci" (default) or "mmio" virtio-blk transport
-  RUX_APPEND     extra kernel cmdline (e.g. "dfx=schedtrace")
+  RUX_APPEND     extra kernel cmdline (e.g. "debug=schedtrace")
 
 Usage: serialclean-boot.py <log-path> [extra-append-args...]
 """

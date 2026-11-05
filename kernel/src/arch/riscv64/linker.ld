@@ -25,7 +25,7 @@ SECTIONS
 
 	_text = .;
 	_stext = .;
-	/* x86_64-style alias consumed by dfx::hung_task's kernel-text window */
+	/* x86_64-style alias consumed by debug::hung_task's kernel-text window */
 	__stext = .;
 
 	.text : AT(KERNEL_PHYS) ALIGN(4096)

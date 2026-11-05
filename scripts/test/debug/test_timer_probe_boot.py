@@ -2,11 +2,11 @@
 """timer_probe_boot.py — boot the Rux kernel with timer_probe on a cold
 copy of the Ubuntu disk, stream the serial log, report the verdict.
 
-Adapted from unix-repro's unix_wedge_boot.py. Extra: --dfx cmdline switch
-appended to the kernel command line (e.g. "dfx=watchdog,periodic").
+Adapted from unix-repro's unix_wedge_boot.py. Extra: --debug cmdline switch
+appended to the kernel command line (e.g. "debug=watchdog,periodic").
 
 Usage:
-  ./timer_probe_boot.py [--dur 600] [--sleepers 6] [--dfx "watchdog,periodic"]
+  ./timer_probe_boot.py [--dur 600] [--sleepers 6] [--debug "watchdog,periodic"]
       [--kernel ELF] [--img-base PATH] [--timeout SECS] [--out DIR]
       [--smp 4] [--reuse-img]
 """
@@ -60,7 +60,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dur", type=int, default=600)
     ap.add_argument("--sleepers", type=int, default=6)
-    ap.add_argument("--dfx", default="")
+    ap.add_argument("--debug", default="")
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
     ap.add_argument("--img-base", default=DEFAULT_IMG_BASE)
     ap.add_argument("--timeout", type=int, default=None)
@@ -86,8 +86,8 @@ def main():
         return 2
 
     append = "root=/dev/vda rw init=/usr/sbin/runit console=ttyS0"
-    if args.dfx:
-        append += " dfx=" + args.dfx
+    if args.debug:
+        append += " debug=" + args.debug
     cmd = [QEMU,
            "-M", "virt", "-accel", "tcg,thread=single", "-cpu", "rv64",
            "-m", "2G", "-smp", str(args.smp),
@@ -96,8 +96,8 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel,
            "-append", append]
-    print("[boot] qemu dur=%d sleepers=%d dfx='%s' smp=%d" %
-          (args.dur, args.sleepers, args.dfx, args.smp))
+    print("[boot] qemu dur=%d sleepers=%d debug='%s' smp=%d" %
+          (args.dur, args.sleepers, args.debug, args.smp))
 
     ser = open(os.path.join(args.out, "serial.log"), "wb")
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,

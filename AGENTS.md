@@ -63,7 +63,7 @@ The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
 1. **Dual-arch build** (`PLATFORM=x86_64 make build`, then `rm build/.config && make build`) — rc=0 both.
 2. **riscv64 regression boot** (minimal rootfs scripted serial: cd/proc, rc=0, zero panics).
 3. **`make test`** on riscv64 — full suite green (currently 1096/1096).
-4. **Performance gate** — measured with the in-tree DFX tools (`syscost`, census probes, `test/pbench.c`), against the last-accepted baseline in `docs/development/perf-gate-baseline.md`. **General principle (user mandate 2026-10-25): ANY subsystem that can affect system performance gets gate-code guardianship — if it is not measured, add the DFX tool that measures it.** The named guarded domains so far (a change touching any of them needs its domain check explicitly reported, not just the generic tiers):
+4. **Performance gate** — measured with the in-tree debug tools (`syscost`, census probes, `test/pbench.c`), against the last-accepted baseline in `docs/development/perf-gate-baseline.md`. **General principle (user mandate 2026-10-25): ANY subsystem that can affect system performance gets gate-code guardianship — if it is not measured, add the debug tool that measures it.** The named guarded domains so far (a change touching any of them needs its domain check explicitly reported, not just the generic tiers):
    - **Guarded domain: memory allocation/reclaim** (mm/, small_alloc, buddy, page cache) — small_alloc global class-lock sections ≤ ~25M/boot (post-magazine ~19.7M), small_alloc REST wall ≤ 10% of machine, no reclaim-slowpath emergence on standard boots (drct=0 class), zone free floor unchanged on standard loads.
    - **Guarded domain: scheduling** (sched/, timer/, wakeup paths) — GRQ average hold flat (5.1–6.1 µs class), census in band (TERM 8±2 / REFUSED 32±4 / no grid strands), wake→pick deltas and context-switch cost (pbench P2) within band.
    - **Guarded domain: filesystem hot paths** (fs/, ext4, bio, page cache) — pbench fs rows within band of baseline (stat/mkdir+rmdir/unlink/write+fsync medians), fsw counters show no new sync-write class outside the provisioning phase, buffer-cache hit rate ≥ baseline.
@@ -74,7 +74,7 @@ The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
    - **Tier 2 (changes touching hot paths: mm/, sched/, fs/, ipc/, binder/, timer/, arch trap)** — additionally one `pbench` boot: P1-P7 medians within ±20% of the baseline column or improved.
    - **Tier 3 (allocator or IRQ-path changes)** — additionally an IF=0 measurement (EFLAGS-pair probe; if the probe patch is not yet on main, tick-mode shares from syscost serve as the interim proxy).
    - Baseline updates only via a merge that passed its own tier; regressions block the merge until fixed or justified in writing with numbers.
-   - If a change's performance effect cannot be measured with existing tools, ADD a DFX tool for it (gated off by default) — measuring is part of the change, not an afterthought.
+   - If a change's performance effect cannot be measured with existing tools, ADD a debug tool for it (gated off by default) — measuring is part of the change, not an afterthought.
 
 ---
 
@@ -232,15 +232,15 @@ accept02, getrusage04, kill02, genfmod, rename/statfs families).
 - **Observability policy (user directive 2026-11-02)**: NEW kernel
   observability goes through TRACEPOINTS in the unified trace-event
   framework (`kernel/src/trace/`, exposed via tracefs at
-  /sys/kernel/tracing — reference semantics). The bespoke `dfx=` switch
-  table (`kernel/src/dfx/switches.rs`) is FROZEN legacy: it keeps
+  /sys/kernel/tracing — reference semantics). The bespoke `debug=` switch
+  table (`kernel/src/debug/switches.rs`) is FROZEN legacy: it keeps
   working for the lanes still hunting with it, but it must not grow —
   add a tracepoint in the reference's shape instead. The migration
   ledger mapping each bespoke instrument to its replacement lives in
   the dfx-trace lane's TASK.md.
 - Serial console output is the primary log (`console=ttyS0`).
-- `dfx=taskdump,watchdog` boot flags enable periodic task dumps and the
-  spinlock/deadlock watchdog; `dfx=memwatch` adds heap/page accounting.
+- `debug=taskdump,watchdog` boot flags enable periodic task dumps and the
+  spinlock/deadlock watchdog; `debug=memwatch` adds heap/page accounting.
 - On kernel panic the trap printer emits epc/ra/sp/badaddr plus 24 stack
   words — symbolize with `riscv64-linux-gnu-addr2line -e <kernel> <addr>`.
 - `debugfs` on a copied disk image extracts guest-side logs without booting.

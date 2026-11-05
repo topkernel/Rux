@@ -1434,11 +1434,11 @@ fn build_tree() -> Arc<KObject> {
     // record deep: the next capture overwrites the region and the
     // boot after that sees the new record. No record, no file (the
     // reference's directory is empty after a clean boot).
-    if crate::dfx::pstore::has_record() {
+    if crate::debug::pstore::has_record() {
         attr_ro(
             &pstore_fs,
-            crate::dfx::pstore::record_name(),
-            crate::dfx::pstore::read_record,
+            crate::debug::pstore::record_name(),
+            crate::debug::pstore::read_record,
         );
     }
 

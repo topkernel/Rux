@@ -1,22 +1,22 @@
 #!/bin/bash
-# dfx-smoke.sh — boot the minimal rootfs and exercise the new DFX
+# debug-smoke.sh — boot the minimal rootfs and exercise the new debug
 # surfaces from the guest shell.
 #
 # Checks, in order:
-#   1. /sys/kernel/debug/dfx/ lists one knob per DFX switch
+#   1. /sys/kernel/debug/debug/ lists one knob per debug switch
 #   2. a knob reads Y/N and can be armed and disarmed at runtime
 #   3. /proc/sys/kernel/tainted carries the live taint bitmask
 #   4. /proc/sysrq-trigger runs a command (task dump + help)
 #   5. /sys/kernel survived the debugfs mount (uevent etc. still there)
 #
-# Usage: test/dfx-smoke.sh [kernel] [logfile]
+# Usage: test/debug-smoke.sh [kernel] [logfile]
 # Env:   BOOT_DELAY (default 15), TIMEOUT (default 240)
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KERNEL="${1:-$ROOT/target/riscv64gc-unknown-none-elf/debug/rux}"
-LOG="${2:-$ROOT/run/dfx-smoke-serial.log}"
+LOG="${2:-$ROOT/run/debug-smoke-serial.log}"
 BOOT_DELAY="${BOOT_DELAY:-30}"
 TIMEOUT="${TIMEOUT:-240}"
 
@@ -25,25 +25,25 @@ rm -f "$LOG"
 
 {
     sleep "$BOOT_DELAY"
-    echo 'echo ===SMOKE: dfx knobs ==='
+    echo 'echo ===SMOKE: debug knobs ==='
     sleep 0.3
-    echo 'ls /sys/kernel/debug/dfx'
+    echo 'ls /sys/kernel/debug/debug'
     sleep 0.3
     echo 'echo ===SMOKE: knob read ==='
     sleep 0.3
-    echo 'cat /sys/kernel/debug/dfx/taskdump'
+    echo 'cat /sys/kernel/debug/debug/taskdump'
     sleep 0.3
     echo 'echo ===SMOKE: knob arm ==='
     sleep 0.3
-    echo 'echo 1 > /sys/kernel/debug/dfx/memwatch'
+    echo 'echo 1 > /sys/kernel/debug/debug/memwatch'
     sleep 0.3
-    echo 'cat /sys/kernel/debug/dfx/memwatch'
+    echo 'cat /sys/kernel/debug/debug/memwatch'
     sleep 0.3
     echo 'echo ===SMOKE: knob disarm ==='
     sleep 0.3
-    echo 'echo 0 > /sys/kernel/debug/dfx/memwatch'
+    echo 'echo 0 > /sys/kernel/debug/debug/memwatch'
     sleep 0.3
-    echo 'cat /sys/kernel/debug/dfx/memwatch'
+    echo 'cat /sys/kernel/debug/debug/memwatch'
     sleep 0.3
     echo 'echo ===SMOKE: taint ==='
     sleep 0.3
@@ -93,7 +93,7 @@ rm -f "$LOG"
     sleep 0.3
     echo 'cat /proc/locks'
     sleep 0.3
-    echo 'flock /tmp/dfxlock cat /proc/locks'
+    echo 'flock /tmp/debuglock cat /proc/locks'
     sleep 0.3
     echo 'echo ===SMOKE: proc self stat fields ==='
     sleep 0.3

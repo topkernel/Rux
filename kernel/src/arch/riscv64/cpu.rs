@@ -81,7 +81,7 @@ pub fn read_counter() -> u64 {
 #[track_caller]
 pub fn enable_irq() {
     // syscost probe: pre-sti edge (see the x86_64 twin); no-op when off.
-    crate::dfx::syscost::irq_note_on();
+    crate::debug::syscost::irq_note_on();
     // SAFETY: csrsi atomically sets the SIE bit in sstatus; safe at any time.
     unsafe {
         asm!("csrsi sstatus, 2", options(nomem, nostack));
@@ -94,7 +94,7 @@ pub fn enable_irq() {
 pub fn disable_irq() {
     // syscost probe: pre-cli edge with call-site attribution (see the
     // x86_64 twin); no-op when off.
-    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+    crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
     // SAFETY: csrci atomically clears the SIE bit in sstatus; safe at any time.
     unsafe {
         asm!("csrci sstatus, 2", options(nomem, nostack));

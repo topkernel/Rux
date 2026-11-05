@@ -33,7 +33,7 @@ use crate::process::task::{Task, SchedPolicy};
 use super::class::{SchedClass, RunQueueRef};
 
 // ============================================================================
-// s14 pick-skip history (dfx=schedtrace) — the strand-victim discriminator.
+// s14 pick-skip history (debug=schedtrace) — the strand-victim discriminator.
 //
 // PICK-SKIP-ALL reports only the total-failure shape (a pick that found
 // NOTHING pickable). The msg-region WAKE-STRANDED family shows the other
@@ -78,7 +78,7 @@ static SKIP_HIST: [SkipHistSlot; SKIP_HIST_SLOTS] = {
 // a print-null is not a count-null. These counters are exact and
 // unconditional (same class as wakewatch's WAKE_N/PICK_N: one relaxed
 // inc on the pick-walk entry and two on cold heal paths); the WW5
-// heartbeat line reports them under dfx=wwcensus.
+// heartbeat line reports them under debug=wwcensus.
 // ============================================================================
 static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
 static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
@@ -108,7 +108,7 @@ fn skip_hist_of(task: *mut Task) -> &'static SkipHistSlot {
 }
 
 /// Record one pick-walk refusal of `task` (called under the GRQ; only
-/// when dfx=schedtrace is armed).
+/// when debug=schedtrace is armed).
 pub fn note_pick_skip(task: *mut Task, reason: u8) {
     let s = skip_hist_of(task);
     if s.task.load(Ordering::Relaxed) != task as usize as u64 {
@@ -988,7 +988,7 @@ impl CfsRunQueue {
     /// prepare-to-wait recheck window) from a stale on_rq=true flag.
     ///
     /// INVARIANT: the timeline BTreeMap (including this read-only scan)
-    /// is only touched with the GRQ lock held. The DFX taskdump calls it
+    /// is only touched with the GRQ lock held. The debug taskdump calls it
     /// via grq_diag_cfs_linked's try-lock (busy lock → linkage reported
     /// unknown); a lockless scan would race structural insert/remove on
     /// other CPUs and corrupt the stdlib iterator.
@@ -1153,7 +1153,7 @@ impl CfsRunQueue {
         }
     }
 
-    /// dfx=claiminject adjudication scan (GNOME-wedge hunt): poison every
+    /// debug=claiminject adjudication scan (GNOME-wedge hunt): poison every
     /// linked task that currently shows the fully-pickable ownership state
     /// {on_cpu=false, claim=-1} with a claim from CPU 7 — a CPU that does
     /// not exist on any board we boot, so no picker can ever own it. On an
@@ -1178,7 +1178,7 @@ impl CfsRunQueue {
         n
     }
 
-    /// dfx=oncpuinject adjudication scan (R85 tail-wedge hunt): stamp the
+    /// debug=oncpuinject adjudication scan (R85 tail-wedge hunt): stamp the
     /// FULL lost-release shape — {on_cpu=true, claim=7, pk=LIVE} via
     /// publish_pick_ownership — onto every linked task currently showing
     /// the pickable {on_cpu=false, claim=-1}. CPU 7 exists on no board we
@@ -1238,7 +1238,7 @@ impl CfsRunQueue {
     ///
     /// Returns the census tuple (linked, stale_reset, owned_claim,
     /// oncpu_marked, oncpu_pids, owned_pids) — printed by the tick hook
-    /// (dfx=wwcensus). owned_claim counts the lying-slot shape (a live
+    /// (debug=wwcensus). owned_claim counts the lying-slot shape (a live
     /// slot names the task): NOT healable here (that adjudication needs
     /// the frozen-exec-clock conviction against the SLOT's liveness, not
     /// just the task's), but the census names its pids so the next
@@ -1627,8 +1627,8 @@ impl CfsRunQueue {
             // skip-alls in ltp-b r2's msg region). Stamp every refusal
             // into a per-task history so the strand report (wakewatch
             // check_picked) can name WHY the victim sat unpicked for
-            // the whole strand window. Armed only under dfx=schedtrace.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+            // the whole strand window. Armed only under debug=schedtrace.
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace) {
                 note_pick_skip(task, skip_reason as u8);
             }
             // Not allowed — remove temporarily and stash (the entity's
@@ -1673,7 +1673,7 @@ impl CfsRunQueue {
         // pickable by this CPU — the exact shape that stranded 10 linked
         // tasks in the g2 freeze (Xorg/dbus/gmain linked, every CPU
         // idle-looping on the R20-2 recheck, nothing picked for 35 min).
-        // The 5s DFX dump shows the state but never the REASON, so name it
+        // The 5s debug dump shows the state but never the REASON, so name it
         // here at skip time: per task its on_cpu/claim/affinity/throttle
         // legs. Rate-limited to one report per 100 jiffies system-wide so
         // the hot idle-loop callers cannot flood the console. SBI direct
@@ -1708,8 +1708,8 @@ impl CfsRunQueue {
             let now = crate::drivers::timer::get_jiffies();
             let last = LAST_REPORT.load(core::sync::atomic::Ordering::Acquire);
             // serial-clean: this canary fires on benign mid-switch-out
-            // transients too — print only behind dfx=schedtrace.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+            // transients too — print only behind debug=schedtrace.
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace)
                 && now.wrapping_sub(last) >= 100
                 && LAST_REPORT
                     .compare_exchange(

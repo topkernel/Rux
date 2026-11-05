@@ -35,7 +35,7 @@ TCG smp2/2G, random-sweepstart LTP sweeps), monkey-a/b (x86_64 KVM q35 4G,
 usbless OH image + randomized churn: sdc cycles, hilog flood/rotate,
 paced appspawn kill-restart, bm/hidumper/param walks, sync), memstorm
 (riscv64, init=/test/memstorm: mmap/munmap/MAP_FIXED/mprotect/fork
-storms, dfx=periodic,memwatch,watchdog), fsfuzz (riscv64, init=/test/fsfuzz:
+storms, debug=periodic,memwatch,watchdog), fsfuzz (riscv64, init=/test/fsfuzz:
 random-syscall fuzzer + file/pipe/socket/madvise/fork sequences).
 
 ## Round log (cont.)
@@ -113,7 +113,7 @@ Fleet state after fix: v4 kernel rolled; all 8 members relaunched
   — not counter gating; repo convention `rv64,zbb=true,zba=true,zbs=true`
   restored). v=true also withdrawn (not in repo convention; alone it did
   not reproduce, kept out to match the 29 existing drivers). (b) monkey
-  members now boot with dfx=memwatch,periodic — monkey-b r1 caught the
+  members now boot with debug=memwatch,periodic — monkey-b r1 caught the
   fake-OOM class (see OPEN items). (c) stress-monkey.sh beats now write
   to /dev/console (echo went to hilog, never to serial). Root-caused in
   round 1: fsfuzz r2-r6 + ltp-a/c/d r2-r4 wedge-looped on the zcb panic.
@@ -163,7 +163,7 @@ OPEN items:
   reclaim before killing; expected behavior (reference kernel + POSIX
   OOM semantics): reclaim page cache / drop slab first; killing
   ueventd on a 4G guest under app churn is the fake-OOM signature.
-  NEXT: instrumented rounds (dfx=memwatch,periodic now on) to capture
+  NEXT: instrumented rounds (debug=memwatch,periodic now on) to capture
   used-vs-reclaimable at the OOM point; then root-cause the reclaim
   path (alloc domain, guarded — see AGENTS.md merge gate + perf
   baseline).
@@ -378,7 +378,7 @@ Next-session queue (priority order):
    episodes) and whether v7's merged tree changed the rate.
 4. oom01-wedge family: v7 carries the KILLDUMP pin fixes — compare
    wedge rate (v5: roughly half of ltp-b/c/d rounds) on v7.
-5. Fake-OOM open item: instrumentation (dfx=memwatch,periodic) keeps
+5. Fake-OOM open item: instrumentation (debug=memwatch,periodic) keeps
    accumulating on monkey rounds; root-cause per ledger OPEN items.
 
 ## Session 4 (2026-10-25 15:00-...) — sweep of the 11:42-14:48 unattended window
@@ -504,7 +504,7 @@ Next-session queue (priority order):
    (V fix + chain adjudication + classifier) to main.
 2. oom01-wedge: the deterministic fake-OOM-family repro (100% at sweep
    position ~837-847, children hold memory after SIGKILL of the test
-   main, no reclaim progress). Instrument with dfx=memwatch + the new
+   main, no reclaim progress). Instrument with debug=memwatch + the new
    trace events; root-cause the reclaim path. Same class as the GNOME
    blocker (OOM at reclaimable state).
 3. SOFTIRQ-bracket discriminator for the pc=0x10001 count-migration
@@ -747,7 +747,7 @@ question joins the W3 hunt.
   0x13ff0 panics the boot from inside a printer; fix =
   kernel_stack_top_checked() guards on every diagnostic reader of a
   foreign stack), v11-canary launch, v12-x86 staging.
-- main merged: 94c670da (DFX batch-5 klogd/Oops/pstore + F4 route-1 +
+- main merged: 94c670da (debug batch-5 klogd/Oops/pstore + F4 route-1 +
   D-6 capability-checked FileOps builder) — conflict only in the
   GENERATED kernel/src/config.rs (stale platform flavors of an identical
   Kernel.toml; build.rs regenerates, took ours).
@@ -948,7 +948,7 @@ per-vector budget fix does not prevent the oom01-wedge class.
   the v14/v15 default (which CARRIES the COW pre-lock fix) runs 2.1
   beats/min (r49, 72 beats/34min) — inside the v10 band, NOT the 0.8
   crawl. The v11-era starvation does not reproduce on v14-class;
-  something between v11 and v14 (main's DFX batch-5 wave) or load
+  something between v11 and v14 (main's debug batch-5 wave) or load
   timing resolved it. The COW fix is now fleet-wide with no memstorm
   regression.
 
@@ -1021,7 +1021,7 @@ per-vector budget fix does not prevent the oom01-wedge class.
   Referenced-flag lead and a brand-new reclaim engine to hunt.
   NOT yet in main: scoped-publication bio draining (c3e5a314, OH line),
   KILLDUMP census fix, OOM-FORENSIC file-LRU counter.
-- dfx instruments confirmed on main: wwcensus (census behind a token —
+- debug instruments confirmed on main: wwcensus (census behind a token —
   ordinary boots stay serial-clean per b7870bfd/6ed45aba), txnhunt,
   treehunt, pathstash, pstore, ksyms.
 - Fleet home moves HERE from the wildwrite-hunt worktree (this lane's
@@ -1061,7 +1061,7 @@ resource discipline; ramp gated on a 10 min hold + floor check.
 ### Session 10 continued — fsfuzz chase: one kernel bug fixed, one probe defect exposed
 
 - fsfuzz rounds on main froze at 231 lines deterministically. gdb +
-  dfx=periodic taskdump on a repro: pid 1 INTERRUPTIBLE-parked in
+  debug=periodic taskdump on a repro: pid 1 INTERRUPTIBLE-parked in
   epoll_pwait(0, 0x1000, ...) with the machine otherwise healthy (both
   CPUs idle, kthreads parked, RWFRZ alive).
 - printf-per-call trace variant decoded the deterministic seed-7 stream:
@@ -1086,7 +1086,7 @@ resource discipline; ramp gated on a 10 min hold + floor check.
   residual CPU#1, PREEMPT-UNDERFLOW count-migration family, LTP OOM
   output strings). memstorm r1 clean (87 beats, heap flat). dirtyscan
   r3 clean. modchurn r1 clean (dh=0 through 36 loads/84 donors).
-- Main merged: 0cd29a75 (scoped-publication draining + DFX batch
+- Main merged: 0cd29a75 (scoped-publication draining + debug batch
   edf22c33); dual-arch rebuilt (a46464fb/654ca5df), 150 s LTP smoke
   397 TPASS 0 panics; members pick the new kernel on round rollover.
 - OPEN: the fixed fsfuzz member still reaches a deep park (~255 lines,
@@ -1134,7 +1134,7 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
 
 ### Deep-park adjudication: CLOSED as blocking-call (no kernel defect)
 
-- The gdbstub chase's answer was already on disk: repro2's dfx=taskdump
+- The gdbstub chase's answer was already on disk: repro2's debug=taskdump
   on the frozen guest (line 631) shows
   `pid=1 state=INTERRUPTIBLE(sleep) comm=fsfuzz lastsys=22(0x0,0x1000)`
   — syscall 22 = epoll_pwait, a0=0 (epfd 0), a1=0x1000 (maxevents):
@@ -1184,7 +1184,7 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
   hold only a few MB. The staging buffer is the VICTIM not the leaker
   (RW_CHUNK staging is a properly-dropped local; 65537 is a len+1
   capacity from elsewhere — site not yet pinned; rawframes did not
-  symbolize). NEXT: capture with dfx backtrace build; audit the
+  symbolize). NEXT: capture with debug backtrace build; audit the
   41KB-class live set (fork children x stack+fdtable, held pipes'
   rings, length-derived buffers on raw-syscall paths).
 - Related old-home reminder: monkey-b r20/r24/r26 (stale sweep file)
@@ -1657,7 +1657,7 @@ fsfuzz-r268-serial.log}. The member doubles as the standing repro
    bracket the slot rewrites) goes through the FULL sched-domain merge
    gates — this closes the longest-standing wedge family in the fleet
    ledger; (b) the perf REGISTRY spin-stall + the two perf ABI defects
-   are routed to the DFX lane as MERGE-BLOCKING for the perf surface —
+   are routed to the debug lane as MERGE-BLOCKING for the perf surface —
    keep the fsfuzz perf arm hot until their fixes land, then ONE clean
    round on the fixed kernel closes the catch.
 
@@ -1738,11 +1738,11 @@ the first-ever PARKED-WILDWRITE firing. Adjudications:
   same task — split = tp changed inside the bracket, measured at
   booking time, no trap-boundary sampling hole;
 - parkwalk mid-switch-out adjudication (SWITCHING_OUT);
-- harness 42e6fe52: START/DFX env overrides on the ltp member kind
+- harness 42e6fe52: START/debug env overrides on the ltp member kind
   (installed via atomic rename; running loops keep their old inode).
 
 Canary round live: fleet-rv64-instr-rux md5 72e03151f484d99de14162a8b7dad1cc,
-sweepstart=660 (replays the msg region), dfx=watchdog,taskdump,
+sweepstart=660 (replays the msg region), debug=watchdog,taskdump,
 leakhunt,wwcensus,schedtrace (schedtrace arms the PICK-SKIP-ALL why=
 reports — the discriminator for adjudication 4; wwcensus arms the
 PREEMPT-LEAK incumbent site reports).
@@ -1753,7 +1753,7 @@ Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
 ### Cross-lane notes
 
 - origin/main 0f806d8b..584c1105 carries NO perf fix yet (fsfuzz perf
-  arm stays hot; catch closure queued behind the DFX lane's merge).
+  arm stays hot; catch closure queued behind the debug lane's merge).
 - main 584c1105 (leakhunt v3) adjudicates the parkwalk against "arch
   tp slots" — on riscv64 that helper reads cpu_state.current (tp is
   register-only), i.e. the same slots the walk scanned: x86-effective,
@@ -1774,7 +1774,7 @@ Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
    monkeys resume for monkey-b's formal 500MB criterion (r2 partial:
    294MB@25min panic-free, on pace).
 2. perf catch closure: ONE clean fsfuzz round on the fixed kernel when
-   the DFX lane's perf fixes land on main.
+   the debug lane's perf fixes land on main.
 3. vmscan file-lru question stays queued (s13 item 4).
 
 ### s14 continued (04:0x-...) — FAMILY A1 CAUGHT, FIXED, VERIFIED; A2 chained to the idle/wake protocol
@@ -1845,7 +1845,7 @@ verification).
 Fleet state at close: memstorm r19, dirstorm r36, dirtyscan r21,
 fsfuzz r272 (perf arm hot on main 0f806d8b image — no perf fix on
 main yet), ltp-a r18 (control), ltp-b r4 (canary 9a03e78e, START=660,
-dfx=watchdog,taskdump,leakhunt,wwcensus,schedtrace — A2 watch with
+debug=watchdog,taskdump,leakhunt,wwcensus,schedtrace — A2 watch with
 SKIPHIST live). PAUSED on floor rule: modchurn (next r16), monkey-a
 (next r2; criterion closed at r1 605MB), monkey-b (next r2; formal
 500MB pending, r2 partial 294MB@25min panic-free).
@@ -1858,8 +1858,8 @@ Next-session queue (s14 close):
    idle CPUs; 418/418 idle-mask-empty correlation, 62% baseline).
 1. Coordinator: 7e9d2ad0 (affinity fix) passed tiers 1+2 + make test
    on stress-fleet-2 — merge-gate ready. The parkwalk fix (766d60a9)
-   is probe-only (dfx-gated) but rides the same branch.
-2. fsfuzz perf catch closure once the DFX lane's perf fixes land.
+   is probe-only (debug-gated) but rides the same branch.
+2. fsfuzz perf catch closure once the debug lane's perf fixes land.
 3. Resume modchurn/monkeys when the floor relaxes; monkey-b formal
    500MB criterion pending.
 4. vmscan file-lru question still queued (s13 item 4).
@@ -1915,7 +1915,7 @@ tick-entry tp-vs-slot mismatch census (slotmm), WW_TICK_IRQ now
 increments on riscv64 (the x86 twin was the only one — WW2
 ticks=[0,0] was a probe gap; smoke shows ticks=[93,102] with
 phase=[4,4] idle, zero panics). New WW4 heartbeat line under
-dfx=wwcensus. NOTE: phase=1 is ambiguous between "idle loop about to
+debug=wwcensus. NOTE: phase=1 is ambiguous between "idle loop about to
 pick" and "idle task switched away long ago" — discriminate against
 WW3 slot pids (real pid = CPU busy; the idle loop is not executing).
 Kernel md5 19de1371 rolled to BOTH fleet-rv64-instr-rux (ltp-b) and
@@ -2020,9 +2020,9 @@ smoke produced the opposite verdict, with counters:
   was silently cut (smoke1 showed WW4 without WW5); it is now its own
   pr_info.
 - Cost class: same as WAKE_N/PICK_N (relaxed atomic incs on
-  wake/pick/heal paths); all new prints dfx-gated (wwcensus/schedtrace).
+  wake/pick/heal paths); all new prints debug-gated (wwcensus/schedtrace).
 
-### Smoke2 census (sweepstart=660, 120s, dfx full set, zero panics)
+### Smoke2 census (sweepstart=660, 120s, debug full set, zero panics)
 
 - **oncpu_heal=0 claim_heal=0 across the whole boot** — counter-exact:
   the heal never fires; heal-window tuning cannot move this family.
@@ -2043,7 +2043,7 @@ smoke produced the opposite verdict, with counters:
   evidence was uninformative — under 418+ runnable the 256-slot table
   is always stolen by colliding tasks; the victims' refusal history
   (if any) was clobbered before every report. Not a walk exoneration.
-- Control arm agrees: ltp-a r25 (plain dfx set, same 19de1371 binary)
+- Control arm agrees: ltp-a r25 (plain debug set, same 19de1371 binary)
   shows the same family (236 strand lines, same geometry) — the family
   is workload-driven (msgstress churn), not instrument-driven.
 
@@ -2063,7 +2063,7 @@ checked in r6/r7 heartbeats, no runnable-task leak).
 
 Fleet state at this point: ltp-b r8 on the old image (19de1371, census
 continues), r9+ on f49227de (WW5 live); ltp-a image rolled to f49227de
-too (instruments dfx-gated, control semantics unchanged); fsfuzz r273;
+too (instruments debug-gated, control semantics unchanged); fsfuzz r273;
 monkey-b r2 running (formal 500MB criterion); floor 40G available.
 
 ### s16 continued (08:2x) — monkey-b r2: 500MB criterion CROSSED
@@ -2167,7 +2167,7 @@ round. Member keeps running (r4+) for free margin evidence.
 
 Fleet state at s16 close: ltp-b r10 (cb314f43, WW5 census live,
 START=660); ltp-a next round on cb314f43; fsfuzz r274+ (perf arm
-still hot — no DFX perf fix on origin/main yet, main HEAD f15b9660
+still hot — no debug perf fix on origin/main yet, main HEAD f15b9660
 = gnome-bringup, not the s15 chain either; closure still blocked);
 memstorm cycling; monkey-b r4; sweeper. Floor 36-40G available all
 session. Commits on stress-fleet-2: 5cd51434 (WW5 instruments +
@@ -2179,7 +2179,7 @@ chain awaiting coordinator merge.
 Handover from s16 (fleet on cb314f43; ltp-b WW5 census r10+, ltp-a
 control, fsfuzz r275+, memstorm, monkey-b r4+, sweeper). origin/main
 at session open: f15b9660 — NEITHER awaited merge is visible (no
-OH-A wake-placement change, no DFX perf fix); both watch items stay
+OH-A wake-placement change, no debug perf fix); both watch items stay
 queued. Working-tree drift repaired: the round-rotation had deleted
 four tracked .wedge markers (ltp-a r24/r25, ltp-b r6/r7) — restored
 to match 5cd51434's committed state; untracked artifacts (images/,
@@ -2204,7 +2204,7 @@ bzImage, config.rs) stay uncommitted per the big-binary rule.
   121 = the count-migration trio (root-caused, heal-arm prints).
 - fsfuzz r274/r275: WARN (FSFUZZ-ODD 42-44k = standing errno-oddity
   census; perf arm churning — FSFUZZ-PERF lines present). Closure
-  round still blocked on the DFX perf fixes reaching main.
+  round still blocked on the debug perf fixes reaching main.
 - memstorm r25/r26: WARN, PREEMPT-UNDERFLOW 8-10 (trio family),
   heap growth modest (13->24 MB, 12->51 MB). monkey-b r4 in flight
   (margin evidence; criterion already closed at r2).
@@ -2317,7 +2317,7 @@ slowpath change ~40 lines, counters ~30).
   When it lands: one deep-queue census round on the fixed kernel,
   harvest.sh diff vs r9/r10 baseline (strand count, wtie mass,
   sub-gate steps, visits) = the cross-lane verdict data.
-- fsfuzz perf-catch closure: still blocked on the DFX perf fixes
+- fsfuzz perf-catch closure: still blocked on the debug perf fixes
   (origin/main beyond f15b9660); one clean round on the fixed
   kernel closes it.
 - monkey-b margin rounds continue (r4+). New-capture tripwires
@@ -2380,7 +2380,7 @@ Code-level mapping, this lane's evidence:
 
 origin/main sat at 478ece08 (the WW5-batch merge, 09:23) through
 the whole leg — NEITHER awaited change landed (OH-A wake-placement,
-DFX perf fixes), so both closure rounds stay queued for the next
+debug perf fixes), so both closure rounds stay queued for the next
 leg with the runbook: build from a clean origin/main worktree (the
 merged main already carries the WW5 instruments), atomic-rename the
 kernel over images/fleet-rv64-instr-rux at an ltp-b round boundary
@@ -2395,7 +2395,7 @@ the known mmap3 print-storm shape: 1.36M userspace `pagefault:`
 lines of 1.4M total); fsfuzz r277 CRITICAL WATCHDOG=91 adjudicated
 the KNOWN r268/r272 static+heap lock-pair family (lock
 0xffffffff808818d8, same bss region, same ra, wedge=no beats=1802
-— the exact class the DFX perf fix targets); memstorm r28 (trio
+— the exact class the debug perf fix targets); memstorm r28 (trio
 family WARN); monkey-b r6 margin rounds (heap growth 159-188MB,
 zero flags). Tripwires clean all leg: WILDWATCH-CANARY 0
 everywhere, slotmm [0,0] + single-second transient blips only
@@ -2417,7 +2417,7 @@ open + design note + watcher), 1006ace5 (cross-lane map).
   the ltp-scan r18 row (1021/1869).
 - fsfuzz perf-catch closure adjudication: c5640ccc (no-allocation-
   under-spinlocks, the r268 REGISTRY fix) and ae317e86 (perf ABI
-  bits) are NOT ancestors of 2a960538 — the DFX perf batch is still
+  bits) are NOT ancestors of 2a960538 — the debug perf batch is still
   off-main. Closure stays QUEUED per the s13 directive (one clean
   round on the kernel that carries the fix).
 
@@ -2518,7 +2518,7 @@ f. memstorm r34 (first rv64 round): WARN, PREEMPT-UNDERFLOW=8 (trio
 - ltp-a r36+ control (cb314f43 KIMG-pinned); ltp-b r21+ census
   (96f67cbd); fsfuzz r284+ (96f67cbd, WATCHDOG-family n-count);
   memstorm r35+ (96f67cbd, beat-band watch); monkey-b r12+ (5b0ea12c);
-  sweeper; main-watch.sh still armed (OH-A wake-placement and the DFX
+  sweeper; main-watch.sh still armed (OH-A wake-placement and the debug
   perf batch remain the two awaited merges).
 - Queue: (1) fsfuzz accumulation; closure round when c5640ccc-class
   reaches main; (2) kswapd-leg handoff to the mm/perf owner; (3)

@@ -56,7 +56,7 @@ const CFG_ENABLE: u32 = 1;
 static BASE: AtomicU64 = AtomicU64::new(0);
 /// wildwrite-hunt guard cluster: the QUIET-after-init timekeeper
 /// statics live in a page-exclusive 2-page region (page 0 = canary
-/// fill, page 1 = the members) so dfx=wildwatch can clear RW on their
+/// fill, page 1 = the members) so debug=wildwatch can clear RW on their
 /// PTEs after init — a wild store then page-faults at the writer's RIP
 /// instead of silently landing (b77/wt1 smashed BASE/BASE_LOCKED here;
 /// read-side healing survives, attribution did not exist). The hot
@@ -226,11 +226,11 @@ fn validated_read_base() -> usize {
     good as usize
 }
 
-/// True while dfx=wildwatch holds the guard cluster read-only.
+/// True while debug=wildwatch holds the guard cluster read-only.
 fn guard_armed() -> bool {
     #[cfg(feature = "x86_64")]
     {
-        crate::dfx::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
+        crate::debug::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
     }
     #[cfg(not(feature = "x86_64"))]
     {
@@ -377,7 +377,7 @@ pub fn init() -> bool {
     if ready() {
         return true;
     }
-    // Debugging gate (dfx discipline): "nohpet" keeps the calibrated-TSC
+    // Debugging gate (debug discipline): "nohpet" keeps the calibrated-TSC
     // timebase so clocksource behavior can be A/B compared.
     if crate::cmdline::get_param("nohpet").is_some() {
         return false;

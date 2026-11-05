@@ -1,8 +1,8 @@
-# DFX Alignment with the Reference Kernel — Gap Analysis and Phased Plan
+# debug Alignment with the Reference Kernel — Gap Analysis and Phased Plan
 
 Date: 2026-10-24
 Status: analysis complete; Tranche 1 implemented (see §5)
-Scope: `kernel/src/dfx/` plus the user-visible debug surfaces
+Scope: `kernel/src/debug/` plus the user-visible debug surfaces
 (`/proc`, `/sys`, printk, crash paths).
 
 Design rule for this work: **every surface follows the reference kernel**. Where the reference kernel
@@ -12,7 +12,7 @@ and that command semantics. Rux does not invent parallel interfaces.
 
 ## 1. Why this document exists
 
-Rux has grown a large but entirely **console-only** DFX layer: 20
+Rux has grown a large but entirely **console-only** debug layer: 20
 modules, 29 boot-time switches, two watchdogs, a printk ring buffer, and
 a pile of forensic printers. Every one of those instruments prints to
 the serial console and nothing else. The kernel cannot be observed from
@@ -20,7 +20,7 @@ userspace, and the instruments cannot be armed or disarmed while the
 system runs.
 
 That has a concrete cost. The project debugs functional problems by
-booting the kernel with a different `dfx=` command line for every hunt,
+booting the kernel with a different `debug=` command line for every hunt,
 and cannot answer performance questions at all because the kernel exposes
 no per-CPU time accounting, no VM statistics, no scheduler statistics and
 no per-process context-switch counts.
@@ -30,30 +30,30 @@ diagnosis first, and fixes the order of work.
 
 ## 2. What Rux already has (the asset inventory)
 
-### 2.1 The `dfx=` instrument family
+### 2.1 The `debug=` instrument family
 
-`kernel/src/dfx/switches.rs` holds 29 switches; before Tranche 1 every
+`kernel/src/debug/switches.rs` holds 29 switches; before Tranche 1 every
 one of them was **boot-time only** (`init_from_cmdline()` at
 `switches.rs:347` was the only writer; `set()` had no callers).
 
 | Module | Lines | Purpose | Cost when armed |
 |---|---|---|---|
-| `dfx/taskdump.rs` | 742 | all-task state snapshot (sched state, claims, runqueue links, optional backtrace) | on demand |
-| `dfx/ledger.rs` | 491 | physical page census + zone counter reconciliation | on demand + 30 s series |
-| `dfx/memwatch.rs` | 1066 | heap alloc/free size classes, call-site histograms | per-alloc counters |
-| `dfx/scribble.rs` | 1658 | byte-level canary over live `Task` control words (x86_64) | per-switch + per-tick |
-| `dfx/syscost.rs` | 696 | whole-syscall cost table + kernel-rip histogram (perf-audit line) | on demand |
-| `dfx/wildwatch.rs` | 479 | RO-guard tripwire on the hpet quiet-statics cluster (x86_64) | arm-time + 1 Hz verify |
-| `dfx/metawatch.rs` | 157 | buddy free-list vs bitmap cross-check | 10 s scan |
-| `dfx/r83hunt.rs` | 566 | task-header corruption hunt | per-tick audit |
-| `dfx/softlockup.rs` | 222 | per-CPU 10 s no-schedule detector | per-tick |
-| `dfx/hung_task.rs` | 286 | khungtaskd: D-state > 120 s | 60 s scan |
-| `dfx/backtrace.rs` | 341 | frame-pointer stack walk + register/CSR dump | on demand |
-| `dfx/bug.rs` | 98 | WARN / BUG cut-here banners | on demand |
-| `dfx/driftwatch.rs` | 130 | zero-put / free-refusal attribution | counters |
-| `dfx/monowatch.rs` | 137 | CLOCK_MONOTONIC jump tripwire | 1 Hz |
-| `dfx/taint.rs` | 108 | taint bitmask | — |
-| `dfx/hexdump.rs`, `dfx/sbi_debug.rs` | — | **dead code** (zero callers) | — |
+| `debug/taskdump.rs` | 742 | all-task state snapshot (sched state, claims, runqueue links, optional backtrace) | on demand |
+| `debug/ledger.rs` | 491 | physical page census + zone counter reconciliation | on demand + 30 s series |
+| `debug/memwatch.rs` | 1066 | heap alloc/free size classes, call-site histograms | per-alloc counters |
+| `debug/scribble.rs` | 1658 | byte-level canary over live `Task` control words (x86_64) | per-switch + per-tick |
+| `debug/syscost.rs` | 696 | whole-syscall cost table + kernel-rip histogram (perf-audit line) | on demand |
+| `debug/wildwatch.rs` | 479 | RO-guard tripwire on the hpet quiet-statics cluster (x86_64) | arm-time + 1 Hz verify |
+| `debug/metawatch.rs` | 157 | buddy free-list vs bitmap cross-check | 10 s scan |
+| `debug/r83hunt.rs` | 566 | task-header corruption hunt | per-tick audit |
+| `debug/softlockup.rs` | 222 | per-CPU 10 s no-schedule detector | per-tick |
+| `debug/hung_task.rs` | 286 | khungtaskd: D-state > 120 s | 60 s scan |
+| `debug/backtrace.rs` | 341 | frame-pointer stack walk + register/CSR dump | on demand |
+| `debug/bug.rs` | 98 | WARN / BUG cut-here banners | on demand |
+| `debug/driftwatch.rs` | 130 | zero-put / free-refusal attribution | counters |
+| `debug/monowatch.rs` | 137 | CLOCK_MONOTONIC jump tripwire | 1 Hz |
+| `debug/taint.rs` | 108 | taint bitmask | — |
+| `debug/hexdump.rs`, `debug/sbi_debug.rs` | — | **dead code** (zero callers) | — |
 
 Triggers available before Tranche 1: UART magic `DUMP!` and `LEDGER!`
 (`console.rs:558`, `console.rs:577`), the spinlock-deadlock watchdog
@@ -85,10 +85,10 @@ lockdep/lockstat, **no** PSI.
 These are cheap to fix and actively mislead:
 
 - `/proc/sys/kernel/tainted` was hardcoded to `0`
-  (`fs/procfs/sysctl.rs`) although `dfx/taint.rs` maintained a real
+  (`fs/procfs/sysctl.rs`) although `debug/taint.rs` maintained a real
   mask that WARN/BUG set. **Fixed in Tranche 1** — the reference kernel's format is
   numeric, and the value is now the live mask.
-- The taint letters in `dfx/taint.rs` were not the reference kernel's
+- The taint letters in `debug/taint.rs` were not the reference kernel's
   (`b"GFfUvPDdCAcNIOsl"`). **Fixed in Tranche 1** — the reference kernel's set is
   `P F S R M B U D A W C I O E L K`, rendered as a 16-column line with
   `G` in the first column when the proprietary-module bit is clear.
@@ -100,14 +100,14 @@ These are cheap to fix and actively mislead:
   instead of walking the irq descriptor registry.
 - `readdir` on `/proc/[pid]` omits `smaps` and `task`.
 - `printk::persistent_log_init()` was **commented out** at `main.rs`, so
-  the persistent log the DFX plan claims existed never ran. **Fixed in
+  the persistent log the debug plan claims existed never ran. **Fixed in
   Tranche 5** — re-enabled as the klogd thread (see §Tranche 5).
 - The panic handler halted in a `wfi` loop; no `panic=` timeout policy
   and no reboot-after-panic. **Fixed in Tranche 5 Part 1** (`panic=N`).
 - There was no non-fatal "Oops" path: every fault went straight to
   `panic!`. **Fixed in Tranche 5** (the Oops path, both arches).
 
-## 3. Reference-kernel DFX capability matrix
+## 3. Reference-kernel debug capability matrix
 
 Legend: **OK** = present and reference-shaped · **PART** = present but
 incomplete or non-reference shape · **--** = absent.
@@ -140,7 +140,7 @@ incomplete or non-reference shape · **--** = absent.
 | Memory | KASAN / UBSAN / Kfence / slub debug | -- | absent (Rux substitutes are bespoke) |
 | Memory | page poisoning on free | -- | absent |
 | Locking | lockdep (lock-class graph, cycle detect) | -- | absent |
-| Locking | lock owner tracking | PART | compile-time feature `dfx-lock-owner` only |
+| Locking | lock owner tracking | PART | compile-time feature `debug-lock-owner` only |
 | Locking | soft lockup / hung task | OK | present and working |
 | Locking | RCU stall detector | -- | absent |
 | Storage | `/proc/diskstats`, `/proc/partitions` | PART | partitions present, diskstats absent |
@@ -168,8 +168,8 @@ userspace, without a reboot, through the reference kernel's interfaces.
    `/sys/kernel/debug`, exactly like the reference kernel. The mount point is a real
    sysfs directory (`/sys/kernel/debug`), so sysfs owns the directory
    and debugfs is mounted over it — the reference kernel's arrangement.
-2. **Switch knobs** at `/sys/kernel/debug/dfx/<switch>`: one file per
-   switch, named after its `dfx=` spelling. the reference kernel's `debugfs_create_bool`
+2. **Switch knobs** at `/sys/kernel/debug/debug/<switch>`: one file per
+   switch, named after its `debug=` spelling. the reference kernel's `debugfs_create_bool`
    convention — the file reads `Y`/`N`, a write of `Y`/`y`/`1` arms the
    instrument and `N`/`n`/`0` disarms it, anything else is `EINVAL`.
    The switch table became a single source of truth: one macro
@@ -186,7 +186,7 @@ userspace, without a reboot, through the reference kernel's interfaces.
    bitmask in the reference kernel's numeric format, and the "Tainted:" line uses
    the reference kernel's letters and 16-column layout.
 
-Acceptance (verified in the guest, `test/dfx-smoke.sh`): the knob
+Acceptance (verified in the guest, `test/debug-smoke.sh`): the knob
 directory lists all 29 switches; a knob reads `N`, arms to `Y` on
 `echo 1 > …`, disarms on `echo 0 > …`; `/proc/sysrq-trigger` runs the
 task dump and the help; `/proc/sys/kernel/tainted` reports the live
@@ -282,8 +282,8 @@ NUL-separated name blob (`ksyms.bin`, embedded with `include_bytes!`)
 plus an index of (name offset, address, size, type). `build/Makefile`
 runs the pass after the link and rebuilds; `build.rs` writes a
 placeholder so a plain `cargo build` still compiles. At runtime
-`dfx/ksyms.rs` binary-searches the index, `/proc/kallsyms` prints
-the standard `addr type name` lines, and `dfx/backtrace.rs` prints
+`debug/ksyms.rs` binary-searches the index, `/proc/kallsyms` prints
+the standard `addr type name` lines, and `debug/backtrace.rs` prints
 `[<addr>] rux::mod::fn+0xoff/0xsize` (the classic frame format, with
 `?` for an unresolved address) under the `Call Trace:` header.
 
@@ -310,7 +310,7 @@ the shell with the heap at the new base (`heap region 128MB @
 0x81400000`); `/proc/kallsyms` lists 22,636 lines — the full table;
 coverage reaches the end of `.text` (`__etext` resolves at the table's
 top); the sched/trap/syscall families resolve by name; sysrq `l`
-prints `Call Trace:` with `rux::dfx::backtrace::dump_stack+0x1c/0xdc`.
+prints `Call Trace:` with `rux::debug::backtrace::dump_stack+0x1c/0xdc`.
 The two-pass build converges (the table's max text address equals the
 final ELF's `_etext`; only `.rodata` grows, `.text` never moves).
 
@@ -477,7 +477,7 @@ scheme rests on, verified by the reboot cycle itself.
 
 **Remaining (Part 2) — all done, batch 4 (2026-10-26).**
 
-- **Non-fatal Oops path (done).** `dfx/oops.rs`: the kernel fault sites
+- **Non-fatal Oops path (done).** `debug/oops.rs`: the kernel fault sites
   that used to take the whole machine down (kernel page fault with no
   exception-table fixup, kernel-mode illegal instruction, unhandled
   kernel exceptions — both arches) now run the reference's contract.
@@ -500,7 +500,7 @@ scheme rests on, verified by the reboot cycle itself.
   `console-ramoops-0`; last writer owns the one region). Taint D and
   the `[#N]` counter land before the report's own `Tainted:` line.
   The old KERNPANIC raw SBI dump and re-entrancy latches stay in front
-  of the oops on every site; `/sys/kernel/debug/dfx/provoke-oops`
+  of the oops on every site; `/sys/kernel/debug/debug/provoke-oops`
   (LKDTM's discipline) faults on purpose so the path is exercisable
   from a shell.
 - **Persistent log (done).** `/var/log/kmsg` is written again — by a
@@ -630,7 +630,7 @@ lane's pbench can consume in-guest. The choice:
   census rows.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
-to the perf lane; the DFX lane's remaining stake is whatever counter
+to the perf lane; the debug lane's remaining stake is whatever counter
 surface that report finds missing.
 
 ## 5. Explicit non-goals
@@ -655,7 +655,7 @@ Every tranche is verified in the guest, not by inspection:
 - Build: `cargo build --target riscv64gc-unknown-none-elf` and
   `--target x86_64-unknown-none --no-default-features --features x86_64`.
 - Boot the minimal rootfs and exercise the new `/proc` and `/sys`
-  surfaces from the guest shell (`test/dfx-smoke.sh` drives the current
+  surfaces from the guest shell (`test/debug-smoke.sh` drives the current
   Tranche).
 - Confirm the LTP pass rate does not regress
   (`/home/william/rux-agents/ltp-r<N>/results/`).
@@ -666,14 +666,14 @@ Every tranche is verified in the guest, not by inspection:
 
 | Area | File |
 |---|---|
-| switch table | `kernel/src/dfx/switches.rs` |
-| instrument modules | `kernel/src/dfx/*.rs` |
+| switch table | `kernel/src/debug/switches.rs` |
+| instrument modules | `kernel/src/debug/*.rs` |
 | debugfs | `kernel/src/fs/debugfs.rs` |
 | procfs tree | `kernel/src/fs/procfs/mod.rs` |
 | procfs generators | `kernel/src/fs/procfs/{meminfo,interrupts,loadavg,uptime,pid,sysctl,sysrq}.rs` |
 | printk / kmsg | `kernel/src/printk.rs` |
 | panic handler | `kernel/src/main.rs` |
-| backtrace | `kernel/src/dfx/backtrace.rs` |
+| backtrace | `kernel/src/debug/backtrace.rs` |
 | page allocator | `kernel/src/mm/page_alloc.rs` |
 | scheduler | `kernel/src/sched/sched.rs` |
 | timer | `kernel/src/timer.rs` |
@@ -691,7 +691,7 @@ First conversion: `/proc/vmstat` (byte-identical to the hand-written
 version, snapshot-pinned).
 
 ADOPTION RULE for this lane's files (this is the coordination point
-between the perf lane, which owns the macro, and the DFX lane, which
+between the perf lane, which owns the macro, and the debug lane, which
 owns most /proc additions):
 
 - Every NEW /proc key-value file uses `procfile!` — no new hand-written

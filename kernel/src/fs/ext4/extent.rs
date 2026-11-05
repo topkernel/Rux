@@ -447,13 +447,13 @@ pub fn ext4_ext_get_block(
     }
 
     let r = find_block_in_extent_tree(fs, i_block, logical_block, 0);
-    // dfx=exthunt: a read-side miss on a DEEP tree (depth >= 1) — the
+    // debug=exthunt: a read-side miss on a DEEP tree (depth >= 1) — the
     // reader is about to serve a hole for a file that grew past its
     // root. Print the root view so a stale cached root (old depth /
     // fewer entries) is distinguishable from a broken index block.
     if header.eh_depth >= 1
         && (r.is_err() || *r.as_ref().unwrap_or(&0) == 0)
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt)
     {
         use core::sync::atomic::{AtomicUsize, Ordering};
         static MISSES: AtomicUsize = AtomicUsize::new(0);
@@ -472,7 +472,7 @@ pub fn ext4_ext_get_block(
     r
 }
 
-/// dfx=exthunt read-side companion to EXT-HUNT-MISS: call wherever a read
+/// debug=exthunt read-side companion to EXT-HUNT-MISS: call wherever a read
 /// path concludes "hole" (mapping 0) and is about to zero-fill — the page
 /// cache batch fill, the synchronous fallback, and the O_DIRECT reader all
 /// map through the CACHED inode's root, NOT through ext4_ext_get_block,
@@ -481,7 +481,7 @@ pub fn ext4_ext_get_block(
 /// from a legitimately sparse file: a file that already grew past its
 /// root (see EXT-HUNT-GROW) should never again report a shallow root.
 pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt) {
         return;
     }
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -505,7 +505,7 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
     );
 }
 
-// ---- dfx=exthunt write/read adjudication probes (ltp-fix-b leg-10) ----
+// ---- debug=exthunt write/read adjudication probes (ltp-fix-b leg-10) ----
 //
 // The ftest04/zzprobe4 all-zeros family needs the write-side vs read-side
 // (logical -> phys) story on ONE boot: which physical block each side
@@ -542,7 +542,7 @@ static HUNT_WATCH_NEXT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 fn hunt_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+    crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt)
 }
 
 fn hunt_watch(ino: u32) {
@@ -678,7 +678,7 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
     );
 }
 
-// ---- dfx=exthunt block-cache eviction/fabrication tracers (leg-11) ----
+// ---- debug=exthunt block-cache eviction/fabrication tracers (leg-11) ----
 //
 // The last open gap between EXT-HUNT-WRPUT pat=XX and EXT-HUNT-RDHIT
 // b0=0000 on identical (logical, phys): a read DMA that races an
@@ -959,11 +959,11 @@ fn find_block_in_external_extent_ex(
         if header.eh_magic != EXT4_EXT_MAGIC
             || header.eh_entries > header.eh_max
         {
-            // dfx=exthunt: the walk below the root just failed — the
+            // debug=exthunt: the walk below the root just failed — the
             // reader will turn this Err into a hole (zeros). Dump the
             // block header + first bytes so zeros / foreign data / a
             // reverted header are distinguishable.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt) {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static BADS: AtomicUsize = AtomicUsize::new(0);
                 if BADS.fetch_add(1, Ordering::Relaxed) < 40 {
@@ -1483,9 +1483,9 @@ pub fn ext4_ext_append(
                 slot2.ei_unused = 0;
             }
             node_header_mut(&mut root).eh_entries = 2;
-            // dfx=exthunt: the tree just grew one level — the event the
+            // debug=exthunt: the tree just grew one level — the event the
             // ftest04/zzprobe4 all-zeros family correlates with.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt) {
                 use core::sync::atomic::{AtomicUsize, Ordering};
                 static GROWS: AtomicUsize = AtomicUsize::new(0);
                 if GROWS.fetch_add(1, Ordering::Relaxed) < 20 {

@@ -271,7 +271,7 @@ pub fn balance_pgdat(order: i32) -> usize {
 /// Returns the number of pages reclaimed.
 pub fn try_to_free_pages(order: i32) -> usize {
     // Leg-15 pace: cumulative round count + jiffies spent here, read by
-    // the schbd heartbeat (dfx=schb). No lock held; note_drct is a
+    // the schbd heartbeat (debug=schb). No lock held; note_drct is a
     // counter tick unless the switch is off.
     let j0 = crate::drivers::timer::get_jiffies();
     super::page_alloc::gate_note_phase(super::page_alloc::GATE_PHASE_ROUND);
@@ -281,14 +281,14 @@ pub fn try_to_free_pages(order: i32) -> usize {
     if r > 0 {
         super::page_alloc::gate_note_round_done(r as u64);
     }
-    crate::dfx::schb::note_drct(j0);
+    crate::debug::schb::note_drct(j0);
     r
 }
 
 // ==================== Deep pre-OOM drain (stress-fleet s17, leg 49B) ====
 
 /// Counters for the deep pre-OOM drain — the change's own instrument
-/// (the merge gate's "add the DFX tool that measures it" duty). They
+/// (the merge gate's "add the debug tool that measures it" duty). They
 /// stay zero on every standard boot (the drain runs only on the
 /// doomed slowpath, after the 8 steady-state rounds have failed to
 /// satisfy the allocation); the storm fleet reads them on the serial
@@ -699,7 +699,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
+                    let refcount = p.put_page_site(crate::debug::driftwatch::S_VMSCAN_SWAP);
                     // R14-1 (F10): free ONLY when WE took it to zero.
                     if refcount == 0 {
                         free_page(phys);
@@ -768,7 +768,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
+                    let refcount = p.put_page_site(crate::debug::driftwatch::S_VMSCAN_SWAP);
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;

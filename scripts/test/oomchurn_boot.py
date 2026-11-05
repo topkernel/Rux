@@ -14,7 +14,7 @@ the verdict:
 Usage:
   ./oomchurn_boot.py [--smp 2] [--thread multi|single] [--mem 2G]
       [--secs 600] [--mode anon] [--mb 1200] [--fork-n 8] [--rounds 4]
-      [--kernel ELF] [--extra-append "dfx=memwatch"] [--keep-img]
+      [--kernel ELF] [--extra-append "debug=memwatch"] [--keep-img]
 """
 import argparse
 import os
@@ -130,7 +130,7 @@ def main():
     ap.add_argument("--accel", default="tcg")
     ap.add_argument("--magic", default=None,
                     help="raw bytes written to guest serial stdin after boot "
-                         "(e.g. 'LEDGER!' with dfx=ledger)")
+                         "(e.g. 'LEDGER!' with debug=ledger)")
     ap.add_argument("--magic-at", type=float, default=25.0,
                     help="seconds before writing --magic")
     ap.add_argument("--magic-every", type=float, default=0.0,

@@ -492,7 +492,7 @@ informal until the med-of-runs runner catches a loadavg<4 window):**
 | + merged page-run copyout | (neutral alone; order-0 batch fills are not physically contiguous) | - |
 | + read-ahead stops at holes | **32,481-33,458 MB/s (median 32,889)** | **1.02x** |
 
-The `dfx=filerd` phase probe (this branch, `/proc/filerd`) attributed
+The `debug=filerd` phase probe (this branch, `/proc/filerd`) attributed
 the warm read(2) kernel time before the fixes: 1943 ns per 64 KiB
 read, 81% of it the copyout, in 16 per-page `copy_to_user` calls whose
 pushfq/orq/popfq AC brackets cost ~55 ns each; STAC/CLAC brackets cut

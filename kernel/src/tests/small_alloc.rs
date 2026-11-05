@@ -177,7 +177,7 @@ pub fn test_small_alloc() {
     // poison the distinctness assertions above.)
     let mut ok = true;
     const BAD_PAGE_BIT: u32 = 0x0020;
-    let t0 = crate::dfx::taint::get_taints();
+    let t0 = crate::debug::taint::get_taints();
     let p = small_alloc::alloc(8, 8) as usize;
     if p == 0 {
         test_fail("screening setup", "alloc null");
@@ -186,7 +186,7 @@ pub fn test_small_alloc() {
     unsafe { core::ptr::write_volatile(p as *mut u64, 0x5555_5555_5555_5555) };
     let bad = p + 3; // same page (S=8 objects end at most at page-8), misaligned
     small_alloc::free(bad); // must taint + consume, never park
-    let t1 = crate::dfx::taint::get_taints();
+    let t1 = crate::debug::taint::get_taints();
     if t1 & BAD_PAGE_BIT == 0 && t0 & BAD_PAGE_BIT == 0 {
         ok = false; // screening must have tailed to the locked taint path
     }

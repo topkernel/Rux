@@ -12,7 +12,7 @@ use crate::arch::uaccess::strncpy_from_user;
 /// Maximum path length (PATH_MAX)
 const PATH_MAX: usize = 4096;
 
-/// (28th successor) BMS scan-leg fs probe — dfx=ams46 cohort.
+/// (28th successor) BMS scan-leg fs probe — debug=ams46 cohort.
 ///
 /// The initial user-0 preinstall scan never installs on fresh boots
 /// (dead since cg17), so user 100's per-user bundle query comes back
@@ -35,9 +35,9 @@ const PATH_MAX: usize = 4096;
 /// SAVING records opens bmsdb.db writable) and per-directory getdents
 /// outcomes (an empty ScanDir result is the first-boot verdict; a
 /// walked /system/app tree is the install branch firing). Budgeted;
-/// OFF unless dfx=ams46.
+/// OFF unless debug=ams46.
 fn bmsscan_on() -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+    crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Ams46)
 }
 
 #[inline]
@@ -187,9 +187,9 @@ fn parse_proc_fd_dir_path(path: &str) -> Option<u64> {
 /// attributes the syscost 85us-under-load open row. One relaxed load
 /// when off.
 pub fn sys_openat(args: SyscallArgs) -> i64 {
-    let (w0, exec_armed) = crate::dfx::fsw::open_exec_stamp();
+    let (w0, exec_armed) = crate::debug::fsw::open_exec_stamp();
     let rc = sys_openat_impl(args);
-    crate::dfx::fsw::open_close(w0, exec_armed);
+    crate::debug::fsw::open_close(w0, exec_armed);
     rc
 }
 
@@ -201,9 +201,9 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
 
     // pathcost: entry bracket; PRE closes at the dispatch call below,
     // TAIL covers File creation + fd install + return path.
-    let pc_pre = crate::dfx::fsw::pc_now();
+    let pc_pre = crate::debug::fsw::pc_now();
     if pc_pre != 0 {
-        crate::dfx::fsw::OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::debug::fsw::OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     // (perf-path lane) Chroot verdict computed ONCE — the shortcut gates
@@ -312,10 +312,10 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
 
     // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
     // loop is only visible when the loaded-each-round libs are shown).
-    // dfx=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
+    // debug=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
     // trace from /dev/kmsg and eats a vCPU at KVM speed (b128/b129).
     if full_path.ends_with(".so")
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
     {
         // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
         // every lib searched across ~15 dirs) consume the whole budget
@@ -483,14 +483,14 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
         };
     }
 
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::OPEN_PRE_NS, pc_pre);
-    let pc_tail = crate::dfx::fsw::pc_now();
+    crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_PRE_NS, pc_pre);
+    let pc_tail = crate::debug::fsw::pc_now();
     let result = if (flags & O_DIRECTORY) != 0 {
         crate::fs::vfs::file_opendir(&full_path, flags)
     } else {
         crate::fs::file_open(&full_path, flags, mode)
     };
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::OPEN_TAIL_NS, pc_tail);
+    crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_TAIL_NS, pc_tail);
 
     // sc33/sc34 hunt: the pivoted appspawn child dies at
     // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
@@ -913,7 +913,7 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     let flags = args[3] as u32;
 
     // pathcost: entry bracket (closed just before the lookup below).
-    let pc_pre = crate::dfx::fsw::pc_now();
+    let pc_pre = crate::debug::fsw::pc_now();
 
     if statbuf.is_null() {
         return -(errno::EFAULT as i64);
@@ -1158,14 +1158,14 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     // pathcost: PRE = syscall entry (copies, magic-link/empty-path probes,
     // resolve_user_path) up to the lookup; TAIL = getattr + copyout.
     if pc_pre != 0 {
-        crate::dfx::fsw::STAT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::debug::fsw::STAT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::STAT_PRE_NS, pc_pre);
-    let pc_tail = crate::dfx::fsw::pc_now();
+    crate::debug::fsw::pc_add(&crate::debug::fsw::STAT_PRE_NS, pc_pre);
+    let pc_tail = crate::debug::fsw::pc_now();
     let ret = match crate::fs::vfs::stat_file_by_path_with_flags(&full_path, &mut stat, lookup_flags) {
         Ok(()) => {
             let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
-            crate::dfx::fsw::pc_add(&crate::dfx::fsw::STAT_TAIL_NS, pc_tail);
+            crate::debug::fsw::pc_add(&crate::debug::fsw::STAT_TAIL_NS, pc_tail);
             if result != 0 {
                 -(errno::EFAULT as i64)
             } else {
@@ -1348,9 +1348,9 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
 /// baked per-user-100 bundle dirs at runtime with no guest-side record
 /// (bindwalk saw el2/100/log as ino 172 and el1/100/database as ino 44
 /// — neither is the baked inode 79/41), so every relevant syscall's
-/// path + result is recorded kernel-side while dfx=datatap is on.
+/// path + result is recorded kernel-side while debug=datatap is on.
 fn datatap_enabled(path: &str) -> bool {
-    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+    crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::DataTap)
         && (path.starts_with("/data/") || path == "/data")
 }
 
@@ -3418,7 +3418,7 @@ pub fn sys_ftruncate(args: SyscallArgs) -> i64 {
             .map(|f| f.path())
             .unwrap_or_default();
         if !p.is_empty() {
-            crate::dfx::pathstash::stash_file(crate::dfx::pathstash::OP_TRUNC, &p);
+            crate::debug::pathstash::stash_file(crate::debug::pathstash::OP_TRUNC, &p);
         }
     }
 
@@ -3442,7 +3442,7 @@ pub fn sys_truncate(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
     // leg-36B: truncate-family pathstash (see sys_ftruncate).
-    crate::dfx::pathstash::stash_file(crate::dfx::pathstash::OP_TRUNC, full_path.as_ref());
+    crate::debug::pathstash::stash_file(crate::debug::pathstash::OP_TRUNC, full_path.as_ref());
 
     match crate::fs::vfs::vfs_truncate(full_path.as_ref(), length) {
         Ok(()) => 0,
@@ -4522,14 +4522,14 @@ fn do_fsync(args: SyscallArgs, datasync: i32) -> i64 {
                     {
                         return -(errno::EINVAL as i64);
                     }
-                    // dfx=txnhunt (leg-29A): name the file when this
+                    // debug=txnhunt (leg-29A): name the file when this
                     // fsync/fdatasync later draws a TXN-HANG — sc310's
                     // hiview handler sat in fdatasync(fd) for 43 min
                     // and the entry frame showed only the raw fd.
                     // Lazy form (leg 44): skip the per-call File::path()
                     // construction when the switch is off.
-                    crate::dfx::pathstash::stash_file_lazy(
-                        crate::dfx::pathstash::OP_SYNC,
+                    crate::debug::pathstash::stash_file_lazy(
+                        crate::debug::pathstash::OP_SYNC,
                         || file.path(),
                     );
                     if is_ext4 {

@@ -51,7 +51,7 @@ fn lock_bucket(idx: usize) {
 
 /// Try-lock a bucket. Returns false if it is currently held.
 ///
-/// For wedge-diagnostic paths (dfx taskdump): the code that most needs the
+/// For wedge-diagnostic paths (debug taskdump): the code that most needs the
 /// snapshot runs precisely when some CPU is stuck — possibly while holding
 /// a bucket lock (sys_kill broadcast / send_signal_to_pgid / oom_kill call
 /// send_signal → wake_up → runqueue lock INSIDE the for_each callback).

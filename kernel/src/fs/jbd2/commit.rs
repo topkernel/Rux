@@ -111,7 +111,7 @@ pub fn jbd2_journal_commit_transaction(
     // post-exec "hang" family: every test writing a few KB of setup data
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
     if commit_transaction.t_revoke_records.lock().is_empty() {
-        crate::dfx::fsw::note_j_commit_fast(dirty_buffers.len());
+        crate::debug::fsw::note_j_commit_fast(dirty_buffers.len());
         let mut first_err: i32 = 0;
         for (blocknr, _kind) in &dirty_buffers {
             // Write-through semantics: every jbd2_journal_dirty_metadata
@@ -223,7 +223,7 @@ pub fn jbd2_journal_commit_transaction(
 
     // Phase 2: Write to journal
     {
-        crate::dfx::fsw::note_j_commit_slow();
+        crate::debug::fsw::note_j_commit_slow();
         let mut state = commit_transaction.t_state.lock();
         *state = TransactionState::Flush;
     }

@@ -80,7 +80,7 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel,
            "-append", f"root=/dev/vda rw init=/test/{args.probe} "
-                      f"console=ttyS0 dfx=watchdog"]
+                      f"console=ttyS0 debug=watchdog"]
     print("[boot]", " ".join(cmd[1:]), flush=True)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT)

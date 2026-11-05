@@ -2539,7 +2539,7 @@ pub fn vw_lag_watchdog(now: u64) {
         static WEDGE_DUMPED: core::sync::atomic::AtomicBool =
             core::sync::atomic::AtomicBool::new(false);
         if !WEDGE_DUMPED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            crate::dfx::taskdump::dump_all_tasks("vw-wedge");
+            crate::debug::taskdump::dump_all_tasks("vw-wedge");
         }
     }
 }

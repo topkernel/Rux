@@ -125,23 +125,23 @@ pub fn generate_ostype() -> Vec<u8> {
 /// Linux's format is NUMERIC ("Non-zero if the kernel has been tainted.
 /// Numeric values, which can be ORed together.") — the letters appear
 /// in the "Tainted:" line of WARN/BUG/panic output, not here. The value
-/// is the live `dfx::taint` mask, so a WARN or a soft lockup shows up
+/// is the live `debug::taint` mask, so a WARN or a soft lockup shows up
 /// immediately. LTP's tst_taint reads it before/after each test to
 /// detect kernel bugs (timerfd_settime02 aborts TBROK when the file is
 /// missing).
 pub fn generate_tainted() -> Vec<u8> {
-    alloc::format!("{}\n", crate::dfx::taint::get_taints()).into_bytes()
+    alloc::format!("{}\n", crate::debug::taint::get_taints()).into_bytes()
 }
 
 
 /// /proc/sys/kernel/panic_on_oops — dies on oops instead of killing the
 /// faulting task (kernel/panic.c's oops=panic seed, sysctl runtime
-/// knob). Default 0, like the reference; the DFX lane's oops path reads
-/// it through dfx::oops::panic_on_oops().
+/// knob). Default 0, like the reference; the debug lane's oops path reads
+/// it through debug::oops::panic_on_oops().
 pub fn generate_panic_on_oops() -> Vec<u8> {
     alloc::format!(
         "{}\n",
-        if crate::dfx::oops::panic_on_oops() { 1 } else { 0 }
+        if crate::debug::oops::panic_on_oops() { 1 } else { 0 }
     )
     .into_bytes()
 }
@@ -149,7 +149,7 @@ pub fn generate_panic_on_oops() -> Vec<u8> {
 pub fn write_panic_on_oops(input: &[u8]) -> i32 {
     match parse_u64(input) {
         Ok(v @ 0..=1) => {
-            crate::dfx::oops::set_panic_on_oops(v == 1);
+            crate::debug::oops::set_panic_on_oops(v == 1);
             0
         }
         _ => -(crate::errno::constants::EINVAL as i32),

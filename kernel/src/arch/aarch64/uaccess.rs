@@ -385,14 +385,14 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
 }
 
 // ============================================================================
-// Boot-time fault-containment self-check (dfx-aa64-uaccess-selftest)
+// Boot-time fault-containment self-check (debug-aa64-uaccess-selftest)
 // ============================================================================
 
 /// Poissoned-pointer probe for the whole fault-containment chain:
 /// access_ok range rules → asm fault site → data abort (EC 0x25) →
 /// exception-table fixup → short count / -EFAULT, with NO oops.
 ///
-/// Runs at dfx init (before init exec — userspace exec is blocked on the
+/// Runs at debug init (before init exec — userspace exec is blocked on the
 /// mm walker anyway) on a kernel context where TTBR0 still carries
 /// boot.S's early identity map ([0, 2GB) device + RAM blocks — it is
 /// torn down only after SMP start, well after this probe), so the probe
@@ -400,7 +400,7 @@ pub unsafe fn strnlen_user(str: *const u8, maxlen: usize) -> usize {
 /// 4 GB — below TASK_SIZE (256GB), above the early map, an invalid L1
 /// entry either way. access_ok must ACCEPT it (the exception table, not
 /// the range check, contains the fault).
-#[cfg(feature = "dfx-aa64-uaccess-selftest")]
+#[cfg(feature = "debug-aa64-uaccess-selftest")]
 pub fn selftest() {
     // printk's console emit does not reach PL011 on this board yet (the
     // boot table goes through console::putchar directly) — same here.

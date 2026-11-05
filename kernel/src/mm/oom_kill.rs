@@ -378,7 +378,7 @@ pub fn out_of_memory(oc: &mut OomControl) -> bool {
         // Leg-16: at the fake-OOM floor the interesting question is WHAT
         // holds the ~900MB kernel heap. One-shot, raw UART, allocation-
         // free (internally rate-limited to the first firing per boot).
-        crate::dfx::schb::oom_anat_dump();
+        crate::debug::schb::oom_anat_dump();
         false
     }
 }

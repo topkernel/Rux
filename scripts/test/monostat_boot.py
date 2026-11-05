@@ -103,7 +103,7 @@ def main():
             os.remove(f)
 
     append = ("root=/dev/vda rw init=/test/monostat console=ttyS0 "
-              "dfx=monowatch")
+              "debug=monowatch")
     cmd = [QEMU, "-M", "q35", "-accel", args.accel, "-cpu", "max",
            "-m", args.mem, "-smp", str(args.smp),
            "-display", "none",

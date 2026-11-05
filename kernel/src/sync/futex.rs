@@ -245,8 +245,8 @@ impl FutexKey {
         // uaddr AND the resolved physical identity — so a lost cross-
         // process wake (parent WAIT vs exec'd child WAKE on a MAP_SHARED
         // page) shows which side resolved which frame. Gated behind
-        // dfx=futextrace (console-cost discipline; see FXDV2 note).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace) {
+        // debug=futextrace (console-cost discipline; see FXDV2 note).
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FutexTrace) {
             static FXK_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             let n = FXK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -320,10 +320,10 @@ fn current_futex_mm_id() -> usize {
     }
 }
 
-/// DFX futex protocol tracer (feature `dfx-futex-trace`).
-#[cfg(feature = "dfx-futex-trace")]
+/// debug futex protocol tracer (feature `debug-futex-trace`).
+#[cfg(feature = "debug-futex-trace")]
 fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
     taskdump_raw_line(b"FTX ");
     taskdump_raw_line(tag);
@@ -338,7 +338,7 @@ fn ftx_trace(tag: &[u8], uaddr: usize, a: u64, b: u64) {
     taskdump_raw_line(b"\n");
 }
 
-#[cfg(feature = "dfx-futex-trace")]
+#[cfg(feature = "debug-futex-trace")]
 fn ftx_opname(op: i32) -> &'static [u8] {
     match op & FUTEX_CMD_MASK {
         FUTEX_WAIT => b"WAIT",
@@ -351,7 +351,7 @@ fn ftx_opname(op: i32) -> &'static [u8] {
     }
 }
 
-#[cfg(not(feature = "dfx-futex-trace"))]
+#[cfg(not(feature = "debug-futex-trace"))]
 fn ftx_trace(_tag: &[u8], _uaddr: usize, _a: u64, _b: u64) {}
 
 /// Waiter information
@@ -365,7 +365,7 @@ struct Waiter {
     /// Whether already woken
     woken: bool,
     /// Jiffies when this waiter was linked into its bucket chain (the
-    /// park stamp for the dfx=fuxstuck census; 0 on the alloc_waiter
+    /// park stamp for the debug=fuxstuck census; 0 on the alloc_waiter
     /// placeholder, overwritten at real insertion). NOT reset on requeue —
     /// the park episode continues, so the original stamp stays truthful.
     park_j: u64,
@@ -508,7 +508,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
     out
 }
 
-/// dfx=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
+/// debug=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
 /// timer heartbeat (same slot as the TXN-HANG audit). The post-creation OH
 /// stall web parks threads in userspace-internal condvars (useriam's FFRT
 /// executor 248-596 s, distributeddata's DB_TaskExecutor, samgr's Executor)
@@ -528,12 +528,12 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
 /// locks (waiter_of discipline) copying POD only; phase B reads task state
 /// under for_each_task (pid-hash per-bucket lock, slowtask contract) — the
 /// two phases never nest. Bounded: 8 lines per burst, 32 sampled waiters.
-/// Zero cost when dfx=fuxstuck is off (one switch load).
+/// Zero cost when debug=fuxstuck is off (one switch load).
 pub fn futex_stuck_census() {
     use alloc::vec::Vec;
     use core::sync::atomic::Ordering::Relaxed;
 
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FuxStuck) {
         return;
     }
     let now = crate::drivers::timer::get_jiffies();
@@ -1078,7 +1078,7 @@ pub fn futex_stuck_census() {
         let g = &groups[gi];
         let h = histos.iter().find(|h| h.tgid == g.tgid);
         // HOTPATH-PRINT: fuxstuck census report — gated by
-        // dfx=fuxstuck at futex_stuck_census() entry plus the 5s burst
+        // debug=fuxstuck at futex_stuck_census() entry plus the 5s burst
         // budget and the 1200-line LINES cap; never fires on a plain boot.
         use core::fmt::Write as _;
         let mut vmx = alloc::string::String::new();
@@ -1138,7 +1138,7 @@ pub fn futex_stuck_census() {
         }
     }
     if total > printed && printed == 8 {
-        // HOTPATH-PRINT: census overflow marker — same dfx=fuxstuck gate
+        // HOTPATH-PRINT: census overflow marker — same debug=fuxstuck gate
         // and 5s burst budget as the FUX-STUCK rows above (8 per burst).
         crate::pr_warn!(
             "FUX-STUCK-SUM stuck_total={} printed=8 (sampled {})",
@@ -1293,7 +1293,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
 
     let key = FutexKey::new_user(uaddr, mm, flags);
     let bucket_idx = futex_hash(&key);
-    #[cfg(feature = "dfx-futex-trace")]
+    #[cfg(feature = "debug-futex-trace")]
     ftx_trace(b"WAKE-IN", uaddr, mm as u64, nr_wake as u64);
 
     let mut ret = 0i64;
@@ -1395,10 +1395,10 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     }
     drop(head);
 
-    #[cfg(feature = "dfx-futex-trace")]
+    #[cfg(feature = "debug-futex-trace")]
     ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
 
-    // b133 hunt (dfx=syscalltrace): OH's samgr/SA threads park forever in
+    // b133 hunt (debug=syscalltrace): OH's samgr/SA threads park forever in
     // PRIVATE futex_wait inside musl's ld.so malloc locks — 120s+ binder
     // stalls queue the whole display chain behind them. Wake/wait protocol
     // is documented-solid, so the prime suspect is a KEY MISMATCH: a
@@ -1409,7 +1409,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // and uncontended FUTEX_WAKEs (every pthread_mutex_unlock) must not
     // pay for it.
     if ret < nr_wake as i64
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FutexTrace)
     {
         static MISS_REPORTS: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
@@ -1530,7 +1530,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             Some(v) => v,
             None => return -EFAULT as i64,
         };
-        #[cfg(feature = "dfx-futex-trace")]
+        #[cfg(feature = "debug-futex-trace")]
         ftx_trace(b"WAIT-VAL", uaddr, uval as u64, val as u64);
         if uval != val {
             return -EAGAIN as i64;
@@ -1649,7 +1649,7 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         }
         crate::sched::schedule();
         drop(wake);
-        #[cfg(feature = "dfx-futex-trace")]
+        #[cfg(feature = "debug-futex-trace")]
         ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 
         // The waiter's bucket may have changed while we slept (FUTEX_REQUEUE
@@ -2430,11 +2430,11 @@ pub fn futex_wake_op(
     woken
 }
 
-/// DFX: dump the live state of a futex word + its waiter chain.
-#[cfg(feature = "dfx-futex-trace")]
-pub fn dfx_dump_futex_state(uaddr: usize, parked_pid: u32) {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
-    use crate::dfx::taskdump::dump_syscall_ring_for;
+/// debug: dump the live state of a futex word + its waiter chain.
+#[cfg(feature = "debug-futex-trace")]
+pub fn debug_dump_futex_state(uaddr: usize, parked_pid: u32) {
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::dump_syscall_ring_for;
     let bucket = uaddr % HASH_SIZE;
     taskdump_raw_line(b"FTX-STATE u=");
     taskdump_dec(uaddr as u64);
@@ -2574,10 +2574,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // comm read + utf8 + name compare per op on every boot that never
     // runs hdf_devmgr; latched (or in the FXDV2 arena window below), it
     // printed up to 900 lines of HEALTHY churn per OH boot (~0.6 s of
-    // polled-16550 time). The hunt is gated behind dfx=futextrace (the
+    // polled-16550 time). The hunt is gated behind debug=futextrace (the
     // same switch as the wake-miss scan in futex_wake_in_mm); the
     // sc184/sc185 hunts re-arm with the flag.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FutexTrace)
     {
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
@@ -2660,7 +2660,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // while the count is nonzero) vs lost-wake (WAKE issued, writer
         // still parked) vs coherence drift (two processes observe
         // different vals for the same word).
-        // GATED behind dfx=futextrace since the lb243 decode: this tracer
+        // GATED behind debug=futextrace since the lb243 decode: this tracer
         // ran ALWAYS-ON from inside do_futex's hot path, and the param
         // arena is the boot critical path (param_service sync + every
         // param read). Its 500 budgeted console writes (each allocating +
@@ -2670,10 +2670,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         // print half-done (lb243: samgr's self-send worker frozen at
         // do_futex+0x112e over LowerHex/unix_write_slice_owned residue)
         // and the param sync chain freezes the whole service graph — the
-        // 'samgr-dark' boot family. Hunt with dfx=futextrace, never by
+        // 'samgr-dark' boot family. Hunt with debug=futextrace, never by
         // default.
         if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+            && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FutexTrace)
         {
             use core::sync::atomic::Ordering::Relaxed as R2;
             let n = FXDV2_N.fetch_add(1, R2);
@@ -2698,10 +2698,10 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         }
     }
 
-    #[cfg(feature = "dfx-futex-trace")]
+    #[cfg(feature = "debug-futex-trace")]
     {
         let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"FTX ENTER pid=");
         taskdump_dec(pid);
         taskdump_raw_line(b" op=");
@@ -2800,11 +2800,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             static PARKED_DUMPS: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             let n = PARKED_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            // dfx=parkdump: each park dump costs hundreds of UART+kmsg
+            // debug=parkdump: each park dump costs hundreds of UART+kmsg
             // lines (hilogd.rd_kmsg eats a vCPU copying them out of
             // /dev/kmsg — the b128/b129 lesson), so the park-dump family
             // is OFF in launcher-milestone boots.
-            if n < 16 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ParkDump) {
+            if n < 16 && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ParkDump) {
                 if let Some(t) = crate::sched::current() {
                     let tk = unsafe { &*t };
                     let comm = tk.comm();
@@ -2843,7 +2843,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
         }
     }
     // sc122 (Session P): the app-child park dump. The KILLDUMP path can
-    // never sample the park — SIGKILL lands right after the userspace DFX
+    // never sample the park — SIGKILL lands right after the userspace debug
     // freeze-dump handshake, so every kill catches the child inside that
     // handshake (getrusage loop / open), never the eternal wait. This
     // hook dumps AT WAIT ENTRY, in the parking thread's own syscall
@@ -2871,14 +2871,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         core::sync::atomic::AtomicU32::new(0);
                     let n =
                         APPPARK_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    // dfx=parkdump: the APP-PARK dump prints the child's
+                    // debug=parkdump: the APP-PARK dump prints the child's
                     // whole lib-region VMA table (APPMAP, ~2.9k lines per
                     // dump in sc179) + fd table + syscall rings — pure
                     // chain forensics, OFF in milestone boots (b128/b129
                     // hilogd.rd_kmsg lesson).
                     if n < 6
-                        && crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::ParkDump,
+                        && crate::debug::switches::enabled(
+                            crate::debug::switches::DebugSwitch::ParkDump,
                         )
                     {
                         crate::pr_warn!(
@@ -3317,13 +3317,13 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // main-thread futex on a shallow frame hit this — two pr_warn
     // lines per op through the polled UART until the 400-op budget
     // burned (~0.8 s of serial per boot). The census joins the
-    // dfx=futextrace family; the sc118/sc119 hunts re-arm with the
+    // debug=futextrace family; the sc118/sc119 hunts re-arm with the
     // flag.
     {
         const STK_PAGE: usize = 0x7fffffffc000;
         if uaddr & !0xfff == STK_PAGE
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::FutexTrace,
+            && crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::FutexTrace,
             )
         {
             // Budget raised 150 -> 400 for sc119: the page is 3 pages below
@@ -3437,11 +3437,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): condition_variable
     // wait_for is a hot per-op path for foundation/sa_main threads —
     // ungated this paid a comm compare per timed WAIT plus up to 240
-    // pr_warn lines per OH boot. The census joins the dfx=futextrace
+    // pr_warn lines per OH boot. The census joins the debug=futextrace
     // family; the sc156 hunt re-arms with the flag.
     if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET)
         && timeout != 0
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FutexTrace)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::FutexTrace)
     {
         if let Some(t) = crate::sched::current() {
             let tk = unsafe { &*t };
@@ -3660,7 +3660,7 @@ fn exit_ring_dump_tgid(tgid: u32) {
 }
 
 /// sc93 launcher gate: AMS SIGKILLs a lifecycle-timed-out app while the
-/// DFX userspace dumper itself fails on that app (every LIFECYCLE_TIMEOUT
+/// debug userspace dumper itself fails on that app (every LIFECYCLE_TIMEOUT
 /// freeze artifact says "normal stack:failed to fully dump due to
 /// timeout") — the kernel is the only observer that can still read the
 /// wedged process. Called at SIGKILL send time (signal.rs), when the app
@@ -4579,7 +4579,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // irq-off WORLD window); without this line that death is invisible.
     // Serial-cleanliness: the heartbeat joins the wwcensus family so
     // ordinary boots print nothing periodic.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WwCensus) {
         static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(last) >= 60 * hz {

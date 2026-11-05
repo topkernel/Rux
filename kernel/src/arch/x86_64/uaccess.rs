@@ -379,7 +379,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
                         crate::arch::mm::VirtAddr::new(page as u64),
                     )
                 };
-                crate::dfx::schb::note_cow(cow_j0);
+                crate::debug::schb::note_cow(cow_j0);
                 match cow_res {
                     crate::arch::mm::CowFaultResult::Resolved
                     | crate::arch::mm::CowFaultResult::Retry => {

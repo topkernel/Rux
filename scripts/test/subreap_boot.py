@@ -7,7 +7,7 @@ Verdict discipline (exitwalk_boot.py family):
   SUBREAP-PASS                          -> rc 0
   SUBREAPFAIL-*                         -> rc 2 (probe-level fail)
   TREE-PARENT-DEAD / TREE-SNAP-STALE /
-  TREE-UNLINKED (dfx=treehunt)          -> rc 2 (forensic: the
+  TREE-UNLINKED (debug=treehunt)          -> rc 2 (forensic: the
                                            invariant violation drew)
   kernel panic / Oops / wedge           -> rc 2
   timeout (no PASS line)                -> rc 3
@@ -64,7 +64,7 @@ def main():
         WT, "target/x86_64-unknown-none/debug/bzImage"))
     ap.add_argument("--accel", default="kvm",
                     help="kvm (default; falls back to tcg) or tcg")
-    ap.add_argument("--dfx", default="dfx=treehunt")
+    ap.add_argument("--debug", default="debug=treehunt")
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--show", action="store_true",
                     help="stream raw serial to stdout too")
@@ -93,7 +93,7 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel,
            "-append", f"root=/dev/vda rw init=/test/subreap_churn "
-                      f"console=ttyS0 {args.dfx}"]
+                      f"console=ttyS0 {args.debug}"]
     print("[boot]", " ".join(cmd[1:]), flush=True)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT)

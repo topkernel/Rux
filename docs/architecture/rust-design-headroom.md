@@ -53,7 +53,7 @@ type-enforced rather than review-enforced. Same for the run queue: the
 existing GRQ (divergence D-1) can gain a typed lock key so lock-order
 violations (INV-LOCK-*) are rejected at compile time via lock-key types.
 
-## 4. Deriving interface formats from structure definitions (procfs/, dfx/)
+## 4. Deriving interface formats from structure definitions (procfs/, debug/)
 
 **Mainstream approach:** hand-written format strings per file; drift is a
 review problem. **Paid incident:** five byte-format defects (column order,
@@ -106,7 +106,7 @@ the repo).
 ## Priority by expected payoff
 
 1. **§4 procfile macro** — smallest scope, kills a freshly-paid bug class,
-   immediate for the DFX lane.
+   immediate for the debug lane.
 2. **§1 capability traits** — medium scope, kills the errno-class at the
    biggest syscall surface; starts from the EINVAL fix already in flight.
 3. **§3 typed per-CPU + lock keys** — direct perf relevance (magazine

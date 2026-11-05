@@ -241,27 +241,27 @@ make build RELEASE=1
 | `kernel/src/arch/riscv64/trap.rs` | Trap/exception handling |
 | `kernel/src/arch/riscv64/pt_regs.rs` | PtRegs structure (register layout) |
 
-## Toggleable DFX Diagnostics
+## Toggleable debug Diagnostics
 
-The kernel's observability facilities live in `kernel/src/dfx/` and come in
+The kernel's observability facilities live in `kernel/src/debug/` and come in
 two flavors: **compile-time Cargo features** (hot-path hooks, zero overhead
-when off) and **runtime boot-parameter switches** (`dfx=...`, enable
+when off) and **runtime boot-parameter switches** (`debug=...`, enable
 individually).
 
 ### Compile-time features (Cargo.toml)
 
 | Feature | Cost | Purpose |
 |---|---|---|
-| `dfx-lock-owner` | One atomic store per lock/unlock | Spinlock holder tracking; deadlock warnings print `holder=<cpu>` |
+| `debug-lock-owner` | One atomic store per lock/unlock | Spinlock holder tracking; deadlock warnings print `holder=<cpu>` |
 
 ```bash
-# Regular build (zero DFX overhead)
+# Regular build (zero debug overhead)
 cargo build --target riscv64gc-unknown-none-elf --features riscv64
 # When hunting lock deadlocks
-cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owner
+cargo build --target riscv64gc-unknown-none-elf --features riscv64,debug-lock-owner
 ```
 
-### Runtime switches (boot parameter `dfx=`, comma-separated)
+### Runtime switches (boot parameter `debug=`, comma-separated)
 
 | Switch | Purpose |
 |---|---|
@@ -278,16 +278,16 @@ cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owne
 | `wwcensus` | Wake-wait census heartbeats (perf-gate census boots) |
 
 The full authoritative table is the switch registry in
-`kernel/src/dfx/switches.rs` (`dfx_switch_table!`); `sysrq`/debugfs
-control files mirror it under /sys/kernel/debug/dfx/.
+`kernel/src/debug/switches.rs` (`debug_switch_table!`); `sysrq`/debugfs
+control files mirror it under /sys/kernel/debug/debug/.
 
 ```bash
--append "root=/dev/vda rw console=ttyS0 dfx=watchdog"
+-append "root=/dev/vda rw console=ttyS0 debug=watchdog"
 ```
 
 ### Deadlock / hang capture tool
 
-`test/hunt-wedge.sh` automatically builds a kernel with `dfx-lock-owner`,
+`test/hunt-wedge.sh` automatically builds a kernel with `debug-lock-owner`,
 then loops smoke + nettest + pipe-bomb workloads watching for two classes of
 hangs (type A: lock-deadlock warning; type B: a pipe going silent with no
 output for >30s). When either fires, it captures per-CPU registers / stacks /

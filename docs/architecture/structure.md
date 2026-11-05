@@ -27,7 +27,7 @@ where it disagrees with these tables, the tables win.*
 | **fs/** | 80 | 61,091 | 19.1% | File system (ext4, procfs, jbd2, page cache, VFS) |
 | **arch/** | 73 | 43,440 | 13.6% | Three architectures (riscv64, x86_64, aarch64) |
 | **syscall/** | 12 | 33,840 | 10.6% | System call dispatch and implementations |
-| **dfx/** | 30 | 37,946 | 11.9% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
+| **debug/** | 30 | 37,946 | 11.9% | Observability (syscost, kallsyms, debugfs, taskdump, watchdog, traces) |
 | **drivers/** | 40 | 23,247 | 7.3% | virtio, DRM, serial, timer, input |
 | **net/** | 18 | 18,649 | 5.8% | TCP/UDP/unix/netlink stack |
 | **mm/** | 29 | 16,712 | 5.2% | Memory (zones, pcp pagesets, VMA, page cache glue, swap) |
@@ -350,7 +350,7 @@ Rux/
 |   |   |   +-- ksoftirqd.rs # Per-CPU softirq daemon
 |   |   |   +-- preempt.rs   # Preempt count and context tracking
 |   |   |
-|   |   +-- dfx/          # Diagnostics and debugging
+|   |   +-- debug/          # Diagnostics and debugging
 |   |   |   +-- mod.rs       # Module export
 |   |   |   +-- backtrace.rs # Stack backtrace
 |   |   |   +-- bug.rs       # BUG/WARN macros

@@ -113,14 +113,14 @@ fn tx_record_endpoints(
     }
 }
 
-/// dfx=tcptrace: sequence-level segment forensics for the hdc
+/// debug=tcptrace: sequence-level segment forensics for the hdc
 /// file-corruption hunt. Inbound lines print the receiver's post-parse
 /// view (nothing decoded yet); outbound lines print each emitted
 /// descriptor. Budget: 24000 lines per boot — enough for several full
 /// 1 MB transfers, then silent.
 fn tcp_trace_budget() -> bool {
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TcpTrace) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::TcpTrace) {
         return false;
     }
     N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24000

@@ -85,7 +85,7 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     # (1) the oops
     echo 'echo ===OS: provoking kernel oops (child shell dies) ==='
     sleep 0.3
-    echo 'sh -c "echo pagefault > /sys/kernel/debug/dfx/provoke-oops"'
+    echo 'sh -c "echo pagefault > /sys/kernel/debug/debug/provoke-oops"'
     sleep 2
     echo 'echo ===OS: SURVIVED-the-oops marker ==='
     sleep 0.5

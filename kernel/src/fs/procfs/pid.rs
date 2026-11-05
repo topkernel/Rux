@@ -1039,7 +1039,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
             // back to the caller's fdtable for VMAs that only know the
             // fd number.
             let mut resolved: Option<(String, u64)> = None;
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
                 && addr_space.get_vma_file(start).is_none()
             {
                 crate::pr_info!(

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """soak.py — long-run stability soak for the Ubuntu GUI (udesk) session.
 
-Boots the Ubuntu GUI image (smp4, MTTCG multi, dfx watchdog+taskdump),
+Boots the Ubuntu GUI image (smp4, MTTCG multi, debug watchdog+taskdump),
 logs into the desktop, starts a guest-side churn loop in the Terminal's
 dash (fork/exec + batch reads + /tmp write churn — the GNOME-session
 shape), then for N minutes:
@@ -75,7 +75,7 @@ class Soak:
             "-device", "virtio-gpu-pci",
             "-kernel", kernel,
             "-append", "root=/dev/vda rw init=/sbin/init console=ttyS0 "
-                       "dfx=watchdog,taskdump",
+                       "debug=watchdog,taskdump",
         ]
         print("qemu:", " ".join(cmd), flush=True)
         qemu_log = open(os.path.join(self.run_dir, "qemu.log"), "wb")

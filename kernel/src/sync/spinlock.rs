@@ -61,7 +61,7 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
-#[cfg(feature = "dfx-lock-owner")]
+#[cfg(feature = "debug-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
 // ==================== RawSpinlock (TTAS) ====================
@@ -95,7 +95,7 @@ pub struct RawSpinlock {
     /// AFTER acquiring / cleared BEFORE releasing, so a concurrent reader
     /// may briefly see a stale value — fine for the watchdog print, which
     /// only needs "who held it when everything wedged".
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     owner: AtomicUsize,
 }
 
@@ -104,31 +104,31 @@ impl RawSpinlock {
     pub const fn new() -> Self {
         Self {
             locked: AtomicU32::new(0),
-            #[cfg(feature = "dfx-lock-owner")]
+            #[cfg(feature = "debug-lock-owner")]
             owner: AtomicUsize::new(0),
         }
     }
 
-    /// Record the holder (dfx-lock-owner feature only).
+    /// Record the holder (debug-lock-owner feature only).
     #[inline]
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     fn record_owner(&self) {
         self.owner.store(crate::arch::smp::cpu_id() + 1, Ordering::Relaxed);
     }
 
-    /// Clear the holder (dfx-lock-owner feature only).
+    /// Clear the holder (debug-lock-owner feature only).
     #[inline]
-    #[cfg(feature = "dfx-lock-owner")]
+    #[cfg(feature = "debug-lock-owner")]
     fn clear_owner(&self) {
         self.owner.store(0, Ordering::Relaxed);
     }
 
     #[inline]
-    #[cfg(not(feature = "dfx-lock-owner"))]
+    #[cfg(not(feature = "debug-lock-owner"))]
     fn record_owner(&self) {}
 
     #[inline]
-    #[cfg(not(feature = "dfx-lock-owner"))]
+    #[cfg(not(feature = "debug-lock-owner"))]
     fn clear_owner(&self) {}
 
     /// Spinlock deadlock threshold (iterations before warning).
@@ -208,7 +208,7 @@ impl RawSpinlock {
         }
 
         // Holder identity: owner = hart+1 (0 = free / mid-handoff).
-        #[cfg(feature = "dfx-lock-owner")]
+        #[cfg(feature = "debug-lock-owner")]
         {
             let msg4 = b" holder=";
             for &b in msg4 {
@@ -231,10 +231,10 @@ impl RawSpinlock {
 
         unsafe { crate::console::putchar_no_lock(b'\n'); }
 
-        // dfx=watchdog: follow the warning with a full task-state snapshot
+        // debug=watchdog: follow the warning with a full task-state snapshot
         // (silent-wedge diagnosis — CPUs idle + sleepers never woken).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WatchdogDump) {
-            crate::dfx::taskdump::dump_all_tasks("deadlock-watchdog");
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WatchdogDump) {
+            crate::debug::taskdump::dump_all_tasks("deadlock-watchdog");
         }
     }
 

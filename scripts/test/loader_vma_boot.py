@@ -62,7 +62,7 @@ def main():
     if os.path.exists(serial):
         os.remove(serial)
 
-    append = "root=/dev/vda rw init=/test/loader_vma console=ttyS0 dfx=syscalltrace"
+    append = "root=/dev/vda rw init=/test/loader_vma console=ttyS0 debug=syscalltrace"
     cmd = [QEMU,
            "-M", "q35", "-accel", "tcg,thread=multi", "-cpu", "max",
            "-m", "2G", "-smp", "2",

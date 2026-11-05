@@ -124,7 +124,7 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", cfg["kernel"],
            "-append", "root=/dev/vda rw init=/test/filedrain "
-                      "console=ttyS0 dfx=taskdump,watchdog,periodic,"
+                      "console=ttyS0 debug=taskdump,watchdog,periodic,"
                       "memwatch,ledger"]
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL,

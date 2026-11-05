@@ -126,7 +126,7 @@ def main():
                     help="leg 46: stage the p5long wrapper and boot it as "
                          "init — pbench runs duration-bounded p5c2/p5c3 "
                          "windows with serial markers (pair with "
-                         "--append-extra dfx=wwcensus so the WW heartbeats "
+                         "--append-extra debug=wwcensus so the WW heartbeats "
                          "bracket the windows). cold = windows only; warm = "
                          "the board's p5 section first (regime driver), "
                          "then windows + pinned spread/samecpu variants; "
@@ -136,7 +136,7 @@ def main():
                     help="ship this prebuilt probe as init instead of building pbench.c")
     ap.add_argument("--append-extra", default=None,
                     help="leg 46: extra kernel cmdline tokens appended "
-                         "to -append (e.g. 'dfx=wwcensus')")
+                         "to -append (e.g. 'debug=wwcensus')")
     args = ap.parse_args()
 
     os.makedirs(WORK, exist_ok=True)

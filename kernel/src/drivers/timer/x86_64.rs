@@ -390,7 +390,7 @@ fn resync_report(msg: &[u8], v: u64) {
 }
 
 /// True when the calibrated TSC is the active timekeeper (no HPET).
-/// Exposed for diagnostics (dfx monowatch names the clocksource).
+/// Exposed for diagnostics (debug monowatch names the clocksource).
 pub fn tsc_active() -> bool {
     TSC_ACTIVE.load(Ordering::Acquire) != 0
 }

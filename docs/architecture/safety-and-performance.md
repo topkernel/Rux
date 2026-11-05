@@ -85,7 +85,7 @@ interior — 23 rows:*
 | 16 | do_exit woke the parent before schedule() — parent reaped (freed) the still-running child; the freed Task's ti_cpu (−1) sign-extended through trap.S `lw` into per-CPU index corruption | raw `*mut Task` protocol + trap.S | 3b39b73270c6 |
 | 17 | secondary CPU enabled timer IRQs before tp held a valid Task; the trap WFI-skip dereferenced garbage sepc (unmapped phys) — nested fault, loud panic (no silent read: the MMU caught it) | unchecked deref in trap path | 33b954a70b5a |
 | 18 | devfs stored `Arc::as_ptr` without an owning clone — dangles when the map entry drops (review-found) | safe storage → unsafe deref boundary | 69f456923298 (F7-02) |
-| 19 | KILLDUMP walked unpinned raw task pointers — freed mid-dump, poisoned tid printed, deepest boot page-faulted | dfx unsafe raw pointers | d14d9403bec7 |
+| 19 | KILLDUMP walked unpinned raw task pointers — freed mid-dump, poisoned tid printed, deepest boot page-faulted | debug unsafe raw pointers | d14d9403bec7 |
 | 20 | scheduler tick dereferenced a garbage cgroup_ptr (deterministic 0x652a... value; producer = the page-table teardown family of rows 8-11) | `unsafe { &*ptr }`, sched/cgroup.rs | 5393d3aa8a84 |
 | 21 | io_uring SQE index read from the user-shared ring used unchecked in `kvirt.add(idx * 64)` raw-pointer read (review-found) | unsafe raw-pointer arithmetic | 5465735f8999 (F15-12) |
 | 22 | ext4 write_group_descriptor `from_raw_parts` length taken from on-disk desc_size over a 32-byte struct — 64-byte read/write, on-disk descriptor fields corrupted | unsafe block, ext4 | 8bbb94fd534d |
@@ -182,7 +182,7 @@ the row ("index out of bounds: the len is 32 but the index is 32",
 165ee5fcebc0); the UTF-8 printer family on userspace comms
 (f0c57182 / 3ad32b9e); the stale negative-memo null-deref panic
 (ea26d923); the mmprof scalar-slot namespace indexing panic
-(276c2e70); the dfx switch-table array panic (363401cd); the memwatch
+(276c2e70); the debug switch-table array panic (363401cd); the memwatch
 PFN→site bound panic on >2G RAM (cbd41b40); R81 garbage-pid print
 hardening (2c044bb5); the R73 KERNPANIC stack-walk bound and dump
 latch (9777f195); the taskdump lockless-timeline scan panic
@@ -295,7 +295,7 @@ absents stated plainly. Each absent names what closing looks like.
   security/capability.rs) with UAPI numbering, exec transitions with
   rollback, no_new_privs; enforcement breadth partial (below).
 - Kernel-stack guard rails: per-slot canary (R18-2), KSTACK-HW depth
-  probe, freed-stack ring with 0xC3 free-paint (dfx-gated) — the
+  probe, freed-stack ring with 0xC3 free-paint (debug-gated) — the
   stack-protector + overflow-detection analog for kernel stacks.
 - Deferred-free quarantine for teardown-raced objects
   (mm/deferred_free.rs; the call_rcu idea, wall-clock so preempted
@@ -326,7 +326,7 @@ absents stated plainly. Each absent names what closing looks like.
   a measured boot/perf cost through the merge gate.
 - KASAN-style allocator poisoning breadth: today's poisoning is
   task-page paint + header audits + the buddy-meta shadow, all
-  dfx-gated (metawatch, R83); no redzones on small_alloc. Closing:
+  debug-gated (metawatch, R83); no redzones on small_alloc. Closing:
   build-flag redzones and poison-on-free in small_alloc/slab.
 - LSM surface: a Linux-like hook point exists; selinuxfs is a
   label-carrying compat mount, permissive by construction
@@ -343,7 +343,7 @@ absents stated plainly. Each absent names what closing looks like.
   print of a varying offset.
 - Kernel text/rodata W^X tightening: the image is mapped RWX
   (riscv64) / RW without NX (x86_64); no mark_rodata_ro pass exists
-  (posture row). Closing: post-init RO flip + a dfx page-table walk
+  (posture row). Closing: post-init RO flip + a debug page-table walk
   tripwire.
 - Compiler stack-protector / shadow-call-stack instrumentation: none
   today (the kernel-stack canary above is kernel-side, not
@@ -379,8 +379,8 @@ absents stated plainly. Each absent names what closing looks like.
   addresses in the lane record); enabled cost opt-in at 13-35
   ns/record; events-off census A/B identical (TERM-DESCHED 8/8, 0
   panics both sides). Real bug fixed in the same change: the round-2
-  alias CONSUMER (boot arming loop in DfxSwitch::set) was silently
-  dropped by a merge while its table survived — dfx= hunt boots had
+  alias CONSUMER (boot arming loop in DebugSwitch::set) was silently
+  dropped by a merge while its table survived — debug= hunt boots had
   armed nothing until restored. Lesson: table+consumer pairs
   reconcile as one unit; keeping the table and losing the call site
   is a silent observability outage, not a clean merge.

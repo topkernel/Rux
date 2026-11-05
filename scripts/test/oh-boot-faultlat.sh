@@ -9,7 +9,7 @@
 # never touches the shared original).
 #
 # Usage: oh-boot-faultlat.sh <tag> [kernel]
-# Env: ACCEL (default kvm), SMP (2), MEM (4G), EXTRA_APPEND (dfx= flags)
+# Env: ACCEL (default kvm), SMP (2), MEM (4G), EXTRA_APPEND (debug= flags)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

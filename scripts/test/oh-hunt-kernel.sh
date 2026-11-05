@@ -1,7 +1,7 @@
 #!/bin/bash
 # oh-hunt-kernel.sh — build the "every wedge names its syscall" kernel.
 #
-# Sprint recipe (ui-launcher timer/dfx lane): one ready-made kernel build
+# Sprint recipe (ui-launcher timer/debug lane): one ready-made kernel build
 # where each taskdump line carries, for EVERY task (D-state included):
 #
 #   uepc=/usp=      the user instruction/stack a sleeper is blocked at
@@ -12,18 +12,18 @@
 #                   riscv64-linux-gnu-addr2line / addr2line -e rux)
 #
 # plus, with the runtime switches below:
-#   dfx=periodic    a full task snapshot every 5 s — silent wedges land on
+#   debug=periodic    a full task snapshot every 5 s — silent wedges land on
 #                   serial even when nothing trips a watchdog
-#   dfx=taskdump    the "DFX!" UART magic takes an on-demand snapshot
-#   dfx=monowatch   ~1 Hz CLOCK_MONOTONIC jump tripwire (clocksource named)
-#   dfx=ledger      "LEDGER!" UART magic + OOM-moment page accounting
-#   dfx=watchdog    spinlock-stuck prints append the task snapshot
+#   debug=taskdump    the "debug!" UART magic takes an on-demand snapshot
+#   debug=monowatch   ~1 Hz CLOCK_MONOTONIC jump tripwire (clocksource named)
+#   debug=ledger      "LEDGER!" UART magic + OOM-moment page accounting
+#   debug=watchdog    spinlock-stuck prints append the task snapshot
 #
 # Build features used (kernel/Cargo.toml):
-#   dfx-taskdump-bt   the per-task bt/nr/args lines (taskdump.rs)
-#   dfx-futex-trace   futex sleeper word + waiter-chain dump in taskdump,
-#                     and (with dfx=futextrace at runtime) per-op traces
-#   dfx-lock-owner    deadlock prints carry holder=<cpu> (optional; adds
+#   debug-taskdump-bt   the per-task bt/nr/args lines (taskdump.rs)
+#   debug-futex-trace   futex sleeper word + waiter-chain dump in taskdump,
+#                     and (with debug=futextrace at runtime) per-op traces
+#   debug-lock-owner    deadlock prints carry holder=<cpu> (optional; adds
 #                     two atomic stores per spinlock pair — include when
 #                     lock ordering is in scope)
 #
@@ -34,7 +34,7 @@
 #         (a separate name — never clobbers the plain bzImage other
 #          flows boot). Boot it with the OH driver and:
 #
-#   EXTRA_APPEND="dfx=periodic,taskdump,monowatch" \
+#   EXTRA_APPEND="debug=periodic,taskdump,monowatch" \
 #       SMP=2 MEM=4G ACCEL=kvm ./run/oh-boot.sh hunt <bzImage-hunt path>
 #
 # Notes:
@@ -49,9 +49,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-FEATURES="x86_64,dfx-taskdump-bt,dfx-futex-trace"
+FEATURES="x86_64,debug-taskdump-bt,debug-futex-trace"
 if [ "${1:-}" = "--with-lock-owner" ]; then
-    FEATURES="$FEATURES,dfx-lock-owner"
+    FEATURES="$FEATURES,debug-lock-owner"
 fi
 
 echo "[hunt-kernel] building with features: $FEATURES"
@@ -61,4 +61,4 @@ python3 build/mkbzimage.py \
     target/x86_64-unknown-none/debug/bzImage-hunt
 
 echo "[hunt-kernel] done: target/x86_64-unknown-none/debug/bzImage-hunt"
-echo "[hunt-kernel] boot with EXTRA_APPEND='dfx=periodic,taskdump,monowatch'"
+echo "[hunt-kernel] boot with EXTRA_APPEND='debug=periodic,taskdump,monowatch'"

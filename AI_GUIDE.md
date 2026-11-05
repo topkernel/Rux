@@ -87,7 +87,7 @@ Notes:
 6. Performance gate — read the tier list in
    [AGENTS.md](AGENTS.md); `run/perf-gate.sh --tiers 1` for every
    change, deeper tiers for hot-path changes. If a change affects
-   performance through a path no tool measures, **add the DFX tool
+   performance through a path no tool measures, **add the debug tool
    that measures it** — measuring is part of the change.
 
 ## Repository layout
@@ -98,7 +98,7 @@ kernel/src/            the kernel
   sched/ mm/ fs/ ipc/  scheduler, memory, filesystems, IPC (incl. binder)
   drivers/             virtio, DRM, serial, …
   syscall/             syscall dispatch and implementations
-  dfx/                 observability (kallsyms, debugfs, taskdump, watchdog)
+  debug/                 observability (kallsyms, debugfs, taskdump, watchdog)
   tests/               in-kernel unit tests (run under QEMU via make test)
 kernel/verify/         Kani/proptest mirrors of kernel code — keep in sync
 test/                  guest-side C probes + boot/test drivers (tar-packed)
@@ -125,8 +125,8 @@ run/                   lane-local scratch and boot drivers (never commit
 ## Debugging toolkit
 
 - The serial console (`console=ttyS0`) is the primary log.
-- `dfx=taskdump,watchdog` boot flag: periodic task dumps + spinlock
-  watchdog. `dfx=memwatch` adds heap/page accounting.
+- `debug=taskdump,watchdog` boot flag: periodic task dumps + spinlock
+  watchdog. `debug=memwatch` adds heap/page accounting.
 - On panic the trap printer emits epc/ra/sp/badaddr plus 24 stack words;
   symbolize with
   `riscv64-linux-gnu-addr2line -e <kernel-elf> <addr>`.

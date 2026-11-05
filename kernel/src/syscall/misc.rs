@@ -117,7 +117,7 @@ struct EpollEntry {
     /// (LTP epoll_wait07: "Write channel for the 2nd time. No events
     /// expected").
     oneshot_fired: bool,
-    /// dfx=socksnap (b16 appspawn hunt): how many times a wait delivered
+    /// debug=socksnap (b16 appspawn hunt): how many times a wait delivered
     /// this entry — a readable LT entry with reports==0 while its epoll's
     /// wait_count grows is the lost-delivery signature.
     reports: u64,
@@ -130,10 +130,10 @@ struct EpollFile {
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
     wait_queue: crate::process::wait::WaitQueueHead,
-    /// dfx=socksnap (b16): creator pid, printed by the interest dump so an
+    /// debug=socksnap (b16): creator pid, printed by the interest dump so an
     /// epoll line can be tied to its owning process.
     owner_pid: u32,
-    /// dfx=socksnap (b16): total completed wait syscalls on this instance.
+    /// debug=socksnap (b16): total completed wait syscalls on this instance.
     wait_count: u64,
 }
 
@@ -332,7 +332,7 @@ fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     }
 }
 
-/// dfx=socksnap (b20 epoll wedge hunt): dump the epoll instances watching
+/// debug=socksnap (b20 epoll wedge hunt): dump the epoll instances watching
 /// `file_id` — one line per instance with owner, completed-wait count, and
 /// the entry row (fd, events, fid, last_reported, reports). Called from the
 /// Spawn-family connect trace (net::unix) because the khungtaskd cadence
@@ -343,7 +343,7 @@ fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
 /// never-reports signature. Lock order registry → entries (same as
 /// epoll_notify_file); collect under lock, print after release.
 pub fn epoll_dump_for_file(file_id: u64) {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SockSnap) {
         return;
     }
     let mut out: alloc::vec::Vec<(usize, u32, u64, alloc::vec::Vec<(i32, u32, u64, u32, u64)>)> =
@@ -399,7 +399,7 @@ pub fn epoll_dump_for_file(file_id: u64) {
     }
 }
 
-/// dfx=socksnap (appspawn wedge hunt, b15): dump the interest set of every
+/// debug=socksnap (appspawn wedge hunt, b15): dump the interest set of every
 /// epoll instance reachable through the wake registry — one line per
 /// instance listing up to 24 registered fds (fd number, events mask, file
 /// id, ET snapshot). Cross-reference against the AF_UNIX listener dump
@@ -408,9 +408,9 @@ pub fn epoll_dump_for_file(file_id: u64) {
 /// never made); one whose listener IS registered but never reports has a
 /// readiness bug. Lock order registry → entries matches epoll_notify_file.
 /// Formatting happens AFTER both locks drop (collect under lock, print
-/// outside). Purely diagnostic; self-gated by dfx=socksnap.
+/// outside). Purely diagnostic; self-gated by debug=socksnap.
 pub fn epoll_interest_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SockSnap) {
         return;
     }
     // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
@@ -995,7 +995,7 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
 }
 
 
-// Raw-console writers for the dfx=epollscan trace (leg-9 epoll hunt):
+// Raw-console writers for the debug=epollscan trace (leg-9 epoll hunt):
 // pr_info is dropped whole at session loglevel=3, so the scan trace uses
 // the same putchar_no_lock path as sched/wakewatch's ww_msg and evdev's
 // INPTRC/INPPL lines.
@@ -2257,7 +2257,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         ready_events.clear();
         trace_fds.clear();
         dead_fds.clear();
-        // dfx=epolltrace: identity of each ready fd (fd, file ops table) so
+        // debug=epolltrace: identity of each ready fd (fd, file ops table) so
         // the trace line can be symbolized against the kernel ELF.
         let mut trace_fds: alloc::vec::Vec<(i32, u32, *const ())> =
             alloc::vec::Vec::new();
@@ -2361,8 +2361,8 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                 // registration did not subscribe to them — they are not
                 // maskable. Only the I/O readiness bits honor entry.events.
                 let report_mask = entry.events | EPOLLERR | EPOLLHUP;
-                if crate::dfx::switches::enabled(
-                    crate::dfx::switches::DfxSwitch::EpollTrace,
+                if crate::debug::switches::enabled(
+                    crate::debug::switches::DebugSwitch::EpollTrace,
                 ) || crate::trace::EVENT_EPOLL_DELIVERY.armed() {
                     trace_fds.push((
                         entry.fd,
@@ -2370,7 +2370,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                         file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
                     ));
                 }
-                // dfx=socksnap (b16): count the delivery.
+                // debug=socksnap (b16): count the delivery.
                 entry.reports = entry.reports.saturating_add(1);
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
@@ -2402,12 +2402,12 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             );
         }
 
-        // dfx=epollscan (leg-9 epoll hunt): one raw-console line per scan —
+        // debug=epollscan (leg-9 epoll hunt): one raw-console line per scan —
         // the r13ep2 boot had 14 events drained into the device queue yet
         // every epoll_wait returned idle, so the missing datum is whether
         // the scan ran at all, how many interests it saw, and what it
         // collected. Rate-limited: first 400 then 1-in-100.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollScan) {
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::EpollScan) {
             use core::sync::atomic::{AtomicU64, Ordering};
             static SC_N: AtomicU64 = AtomicU64::new(0);
             let n = SC_N.fetch_add(1, Ordering::Relaxed);
@@ -2448,11 +2448,11 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     );
                 }
             }
-            // dfx=epolltrace: who got woken by which fd. Rate-limited to the
+            // debug=epolltrace: who got woken by which fd. Rate-limited to the
             // first 400 deliveries plus every 2000th after, so a spinning
             // waiter does not flood the serial console.
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::EpollTrace,
+            if crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::EpollTrace,
             ) {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
@@ -2494,7 +2494,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
-            // dfx=socksnap (b16): one completed wait syscall.
+            // debug=socksnap (b16): one completed wait syscall.
             epoll.wait_count = epoll.wait_count.saturating_add(1);
             return count as i64;
         }
@@ -2513,10 +2513,10 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         }
 
         if crate::signal::signal_pending() {
-            // dfx=epolltrace: an EINTR-storm burns a waiter at ~100% CPU
+            // debug=epolltrace: an EINTR-storm burns a waiter at ~100% CPU
             // with ZERO ready deliveries (invisible to the delivery trace).
             // Rate-limited print of the pending mask so a storm is obvious.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::EpollTrace)
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
@@ -2678,7 +2678,7 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
         if timer_id == 0 {
             // Timer pool exhausted: degrade to a single yield rather than
             // sleep forever (nothing else is guaranteed to wake us).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollTrace)
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::EpollTrace)
             {
                 use core::sync::atomic::{AtomicU64, Ordering};
                 static N: AtomicU64 = AtomicU64::new(0);
@@ -3332,9 +3332,9 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
-    // Serial-cleanliness: opt-in via dfx=sfddbg.
+    // Serial-cleanliness: opt-in via debug=sfddbg.
     if unsafe { (*task).pid() == 1 }
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SfdDbg)
     {
         static NT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
@@ -3820,13 +3820,13 @@ pub fn sys_timerfd_create(args: SyscallArgs) -> i64 {
     static TFDC_N: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
     let tfdc_i = TFDC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    // dfx=tfdcensus: WINDOWED caller census. The syscost boots show the
+    // debug=tfdcensus: WINDOWED caller census. The syscost boots show the
     // storm accelerating 1.9k -> 4.3k/s by t=240s, so a boot-start budget
     // only ever names bluetooth/audio's one-shots. Behind the switch the
     // tap prints the first 16 calls of every 500-jiffy window, so the
     // phase that runs the storm names its caller.
-    let tfdc_log = if crate::dfx::switches::enabled(
-        crate::dfx::switches::DfxSwitch::TfdCensus,
+    let tfdc_log = if crate::debug::switches::enabled(
+        crate::debug::switches::DebugSwitch::TfdCensus,
     ) {
         static WIN_JIF: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);

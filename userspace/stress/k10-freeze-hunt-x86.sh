@@ -94,7 +94,7 @@ timeout "$BUDGET" qemu-system-x86_64 -M q35 -accel kvm -cpu max \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,drive=rootfs \
   -kernel "$KERNEL" \
-  -append "root=/dev/vda rw init=/test/stress-ng/k10loop console=ttyS0 dfx=taskdump,watchdog" \
+  -append "root=/dev/vda rw init=/test/stress-ng/k10loop console=ttyS0 debug=taskdump,watchdog" \
   < /dev/null > "$LOG" 2>&1
 kill $FEEDER $WATCHER 2>/dev/null
 rm -f "$FIFO"

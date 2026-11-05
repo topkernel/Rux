@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../.."
 IMAGE="${IMAGE:-run/rootfs-stress.img}"
 KERNEL="${KERNEL:-target/x86_64-unknown-none/debug/bzImage}"
 OUTDIR="${OUTDIR:-run/stress-runs}"
-DFX="${DFX:-dfx=allocwatch,taskdump,watchdog}"
+debug="${debug:-debug=allocwatch,taskdump,watchdog}"
 EXTRA="${EXTRA:-syscost=1}"
 BUDGET="${BUDGET:-180}"
 mkdir -p "$OUTDIR"
@@ -65,13 +65,13 @@ debugfs -w -f "$INJ" "$IMAGE" 2>&1 | grep -v "^debugfs" | head -2 || true
 rm -f "$CMD" "$INJ"
 
 LOG="$OUTDIR/${CLASS}.log"
-echo "boot: class=$CLASS args=$ARGS dfx=$DFX extra=$EXTRA log=$LOG"
+echo "boot: class=$CLASS args=$ARGS debug=$debug extra=$EXTRA log=$LOG"
 timeout "$BUDGET" qemu-system-x86_64 -M q35 -accel kvm -cpu max \
   -m 2G -smp 2 -display none -serial stdio -monitor none -no-reboot -snapshot \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,drive=rootfs \
   -kernel "$KERNEL" \
-  -append "root=/dev/vda rw init=/test/stress-ng/rsrun console=ttyS0 $DFX $EXTRA" \
+  -append "root=/dev/vda rw init=/test/stress-ng/rsrun console=ttyS0 $debug $EXTRA" \
   > "$LOG" 2>&1 || true
 
 echo "=== verdict input (tail of $LOG) ==="

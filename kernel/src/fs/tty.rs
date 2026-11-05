@@ -782,7 +782,7 @@ impl TtyDevice {
 /// every console byte costs the writing task vCPU residency under KVM
 /// (port-IO VM exits); diverting them keeps dmesg complete while the UART
 /// stays idle during the race. The printk console path (loglevel-gated) and
-/// the raw DFX sinks are unaffected.
+/// the raw debug sinks are unaffected.
 fn console_output(_ctx: usize, bytes: &[u8]) {
     if CONSOLE_SINK_QUIET.load(Ordering::Acquire) {
         crate::printk::ring_stash_console(bytes);

@@ -276,7 +276,7 @@ fn kstack_slab_free(bottom: *mut u8) -> bool {
     true
 }
 
-/// Packed-slab state for the SC-ANAT beat line (dfx=schb):
+/// Packed-slab state for the SC-ANAT beat line (debug=schb):
 /// (blocks, live slots, fallback note). x86_64 only — every other arch
 /// keeps the plain power-of-two buddy allocation and reports zeros.
 #[cfg(target_arch = "x86_64")]
@@ -296,7 +296,7 @@ pub fn kstack_slab_stats() -> (u64, u64, u64) {
     (0, 0, 0)
 }
 
-// Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
+// Leg-16 kernel-heap anatomy (debug=schb): live kernel-stack count and the
 // boot-max stack high-water in bytes. The high-water probe ZEROES each
 // fresh stack at alloc (outside every lock) and scans for the first
 // nonzero word from the bottom at free time — the depth distribution is
@@ -307,7 +307,7 @@ static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
 static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
 
 /// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
-/// Both stay 0 unless dfx=schb armed the probe at alloc time.
+/// Both stay 0 unless debug=schb armed the probe at alloc time.
 pub fn kstack_anat() -> (u64, u64) {
     (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
 }
@@ -361,8 +361,8 @@ fn stack_cache_alloc() -> *mut u8 {
     #[cfg(not(target_arch = "x86_64"))]
     let bottom = plain_kstack_alloc();
     if !bottom.is_null() {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Schb)
+            && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::KsProbe)
         {
             // Fresh stack is visible to nobody else yet: zero it so the
             // free-side scan can measure the true high-water, and count it.
@@ -377,7 +377,7 @@ fn stack_cache_alloc() -> *mut u8 {
     bottom
 }
 
-/// DFX (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
+/// debug (LTP chunk@700 hunt, 2026-11-02): ring of recently freed kernel
 /// stacks, so a kernel fault with rsp inside a freed-but-recycled stack
 /// names the freer. Diagnostic only; cold path.
 pub struct FreedStackRec {
@@ -453,7 +453,7 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
                 while kk > 0 { kk -= 1; putchar(dd[kk]); }
                 // frame walk naming the deepest live frames
-                crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                crate::debug::backtrace::walk_stack_trace(&mut |pc, _fp| {
                     let _ = pc;
                 });
             }
@@ -481,11 +481,11 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
         }
     }
-    // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
+    // Leg-16 anatomy (debug=schb,ksprobe): the high-water scan + record
     // stash lives in free_kernel_stack (needs self for comm/pid); this
     // side only keeps the live count honest for the SC-ANAT kN column.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Schb)
+        && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::KsProbe)
     {
         KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
@@ -1001,7 +1001,7 @@ pub struct Task {
     /// forensic ring overwrites a parked waiter's record within
     /// milliseconds under system-wide traffic, so per-task storage is
     /// the only form that survives. Written at dispatch entry (Relaxed
-    /// stores); read by the DFX taskdump.
+    /// stores); read by the debug taskdump.
     pub last_syscall_nr: core::sync::atomic::AtomicU32,
     pub last_syscall_a0: AtomicU64,
     pub last_syscall_a1: AtomicU64,
@@ -3135,10 +3135,10 @@ impl Task {
             }
             return false;
         }
-        // Scribble hunter (dfx=scribble): track this Task's scheduling
+        // Scribble hunter (debug=scribble): track this Task's scheduling
         // fields from birth. No-op unless the runtime switch is on.
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::register(ptr);
+        crate::debug::scribble::register(ptr);
         return true;
     }
 
@@ -3379,19 +3379,19 @@ impl Task {
             if old_state.is_sleeping() || old_state.contains(TaskState::STOPPED) {
                 // forkprof (cmdline forkprof=1): waker-side body cost and
                 // the stamp consumed at the wakee's switch-in.
-                let fp = crate::dfx::forkprof::on();
-                let fp_t_wake = if fp { crate::dfx::forkprof::now() } else { 0 };
+                let fp = crate::debug::forkprof::on();
+                let fp_t_wake = if fp { crate::debug::forkprof::now() } else { 0 };
                 // cctx probe (closegap lane): select / enqueue / dispatch
                 // phase sums for the sleeping-target wake path.
-                let cc = crate::dfx::cctx::on();
-                let cc_t_sel = if cc { crate::dfx::cctx::now() } else { 0 };
-                crate::dfx::cctx::bump(&crate::dfx::cctx::WK_N);
+                let cc = crate::debug::cctx::on();
+                let cc_t_sel = if cc { crate::debug::cctx::now() } else { 0 };
+                crate::debug::cctx::bump(&crate::debug::cctx::WK_N);
                 // Select best CPU for this task (wake-affine / least-loaded)
                 let sched_class = crate::sched::class::task_sched_class(&*task);
                 let prev_cpu = (*task).ti_cpu();
                 let target_cpu = sched_class.select_task_rq(task, prev_cpu, 0);
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_SEL_NS, cc_t_sel);
-                let cc_t_enq = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_SEL_NS, cc_t_sel);
+                let cc_t_enq = crate::debug::cctx::now();
 
                 // Update task's CPU if it changed.
                 // R13-5: never steer a task that is still executing (on_cpu
@@ -3502,8 +3502,8 @@ impl Task {
                 // (pipe echo, futex handoff) still gets the in-place
                 // handoff from its own schedule().
                 let allowed = (*task).cpus_allowed();
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_ENQ_NS, cc_t_enq);
-                let cc_t_disp = crate::dfx::cctx::now();
+                crate::debug::cctx::add(&crate::debug::cctx::WK_ENQ_NS, cc_t_enq);
+                let cc_t_disp = crate::debug::cctx::now();
                 match crate::sched::claim_idle_cpu_for(allowed) {
                     Some(idle_cpu) => {
                         crate::sched::resched_cpu(idle_cpu);
@@ -3518,7 +3518,7 @@ impl Task {
                         crate::sched::preempt_check_wake(task);
                     }
                 }
-                crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);
+                crate::debug::cctx::add(&crate::debug::cctx::WK_DISP_NS, cc_t_disp);
 
                 // sched:sched_wakeup — the enqueue succeeded, the task is
                 // runnable on target_cpu (the reference's post-enqueue
@@ -3543,8 +3543,8 @@ impl Task {
                 }
 
                 if fp {
-                    crate::dfx::forkprof::add(crate::dfx::forkprof::P_WAKE_BODY, fp_t_wake);
-                    crate::dfx::forkprof::stamp_wake(pid as u32);
+                    crate::debug::forkprof::add(crate::debug::forkprof::P_WAKE_BODY, fp_t_wake);
+                    crate::debug::forkprof::stamp_wake(pid as u32);
                 }
                 true
             } else {
@@ -3869,7 +3869,7 @@ impl Task {
         }
     }
 
-    /// Raw parent-children-list head pointer (dfx=treehunt reads it to
+    /// Raw parent-children-list head pointer (debug=treehunt reads it to
     /// distinguish linked leaders from unlinked snapshot members; null
     /// for members by design). Diagnostic use only.
     #[inline]
@@ -4230,9 +4230,9 @@ fn preempt_underflow_report(
     // for a post-heal underflow that is the REAL guard the heal zeroed
     // (a guard held across a scheduler point); for a booking split it is
     // the phantom's home site. Rate-gate already passed above.
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         if let Some(task) = crate::sched::current() {
-            crate::dfx::leakorigin::report_outermost(
+            crate::debug::leakorigin::report_outermost(
                 b"UNDERFLOW-ORIGIN",
                 task as *mut Task,
             );
@@ -4377,7 +4377,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: a LIVE outermost pair just
             // completed — re-arm the run counter the tick-side heal
             // actually gates on. (The pb3 re-arm stored the superseded
@@ -4396,7 +4396,7 @@ impl Task {
         if val == crate::interrupt::preempt::SOFTIRQ_OFFSET
             && (prev & crate::interrupt::preempt::SOFTIRQ_MASK) == crate::interrupt::preempt::SOFTIRQ_OFFSET
         {
-            crate::dfx::leakorigin::note_softirq_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_softirq_release(self as *const Task as *mut Task);
             self.ti_pc_sirq_present_run.store(
                 0,
                 core::sync::atomic::Ordering::Relaxed,
@@ -4426,7 +4426,7 @@ impl Task {
         if val == crate::interrupt::preempt::PREEMPT_OFFSET
             && (prev & crate::interrupt::preempt::PREEMPT_MASK) == 1
         {
-            crate::dfx::leakorigin::note_release(self as *const Task as *mut Task);
+            crate::debug::leakorigin::note_release(self as *const Task as *mut Task);
             // phantom-bits / stress-port r3: live pair completed — re-arm
             // the run counter the heal gates on (see sub_preempt_count_at;
             // the old store hit the superseded ti_pc_zero_jif field).
@@ -4969,13 +4969,13 @@ impl Task {
                 }
             }
 
-            // Leg-16 anatomy (dfx=schb,ksprobe): high-water scan + record
+            // Leg-16 anatomy (debug=schb,ksprobe): high-water scan + record
             // stash. The stack is dead (on_cpu cleared + RCU waited
             // upstream), no locks held — safe to walk. Records stash the
             // surviving return addresses for the next schbd beat (the
             // in-context print was eaten by early-boot UART storms twice).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
-                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Schb)
+                && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::KsProbe)
             {
                 let base = stack_bottom as usize;
                 let mut off = 8usize; // skip the canary slot
@@ -5044,7 +5044,7 @@ impl Task {
                 }
             }
 
-            // DFX (LTP chunk@700 panic hunt, 2026-11-02): if any CPU's
+            // debug (LTP chunk@700 panic hunt, 2026-11-02): if any CPU's
             // live TSS.rsp0 still points at THIS stack's top, every later
             // user-origin trap entry on that CPU pushes its frame into
             // freed-and-recycled memory — the stale-rsp0 engine behind the
@@ -5110,7 +5110,7 @@ impl Task {
                 }
             }
 
-            // DFX: record for the freed-stack execution detector.
+            // debug: record for the freed-stack execution detector.
             note_kstack_freed(
                 stack_bottom as usize,
                 stack_top as usize,
@@ -5763,7 +5763,7 @@ impl Task {
         // memory that gets reaped and recycled while the members live.
         // The member's own exit then walks release_task's
         // parent_ptr()/remove_child through freed memory (the sc304
-        // signal-Arc Oops family; reproduced by dfx=treehunt +
+        // signal-Arc Oops family; reproduced by debug=treehunt +
         // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
         // member's snapshot to the new dest under this same lock hold —
         // the ring walk is the same bounded pattern the reparent member

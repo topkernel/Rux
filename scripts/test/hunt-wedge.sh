@@ -1,13 +1,13 @@
 #!/bin/bash
-# hunt-wedge.sh — Rux kernel wedge/deadlock现场捕获工具 (DFX)
+# hunt-wedge.sh — Rux kernel wedge/deadlock现场捕获工具 (debug)
 #
 # 用途：复现并捕获两类偶发系统级挂起的全量现场（QEMU monitor 寄存器+栈）：
 #   A 型：自旋锁死锁 —— guest 打印 "DEADLOCK: spinlock stuck ... holder=N"
 #   B 型：静默挂起 —— 管道命令 echo PP | cat 无输出持续 >30s（CPU idle、任务沉睡）
 #
-# 依赖内核侧 DFX 特性：
-#   编译期 feature  dfx-lock-owner   —— 死锁打印含 holder=<cpu>
-#   运行时开关      dfx=watchdog     —— boot 参数，DEADLOCK 后自动 dump 全任务状态
+# 依赖内核侧 debug 特性：
+#   编译期 feature  debug-lock-owner   —— 死锁打印含 holder=<cpu>
+#   运行时开关      debug=watchdog     —— boot 参数，DEADLOCK 后自动 dump 全任务状态
 #
 # 用法：
 #   ./test/hunt-wedge.sh [max_rounds]     # 默认 6 轮，任一轮捕获即停
@@ -23,11 +23,11 @@ ROUNDS=${1:-6}
 WORK=/tmp/rux-hunt
 mkdir -p $WORK
 
-# HUNT_PROD=1: hunt with the PRODUCTION build (no dfx-lock-owner) — the
+# HUNT_PROD=1: hunt with the PRODUCTION build (no debug-lock-owner) — the
 # feature changes binary layout and shifts the very races being hunted;
 # use it when the production gate reproduces a wedge the diagnostic build
 # does not. Monitor capture works either way (it needs no guest support);
-# only the holder=<cpu> field and dfx=watchdog taskdump are owner-build
+# only the holder=<cpu> field and debug=watchdog taskdump are owner-build
 # features.
 # HUNT_ICOUNT=1: deterministic execution (-icount shift=2) — timing
 # advances by instruction count, so the QEMU monitor no longer perturbs
@@ -40,11 +40,11 @@ else
     ICOUNT_ARGS=""
 fi
 if [ "${HUNT_PROD:-0}" = "1" ]; then
-    echo "[hunt] building PRODUCTION kernel (no dfx-lock-owner) ..."
+    echo "[hunt] building PRODUCTION kernel (no debug-lock-owner) ..."
     cargo build --target riscv64gc-unknown-none-elf --features riscv64 || exit 1
 else
-    echo "[hunt] building kernel with dfx-lock-owner ..."
-    cargo build --target riscv64gc-unknown-none-elf --features riscv64,dfx-lock-owner || exit 1
+    echo "[hunt] building kernel with debug-lock-owner ..."
+    cargo build --target riscv64gc-unknown-none-elf --features riscv64,debug-lock-owner || exit 1
 fi
 KRN=$WORK/kernel.elf
 RFS=test/rootfs.img
@@ -63,7 +63,7 @@ for round in $(seq 1 $ROUNDS); do
     -drive file=$RFS,if=none,id=rootfs,format=raw \
     -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
     -kernel $KRN \
-    -append "root=/dev/vda rw init=/bin/sh console=ttyS0 dfx=watchdog" \
+    -append "root=/dev/vda rw init=/bin/sh console=ttyS0 debug=watchdog" \
     > $LOG 2>&1 <<IN &
 sleep 2
 /test/smoke_test

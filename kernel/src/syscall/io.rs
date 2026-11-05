@@ -84,14 +84,14 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     // is a nonblocking fd returning EAGAIN in a hot loop. Census the
     // (comm, path) of EAGAIN reads once per comm.
     let ret = sys_read_inner(args);
-    if (ret == -11 || ret == 0) && crate::dfx::syscost::on() {
+    if (ret == -11 || ret == 0) && crate::debug::syscost::on() {
         if let Some(file) = crate::fs::file::get_file_fd_safe(args[0] as usize) {
             if ret == -11 {
-                crate::dfx::syscost::note_read_eagain(&file);
+                crate::debug::syscost::note_read_eagain(&file);
             } else {
                 // Covers the pipe/ext4 fast paths the generic-loop EOF
                 // census never sees (pa5: hilogd.rd_kmsg missing there).
-                crate::dfx::syscost::note_read_eof(&file);
+                crate::debug::syscost::note_read_eof(&file);
             }
         }
     }
@@ -100,7 +100,7 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
     // the remaining shape is a negative errno, and which one decides
     // kernel-fix vs OH-behavior routing.
     if ret < 0 && ret != -11 {
-        crate::dfx::syscost::note_read_fail(args[0] as usize, ret);
+        crate::debug::syscost::note_read_fail(args[0] as usize, ret);
     }
     ret
 }
@@ -131,7 +131,7 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
 /// sys_read/sys_write — one fresh fdtable get_file per iov on the hottest
 /// vector paths (perf-report 8.10.22: the 132-144M get_file/boot REST
 /// volume decomposes into 2-5x amplification of exactly this shape).
-/// `fd` rides along for the dfx census attribution.
+/// `fd` rides along for the debug census attribution.
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller (same contract the sys_read path had at its lookup point).
@@ -164,7 +164,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
         // not /dev/kmsg, not EOF, not EAGAIN).
         if n > 0 {
-            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+            crate::debug::syscost::note_read_data(&file, n as usize, fd);
         }
         return n;
     }
@@ -181,7 +181,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         // (same contract as the pipe path).
         let n = crate::net::unix::unix_read_user(&file, buf as *mut u8, count) as i64;
         if n > 0 {
-            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+            crate::debug::syscost::note_read_data(&file, n as usize, fd);
         }
         return n;
     }
@@ -193,7 +193,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
     {
         let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf as *mut u8, count) as i64;
         if n > 0 {
-            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+            crate::debug::syscost::note_read_data(&file, n as usize, fd);
         }
         return n;
     }
@@ -214,7 +214,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
             let chunk = left.min(z.len());
             if crate::arch::uaccess_safe::copy_out(p, &z[..chunk]) > 0 {
                 if filled > 0 {
-                    crate::dfx::syscost::note_read_data(&file, filled, fd);
+                    crate::debug::syscost::note_read_data(&file, filled, fd);
                     return filled as i64;
                 }
                 return -errno::EFAULT as i64;
@@ -224,7 +224,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
             filled += chunk;
         }
         crate::fs::inotify::notify_file(&file, crate::fs::inotify::inotify_events::IN_ACCESS);
-        crate::dfx::syscost::note_read_data(&file, count, fd);
+        crate::debug::syscost::note_read_data(&file, count, fd);
         return count as i64;
     }
     // Small-count stack staging (perf-r3): a 1-byte read (lat_syscall
@@ -246,7 +246,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
             return result as i32 as i64;
         }
         if result == 0 {
-            crate::dfx::syscost::note_read_eof(&file);
+            crate::debug::syscost::note_read_eof(&file);
             return 0;
         }
         let n = result as usize;
@@ -256,7 +256,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         if uncopied > 0 {
             return -errno::EFAULT as i64;
         }
-        crate::dfx::syscost::note_read_data(&file, n, fd);
+        crate::debug::syscost::note_read_data(&file, n, fd);
         return n as i64;
     }
     // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
@@ -281,7 +281,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         let result = file.read_slice(&mut kernel_buf[..chunk]);
         if result < 0 {
             if total > 0 {
-                crate::dfx::syscost::note_read_data(&file, total, fd);
+                crate::debug::syscost::note_read_data(&file, total, fd);
             }
             return if total > 0 { total as i64 } else { result as i32 as i64 };
         }
@@ -292,7 +292,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
             // /dev/kmsg's counters, so it is looping on some
             // EOF fd). Record (comm, path) once per comm;
             // syscost dumps print the table.
-            crate::dfx::syscost::note_read_eof(&file);
+            crate::debug::syscost::note_read_eof(&file);
             break;
         }
         let n = result as usize;
@@ -313,7 +313,7 @@ fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf
         }
     }
     if total > 0 {
-        crate::dfx::syscost::note_read_data(&file, total, fd);
+        crate::debug::syscost::note_read_data(&file, total, fd);
     }
     total as i64
 }
@@ -440,7 +440,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
         // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
         // its ~20 init-time frames; the old 48/pid budget cut exactly
         // there and the AddSystemAbility(5100) failure reason stayed
-        // invisible (dfx=writetrace boots only).
+        // invisible (debug=writetrace boots only).
         const WTRACE_PID_MAX: usize = 512;
         const WTRACE_SLOTS: usize = 256;
         static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
@@ -488,8 +488,8 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                             .filter(|&&b| b.is_ascii_graphic() || b == b' ')
                             .count();
                         if head >= 24
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::WriteTrace,
+                            && crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::WriteTrace,
                             )
                         {
                             crate::pr_info!("w pid {} fd {} hx {}: {}", pid, fd, hexout, t);
@@ -594,7 +594,7 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
 /// Leg-52 lever A: post-lookup write core shared by sys_write and
 /// sys_writev's stream loop (see read_file_core's note — the old writev
 /// paid one fdtable lookup per iovec through sys_write). `fd` rides
-/// along for the console fast-path check and the dfx stashes.
+/// along for the console fast-path check and the debug stashes.
 ///
 /// The user window `buf..buf+count` must be access_ok-validated by the
 /// caller.
@@ -674,7 +674,7 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     }
 
     // Regular file or redirected output
-    // dfx=txnhunt (leg-29A): name the file when this write
+    // debug=txnhunt (leg-29A): name the file when this write
     // later draws a TXN-HANG (sc303's storage family parked
     // in a write(9) loop; entry frame shows only the raw
     // fd). Stash BEFORE the pipe fast path so a hang in a
@@ -684,8 +684,8 @@ fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, bu
     // even with the switch off — File::path() walks the
     // dentry and formats, a per-call probe cost on the
     // write hot path.
-    crate::dfx::pathstash::stash_file_lazy(
-        crate::dfx::pathstash::OP_WRITE,
+    crate::debug::pathstash::stash_file_lazy(
+        crate::debug::pathstash::OP_WRITE,
         || file.path(),
     );
     // Pipe fast path: transfer directly user↔ring (see the
@@ -914,8 +914,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
         {
             // unixrd probe: outer bracket + outcome counts (libhilog's
             // writev(header, tag, content) storm producer anatomy).
-            let ur_t0 = crate::dfx::unixrd::now();
-            crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_N);
+            let ur_t0 = crate::debug::unixrd::now();
+            crate::debug::unixrd::bump(&crate::debug::unixrd::WV_N);
             // Bound the gathered datagram like sys_sendmsg does (R7-D4
             // heap discipline; Linux answers an oversized message with
             // EMSGSIZE).
@@ -933,12 +933,12 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                 let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
                     iov_addr + i * core::mem::size_of::<Iovec>(),
                 ) else {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
                 };
                 if !iov.iov_base.is_null() && iov.iov_len != 0 {
                     if gathered.try_reserve_exact(iov.iov_len).is_err() {
-                        crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                        crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                         return -errno::ENOMEM as i64;
                     }
                 }
@@ -946,13 +946,13 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // Entries were whole-vector validated above; zero-length and
             // NULL-base entries contribute nothing (a total-0 dgram
             // writev is a no-op returning 0, like the reference).
-            let ur_t_gather = crate::dfx::unixrd::now();
+            let ur_t_gather = crate::debug::unixrd::now();
             for i in 0..iovcnt {
                 // Read the iovec entry through the exception-table copy.
                 let Some(iov) = crate::arch::uaccess_safe::read_user::<Iovec>(
                     iov_addr + i * core::mem::size_of::<Iovec>(),
                 ) else {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
                 };
                 let base = iov.iov_base as usize;
@@ -961,8 +961,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                     continue;
                 }
                 if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_GATHER_NS, ur_t_gather);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EMSGSIZE as i64;
                 }
                 // perf-ipc: reserve + copy over the reserved window — the
@@ -970,15 +970,15 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
                 // copy_in overwrote it (hilogd's writev(h28, tag, content)
                 // paid a full memset of the record per call).
                 if !crate::fs::file::gather_append_user(&mut gathered, base, len) {
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
-                    crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_GATHER_NS, ur_t_gather);
+                    crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                     return -errno::EFAULT as i64;
                 }
             }
-            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_GATHER_NS, ur_t_gather);
-            crate::dfx::unixrd::addb(&crate::dfx::unixrd::WV_GATHER_B, gathered.len() as u64);
+            crate::debug::unixrd::add(&crate::debug::unixrd::WV_GATHER_NS, ur_t_gather);
+            crate::debug::unixrd::addb(&crate::debug::unixrd::WV_GATHER_B, gathered.len() as u64);
             if gathered.is_empty() {
-                crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                 return 0;
             }
             // Leg-52 lever A: write through the file resolved at the head
@@ -990,24 +990,24 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
                 & crate::fs::file::FileFlags::O_ACCMODE;
             if mode == crate::fs::file::FileFlags::O_RDONLY {
-                crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+                crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
                 return -errno::EBADF as i64;
             }
             // perf-ipc: hand the gathered buffer to the unix engine OWNED
             // (write_slice would re-copy it into the segment).
-            let ur_t_send = crate::dfx::unixrd::now();
+            let ur_t_send = crate::debug::unixrd::now();
             let sent = crate::net::unix::unix_write_slice_owned(&file, gathered) as i64;
-            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_SEND_NS, ur_t_send);
+            crate::debug::unixrd::add(&crate::debug::unixrd::WV_SEND_NS, ur_t_send);
             if sent < 0 {
                 if sent == -11 {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_EA_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::WV_EA_N);
                 } else {
-                    crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_ERR_N);
+                    crate::debug::unixrd::bump(&crate::debug::unixrd::WV_ERR_N);
                 }
             } else {
-                crate::dfx::unixrd::bump(&crate::dfx::unixrd::WV_OK_N);
+                crate::debug::unixrd::bump(&crate::debug::unixrd::WV_OK_N);
             }
-            crate::dfx::unixrd::add(&crate::dfx::unixrd::WV_OUTER_NS, ur_t0);
+            crate::debug::unixrd::add(&crate::debug::unixrd::WV_OUTER_NS, ur_t0);
             return sent;
         }
     }
@@ -1259,9 +1259,9 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                 // fires exactly when the kms sw winsys's MAP_DUMB or its
                 // node mmap fails inside RS while the same chain works in
                 // isolation (glmprobe). Trace the MAP_DUMB requests and
-                // every failing drm ioctl. Gated behind dfx=ohhunt
+                // every failing drm ioctl. Gated behind debug=ohhunt
                 // (known-gap 4: hunt taps off the hot path by default).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt)
                     && request == 0xc010_64b3
                 {
                     // struct drm_mode_map_dumb: handle@0 (read via uaccess;
@@ -1284,7 +1284,7 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                     }
                 }
                 if ret < 0
-                    && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OhHunt)
+                    && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::OhHunt)
                 {
                     static IOCTLFAIL_N: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);

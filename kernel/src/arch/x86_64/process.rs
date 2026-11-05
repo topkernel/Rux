@@ -80,7 +80,7 @@ pub fn flush_thread() {
             super::cpu::stts();
         }
         // Scribble hunter: absorb this legitimate in-run write.
-        crate::dfx::scribble::note_thread_write(current);
+        crate::debug::scribble::note_thread_write(current);
     }
 }
 
@@ -126,7 +126,7 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
                 super::cpu::wrmsr(MSR_FS_BASE, addr);
             }
             // Scribble hunter: absorb this legitimate in-run write.
-            crate::dfx::scribble::note_thread_write(current);
+            crate::debug::scribble::note_thread_write(current);
             0
         }
         ARCH_GET_FS => {
@@ -151,7 +151,7 @@ pub fn sys_arch_prctl(args: crate::syscall::SyscallArgs) -> i64 {
                 super::cpu::wrmsr(MSR_KERNEL_GS_BASE, addr);
             }
             // Scribble hunter: absorb this legitimate in-run write.
-            crate::dfx::scribble::note_thread_write(current);
+            crate::debug::scribble::note_thread_write(current);
             0
         }
         ARCH_GET_GS => {

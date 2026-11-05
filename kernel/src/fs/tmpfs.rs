@@ -1167,7 +1167,7 @@ fn tmpfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             && buf.len() > 1
             && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
             && buf[1] == b':'
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DbFileTrace)
+            && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::DbFileTrace)
         {
             let show = n.min(80);
             crate::println!(
@@ -1212,7 +1212,7 @@ fn tmpfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         if !buf.is_empty()
             && matches!(buf[0], b'I' | b'G' | b'Q' | b'S' | b'E' | b'V')
             && buf.get(1) == Some(&b':')
-            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DbFileTrace)
+            && crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::DbFileTrace)
         {
             let show = buf.len().min(80);
             crate::println!(

@@ -38,14 +38,14 @@ Runs (this worktree, `run/`):
 | `pa-pa23-tickfix-tcg` | main@78460742 + the launcher lane's timer fix hunk ONLY (u128 multiply-then-shift, `tsc_delta_nominal`, extracted from samgr-callback wip 1e54319f; scratch branch `scratch/tickfix`, commit 9a451bef — pre-merge validation of the A-line fix, never for main) | syscost=1 sprobe=0, **ACCEL=tcg** | 600 s wall (~300 guest s, dumps t=60..540) | leg-15 tick-fix battery (section 2h): tripwire `[ok]` 16 jiffies/150 ms (pa21: 0 [fail]); tick counters 99.9/s/CPU sustained through all 9 dumps; WW IRQ-OFF-WINDOW 2 prints, organic ages 414/251 ms (pa21: 57 all at exactly 1001 ms); WAKE-STRANDED 0 (pa21: 100); TERM-DESCHED 8 and WAKE-REFUSED 32 — identical to pa21 (tick-independent census counts hold); nanosleep avg 1.87 s -> 88.5 ms (-21x) at same-horizon t=60; clock_gettime max 654 ms -> 3 ms; composer_host.ready +95.1 -> +89.9 s wall (-5.5%) |
 | `pa-pa24-tickfix-probe-tcg` | pa23's branch + pa16 probe v3 patch (scratch 520970f0; nm run/pa24-nm.txt) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 battery item (b), EFLAGS-exact probe under the fix: IF=0 35.3% of machine at t=540 — TCG-inflated, not comparable to the KVM 23% band (official re-measure = post-merge KVM flagship); structure intact (heal 0.05-0.09% miss=0, max REST segment 13 ms ms-class, site table family shape kept) + expected new timer.rs:173/:317 site pair (true 100 Hz hrtimer dispatch); SOFTIRQ zone share 7.7-13.9% of IF=0 (was 1.0-1.7% pre-fix KVM — suppressed dispatch volume now real); WW/WAKE-STRANDED prints 0 all boot; tripwire `[ok]` |
 | `pa-pa25-prefix-tcg` | stock main@78460742 (pre-fix rebuild; tripwire `[fail]` confirms) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 same-accel deep baseline for pa23: WW ages pinned 1001 ms x283; nanosleep @t=240 avg 1.34 s / n 1300 (pa23: 120 ms / 6549, -11x at depth); futex+epoll avgs UNCHANGED (F3 tail, tick-independent); composer 130.3 s vs pa23 89.9 s but appspawn.started 312 s vs 468 s — opposite directions, wall-clock deltas noise-dominated, no claim; both runs end at the same depth (appspawn, not bundles) |
-| `pa-pa26-preview-kvm` | main@6aa2fc74 + merge --no-commit of A-line 675095c0 (fix only; timer file verified byte-identical to scratch/tickfix) + pa16-probe v3; provenance run/pa26-built-from.txt; bzImage run/pa26-preview-bzImage (untracked, >10MB leg rule) | syscost=1 sprobe=0, **ACCEL=kvm** | 600 s wall (dumps to t=540) | **LEG-16 PREVIEW of the flagship** (official = post-merge re-run; see 2i): tripwire `[ok]` 15 jiffies/150 ms; **IF=0 = 25.5% of machine cumulative** (cpu0 138.6 s + cpu1 136.8 s / 2x540 s) — INSIDE the pre-fix KVM band 23.4-25.0%, so the fix does NOT move total IRQ-off share (it removes clock granularity, not irqsave work); splits REST 88.4% / HARD 7.7% / SOFT 3.1% / UART 0.7% — SOFTIRQ component 1.0-1.7% -> 3.1% of IF=0 (real hrtimer dispatch; direction matches pa24's TCG 7.7-13.9% but far below TCG inflation); max closed segments 3-7 ms ms-class; heal miss=0; REST #1 single site = GRQ sched.rs:2140 (68.8 s, 12.3 M seg, avg 5.6 us) over small_alloc family 71.5 s/4 sites, file.rs:676 29.1 s, wait.rs family 36.3 s, NEW timer.rs:173 pair 2.3 s; tick-mode kernel share 84.1-85.6% (post-fix true sampling; pa17/20 pre-fix read 86-89%); nanosleep avg 183 ms @ n=20048 (pa17 pre-fix KVM: 2.2 s — ~-12x on KVM, confirming the TCG -11x at depth); clock_gettime 30.9 M @ 3 us avg, cumulative max 289 ms (late-boot host-noise class); depth: appspawn binary load +5.4 s, composer host start +25.4 s, BootAnimation procs ready-true +39.98 s and alive to +541 s, foundation SIGCHLD +50.3 s (appfwk/launcher/bms/lockscreen not set), NO bootanimation.finished/launcher.ready at 600 s — same depth class as pre-fix quiet boots, single boot, no wall-clock claim; hot rip page 26% = the enable_irq/restore_irq thunk page (documented cli-window re-enable bias, amplified because ticks now really land — NOT a new cost center). LEG-17 PROVENANCE CORRECTION: the merge --no-commit brought the A-line dfx commits too (binder-stall/sleepsnap/TICKPROBE prints — 563 binder-stall lines in this log; 675095c0's parent is not on main), so this kernel is NOT identical to the official pa27 kernel; timer file itself was identical, so the tick-fix validation transfer stands. Superseded by pa27 wherever both exist. |
+| `pa-pa26-preview-kvm` | main@6aa2fc74 + merge --no-commit of A-line 675095c0 (fix only; timer file verified byte-identical to scratch/tickfix) + pa16-probe v3; provenance run/pa26-built-from.txt; bzImage run/pa26-preview-bzImage (untracked, >10MB leg rule) | syscost=1 sprobe=0, **ACCEL=kvm** | 600 s wall (dumps to t=540) | **LEG-16 PREVIEW of the flagship** (official = post-merge re-run; see 2i): tripwire `[ok]` 15 jiffies/150 ms; **IF=0 = 25.5% of machine cumulative** (cpu0 138.6 s + cpu1 136.8 s / 2x540 s) — INSIDE the pre-fix KVM band 23.4-25.0%, so the fix does NOT move total IRQ-off share (it removes clock granularity, not irqsave work); splits REST 88.4% / HARD 7.7% / SOFT 3.1% / UART 0.7% — SOFTIRQ component 1.0-1.7% -> 3.1% of IF=0 (real hrtimer dispatch; direction matches pa24's TCG 7.7-13.9% but far below TCG inflation); max closed segments 3-7 ms ms-class; heal miss=0; REST #1 single site = GRQ sched.rs:2140 (68.8 s, 12.3 M seg, avg 5.6 us) over small_alloc family 71.5 s/4 sites, file.rs:676 29.1 s, wait.rs family 36.3 s, NEW timer.rs:173 pair 2.3 s; tick-mode kernel share 84.1-85.6% (post-fix true sampling; pa17/20 pre-fix read 86-89%); nanosleep avg 183 ms @ n=20048 (pa17 pre-fix KVM: 2.2 s — ~-12x on KVM, confirming the TCG -11x at depth); clock_gettime 30.9 M @ 3 us avg, cumulative max 289 ms (late-boot host-noise class); depth: appspawn binary load +5.4 s, composer host start +25.4 s, BootAnimation procs ready-true +39.98 s and alive to +541 s, foundation SIGCHLD +50.3 s (appfwk/launcher/bms/lockscreen not set), NO bootanimation.finished/launcher.ready at 600 s — same depth class as pre-fix quiet boots, single boot, no wall-clock claim; hot rip page 26% = the enable_irq/restore_irq thunk page (documented cli-window re-enable bias, amplified because ticks now really land — NOT a new cost center). LEG-17 PROVENANCE CORRECTION: the merge --no-commit brought the A-line debug commits too (binder-stall/sleepsnap/TICKPROBE prints — 563 binder-stall lines in this log; 675095c0's parent is not on main), so this kernel is NOT identical to the official pa27 kernel; timer file itself was identical, so the tick-fix validation transfer stands. Superseded by pa27 wherever both exist. |
 | `pa-pa27-flagship-kvm` | **merged main@e1e317f2 (= 199f308c timer fix, timer file diffed EMPTY vs scratch/tickfix and hunk byte-identical to 9a451bef/675095c0 — section 2j step 1)** + pa16-probe v3 (nm run/pa27-nm.txt; parse run/pa27-parse.txt) | syscost=1 sprobe=0, **ACCEL=kvm** | 780 s wall (dumps to t=720) | **THE OFFICIAL POST-MERGE FLAGSHIP (section 2j): tripwire `[ok]` 15 jiffies/150 ms; IF=0 = 25.7% of machine at t=720 (cpu0 185.9 s + cpu1 184.7 s / 2x720 s; heal miss=0 both CPUs; same-horizon t=540 reads 25.53% vs pa26's 25.50% — preview confirmed to 0.03 pp); split REST 88.5% / HARD 7.6% / SOFT 3.1% / UART 0.8% of IF=0 — official SOFTIRQ 3.1% confirms the suppressed hrtimer dispatch is real (pre-fix 1.0-1.7%; softirq busy 13.9 s/720 s vs pa16's 2.5 s/420 s, v1/v8 raises at the ~100 Hz/CPU dispatch ceiling); max closed segments 3-6 ms; REST sites: GRQ sched.rs:2140 96.1 s (17.7 M @ 5.4 us — volume ~2x pa16, avg flat), small_alloc 4 sites 91.0 s, file.rs:676 39.3 s, wait.rs family 50.0 s, EPOLL misc.rs:190 25.0 s, timer.rs:173/:317 pair 3.3 s; 95.4% of REST attributed; ticks 99.85/s/CPU sustained (71,890+71,845 samples/720 s); tick modes c0 13.5/85.1/1.4 c1 14.8/83.4/1.8; nanosleep avg 221 ms @ n=22,848 (-10x vs pa17 pre-fix KVM 2.2 s), clock_gettime 42.6 M @ 3 us max 288 ms (host-noise class); syscalls 100.9 M total (series-deepest volume); census TERM-DESCHED 8 / WAKE-REFUSED 32 / WAKE-STRANDED 0 / PREEMPT-LEAK 0, WAKE-RUN-LEAK 486 prints (pre-fix pa18/20: 677-678), IRQ-OFF-WINDOW prints 9; UART 1.49 M bytes @ 13.2-13.6 us/byte; milestones (host stamps): composer_host.ready +29.8 s, bms.appfwk param activity +57.4 s (appfwk.ready time-param already set; bms/launcher/lockscreen NOT set), appspawn.started +80.1 s, NO bootanimation exec / launcher.ready at 780 s — WALL-CLOCK VERDICT: not moved beyond the band (composer at the fast edge, appspawn above the band top — both directions = single-boot variance; F3 + binder cost classes own the deep-boot wall) |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 | `ref-r1..r4` (LEG-23) | **reference kernel** = the OH image's own OHOS 6.6.101 bzImage (oh-robot images, same files oh-ref-r1 booted); userspace = image + pbench injected in the key_enable slot (run/pbref-inject.sh, private reflink system copy, e2fsck-clean; trigger = bootevent.launcher.ready param job) | private reflink userdata-tok, no snapshot on that drive | ~35-40 s wall each (probe starts t=10.2-16.7s, powerdown t=32-35s kernel) | **LINUX REFERENCE P1-P7 BANKED** (perf-report.md 8.8, table 8a Linux column): 4/4 boots full pass (25/25 lines, DONE rc=0, results extracted via debugfs), machine class matched to pa (q35/KVM/-cpu max/SMP2/4G, foreign_qemus 4-5). Med-of-4 highlights: p1_null 0.040us, p1_clock 0.070us, p2 half-rt 0.090us, p3a anon 5.01us med THP-bimodal (avg 9.8-10.3 stable), p3b COW 0.751us, p4 fork+exit 10.88us / fork+exec 22.37us, p5a 0.180us, p6 stat 0.271 / openclose 0.436 / read_cached 0.676us, getdents sweep 88.9us, write+fsync 4.75ms, mkdrmdir 40.4us, unlink 26.99us, p7 overshoot 14.64us. Med spread <=6.4% on 18/21 benches; p3a's 70% spread triggered the protocol's 4th run (THP 2MB coalescing — 0.38-7.15us med across runs, avg is the comparable stat) |
 | `pa-pa32` (LEG-23) | origin/main @ 3cb8a24e (dfx-align tranche 1+2, 30 kernel/ files — the commit that fired the census-hold gate), built via make build-x86 (run/pa32-built-from.txt; bzImage run/pa32-main-bzImage untracked 11.5MB) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31 fourth consecutive roll). Ticks 99.85-99.86/s/CPU sustained to t=720 (71,890/71,902 samples — pa27 flagship rates) — tick fix holds on merged dfx-align. WAKE-STRANDED 7 prints: 2 organic 1.0-1.1s (pa31 class) + 5 strands pid=303 appspawn 24-34s — a phase pa31 never reached (its foundation died +45s); organic non-grid values, echoes the A-line's live sc217 strand_max 24.7s; recorded as phase-new + A-line-correlated, NOT a gate trip (no exactly-1001ms grid class). Depth: composer_host.ready SET, appspawn.started, bootanimation.finished SET, launcher.ready NOT set (warning +50.4s) — deeper than pa31, no UI milestone |
 | `pa-pa33` (LEG-24) | origin/main @ e207f86e (= 65d6c788 + 8480751c stallwatch pidhash fix + c2e2c885 config-test refresh — the kernel commit that fired the census-hold gate; branch fast-forwarded to main), built via make build-x86 (run/pa33-built-from.txt; bzImage run/pa33-main-bzImage untracked 11.5MB, md5 differs from pa32 as expected) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31/pa32 fifth consecutive roll); the stallwatch pidhash fix does not move the census. Tick tripwire `[ok]` 15 jiffies/150 ms; ticks 99.86/99.83/s/CPU at t=720 (71,899/71,880 samples — pa27/pa32 rates). WAKE-STRANDED 2 prints only, both organic ~1s class (1010/1252 ms, no 1001ms grid, no appspawn 24-34s strands — pa32's new-phase strands did not recur this roll, consistent with organic). Depth: composer_host.ready, appspawn.started, bootanimation.finished all SET, launcher.ready NOT set — same profile as pa32, no UI milestone |
-| `pa-pa38` (LEG-29) | origin/main @ fee7774f (the A-line stack landed rebased: from_fn trilogy dca64cc4/056b68ad/26391849 + kstack sizing 8a29c353/ce80c5b5/c36b7ed6, the latter trio REVERTED at tip fee7774f — 14 kernel/ commits since 8480751c fired both the census gate AND the trigger's footprint arm; branch fast-forwarded to main), built via make build-x86 (run/pa38-built-from.txt; bzImage run/pa38-main-bzImage untracked 11.5MB, md5 3cfb2178 != pa33 d2ffbf82; new dfx strings verified present in the binary) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD — sixth consecutive exact.** TERM-DESCHED 8 / WAKE-REFUSED 32 (pa23/pa27/pa31/pa32/pa33/pa38); the from_fn fork-path fixes do not move the census. Ticks 99.74/99.76/s/CPU at t=720 (SYSCOST 60s->720s deltas 65,828/65,840 over 660 s; pa33 was 99.86/99.83 — in-band). WAKE-STRANDED 2 prints, organic ~1-2 s class (1332 ms pid 318, 2013 ms pid 675; no 1001 ms grid). Depth: composer_host.ready/appspawn.started/bootanimation.finished SET; appfwk.ready, bms.main.bundles.ready, launcher.ready (warning +44.1 s), lockscreen.ready NOT set. **RUN-DAY VERDICT (trigger fired):** milestone FALSE on this main-class kernel — the blocker is no longer memory (ZERO kernel OOM lines, first from_fn-era roll) but the PRE-EXISTING deterministic NULL-deref `Segfault at 0x0, rip=0x7ff082996bac, rsp=0x7fffffffcb10` in every appspawn child (5 pids x 3 prints; 81 ABC restarts: launcher 48, systemui 33; launcher rd_fail ret=-9 n=155,991 fd=32) — byte-identical signature already in pa33, so not a from_fn regression; volume 21.5k -> 49.5k lines and 100.9M -> 136.4M syscalls = from_fn lets the app phase run the full window. N=3 probe boots skipped per 8.6 step 1 (start condition measured false); terminal report = perf-report.md 8.9 |
+| `pa-pa38` (LEG-29) | origin/main @ fee7774f (the A-line stack landed rebased: from_fn trilogy dca64cc4/056b68ad/26391849 + kstack sizing 8a29c353/ce80c5b5/c36b7ed6, the latter trio REVERTED at tip fee7774f — 14 kernel/ commits since 8480751c fired both the census gate AND the trigger's footprint arm; branch fast-forwarded to main), built via make build-x86 (run/pa38-built-from.txt; bzImage run/pa38-main-bzImage untracked 11.5MB, md5 3cfb2178 != pa33 d2ffbf82; new debug strings verified present in the binary) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD — sixth consecutive exact.** TERM-DESCHED 8 / WAKE-REFUSED 32 (pa23/pa27/pa31/pa32/pa33/pa38); the from_fn fork-path fixes do not move the census. Ticks 99.74/99.76/s/CPU at t=720 (SYSCOST 60s->720s deltas 65,828/65,840 over 660 s; pa33 was 99.86/99.83 — in-band). WAKE-STRANDED 2 prints, organic ~1-2 s class (1332 ms pid 318, 2013 ms pid 675; no 1001 ms grid). Depth: composer_host.ready/appspawn.started/bootanimation.finished SET; appfwk.ready, bms.main.bundles.ready, launcher.ready (warning +44.1 s), lockscreen.ready NOT set. **RUN-DAY VERDICT (trigger fired):** milestone FALSE on this main-class kernel — the blocker is no longer memory (ZERO kernel OOM lines, first from_fn-era roll) but the PRE-EXISTING deterministic NULL-deref `Segfault at 0x0, rip=0x7ff082996bac, rsp=0x7fffffffcb10` in every appspawn child (5 pids x 3 prints; 81 ABC restarts: launcher 48, systemui 33; launcher rd_fail ret=-9 n=155,991 fd=32) — byte-identical signature already in pa33, so not a from_fn regression; volume 21.5k -> 49.5k lines and 100.9M -> 136.4M syscalls = from_fn lets the app phase run the full window. N=3 probe boots skipped per 8.6 step 1 (start condition measured false); terminal report = perf-report.md 8.9 |
 | `pa34-maketest` (LEG-25) | this branch @ 26e8f067 (= main; kernel/ identical to main), riscv64 unit-test build (same target path as the normal kernel — restored after via make build-x86, config.rs diff verified clean) | test/run.sh test mode (qemu-system-riscv64 TCG smp4 -m 2G, unit-test feature) | suite body ~4.5 min; wrapper EXIT=124 = the 550 s timeout killing QEMU AFTER the full summary + the deliberate failing-suite panic parked it (not a load timeout) | **MAIN SESSION'S PENDING make-test VERIFICATION DISCHARGED: Total 1096 / Passed 1095 / Failed 1.** The one failure = `KERNEL_HEAP_SIZE == 1024MB` (c2e2c885's refresh). Root cause: the suite is riscv64-only (run.sh test mode) and build.rs clamps kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024 is the x86_64 value; a 1GB heap overruns the riscv64 memory map — the documented 2026-10-19 merge gate), so the runtime constant is 134217728 and the 1024MB assertion can never pass in-suite. NOT a kernel regression. Fixed test-only on this branch (015e5488: assert the clamped 128MB + comment); next full run on main should read 1096/1096. Log: run/pa34-maketest.log (untracked). Setup note: first invocation died pre-boot (test/rootfs.img missing — generated artifact, not committed; reflink-copied from the main repo's fresh Oct-24 copy, gitignored) |
 | `pa35-maketest` (LEG-26) | this branch @ 73c98a45 (tree 33ae90fb == merged main a94bf77b, identity verified), riscv64 unit-test build (restored after via make build-x86: cargo fresh 1.4 s, bzImage 11501568 B regenerated) | test/run.sh test mode (qemu-system-riscv64 TCG smp4 -m 2G, unit-test feature; incremental build 7.94 s — tree unchanged since pa34's build) | suite body well inside the 550 s window; kernel printed "All tests passed! Halting..." and QEMU lingered in the halt loop (watchdog chatter) until the wrapper's kill — same linger class as pa34, wrapper status reflects the kill, not a suite fault | **CONFIRMATION RUN: 015e5488 VERIFIED ON MERGED MAIN — Total 1096 / Passed 1096 / Failed 0, `*** ALL TESTS PASSED ***`** (log lines 21416-21424). The pa34 failure is gone; the suite is green on main as merged. Log: run/pa35-make-test.log (untracked) |
 
@@ -380,7 +380,7 @@ Gate events + pa18 (11:00-11:15):
   pa17-era GRQ attribution corrected. Remaining open items for the
   next leg: UI milestone (launcher lane's sc-series; sc197-sc200 all
   died without UI markers, sc201 rolling at leg close with the 8-color
-  oracle up and their schb soft-wedge heartbeat dfx 858b455a/18c194f6
+  oracle up and their schb soft-wedge heartbeat debug 858b455a/18c194f6
   in the kernel), the census birth forensics (their lane),
   and the allocation-churn hunt (row 7's new priority).
 
@@ -1239,7 +1239,7 @@ Open items filed for the next legs / other lanes:
 - **WW2 heartbeat availability**: pa22 (loglevel=7) still printed no
   WW/WW2 heartbeat — the 1 Hz heartbeat rides the Hrtimer softirq,
   whose dispatch condition was not met on that boot; getting
-  per-second WW_TICK_IRQ deltas on a normal boot (dfx switch or
+  per-second WW_TICK_IRQ deltas on a normal boot (debug switch or
   moving the print into the SYSCOST dump) would close the residual
   question of which boot phases feed the u/k/i counters (they
   accumulate ~91-99/s/CPU on average while steady-state stamps are
@@ -1453,7 +1453,7 @@ scratch/tickfix hunk 9a451bef that pa23/pa24/pa25 validated:
 pre-merge battery therefore covers exactly what will merge — no
 re-validation gap. Their branch also carries 852d0cf2 (one-shot
 TICKPROBE, sc203-205 diagnostic), 2a02d5db (PREEMPT-LEAK tripwire
-hardirq discount), b634a615 (schb census re-arm fix) — dfx-only,
+hardirq discount), b634a615 (schb census re-arm fix) — debug-only,
 outside this lane's measurement surface except as extra log lines.
 
 **(2) Main does NOT have the fix yet** (verified by diff
@@ -1518,7 +1518,7 @@ check, all green:
   lines): byte-identical (`diff /tmp/mergefix.diff /tmp/scratchfix.diff`
   empty).
 - 199f308c touches ONLY the timer file (37 lines, 30+/7-) — the
-  cherry-pick excluded the A-line dfx commits (852d0cf2 / 2a02d5db /
+  cherry-pick excluded the A-line debug commits (852d0cf2 / 2a02d5db /
   b634a615 verified NOT ancestors of main). So the pre-merge battery
   covered exactly what merged; no re-validation gap.
 
@@ -1577,7 +1577,7 @@ cells, filled:
 stays untracked (11.5 MB > the 10 MB leg rule) — correct. The rebuild
 recipe in run/pa26-built-from.txt was re-verified and EXPANDED: the
 merge --no-commit of 675095c0 brought the A-line branch deltas beyond
-the timer fix (dfx commits + binder-stall/sleepsnap print code; 675095c0's
+the timer fix (debug commits + binder-stall/sleepsnap print code; 675095c0's
 parent efd3868e is not on main), proven by 563 binder-stall lines in
 the pa26 serial log — so the pa26 kernel is NOT identical to pa27's
 (the fix-only cherry-pick). The timer file itself was byte-identical,
@@ -1606,7 +1606,7 @@ and the ranked route map live in **docs/development/f4-ext4-route-map.md**
 (the fs-lane deliverable); this section records what the leg measured and
 what changed in this document's own tables.
 
-**(1) The probe (dfx/fsw.rs, cmdline `fsw=1`).** Volume counters for the
+**(1) The probe (debug/fsw.rs, cmdline `fsw=1`).** Volume counters for the
 ext4/bio/jbd2/big-lock/VFS-walk layers, dumped as two compact lines per
 minute. Two probe bugs found and fixed in-leg (negative results, ledger):
 the first build printed via pr_info (console-filtered at loglevel=4 —
@@ -1912,7 +1912,7 @@ did NOT trigger at open).
 **(2) Census-hold gate (standing).** origin/main == 62c2708e at open
 (the branch was 1 behind purely because the leg-20 merge commit
 postdates the branch head; the ff-only merge closed it). No A-line/
-DFX kernel commits on main since 14d8950d (pa31-validated). Gate not
+debug kernel commits on main since 14d8950d (pa31-validated). Gate not
 triggered; rechecked at each round; one quiet census boot fires only
 if main moves on kernel code mid-leg.
 
@@ -2232,7 +2232,7 @@ main-class): launcher.ready 1 mention = init's "not set" warning,
 OnForeground 0, ArkUI 0. sc219 appeared 21:29 (log growing fast,
 14MB within minutes) — 0 milestone hits there too, WW prints present
 = still the A-line's instrumented kernel, not main-class. No A-line
-kernel-footprint fix on main (their worktree tip is wip dfx anatomy
+kernel-footprint fix on main (their worktree tip is wip debug anatomy
 probes, nothing merged; origin/main == 26e8f067 all window). Both
 trigger conditions unmet; the injected run-day image stays parked.
 
@@ -2359,7 +2359,7 @@ drives snapshot=on) plus a final read of sc220/221/222:
 A-line's footprint work is real and moving on their branch — d08dca37
 21:37 fix(ext4) fill_page_cache_batch stack materialisation,
 07a1e7be 21:41 fix(task) fork-path from_fn array init (the
-65-76KB-span fixes KSTACK-HW measured), 93c970a3 22:03 wip(dfx) slab
+65-76KB-span fixes KSTACK-HW measured), 93c970a3 22:03 wip(debug) slab
 census peek + 80%-heap anatomy dump — but nothing merged to main
 yet; the trigger waits for the merge, not the wip.
 
@@ -2412,7 +2412,7 @@ converging on their branch.** origin/main == e5fa6f85 all 77 ticks.
 Their worktree tip moved 93c970a3 -> fb0141e8 (wip floor anatomy:
 kstack 42%, c256 520K live) -> 3a673c25 (feat(config) kstack 128->96KB)
 -> 2d308b98 (fix(fs) FdTable fork_from must not array-clone — THE
-89,368B deepest chain) -> 753defbd (dfx ksprobe gate) -> b35919b3 (wip
+89,368B deepest chain) -> 753defbd (debug ksprobe gate) -> b35919b3 (wip
 "from_fn trilogy closed") -> 466cde69 (feat(config) kstack 64KB, 62,432B
 max depth) -> f793c63f (feat(mm) packed kstack slab: order-6 blocks
 carved into three 80KB slots, ~-115MB at launcher-floor) -> ab84c96e
@@ -2471,7 +2471,7 @@ REBASED (no merge commits, 14 kernel/ commits since census baseline
 8480751c): the from_fn trilogy dca64cc4 (ext4 fill_page_cache_batch) /
 056b68ad (Task construction) / 26391849 (FdTable fork_from), the kstack
 sizing 8a29c353 (96KB) / ce80c5b5 (64KB) / c36b7ed6 (packed 80KB slab),
-the dfx anatomy instruments — and then fee7774f at tip REVERTING the
+the debug anatomy instruments — and then fee7774f at tip REVERTING the
 kstack-sizing trio (the 80KB margin was measured on x86_64 OH loads
 only; riscv64 nests deeper, the overflow corrupted adjacent data,
 suite 1094/1096 -> 1096/1096 with the revert; their campaign "returns
@@ -2486,7 +2486,7 @@ in the same tick: trigger arm 2 AND the census-hold gate.
 **(2) Census-hold gate response + run-day response (one boot serves
 both — the 8.6 recipe).** merge --ff-only to fee7774f (tree verified:
 kstack back at 128KB in Kernel.toml) -> make build-x86 (bzImage
-11,505,664 B, md5 3cfb2178 != pa33; the new dfx strings OOM-ANAT /
+11,505,664 B, md5 3cfb2178 != pa33; the new debug strings OOM-ANAT /
 KSTACK-HW / SC-ANAT / census verified present in the binary before
 trusting it; provenance run/pa38-built-from.txt, parked
 run/pa38-main-bzImage) -> quiet boot pa38 (run/pa-boot.sh pa38, 780 s,
@@ -2840,7 +2840,7 @@ fault), is verified fixed (see section 6).
    feeds it). Kernel levers: per-call recv cost, and the wake tail
    (recvfrom max 59 s = wake-loss family). OH-side lever (their
    code): drop the PEEK — 9.5 M syscalls/boot of pure overhead.
-3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** ~~92.6K read()/s
+3. **Kill the hilogd.rd_kmsg spin (printk/debug).** ~~92.6K read()/s
    sustained for the whole boot, ~15-25% of a vCPU. Attribution
    narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
    the remaining step is one fdtable dump of that thread mid-flood
@@ -2877,8 +2877,8 @@ fault), is verified fixed (see section 6).
 
 ## 8. Tools landed (this branch)
 
-- `kernel/src/dfx/syscost.rs` — cmdline `syscost=1` (own key, no
-  dfx=switches.rs bit): per-syscall {n, wall, max}, >4 ms slow ring
+- `kernel/src/debug/syscost.rs` — cmdline `syscost=1` (own key, no
+  debug=switches.rs bit): per-syscall {n, wall, max}, >4 ms slow ring
   with comm, per-CPU tick modes (user/kernel/idle), 256-slot kernel-rip
   page histogram, softirq vec counts, flood-nr per-comm attribution,
   kmsg read counters + EOF/EAGAIN read censuses (fd paths), and

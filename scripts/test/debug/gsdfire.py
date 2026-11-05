@@ -115,7 +115,7 @@ def main():
     ser_path = os.path.join(outdir, "serial.log")
     ser = open(ser_path, "wb")
     append = ("root=/dev/vda rw init=/sbin/runit console=ttyS0 "
-              "dfx=watchdog,periodic,taskdump " + args.append).strip()
+              "debug=watchdog,periodic,taskdump " + args.append).strip()
     cmd = [QEMU, "-M", "virt", "-accel", "tcg,thread=single", "-cpu", "rv64",
            "-m", "2G", "-smp", "4", "-display", "none", "-serial", "stdio",
            "-qmp", f"unix:{qmp},server,nowait",

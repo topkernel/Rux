@@ -58,7 +58,7 @@ static TICKET: crate::sync::semaphore::Semaphore =
 /// slower close, same correctness; nothing may skip the grace.
 static LIVE: AtomicBool = AtomicBool::new(false);
 
-/// DFX gauges: parked references currently awaiting grace, and grace
+/// debug gauges: parked references currently awaiting grace, and grace
 /// waits that exceeded their budget (the monopolist-window family —
 /// see synchronize_rcu_bounded). A non-zero RETIRED_DEPTH on a standard
 /// boot should drain to zero within a grace period; sustained growth

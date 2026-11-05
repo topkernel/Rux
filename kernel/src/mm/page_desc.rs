@@ -554,7 +554,7 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
-                crate::dfx::driftwatch::PUT_UNDERFLOW
+                crate::debug::driftwatch::PUT_UNDERFLOW
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
@@ -572,13 +572,13 @@ impl Page {
 
     /// `put_page()` with drift attribution: a transition to 0 is the exact
     /// moment a frame becomes orphan-able — count it per call site
-    /// (dfx::driftwatch) so the MEMLEDGER census can attribute drift to the
+    /// (debug::driftwatch) so the MEMLEDGER census can attribute drift to the
     /// release path that dropped it. Same return contract as `put_page`.
     #[inline]
     pub fn put_page_site(&self, site: usize) -> i32 {
         let r = self.put_page();
         if r == 0 {
-            crate::dfx::driftwatch::note_zero_put(site);
+            crate::debug::driftwatch::note_zero_put(site);
         }
         r
     }
@@ -1244,7 +1244,7 @@ pub struct PageDescStats {
 pub fn page_desc_stats() -> PageDescStats {
     // F12: iterate only the pages the RUNNING machine actually has.
     // MAX_PAGES is the compile-time 2 GB worst case; on a 1 GB QEMU the
-    // vmemmap pages past the real RAM are unmapped, and the dfx periodic
+    // vmemmap pages past the real RAM are unmapped, and the debug periodic
     // dump walked straight into them (KERNPANIC pfault from
     // Page::refcount — the diagnostic killed the box it was diagnosing).
     // Runtime descriptor count (discovered memory map; config fallback
@@ -1260,9 +1260,9 @@ pub fn page_desc_stats() -> PageDescStats {
     // Clamp to the descriptors actually mapped by init_vmemmap: MAX_PAGES
     // is the compile-time PHYS_MEMORY_SIZE (2 GiB) while the machine may
     // boot with less RAM — descriptors past the mapped range are unmapped
-    // vmemmap, and dereferencing them panics the periodic DFX dump
+    // vmemmap, and dereferencing them panics the periodic debug dump
     // (observed: KERNPANIC in page_desc_stats 8s into a -m 1G boot with
-    // dfx=periodic,taskdump). The vmemmap-mapped count is the direct
+    // debug=periodic,taskdump). The vmemmap-mapped count is the direct
     // dereference-safety bound; F12's phys_memory_size estimate is kept
     // for total_pages above.
     let live_pages = live_pages.min(crate::mm::vmemmap::vmemmap_stats().nr_pages);

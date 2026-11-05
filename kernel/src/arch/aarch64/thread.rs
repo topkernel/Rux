@@ -102,7 +102,7 @@ pub struct ThreadStruct {
 }
 
 /// Callee-saved register block (diagnostic parity with the x86_64
-/// backend; dfx probes read `ret_addr`)
+/// backend; debug probes read `ret_addr`)
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct CalleeSaved {

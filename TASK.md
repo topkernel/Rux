@@ -50,7 +50,7 @@ the permanent-store image in run/, rs/rsrun/renameco injected via
 debugfs); PID-1 rsrun runs cmds.txt lines with per-class budgets.
 
 **Round-1 campaign** (baseline 819a1be2, one family per boot,
-dfx=allocwatch,taskdump,watchdog + syscost=1, logs in
+debug=allocwatch,taskdump,watchdog + syscost=1, logs in
 run/stress-runs/): ipc / sched / timer / memory PASS (0 panics, 0
 wedges, 0 probe errors); fsmeta FAIL (SP-2); forker survived but lit
 up the SP-1 storm. Verdicts + census numbers: run/stress-runs/
@@ -104,7 +104,7 @@ fixed kernel to guard the setattr/preempt changes.
 3. The per-op wall (26x): syscall wall-times include wait-behind-
    incumbents; after the monopoly fixes the residue is COW/fault cost
    (rmap 28% of kernel ticks) + the timerfd_create storm (4k/s caller
-   STILL unnamed — bump the TFDC budget behind a dfx switch and boot once).
+   STILL unnamed — bump the TFDC budget behind a debug switch and boot once).
 4. The false-heal vs kpreempt dependency: real guards held >2s exist;
    bounding them (cond_resched at lock-free boundaries of fork copy /
    exit unmap / rmap batch loops) is the prerequisite for arming kpreempt.
@@ -153,7 +153,7 @@ Base c23045fe + this session. THE WALL WAS MOSTLY A MISSING /data.
   com.ohos.launcher process, screen still the frozen logo md5
   06b933b4 through 911s). bootevent.account.ready is watched (pid 1
   msgId 26) but never SET — find what sets it on the reference kernel.
-- lb28 (dfx=ams46): StartUser oneway LATCHED (node=12710 pid=876
+- lb28 (debug=ams46): StartUser oneway LATCHED (node=12710 pid=876
   foundation @283s) — this boot's SA-load phase ran the slow samgr
   code-7 family again (29-75s exec), unlock not reached by 663s.
   Boot-to-boot variance in the huks/account keygen path decides it.
@@ -167,22 +167,22 @@ Base c23045fe + this session. THE WALL WAS MOSTLY A MISSING /data.
    adjudication: {on_cpu=false, claim!=-1} owned by no slot/switch-out
    -> reset claim; linked+on_cpu orphaned-mark shape (ownerless +
    50-jiffy exec-frozen orphan-watch confirm) -> full-qword release.
-   Census line (dfx=wwcensus) names pids of both classes. lb22-lb25
+   Census line (debug=wwcensus) names pids of both classes. lb22-lb25
    validated: zero false heals (every oncpu sighting was owner-backed);
    no cluster thread was ever stale-claimed on those boots — the claim
    stranding class was NOT the softbus killer (the missing /data was).
-2. tfdcensus (dfx=tfdcensus): windowed TFDC tap (first 16 calls per 5s
+2. tfdcensus (debug=tfdcensus): windowed TFDC tap (first 16 calls per 5s
    window). Storm callers named: companion_device (42), useriam (20),
    time_service (10), OS_IPC workers, usb_host. Entry point 4 CLOSED
    (naming); the storm is fd-churn COST, not a timerfd leak — timeouts
    expire on schedule.
-3. TXN-HANG lens (lb24, dfx=txnhunt+poolcensus): binder delivery is
+3. TXN-HANG lens (lb24, debug=txnhunt+poolcensus): binder delivery is
    CLEAN (zero queued todo across the whole boot; no stuck inbound
    sync txn into softbus). The 30-55s waits are userspace-INTERNAL
    futex waits inside executing handlers (accountmgr tid 976 sys=202
    FUTEX_WAIT 31s; foundation main thread 55s; nested BWR reads 50s) —
    exec-class compute/condition waits, NOT kernel scheduling strands.
-4. leakhunt (lb25, dfx=leakhunt): the phantom base-bit (+1) acquire
+4. leakhunt (lb25, debug=leakhunt): the phantom base-bit (+1) acquire
    sites on the carriers (pids 318/512/537/601): spinlock.rs:292,
    mm/slab.rs:628, mm/small_alloc.rs:283, mm/buddy_allocator.rs:857,
    sync/rwlock.rs — the ALLOCATOR-lock family. Producer still at large
@@ -196,7 +196,7 @@ Base c23045fe + this session. THE WALL WAS MOSTLY A MISSING /data.
 
 ### FIFTH-SUCCESSOR ENTRY POINTS (in order)
 1. THE LAUNCHER START: boot release kernel + USERDATA=run/userdata-
-   fresh2.img + dfx=ams46,txnhunt; watch AMSI1640/SwitchToUser/appspawn
+   fresh2.img + debug=ams46,txnhunt; watch AMSI1640/SwitchToUser/appspawn
    spawn of com.ohos.launcher after lockstatus_100. Variance: lb27-class
    boots unlock at ~237s; lb28-class get stuck in the samgr code-7 30s
    exec family — if an ams46 boot shows the StartUser oneway delivered
@@ -213,7 +213,7 @@ Base c23045fe + this session. THE WALL WAS MOSTLY A MISSING /data.
    merge to main.
 
 ### Boot inventory this session
-lb22 (dfx=wwcensus,schedtrace, debug): claim sweep live, 17 pick-side
+lb22 (debug=wwcensus,schedtrace, debug): claim sweep live, 17 pick-side
   resets, cluster threads never stale-claimed; timeout loop present.
 lb23 (+full sweep): softbus pid 731 REPLIES code-8 in 2.6s (not silent);
   TFDC windowed census first data; timeout loop still present (no /data).
@@ -242,7 +242,7 @@ racing a dead reader.
 ## FIFTH-SUCCESSOR SESSION (2026-10-31 20:00-23:xx, branch oh-launcher @ a7189470+)
 Kernel delivery is CLEAN; the wall is INSIDE foundation userspace, and it
 has TWO shapes. All boots: release kernel, LOGLEVEL=6, SMP=2,
-USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
+USERDATA=run/userdata-fresh2.img, debug=ams46(+txnhunt/periodic).
 
 ### The ams46 verdict (lb30/lb32/lb34/lb35/lb36/lb37)
 1. **lb30**: ENQ 807.707 (accountmgr→foundation AMS node, oneway 0x11) ->
@@ -314,7 +314,7 @@ USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
   for that boot; UNVERIFIED whether the ladder eventually exits.
 
 ### Successor entry points (in order)
-1. Boot run/system-lb2.img + dfx=ams46,txnhunt (LOGLEVEL=6, SMP=2,
+1. Boot run/system-lb2.img + debug=ams46,txnhunt (LOGLEVEL=6, SMP=2,
    USERDATA=run/userdata-fresh2.img). Hope for the lb40 shape and read
    the "can't find target AbilityInfo" verdict: if BMS's
    ImplicitQueryAbilityInfos misses the launcher for user 100 even after
@@ -331,7 +331,7 @@ USERDATA=run/userdata-fresh2.img, dfx=ams46(+txnhunt/periodic).
   query ENQ, NO proxy-failure line at the moment, accountmgr did NOT
   restart — the failing call never left foundation's userspace. The
   ipc-skeleton keys ("SendRequest", "work thread") landed after lb44.
-- lb45 (dfx=poolcensus): ZERO POOL census lines all boot = no proc ever
+- lb45 (debug=poolcensus): ZERO POOL census lines all boot = no proc ever
   had queued todo at census time — the "queued work undrained" pool
   shape is absent; the exhaustion shape (all workers parked as CLIENTS,
   SendRequest failing locally) is invisible to that census gate.
@@ -418,7 +418,7 @@ The phantom preempt-count producer is NAMED: two faces, one dominant.
    + live ACQUIRE-DIVERGENT report + multiplicative slot hash (the old
    XOR mixes aliased task structs 0x1000000/0x2080000 apart — ph2's 40
    "splits" were hash collisions; ph3 with the Fibonacci hash: 1).
-2. ph2 evidence (system-lb.img + userdata-fresh2.img, dfx=leakhunt,
+2. ph2 evidence (system-lb.img + userdata-fresh2.img, debug=leakhunt,
    wwcensus, debug kernel, 1200s): 320 tick-heals, 109 underflows, 321
    strands. The >2s "phantom" incumbents name SHORT-section locks
    (dentry children/vfsmount, unix dgram_peer/recv_queue, inode icache,
@@ -503,7 +503,7 @@ lb19b/s14 stranded-0x10000 family — the next hunt's Face C candidate.
 ## EIGHTH-SUCCESSOR SESSION (2026-11-01, branch oh-ladder @ 53f4fd47)
 Mission: re-measure SLOW-TXN/watchdog with the preempt-hunt spinlock fix on
 main, chase the launcher ladder. Rig findings first (both boots main @ 4a757d6e,
-system-lb2.img + userdata-fresh2.img + dfx=ams46,txnhunt LOGLEVEL=6 SMP=2):
+system-lb2.img + userdata-fresh2.img + debug=ams46,txnhunt LOGLEVEL=6 SMP=2):
 
 ### WEDGE CHECK (coordinator question answered): current main still wedges, BOTH profiles
 - lb55 (DEBUG main): SA inserts stop at 16 (24.1s); first strand 12.4s at 38.1s;
@@ -732,13 +732,13 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
    (only the debug `build` target does). A release build after a
    `make build` for ANOTHER arch embeds wrong symbols. Two-pass release:
    cargo build --release; gen-ksyms.py <elf> x86_64-unknown-none
-   kernel/src/dfx/ksyms_generated.rs; cargo build --release; mkbzimage.
+   kernel/src/debug/ksyms_generated.rs; cargo build --release; mkbzimage.
    LTO byte-loop-transforms the tick prints into immediate stores —
    `strings` on the release ELF is NOT evidence a print was stripped;
    disassemble for the heal's andl sites instead (0xff0000 = clear_base,
    0xf10000 = keep_tick_nesting).
 6. lb66 (verification boot): bzImage-ladder-fieldheal + system-lb3.img +
-   userdata-warm.img + dfx=ams46,txnhunt, SMP=2. Watch: PREEMPT-HEAL*
+   userdata-warm.img + debug=ams46,txnhunt, SMP=2. Watch: PREEMPT-HEAL*
    lines (the fix firing), the install stream completing (installs
    code-4 execs bounded), startUser in service:100 -> CheckUserParam
    (poison leg: POISON32-DELIVER then NO marking = patch works) ->
@@ -775,7 +775,7 @@ userdata-warm.img) got FURTHER THAN EVER — and then froze on a NAMED engine.
    old global one-shot latch spent itself on an early 20s samgr txn
    and went dark at the real hang — lb70 lesson; now once per 600s).
 4. OH boots this session (all bzImage + system-lb3.img + userdata-warm,
-   dfx=ams46,txnhunt, SMP=2): lb66 (r2 kernel) froze at the monopolist
+   debug=ams46,txnhunt, SMP=2): lb66 (r2 kernel) froze at the monopolist
    wall AGAIN pre-install; lb67 (cumulative heals, 185 heals/70
    underflows) passed the wall, SA storm 88, then the accountmgr
    userspace-futex stall (txn16360 code66, tid977 in FUTEX_WAIT with
@@ -826,7 +826,7 @@ freeze) is now named to its exact victim signature and blocks verification.
    PASSED; x3 builds rc=0 (x86_64 two-pass release, riscv64, aarch64).
 4. Also landed while chasing the dark family: FXDV2 param-arena futex tracer
    ran ALWAYS-ON (500 console prints from do_futex's hot path in the first
-   seconds of every boot) — gated behind dfx=futextrace (6e5afaae).
+   seconds of every boot) — gated behind debug=futextrace (6e5afaae).
 
 ### THE REMAINING BLOCKER (older than this session, now precisely named)
 Every boot since ~07:45 wedges before SA inserts (samgr-dark; 10+ consecutive,
@@ -884,7 +884,7 @@ its OWN CPU's tick cannot fire, so every tick-side observer (PREEMPT-HEAL
 per-field stamps, claim-sweep census) is blind to it — ZERO heal lines on
 every dark boot while the machine is wedged. Only an observer on the OTHER
 CPU (GRQ timeline walk / cross-CPU dump) can see and name the holder. A
-holder-naming DFX needs to be cross-CPU by construction; also note the
+holder-naming debug needs to be cross-CPU by construction; also note the
 waiters cannot self-report (printing allocates — they are parked IN the
 allocator). Boot-side, the frozen holder's identity is recoverable from a
 cross-CPU task dump (the txn-hang dump_all_tasks machinery) — none armed on
@@ -929,7 +929,7 @@ store-load/ladder userspace family.
    (cycle defense; walk_cycles counter). DEFENSIVE — no cycle was ever
    observed (see meter below).
 
-### The allocwatch DFX (dfx=allocwatch) — and the mirage it created then killed
+### The allocwatch debug (debug=allocwatch) — and the mirage it created then killed
 - Final design: DEDICATED per-key slots (site base + class; 24 slots),
   cross-CPU tick scan reports holds >300ms with holder identity/state/
   preempt/ti_cpu/buddy-word + kernel-stack PCs; ALLOC-STUCK lock-word
@@ -1122,7 +1122,7 @@ loss). The race is now a coin-flip, not a wall.
    paths (dead_reply_to_sender etc.) already set process_todo → the parked
    client wakes exactly like the reference.
 
-### Verification boots (system-lb5, SMP=2, LOGLEVEL=6, dfx=ams46,txnhunt,syncguard)
+### Verification boots (system-lb5, SMP=2, LOGLEVEL=6, debug=ams46,txnhunt,syncguard)
 - lb311 (guards ON, warm userdata, cg16c): why=20 fired ONCE (176.3s, RSS),
   boot UNWEDGED (the 15th's lb304 wedge fear did not reproduce), startUser
   + SwitchToUser reached at 176.5s, ladder spun on warm's stale user-100
@@ -1151,7 +1151,7 @@ loss). The race is now a coin-flip, not a wall.
   the pre-fix bookkeeping. Post-fix boots (lb313) show ZERO guard prints —
   the reference discipline holds without rejections, exactly like the
   reference kernel.
-- Guards stay dfx=syncguard-gated (default off) until the coordinator decides;
+- Guards stay debug=syncguard-gated (default off) until the coordinator decides;
   syncwatch (log-only companion) landed for divergence hunting (55b5f6d6).
 
 ### Git reconciliation (c8d1b9f7)
@@ -1167,7 +1167,7 @@ loss). The race is now a coin-flip, not a wall.
 
 ### Successor entry points (in order)
 1. ROLL THE RACE: system-lb5 + USERDATA=run/userdata-fresh2.img + cg16e-class
-   kernel + dfx=ams46,txnhunt,syncguard. The race is now ~1s-class; a boot
+   kernel + debug=ams46,txnhunt,syncguard. The race is now ~1s-class; a boot
    where the KVS read lands AFTER bundles.ready wins: watch "create user:100
    bundle size:34" (NOT the empty-set end) -> SetBundleQuota -> per-user
    install stream -> ImplicitQuery EXITS -> appspawn com.ohos.launcher ->
@@ -1215,7 +1215,7 @@ the stress lane's TASK.md on main.
    the exact condvar and its non-running producers; park it next to the
    TXN-HANG census in the same tick.
 3. Boot classes this session (cg16e/cg16f, all system-lb5+fresh2,
-   dfx=ams46,txnhunt,syncguard): lb311 guards-on warm (1 why=20, boot
+   debug=ams46,txnhunt,syncguard): lb311 guards-on warm (1 why=20, boot
    unharmed, POISON32 2372->16), lb312 pre-fix kernel crawl (no ready in
    1355s), lb313 RACE LOST BY ~1s (ready 238.8 vs giveup 239.7),
    lb314/316 samgr-buffer-exhaust watchdog spiral -> init sysrq-c
@@ -1250,7 +1250,7 @@ the stress lane's TASK.md on main.
 ## SEVENTEENTH-SUCCESSOR SESSION (2026-11-02 23:00-00:0x, branch biofix-fieldpoll @ ca58fc80+)
 Mission: sync main (128KB stacks + ext4 size hold), roll the race in quiet windows,
 build the 16th's futex-stuck census, re-check the long-handler parks. Outcome:
-THE CENSUS IS IN (dfx=fuxstuck, two commits), the cg17 kernel DOUBLED boot speed,
+THE CENSUS IS IN (debug=fuxstuck, two commits), the cg17 kernel DOUBLED boot speed,
 the account side of the race now WINS every roll (startUser+SwitchToUser on all
 three boots — first fresh-boot boots ever where creation completed and the account
 existed), useriam's 248-596s FFRT parks are GONE, but the BMS per-user install
@@ -1267,7 +1267,7 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
 
 ### The futex-stuck census (mission leg 2) — landed, verified on live boots
 - 45a3b60b: Waiter::park_j stamped at chain insertion; futex_stuck_census() on
-  the 1Hz heartbeat slot next to txn_hang_audit; dfx=fuxstuck-gated; one burst
+  the 1Hz heartbeat slot next to txn_hang_audit; debug=fuxstuck-gated; one burst
   per 5s; >=10s threshold; bounded (32 sampled, 8 printed, 1200-line budget).
   Line: uaddr/mm/tgid/tid + park span + anywoken + entry-frame sysno/epc + the
   owning tgid's thread histogram [run/futex/int/unint].
@@ -1277,7 +1277,7 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
   top-4 newest-onset groups (FUX-STUCK-FRESH).
 
 ### Roll results (system-lb5 + userdata-fresh2 + SMP2 + LOGLEVEL6, host load ~6.6-7.1)
-- lb322 (cg17, dfx=ams46,txnhunt,syncguard): bundles.ready 104.5s (lb313:
+- lb322 (cg17, debug=ams46,txnhunt,syncguard): bundles.ready 104.5s (lb313:
   238.8s — 2.3x faster), CreateNewUser start 73.1 / end 104.6, startUser
   104.9, SwitchToUser 105.0. ACCOUNT SIDE WON. But the BMS "create user:100
   bundle size:34" print NEVER came -> empty-set ladder spin -> frozen logo.
@@ -1350,7 +1350,7 @@ query is now a STRUCTURAL loss (fires ~73s, data lands ~104s) — pixels still f
 4. Roll discipline unchanged: quiet windows only (the three boots above all
    ran at load 6.6-7.1 and all reached SwitchToUser — the fastest, healthiest
    fresh-boot class yet). Recipe: system-lb5 + USERDATA=run/userdata-fresh2.img
-   + cg17c-class kernel + dfx=ams46,txnhunt,syncguard,fuxstuck.
+   + cg17c-class kernel + debug=ams46,txnhunt,syncguard,fuxstuck.
 
 ### lb324 final verdict + session close (00:0x)
 - lb324 ran to 1500s: markers = appspawn 5.1s / bootanimation.ready 22.7s /
@@ -1383,7 +1383,7 @@ watchdog-restart path) — then wedged at 107s (the fix's target).
   TASK.md auto-resolved to main's copy (stress charter + our tail — a
   superset, kept as-is; no ours-restore needed this time).
 - cg18 build x3 rc=0 (x86_64 first, others before push). lb325 rolled with
-  slowtask ADDED to the census recipe (dfx=ams46,txnhunt,syncguard,fuxstuck,
+  slowtask ADDED to the census recipe (debug=ams46,txnhunt,syncguard,fuxstuck,
   slowtask + syscost=1) on userdata-fresh2 at load ~7.5.
 
 ### THE RETRY QUESTION — answered (mission leg 1)
@@ -1451,7 +1451,7 @@ watchdog-restart path) — then wedged at 107s (the fix's target).
   0xffffffff814de05e on BOTH (pid_hash::BUCKET_LOCK+22), RFL=0x97 (IF=0!)
   on both; a full scan of the 256-byte BUCKET_LOCK array found byte 22 the
   ONLY one held. Stack walks: CPU0 = futex_stuck_census -> for_each_task
-  -> pid_hash_for_each_task -> lock_bucket(22); CPU1 = dfx::slowtask::audit
+  -> pid_hash_for_each_task -> lock_bucket(22); CPU1 = debug::slowtask::audit
   -> for_each_task -> pid_hash_for_each_task -> lock_bucket(22).
 - Mechanism (the sc207/sc215 class, re-convicted): both audits run on the
   1Hz timer-softirq heartbeat with IF=0. A task-context pid-hash writer
@@ -1467,7 +1467,7 @@ watchdog-restart path) — then wedged at 107s (the fix's target).
   window.
 - FIX (cg18b): new sched::for_each_task_try wrapper (documents the
   conviction); slowtask::audit, futex_stuck_census phases B1/B2, and
-  treehunt::tick (heartbeat member, same hazard when dfx=treehunt is
+  treehunt::tick (heartbeat member, same hazard when debug=treehunt is
   armed) switched to it; slowtask reports partial-snapshot rounds (8-line
   cap). Blocking walks remain for preemptible callers (task context,
   khungtaskd) where the holder always resumes. Kernel-semantic change:
@@ -1490,7 +1490,7 @@ stage table below. Same image, same accel (KVM), reference vs ours, same binary
 - 3587fd4b = origin/main merged (d2be598d: the dfx-trace lane — tracefs +
   reference-exact set_event grammar; TASK.md resolved ours-by-intent per the
   standing rule; main's copy is the dfx-trace charter).
-- f3bf6d8b dfx(mmprof): cmdline `mmprof=1` (forkprof pattern, zero cost when
+- f3bf6d8b debug(mmprof): cmdline `mmprof=1` (forkprof pattern, zero cost when
   off) — TSC stage brackets: mmap {tot, vma_write lockwait, find_free_area,
   VmaManager::add, MAP_FIXED's munmap+install}, munmap {body, surgery, walk,
   tlb, cond_resched yields}, mprotect {tot, lock, coverage+EACCES, pte walk,
@@ -1578,7 +1578,7 @@ spiral class).
    distributeddata's DB_TaskExecutor threads directly. The 18th's "FFRT
    arena" attribution was the family; the top comm is the sys-event scan.
 3. ROLL THE RACE (mission 2): the four coin-flips need one clean boot.
-   Recipe unchanged (system-lb5 + fresh2 + dfx=ams46,txnhunt + syscost=1).
+   Recipe unchanged (system-lb5 + fresh2 + debug=ams46,txnhunt + syscost=1).
    Any frame change from frozen-logo md5 06b933b4: driver auto-writes
    run/oh-<tag>-shot-*.ppm — convert + report IMMEDIATELY.
 4. The early-death spiral (3/8 boots tonight, 27-56s ExecReboot panic:
@@ -1630,10 +1630,10 @@ banked; lb343 (syscost + 3s census bar) rolling at write time.
 
 ### Merge + instrument boots
 - 5ddc03d2 = origin/main 113cd2b3 merged (docs; clean).
-- ea6992a6 dfx(futex): stuck-census bar 10s -> 3s (the decisive cascade parks
+- ea6992a6 debug(futex): stuck-census bar 10s -> 3s (the decisive cascade parks
   are 4-5s class — invisible at the old bar; diagnostics only, 8-line cap
   bounds volume). x86_64 build rc=0.
-- lb342 (mmprof=1 + dfx=ams46,txnhunt,syncguard,fuxstuck,slowtask, LOGLEVEL=6,
+- lb342 (mmprof=1 + debug=ams46,txnhunt,syncguard,fuxstuck,slowtask, LOGLEVEL=6,
   fresh2, load ~5.5): HEALTHY boot, race lost by the usual margin (CreateNewUser
   71.8s vs bundles.ready 103.2s = 31.4s), SA:1301 init 28,532ms (11.5->40.0),
   59 POISON32 (ladder-spin family), no panic/ExecReboot. mmprof: mmap tot=24us
@@ -1749,7 +1749,7 @@ banked; lb343 (syscost + 3s census bar) rolling at write time.
 1. THE SAMGR HANDLER BLACK BOX: instrument ONE samgr-internal slow handler
    end-to-end (code 12/30, queue-0/exec-seconds): is it userspace CPU at the
    open()/mkdir() wall, a userspace spin, or a chain? A per-tgid syscall-tap
-   (scmtap exists) behind dfx, or fsw counters, inside the 15-40s window.
+   (scmtap exists) behind debug, or fsw counters, inside the 15-40s window.
    The open()/mkdir() per-op rows above are the named kernel lever family.
 2. init's param-service drain stall (5-8.3s variance): catch init's param
    thread posture DURING the stall with the 3s-bar census (its parks are
@@ -1870,7 +1870,7 @@ nested-call wall class. Race tally this session 0/2 so far. lb348
 3. Roll the race on the nm2 kernel (recipe: SMP=2 LOGLEVEL=6
    USERDATA=run/userdata-warm2.img lb-boot.py <tag> 1500
    run/system-lb5.img run/bzImage-ladder-nm2 " syscost=1 fsw=1
-   negmemo=1 dfx=fuxstuck,txnhunt,ams46,slowtask"). The wedge dice are
+   negmemo=1 debug=fuxstuck,txnhunt,ams46,slowtask"). The wedge dice are
    the odds (pre-existing family); boot.completed now fires ~9.2s —
    1.3s earlier than the 20th's best gate.
 4. PC2's openexecavg is the health check for any fs change: exec should
@@ -2008,7 +2008,7 @@ roll launched at session close).** No pixel change (frozen-logo md5
 06b933b4 where shots landed).
 
 **Successor entry points (23rd, in order):**
-1. ROLL UNTIL A WEDGE with the h23c-class kernel + dfx=ams46,txnhunt:
+1. ROLL UNTIL A WEDGE with the h23c-class kernel + debug=ams46,txnhunt:
    the three probes decide the wedge-seed fix in one boot —
    PICK-LATE.enq_elig=0 => nested-call tower capacity (chase the
    handler CPU), enq_elig>0 => wake-path bug (chase wake_proc_one);
@@ -2173,7 +2173,7 @@ staggered relaunch (pair 2 waits on this closure).
 ### MISSION-1 VERDICT: the wedge family did NOT lose its teeth
 - lb358 (cg26b = fix in): early-death spiral (storage_manager kill wave
   5.6 s -> init sysrq-c 42.8 s) — the pre-existing ~40-50% dice, unrelated.
-- lb359 (cg26b, fresh2, dfx=ams46,txnhunt,negmemo=syscost=1, load ~4-5):
+- lb359 (cg26b, fresh2, debug=ams46,txnhunt,negmemo=syscost=1, load ~4-5):
   HEALTHY through the cascade — SA storm 67+, CreateNewUser start 69.95,
   bundles.ready SET 101.36, CreateNewUser end 101.37, startUser 101.6,
   SwitchToUser 101.6 — and the clock is ALIVE: syscost ticks advance at
@@ -2241,7 +2241,7 @@ completes in milliseconds (same image, refu8/9: whole boot 12 s).
 - (b) the signaler exists but is stuck in a KERNEL object (lost futex
   wake / unfinishable syscall) = kernel bug, fuxstuck's anywoken field
   decides it (a never-woken uaddr with runnable producers).
-lb360 RAN (cg26b + dfx=ams46,txnhunt,syncguard,fuxstuck,slowtask +
+lb360 RAN (cg26b + debug=ams46,txnhunt,syncguard,fuxstuck,slowtask +
 negmemo=1). Verdict:
 
 ### lb360 — the (a)-vs-(b) fork, adjudicated partial: the family ROTATES
@@ -2307,7 +2307,7 @@ negmemo=1). Verdict:
    quiet host if the coordinator wants fresh numbers).
 2. THE RACE (unchanged recipe, cg26b-class kernel + the fix):
    system-lb5 + USERDATA=run/userdata-fresh2.img + SMP=2 LOGLEVEL=6 +
-   " dfx=ams46,txnhunt negmemo=1" (+syscost=1 when measuring). The
+   " debug=ams46,txnhunt negmemo=1" (+syscost=1 when measuring). The
    account side wins every healthy boot; pixels need (i) no early
    spiral, (ii) the BMS KVS query to hit a serving store — the 17th's
    29201-family readiness gap. Watch "create user:100 bundle size:34"
@@ -2323,7 +2323,7 @@ negmemo=1). Verdict:
    census prints only park-time state, not the signaler's identity).
 4. The early-death spiral (storage_manager/hdf_devmgr kill waves ->
    init sysrq-c, ~30-50%): unresolved for many sessions; a forensic
-   boot with dfx=taskdump from t=0 + hilog keys for the FIRST crash
+   boot with debug=taskdump from t=0 + hilog keys for the FIRST crash
    (not the cascade) would name the origin service crash.
 
 ## TWENTY-SIXTH-SUCCESSOR SESSION (2026-11-03 20:00-.., branch biofix-fieldpoll @ 491ebc09)
@@ -2427,7 +2427,7 @@ main's diverged ext4 structure, and the branch lineage is the fix.
 
 ### Successor entry points (26th, in order)
 1. THE RACE: same recipe, quiet window (load <4): system-lb5 +
-   USERDATA=run/userdata-fresh2.img SMP=2 LOGLEVEL=6 " dfx=ams46,txnhunt
+   USERDATA=run/userdata-fresh2.img SMP=2 LOGLEVEL=6 " debug=ams46,txnhunt
    negmemo=1". Watch lb362's good sign (SetBundleQuota at 18s) repeat;
    the account side (create user:100 bundle size:34) is the deciding
    half. Pixels: md5 leaving {5f8b704d,06b933b4,82f0a25f,23312e5b} =
@@ -2515,7 +2515,7 @@ serial log — no new boot needed)
   192 reading as stale, not as a SysV-sem kernel lead.
 
 ### 3. lb364 (roll 2, CLEAN quiet-window launch at load 2.6, full probe
-set dfx=ams46,txnhunt,fuxstuck,slowtask + negmemo=1) — WEDGE boot, and
+set debug=ams46,txnhunt,fuxstuck,slowtask + negmemo=1) — WEDGE boot, and
 the readiness gap's mechanism CAUGHT LIVE:
 - distributeddata (pid 560) starts 8.16s, OpenSo 8.49s. Main thread
   (tid 560) parks on FUTEX_WAIT_PRIVATE at stack uaddr 0x7fffffffd004
@@ -2692,7 +2692,7 @@ self-terminates at 1500s) — THE SCAN LEG FIRED, then stalled mid-stream
    uncontrolled estimate.
 3. THE RACE (unchanged recipe, quiet window load <4):
    system-lb5 + USERDATA=run/userdata-fresh2.img SMP=2 LOGLEVEL=6
-   " dfx=ams46,txnhunt,fuxstuck,slowtask negmemo=1" on
+   " debug=ams46,txnhunt,fuxstuck,slowtask negmemo=1" on
    run/bzImage-ladder-scanverdict. Pixels: md5 leaving
    {5f8b704d,06b933b4,82f0a25f,23312e5b} = convert + report IMMEDIATELY.
    lb366 shows the healthy fast cascade reaches startUser at ~99s with
@@ -2718,13 +2718,13 @@ where the reference's image replays its journal clean.
 
 ### Merge + instruments (all committed, pushed at close)
 - 9094970b = origin/main 91fed16d merged (TASK.md ours-by-intent).
-- BMSSCAN fs-side probe (dfx=ams46 cohort, 4 commits): openat attempts
+- BMSSCAN fs-side probe (debug=ams46 cohort, 4 commits): openat attempts
   on the scan's watched paths (bms RDB store chain, /data/app/el1,
   /system/app, /system/etc/app install_list) with R/W/C intent +
   PARENT-DIR state; per-directory first-getdents outcome; the
   access(bmsdb.db, F_OK) is-new-db probes WITH THE FILE SIZE (live
   divergence meter); mkdir attempt watch on the same set. Budgets
-  800/100(sysapp)/500/64/128, OFF unless dfx=ams46.
+  800/100(sysapp)/500/64/128, OFF unless debug=ams46.
 - Rig: run/bmsdump.sh (debugfs extraction + sqlite3 row counts — NOTE
   the image root IS the /data content: paths are /service/el1/..., not
   /data/service/...); run/sp-ref-n.py (reference kernel, NOSNAP
@@ -2836,7 +2836,7 @@ left alone; it wedged in the DEADLOCK class at ~1319s).
    on the minimal rootfs; if it reproduces, it is a correctness bug
    ahead of every NOSNAP population plan.
 4. Race rolls: recipe unchanged (system-lb5 + fresh2 + SMP2 LOGLEVEL6
-   dfx=ams46,txnhunt negmemo=1, quiet window load <4-5); the probe
+   debug=ams46,txnhunt negmemo=1, quiet window load <4-5); the probe
    kernel (bzImage-ladder-bmsscan26) narrates the scan leg for free.
    Pixels: md5 leaving {5f8b704d,06b933b4,82f0a25f,23312e5b} ->
    convert + report IMMEDIATELY.
@@ -2904,7 +2904,7 @@ resolve hit the 0-length extent.
 
 ### In-situ OH verification (the campaign image set)
 Roll boots (system-lb5 + fresh2 reflink, SMP2 LOGLEVEL6
-dfx=ams46,txnhunt negmemo=1, kernel bzImage-fixext-dbg): journal-empty
+debug=ams46,txnhunt negmemo=1, kernel bzImage-fixext-dbg): journal-empty
 line 0 per boot (was 1); /data mounts at ~2.26s. The jbd2 write-through
 + parity fixes (c917a4b6) are now actually ACTIVE on /data — the 28th's
 NOSNAP-population plans inherit real journaling for free.
@@ -3072,7 +3072,7 @@ under load 2.4-6.4, no healthy sample yet).
   benign config warnings before the exit.
 - The healthy-boot ceiling so far: 57 SA inserts + graphic stack up.
   The two userspace walls on the populated store: the samgr wedge dice
-  and the render_service cascade. DFX watchdog kills leaf services
+  and the render_service cascade. debug watchdog kills leaf services
   (inputmethod, useriam) but NEVER foundation/samgr — no image-side
   restart lever exists for the wedge; kernel timers demonstrably fire
   through wedges (TXN-HANG rescans on schedule) — userspace-internal
@@ -3147,10 +3147,10 @@ TXN-HUNT adjudication, now with the pick side convicted-free.
   intermediate A/B point); bzImage-fullfix2-dbg (103670dc) carries it.
 - 9096ae0d: cherry-pick of the stress lane's c6d74e01 (pick-generation
   ledger, origin/stress-port) — their instrument, used not re-invented;
-  dfx-only, default-off; dedupes when stress-port merges to main.
+  debug-only, default-off; dedupes when stress-port merges to main.
 
 ### 1. Roll tallies (all x86_64 KVM SMP2, NOSNAP populated / fresh2,
-system-lb5, dfx=ams46,txnhunt negmemo=1)
+system-lb5, debug=ams46,txnhunt negmemo=1)
 - POPULATED (bms-ref reflink), intermediate kernel (rlimits+spinguard,
   NO wake_up fix): lb404 WEDGE SA=61 (first-hang txn500
   OS_IPC_2_527->OS_IPC_1_383 @12.0s), lb405 WEDGE SA=60
@@ -3174,14 +3174,14 @@ system-lb5, dfx=ams46,txnhunt negmemo=1)
   lb406-class produce no lit shot). ZERO changes.
 
 ### 2. Mission 2 — the instruments' verdict (lb421/lb422/lb423)
-- lb421 (populated, dfx+=lostpark): 58 why=c lying-slot refusals; the
+- lb421 (populated, debug+=lostpark): 58 why=c lying-slot refusals; the
   lostpark census names pid 318 x45 (naming_cpu=0/1, slotw=1 = PICK
   writer, idlebit=0 = CPU not idle) from t=6.8s — the wedge onset.
-- lb422 (dfx+=leakhunt,taskdump): WAKE-SKIP-ORIGIN sites are
+- lb422 (debug+=leakhunt,taskdump): WAKE-SKIP-ORIGIN sites are
   wait.rs:384/199 brackets (the benign mid-schedule park class per the
   stress lane's r10 adjudication) for pid 318 x25; pid 329 = SAMGR x19
   with origin sched.rs:2677. taskdump produced NOTHING without
-  dfx=watchdog (the periodic dump rides the watchdog timer — the
+  debug=watchdog (the periodic dump rides the watchdog timer — the
   AGENTS.md pairing is load-bearing).
 - THE DISCRIMINATOR: healthy boots (bmsours3/5, lb366) show the SAME
   58-60 why=c refusals with the same early-exhaustion (last skip at
@@ -3239,7 +3239,7 @@ system-lb5, dfx=ams46,txnhunt negmemo=1)
 1. The kernel is acquitted at the instruments' reach; the wedge hunt
    needs the USERSPACE wait-site census (rip of the futex the stuck
    OS_IPC workers sleep on) — a tracepoint in the unified framework
-   (kernel/src/trace/), NOT a new bespoke dfx switch (frozen). The
+   (kernel/src/trace/), NOT a new bespoke debug switch (frozen). The
    TXN-HANG sampler already walks the server's kernel stack; the
    userspace return address of the FUTEX_WAIT is one frame further.
 2. If the stress lane convicts an R49 producer on their workload,
@@ -3372,7 +3372,7 @@ telephony +0x8001a4: still no sample (0 hits lb396-425).
 
 ### 5. Boots this round
 lb409-425 (poproll2b on bms-ref-derived userdata, private copies;
-kernels cg36-comm/cg36-bwrsnap/2/3; DFX=ams46,txnhunt,fuxstuck).
+kernels cg36-comm/cg36-bwrsnap/2/3; debug=ams46,txnhunt,fuxstuck).
 Verdicts all wedge-class (SA 0-58 variance as before); zero panics;
 pixels unchanged (frozen md5 set — no PIXEL-CHANGE lines).
 
@@ -3436,7 +3436,7 @@ the "deepest" hypothesis is refuted).
    stack-top-not-mine) — the reference rejects them unconditionally; the
    lb304-era gating existed because the same-proc sends violated the
    shape, and those now die earlier.
-2. 2daa78b3 dfx(binder): bounded (40/boot) BINDER-REJECT verdict prints
+2. 2daa78b3 debug(binder): bounded (40/boot) BINDER-REJECT verdict prints
    for why=22/23 so rolls can count the rejections.
 3. 94c48416 fix(epoll): eventfd poll_wait registration — the ONE fd
    class missing from poll_wait_impls (unix/pipe/fifo/socket/inotify/
@@ -3475,7 +3475,7 @@ normal wrapper shape — run/cgf1-maketest-x86.log). Roll kernel:
 run/bzImage-cgf1-dbg (md5 c72ed210).
 
 ### 5. Verification (run/cgf-roll.sh, fresh2 reflinks, SMP2 LOGLEVEL6,
-dfx=ams46,txnhunt negmemo=1) — rolling at write time
+debug=ams46,txnhunt negmemo=1) — rolling at write time
 - cgf1 (manual verdict, v1 roller murdered cgf2/cgf3 at 15s on a
   '/proc/sysrq-trigger' chown-noise false match — v2 fixed): WEDGE at
   392s, SA frozen 53 since ~20s, TXN-HANG wifi->samgr OS_IPC_7 exec
@@ -3540,7 +3540,7 @@ face.
 - make test x86_64 ALL PASSED again on the final tree
   (run/cgf3-maketest-x86.log); riscv64 + aarch64 builds rc=0.
 - Roll (run/cgf-roll.sh, fresh2 reflinks, SMP2 LOGLEVEL6
-  dfx=ams46,txnhunt negmemo=1): cgf1 SA=52 wedge@383s (load 9.56,
+  debug=ams46,txnhunt negmemo=1): cgf1 SA=52 wedge@383s (load 9.56,
   HEALTHY-noladder shape), cgf2 SA=60 wedge@383s (load 11.83, samgr
   handlers in FFRT waits: softbus/foundation code-6 exec 358-367s,
   RCU-GP sparse not frozen — no monopolist). Both boots show ZERO
@@ -3634,10 +3634,10 @@ PASSED, pushed. Also banked its run/u2vbank.py (record-bounded extractor).
 
 ### 2. Boot u2v1 (kernel 555ec7d3) — the wedge face extracted
 Same substrate (system-lb5 + fresh2 userdata reflink, SMP2, KVM).
-DFX=txnhunt,fuxstuck,taskdump,periodic syscost=1; new driver run/u2v-boot.py
+debug=txnhunt,fuxstuck,taskdump,periodic syscost=1; new driver run/u2v-boot.py
 (drives the uart-RX "DUMP!" magic via QEMU stdin — dumps fire from the RX
 IRQ, the only path guaranteed to run while everything is parked; DUMP!s at
-131.9/192.3/252.3/310.8s banked dump_all_tasks + binder_dfx_dump each).
+131.9/192.3/252.3/310.8s banked dump_all_tasks + binder_debug_dump each).
 
 **RETRY-LOOP REFUTED for the wedged handler** (the mission's question):
 samgr tid 341 (OS_FFRT_2_0) executing code-6 from el5_filekey_man (txn40,
@@ -3662,7 +3662,7 @@ wedge: SEVEN parkers on SEVEN distinct stack-node uaddrs (each waiter
 parks on its OWN musl waiter-node barrier — per src-path.md the censused
 uaddr IS stack-local; the A+0x8006xx/7xx/8xx "arena offsets" are per-thread
 STACK tops of ~8MB anon thread stacks, NOT FFRT sync-arena slots), 15
-binder threads holding in-flight txns (binder-dfx stack=1), 26 queued,
+binder threads holding in-flight txns (binder-debug stack=1), 26 queued,
 ALL sleeping except the periodic RefCountCollect (which legitimately
 cycles — vruntime grows every 30s window, not a strand).
 
@@ -3694,7 +3694,7 @@ deltas (per 60s at the wedge, 105/165/225/285s):
   SOCKET-READ SEMANTICS DIVERGENCE (blocking on the reference, EAGAIN
   spin on ours) is the one 10-100x-class volume diff found. The spinners
   (task dumps: sysevent_source/os_ds_service/mmi_service RUNNING
-  constantly, plus hilogd) need naming: next boot arms dfx=sysring (the
+  constantly, plus hilogd) need naming: next boot arms debug=sysring (the
   hung-task path at 120s+ dumps the 2048-entry ring with (pid,nr,a0,ret)
   — the spin's fd + EAGAIN return names the fd and the thread).
 
@@ -3707,8 +3707,8 @@ deltas (per 60s at the wedge, 105/165/225/285s):
    right before 'PANIC: attempt to add with overflow' context.rs:364).
    A wedge converted into a kernel panic by a debug printer — the boot
    died ~5s after DUMP!4.
-2. 8ccf6ed6 dfx(syscost): phase-shift the dump off the taskdump boundaries.
-3. 2a6358e0 dfx(futex): FUX-STUCK-U2V continuation row (the main row was
+2. 8ccf6ed6 debug(syscost): phase-shift the dump off the taskdump boundaries.
+3. 2a6358e0 debug(futex): FUX-STUCK-U2V continuation row (the main row was
    already at the 256-byte printk record ceiling — u2v2 anchors truncated
    mid-field on u2v1) + sample cap 32->64 / walk cap 64->192 (u2v1's
    blind spot: 357 FUX-STUCK-FULL rows for sharing_service, ZERO for
@@ -3718,7 +3718,7 @@ Gates: x3 builds rc=0, make test x86_64 ALL PASSED twice (pre- and
 post-64-sample tree), pushed through 2a6358e0.
 
 ### 5. u2v2 boot (kernel 225d24f5 = 2a6358e0 tree) — chain extraction
-DFX=txnhunt,fuxstuck,taskdump,periodic syscost=1, DUMP!x8. SA stuck 26-27
+debug=txnhunt,fuxstuck,taskdump,periodic syscost=1, DUMP!x8. SA stuck 26-27
 by 16.8s (early wedge), stuck_total=137 at 748s, hung-task fired 183.4s,
 rcu-gp-frozen-cpu fired once at 32.6s (CPU0 incumbent = accountmgr pid
 908 RUNNING — the monopolist face, transient here; gone by 60s).
@@ -3731,7 +3731,7 @@ bases identified by matching the known anchors (libc++ LOAD 0x96000,
 libffrt LOAD 0x66000, libhicollie 0x12000+0x91b7).
 
 ### 6. Next agent entry points (in order)
-1. **dfx=sysring boot (u2v3)**: name the socket-spin threads (fd + EAGAIN
+1. **debug=sysring boot (u2v3)**: name the socket-spin threads (fd + EAGAIN
    + pid from the hung-task ring dump) and adjudicate the blocking-vs-
    EAGAIN recvmsg divergence (reference blocks in __skb_wait_for_more_
    packets; ours spins). Candidate kernel fork: O_NONBLOCK flag handling
@@ -3784,7 +3784,7 @@ not failing.
 **The hilogd.server flood is BOOT-VARIANCE, not a constant:** u2v2
 reached 6.25M recvmsg+recvfrom (28k/s each, steady across 105->285s,
 kernel ticks 93%, softirq busy 10s/105s); u2v5 (same kernel family,
-dfx=sysforensic added) ramped to only 78,864 and STOPPED (the reader
+debug=sysforensic added) ramped to only 78,864 and STOPPED (the reader
 drained the backlog and the producers stopped). The flood = a PRODUCER
 storm (writev 2.3-2.6M/60s on u2v2) consumed by the reader — consume
 rate (28k/s) ~= produce rate (25k/s). The flood table's 16 comm slots
@@ -3818,7 +3818,7 @@ the park cascade. The parked handlers themselves are clean (no retry).
    green, so check the REARM path specifically (settime while the old
    expiry is still pending).
 3. The FFRT-mutex holders: samgr's 7 parkers + 15 stack=1 binder threads
-   (binder-dfx at every uart DUMP!). Extend TXN-HANG to print EVERY
+   (binder-debug at every uart DUMP!). Extend TXN-HANG to print EVERY
    stack=1 thread's current sys (not only >=20s txns) so the
    BWR-parked holders (the futex-census blind spot) surface.
 4. Candidate kernel levers for the per-op wall (the machine-capacity
@@ -3867,8 +3867,8 @@ reaches the GUI.
   memory; run/u2v-boot.py drives the DUMP! uart-magic boots.
 - The two instruments this session added: FUX-STUCK-U2V continuation
   rows (caller chains per park) + SYSCOST-RING (fd+ret per dump, joins
-  the flood table's comm attribution). REMEMBER: dfx=sysring needs
-  dfx=sysforensic to actually record (the ring sites sit behind the
+  the flood table's comm attribution). REMEMBER: debug=sysring needs
+  debug=sysforensic to actually record (the ring sites sit behind the
   SysForensic gate); the OH image uses NATIVE x86_64 nrs (translate
   maps them; TXN-HANG/flood print native, SYSCOST-RING prints generic).
 - Next levers, in order: (1) the recvmsg/SO_PASSCRED per-op cost (the
@@ -3894,7 +3894,7 @@ consume vs the reference's ~2-5us), (2) fix per reference semantics
 (net guarded domain), (3) verify post-fix per-op rows, wedge rate,
 pixels.
 
-### 1. The instrument: dfx unixrd=1 (c33129a1)
+### 1. The instrument: debug unixrd=1 (c33129a1)
 
 A filerd-shaped monotonic-ns phase probe around the three AF_UNIX hot
 entries, dumped on the syscost 60s cadence + shutdown cascade:
@@ -3910,7 +3910,7 @@ so the attribution reads as an upper bound. Gated behind the unixrd=1
 cmdline param (cctx tri-state pattern), zero cost when off.
 
 ### 2. THE PROFILE (u2v7: system-lb5 + fresh2, SMP2 KVM, syscost=1
-### unixrd=1 dfx=txnhunt,taskdump; probe armed at the first dump t=45s)
+### unixrd=1 debug=txnhunt,taskdump; probe armed at the first dump t=45s)
 
 Per-op walls, cumulative but stable across 105s -> 765s (wedge era):
 
@@ -3956,7 +3956,7 @@ Per-op walls, cumulative but stable across 105s -> 765s (wedge era):
    objects. No-room/EFAULT semantics byte-identical to the staged
    path.
 2. hilog diagnostic tap gated behind hilogtap=1 (cctx tri-state,
-   default OFF — the filerd discipline "OFF by default like every DFX
+   default OFF — the filerd discipline "OFF by default like every debug
    probe"): the tap is instrumentation, not kernel semantics; the
    125-scan-per-record cost on the storm path was ours alone. Boots
    needing HILOG-AMS/slog/alog/ilog/PCTL evidence arm it explicitly
@@ -4053,7 +4053,7 @@ Mission: (A) verify the 40th's three fixes on OH boots, (B) systematic
 reference-diff audit of the census's top syscall classes.
 
 ### PART A — verification (substrate: system-lb5 + fresh2 reflinks, SMP2
-### KVM, LOGLEVEL6, dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1)
+### KVM, LOGLEVEL6, debug=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1)
 
 Per-op phase tables, t=885s cumulative (vs the 39th's u2v7/u2v8):
 - UNIXRD-RM outer: u2v7 4852ns -> u2v8 1874 -> u2v9/u2v10 2166-2254ns.
@@ -4178,7 +4178,7 @@ Rig lessons this session:
 ### 41st session close — final ledger
 
 BOOT LEDGER (all system-lb5 + fresh2 reflink, SMP2 KVM, LOGLEVEL6,
-dfx=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1):
+debug=txnhunt,fuxstuck,taskdump,periodic unixrd=1 syscost=1):
 - u2v9  (40th kernel 6339074f): SA 37, wedge, pixels frozen.
 - u2v10 (40th kernel): SA 47, wedge, pixels frozen.
 - u2v12 (futex batch 4ecce94e): SA 56, wedge, pixels frozen.
@@ -4202,7 +4202,7 @@ COMMITS THIS SESSION (biofix-fieldpoll):
   d057f973 — required for make test to link at all)
 ed1549c5 fix(futex): reference parity batch (waiters-pending fast path,
   FIFO wait chain, nr_wake==0 quirk, cmp-under-locks requeue)
-121fc908 dfx(binder): TXN-HANG-HLD — BWR-parked nested clients named
+121fc908 debug(binder): TXN-HANG-HLD — BWR-parked nested clients named
 6cf83b15 fix(net): AF_UNIX recvmsg MSG_TRUNC return value
 62f6b670 fix(epoll): drop the 1024 maxevents cap
 d402fa90 fix(net): AF_UNIX peer close with unread data sets ECONNRESET

@@ -406,13 +406,13 @@ impl MmStruct {
             // with MAP_FIXED's multi-phase surgery dropped a live VMA
             // piece. Pick AND insert under ONE guard, like the hint path
             // below and the riscv64 twin.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if map_flags & map::MAP_32BIT != 0 {
                 // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces
                 // the mapping into the FIRST 2GB, bottom-up from 1GB
@@ -426,10 +426,34 @@ impl MmStruct {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
+            // Paranoia (the occupied-address handout class): the chooser
+            // must never select a range an existing VMA covers. Verify
+            // BEFORE insert against the SAME locked tree.
+            {
+                let dup = vma_mgr
+                    .last_at_or_before(chosen)
+                    .filter(|v| v.end().as_usize() > chosen.as_usize())
+                    .is_some()
+                    || vma_mgr.iter().any(|v| {
+                        v.start().as_usize() < vend.as_usize()
+                            && v.start().as_usize() >= chosen.as_usize()
+                    });
+                if dup {
+                    static ND: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if ND.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        crate::pr_warn!(
+                            "ALLOC-OVERLAP chosen={:#x} len={:#x}",
+                            chosen.as_usize(),
+                            aligned_size
+                        );
+                    }
+                }
+            }
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
             vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
@@ -440,7 +464,7 @@ impl MmStruct {
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -467,13 +491,13 @@ impl MmStruct {
             // an unaligned hint used to reach Vma::new and trip its
             // page-alignment assert (Vma::new asserts; Linux masks the
             // hint instead).
-            let mp = crate::dfx::mmprof::on();
-            let mp_tl = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tl = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = self.vma_write();
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_LOCKWAIT, mp_tl);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_LOCKWAIT, mp_tl);
             }
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let chosen = if addr.as_usize() != 0 {
                 let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
                 let hint_end = hint.checked_add(aligned_size);
@@ -502,9 +526,9 @@ impl MmStruct {
                 self.find_free_area_locked(&vma_mgr, aligned_size)?
             };
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_FINDFREE, mp_tf);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_FINDFREE, mp_tf);
             }
-            let mp_ta = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp_ta = if mp { crate::debug::mmprof::now() } else { 0 };
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
@@ -516,7 +540,7 @@ impl MmStruct {
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
             self.update_highest_vm_end(chosen.as_usize() + aligned_size);
             if mp {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::M_ADD, mp_ta);
+                crate::debug::mmprof::add(crate::debug::mmprof::M_ADD, mp_ta);
             }
             vma_installed = true;
             chosen
@@ -555,8 +579,8 @@ impl MmStruct {
             // kernel permits any interleaving there too). The b89
             // piece-drop hole cannot recur: pieces are never held across
             // a guard drop by the chunked loop.
-            let mp = crate::dfx::mmprof::on();
-            let mp_tf = if mp { crate::dfx::mmprof::now() } else { 0 };
+            let mp = crate::debug::mmprof::on();
+            let mp_tf = if mp { crate::debug::mmprof::now() } else { 0 };
             let mut attempts = 0;
             loop {
                 self.munmap(start, aligned_size)?;
@@ -581,7 +605,7 @@ impl MmStruct {
                 self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
                 self.update_highest_vm_end(end.as_usize());
                 if mp {
-                    crate::dfx::mmprof::add(crate::dfx::mmprof::M_FIXEDMUN, mp_tf);
+                    crate::debug::mmprof::add(crate::debug::mmprof::M_FIXEDMUN, mp_tf);
                 }
                 vma_installed = true;
                 break;
@@ -762,8 +786,8 @@ impl MmStruct {
         // follows the VMA, not the address).
         const MUNMAP_CHUNK_BYTES: usize = 256 * PAGE_SIZE_USIZE;
 
-        let mp = crate::dfx::mmprof::on();
-        let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
 
         let mut zap_pieces: alloc::vec::Vec<(usize, usize)> =
             alloc::vec::Vec::new();
@@ -827,8 +851,8 @@ impl MmStruct {
                 let seg_end = ve.min(end_addr);
 
                 if mp {
-                    crate::dfx::mmprof::bump(
-                        crate::dfx::mmprof::S_MUNLOOPS,
+                    crate::debug::mmprof::bump(
+                        crate::debug::mmprof::S_MUNLOOPS,
                         1,
                     );
                 }
@@ -941,7 +965,7 @@ impl MmStruct {
         crate::arch::mm::asid::flush_tlb_all();
 
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
+            crate::debug::mmprof::add(crate::debug::mmprof::MU_BODY, mp_t0);
         }
         Ok(())
     }
@@ -981,8 +1005,8 @@ impl MmStruct {
     ) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (this mm's
         // PTE section, INV-LOCK-7).
-        let mp = crate::dfx::mmprof::on();
-        let mp_tw = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp = crate::debug::mmprof::on();
+        let mp_tw = if mp { crate::debug::mmprof::now() } else { 0 };
         let _pte_guard = pte_lock_for(self).lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
@@ -1133,7 +1157,7 @@ impl MmStruct {
                     continue;
                 }
                 if mp {
-                    crate::dfx::mmprof::bump(crate::dfx::mmprof::S_UNPAGES, 1);
+                    crate::debug::mmprof::bump(crate::debug::mmprof::S_UNPAGES, 1);
                 }
                 if raw & PageTableEntry::P == 0 {
                     // Swap entry (P=0 leaf): free the swap slot and clear
@@ -1201,7 +1225,7 @@ impl MmStruct {
                     if !leaf_is_ro {
                         // SAFETY: page descriptor for a page mapped by this address space.
                         let new_ref =
-                            unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                            unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
                             crate::mm::page_alloc::free_pages(
                                 (ppn_val as usize) << PAGE_SHIFT, 0,
@@ -1248,9 +1272,9 @@ impl MmStruct {
         }
 
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_WALK, mp_tw);
+            crate::debug::mmprof::add(crate::debug::mmprof::MU_WALK, mp_tw);
         }
-        let mp_tt = if mp { crate::dfx::mmprof::now() } else { 0 };
+        let mp_tt = if mp { crate::debug::mmprof::now() } else { 0 };
         if !defer_tlb_flush {
             crate::arch::ipi::flush_tlb_others(
                 start.as_usize() as u64,
@@ -1261,7 +1285,7 @@ impl MmStruct {
             crate::arch::mm::asid::flush_tlb_all();
         }
         if mp {
-            crate::dfx::mmprof::add(crate::dfx::mmprof::MU_TLB, mp_tt);
+            crate::debug::mmprof::add(crate::debug::mmprof::MU_TLB, mp_tt);
         }
 
         Ok(())
@@ -1343,7 +1367,7 @@ impl MmStruct {
                     }
                     if !leaf_is_ro {
                         let new_ref =
-                            unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                            unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
                         if new_ref == 0 {
                             crate::mm::page_alloc::free_pages(
                                 (ppn_val as usize) << PAGE_SHIFT, 0,
@@ -1420,7 +1444,7 @@ impl MmStruct {
             if !leaf_is_ro {
                 // SAFETY: page descriptor for a page mapped by this address space.
                 let new_ref =
-                    unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+                    unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
                 if new_ref == 0 {
                     crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
                 }
@@ -1599,8 +1623,8 @@ impl MmStruct {
         // mm writers concurrent with fork.
         // forkprof (cmdline forkprof=1): phase split of the mm fork —
         // snapshot / COW walk / VMA replay. One relaxed load when off.
-        let fp = crate::dfx::forkprof::on();
-        let fp_t_snap = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp = crate::debug::forkprof::on();
+        let fp_t_snap = if fp { crate::debug::forkprof::now() } else { 0 };
         let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)>) = {
             let parent_vma_guard = self.vma_read();
 
@@ -1631,9 +1655,9 @@ impl MmStruct {
             (exempt, snapshot)
         };
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_SNAPSHOT, fp_t_snap);
-            crate::dfx::forkprof::bump(
-                crate::dfx::forkprof::S_FORKS_VMASES,
+            crate::debug::forkprof::add(crate::debug::forkprof::P_MM_SNAPSHOT, fp_t_snap);
+            crate::debug::forkprof::bump(
+                crate::debug::forkprof::S_FORKS_VMASES,
                 vma_snapshot.len() as u64,
             );
         }
@@ -1643,12 +1667,12 @@ impl MmStruct {
         // The walk takes the PARENT's per-mm PTE section internally per leaf
         // table and may cond_resched between chunks (launcher wall fix — see
         // the function's own comment for the exclusion argument).
-        let fp_t_cow = if fp { crate::dfx::forkprof::now() } else { 0 };
+        let fp_t_cow = if fp { crate::debug::forkprof::now() } else { 0 };
         let new_root_ppn = unsafe {
             copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
         if fp {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_COW, fp_t_cow);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_MM_COW, fp_t_cow);
         }
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
@@ -1663,7 +1687,7 @@ impl MmStruct {
         {
             // Everything after this point only touches the CHILD's manager
             // (the snapshot was taken before the walk — no parent lock held).
-            let fp_t_replay = if fp { crate::dfx::forkprof::now() } else { 0 };
+            let fp_t_replay = if fp { crate::debug::forkprof::now() } else { 0 };
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
@@ -1702,7 +1726,7 @@ impl MmStruct {
                 }
             }
             if fp {
-                crate::dfx::forkprof::add(crate::dfx::forkprof::P_MM_REPLAY, fp_t_replay);
+                crate::debug::forkprof::add(crate::debug::forkprof::P_MM_REPLAY, fp_t_replay);
             }
         }
 
@@ -2535,7 +2559,7 @@ pub unsafe fn copy_page_table_cow(
     use crate::mm::page_desc::pfn_to_page_mut;
 
     // forkprof scalars (armed check hoisted out of the PTE loop).
-    let fp_count = crate::dfx::forkprof::on();
+    let fp_count = crate::debug::forkprof::on();
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
     // device-shared memory and must NEVER be COW-marked — mirror of the
@@ -2681,7 +2705,7 @@ pub unsafe fn copy_page_table_cow(
                         let child_pt_phys = alloc_page_table()?;
                         let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
                         if fp_count {
-                            crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_TABLES, 1);
+                            crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_TABLES, 1);
                         }
                         (*child_pmd_ref).set(
                             vpn2,
@@ -2808,7 +2832,7 @@ pub unsafe fn copy_page_table_cow(
                     // forkprof scalar: PTEs copied (hoisted armed check —
                     // one relaxed load when off).
                     if fp_count {
-                        crate::dfx::forkprof::bump(crate::dfx::forkprof::S_COW_PTES, 1);
+                        crate::debug::forkprof::bump(crate::debug::forkprof::S_COW_PTES, 1);
                     }
                     pte_install_log(
                         child_root_ppn,
@@ -3025,7 +3049,7 @@ pub unsafe fn handle_cow_fault(
     // across COW cycles and eventually corrupts page reclaim / rmap
     // decisions.
     if !old_page.is_null() {
-        (*old_page).put_page_site(crate::dfx::driftwatch::S_COW_X86);
+        (*old_page).put_page_site(crate::debug::driftwatch::S_COW_X86);
         (*old_page).dec_mapcount();
     }
 

@@ -480,7 +480,7 @@ table):
   `docs/development/perf-audit.md` (sections 2a-2d carry the per-run
   readings; the run table at the top lists every boot's kernel and
   boot args).
-- Tools (committed on this branch): `kernel/src/dfx/syscost.rs`,
+- Tools (committed on this branch): `kernel/src/debug/syscost.rs`,
   `run/pa-boot.sh` (quiet measurement boot), `run/patstamp.py`
   (serial timestamping), `run/pa-parse.py` (offline parser + rip
   symbolization). Reproduction recipe in perf-audit.md section 9.
@@ -1317,7 +1317,7 @@ is LTP-clean for the merge claim.
 
 ### 8.10.5 First trace-event deliverable: wake-latency distribution under churn (leg 35, pa49)
 
-The DFX batch's T4 sched events make wake-latency measurement a ONE-
+The debug batch's T4 sched events make wake-latency measurement a ONE-
 QEMU capture instead of an A-B syscost pair. Channel: minimal rootfs,
 init=/bin/mrsh, TCG MTTCG smp2/1G; only sched_waking + sched_wakeup +
 sched_switch armed (three events per wake cycle keeps the 1024-entry
@@ -1350,7 +1350,7 @@ wake) — with overrun 0 it is not data loss.
 The capture also VERIFIED the ff48bbf3 frrm fix end to end: the two
 pre-fix attempts died deterministically (mrsh SIGILL in __multf3's
 `frrm` under the capture loop's shell arithmetic); the fixed kernel
-ran the full capture clean. Side observation for the DFX lane: T4
+ran the full capture clean. Side observation for the debug lane: T4
 record path under MTTCG + churn held overrun=0 at three-event
 production — the single-threaded soak's coverage is extended, not
 contradicted.
@@ -1380,7 +1380,7 @@ the call. /proc/stat keeps its dynamic-arity intr/softirq sum lines
 explicit and renders the kv tail through render_kv; whole-file LINE
 ORDER pinned by stat_file_tests::line_order_check (no per-line test
 can see order). Unit suite (riscv64, pa53-maketest.log): group [13]
-procfile-shape runs the three new checks, All tests passed. DFX note
+procfile-shape runs the three new checks, All tests passed. debug note
 §8 records the form + remaining candidates (interrupts/softirqs/
 diskstats, dynamic-arity).
 
@@ -1448,7 +1448,7 @@ post-p5-merge main class — the track-2 re-measure debt).
 
 **The oh-img trap (hit and fixed locally):** origin/main carries a
 TRACKED run/oh-img SYMLINK whose target is the perf-audit worktree's
-own run/oh-img (a self-referential loop — it came in with the dfx
+own run/oh-img (a self-referential loop — it came in with the debug
 lane's wip commits and resolves nowhere). The leg-36->37 merge
 replaced this worktree's real image directory with that loop, which
 would have killed the census boot at its userdata copy. Fixed on
@@ -2118,7 +2118,7 @@ hypothesis.** pa72b (full board + new rows):
 p5f's eagain=0 (sys_sendto DOES pass MSG_DONTWAIT through to
 unix_send's nonblock) proves the class is paid on NEVER-GATED sends:
 flow control is exonerated. The wake machinery is exonerated by the
-census (dfx=wwcensus, 1 Hz WW heartbeat between serial markers):
+census (debug=wwcensus, 1 Hz WW heartbeat between serial markers):
 every window, slow or fast, shows wakes==picks to +-1 (direct
 handoff per wake, no refusal, no stranding); one benign early-boot
 W3-RUNWAKE-REFUSED in 454 heartbeats; zero unixsend-loop prints.
@@ -2256,7 +2256,7 @@ the children-scan loop monopolizing its CPU until the 10 s tick heal
 clears the base; if the heal lands inside a live guard window, that
 guard's drop books -1 on zero = the underflow print. LTP rows are
 unaffected (their own byte-identical failure-set A/B). pa73c's
-dfx=leakhunt+wwcensus boot captured the acquire sites on the
+debug=leakhunt+wwcensus boot captured the acquire sites on the
 PRE-DELTA kernel: sched.rs:4124 (dequeue_if_enqueued's
 grq().lock_irqsave), wait.rs:361 (finish_wait's list lock_irqsave),
 spinlock.rs:292 — all do_wait-machinery guard scopes, cnt_after=1
@@ -2554,7 +2554,7 @@ re-derived against the code. Verdict on each link:
   so "no reclaim-slowpath emergence on standard boots" reduces to the
   deep pass never running there (separate counter, verifiable in the
   census).
-- Instrument (the change's own DFX duty): counters + one
+- Instrument (the change's own debug duty): counters + one
   OOM-DEEP-PASS serial line per invocation (freed/target/demoted/
   passes) — the storm fleet's next rounds read it directly; standard
   boots print nothing.
@@ -2625,7 +2625,7 @@ test/perf-gate.sh` — no such path (it is run/perf-gate.sh and bash);
 the "rc=0" the chain logged was the rc of the `$(stamp)` command
 substitution inside the echo, not python3's. (2) The boot's
 APPEND_EXTRA="syscost=1 fsw=1" OVERRIDE dropped pa-boot.sh's default
-`dfx=wwcensus` token — so the census rows read 0/0 by construction:
+`debug=wwcensus` token — so the census rows read 0/0 by construction:
 every quiet census boot pa50-pa76 with the token reads exactly
 TERM=8 / REFUSED=32. Not a scheduler regression. The re-parse PASSes:
 panics 0, OOM 0, ticks 99.50-99.98/s/CPU sustained, GRQ hold 6308 ns
@@ -3000,12 +3000,12 @@ commits; the fs-lane handoffs are the SYNC_WALK_NULL_BH producer hunt
 and (unchanged) the mkdir scoped flush; the p5b optimization decision
 waits on pa91's pair; the baseline whole-table refresh waits on pa91's
 boards per the merge-gate rules.
-### 8.10.23 abi-review session 1 (2026-10-28): exec decomposed (dfx=execcost) — ladder kernel work -172.5 us (-17.5%); the remaining 814 us is 44% eager image map + 18% old-mm teardown
+### 8.10.23 abi-review session 1 (2026-10-28): exec decomposed (debug=execcost) — ladder kernel work -172.5 us (-17.5%); the remaining 814 us is 44% eager image map + 18% old-mm teardown
 
 Lane: feature/abi-review (the positive-review lane's first perf entry; the
 process-creation subsystem is its standing thesis — p4_fork_exec ~70x is
-the biggest unowned reference multiple). New instrument: dfx=execcost
-(DfxSwitch::ExecCost, OFF by default) — two rate-limited lines per exec:
+the biggest unowned reference multiple). New instrument: debug=execcost
+(DebugSwitch::ExecCost, OFF by default) — two rate-limited lines per exec:
 the ladder stages (path build/lookup/read/parse/interp/creds/de_thread+pin)
 and the image stages (address-space create/map/stack/copy/tighten/interp/
 fill/vma/switch), raw read_time() ticks (10 MHz domain — 100 ns/tick).
@@ -3175,7 +3175,7 @@ small_alloc.rs:289).
 
 ### 8.10.24 Leg 54 (2026-10-29): the sampler verdict — 94% KERNEL / 6% user; the target list decomposes into TWO levers (and a boot-arg gift for the OH lane)
 
-**The sample (sc357, in-kernel dfx=ripsample, launcher-only, 242K
+**The sample (sc357, in-kernel debug=ripsample, launcher-only, 242K
 kernel samples vs 15K user).** Mode split: launcher utime=1583 /
 stime=22093 ticks — the ~100x cold-start gap is KERNEL time on the
 launcher's behalf (syscall/fault paths under 100MB of page-by-page
@@ -3495,7 +3495,7 @@ shape — the pbench p3c_fault_file row (0.070us med, pa91q2) is
 single-threaded warm-cache and does NOT see the contention: a
 CONCURRENT fault probe is owed (4 procs mmap-touching distinct files;
 add as a pbench row — instrument debt, gated off by default per the
-DFX rule); (b) syscost REST attribution at the pcache lock site
+debug rule); (b) syscost REST attribution at the pcache lock site
 (track_caller) before/after; (c) the grind re-sample: the pcache
 family pages (#2's fetch_update share is gone; the BTreeMap-compare
 glue should halve) on a current-main kernel with the OH lane's rig;

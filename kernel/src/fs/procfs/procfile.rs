@@ -32,7 +32,7 @@
 //!   (order is part of the Linux-observable format; moving a line in
 //!   the declaration intentionally moves it in the file),
 //! * `pub const VMSTAT_FIELDS: &[&str]` — the key list, in order, for
-//!   parsers/tests/dfx tooling,
+//!   parsers/tests/debug tooling,
 //! * `mod vmstat_shape` with a `#[test]` asserting every declared key
 //!   renders as `"<key> <value>\n"` (the width/separator/trailing-space
 //!   drift floor).

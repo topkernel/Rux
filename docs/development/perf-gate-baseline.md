@@ -191,7 +191,7 @@ next main-class board (pa94 chain armed).
 
 First Tier-1 battery since the image cleanup, closing the aarch64
 merge's vehicle exception. Vehicle: pa-boot.sh 780 s KVM q35 smp2/4G,
-syscost=1 dfx=wwcensus, kernel = main@82059759 x86_64 debug bzImage
+syscost=1 debug=wwcensus, kernel = main@82059759 x86_64 debug bzImage
 (md5 c800ffe3710b07b8), userdata lineage = tok109 asset (see the
 note above). Two boots, each with its own recorded load window
 (run/pa112tok-window.log, run/pa113tok-window.log):
@@ -267,7 +267,7 @@ rc=0, zero panics.
 
 The tok109 userdata asset was lost in a second host cleanup (lineage
 searched and confirmed gone). Vehicle: pa-boot.sh 780 s KVM q35 smp2/4G,
-`syscost=1 dfx=wwcensus`, kernel = main@12c5e326 x86_64 debug bzImage
+`syscost=1 debug=wwcensus`, kernel = main@12c5e326 x86_64 debug bzImage
 (md5 696e6c4131ecb7f4c52a38a91dfb61ee), userdata = the SEED bytes
 (central-store image md5 ae9cde56be0b683fe5a6b32ca6aa97f6), reflinked
 privately per tag, boot writable. Four boots, each with its recorded
@@ -427,7 +427,7 @@ Board log: run/116pb1-boot.log, serial work/pbench-116pb1-serial.log.
 
 General principle (user mandate): any subsystem that can affect system
 performance gets gate-code guardianship — not measured yet means "add the
-DFX tool", not "skip the check".
+debug tool", not "skip the check".
 
 ## Tier 3 — IF=0 share (allocator / IRQ-path changes)
 
@@ -486,7 +486,7 @@ perf-ipc), and the sync-realign SleepMutex conversions
 (dd5f3731/a9825b45/ab397dfd).
 
 Vehicle: same rig as the 2026-10-31 re-bank (pa-boot 780 s KVM q35
-smp2/4G, syscost=1 dfx=wwcensus, tok109 lineage), kernel =
+smp2/4G, syscost=1 debug=wwcensus, tok109 lineage), kernel =
 main@afc41b8b x86_64 debug bzImage md5 6fe271cbf910ec667bf8f2136e0bee83
 (strong twin for the p2f rig: 974d519ef141e513e3a9223abd3d8939).
 Evidence: run/pa115debt1-gate.txt, run/perf-gate-pa115debt1-parse.txt,

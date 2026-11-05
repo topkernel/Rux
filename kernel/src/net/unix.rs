@@ -487,7 +487,7 @@ fn current_unix_cred() -> UnixCred {
 /// cctx pattern). The tap scans every record for ~125 key/tag shapes;
 /// on the hilogd storm that is seconds of CPU per second inside the
 /// send path (the 39th's UNIXRD-WV send-phase measurement). OFF by
-/// default like every DFX probe; boot drivers that need the HILOG-AMS /
+/// default like every debug probe; boot drivers that need the HILOG-AMS /
 /// slog / alog / ilog / PCTL evidence pass hilogtap=1.
 static HILOGTAP_ARMED: AtomicU8 = AtomicU8::new(0);
 fn hilogtap_on() -> bool {
@@ -1440,7 +1440,7 @@ pub fn unix_connect(
             if fid != 0 {
                 crate::syscall::misc::epoll_notify_file(fid);
             }
-            // dfx=socksnap (launcher-chain hunt, b16): name every client
+            // debug=socksnap (launcher-chain hunt, b16): name every client
             // that reaches a Spawn-family listener. The OH appspawn
             // protocol is one connect + one request + one pid reply, so
             // this line paired with the REQ dump in unix_send answers
@@ -1454,7 +1454,7 @@ pub fn unix_connect(
             // park never registered on this socket (poll_wait routing
             // bug); entries>0 with woken>0 but awakened==0 is the VW
             // sticky-skip lost wake (entry marked, task never scheduled).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SockSnap) {
                 let name = server.bound_name.lock().clone();
                 if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
                     let (tot, won) = server.wait_queue.vw_queue_census();
@@ -1717,7 +1717,7 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
-        // dfx=socksnap (launcher-chain hunt, b16): dump the head of every
+        // debug=socksnap (launcher-chain hunt, b16): dump the head of every
         // message whose receiving end belongs to a Spawn-family listener
         // (AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn). The OH request
         // carries the target process name as a C string inside the struct,
@@ -1725,7 +1725,7 @@ pub fn unix_send(
         // for. Replies from appspawn ride the same socket in the other
         // direction (target = client socket, no Spawn bound name) and stay
         // silent — only requests print.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap)
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SockSnap)
             && !data.is_empty()
         {
             // leg-34: the Spawn classification is cached in tap_class at
@@ -1778,7 +1778,7 @@ pub fn unix_send(
         // inside the send path and part of the 90%-kernel-tick saturation
         // face (UNIXRD-WV send phase 14.3 us/op, u2v7). It is a DIAGNOSTIC
         // instrument, not kernel semantics — OFF by default like every
-        // DFX probe (filerd discipline); arm with hilogtap=1 when a boot
+        // debug probe (filerd discipline); arm with hilogtap=1 when a boot
         // needs the HILOG-AMS/slog/alog/ilog/PCTL evidence.
         // The first tap smeared the whole datagram through a printable
         // filter, mixing header bytes into the text and hiding the exact
@@ -2721,7 +2721,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
     // scmtap (gdm session-fifo hunt): fds still parked in OUR receive
     // queue at close time are about to be released — the receiver died
     // (or stopped reading) before the ancillary segment was touched.
-    if crate::dfx::scmtap::enabled() {
+    if crate::debug::scmtap::enabled() {
         let q = sock.recv_queue.lock();
         let mut nfds = 0usize;
         let mut segs = 0usize;
@@ -2733,7 +2733,7 @@ pub fn unix_close(sock: &Arc<UnixSocket>) {
         }
         drop(q);
         if nfds > 0 {
-            crate::dfx::scmtap::tap_orphan(nfds, segs);
+            crate::debug::scmtap::tap_orphan(nfds, segs);
         }
     }
     // unix_release_sock: wake_up_interruptible_all(&u->peer_wait) —
@@ -2818,10 +2818,10 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
 pub fn unix_write_user(file: &File, src: *const u8, count: usize) -> isize {
     use crate::arch::uaccess::copy_from_user;
     // cctx probe (closegap lane): whole-op send sum for lat_unix.
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::UW_N);
+    let cc_t = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::UW_N);
     let cc_out = |r: isize| -> isize {
-        crate::dfx::cctx::add(&crate::dfx::cctx::UW_NS, cc_t);
+        crate::debug::cctx::add(&crate::debug::cctx::UW_NS, cc_t);
         r
     };
     // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
@@ -2936,10 +2936,10 @@ const READ_BOUNCE: usize = 1024;
 pub fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
     // cctx probe (closegap lane): whole-op recv sum for lat_unix (the
     // body has many return points — wrap instead of threading stamps).
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::UR_N);
+    let cc_t = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::UR_N);
     let r = unix_read_user_inner(file, dst, count);
-    crate::dfx::cctx::add(&crate::dfx::cctx::UR_NS, cc_t);
+    crate::debug::cctx::add(&crate::debug::cctx::UR_NS, cc_t);
     r
 }
 
@@ -2977,8 +2977,8 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 if r.len == 0 {
                     return 0; // EOF
                 }
-                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // SAFETY: dst validated with access_ok(count) by the
                 // caller; r.len <= stage <= count.
@@ -3025,9 +3025,9 @@ fn unix_read_user_inner(file: &File, dst: *mut u8, count: usize) -> isize {
                 // same way). A fd-carrying segment touched by a plain
                 // read is the dbus "message refers to more unix fds
                 // than were sent" corruption shape, so make the loss
-                // visible when hunting (dfx=scmtap).
-                if crate::dfx::scmtap::enabled() && !r.files.is_empty() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
+                // visible when hunting (debug=scmtap).
+                if crate::debug::scmtap::enabled() && !r.files.is_empty() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", r.files.len());
                 }
                 // SAFETY: user_ptr stays within the access_ok-validated
                 // [dst, dst+count) window; only the n bytes unix_recv
@@ -3168,8 +3168,8 @@ fn unix_recv_stream_user(
                 }
             }
             if !files.is_empty() {
-                if crate::dfx::scmtap::enabled() {
-                    crate::dfx::scmtap::tap_rx_drop("PLAINREAD", files.len());
+                if crate::debug::scmtap::enabled() {
+                    crate::debug::scmtap::tap_rx_drop("PLAINREAD", files.len());
                 }
                 let _ = cred;
             }
@@ -3333,15 +3333,15 @@ pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     }
 }
 
-/// dfx=socksnap (appspawn wedge hunt, b15): one console line per
+/// debug=socksnap (appspawn wedge hunt, b15): one console line per
 /// LISTENING socket in the namespace — registry key, accept-queue depth,
 /// backlog cap, and the open-file-description id that epoll registrations
 /// key on. Cross-reference the printed file id against the epoll interest
 /// dump (syscall::misc::epoll_interest_snapshot) to decide whether a
 /// wedged server's listener is still registered anywhere. Purely
-/// diagnostic; self-gated, OFF unless dfx=socksnap is on the cmdline.
+/// diagnostic; self-gated, OFF unless debug=socksnap is on the cmdline.
 pub fn unix_listener_snapshot() {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SockSnap) {
         return;
     }
     let table = UNIX_TABLE.lock();

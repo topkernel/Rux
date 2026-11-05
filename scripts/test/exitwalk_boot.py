@@ -78,8 +78,8 @@ def main():
                     help="0 = churn-only mode (no /proc readers)")
     ap.add_argument("--smaps-every", default="7",
                     help="smaps every Nth pid (1 = every pid)")
-    ap.add_argument("--dfx", default="",
-                    help="dfx= boot flags (default: none — the watchdog's "
+    ap.add_argument("--debug", default="",
+                    help="debug= boot flags (default: none — the watchdog's "
                          "periodic taskdumps are a crash discriminator)")
     ap.add_argument("--keep-img", action="store_true")
     ap.add_argument("--show", action="store_true",
@@ -113,7 +113,7 @@ def main():
            "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
            "-kernel", args.kernel,
            "-append", f"root=/dev/vda rw init=/test/exitwalk_churn "
-                      f"console=ttyS0{(' ' + args.dfx) if args.dfx else ''}"]
+                      f"console=ttyS0{(' ' + args.debug) if args.debug else ''}"]
     print("[boot]", " ".join(cmd[1:]), flush=True)
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT)

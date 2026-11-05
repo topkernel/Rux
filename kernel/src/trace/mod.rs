@@ -101,7 +101,7 @@ impl TraceEvent {
     ///
     /// ONE relaxed load — the whole disabled-path cost at a call site
     /// (the lane charter's overhead gate; the same class as the bespoke
-    /// `dfx=` switch table). The global `tracing_on` master is checked
+    /// `debug=` switch table). The global `tracing_on` master is checked
     /// inside `record`, after the arguments are marshalled — exactly
     /// where the reference checks it (the tracepoint's static key gates
     /// the site; `tracing_on` gates the ring buffer reserve, which
@@ -2272,7 +2272,7 @@ fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
 pub fn ps_render(addr: u64) -> String {
     let sym_offset = option_enabled(&OPT_SYM_OFFSET);
     let sym_addr = option_enabled(&OPT_SYM_ADDR);
-    let mut out = match crate::dfx::ksyms::lookup(addr) {
+    let mut out = match crate::debug::ksyms::lookup(addr) {
         Some((name, sym, size)) => {
             if sym_offset {
                 if size > 0 {
@@ -2469,8 +2469,8 @@ pub fn alloc_call_site(frames: &[u64]) -> u64 {
     fn is_plumbing(name: &str) -> bool {
         name.contains("mm::buddy_allocator")      // the GlobalAlloc impl + the trace helpers
             || name.contains("mm::small_alloc")   // the packing layer
-            || name.contains("dfx::memwatch")     // the walker itself
-            || name.contains("dfx::backtrace")    // current_frame_pointer
+            || name.contains("debug::memwatch")     // the walker itself
+            || name.contains("debug::backtrace")    // current_frame_pointer
             // The compiler shims demangle inside the __rustc module
             // namespace ("__rustc::__rust_alloc+0x.."): substring, not
             // prefix, or the origin lands one frame too low.
@@ -2504,7 +2504,7 @@ pub fn alloc_call_site(frames: &[u64]) -> u64 {
         if f == 0 {
             break;
         }
-        let (name, is_rux) = match crate::dfx::ksyms::lookup(f) {
+        let (name, is_rux) = match crate::debug::ksyms::lookup(f) {
             Some((name, _, _)) => {
                 let rux = name.starts_with("rux::") || name.starts_with("<rux::");
                 (name, rux)

@@ -141,7 +141,7 @@ all 24k lines of syscall handlers at once.
 | Boot (before scheduler) | panic allowed — fail fast, print, halt |
 | Task context, invariant "impossible" | panic allowed (it is a kernel bug; want it loud) |
 | Task context, runtime failure | degrade: return error, or kill the offending task (OOM path already does this — `alloc_error_handler` design) |
-| IRQ / softirq / scheduler-internal | **panic forbidden**: no allocation in the message, use the raw-line printer (`dfx::taskdump_raw_line` style), then contain |
+| IRQ / softirq / scheduler-internal | **panic forbidden**: no allocation in the message, use the raw-line printer (`debug::taskdump_raw_line` style), then contain |
 | Per-task recoverable (bad user pointer) | never panic — EFAULT |
 
 Rule of thumb: *a user process must never be able to panic the kernel,
@@ -168,7 +168,7 @@ dispatchers, mm alloc, signal, sched, arch trap paths):
 
 - Legitimate prints: boot-time one-shots, panic/oops/trap printers,
   fatal-error paths (a line per *death* is fine; a line per *surviving
-  fault* is not), and prints behind an explicit `DfxSwitch` gate or a
+  fault* is not), and prints behind an explicit `DebugSwitch` gate or a
   boot-budget counter.
 - Adding a print to those files requires a `// HOTPATH-PRINT: <why>`
   annotation on the line above; `scripts/hotpath_print_check.py` (wired
@@ -244,7 +244,7 @@ address space happens to include it.
 6. **Context rules**: IRQ and softirq context performs no allocation
    and takes no sleeping locks — this is reviewable by looking at
    what a path is *allowed* to call; keep the allowed-call lists in
-   the dfx docs.
+   the debug docs.
 
 ---
 

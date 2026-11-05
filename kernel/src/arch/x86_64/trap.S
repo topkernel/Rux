@@ -336,7 +336,7 @@ TRAP_STUB 229
  * The kernel is unrecoverable here: no pt_regs, no unwinding, no locks.
  * The IST switch gave us a fresh 16K stack; just raw-print and halt.
  * x86_double_fault_dump must not take locks or allocate (it uses the
- * same raw serial path as the dfx taskdump helpers).
+ * same raw serial path as the debug taskdump helpers).
  * ============================================================================
  */
 .global stub_8

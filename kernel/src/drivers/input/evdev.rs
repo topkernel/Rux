@@ -436,7 +436,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
-        // dfx=inputtrace (leg-9 epoll hunt): one line per POLL dispatch,
+        // debug=inputtrace (leg-9 epoll hunt): one line per POLL dispatch,
         // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
         // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
         // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
@@ -444,7 +444,7 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         // splitting "dispatch never ran" from "dispatch ran, reported
         // ready, but the waiter still idled". Rate-limited: first 600
         // then 1-in-50 (a spinning poller must not flood the console).
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::InputTrace) {
             use core::sync::atomic::{AtomicU64, Ordering};
             static PL_N: AtomicU64 = AtomicU64::new(0);
             let n = PL_N.fetch_add(1, Ordering::Relaxed);
@@ -948,7 +948,7 @@ fn fill_capabilities(
 
 /// Push event to evdev device
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
-    // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
+    // debug=inputtrace: payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log
     // frequency analysis works; rate-limited so a flooding stream cannot
     // wedge the serial console; gated by a runtime switch (default OFF).
@@ -963,7 +963,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     // enough to survive a phantom flood while keeping full detail in
     // the common case (a quiet -display none boot has no events at
     // all, so anything printed here IS the anomaly).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::InputTrace) {
         use core::sync::atomic::{AtomicU64, Ordering};
         static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
         static TRACE_SYN_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1025,7 +1025,7 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     }
 }
 
-// Raw-console writers for the dfx=inputtrace path (same shape as
+// Raw-console writers for the debug=inputtrace path (same shape as
 // sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
 // trace must survive loglevel=3 boots, and the callers can be in IRQ
 // context, so no printk locks.

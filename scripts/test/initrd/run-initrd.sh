@@ -8,7 +8,7 @@
 # Success markers in the serial log:
 #   "initrd" reserve+unpack status rows, "root=/dev/ram0 — initrd ramfs
 #   root", "INITTEST: /init from initrd is running", the verbatim cmdline
-#   dump (incl. ohos.* tokens), node checks, and dfx=taskdump,periodic rows.
+#   dump (incl. ohos.* tokens), node checks, and debug=taskdump,periodic rows.
 #
 # Resource discipline: 1 QEMU, no disk (nothing to snapshot), killed by
 # its own `timeout` — no pkill.
@@ -31,7 +31,7 @@ if [ ! -f "$INITRD" ]; then
     exit 1
 fi
 
-CMDLINE="root=/dev/ram0 rw init=/init console=ttyS0,115200 dfx=taskdump,periodic ohos.boot.hardware=virt debug_boot_device=a"
+CMDLINE="root=/dev/ram0 rw init=/init console=ttyS0,115200 debug=taskdump,periodic ohos.boot.hardware=virt debug_boot_device=a"
 
 echo "booting initrd test (log: $LOG, ${DURATION}s)..."
 timeout --signal=TERM --kill-after=5 "$DURATION" qemu-system-riscv64 \
@@ -74,4 +74,4 @@ echo "--- kernel initrd rows ---"
 grep -E "^initrd:|^fs:.*(initrd|ramfs|ram0)" "$LOG" | head -10 || true
 grep -E "init: trying" "$LOG" | head -5 || true
 echo "--- taskdump smoke ---"
-grep -c "DFX TASK DUMP" "$LOG" || true
+grep -c "debug TASK DUMP" "$LOG" || true

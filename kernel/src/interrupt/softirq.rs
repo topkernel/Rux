@@ -243,7 +243,7 @@ pub fn __do_softirq() -> bool {
     );
     // syscost probe: splits the open IF=0 segment only on the inline
     // irq-exit path (no-op when off).
-    crate::dfx::syscost::zone_softirq_enter();
+    crate::debug::syscost::zone_softirq_enter();
 
     let mut restart_count = 0;
     let budget_t0 = crate::drivers::timer::read_time();
@@ -350,7 +350,7 @@ pub fn __do_softirq() -> bool {
             ((*a).preempt_count(), (*b).preempt_count())
         };
         use core::fmt::Write;
-        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let mut w = crate::debug::backtrace::ConsoleWriter::new();
         let _ = write!(w,
             "SOFTIRQ-BRACKET-LEAK cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
             cpu, tp_entry,
@@ -358,7 +358,7 @@ pub fn __do_softirq() -> bool {
             tp_exit, unsafe { (*b).pid() }, pb,
             first_pending);
     }
-    crate::dfx::syscost::zone_softirq_exit(); // syscost probe
+    crate::debug::syscost::zone_softirq_exit(); // syscost probe
 
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release); }

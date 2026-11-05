@@ -243,10 +243,10 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
     // at publish entry means the R49 heal (or a scribble) reset the
     // ownership word inside the switch-out window — name it.
     if !prev.is_null()
-        && crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        && crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         && !unsafe { (*prev).on_cpu() }
     {
-        crate::dfx::scribble::switch_window_heal(prev as u64);
+        crate::debug::scribble::switch_window_heal(prev as u64);
     }
     // RACE-FORENSICS (x86-smprace): claim next's continuation BEFORE its
     // registers are restored. A claim held by another CPU is a double-run
@@ -259,11 +259,11 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
         // its whole prev-side bookkeeping through garbage (the
         // self-propagating half of the x86-scribble3 cascade). Report and
         // keep the previous current instead.
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
-            && !crate::dfx::scribble::task_plausible(next)
+        if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !crate::debug::scribble::task_plausible(next)
         {
-            crate::dfx::scribble::bad_switch_arg(2, next as u64, prev as u64);
-            crate::dfx::scribble::ring_log(
+            crate::debug::scribble::bad_switch_arg(2, next as u64, prev as u64);
+            crate::debug::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 2,
                 prev as u64,
@@ -283,8 +283,8 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 // protocol breach. Report through the scribble hunter
                 // when armed, then abort — the asm repairs nothing of
                 // next and returns with prev still running.
-                if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
-                    crate::dfx::scribble::double_run(
+                if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                    crate::debug::scribble::double_run(
                         unsafe { (*next).pid() } as u64,
                         cpu as u64,
                         observed as u64,
@@ -443,22 +443,22 @@ pub unsafe extern "C" fn x86_switch_publish(prev: *mut Task, next: *mut Task) ->
                 // run on the static AP boot stacks (their kstack fields are
                 // never used), so a "foreign" sp here is not automatically
                 // corruption — repinning would break a mid-loop resume.
-                crate::dfx::scribble::ring_dump();
+                crate::debug::scribble::ring_dump();
             }
         }
     }
-    // Scribble hunter (dfx=scribble): record the switch completion.
-    crate::dfx::scribble::ring_log(
+    // Scribble hunter (debug=scribble): record the switch completion.
+    crate::debug::scribble::ring_log(
         crate::arch::cpu_id() as usize,
         2,
         prev as u64,
         next as u64,
     );
-    // Scribble hunter (dfx=scribble): quiesce point — prev's context is
+    // Scribble hunter (debug=scribble): quiesce point — prev's context is
     // fully saved here, so any tracked field off its shadow was written
     // by someone else while it ran.
     if !prev.is_null() {
-        crate::dfx::scribble::quiesce(prev);
+        crate::debug::scribble::quiesce(prev);
     }
     0 // proceed with the resume
 }
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn x86_update_rsp0(task: *mut Task) {
     // flips).
     const HEAP_LO: u64 = 0xffff_8880_4000_0000;
     const HEAP_HI: u64 = HEAP_LO + crate::config::KERNEL_HEAP_SIZE as u64;
-    // DFX (LTP chunk@700 hunt): a top==0 (no-kstack) switch-in silently
+    // debug (LTP chunk@700 hunt): a top==0 (no-kstack) switch-in silently
     // keeps the PREVIOUS task's rsp0 — if that task has exited and its
     // stack was freed, every later user entry on this CPU lands on
     // recycled memory (the stale-rsp0 engine). Name it.
@@ -618,7 +618,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // The post-asm stamp is parked in a per-CPU slot (the switch is
     // CPU-local with IRQs off) because prev's frame freezes
     // mid-__switch_to — the INCOMING task closes the bracket.
-    let cc_c0 = crate::dfx::cctx::now();
+    let cc_c0 = crate::debug::cctx::now();
     // R56-heal (early revoked-pick check): if the slot-capture steal
     // already revoked this pick (the picking vCPU was TCG-starved past
     // the whole GRQ-release → wrapper window), the pick state is
@@ -648,8 +648,8 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     if fpu_dirty {
         prev.thread_mut().fpu_save_for_switch();
     }
-    let cc_c1 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUSAVE_NS, cc_c0);
+    let cc_c1 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::CW_FPUSAVE_NS, cc_c0);
 
     // Store prev task for ret_from_fork's schedule_tail(prev)
     set_prev_task(prev as *mut Task);
@@ -678,7 +678,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                     next_mm.alloc_asid().unwrap_or(0)
                 }
             };
-            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+            crate::debug::cctx::bump(&crate::debug::cctx::CW_MM_N);
             if asid != 0 || !super::mm::asid::pcid_enabled() {
                 write_cr3(super::mm::asid::build_satp(asid, next_ppn));
             } else {
@@ -694,12 +694,12 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         // are only invalidated by the explicit kernel flush sites.
         let kernel_ppn = super::mm::mmu_init::root_page_table_ppn();
         if super::mm::asid::satp_to_ppn(read_cr3()) != kernel_ppn {
-            crate::dfx::cctx::bump(&crate::dfx::cctx::CW_MM_N);
+            crate::debug::cctx::bump(&crate::debug::cctx::CW_MM_N);
             write_cr3(super::mm::asid::build_satp(0, kernel_ppn));
         }
     }
-    let cc_c2 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MM_NS, cc_c1);
+    let cc_c2 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::CW_MM_NS, cc_c1);
 
     // Step 3: FS base (TLS pointer) and the GS shadow
     // (IA32_KERNEL_GS_BASE). thread.fs_base / thread.gs_base are the
@@ -755,23 +755,23 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
             unsafe { wrmsr(MSR_KERNEL_GS_BASE, gs_next) };
         }
     }
-    let cc_c3 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::CW_MSR_NS, cc_c2);
+    let cc_c3 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::CW_MSR_NS, cc_c2);
 
     // Step 4: registers + stacks + per-CPU current + TSS.rsp0.
     //
     // WARNING: after this call all locals are INVALID (callee-saved
     // registers and rsp belong to the incoming task).
-    crate::dfx::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
+    crate::debug::cctx::SW_STAMP[cpu_of()].store(cc_c3, core::sync::atomic::Ordering::Relaxed);
     __switch_to(prev, next);
 
     // cctx: the incoming task closes the asm bracket parked by the
     // outgoing task on this CPU (IRQs stayed off across the switch).
     {
-        let t3 = crate::dfx::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
-        let t4 = crate::dfx::cctx::now();
+        let t3 = crate::debug::cctx::SW_STAMP[cpu_of()].swap(0, core::sync::atomic::Ordering::Relaxed);
+        let t4 = crate::debug::cctx::now();
         if t3 != 0 && t4 != 0 {
-            crate::dfx::cctx::add(&crate::dfx::cctx::CW_ASM_NS, t3);
+            crate::debug::cctx::add(&crate::debug::cctx::CW_ASM_NS, t3);
         }
     }
 
@@ -782,10 +782,10 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // restore_fpu (fpu_valid image or the ABI-init fallback). FP-idle
     // ping-pong workloads (the scheduler-family benches) never pay the
     // xrstor at all.
-    let cc_c4 = crate::dfx::cctx::now();
+    let cc_c4 = crate::debug::cctx::now();
     // SAFETY: single CR0 bit set (see stts); no register clobber.
     unsafe { super::cpu::stts() };
-    crate::dfx::cctx::add(&crate::dfx::cctx::CW_FPUREST_NS, cc_c4);
+    crate::debug::cctx::add(&crate::debug::cctx::CW_FPUREST_NS, cc_c4);
 }
 
 /// This CPU's index for the per-CPU cctx switch stamp (the context.rs

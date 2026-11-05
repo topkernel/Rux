@@ -230,7 +230,7 @@ impl BufferHead {
                 )?;
                 self.clear_state_bit(BufferState::BH_Dirty);
             }
-            crate::dfx::fsw::note_dev_write();
+            crate::debug::fsw::note_dev_write();
         }
         Ok(())
     }
@@ -336,7 +336,7 @@ unsafe impl Send for BlockCache {}
 // Spinlocks; raw pointer access is always under the appropriate bucket lock.
 unsafe impl Sync for BlockCache {}
 
-/// Leg-52 dfx counter: sync_all/sync_all_excluding walked a LINKED
+/// Leg-52 debug counter: sync_all/sync_all_excluding walked a LINKED
 /// cache entry whose bh was NULL (the R11-1 crash family's read side).
 /// Non-zero names the residual producer for the fs lane; the walks skip
 /// those entries instead of faulting.
@@ -553,13 +553,13 @@ impl BlockCache {
         }
         // bucket lock released; entry is unpinnable and unhashed
 
-        // dfx=exthunt: the victim left the hash — from here until the
+        // debug=exthunt: the victim left the hash — from here until the
         // Phase-4 sync lands, every lookup of this key misses and may
         // fabricate a fresh entry over stale disk (the unhashed-victim
         // window; see the tracers in ext4/extent.rs).
         let vkey = unsafe { (*victim).key };
         let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+        if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt)
             && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
         {
             crate::fs::ext4::extent::exthunt_evict_unhash(vkey.2, v_dirty);
@@ -592,14 +592,14 @@ impl BlockCache {
                     Ok(()) => 0,
                     Err(e) => e,
                 };
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+                if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExtHunt)
                     && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
                 {
                     crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
                 }
-                crate::dfx::fsw::note_evict(true);
+                crate::debug::fsw::note_evict(true);
             } else {
-                crate::dfx::fsw::note_evict(false);
+                crate::debug::fsw::note_evict(false);
             }
             let _ = Box::from_raw(victim);
         }
@@ -684,7 +684,7 @@ impl BlockCache {
             // SAFETY: victim was LRU-linked; LRU lock held for the unlink.
             unsafe { Self::remove_from_lru(&mut lru, victim); }
         }
-        crate::dfx::fsw::note_drop_block();
+        crate::debug::fsw::note_drop_block();
         // SAFETY: unhashed, LRU-unlinked, unpinnable; bh owned by it.
         unsafe { let _ = Box::from_raw(victim); }
         self.count.fetch_sub(1, Ordering::Release);
@@ -711,7 +711,7 @@ impl BlockCache {
                         // Being evicted: treat as not found — pinning it
                         // would hand out a buffer that is about to be
                         // freed (R7-C1 resurrection race).
-                        // dfx=exthunt: same-key eviction = miss-causing
+                        // debug=exthunt: same-key eviction = miss-causing
                         // event (see bread_async Phase 1).
                         if entry.key == (device_major, device_minor, blocknr) {
                             skipped_evicting = true;
@@ -721,15 +721,15 @@ impl BlockCache {
                         continue;
                     }
                     if entry.key == (device_major, device_minor, blocknr) {
-                        // dfx=exthunt: a SECOND live entry for the same
+                        // debug=exthunt: a SECOND live entry for the same
                         // block forks the buffer-cache view — writers and
                         // readers can land on different copies (the
                         // zzprobe4/ftest04 extent-revert family). Count
                         // same-key entries in the chain and report via
                         // the no-lock console (bucket spinlock held, same
                         // discipline as the dead-bh tripwire below).
-                        if crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::ExtHunt,
+                        if crate::debug::switches::enabled(
+                            crate::debug::switches::DebugSwitch::ExtHunt,
                         ) {
                             let mut dup = 0usize;
                             let mut c2 = bucket.head;
@@ -845,7 +845,7 @@ impl BlockCache {
             }
 
             // Phase 2: Read from disk (no locks held)
-            // dfx=exthunt: fresh-entry fabrication, sync path.
+            // debug=exthunt: fresh-entry fabrication, sync path.
             crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
@@ -856,7 +856,7 @@ impl BlockCache {
             ) {
                 return None;
             }
-            crate::dfx::fsw::note_dev_read();
+            crate::debug::fsw::note_dev_read();
 
             bh.set_device(device);
             bh.set_state_bit(BufferState::BH_Uptodate);
@@ -1315,7 +1315,7 @@ fn get_block_cache() -> &'static BlockCache {
 ///
 /// Read a block from cache (or disk if not cached)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
-    crate::dfx::fsw::note_bread();
+    crate::debug::fsw::note_bread();
     get_block_cache().get(device, blocknr)
 }
 
@@ -1462,7 +1462,7 @@ pub fn bread_async(
                 // R9-9: same guards as get() — skip entries being evicted
                 // and dead (freed/reused) BufferHeads.
                 if entry.evicting {
-                    // dfx=exthunt: an evicting entry with OUR key is the
+                    // debug=exthunt: an evicting entry with OUR key is the
                     // miss-causing event — its Phase-4 sync may not have
                     // landed, so a Phase-2 fabrication would read stale
                     // disk over a block whose only dirty copy is the
@@ -1526,7 +1526,7 @@ pub fn bread_async(
                     // wake-nested-in-a-driver-lock site; INV-LOCK-6).
                     drop(lru);
                     drop(bucket);
-                    // dfx=exthunt: block-cache hit truth (buffer pointer +
+                    // debug=exthunt: block-cache hit truth (buffer pointer +
                     // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
                     // SAFETY: hit_bh passed the b_data length guard above.
                     unsafe {
@@ -1559,7 +1559,7 @@ pub fn bread_async(
         // Phase 2: Cache miss — submit async I/O (no lock held).
         // Uninit buffer: the device DMA fills every byte; zero-filling 4 KiB
         // per block was measurable waste on the batch read-ahead path.
-        // dfx=exthunt: fresh-entry fabrication (adjudicates the unhashed
+        // debug=exthunt: fresh-entry fabrication (adjudicates the unhashed
         // evicting-victim race — see the tracers in ext4/extent.rs).
         crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, false);
         let block_size = cache.block_size;
@@ -1741,7 +1741,7 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
-        // dfx=exthunt: detect the guard's blind spot under the lock (an
+        // debug=exthunt: detect the guard's blind spot under the lock (an
         // evicting same-key entry makes this lookup return false while the
         // victim's dirty data may not be on disk yet); print after release.
         let mut evicting_match = false;
@@ -1859,10 +1859,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
         crate::fs::ext4::namei::get_current_handle().is_some()
     };
     if journal_active {
-        crate::dfx::fsw::note_sync_dirty_skip();
+        crate::debug::fsw::note_sync_dirty_skip();
         return Ok(());
     }
-    crate::dfx::fsw::note_sync_dirty();
+    crate::debug::fsw::note_sync_dirty();
     // Ordered-publication guard: this buffer may be a pending entry/post
     // block whose order constraints a plain sync would violate. Satisfy
     // THIS block's constraints first (per-block closure — the journal
@@ -1891,7 +1891,7 @@ pub fn sync_buffers() -> Result<(), i32> {
     // Durability point: ordered publications must go out first (a plain
     // hash-order drain could persist an entry block before its metadata).
     let _ = flush_publications();
-    crate::dfx::fsw::note_sync_all();
+    crate::debug::fsw::note_sync_all();
     get_block_cache().sync_all()
 }
 
@@ -2119,7 +2119,7 @@ pub fn publication_batch_drain() {
         !pend.is_empty() && pend.len() >= PUB_BATCH
     };
     if over {
-        crate::dfx::fsw::note_pub_batch();
+        crate::debug::fsw::note_pub_batch();
         // Whole queue, append order (pre -> entry -> post per record).
         // No ext4 locks are held by this path (PENDING is a leaf lock;
         // the I/O runs lock-free), so this cannot deadlock against the
@@ -2177,14 +2177,14 @@ pub fn publication_defer(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::dfx::fsw::note_pub_qmax(pend.len());
+        crate::debug::fsw::note_pub_qmax(pend.len());
     }
     if over_hiwat {
         // Bounded ordered drain by the backlog's own producer (see
         // PUB_HIGH_WATER). No locks are held here and this runs in the
         // creator's syscall context, exactly where the old synchronous
         // barrier used to run.
-        crate::dfx::fsw::note_pub_hiwat();
+        crate::debug::fsw::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -2211,10 +2211,10 @@ pub fn publication_defer_entry_only(
             cookie: publication_cookie(),
         });
         over_hiwat = pend.len() > PUB_HIGH_WATER;
-        crate::dfx::fsw::note_pub_qmax(pend.len());
+        crate::debug::fsw::note_pub_qmax(pend.len());
     }
     if over_hiwat {
-        crate::dfx::fsw::note_pub_hiwat();
+        crate::debug::fsw::note_pub_hiwat();
         let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
     }
     id
@@ -2533,7 +2533,7 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
             }
             return Ok(());
         }
-        crate::dfx::fsw::note_pub_scoped(mine.len());
+        crate::debug::fsw::note_pub_scoped(mine.len());
 
         // One plan per device (a task may publish on several mounted
         // filesystems; blocks and obligations are device-keyed, so the
@@ -2626,7 +2626,7 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
         pend.set_list(snapshot);
         return Ok(());
     }
-    crate::dfx::fsw::note_pub_cstr();
+    crate::debug::fsw::note_pub_cstr();
 
     let mut plan = WritePlan::new();
     plan.note_queue_entries(&snapshot, dev);
@@ -2699,7 +2699,7 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         if batch.is_empty() {
             return Ok(());
         }
-        crate::dfx::fsw::note_pub_flush(batch.len());
+        crate::debug::fsw::note_pub_flush(batch.len());
         let mut first_err: i32 = 0;
         for p in &batch {
             for &b in &p.pre {

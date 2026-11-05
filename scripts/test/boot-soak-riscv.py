@@ -4,7 +4,7 @@
 Boots the minimal musl rootfs with init=/bin/sh, feeds shell commands over
 serial, and watches for POISONED/wedge/panic. Usage:
 
-    python3 repro.py [--smp 2] [--seconds 120] [--kernel PATH] [--dfx schedtrace]
+    python3 repro.py [--smp 2] [--seconds 120] [--kernel PATH] [--debug schedtrace]
 """
 import argparse
 import os
@@ -23,7 +23,7 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--seconds", type=int, default=120)
     ap.add_argument("--kernel", default=KERNEL)
-    ap.add_argument("--dfx", default="")
+    ap.add_argument("--debug", default="")
     ap.add_argument("--cpuext", default="", help="extra -cpu extension bits, e.g. ,zcmop=true")
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
@@ -43,7 +43,7 @@ def main():
         "-drive", f"file={ROOTFS},if=none,id=rootfs,format=raw,snapshot=on,file.locking=off",
         "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
         "-kernel", args.kernel,
-        "-append", f"root=/dev/vda rw init=/bin/sh console=ttyS0 dfx={args.dfx}".rstrip("="),
+        "-append", f"root=/dev/vda rw init=/bin/sh console=ttyS0 debug={args.debug}".rstrip("="),
     ]
     print("CMD:", " ".join(cmd), flush=True)
 

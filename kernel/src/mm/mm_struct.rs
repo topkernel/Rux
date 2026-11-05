@@ -339,7 +339,7 @@ impl MmStruct {
         // Leg-17 leak census: creation-side twin of memwatch::MM_DROPS —
         // both gated on User spaces so live_mm = MM_NEWS - MM_DROPS.
         if space_type == PageTableType::User {
-            crate::dfx::memwatch::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::memwatch::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
 
         let vma_manager = VmaManager::new();
@@ -1146,15 +1146,15 @@ impl Drop for MmStruct {
         // The VMA tree itself is released with the struct. RSS/LRU stats
         // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
-            crate::dfx::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
             // forkprof (cmdline forkprof=1): drop-phase split — VMA
             // release / grace wait / page-table free.
-            let fp = crate::dfx::forkprof::on();
+            let fp = crate::debug::forkprof::on();
             if fp {
-                crate::dfx::forkprof::bump(crate::dfx::forkprof::S_MM_DROPS, 1);
+                crate::debug::forkprof::bump(crate::debug::forkprof::S_MM_DROPS, 1);
             }
-            let fp_t_vma = if fp { crate::dfx::forkprof::now() } else { 0 };
+            let fp_t_vma = if fp { crate::debug::forkprof::now() } else { 0 };
 
             // ===== SysV shm detach (exactly once, Linux exit_mmap parity) =====
             // nattch must drop exactly once per mm, at the point its address
@@ -1199,7 +1199,7 @@ impl Drop for MmStruct {
                 self.vma_files.write().clear();
             }
             if fp {
-                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_VMAFREE, fp_t_vma);
+                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_VMAFREE, fp_t_vma);
             }
 
             // ===== Grace-period wait: hold off the free under raw borrowers =====
@@ -1215,7 +1215,7 @@ impl Drop for MmStruct {
             // softirq — e.g. an OOM-scan Arc dropped under a pid-hash
             // bucket lock): those callers are restructured to drop outside
             // their locks, this is the belt-and-braces guard.
-            let fp_t_rcu = if fp { crate::dfx::forkprof::now() } else { 0 };
+            let fp_t_rcu = if fp { crate::debug::forkprof::now() } else { 0 };
             if crate::interrupt::preempt::preempt_count() == 0
                 && crate::arch::cpu::get_interrupts_state()
             {
@@ -1227,7 +1227,7 @@ impl Drop for MmStruct {
                 crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "mm-drop");
             }
             if fp {
-                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_RCU, fp_t_rcu);
+                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_RCU, fp_t_rcu);
             }
 
             // Teardown-context witness (FUT-STALE family): a teardown in a
@@ -1271,7 +1271,7 @@ impl Drop for MmStruct {
                 }
             }
 
-            let fp_t_pt = if fp { crate::dfx::forkprof::now() } else { 0 };
+            let fp_t_pt = if fp { crate::debug::forkprof::now() } else { 0 };
             unsafe {
                 // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
                 // construction here (last-Arc + synchronize_rcu drain), so
@@ -1280,7 +1280,7 @@ impl Drop for MmStruct {
                 crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd);
             }
             if fp {
-                crate::dfx::forkprof::add(crate::dfx::forkprof::P_DROP_PTFREE, fp_t_pt);
+                crate::debug::forkprof::add(crate::debug::forkprof::P_DROP_PTFREE, fp_t_pt);
             }
         }
     }

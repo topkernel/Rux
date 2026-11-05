@@ -150,11 +150,11 @@ cfg-guarded), but both need `aarch64` arms added when the feature is enabled:
    `#[cfg(not(any(...)))]` fallback arm, some do not):
    - `sync/futex.rs` (27): pt_regs stack-walk diagnostics (PT_REGS_SIZE + regs field reads). Needs an aarch64 arm reading `sp/pc/pstate` or an interface fn `pt_regs_sp_of(stack_top)`.
    - `ipc/binder.rs` (22): same pattern, binder stall diagnostics.
-   - `fs/vfs.rs` (4), `dfx/slowtask.rs` (4), `drivers/virtio/virtio_pci.rs` (3, x86-only anyway), `dfx/scribble.rs` (2), `dfx/memwatch.rs` (2), `syscall/process.rs` (1), `main.rs` (1: `arch::riscv64::vext::prime_hart_has_v` — riscv-gated already), `fs/ext4/file.rs` (1).
+   - `fs/vfs.rs` (4), `debug/slowtask.rs` (4), `drivers/virtio/virtio_pci.rs` (3, x86-only anyway), `debug/scribble.rs` (2), `debug/memwatch.rs` (2), `syscall/process.rs` (1), `main.rs` (1: `arch::riscv64::vext::prime_hart_has_v` — riscv-gated already), `fs/ext4/file.rs` (1).
 2. **`cfg(target_arch = ...)` blocks** — 25 sites in 5 files:
    - `process/task.rs` (11): the x86_64 80KB packed-slab stack slots (`cfg(x86_64)`-only — aarch64 correctly falls to the 128KB base already).
    - `syscall/memory.rs` (8): mprotect/mmap PTE-flag arms per arch.
-   - `ipc/binder.rs` (3), `dfx/ksyms.rs` (2, symbol name mangling per target), `tests/config_test.rs` (1).
+   - `ipc/binder.rs` (3), `debug/ksyms.rs` (2, symbol name mangling per target), `tests/config_test.rs` (1).
 
 Policy for the port: add `#[cfg(feature="aarch64")]` arms ONLY where semantics
 demand it (mprotect flag mapping, futex/binder pt_regs reads); where a
@@ -202,7 +202,7 @@ Acceptance: `make rootfs`-class image boots to `/bin/sh` prompt on aarch64,
 ### Stage 4 — gates integration (coordinator)
 Propose: merge gate row 1 becomes triple-arch build; `suite.sh` gains aarch64
 legs; riscv64+x86_64 perf baselines untouched (aarch64 gets no perf gate rows
-yet — DFX tools first, per the perf-gate mandate).
+yet — debug tools first, per the perf-gate mandate).
 
 ## 8. Risks / open questions
 

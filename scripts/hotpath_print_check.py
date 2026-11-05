@@ -23,7 +23,7 @@ print to these files requires either:
          // HOTPATH-PRINT: fatal-error path only, fires once per process
          crate::pr_err!("exec: bad ELF {}", pid);
   2. demotion to pr_debug! (compiled out in release), or
-  3. gating behind a DfxSwitch / budget counter — and then the
+  3. gating behind a DebugSwitch / budget counter — and then the
      annotation, because the script cannot see the gate mechanically.
 
 Removing prints shrinks the count: re-run with --update to ratchet the
@@ -142,7 +142,7 @@ def main():
             f"hotpath_print_check: FAIL {rel}: un-annotated print sites grew "
             f"{old} -> {new}. Every pr_err!/pr_warn!/pr_info! on a hot path "
             f"needs a '// HOTPATH-PRINT: <why>' annotation, a pr_debug! "
-            f"demotion, or a DfxSwitch/budget gate (annotate the gate too — "
+            f"demotion, or a DebugSwitch/budget gate (annotate the gate too — "
             f"the script cannot see it). One un-gated line costs ~0.5 ms of "
             f"polled-UART per hit (e271687 class)."
         )

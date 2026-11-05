@@ -134,7 +134,7 @@ pub unsafe fn stts() {
 /// linear map, and device windows are all mapped P|RW — WP only ever
 /// bites user-side COW/RO pages (the trap path resolves those: see
 /// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
-/// kernel statics (dfx=wildwatch).
+/// kernel statics (debug=wildwatch).
 pub fn enable_write_protect() {
     // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
     unsafe {
@@ -450,7 +450,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 pub fn enable_irq() {
     // syscost probe: pre-sti edge (reads the flag BEFORE the asm so the
     // close/heal decision sees the pre-sti state); no-op when off.
-    crate::dfx::syscost::irq_note_on();
+    crate::debug::syscost::irq_note_on();
     // SAFETY: setting IF is safe at any point the caller wants IRQs on.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
 }
@@ -462,7 +462,7 @@ pub fn disable_irq() {
     // syscost probe: pre-cli edge; Location::caller() propagates
     // through the #[track_caller] chain (save_and_disable_irq /
     // irq_save / lock_irq*) to the critical-section owner.
-    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
+    crate::debug::syscost::irq_note_off(Some(core::panic::Location::caller()));
     // SAFETY: clearing IF is always safe.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
 }

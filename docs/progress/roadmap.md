@@ -103,7 +103,7 @@
   strong profile (2.05× the reference median), one whole-queue drain
   per boot instead of one per fsync.
 - **getdents listing cache (route-4)**: **-58%** (1351.9 → 570.9 µs).
-- **DFX landed**: kallsyms, tracepoint!-based trace events (sched /
+- **debug landed**: kallsyms, tracepoint!-based trace events (sched /
   binder / block / signal / oom), pstore with the x86 BSS-zero reboot
   fix, klogd, and perf_event_open (software events, IP samples).
 - **The D-7 lesson, banked as protocol**: a typed per-CPU cache landed
@@ -112,7 +112,7 @@
   (UnsafeCell re-land) and codified: mm/sched/sync changes get one
   release-strong boot before "verified".
 - **Serial cleanliness is a gate**: all periodic/always-on kernel
-  prints live behind `dfx=` switches, off by default; ordinary boots
+  prints live behind `debug=` switches, off by default; ordinary boots
   stay interactive-clean.
 - Code review at scale: a machine-generated
   [coverage map](../development/review-coverage.md) tracks end-to-end
@@ -342,7 +342,7 @@ with a live shell (bash and dash).**
   specifier expansion, NT_AUXV, byte-exact Linux NT_PRSTATUS/NT_PRPSINFO
   layouts — `gdb --core` reads registers, symbolizes the crash PC and
   walks auxv
-- `dfx=memwatch` grew heap + physical-page call-site accounting — the
+- `debug=memwatch` grew heap + physical-page call-site accounting — the
   instrumentation that grounded every leak hunt above
 
 ### LTP

@@ -61,7 +61,7 @@ pub fn mount_gen_bump() {
     MOUNT_GEN.fetch_add(1, Ordering::AcqRel);
 }
 
-/// DFX gauges (read by the fsw PC2 line, same shape as neghit/negstale).
+/// debug gauges (read by the fsw PC2 line, same shape as neghit/negstale).
 /// (perf-gap-hunt) inline fast-gate discipline (the irq_note precedent):
 /// the counters only tick when fsw instrumentation has armed them —
 /// steady-state lookups pay one Relaxed load instead of an RMW pair.
@@ -71,7 +71,7 @@ pub static INSERT: AtomicU64 = AtomicU64::new(0);
 pub static INVAL: AtomicU64 = AtomicU64::new(0);
 static GAUGES_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// Arm the DFX gauges (fsw boot).
+/// Arm the debug gauges (fsw boot).
 pub fn arm_gauges() {
     GAUGES_ON.store(true, Ordering::Relaxed);
 }

@@ -881,7 +881,7 @@ pub fn vfs_bind_mount(
                 // known from debugfs, a divergence here separates "guest
                 // mutated the tree" (runtime inodes) from "dcache went
                 // stale/wrong" (baked inos but lookup still misses).
-                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+                if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::DataTap)
                     && source.starts_with("/data/")
                 {
                     if let Ok(p) = path_lookup(&ok_until, 0) {
@@ -1757,9 +1757,9 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     if pathname.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
-    crate::dfx::fsw::note_walk();
+    crate::debug::fsw::note_walk();
     // pathcost: walk prologue bracket (normalize + root fetch + split).
-    let pc_pre = crate::dfx::fsw::pc_now();
+    let pc_pre = crate::debug::fsw::pc_now();
 
     // Convert to absolute path and normalize. P1 chroot: absolute paths are
     // interpreted in the CURRENT TASK'S namespace (root prefix), and the
@@ -1836,8 +1836,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // exactly what the serial needs to answer). (perf-syscall lane)
     // Hunt instrumentation — the two sbx_want/sbx_noise byte scans ran
     // on EVERY lookup in every boot; now only on sysforensic boots.
-    let sbx_tracing = crate::dfx::switches::enabled(
-            crate::dfx::switches::DfxSwitch::SysForensic)
+    let sbx_tracing = crate::debug::switches::enabled(
+            crate::debug::switches::DebugSwitch::SysForensic)
         && (sbx_want(normalized.as_ref()) || sbx_want(pathname))
         && !sbx_noise(normalized.as_ref())
         && !sbx_noise(pathname);
@@ -2020,13 +2020,13 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         [(core::ptr::null(), 0); crate::fs::path_memo::MAX_CHAIN];
     let mut memo_chain_n: usize = 0;
 
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_PRE_NS, pc_pre);
-    let pc_loop = crate::dfx::fsw::pc_now();
+    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_PRE_NS, pc_pre);
+    let pc_loop = crate::debug::fsw::pc_now();
 
     for (ci, component) in components.iter().enumerate() {
         // pathcost: one count per walked component (divisor for A-D).
         if pc_loop != 0 {
-            crate::dfx::fsw::WALK_COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::debug::fsw::WALK_COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         // NAME_MAX check (review 5.5): components longer than 255 bytes can
         // never exist on any of our filesystems — fail with ENAMETOOLONG
@@ -2060,7 +2060,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // removes the per-component get_inode lock pair; (gap-fs lane)
         // the first fetch of a position goes through the lock-free inode
         // pointer mirror instead.
-        let pc_a = crate::dfx::fsw::pc_now();
+        let pc_a = crate::debug::fsw::pc_now();
         if cur_inode_raw.is_null() {
             cur_inode_raw = cur_d.inode_ptr_walk(cl);
         }
@@ -2097,7 +2097,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 memo_armed = false;
             }
         }
-        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_A_NS, pc_a);
+        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_A_NS, pc_a);
 
         // Skip "." — current directory
         if *component == "." {
@@ -2145,7 +2145,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // = version check + per-slot seqlock pair + one name compare —
         // no lock pair, no Arc traffic; miss falls to the locked map
         // lookup and refills the memo for the next walk.
-        let pc_b = crate::dfx::fsw::pc_now();
+        let pc_b = crate::debug::fsw::pc_now();
         let mut found: Option<*const Dentry> = cur_d.lookup_child_walk(cl, component);
         // (21st successor) STALE negative memo normalization: the parent
         // mutated since the memo was inserted (its mut_gen moved past the
@@ -2162,7 +2162,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // as 87c51458; negstorm 8w+16w rc=0, 568,699 stale hits clean.)
         if let Some(p) = found {
             // SAFETY: p is protected by the claim (memo/map-held).
-            if (unsafe { &*p }).is_negative() && crate::dfx::fsw::negmemo_on() {
+            if (unsafe { &*p }).is_negative() && crate::debug::fsw::negmemo_on() {
                 // The stamp lives on the parent's INODE (shared across
                 // bind-mount aliases) — carried here in cur_inode_raw.
                 let parent_gen = if !cur_inode_raw.is_null() {
@@ -2180,7 +2180,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     // Detach and re-resolve from the filesystem — the
                     // reference kernel drops negative dentries on every
                     // parent mutation; ours refreshes lazily here.
-                    crate::dfx::fsw::note_negstale();
+                    crate::debug::fsw::note_negstale();
                     cur_d.remove_child(component);
                     found = None;
                 }
@@ -2192,7 +2192,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 // Not in dentry cache — ask the filesystem to look it up.
                 // (gap-fs lane) this arm can sleep (fs lookup / iget):
                 // materialize the owned position Arc, drop the claim.
-                crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
+                crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_B_NS, pc_b);
                 cur_inode_raw = core::ptr::null();
                 current = Some(match current.take() {
                     Some(a) => a,
@@ -2202,8 +2202,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     None => unsafe { crate::fs::dentry::dentry_arc_from_raw(current_raw) },
                 });
                 drop(claim.take());
-                let pc_m = crate::dfx::fsw::pc_now();
-                crate::dfx::fsw::note_walk_miss();
+                let pc_m = crate::debug::fsw::pc_now();
+                crate::debug::fsw::note_walk_miss();
                 let cur_now = current.as_ref().unwrap();
                 let dir_inode = match cur_now.get_inode() {
                     Some(i) => i,
@@ -2255,12 +2255,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                     // negmemo off this stays the pure re-scan
                                     // it always was.
                                     if e == errno::Errno::NoSuchFileOrDirectory {
-                                        crate::dfx::fsw::note_walk_miss_enoent();
+                                        crate::debug::fsw::note_walk_miss_enoent();
                                         // ext4-only gate: ops.lookup IS
                                         // ext4_lookup's fn pointer for ext4
                                         // directories (dynamic filesystems
                                         // never memo).
-                                        if crate::dfx::fsw::negmemo_on()
+                                        if crate::debug::fsw::negmemo_on()
                                             && ops.lookup == Some(crate::fs::ext4::ext4_lookup)
                                         {
                                             let pgen = dir_inode.dir_mut_gen_load();
@@ -2343,20 +2343,20 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         }
                         current = Some(landed);
                     }
-                    crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_MISSCOST_NS, pc_m);
+                    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_MISSCOST_NS, pc_m);
                     continue;
                 }
             }
         };
 
         // ---- dcache hit ----
-        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_B_NS, pc_b);
+        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_B_NS, pc_b);
         // SAFETY: child_raw came from lookup_child_walk under the claim
         // (memo slot or the child map — the claim pins its lifetime).
         let c: &Dentry = unsafe { &*child_raw };
         // Negative dentry — file known not to exist
         if c.is_negative() {
-            crate::dfx::fsw::note_neghit();
+            crate::debug::fsw::note_neghit();
             if sbx_tracing {
                 sbx_trace(
                     "walk",
@@ -2377,7 +2377,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // under /data so the dt boot can attribute each
             // "invisible" dir to either this cache or a real
             // on-disk absence.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::DataTap) {
                 let mut prefix = String::new();
                 for c2 in components.iter().take(ci + 1) {
                     prefix.push('/');
@@ -2408,7 +2408,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // lock pair + Arc churn on EVERY hit of EVERY walk).
         // (gap-fs lane) the cached inode is a raw pointer through
         // the mirror; only an identity change pays the Arc swap.
-        let pc_c = crate::dfx::fsw::pc_now();
+        let pc_c = crate::debug::fsw::pc_now();
         let mut inode_raw: *const crate::fs::inode::Inode = c.inode_ptr_walk(cl);
         let gen_now = crate::fs::inode::icache_regen();
         if c.get_inode_gen() != gen_now {
@@ -2426,8 +2426,8 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // later change bumps the generation again.
             c.set_inode_gen(crate::fs::inode::icache_regen());
         }
-        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_C_NS, pc_c);
-        crate::dfx::fsw::note_walk_hit();
+        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_C_NS, pc_c);
+        crate::debug::fsw::note_walk_hit();
 
         // Follow mount point at child, then follow symlink
         // (perf-path lane) has_mount() keeps the common no-mountpoint
@@ -2436,7 +2436,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         // (gap-fs lane) the no-hop advance is a RAW pointer move — no
         // Arc clone, no refcount traffic; the mount-hop arm materializes
         // (rare).
-        let pc_d = crate::dfx::fsw::pc_now();
+        let pc_d = crate::debug::fsw::pc_now();
         let hopped = c.has_mount();
         if hopped {
             crossed += 1;
@@ -2495,10 +2495,10 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             // refreshes current_raw from the owned Arc.)
             let _ = pre_ptr;
         }
-        crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_D_NS, pc_d);
+        crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_D_NS, pc_d);
     }
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_LOOP_NS, pc_loop);
-    let pc_tail = crate::dfx::fsw::pc_now();
+    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_LOOP_NS, pc_loop);
+    let pc_tail = crate::debug::fsw::pc_now();
 
     // (gap-fs lane) An arm may have dropped the claim on the final
     // component (symlink follow); re-acquire for the tail reads.
@@ -2552,7 +2552,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     {
         return Err(errno::Errno::NotADirectory.as_neg_i32());
     }
-    crate::dfx::fsw::pc_add(&crate::dfx::fsw::WALK_TAIL_NS, pc_tail);
+    crate::debug::fsw::pc_add(&crate::debug::fsw::WALK_TAIL_NS, pc_tail);
 
     // (perf-gap-hunt) refill the full-path memo: follow-shape walks only
     // (symlink_depth == 0 — a stored entry must mean the follow-shape

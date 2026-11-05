@@ -103,12 +103,12 @@ pub(crate) fn do_execve_elf(
     };
     use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
 
-    // EXECCOST (dfx=execcost): image-side stage stamps, raw read_time()
+    // EXECCOST (debug=execcost): image-side stage stamps, raw read_time()
     // ticks. Paired with the ladder line (EXECCOST) from do_execve — same
     // switch, its own rate-limit counter (approximate lockstep; both lines
     // carry pid+path for pairing).
     static EXECCOST2_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-    let ec2 = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost);
+    let ec2 = crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExecCost);
     let ec2_n = if ec2 {
         EXECCOST2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
     } else {
@@ -138,7 +138,7 @@ pub(crate) fn do_execve_elf(
 
     // Linux setup_new_exec(): comm becomes the executable's basename (max
     // TASK_COMM_LEN-1 = 15 chars). Without this every post-exec task keeps
-    // the FORK-inherited comm — /proc/[pid]/comm, ps and the DFX task dumps
+    // the FORK-inherited comm — /proc/[pid]/comm, ps and the debug task dumps
     // showed empty names for nearly every process (only PR_SET_NAME users
     // like glib's gdbus/InputThread threads were identifiable).
     {

@@ -151,7 +151,7 @@ impl GlobalRunQueue {
     /// Try-lock with the full lock_irqsave protocol (IRQ save + preempt
     /// count + lock), returning None instead of spinning when the GRQ is
     /// held. For diagnostic paths that must never block on a possibly
-    /// wedged holder (the DFX taskdump runs from the spinlock deadlock
+    /// wedged holder (the debug taskdump runs from the spinlock deadlock
     /// watchdog with IRQs off) but still need the lock to legally read the
     /// per-class queue trees.
     #[inline]
@@ -692,7 +692,7 @@ pub fn report_poisoned_rq_entry(cpu: usize, raw: usize) {
     putchar(b'\n');
 }
 
-/// Scribble hunter (dfx=scribble): trylock the GRQ for the diagnostic
+/// Scribble hunter (debug=scribble): trylock the GRQ for the diagnostic
 /// consistency scan. None when uninitialized or currently held.
 pub fn try_grq_lock() -> Option<GrqGuard<'static>> {
     if !GRQ_READY.load(core::sync::atomic::Ordering::Acquire) {
@@ -1207,15 +1207,15 @@ fn process_deferred_exit_pid(packed: i64) {
     use crate::signal::Signal;
     // forkprof (cmdline forkprof=1): the notify+wake cost that runs in
     // the switcher's context after the exiting task is off-CPU.
-    let fp = crate::dfx::forkprof::on();
-    let fp_t0 = if fp { crate::dfx::forkprof::now() } else { 0 };
+    let fp = crate::debug::forkprof::on();
+    let fp_t0 = if fp { crate::debug::forkprof::now() } else { 0 };
     let (parent_pid, child_pid) = unpack_notify(packed);
     // EXITNOTIFY (dbus-activation hunt): activation stalls were traced to
     // the parent never learning its spawned child exited. Log each
     // delivered exit notification (parent, child, signal rc).
-    // serial-clean: default off — available only behind dfx=schedtrace
+    // serial-clean: default off — available only behind debug=schedtrace
     // (it fired on every child exit and polluted every boot log).
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SchedTrace) {
         static EN_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if EN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
@@ -1251,8 +1251,8 @@ fn process_deferred_exit_pid(packed: i64) {
         crate::process::task::Task::task_put(parent);
     }
     if fp {
-        crate::dfx::forkprof::add(crate::dfx::forkprof::P_SCHED_NOTIFY, fp_t0);
-        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_SNDNOTIFY_DONE, child_pid);
+        crate::debug::forkprof::add(crate::debug::forkprof::P_SCHED_NOTIFY, fp_t0);
+        crate::debug::forkprof::trace(crate::debug::forkprof::T_SNDNOTIFY_DONE, child_pid);
     }
 }
 
@@ -1400,8 +1400,8 @@ pub fn resched_curr() {
 /// Send reschedule IPI to target CPU
 pub fn resched_cpu(cpu: usize) {
     // cctx probe: the IPI send itself (APIC write cost, waker-side).
-    let cc_t = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::IPI_N);
+    let cc_t = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::IPI_N);
     // SAFETY: cpu is bounds-checked against MAX_CPUS; NEED_RESCHED[cpu] is AtomicBool.
     unsafe {
         if cpu < MAX_CPUS {
@@ -1427,7 +1427,7 @@ pub fn resched_cpu(cpu: usize) {
             }
         }
     }
-    crate::dfx::cctx::add(&crate::dfx::cctx::IPI_NS, cc_t);
+    crate::debug::cctx::add(&crate::debug::cctx::IPI_NS, cc_t);
 }
 
 /// Claim an idle CPU (within `affinity`) for a wake dispatch (perf-ipc):
@@ -1824,7 +1824,7 @@ fn task_page_unmark(ptr: *mut u8) {
 pub static IN_TASK_ALLOC: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// stress-port r3 parkwalk census (dfx=leakhunt only): [0] walks run,
+/// stress-port r3 parkwalk census (debug=leakhunt only): [0] walks run,
 /// [1] task observations, [2] parked-with-nonzero-count observations.
 /// The hunt2 postmortem needs this: a 100 s strand produced ZERO
 /// PARKED-LEAK lines, and the counters distinguish "walk blind" from
@@ -1965,7 +1965,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // every later walk of that queue dereferences the recycled page —
         // the "POISONED rq entry" / pick-path KERNPANIC family at
         // T+15-19min. The old check only REPORTED and only under
-        // dfx=scribble; unlink for real, unconditionally, while the page
+        // debug=scribble; unlink for real, unconditionally, while the page
         // is still valid so del()/BTreeMap-removal write to the real
         // neighbors. RT uses force_unlink (does not trust the possibly
         // stale on_rq flag); CFS/DL dequeue scan by pointer and are
@@ -2014,17 +2014,17 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 putchar(b'\n');
             }
         }
-        // Scribble hunter (dfx=scribble): stop tracking before the page
+        // Scribble hunter (debug=scribble): stop tracking before the page
         // is dropped/deallocated (it may be recycled immediately).
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::unregister(task_ptr);
+        crate::debug::scribble::unregister(task_ptr);
         // Scribble hunter: freed-while-linked UAF check — a Task page
         // returned to the heap while still linked in its class tree
         // gets recycled as BTreeMap nodes / new Tasks, and subsequent
         // tree ops write node pointers into the recycled page (the
         // Task-pointer-fragment scribble family). Loud if it happens.
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
             if let Some(grq_guard) = try_grq_lock() {
                 use core::sync::atomic::Ordering as O;
                 let policy = unsafe { (*task_ptr).policy() };
@@ -2072,7 +2072,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // sem_undo / dead_threads / wait_chldexit Vecs, queued siginfo,
         // seccomp_filter — and dealloc() below releases only the Task's
         // own bytes, so every one of those allocations used to leak.
-        // Observed signature (dfx=memwatch): MEMLIVE site
+        // Observed signature (debug=memwatch): MEMLIVE site
         // Task::set_exe_path b=3 sz=9 live=603 a=603 f=0 under a pure
         // exec loop — one 9-byte Box per exec pinning a whole 4kB buddy
         // page (+4kB/exec, +1.2MB/min steady-state HeapUsed growth).
@@ -2138,7 +2138,7 @@ pub fn free_task_slot(task_ptr: *mut Task) {
                 while off < 0x100 {
                     core::ptr::write_volatile(
                         slot.add(off) as *mut u64,
-                        crate::dfx::r83hunt::R83_FREED_PAINT,
+                        crate::debug::r83hunt::R83_FREED_PAINT,
                     );
                     off += 8;
                 }
@@ -2274,11 +2274,11 @@ pub fn schedule_dead_never_returns() {
                 // "helper ran silently with pc==0" — sc191/sc192 both
                 // stranded with ZERO TERM-DESCHED lines and the two were
                 // indistinguishable in the log. Serial-cleanliness:
-                // census boots only (dfx=wwcensus); ordinary boots fire
+                // census boots only (debug=wwcensus); ordinary boots fire
                 // this on every exiting child.
                 if rounds == 0
-                    && crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    && crate::debug::switches::enabled(
+                        crate::debug::switches::DebugSwitch::WwCensus,
                     )
                 {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2389,8 +2389,8 @@ unsafe fn __schedule() {
     // body. t0 at entry; the phases add below bracket guards, GRQ wait,
     // accounting, prev dequeue/requeue, pick, publish. Off = zero cost
     // (now() short-circuits to 0, add() to a no-op).
-    let cc_t0 = crate::dfx::cctx::now();
-    crate::dfx::cctx::bump(&crate::dfx::cctx::SCH_N);
+    let cc_t0 = crate::debug::cctx::now();
+    crate::debug::cctx::bump(&crate::debug::cctx::SCH_N);
     clear_need_resched();
 
     // Context switch is an RCU quiescent state.
@@ -2446,18 +2446,18 @@ unsafe fn __schedule() {
     // before any dereference: fall back to the hardware truth (tp, the
     // arch per-CPU current_task) and resync the slot.
     #[cfg(feature = "x86_64")]
-    if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
-        && !crate::dfx::scribble::task_plausible(prev)
+    if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        && !crate::debug::scribble::task_plausible(prev)
     {
         let tp0: *mut Task = crate::arch::cpu::get_thread_id() as *mut Task;
-        crate::dfx::scribble::bad_switch_arg(0, prev as u64, tp0 as u64);
-        if crate::dfx::scribble::task_plausible(tp0) {
+        crate::debug::scribble::bad_switch_arg(0, prev as u64, tp0 as u64);
+        if crate::debug::scribble::task_plausible(tp0) {
             this_cpu_mut().current = tp0;
             prev = tp0;
         } else {
             // No sane task identity left on this CPU — freeze for gdb
             // instead of switching through garbage.
-            crate::dfx::scribble::scribble_switch_park(prev as u64, 0);
+            crate::debug::scribble::scribble_switch_park(prev as u64, 0);
         }
     }
 
@@ -2476,8 +2476,8 @@ unsafe fn __schedule() {
         // Scribble hunter tripwire: name the divergence the moment the
         // scheduler sees it (slot task vs the task the hardware runs).
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
-            crate::dfx::scribble::slot_divergence(cpu_id, tp, prev);
+        if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            crate::debug::scribble::slot_divergence(cpu_id, tp, prev);
         }
         // Locate the slot that still accounts tp (it was scheduled SOMEWHERE).
         let home = {
@@ -2619,7 +2619,7 @@ unsafe fn __schedule() {
                 r56_print_pid(b"", unsafe { ((*tp).ti_kernel_sp() & 0xFFFF_FFFF) as u32 }, b"\n");
                 // R83: byte-level header dump of the victim — the scribble
                 // shape (extent + alignment) names the writer's store.
-                crate::dfx::r83hunt::dump_victim(b"R74", tp);
+                crate::debug::r83hunt::dump_victim(b"R74", tp);
                 // R85: book the physical truth — unconditional within this
                 // block (tp != prev by the enclosing guard, tp is running,
                 // canonical, and not exiting). The slot's task may be
@@ -2705,11 +2705,11 @@ unsafe fn __schedule() {
                 // unpreemptible poll, its slot keeps naming it (curr_on)
                 // and every later wake is refused (why=c). Name the
                 // outermost acquire site of that holdout directly
-                // (dfx=leakhunt-gated; IRQs are off but the report is
+                // (debug=leakhunt-gated; IRQs are off but the report is
                 // direct-console, GRQ NOT held here — printk would also
                 // work, keep it raw for the IRQ-off window).
                 if voluntary_sleep && holdout != 0 {
-                    crate::dfx::leakorigin::report_outermost(
+                    crate::debug::leakorigin::report_outermost(
                         b"PARK-REFUSED-ORIGIN",
                         prev,
                     );
@@ -2726,8 +2726,8 @@ unsafe fn __schedule() {
             crate::arch::cpu::restore_irq(flags);
             static LPP_N: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
-            if crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            if crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::LostParkTrace,
             ) && LPP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120
             {
                 use crate::console::putchar_no_lock as putchar;
@@ -2776,13 +2776,13 @@ unsafe fn __schedule() {
     }
 
     // Lock the global RQ
-    let cc_t1 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PRE_NS, cc_t0);
+    let cc_t1 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_PRE_NS, cc_t0);
     sched_cs_stamp(cpu_id, 1);
     let mut grq_guard = grq().lock_irqsave();
     sched_cs_stamp(cpu_id, 2);
-    let cc_t2 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_LOCKWAIT_NS, cc_t1);
+    let cc_t2 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_LOCKWAIT_NS, cc_t1);
 
     // Update runtime accounting for current task based on its scheduling class.
     // CFS: update vruntime; DL: consume runtime budget.
@@ -2824,8 +2824,8 @@ unsafe fn __schedule() {
     }
 
     // Deactivate prev: dequeue from the correct class-specific runqueue.
-    let cc_acct = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_ACCT_NS, cc_t2);
+    let cc_acct = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_ACCT_NS, cc_t2);
     let prev_running = (*prev).state() == TaskState::new(TaskState::RUNNING);
     if !prev_running && prev_pid != 0 {
         match prev_policy {
@@ -2854,14 +2854,14 @@ unsafe fn __schedule() {
         // guard; a stale-true flag dropped prev permanently.
         requeue_prev_locked(&mut *grq_guard, prev);
     }
-    let cc_t3 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_DEQREQ_NS, cc_acct);
+    let cc_t3 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_DEQREQ_NS, cc_acct);
 
     // Pick next task (R8-1b: prev is passed so the switching CPU may
     // re-pick itself through the next == prev fast path).
     let next = pick_next_task(&mut *grq_guard, cpu_id, prev);
-    let cc_t4 = crate::dfx::cctx::now();
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PICK_NS, cc_t3);
+    let cc_t4 = crate::debug::cctx::now();
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_PICK_NS, cc_t3);
 
     // Capture next_pid while we still hold references (before unlock)
     let next_pid = if !next.is_null() { (*next).pid() } else { 0 };
@@ -2943,7 +2943,7 @@ unsafe fn __schedule() {
     // Release lock but keep IRQs disabled for context_switch
     let flags = grq_guard.unlock_irqretain();
     sched_cs_stamp(cpu_id, 3);
-    crate::dfx::cctx::add(&crate::dfx::cctx::SCH_PUB_NS, cc_t4);
+    crate::debug::cctx::add(&crate::debug::cctx::SCH_PUB_NS, cc_t4);
 
     if next == prev {
         // Same-task repick: no context switch happens, so the post-switch
@@ -2986,7 +2986,7 @@ unsafe fn __schedule() {
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
-        crate::dfx::cctx::bump(&crate::dfx::cctx::CTX_N);
+        crate::debug::cctx::bump(&crate::debug::cctx::CTX_N);
         // The sched:sched_switch tracepoint (recorded in
         // __schedule just before the switch). One `armed()` check when
         // off; the prev/next fields are marshalled only when on. IRQs
@@ -3251,7 +3251,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // {false, -1}). Name the seed the moment the scheduler first
         // sees it, with the pre-mark state.
         #[cfg(feature = "x86_64")]
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
             let me = crate::arch::cpu_id() as usize;
             let mut owner_slot: i32 = -1;
             for c in 0..crate::config::MAX_CPUS {
@@ -3262,7 +3262,7 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
             }
             let claim = (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
             if owner_slot >= 0 || (claim != -1 && claim as usize != me) {
-                crate::dfx::scribble::double_seed(task, me as u64, owner_slot, claim);
+                crate::debug::scribble::double_seed(task, me as u64, owner_slot, claim);
             }
         }
         // R74 (riscv64 double-run seed tripwire, always on): same check as
@@ -3299,9 +3299,9 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 r56_print_pid(b"", tp_is_task as u32, b"\n");
             }
         }
-        // Scribble hunter: record the pick (dfx=scribble).
+        // Scribble hunter: record the pick (debug=scribble).
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::ring_log(
+        crate::debug::scribble::ring_log(
             crate::arch::cpu_id() as usize,
             1,
             task as u64,
@@ -3604,9 +3604,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
     // wake — the idle fast path in __schedule then never triggered again.
     let inserted = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            // Scribble hunter: record the class insert (dfx=scribble).
+            // Scribble hunter: record the class insert (debug=scribble).
             #[cfg(feature = "x86_64")]
-            crate::dfx::scribble::ring_log(
+            crate::debug::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 3,
                 task as u64,
@@ -3698,9 +3698,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             grq.dl_rq.enqueue(task)
         }
         SchedPolicy::Normal | SchedPolicy::Batch => {
-            // Scribble hunter: record the class insert (dfx=scribble).
+            // Scribble hunter: record the class insert (debug=scribble).
             #[cfg(feature = "x86_64")]
-            crate::dfx::scribble::ring_log(
+            crate::debug::scribble::ring_log(
                 crate::arch::cpu_id() as usize,
                 3,
                 task as u64,
@@ -4122,8 +4122,8 @@ pub fn wake_up_enqueue_opt(
                 // Serial-cleanliness: the W3 refusal census joins the
                 // wwcensus family — ordinary boots stay clean.
                 if !w3_benign_running
-                    && crate::dfx::switches::enabled(
-                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    && crate::debug::switches::enabled(
+                        crate::debug::switches::DebugSwitch::WwCensus,
                     )
                 {
                     w3_print_refused =
@@ -4688,7 +4688,7 @@ pub fn wake_up_enqueue_opt(
                         // home site, printed at the moment the phantom
                         // count is adjudicated (still the direct-console
                         // discipline: GRQ held).
-                        crate::dfx::leakorigin::report_outermost(
+                        crate::debug::leakorigin::report_outermost(
                             b"WAKE-HEAL-ORIGIN",
                             task,
                         );
@@ -4748,15 +4748,15 @@ pub fn wake_up_enqueue_opt(
                         // SKIPPED for curr_on victims, so the producer was
                         // invisible precisely on the permanent-strand
                         // family. Report the outermost acquire site here
-                        // too (dfx=leakhunt-gated, own 200-line budget,
+                        // too (debug=leakhunt-gated, own 200-line budget,
                         // still direct-console: GRQ held).
                         if curr_on {
-                            crate::dfx::leakorigin::report_outermost(
+                            crate::debug::leakorigin::report_outermost(
                                 b"WAKE-SKIP-ORIGIN",
                                 task,
                             );
                         }
-                        // Lost-park census tail (dfx=lostpark): when the
+                        // Lost-park census tail (debug=lostpark): when the
                         // refusal is curr_on, name the lying slot's CPU +
                         // writer tag and the victim's full ownership word —
                         // the wedged-park signature (a satisfiable sleeper
@@ -4766,8 +4766,8 @@ pub fn wake_up_enqueue_opt(
                         // is refused forever, so the empty-queue-only form
                         // never fired on exactly the family it hunts.
                         if curr_on
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::LostParkTrace,
+                            && crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::LostParkTrace,
                             )
                         {
                             static LPW_N: core::sync::atomic::AtomicU32 =
@@ -4966,7 +4966,7 @@ pub fn wake_up_enqueue_opt(
     }
 }
 
-/// DFX diagnostic: authoritative CFS linked-state by pointer scan, used by
+/// debug diagnostic: authoritative CFS linked-state by pointer scan, used by
 /// taskdump to distinguish flag-desync from really-off-queue phantoms.
 ///
 /// The scan mirrors dequeue's own lookup, but the CFS `tasks_timeline`
@@ -4990,25 +4990,25 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
     Some(guard.cfs_rq.is_linked(task))
 }
 
-/// dfx=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
+/// debug=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
 /// the nonexistent CPU 7 onto every linked CFS task currently showing the
 /// pickable state {on_cpu=false, claim=-1}. Called from the timer softirq
 /// every 50 jiffies. Returns the number of tasks poisoned (the caller
 /// prints it); a busy GRQ simply skips that round.
-pub fn dfx_claim_inject() -> usize {
+pub fn debug_claim_inject() -> usize {
     match try_grq_lock() {
         Some(mut g) => g.cfs_rq.claim_inject_scan(),
         None => 0,
     }
 }
 
-/// dfx=oncpuinject adjudication hook (R85 tail-wedge hunt): stamp the
+/// debug=oncpuinject adjudication hook (R85 tail-wedge hunt): stamp the
 /// lost-release ownership shape {on_cpu=true, claim=7, pk=LIVE} onto
 /// every linked CFS task currently showing the pickable state
 /// {on_cpu=false, claim=-1}. Called from the timer softirq every 50
 /// jiffies. Returns the number of tasks poisoned (the caller prints it);
 /// a busy GRQ simply skips that round.
-pub fn dfx_oncpu_inject() -> usize {
+pub fn debug_oncpu_inject() -> usize {
     match try_grq_lock() {
         Some(mut g) => g.cfs_rq.oncpu_inject_scan(),
         None => 0,
@@ -5016,7 +5016,7 @@ pub fn dfx_oncpu_inject() -> usize {
 }
 
 
-/// DFX diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
+/// debug diagnostic (4-thread hang hunt): grq.nr_running (the global runnable
 /// counter the idle fast path trusts) versus the per-class queue depths it is
 /// supposed to mirror. A divergence pins the counter-drift engine in one shot.
 pub fn grq_diag_counts() -> (usize, u64, u64, u64) {
@@ -5029,7 +5029,7 @@ pub fn grq_diag_counts() -> (usize, u64, u64, u64) {
     )
 }
 
-/// DFX diagnostic: per-CPU current task pid (0 = idle) + idle bit + raw task
+/// debug diagnostic: per-CPU current task pid (0 = idle) + idle bit + raw task
 /// pointer, to see which CPU (if any) is executing/spinning while a queued
 /// task goes unpicked. Hash-invisible currents (post-exit spinners) are
 /// identifiable by their pointer not resolving in the dump body.
@@ -5342,21 +5342,21 @@ pub fn dequeue_if_enqueued(task: &Task) {
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
-    crate::dfx::softlockup::touch(cpu_id);
+    crate::debug::softlockup::touch(cpu_id);
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // phantom-bits orphan scan: bits the interrupted task carried INTO
     // the tick whose release never executed (softirq bit outside any
-    // open window / stranded hardirq bit). dfx=leakhunt-gated inside.
+    // open window / stranded hardirq bit). debug=leakhunt-gated inside.
     crate::interrupt::preempt::tick_orphan_scan(cpu_id);
 
-    // Allocator class-lock holder watch (dfx=allocwatch): scan ALL mm
+    // Allocator class-lock holder watch (debug=allocwatch): scan ALL mm
     // stamp slots CROSS-CPU and name any holder frozen >1 s mid-section.
     // The holder sits at IF=0 (lock_irqsave), so its OWN CPU's tick is
     // dead — this check only ever fires from the OTHER CPU. The waiters
     // cannot self-report (they are parked IN the allocator, printing
-    // allocates). See dfx/allocwatch.rs.
-    crate::dfx::allocwatch::tick_check();
+    // allocates). See debug/allocwatch.rs.
+    crate::debug::allocwatch::tick_check();
 
     // OH-launcher wall (2026-10-31): CLAIM-SWEEP — position-independent
     // stale-claim heal. The pick-side STALE-CLAIM-RESET only reaches a
@@ -5387,7 +5387,7 @@ pub fn scheduler_tick() {
             let (linked, stale_reset, owned_claim, oncpu_marked, oncpu_pids, owned_pids) =
                 g.cfs_rq.claim_sweep(cpu_id);
             drop(g);
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::WwCensus)
                 && (stale_reset > 0 || owned_claim > 0 || oncpu_marked > 0)
             {
                 crate::pr_info!(
@@ -5589,11 +5589,11 @@ pub fn scheduler_tick() {
                     if t0 != 0
                             && now.wrapping_sub(t0) >= 200
                             // Serial-noise policy: the periodic PREEMPT-LEAK
-                            // reporter is a hunt instrument (dfx=wwcensus),
+                            // reporter is a hunt instrument (debug=wwcensus),
                             // not default output — idle-task word residue on
                             // quiet boots made the serial unusable.
-                            && crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::WwCensus)
+                            && crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::WwCensus)
                         {
                             let lp = LEAK_LAST_PRINT.load(
                                 core::sync::atomic::Ordering::Acquire);
@@ -5673,10 +5673,10 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
-                                // dfx=leakhunt: the acquire site of the
+                                // debug=leakhunt: the acquire site of the
                                 // leaked count (last PREEMPT_OFFSET
                                 // acquire on the incumbent).
-                                crate::dfx::leakorigin::report_incumbent_site(cur);
+                                crate::debug::leakorigin::report_incumbent_site(cur);
                             }
                         }
                         // PREEMPT-HEAL (round 3c, bound 10 s -> 2 s by
@@ -5808,7 +5808,7 @@ pub fn scheduler_tick() {
                             // (inner pairs are 1->2->1 and do not clear
                             // it), so this names the acquire whose 1->0
                             // release is missing / late.
-                            crate::dfx::leakorigin::report_outermost(
+                            crate::debug::leakorigin::report_outermost(
                                 b"PREEMPT-HEAL-ORIGIN",
                                 cur,
                             );
@@ -5818,7 +5818,7 @@ pub fn scheduler_tick() {
                             // executed anywhere: no sub=0x100 underflow
                             // exists to point at it instead).
                             if pc & crate::interrupt::preempt::SOFTIRQ_MASK != 0 {
-                                crate::dfx::leakorigin::report_softirq_origin(
+                                crate::debug::leakorigin::report_softirq_origin(
                                     b"PREEMPT-HEAL-SOFTIRQ",
                                     cur,
                                 );
@@ -5886,13 +5886,13 @@ pub fn scheduler_tick() {
                             putchar(if h_stale { b'H' } else { b'S' });
                             putchar(b'\n');
                             if s_stale {
-                                crate::dfx::leakorigin::report_softirq_origin(
+                                crate::debug::leakorigin::report_softirq_origin(
                                     b"PREEMPT-HEAL-SOFTIRQ",
                                     cur,
                                 );
                             }
                             if h_stale {
-                                crate::dfx::leakorigin::report_hardirq_origin(
+                                crate::debug::leakorigin::report_hardirq_origin(
                                     b"PREEMPT-HEAL-HARDIRQ",
                                     cur,
                                 );
@@ -5974,7 +5974,7 @@ pub fn scheduler_tick() {
                 core::sync::atomic::AtomicU64::new(0);
             let epoch = WALK_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
             // stress-port r3 census: one count per completed walk entry.
-            if crate::dfx::leakorigin::ENABLED
+            if crate::debug::leakorigin::ENABLED
                 .load(core::sync::atomic::Ordering::Relaxed)
             {
                 PARKWALK_CENSUS[0].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -6068,7 +6068,7 @@ pub fn scheduler_tick() {
                     // "was the victim invisible to the walk, or clean?"
                     // (visibly clean supports the resume-time
                     // stale-bar false-fire, not a parked leak).
-                    if crate::dfx::leakorigin::ENABLED
+                    if crate::debug::leakorigin::ENABLED
                         .load(core::sync::atomic::Ordering::Relaxed)
                     {
                         crate::sched::sched::PARKWALK_CENSUS[1]
@@ -6277,9 +6277,9 @@ pub fn scheduler_tick() {
                     }
                     ph(*tp_named as u64);
                     putchar(b'\n');
-                    // dfx=leakhunt: name the acquire site of the leaked
+                    // debug=leakhunt: name the acquire site of the leaked
                     // count (last PREEMPT_OFFSET acquire on this task).
-                    crate::dfx::leakorigin::report_parked_site(*task);
+                    crate::debug::leakorigin::report_parked_site(*task);
                 }
             }
             // Lazily reclaim slots whose tasks missed 2+ walks.
@@ -6298,8 +6298,8 @@ pub fn scheduler_tick() {
                 }
             }
             // stress-port r3 census print: every 1000 walks while
-            // dfx=leakhunt is armed (direct console — IRQ context).
-            if crate::dfx::leakorigin::ENABLED
+            // debug=leakhunt is armed (direct console — IRQ context).
+            if crate::debug::leakorigin::ENABLED
                 .load(core::sync::atomic::Ordering::Relaxed)
                 && epoch % 1000 == 0
             {
@@ -6345,7 +6345,7 @@ pub fn scheduler_tick() {
     // jiffies, heap fingerprint scan every 64 jiffies (all CAS-gated
     // inside; try-locked walks so IRQ context is safe).
     #[cfg(feature = "riscv64")]
-    crate::dfx::r83hunt::sched_tick_audit();
+    crate::debug::r83hunt::sched_tick_audit();
 
     // Poll UART for pending data — MUST be before current check.
     if crate::console::uart_has_data() {
@@ -6418,7 +6418,7 @@ pub fn scheduler_tick() {
                     putchar(b'\n');
                     // R18-4: frame count + deepest symbols at smash time.
                     let mut frames = 0u32;
-                    crate::dfx::backtrace::walk_stack_trace(&mut |pc, _fp| {
+                    crate::debug::backtrace::walk_stack_trace(&mut |pc, _fp| {
                         frames += 1;
                         if frames <= 6 {
                             const M3: &[u8] = b" f=0x";
@@ -6662,13 +6662,13 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     // cctx probe: CW_N counted here; the phase stamps live inside
     // arch::context::context_switch (the phases — FPU save, CR3, MSRs,
     // asm switch, FPU restore — are arch-local).
-    crate::dfx::cctx::bump(&crate::dfx::cctx::CW_N);
+    crate::debug::cctx::bump(&crate::debug::cctx::CW_N);
 
     // forkprof (cmdline forkprof=1): consume a pending wake stamp —
     // wake->switch-in is the latency the fork/exit handoff pays.
-    if crate::dfx::forkprof::on() {
-        crate::dfx::forkprof::consume_wake((*next).pid());
-        crate::dfx::forkprof::trace(crate::dfx::forkprof::T_CTXSW_IN, (*next).pid());
+    if crate::debug::forkprof::on() {
+        crate::debug::forkprof::consume_wake((*next).pid());
+        crate::debug::forkprof::trace(crate::debug::forkprof::T_CTXSW_IN, (*next).pid());
     }
 
     // Leak-hunt round 3f: __schedule's discipline refuses to switch out
@@ -6736,10 +6736,10 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     #[cfg(feature = "x86_64")]
     let next: &mut Task = {
         let np = next as *mut Task;
-        if crate::dfx::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
-            && !crate::dfx::scribble::task_plausible(np)
+        if crate::debug::scribble::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && !crate::debug::scribble::task_plausible(np)
         {
-            crate::dfx::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
+            crate::debug::scribble::bad_switch_arg(1, np as u64, prev as *mut Task as u64);
             let idle = cpu_state(cpu_id).idle;
             if !idle.is_null() {
                 // Keep the ownership slots consistent with what actually
@@ -6752,7 +6752,7 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
                 &mut *idle
             } else {
                 // No idle pointer (early boot): freeze for gdb.
-                crate::dfx::scribble::scribble_switch_park(np as u64, 1);
+                crate::debug::scribble::scribble_switch_park(np as u64, 1);
                 &mut *np
             }
         } else {
@@ -6780,9 +6780,9 @@ pub extern "C" fn schedule_tail(_prev: *mut Task) {
     // forkprof: first Rust code in the newborn's frame — splits the
     // switch machinery (context_switch entry -> here) from the
     // return-to-user tail (here -> first syscall entry).
-    if crate::dfx::forkprof::trace_on() {
+    if crate::debug::forkprof::trace_on() {
         let pid = crate::sched::get_current_pid();
-        crate::dfx::forkprof::trace(12, pid); // T_NEWBORN_TAIL
+        crate::debug::forkprof::trace(12, pid); // T_NEWBORN_TAIL
     }
     // Called after context_switch in the new task's context (ret_from_fork).
     // R9-2 (HIGH): a newborn never returns into __schedule's tail, so the
@@ -6873,7 +6873,7 @@ pub fn yield_cpu() {
 ///   - mm/rmap.rs try_to_unmap: stale PTEs in sleeping tasks survived
 ///     swap-out/migration (data-corruption family);
 ///   - mm/compact.rs migration: sleeping tasks were skipped entirely;
-///   - dfx/hung_task.rs: D-state tasks are by definition not running on
+///   - debug/hung_task.rs: D-state tasks are by definition not running on
 ///     any CPU, so the detector never saw its exact target;
 ///   - sysinfo procs count: undercount.
 /// kill(-1) in syscall/process.rs already documented this gap and switched
@@ -6892,7 +6892,7 @@ where
 /// Non-blocking variant of [`for_each_task`] for NON-PREEMPTIBLE contexts
 /// (the timer-softirq heartbeat slot and any IRQ-side diagnostic).
 ///
-/// lb325 wedge forensics (18th successor): both `dfx::slowtask::audit` and
+/// lb325 wedge forensics (18th successor): both `debug::slowtask::audit` and
 /// `futex_stuck_census` phase B walk tasks from the 1 Hz heartbeat, which
 /// runs with IF=0. A task-context pid-hash writer (insert/remove/for_each
 /// callback) that a timer interrupt suspends mid-critical-section holds its
@@ -7104,7 +7104,7 @@ unsafe fn task_onrq_flag(t: *mut Task) -> bool {
 /// healthy runner; a frozen TOUCH_TS names a hart that stopped executing
 /// kernel code entirely.
 fn cpu_tick_stale_ms(cpu: usize) -> u64 {
-    let last = crate::dfx::softlockup::last_touch_ns(cpu);
+    let last = crate::debug::softlockup::last_touch_ns(cpu);
     if last == 0 {
         return 0;
     }
@@ -7491,7 +7491,7 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                 // leaves through its own final schedule(). Refuse both.
                 for c in 0..MAX_CPUS {
                     if cpu_state(c).current == task
-                        && crate::dfx::softlockup::cpu_irq_frozen_ms(c) < 5000
+                        && crate::debug::softlockup::cpu_irq_frozen_ms(c) < 5000
                     {
                         return false;
                     }
@@ -7704,8 +7704,8 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                     // never set (R46 family): wake_up_enqueue's GRQ-locked
                     // phantom path verifies linkage/ownership and heals.
                     if wake_up_enqueue(t)
-                        && crate::dfx::switches::enabled(
-                            crate::dfx::switches::DfxSwitch::SchedTrace,
+                        && crate::debug::switches::enabled(
+                            crate::debug::switches::DebugSwitch::SchedTrace,
                         )
                     {
                         // R80 (diag): name the healed pid — the v1-r1 wedge
@@ -7735,8 +7735,8 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // wake_up_enqueue heals the slot and admits the
                         // re-link.
                         if wake_up_enqueue(t) {
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SchedTrace,
+                            if crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::SchedTrace,
                             ) {
                                 r56_print_pid(b"R56-ORPHAN-HARVESTED pid=", pid, b"\n");
                             }
@@ -7754,7 +7754,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
                         // A hart whose timer-IRQ count still MOVES is alive:
                         // refuse the steal. Only a count frozen for as long
                         // as the tick is stale may be read as a dead picker.
-                        && crate::dfx::softlockup::cpu_irq_frozen_ms(c) >= 5000
+                        && crate::debug::softlockup::cpu_irq_frozen_ms(c) >= 5000
                         // A dying task (PF_EXITING or SIGKILL pending)
                         // terminates through its own final schedule();
                         // re-enqueueing it mid-exit hands a live kernel
@@ -7791,7 +7791,7 @@ unsafe fn harvest_orphan_tasks(_my_cpu: usize) {
     });
 }
 
-/// Lost-park idle-lie report (fix-lostpark lane, dfx=lostpark): called
+/// Lost-park idle-lie report (fix-lostpark lane, debug=lostpark): called
 /// from the idle loop when the CPU's own slot names a real task after
 /// schedule() returned. Rate-limited to one line per CPU per 10 jiffies
 /// with a global budget, direct-console (R34 discipline — the caller may
@@ -8201,7 +8201,7 @@ pub fn cpu_idle_loop() -> ! {
         ph(floor.wrapping_sub(sp));
         putchar(b'\n');
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::ring_dump();
+        crate::debug::scribble::ring_dump();
     }
 
     loop {
@@ -8247,7 +8247,7 @@ pub fn cpu_idle_loop() -> ! {
             // R83 (R74 producer hunt): header audit on the same cadence —
             // names the scribbled task within ~4 jiffies of the write,
             // instead of at its next (fatal) schedule.
-            crate::dfx::r83hunt::audit_tick();
+            crate::debug::r83hunt::audit_tick();
         }
 
         // Ensure IRQs are enabled before each schedule() call.
@@ -8276,7 +8276,7 @@ pub fn cpu_idle_loop() -> ! {
             !curr.is_null() && unsafe { (*curr).pid() == 0 }
         };
 
-        // Lost-park lie detector (fix-lostpark lane, dfx=lostpark): this
+        // Lost-park lie detector (fix-lostpark lane, debug=lostpark): this
         // CPU just ran schedule() and is about to idle-mark/halt, but its
         // slot names a REAL task. With an empty global queue that task is
         // registered-nowhere and "running-nowhere" — every wake of it is
@@ -8286,8 +8286,8 @@ pub fn cpu_idle_loop() -> ! {
         // last writer of the lying slot: 1=pick 2=R56d 3=R56c 4=steal
         // 5=abort-republish) so the producer is named live.
         if !is_idle
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::LostParkTrace,
+            && crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::LostParkTrace,
             )
         {
             lp_idle_lie_report(cpu_id);

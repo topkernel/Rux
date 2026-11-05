@@ -788,7 +788,7 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     Ok(envs)
 }
 
-/// EXECCOST (dfx=execcost, abi-review lane): per-stage execve cost
+/// EXECCOST (debug=execcost, abi-review lane): per-stage execve cost
 /// breakdown in raw read_time() ticks. Two lines per exec — the ladder
 /// stages here, the image stages in do_execve_elf (EXECCOST2). Prints
 /// only when the switch is armed, and only for recursion depth 0
@@ -796,7 +796,7 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
 /// afterwards. Purpose: decompose the p4_fork_exec reference gap
 /// (~1.1 ms exec vs ~11 us reference median).
 fn execcost_armed(n: u64) -> bool {
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::ExecCost) {
         return false;
     }
     n < 64 || n % 512 == 0
@@ -1206,7 +1206,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let exe_file_arc = Some(exec_file.file);
     let interp_file_arc = interp_exec.map(|f| f.file);
     if ec { ec_pre = crate::arch::cpu::read_time(); }
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
         crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
             crate::process::current_pid(),
             exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
@@ -1333,14 +1333,14 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
 
     // forkprof (cmdline forkprof=1): whole-exec wall (exec's own mm
     // teardown + ELF load is the other half of lat_proc,exec).
-    let fp_t_exec = if crate::dfx::forkprof::on() {
-        crate::dfx::forkprof::now()
+    let fp_t_exec = if crate::debug::forkprof::on() {
+        crate::debug::forkprof::now()
     } else {
         0
     };
     let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
     if fp_t_exec != 0 {
-        crate::dfx::forkprof::add(crate::dfx::forkprof::P_EXEC_TOTAL, fp_t_exec);
+        crate::debug::forkprof::add(crate::debug::forkprof::P_EXEC_TOTAL, fp_t_exec);
     }
     // sc39 gate: the launcher spawn child completes every sandbox hook
     // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
@@ -1446,8 +1446,8 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
             .filter(|s| !s.is_empty())
             .count() >= 4;
         if deep {
-            // Ring recorded only under dfx=sysring (perf lane 2026-11).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+            // Ring recorded only under debug=sysring (perf lane 2026-11).
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SysRing) {
                 use core::sync::atomic::Ordering::Relaxed;
                 let pid = unsafe { crate::process::current_pid() } as u32;
                 let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
@@ -1483,7 +1483,7 @@ pub fn sys_exit_group(args: SyscallArgs) -> i64 {
                 }
             } else {
                 crate::pr_warn!(
-                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with dfx=sysring)",
+                    "childexit pid={} root='{}' status={:#x} (syscall ring off; boot with debug=sysring)",
                     unsafe { crate::process::current_pid() },
                     root_str,
                     args[0] as u32
@@ -1597,12 +1597,12 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
     } else {
         // Blocking wait for child process to exit
         // forkprof (cmdline forkprof=1): wait4 wall incl. sleep.
-        let fp_t_wt = if crate::dfx::forkprof::on() {
-            crate::dfx::forkprof::trace(
-                crate::dfx::forkprof::T_WAIT_ENTRY,
+        let fp_t_wt = if crate::debug::forkprof::on() {
+            crate::debug::forkprof::trace(
+                crate::debug::forkprof::T_WAIT_ENTRY,
                 crate::sched::get_current_pid(),
             );
-            crate::dfx::forkprof::now()
+            crate::debug::forkprof::now()
         } else {
             0
         };
@@ -1614,7 +1614,7 @@ pub fn sys_wait4(args: SyscallArgs) -> i64 {
             Err(e) => Err(e as i32 as i64),
         };
         if fp_t_wt != 0 {
-            crate::dfx::forkprof::add(crate::dfx::forkprof::P_WT_BODY, fp_t_wt);
+            crate::debug::forkprof::add(crate::debug::forkprof::P_WT_BODY, fp_t_wt);
         }
         return match r {
             Ok(v) => v,
@@ -3496,7 +3496,7 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 /// HILOGD fix: this previously parsed THREE arguments (tgid, tid,
 /// uinfo=args[2]) — args[2] is the SIGNAL number, so uinfo became a
 /// garbage pointer the size of the signo (e.g. 0x23), failed
-/// access_ok, and every caller got EFAULT. hilogd's DFX stack-dump
+/// access_ok, and every caller got EFAULT. hilogd's debug stack-dump
 /// path (rt_tgsigqueueinfo(self-tgid, self-tid, SIGDUMP, &si on its
 /// own stack) — b154/sweep1: `EFAULTTRAC: nr=240 a0=<tgid> a1=<tid>`
 /// immediately before the hilogd.server SIGSEGV at 0x18) depends on
@@ -6085,12 +6085,12 @@ fn shutdown_cascade(cmd: u32) {
         }
     }
 
-    // dfx: final counter dump — short-lived probe boots (lmbench single-
+    // debug: final counter dump — short-lived probe boots (lmbench single-
     // case rigs power off at ~35 s, before the 60 s fsw tick) would
     // otherwise never print their accumulators.
-    crate::dfx::fsw::dump();
-    crate::dfx::cctx::dump();
-    crate::dfx::unixrd::dump();
+    crate::debug::fsw::dump();
+    crate::debug::cctx::dump();
+    crate::debug::unixrd::dump();
 
     // --- 1. Tell init (PID 1) to shut down (SIGTERM, systemd sequence) ---
     let my_pid = crate::sched::get_current_pid();
@@ -6118,9 +6118,9 @@ fn shutdown_cascade(cmd: u32) {
     // forkprof (cmdline forkprof=1): ride the shutdown cascade — every
     // probe rig ends with reboot(2), so the phase table lands in the
     // serial log without a dedicated reader.
-    crate::dfx::forkprof::report();
+    crate::debug::forkprof::report();
     // mmprof (cmdline mmprof=1): vm-op stage table, same discipline.
-    crate::dfx::mmprof::report_line(0);
+    crate::debug::mmprof::report_line(0);
     if let Err(e) = crate::fs::ext4::ext4_shutdown_sync() {
         crate::pr_err!("reboot: filesystem sync failed, err={}", e);
     }

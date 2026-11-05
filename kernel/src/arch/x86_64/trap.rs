@@ -815,12 +815,12 @@ pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
 #[no_mangle]
 pub extern "C" fn x86_bad_frame_exit(regs: *mut PtRegs) -> ! {
     // Forensics: full scribble crash capture (raw console; gated on
-    // dfx=scribble inside crash_report itself).
+    // debug=scribble inside crash_report itself).
     if !regs.is_null() {
         // SAFETY: diagnostic reads of the frame trap_exit just validated
         // (and rejected); the memory is the current task's stack.
         unsafe {
-            crate::dfx::scribble::crash_report(b"BAD-FRAME", &*regs);
+            crate::debug::scribble::crash_report(b"BAD-FRAME", &*regs);
         }
     }
     // Route the owner out like any fatal-user-fault: SIGSEGV, default
@@ -923,7 +923,7 @@ fn scribble_foreign_entry(
         scribble_put_hex(t);
     }
     scribble_put_str(b"\n");
-    crate::dfx::scribble::ring_dump();
+    crate::debug::scribble::ring_dump();
 }
 
 // ============================================================================
@@ -969,7 +969,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     // access below would hit arbitrary memory. Name it and halt instead
     // of corrupting.
     if cpu_id >= crate::config::MAX_CPUS {
-        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
         taskdump_raw_line(b"\nGS-HELL cpu_id=");
         taskdump_dec(cpu_id as u64);
         taskdump_raw_line(b" vector=0x");
@@ -1034,12 +1034,12 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         // (85% of a 400MB serial log) and slowed the whole boot enough
         // to cost samgr the hdf_devmgr race. The remaining per-trap
         // line (syscall entries are the overwhelming majority) is
-        // likewise UART-flooding: it now needs dfx=steptrace.
+        // likewise UART-flooding: it now needs debug=steptrace.
         let routine_ipi = !regs_ref.user_mode()
             && (0xE0..=0xE5).contains(&vector);
         if !routine_ipi
-            && crate::dfx::switches::enabled(
-                crate::dfx::switches::DfxSwitch::Steptrace)
+            && crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::Steptrace)
         {
             crate::pr_debug!(
                 "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
@@ -1148,7 +1148,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
     }
 
-    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // Leak-origin tripwire (debug=leakhunt): this frame returns to
     // userspace, so the task's preempt_count must be exactly 0 (no
     // in-flight IRQ, every syscall-path guard dropped). A nonzero count
     // here is a leaked PREEMPT_OFFSET caught at the earliest possible
@@ -1160,7 +1160,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     if unsafe { (*regs).user_mode() } {
         // Return-to-user quiescent state (rcu.rs; see the riscv64 twin).
         crate::sync::rcu::rcu_note_context_switch();
-        crate::dfx::leakorigin::check_user_return();
+        crate::debug::leakorigin::check_user_return();
     }
 }
 
@@ -1513,9 +1513,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
-                    crate::dfx::syscost::tick_user();
+                    crate::debug::syscost::tick_user();
                     // leg-40C perf rider: user-mode rip sampling for
-                    // launcher-comm tasks (dfx-gated inside).
+                    // launcher-comm tasks (debug-gated inside).
                     utime_sample_rip(regs.rip, (*task).comm());
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
@@ -1530,16 +1530,16 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     if comm_has_launcher((*task).comm()) {
                         STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
                     }
-                    crate::dfx::syscost::tick_kern(regs.rip);
+                    crate::debug::syscost::tick_kern(regs.rip);
                     crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid());
                 }
             } else {
-                crate::dfx::syscost::tick_idle();
+                crate::debug::syscost::tick_idle();
                 crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
             }
         }
     } else {
-        crate::dfx::syscost::tick_idle();
+        crate::debug::syscost::tick_idle();
         crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
     }
 
@@ -1568,19 +1568,19 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         }
     }
 
-    // 1.5 Scribble hunter (dfx=scribble): GS-pairing tripwire + verify
+    // 1.5 Scribble hunter (debug=scribble): GS-pairing tripwire + verify
     // quiescent tasks' tracked scheduling fields against their shadows +
     // scheduler-consistency scan (double-run seed detection).
     // Throttled inside; no-op unless the runtime switch is on.
-    crate::dfx::scribble::verify_gs();
-    crate::dfx::scribble::verify();
-    crate::dfx::scribble::verify_consistency();
+    crate::debug::scribble::verify_gs();
+    crate::debug::scribble::verify();
+    crate::debug::scribble::verify_consistency();
 
     // 2. Scheduler tick
     crate::sched::scheduler_tick();
 
     // 3. Check for soft lockups
-    crate::dfx::softlockup::check();
+    crate::debug::softlockup::check();
 
     // 4. Reschedule if needed (the trap-exit asm path owns the user-mode
     //    preemption; this in-IRQ switch only fires when preemptible,
@@ -1688,9 +1688,9 @@ fn handle_syscall(regs: &mut PtRegs) {
     // forkprof trace: first Rust code of a syscall (entry side). The
     // nr rides a second event (site 15, pid field = nr) so the timeline
     // names each child-side call.
-    if crate::dfx::forkprof::trace_on() {
-        crate::dfx::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
-        crate::dfx::forkprof::trace(15, regs.rax as u32); // T_SYSNR
+    if crate::debug::forkprof::trace_on() {
+        crate::debug::forkprof::trace(14, crate::sched::get_current_pid()); // T_SYSENTRY
+        crate::debug::forkprof::trace(15, regs.rax as u32); // T_SYSNR
     }
     // Re-enable interrupts before entering the syscall handler.  SYSCALL
     // entered with IF=0 (FMASK cleared it); running the whole syscall
@@ -1799,10 +1799,10 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         // corrupt execution. The Oops path prints the report and
         // applies the policy (Tranche 5, the riscv64 twin's).
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::crash_report(b"#UD", regs);
-        crate::dfx::oops::oops(
-            crate::dfx::oops::Kind::IllegalInstruction,
-            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        crate::debug::scribble::crash_report(b"#UD", regs);
+        crate::debug::oops::oops(
+            crate::debug::oops::Kind::IllegalInstruction,
+            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                 oops_show_regs(w, regs);
             },
         );
@@ -1844,7 +1844,7 @@ fn handle_general_protection(regs: &mut PtRegs) {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
-        crate::dfx::scribble::crash_report(b"#GP", regs);
+        crate::debug::scribble::crash_report(b"#GP", regs);
         panic!(
             "trap: #GP in kernel mode at rip={:#x}, error={:#x}",
             regs.rip, regs.orig_rax
@@ -2466,7 +2466,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::Steptrace) {
         crate::pr_debug!(
             "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
             fault_addr,
@@ -2528,16 +2528,16 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
-                crate::dfx::scribble::crash_report(b"#PF-segv", regs);
+                crate::debug::scribble::crash_report(b"#PF-segv", regs);
                 // The riscv64 mm layer returns KernelPanic for kernel
                 // faults; until the x86 twin grows that, do NOT silently
                 // iretq back into the faulting rip (infinite fault loop).
                 // The Oops path prints the report and applies the policy
                 // (panic in interrupt context / oops=panic / idle, task
                 // death otherwise — Tranche 5).
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -2559,12 +2559,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
-                crate::dfx::scribble::crash_report(b"#PF-perm", regs);
+                crate::debug::scribble::crash_report(b"#PF-perm", regs);
                 // Oops path (Tranche 5): report + policy, like the
                 // Segfault arm above.
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -2588,12 +2588,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 }
             } else {
                 #[cfg(feature = "x86_64")]
-                crate::dfx::scribble::crash_report(b"#PF-bus", regs);
+                crate::debug::scribble::crash_report(b"#PF-bus", regs);
                 // Oops path (Tranche 5): report + policy, like the
                 // Segfault arm above.
-                crate::dfx::oops::oops(
-                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                crate::debug::oops::oops(
+                    crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                         oops_show_regs(w, regs);
                     },
                 );
@@ -2652,7 +2652,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
             // tables live from the debugger).
             #[cfg(feature = "x86_64")]
-            crate::dfx::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
+            crate::debug::scribble::kernpanic_park(fault_addr, regs.rip, regs.rsp);
             // Raw serial print (printk may be wedged on a lock this CPU
             // holds), then halt — the twin's R9 discipline.
             // putchar_no_lock writes the serial port directly (no locks).
@@ -2748,9 +2748,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // Forensic ring tail: the last 12 completed syscalls before
             // the crash (pid/nr/a0/ret), oldest first. Identifies the
             // in-flight syscall for interrupt-time crashes. The ring is
-            // recorded only under dfx=sysring (perf lane 2026-11) — say
+            // recorded only under debug=sysring (perf lane 2026-11) — say
             // so instead of replaying a stale/zero ring.
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SysRing) {
+            if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SysRing) {
                 use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
                 let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
                 let len = SYSCALL_RING.len();
@@ -2770,7 +2770,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::putchar_no_lock(b'\n');
                 }
             } else {
-                for &b in b"kp-sys ring off (boot with dfx=sysring)\n" {
+                for &b in b"kp-sys ring off (boot with debug=sysring)\n" {
                     crate::console::putchar_no_lock(b);
                 }
             }
@@ -2781,9 +2781,9 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // report, pstore capture, then either a real panic
             // (interrupt context / oops=panic / idle) or the faulting
             // task dies with SIGSEGV and the machine keeps running.
-            crate::dfx::oops::oops(
-                crate::dfx::oops::Kind::PageFault { addr: fault_addr },
-                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+            crate::debug::oops::oops(
+                crate::debug::oops::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                     oops_show_regs(w, regs);
                 },
             );
@@ -2797,13 +2797,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
 /// 5.15): the RIP line with the symbolized ip, the RSP/EFLAGS line,
 /// then the GPRs three per row. The CS column prints 0010/0018 from
 /// the frame's segment selectors.
-fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+fn oops_show_regs(w: &mut crate::debug::backtrace::ConsoleWriter, regs: &PtRegs) {
     use core::fmt::Write;
     let _ = write!(
         w,
         "RIP: {:04x}:{}\n",
         regs.cs & 0xffff,
-        crate::dfx::ksyms::format_symbol(regs.rip)
+        crate::debug::ksyms::format_symbol(regs.rip)
     );
     let _ = write!(
         w,
@@ -2856,9 +2856,9 @@ fn handle_unknown_exception(regs: &mut PtRegs, vector: u64) {
         // Kernel-mode unknown exceptions indicate a kernel bug; skipping
         // the instruction corrupts state. The Oops path prints the
         // report and applies the policy (Tranche 5).
-        crate::dfx::oops::oops(
-            crate::dfx::oops::Kind::UnknownException { cause: vector },
-            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+        crate::debug::oops::oops(
+            crate::debug::oops::Kind::UnknownException { cause: vector },
+            &|w: &mut crate::debug::backtrace::ConsoleWriter| {
                 oops_show_regs(w, regs);
             },
         );
@@ -2885,7 +2885,7 @@ pub extern "C" fn x86_preemptible() -> i64 {
 /// allocation, no printk machinery — the kernel state is unrecoverable.
 #[no_mangle]
 pub extern "C" fn x86_double_fault_dump() {
-    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    use crate::debug::taskdump::{taskdump_dec, taskdump_raw_line};
     let rsp: u64;
     // SAFETY: reading rsp is side-effect free.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
@@ -2954,7 +2954,7 @@ static STIME_FOCUS: [StimeSample; STIME_SLOTS] = {
 // offline via the byte-matched .so inventory — launcher mmaps are
 // deterministic, no ASLR), plus raw utime/stime tick counts for the
 // mode split. Printed every 60 s by utime_ripsample_report (called
-// from the 1 Hz drift block in the tick path, dfx-gated).
+// from the 1 Hz drift block in the tick path, debug-gated).
 
 const UTIME_SLOTS: usize = 32;
 
@@ -3050,12 +3050,12 @@ fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
     }
 }
 
-/// Periodic report (dfx=ripsample): the launcher's user-rip histogram
+/// Periodic report (debug=ripsample): the launcher's user-rip histogram
 /// + utime/stime split + the kernel-mode focus table. Self-throttled
 /// to one print every 60 s.
 pub fn utime_ripsample_report() {
     use core::sync::atomic::Ordering::Relaxed;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::RipSample) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::RipSample) {
         return;
     }
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

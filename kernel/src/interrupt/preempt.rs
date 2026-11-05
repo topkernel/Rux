@@ -76,7 +76,7 @@ pub static TICK_ENTRY_PC: [core::sync::atomic::AtomicU32;
 /// tick's interrupted RIP names the kernel function it was spinning in
 /// (symbolize offline with addr2line). Written on the owning CPU from
 /// the same sites as TICK_ENTRY_PC; read from the wakewatch strand
-/// print under dfx=leakhunt.
+/// print under debug=leakhunt.
 pub static TICK_ENTRY_RIP: [core::sync::atomic::AtomicU64;
     crate::config::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) };
@@ -128,7 +128,7 @@ pub fn preemptible() -> bool {
 
 /// Add value to current task's preempt_count
 ///
-/// #[track_caller] + the leakorigin hook (dfx=leakhunt): when val is
+/// #[track_caller] + the leakorigin hook (debug=leakhunt): when val is
 /// PREEMPT_OFFSET, record the acquire site in the per-task shadow (last
 /// acquire wins). The disabled-path cost is one register compare plus
 /// one relaxed load. At a leak, the shadow names the most recent guard
@@ -140,11 +140,11 @@ pub fn preemptible() -> bool {
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET || val == SOFTIRQ_OFFSET)
-            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
-                crate::dfx::leakorigin::note_acquire(
+                crate::debug::leakorigin::note_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(1),
@@ -152,7 +152,7 @@ pub fn preempt_count_add(val: i32) {
             } else if val == HARDIRQ_OFFSET {
                 // s14 hardirq shadow: with irq_enter #[track_caller],
                 // Location::caller() names the trap dispatch site.
-                crate::dfx::leakorigin::note_hardirq_acquire(
+                crate::debug::leakorigin::note_hardirq_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(HARDIRQ_OFFSET),
@@ -160,7 +160,7 @@ pub fn preempt_count_add(val: i32) {
             } else {
                 // phantom-bits softirq shadow: names the +0x100 booker
                 // (__do_softirq bracket or SeqLock::write).
-                crate::dfx::leakorigin::note_softirq_acquire(
+                crate::debug::leakorigin::note_softirq_acquire(
                     task,
                     core::panic::Location::caller(),
                     c0.wrapping_add(SOFTIRQ_OFFSET),
@@ -184,13 +184,13 @@ pub fn preempt_count_add_at(
 ) {
     if let Some(task) = crate::sched::current() {
         if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
-            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         {
             let c0 = task.preempt_count();
             if val == PREEMPT_OFFSET {
-                crate::dfx::leakorigin::note_acquire(task, loc, c0.wrapping_add(1));
+                crate::debug::leakorigin::note_acquire(task, loc, c0.wrapping_add(1));
             } else {
-                crate::dfx::leakorigin::note_hardirq_acquire(
+                crate::debug::leakorigin::note_hardirq_acquire(
                     task,
                     loc,
                     c0.wrapping_add(HARDIRQ_OFFSET),
@@ -261,7 +261,7 @@ pub fn preempt_count_reset() {
 /// Called at the beginning of hardware interrupt handling.
 /// IRQ entry path.
 ///
-/// #[track_caller] (s14): under dfx=leakhunt the leakorigin hardirq
+/// #[track_caller] (s14): under debug=leakhunt the leakorigin hardirq
 /// shadow records `Location::caller()` — without this attribute every
 /// acquire would name this line; with it, the trap dispatch site
 /// (timer/soft/ext bracket) is recorded.
@@ -269,7 +269,7 @@ pub fn preempt_count_reset() {
 #[track_caller]
 pub fn irq_enter() {
     preempt_count_add(HARDIRQ_OFFSET);
-    // s14 IRQ-PAIR booking check (dfx=leakhunt): remember which task
+    // s14 IRQ-PAIR booking check (debug=leakhunt): remember which task
     // THIS cpu's bracket booked +HARDIRQ_OFFSET on; irq_exit verifies
     // the paired sub lands on the same task. RISC-V S-mode hardirqs
     // cannot nest on one cpu (SIE cleared for the handler), so the
@@ -278,7 +278,7 @@ pub fn irq_enter() {
     // a split means tp changed between enter and exit: a switch ran
     // inside the hardirq bracket (the only shape that can strand a
     // 0x10000 bit on the enter task).
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         if let Some(task) = crate::sched::current() {
             let cpu = crate::arch::cpu_id() as usize;
             if cpu < crate::config::MAX_CPUS {
@@ -289,7 +289,7 @@ pub fn irq_enter() {
             }
         }
     }
-    crate::dfx::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
+    crate::debug::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
 
 /// Per-CPU token of the task the in-flight outermost hardirq bracket
@@ -313,7 +313,7 @@ pub fn irq_exit() {
     // s14 IRQ-PAIR check BEFORE the sub: fire while both counts are
     // still observable. Direct console, budgeted (60 lines/boot): a
     // split is the stranded-0x10000 producer, not weather.
-    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         let cpu = crate::arch::cpu_id() as usize;
         if cpu < crate::config::MAX_CPUS {
             let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
@@ -400,7 +400,7 @@ pub fn irq_exit() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
         }
     }
-    crate::dfx::syscost::zone_hardirq_exit(); // syscost probe (iret frame boundary; no-op when off)
+    crate::debug::syscost::zone_hardirq_exit(); // syscost probe (iret frame boundary; no-op when off)
 }
 
 // ============================================================================
@@ -463,7 +463,7 @@ pub fn irqentry_nmi_exit() {
 /// pointer this CPU published moments before.
 #[allow(unsafe_code)]
 pub fn tick_orphan_scan(cpu_id: usize) {
-    if !crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+    if !crate::debug::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
     if cpu_id >= crate::config::MAX_CPUS {
@@ -562,13 +562,13 @@ pub fn tick_orphan_scan(cpu_id: usize) {
     }
     putchar(b'\n');
     if soft_orphan {
-        crate::dfx::leakorigin::report_softirq_origin(
+        crate::debug::leakorigin::report_softirq_origin(
             b"BIT-ORPHAN-SOFTIRQ",
             task,
         );
     }
     if hard_orphan {
-        crate::dfx::leakorigin::report_hardirq_origin(
+        crate::debug::leakorigin::report_hardirq_origin(
             b"BIT-ORPHAN-HARDIRQ",
             task,
         );

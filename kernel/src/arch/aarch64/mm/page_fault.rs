@@ -40,9 +40,9 @@
 //!   write fault in large VMAs, and aarch64 has no perf-gate tooling
 //!   ported yet (no pbench/syscost/census parity) — an optimization
 //!   whose effect cannot be measured here violates the "if it is not
-//!   measured, add the DFX tool that measures it" rule, and an
+//!   measured, add the debug tool that measures it" rule, and an
 //!   untestable accounting change risks mincore-class regressions
-//!   sight unseen. Deferred until the aarch64 DFX tools land; the
+//!   sight unseen. Deferred until the aarch64 debug tools land; the
 //!   twin's anon_faultaround_forward is the reference shape.
 
 use super::memory_layout::*;

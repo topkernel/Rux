@@ -42,6 +42,29 @@ fn round_up_pages_checked(len: usize) -> Option<usize> {
 /// - If expansion fails, return current value (no change)
 ///
 /// - RISC-V: 214
+
+        fn brk_anomaly_check(task: &crate::process::task::Task, brk_val: u64, floor: u64) {
+            let Some(aspace) = task.address_space() else { return };
+            let g = aspace.vma_read();
+            let end = g
+                .last_at_or_before(crate::mm::page::VirtAddr::new(floor as usize))
+                .filter(|v| v.vma_type() == crate::mm::vma::VmaType::Anonymous)
+                .map(|v| v.end().as_usize() as u64);
+            let need = (brk_val + 0xFFF) & !0xFFF;
+            if let Some(e) = end {
+                if need > e {
+                    static NA: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if NA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                        crate::pr_warn!(
+                            "BRK-ANOMALY brk={:#x} needpage={:#x} heapvend={:#x}",
+                            brk_val, need, e
+                        );
+                    }
+                }
+            }
+        }
+
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
@@ -114,6 +137,27 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
+                {
+                    static NB: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if NB.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10000 {
+                        let vend = current_task.address_space().and_then(|a| {
+                            let g = a.vma_read();
+                            g.last_at_or_before(crate::mm::page::VirtAddr::new(
+                                brk_floor as usize,
+                            ))
+                            .filter(|v| {
+                                v.vma_type() == crate::mm::vma::VmaType::Anonymous
+                            })
+                            .map(|v| v.end().as_usize())
+                        });
+                        crate::pr_warn!(
+                            "BRK-SHRINK cur={:#x} new={:#x} heapvend={:?}",
+                            current_brk, new_brk, vend
+                        );
+                    }
+                }
+                brk_anomaly_check(current_task, new_brk, brk_floor);
                 current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 return new_brk as i64;
@@ -193,6 +237,15 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
                             // Keep the old brk on failure (Linux parity:
                             // sys_brk returns mm->brk, not an error).
+                            static NR: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                                crate::pr_warn!(
+                                    "BRK-REFUSE-NEIGHBOR cur={:#x} new={:#x} nextstart={:#x}",
+                                    current_brk, new_brk,
+                                    next.map(|v| v.start().as_usize()).unwrap_or(0)
+                                );
+                            }
                             return current_brk as i64;
                         }
                         let heap_vma = Vma::new(
@@ -222,6 +275,27 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
+                {
+                    static NE: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if NE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10000 {
+                        let vend = current_task.address_space().and_then(|a| {
+                            let g = a.vma_read();
+                            g.last_at_or_before(crate::mm::page::VirtAddr::new(
+                                brk_floor as usize,
+                            ))
+                            .filter(|v| {
+                                v.vma_type() == crate::mm::vma::VmaType::Anonymous
+                            })
+                            .map(|v| v.end().as_usize())
+                        });
+                        crate::pr_warn!(
+                            "BRK-GROW cur={:#x} new={:#x} heapvend={:?}",
+                            current_brk, new_brk, vend
+                        );
+                    }
+                }
+                brk_anomaly_check(current_task, new_brk, brk_floor);
                 current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 new_brk as i64
@@ -275,12 +349,12 @@ const MMAP_NEW: MmapEntry = MmapEntry::new();
 pub static MMAP_RING: [MmapEntry; 1024] = [MMAP_NEW; 1024];
 pub static MMAP_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// dfx=vmap line budget (leg-31B): the PROT_NONE-shape traces
+/// debug=vmap line budget (leg-31B): the PROT_NONE-shape traces
 /// (MPROTECT-DN, PROTNONE-MAP-S) share one cap so a hunting boot stays
 /// serial-bounded. The switch check lives here — call sites stay naked.
 fn vmap_budget_line(line: impl FnOnce()) {
     use core::sync::atomic::Ordering::Relaxed;
-    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::VmaProbe) {
+    if !crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::VmaProbe) {
         return;
     }
     static VMAP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -290,13 +364,13 @@ fn vmap_budget_line(line: impl FnOnce()) {
 }
 
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
-    let mp = crate::dfx::mmprof::on();
-    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+    let mp = crate::debug::mmprof::on();
+    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
     let ret = sys_mmap_inner(args);
     if mp {
-        crate::dfx::mmprof::add(crate::dfx::mmprof::M_TOTAL, mp_t0);
+        crate::debug::mmprof::add(crate::debug::mmprof::M_TOTAL, mp_t0);
         if ret > 0 {
-            crate::dfx::mmprof::bucket_len(args[1] as usize, mp_t0);
+            crate::debug::mmprof::bucket_len(args[1] as usize, mp_t0);
         }
     }
     {
@@ -386,15 +460,15 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     // mmprof (cmdline mmprof=1, oh-launcher perf handoff): placement
     // scalars + issuer attribution (the whole-syscall bracket lives in
     // the sys_mmap wrapper so early EINVAL returns still count).
-    let mp = crate::dfx::mmprof::on();
+    let mp = crate::debug::mmprof::on();
     if mp {
-        crate::dfx::mmprof::bump_comm();
+        crate::debug::mmprof::bump_comm();
         if args[3] as u32 & map::MAP_FIXED != 0 || args[3] as u32 & 0x100000 != 0 {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_FIXED, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_FIXED, 1);
         } else if args[0] == 0 {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_ANON0, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_ANON0, 1);
         } else {
-            crate::dfx::mmprof::bump(crate::dfx::mmprof::S_HINT, 1);
+            crate::debug::mmprof::bump(crate::debug::mmprof::S_HINT, 1);
         }
     }
 
@@ -765,7 +839,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         .map(|c| core::str::from_utf8(c).unwrap_or(""))
                         .unwrap_or("")
                         .trim_end_matches('\0');
-                    crate::sched::cgroup::dfx_report_memory_refusal(comm, actual_length);
+                    crate::sched::cgroup::debug_report_memory_refusal(comm, actual_length);
                 }
                 return mmap_error::ENOMEM;
             }
@@ -966,9 +1040,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
                                 else {
                                     // oh-svc T1 attribution tap (known-gap 4):
-                                    // dfx=ohhunt gates it.
-                                    if crate::dfx::switches::enabled(
-                                        crate::dfx::switches::DfxSwitch::OhHunt,
+                                    // debug=ohhunt gates it.
+                                    if crate::debug::switches::enabled(
+                                        crate::debug::switches::DebugSwitch::OhHunt,
                                     ) {
                                         crate::pr_warn!(
                                             "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
@@ -999,15 +1073,15 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // llvmpipe displaytarget_map failure class
                                     // (assert jit_tex->base) needs the
                                     // attribution. Budgeted + gated behind
-                                    // dfx=ohhunt (known-gap 4).
+                                    // debug=ohhunt (known-gap 4).
                                     Err(e) => {
                                         static PEMAP_N: core::sync::atomic::AtomicU32 =
                                             core::sync::atomic::AtomicU32::new(0);
                                         let n =
                                             PEMAP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                                         if n < 20
-                                            && crate::dfx::switches::enabled(
-                                                crate::dfx::switches::DfxSwitch::OhHunt,
+                                            && crate::debug::switches::enabled(
+                                                crate::debug::switches::DebugSwitch::OhHunt,
                                             )
                                         {
                                             crate::pr_warn!(
@@ -1169,6 +1243,22 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 // faults after the caller closes the fd must
                                 // still read the mapped file, not zero-fill.
                                 if let Some(file) = unsafe { crate::fs::get_file_fd(fd as usize) } {
+                                    {
+                                        static NP: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if NP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                                            let ino = unsafe {
+                                                (&*file.inode.get()).as_ref().map(|i| i.ino).unwrap_or(0)
+                                            };
+                                            crate::pr_warn!(
+                                                "PINSITE mm={:#x} addr={:#x} fd={} fileptr={:#x} ino={}",
+                                                address_space as *const _ as usize,
+                                                mapped_addr.as_usize(), fd,
+                                                (&*file as *const _ as usize),
+                                                ino
+                                            );
+                                        }
+                                    }
                                     address_space.pin_vma_file(mapped_addr.as_usize(), file);
                                 }
                             }
@@ -1318,7 +1408,7 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // at 0x7ff000b86000 is carved by fixed RW
                             // mmaps — b93 showed the crash VMA starts
                             // exactly at the reserve base).
-                            // dfx=syscalltrace only (see file.rs so-open
+                            // debug=syscalltrace only (see file.rs so-open
                             // note: ungated trace volume feeds
                             // hilogd.rd_kmsg, which eats a whole vCPU) —
                             // EXCEPT the >=1GB reserves: those are musl's
@@ -1336,8 +1426,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     actual_length
                                 );
                             }
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::SyscallTrace,
+                            if crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::SyscallTrace,
                             ) {
                                 if prot_flags == 0
                                     && map_flags & map::MAP_ANONYMOUS != 0
@@ -1362,13 +1452,13 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     );
                                 }
                             }
-                            // dfx=vmap (leg-31B): small anonymous PROT_NONE
+                            // debug=vmap (leg-31B): small anonymous PROT_NONE
                             // mmaps — the musl pthread-stack construction
                             // (mmap PROT_NONE then RW-upgrade) leaves the
                             // guard with THIS origin; budget-shared with
                             // the MPROTECT-DN trace in sys_mprotect.
-                            if crate::dfx::switches::enabled(
-                                crate::dfx::switches::DfxSwitch::VmaProbe,
+                            if crate::debug::switches::enabled(
+                                crate::debug::switches::DebugSwitch::VmaProbe,
                             ) && prot_flags == 0
                                 && map_flags & map::MAP_ANONYMOUS != 0
                                 && actual_length < 0x10_0000
@@ -1437,8 +1527,8 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): glibc/musl thread
     // stacks are 8 MiB, so this fired UNGATED on EVERY thread exit —
     // one pr_info per join at ~0.5 ms of polled-16550 time each. Joins
-    // the dfx=vmap budget family (VmaProbe switch + the shared 600-line
-    // cap); the b91/b92 hunts re-arm with dfx=vmap.
+    // the debug=vmap budget family (VmaProbe switch + the shared 600-line
+    // cap); the b91/b92 hunts re-arm with debug=vmap.
     if length >= 0x8_0000 {
         vmap_budget_line(|| {
             crate::pr_info!(
@@ -1506,11 +1596,11 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
-    let mp = crate::dfx::mmprof::on();
-    let mp_t0 = if mp { crate::dfx::mmprof::now() } else { 0 };
+    let mp = crate::debug::mmprof::on();
+    let mp_t0 = if mp { crate::debug::mmprof::now() } else { 0 };
     let ret = sys_mprotect_inner(args);
     if mp {
-        crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TOTAL, mp_t0);
+        crate::debug::mmprof::add(crate::debug::mmprof::MP_TOTAL, mp_t0);
     }
     // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
     // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
@@ -1519,7 +1609,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // DSO SIGSEGVs inside __cfi_slowpath. Failures are rare and always
     // interesting: log every one ungated. PROT_READ downgrades (RELRO,
     // the shadow's tmp before mremap) are entry/exit traced only under
-    // dfx=syscalltrace (two lines per call, same gating as MREMAP).
+    // debug=syscalltrace (two lines per call, same gating as MREMAP).
     if ret != 0 {
         crate::pr_info!(
             "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
@@ -1538,7 +1628,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
         // wrong-flags, plus the neighboring VMAs (bounded, failure-only
         // so volume is negligible).
         mprotect_fail_forensics(args[0] as usize, args[1] as usize);
-    } else if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    } else if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace)
         && (args[2] as u32) & 0x6 == 0
     {
         crate::pr_info!(
@@ -1653,9 +1743,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // Serial-cleanliness (print-audit lane, 2026-11): this fired
     // UNGATED on EVERY writable mprotect — one per thread-stack upgrade
     // (thread create), malloc arena extension and JIT RW flip, at
-    // ~0.4 ms of polled-16550 time per line. It joins the dfx=vmap
+    // ~0.4 ms of polled-16550 time per line. It joins the debug=vmap
     // budget family below (VmaProbe switch + shared 600-line cap); the
-    // b91-b93 hunts re-arm with dfx=vmap.
+    // b91-b93 hunts re-arm with debug=vmap.
     if prot & 0x2 != 0 {
         vmap_budget_line(|| {
             crate::pr_info!(
@@ -1667,7 +1757,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
         });
     }
 
-    // dfx=vmap (leg-31B): the PROT_NONE mprotect family — guard
+    // debug=vmap (leg-31B): the PROT_NONE mprotect family — guard
     // downgrades (mprotect(PROT_NONE) over a piece of a live RW mapping,
     // the stack-guard construction pattern; sc321B adjudication:
     // render_service's 2-page guards on top of thread stacks come from
@@ -1760,7 +1850,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     // Serial-cleanliness (print-audit lane, 2026-11):
                     // every DSO's RELRO finalize walks this arm; a
                     // dlopen loop printed one line per load. Joins the
-                    // dfx=vmap budget family.
+                    // debug=vmap budget family.
                     vmap_budget_line(|| {
                         crate::pr_info!(
                             "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
@@ -1790,13 +1880,13 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // can interleave between them.
             // mmprof: the write-guard acquire wait + the coverage/EACCES
             // walk (mmprof=1; the guard spans the whole syscall body).
-            let mp2 = crate::dfx::mmprof::on();
-            let mp_t_lock = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp2 = crate::debug::mmprof::on();
+            let mp_t_lock = if mp2 { crate::debug::mmprof::now() } else { 0 };
             let mut vma_mgr = addr_space.vma_write();
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_LOCK, mp_t_lock);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_LOCK, mp_t_lock);
             }
-            let mp_t_cover = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_cover = if mp2 { crate::debug::mmprof::now() } else { 0 };
 
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
@@ -1906,10 +1996,10 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
 
             // mmprof: coverage+EACCES walk done.
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_COVER, mp_t_cover);
-                crate::dfx::mmprof::bump(crate::dfx::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_COVER, mp_t_cover);
+                crate::debug::mmprof::bump(crate::debug::mmprof::S_MPPAGES, ((length + 4095) / 4096) as u64);
             }
-            let mp_t_pte = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_pte = if mp2 { crate::debug::mmprof::now() } else { 0 };
 
             // Get page table root
             let root_ppn = addr_space.root_ppn();
@@ -2081,14 +2171,14 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // PTE lock so no stale entry survives the section).
             // SAFETY: sfence.vma is a valid RISC-V instruction; required after PTE modification.
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_PTE, mp_t_pte);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_PTE, mp_t_pte);
             }
-            let mp_t_tlb = if mp2 { crate::dfx::mmprof::now() } else { 0 };
+            let mp_t_tlb = if mp2 { crate::debug::mmprof::now() } else { 0 };
             unsafe {
                 crate::arch::mm::asid::flush_tlb_all();
             }
             if mp2 {
-                crate::dfx::mmprof::add(crate::dfx::mmprof::MP_TLB, mp_t_tlb);
+                crate::debug::mmprof::add(crate::debug::mmprof::MP_TLB, mp_t_tlb);
             }
             drop(_pte_guard);
 
@@ -2710,12 +2800,12 @@ fn mremap_carry_file_attrs(
 /// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
 /// logs its identity and arguments on entry and its result on exit —
 /// one boot ties any mystery VMA surgery to its caller.
-/// dfx=syscalltrace only: ungated this is two lines per mremap, and
+/// debug=syscalltrace only: ungated this is two lines per mremap, and
 /// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
     let ret = sys_mremap_inner(args);
     // Failure returns are rare and always interesting (CFI-shadow hunt):
-    // log ungated, success only under dfx=syscalltrace.
+    // log ungated, success only under debug=syscalltrace.
     if ret < 0 {
         crate::pr_info!(
             "MREMAP-FAIL pid {} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x} -> {}",
@@ -2724,7 +2814,7 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
             ret
         );
     }
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+    if crate::debug::switches::enabled(crate::debug::switches::DebugSwitch::SyscallTrace) {
         let pid = crate::process::current_pid();
         let comm_bytes = crate::sched::current()
             .map(|t| unsafe { (*t).comm() }.to_vec())

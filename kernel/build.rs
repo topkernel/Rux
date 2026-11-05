@@ -780,15 +780,15 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
             .expect("Failed to write configuration file");
     }
 
-    // The symbol table (kernel/src/dfx/ksyms_generated.rs) is written by
+    // The symbol table (kernel/src/debug/ksyms_generated.rs) is written by
     // build/gen-ksyms.py after the link step. A placeholder is written
     // here when it is missing so that a plain `cargo build` — which has
     // no symbol pass — still compiles; the table is simply empty then
     // and the runtime symbolization stays disabled.
-    let ksyms_file = src_dir.join("dfx").join("ksyms_generated.rs");
-    let ksyms_bin = src_dir.join("dfx").join("ksyms.bin");
+    let ksyms_file = src_dir.join("debug").join("ksyms_generated.rs");
+    let ksyms_bin = src_dir.join("debug").join("ksyms.bin");
     if !ksyms_file.exists() || !ksyms_bin.exists() {
-        fs::create_dir_all(ksyms_file.parent().unwrap()).expect("Failed to create dfx dir");
+        fs::create_dir_all(ksyms_file.parent().unwrap()).expect("Failed to create debug dir");
         if !ksyms_file.exists() {
             fs::write(&ksyms_file, KSYMS_STUB)
                 .expect("Failed to write the symbol table placeholder");
