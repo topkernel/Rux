@@ -14,16 +14,16 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 ### 已达标（≤0.5x 或反超）
 - lat_ctx 3.15x 反超（2.13 vs 6.71）· lat_pipe 3.56x 反超（3.74 vs 13.30，11-05 栈：钩子门在 ping-pong 路径复利 -12%）
 - lat_proc exec 1.32x 反超（66 vs 87.4）· fstat 1.37x 反超（0.086 vs 0.118）
+- **lat_sem 2.66x 反超（0.785 vs 2.09，11-06 第六任 KVM 参考列重锚——旧账 1.80x 落后系原生/KVM 口径错位，同 rig 公平口径下早已反超）**
+- **lat_unix 3.14x 反超（4.11 vs 12.92，同上重锚；旧账 3.011 为原生值）**
 - lat_mmap 0.24x · bw_pipe 2.68x · bw_unix 1.88x · bw_mem 1.07-1.10x · usleep 0.99x
 - **lat_pagefault 2.26-2.45x 反超（0.0287-0.0312 vs 0.0702；2026-11-05 定妆，门禁六腿全绿待合 main）**
 
-### 未达标（按差距排序 = 主攻顺序）
+### 未达标（按差距排序 = 主攻顺序；sem/unix 移出后全部收敛进 syscall 链）
 | 行 | 我们 | 参考(KVM/原生) | 差距 |
 |---|---|---|---|
 | lat_syscall open | 0.8031→**0.7445**（11-06 第六任定案：全路径 memo+快臂，A/B -6.8%，run/abpf-g6base-g6new.txt） | **0.3566（11-05 重锚复现，与冻结 0.36 一致）** | **2.09x**；剩余=open tail ~250ns + close 88ns + 入口 50ns + memo 命中成本 ~130ns 实测（槽锁 irqsave+claim+链验证+权限重查；v2 攻：无锁读+胶水缩减） |
-| lat_sem | 0.800 | 0.444 原生 | 1.80x |
-| lat_unix | 4.56 | 3.011 原生 | 1.52x |
-| lat_syscall stat | 0.379→**0.3168**（11-06 第六任定案复测，A/B -14.4%） | 0.2141（重锚）/0.227（冻结） | **1.48x**；剩余=stat 尾 ~90ns + 入口 50ns + memo 命中成本 ~130ns |
+| lat_syscall stat | 0.379→**0.3168**（11-06 第六任定案复测，A/B -14.4%） | 0.2141（重锚）/0.227（冻结） | **1.48x**；fsw 分解=pre 72ns + memo 命中 ~130ns + getattr/copyout ~90ns |
 | lat_syscall null | 0.055→**0.0505**（11-05 栈：钩子门×2） | 0.0418（重锚）/0.042（冻结） | 1.21x（入口地板，乘所有行；余量=inner call ~2ns+6 字参数拷贝 ~2-3ns+帧构建） |
 | lat_proc exec | 82-114（hello 真实形摆动）/86.5（失败形，base 88.4） | **84.80（hello 真实形重锚）** | 真实形带内~1.0-1.35x（待静窗细锚）；66 史值不可复现（谱系丢失） |
 | lat_proc fork | 59.9→57.9（11-05 栈，噪声带 54.9-60.9） | 51.61（重锚）/53.99（冻结） | 1.07-1.12x |
@@ -59,8 +59,8 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 5. **syscall 入口地板 13ns**（null 1.21x：两层 dispatch 合一、armed() 残项归并、seccomp/IRQ 门重排——乘所有系统调用行）
 6. **read/write 1.6x**（入口+VFS 层分解未做）
 7. **fork retire 批量 park**（exit_group/cloexec 批量关闭一次锁往返）+ fork 57.9 vs 51.61
-8. **lat_sem 0.800 vs 0.444**（semop 路径分解）
-9. **lat_unix 4.56 vs 3.01**（唤醒侧已到平台，查 socket 缓冲/唤醒队列路径）
+8. ~~lat_sem~~ **关闭 11-06**（第六任 KVM 参考重锚：我方 0.785 vs 参考 2.09 = 2.66x 反超，旧 1.80x 落后为原生口径错位；run/g6-refanchor-*.txt）
+9. ~~lat_unix~~ **关闭 11-06**（同上重锚：我方 4.11 vs 参考 12.92 = 3.14x 反超）
 10. ~~D-1 runqueue 分片评估~~ **完成 2026-11-05**（1475e1a9：保持关闭——最优省 164ns/切换=7.7% lat_ctx，动不到任何未达标行；触发器已记）
 
 ## 纪律（必须遵守）
@@ -115,3 +115,5 @@ lmbench/pbench 指标至少比参考内核好一倍**（我们的时间 ≤ 参�
 - 2026-11-05 23:2x | 四次复活 | — | 第五任 20:36 额度阵亡；死前 path_memo 扩至 295 行+io.rs 挂钩（168 行 WIP 未测量），已归档快照 | — | — | 23:26 主会话派第六任：先给 path_memo 定论（A/B），再 open 定格、队列推进
 - 2026-11-06 00:2x | 五次复活+测量谱系重建（第六任） | 23:28 接手（负载 3.0 好窗）。关键谱系事实：本任 HEAD strong 构建（work/bzImage-lm-g6new）与第五任 bzImage-lm-pm4 **cmp 字节全等**；g6base（8f05666a=fdreap 栈无 memo，独立工作树构建）与第五任 bzImage-lm-g5base **cmp 字节全等**——pm3/pm4 两轮测量全部有效于精确二进制，"未测量"范围收窄为 open/stat 行在含 io.rs 快臂构建上的直接复测（io.rs 快臂与 open/stat 路径不相交，但按令重测定案）。内核构建字节级可复现=rig 新事实（同一 commit+profile → 同一 bzImage） | 无（构建验证） | — | — | 基线内核 work/bzImage-lm-g6base 与新内核 work/bzImage-lm-g6new 留档供后续 A/B
 - 2026-11-06 00:2x | #3/#4 path_memo+丢弃设备快臂 **A/B 定案：四行全赢，门禁六腿绿，转正** | 3+3 交错同窗（run/abpf-g6base-g6new.txt，负载带 3.56-6.34 双侧同窗，每 rep 无侧间重叠）：open 0.7986→**0.7445**（med，-6.8%）· stat 0.3699→**0.3168**（-14.4%）· read 0.1054→**0.0646**（-38.7%）· write 0.0887→**0.0636**（-28.3%）| 被测=9cafa6aa 全栈：全路径 memo（256 槽直接映射，键=(root dentry 指针,规范化路径)，命中=挂载代+逐祖先 dir_mut_gen+当前 creds 重查 MAY_EXEC；miss-storm 退避 >75% miss/512 窗→8192 次旁路）+ io.rs /dev/zero 读快臂（零 staging，64B 块清零直出）+ /dev/null、/dev/zero 写丢弃快臂（不触用户缓冲，IN_MODIFY 照发）+ devfs ops 访问器 + fsw pmhit/pmmiss/pmins 仪表 | vs 参考：open 2.09x（原 2.25x）· stat 1.48x · read 1.08x · write 1.14x | **六腿全绿**：(a) x86_64 make build rc=0；(b) rm .config 后 riscv64 make build rc=0；(c) make test 1316/1316；(d) riscv 90s 浸泡零 KERNPANIC 零 WEDGE-DETECT 零 POISONED（LOOP/CHURN/ARITH 全完成；c3c4 涂写族=基线既有愈合打印，分支率≤基线）；(e) pbench Tier-2 n=2 交错（run/abpb-g6base-g6new.txt）：最差回归 p6_stat +2.9%、p2_ctxsw +4.3%、p3b_cow +4.0% 全带内（pm2 时代 +34% 已被退避修复消解），p6_openclose ±0%、p6_read_cached -1.6%，p4/p5a 大幅负 delta=base 侧高负载伪影非 new 赢点；p5f/mkdrmdir MISSING=已知 rig 形非回归；(f) LTP fs/process 68 例（riscv release，run/g6-ltp-family.txt）逐例同或更优——67 例 rc=0、dup03 本轮 rc=0（第四任侧 "?" 超时抖动类）零分歧 | **定论：赢，转正**。memo 净收益 open -54ns/stat -53ns：走查 ~185ns 省下但命中成本实测 ~130ns（槽锁 irqsave 全验证段+claim+逐祖先 gen+权限重查）——v2 主杠杆=无锁读（dcache reader-bank 形）+胶水缩减；open 行复测定格 **0.7445µs**（参考 0.3566 口径，差距 2.09x）。数据提交随本行
+- 2026-11-06 00:5x | fsw 插桩分解（第六任，fsw=1 靴 run/g6-fsw-open.log / g6-fsw-stat.log） | (1) memo 命中率：lmbench 同文件形 open pmhit=7,701,812 / pmmiss=9 / pmins=4（99.9999%），stat 同形——退避永不触发，memo 处于设计工作点；(2) stat 相位（插桩值 0.3575，净 0.3168）：pre=71.6ns/调用（入口+路径捕获+access_ok）+ tail=217.7ns/调用（tail 括桩 ⊃ memo 命中 ~130ns + getattr/copyout ~90ns），walk 组件仅 23 次=boot 冷走查噪声（memo 化后稳态零走查）；(3) open：openexecavg=490ns（含插桩） | 无（分解） | — | — | v2 攻击权重更新：memo 命中 130ns（槽锁+claim+链验证+权限重查）为 open/stat 共享最大单件，无锁读（Arc 链替代裸指针+claim）估 -40~50ns/命中；getattr/copyout 90ns 与入口 50ns 各自成件
+- 2026-11-06 01:0x | #8/#9 sem/unix KVM 参考列重锚→**双双反超，关闭**（第六任） | 交错同窗 2+2（run/g6-refanchor-0020.txt，负载 5.66-9.16 双侧同窗）：lat_sem 参考 2.0655/2.1142 vs 我方 0.7887/0.7821；lat_unix 参考 12.8936/12.9439 vs 我方 3.9617/4.2654 | 无内核改动（纯测量）；rig 新工具 run/g6-refanchor.sh（原生口径参考行的 KVM 重锚驱动，交错形） | — | — | 章程旧账 lat_sem 1.80x/lat_unix 1.52x 落后均为"参考=原生值 vs 我方=KVM 值"口径错位——唤醒密集行参考核在 KVM 下受罚 4-5x（sem 原生 0.444→KVM 2.09；unix 原生 3.011→KVM 12.92），同 rig 公平口径下两行早已反超。**教训入册：一切参考值必须同 rig KVM 锚定，原生值只作旁证**。未达标行收敛为纯 syscall 链：open 2.09x > stat 1.48x > null 1.21x > write 1.14x > fork 1.12x > read 1.08x（exec 待静窗 hello 形锚）
