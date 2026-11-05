@@ -92,7 +92,7 @@
     <ul>
       <li>GRQ 平均持锁 <b>2786 ns</b>(n=6.3M,门禁带 1200–7320 ns);对 126.0M 系统调用的大规模启动 持锁持平 → 体积耦合而非争用受限(≤4 vCPU 场景)。</li>
       <li>启动 census 每次合格静默启动 精确一致:TERM-DESCHED <b>8</b>(带 8±2)、WAKE-REFUSED <b>32</b>(带 32±4)。</li>
-      <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>0.73 vs 6.71 µs(9.2×)</b>。</li>
+      <li>上下文切换三杠杆(FSGSBASE 393 ns/切换 + 惰性 FPU + PCID 门控)后:<code>lat_ctx -s64 2</code> <b>4.97→2.07 µs(−58%)</b>;lmbench 同机 <b>1.98 vs 6.71 µs(3.39×)</b>;缺页延迟 0.029–0.031 vs 0.0702 µs(2.26–2.45×,累计 16.1×)。</li>
       <li>D-14 生效后:74 字节 unix 流记录的"唤醒—抢占—切换"往返序列 ~275 µs → 对标 Linux ~2.5 µs;p5 IPC 族 <b>10–18×</b>。</li>
     </ul>
     <p><b>兼容性:</b>纯内部策略,无 ABI 面。守卫 = 性能门调度域(hold 带、census、P2 ±20%)。</p>

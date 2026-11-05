@@ -63,10 +63,10 @@
     <p>本页所有与 Linux 的对照均为<b>同机同加速</b>:同一宿主(9950X)、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一镜像形状、同一静态基准二进制。不含任何裸机对照。</p>
     <div class="card-grid grid-2">
       <div class="card">
-        <h3><span class="ico">📏</span>lmbench 同机对照:10 项中 5 项领先、5 项落后</h3>
-        <p><b>领先</b>(延迟,Linux/Rux):上下文切换 <b>9.2×</b>、管道 <b>6.6×</b>、fstat <b>1.37×</b>、exec <b>1.32×</b>、fork <b>1.13×</b>。</p>
-        <p><b>落后</b>(Rux/Linux):open <b>1.95×</b>、stat <b>1.68×</b>、read <b>1.67×</b>、write <b>1.62×</b>、null <b>1.31×</b>。</p>
-        <div class="nums">领先最高 9.2× · 落后最大 1.95× · 数据见 §2</div>
+        <h3><span class="ico">📏</span>lmbench 同机对照:14 项中 9 项领先、5 项落后</h3>
+        <p><b>领先</b>:缺页延迟 <b>2.26–2.45×</b>、lat_mmap <b>4.2×</b>、管道 <b>3.56×</b>、上下文切换 <b>3.39×</b>、lat_unix <b>3.14×</b>、lat_sem <b>2.62×</b>、bw_pipe <b>2.68×</b>、bw_unix <b>1.88×</b>、lat_syscall read <b>1.02×</b>。</p>
+        <p><b>落后</b>(Rux/Linux):open <b>1.82×</b>、stat <b>1.32×</b>、null <b>1.17×</b>、fork <b>1.11×</b>、write <b>1.10×</b>。</p>
+        <div class="nums">领先最高 4.2× · 落后最大 1.82× · 数据见 §2</div>
       </div>
       <div class="card">
         <h3><span class="ico">🏁</span>Geekbench 5:多核总分领先 4.3%、单核总分领先 5.1%</h3>
@@ -74,29 +74,42 @@
         <div class="nums">逐项数据见 §3 · 机位注明:Linux 侧为宿主 4-CPU 钉核(taskset,拓扑对齐)</div>
       </div>
     </div>
-    <div class="callout"><b>差距结构:</b>同机对照下,领先的用例集中在调度/唤醒路径(上下文切换、管道)——Linux 的跨 vCPU 唤醒 IPI 在虚拟化下开销显著,而 Rux 的单全局运行队列不产生跨核重调度风暴;落后的用例集中在系统调用入口与字节填充尾部(open/stat/read/write/null 1.3–2.0×),是当前优化队列的主攻面。</div>
+    <div class="callout"><b>差距结构:</b>领先面覆盖调度/唤醒(上下文切换、管道)、缺页/映射(七轮 campaign 把缺页从落后最大项做成领先 2.26–2.45×)与 IPC 带宽;落后面收窄到系统调用入口与路径解析(open 1.82×、stat 1.32×)、fork(1.11×)—— write 距持平仅 6 ns,read 已反超。数据来自 perf-gap-hunt 七轮 campaign(每行同窗交错 A/B,med-of-3+3)。</div>
 
     <!-- ================= lmbench 数据 ================= -->
-    <h2 id="lmb"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,全量 10 项)</h2>
-    <p style="font-size:13.5px">方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行,同一 loadavg 门控纪律采集。</p>
+    <h2 id="lmb"><span class="anchor">§2</span>lmbench 数据(同机 KVM 对照,14 项全量)</h2>
+    <p style="font-size:13.5px">数据来源:lmbench-report.md「Campaign standings」(2026-11-06,perf-gap-hunt 七轮,内核 53f4a4f6 → 7fed9179)—— 当前权威表;每行为同窗交错 A/B,med-of-3+3。方法:每启动一个用例、35 秒 in-guest 超时、PID 1 runner;Linux 列 = 同一静态二进制在<b>同一 KVM 机位</b>执行。</p>
+    <h3>领先组(9 项)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>用例</th><th class="num">Rux(µs)</th><th class="num">Linux(同机 KVM,µs)</th><th>结论</th></tr></thead>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同机 KVM)</th><th>结论</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num"><b>0.73</b></td><td class="num">6.71</td><td><span class="chip ok">领先 9.2×</span></td></tr>
-          <tr><td class="mono">lat_pipe</td><td class="num"><b>2.01</b></td><td class="num">13.30</td><td><span class="chip ok">领先 6.6×</span></td></tr>
-          <tr><td class="mono">lat_syscall fstat</td><td class="num">0.086</td><td class="num">0.118</td><td><span class="chip ok">领先 1.37×</span>(RCU fd 查找)</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num"><b>47.6</b></td><td class="num">53.99</td><td><span class="chip ok">领先 1.13×</span></td></tr>
-          <tr><td class="mono">lat_proc exec</td><td class="num"><b>66.2</b></td><td class="num">87.43</td><td><span class="chip ok">领先 1.32×</span></td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.055</td><td class="num">0.042</td><td><span class="chip bad">落后 1.31×</span>(入口固有开销)</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.094</td><td class="num">0.058</td><td><span class="chip bad">落后 1.62×</span>(fill/copy 尾 + SMAP AC 括号)</td></tr>
-          <tr><td class="mono">lat_syscall read</td><td class="num">0.110</td><td class="num">0.066</td><td><span class="chip bad">落后 1.67×</span>(同上)</td></tr>
-          <tr><td class="mono">lat_syscall stat</td><td class="num">0.382</td><td class="num">0.227</td><td><span class="chip bad">落后 1.68×</span>(路径快查已落地,余差在派发层)</td></tr>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.70</td><td class="num">0.360</td><td><span class="chip bad">落后 1.95×</span></td></tr>
+          <tr><td class="mono">lat_mmap 1m</td><td class="num">1.049 µs</td><td class="num">4.41 µs</td><td><span class="chip ok">领先 4.2×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">3.74 µs</td><td class="num">13.30 µs</td><td><span class="chip ok">领先 3.56×</span>(hook-call 税内联消除)</td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">1.98 µs(quiet)</td><td class="num">6.71 µs</td><td><span class="chip ok">领先 3.39×</span></td></tr>
+          <tr><td class="mono">lat_unix</td><td class="num">3.96–4.27 µs</td><td class="num">12.89 µs</td><td><span class="chip ok">领先 3.14×</span>(Linux 锚同机重测)</td></tr>
+          <tr><td class="mono">lat_pagefault</td><td class="num">0.0287–0.0312 µs</td><td class="num">0.0702 µs</td><td><span class="chip ok">领先 2.26–2.45×</span>(相对起点 0.468 累计 16.1×)</td></tr>
+          <tr><td class="mono">bw_pipe</td><td class="num">28,030 MB/s</td><td class="num">10,443 MB/s</td><td><span class="chip ok">领先 2.68×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">0.788 µs</td><td class="num">2.065 µs</td><td><span class="chip ok">领先 2.62×</span>(Linux 锚同机重测)</td></tr>
+          <tr><td class="mono">bw_unix</td><td class="num">42,885 MB/s</td><td class="num">22,783 MB/s</td><td><span class="chip ok">领先 1.88×</span>(unix 暂存消除)</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.0646 µs</td><td class="num">0.066 µs</td><td><span class="chip ok">领先 1.02×</span>(已反超)</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">机制注:领先的用例集中在调度/唤醒路径 —— Linux 的跨 vCPU 唤醒 IPI 在虚拟化下开销显著;Rux 的单全局运行队列不产生跨核重调度风暴。系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。</p>
+    <h3>落后组(5 项,攻山中)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同机 KVM)</th><th>结论</th><th>在途手段</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.6497 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">落后 1.82×</span></td><td>尾部分解(累计已 −15.2%;每 tick 10 ms close 停滞类已修)</td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.3081 µs</td><td class="num">0.227 µs</td><td><span class="chip bad">落后 1.32×</span></td><td>路径分量分解(185 ns = 4×23 组件 + 70 胶合 + 50 前置)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0491 µs</td><td class="num">0.042 µs</td><td><span class="chip bad">落后 1.17×</span></td><td>入口地板:派发扁平化、armed() 残留合并</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">59.9 µs</td><td class="num">53.99 µs</td><td><span class="chip bad">落后 1.11×</span></td><td>retire batch-park</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.0636 µs</td><td class="num">0.058 µs</td><td><span class="chip bad">落后 1.10×</span></td><td>距持平 6 ns</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">机制注:领先面集中在调度/唤醒(跨 vCPU 唤醒 IPI 在虚拟化下开销显著,Rux 单全局队列不产生跨核重调度风暴)与缺页/映射路径(后错 fault 窗口 + 连续 put_range + PCACHE_RO 别名协议 + 批量 pin 释放 + munmap 单次 TLB flush);系统调用延迟行 guest 自带入口、不发生 vmexit,两侧几乎无虚拟化附加成本,差距为真实内核差距。fstat(领先 1.37×,RCU fd 查找)与 exec(领先 1.32×)亦在同机对照中领先,详见 lmbench-report.md standing 表。</p>
 
     <!-- ================= Geekbench 数据 ================= -->
     <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 数据(5.5.1,9950X,KVM q35 smp4/4G,strong 内核,2026-11-04)</h2>
@@ -262,17 +275,21 @@
           <tr><td>small_alloc magazine</td><td>per-CPU magazine(深度 16)+ 位图路由</td><td>类锁分段 <b>25M→19.7M→6.0M</b>/次启动;REST 占机 9.2%→0.1–1.2%</td></tr>
           <tr><td>GRQ 持锁</td><td>0.7ms 粒度约束 churn + pick 路径精简(分段测量定位)</td><td>平均持锁 <b>2786 ns</b>@126M 系统调用(带 1200–7320)</td></tr>
           <tr><td>unix 带宽</td><td>unix 暂存消除</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
+          <tr><td>缺页路径(campaign r6)</td><td>后错 fault 窗口 + 连续 put_range + PCACHE_RO 别名协议 + 批量 pin 释放 + munmap 单次 TLB flush</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs(累计 16.1×)</b>,对 Linux 转为领先 2.26–2.45×</td></tr>
+          <tr><td>hook-call 税与 path_memo(campaign r5/r7)</td><td>1331 处 cli/sti 内联快门 + path_memo/lease 门(每 inode open_count 替代全局 BTreeMap 锁、读侧 seqlock 无锁化)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%;open 累计 −15.2%、stat −4.6%,read 转为领先</td></tr>
         </tbody>
       </table>
     </div>
 
     <h2 id="queue"><span class="anchor">§9</span>优化队列(开放差距,按优先序)</h2>
     <ul>
-      <li><b>系统调用入口与字节填充尾部</b>:null 1.31× / open 1.95× / stat 1.68× / read 1.67× / write 1.62×(同机对照)—— 差距在入口固有开销与 fill/copy 尾部(SMAP AC 括号),fd 查找已不是瓶颈(fstat 已领先)。</li>
-      <li><b>AES-XTS 单核 64%</b>:Geekbench 最大单项差距,加密路径(crypto)待专项。</li>
-      <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);连接与数据路径本身已通,修复后才能取得 TCP 吞吐读数。</li>
-      <li><b>futex 唤醒→运行</b>:quiet 路径 7.5 µs 带内;p4 fork 族 TCG 类开放回归按 KVM 锚重裁中。</li>
-      <li><b>补测队列</b>:lmbench 其余用例(lat_pagefault / lat_mmap / bw_mem / bw_pipe / 网络延迟与带宽族)与 Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
+      <li><b>lat_syscall open 1.82× / stat 1.32×</b>:路径解析尾部分解(campaign 已落 open 累计 −15.2%、stat −4.6%,继续攻)。</li>
+      <li><b>lat_proc fork 1.11×</b>:retire batch-park 在途。</li>
+      <li><b>lat_syscall null 1.17× / write 1.10×</b>:入口地板与 fill/copy 尾;write 距持平 6 ns。</li>
+      <li><b>AES-XTS 单核 64%</b>:Geekbench 最大单项差距,加密路径专项。</li>
+      <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
+      <li><b>pbench 主线堆雷</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 腿暂停直到缉获;lmbench 各行不受影响。</li>
+      <li><b>补测队列</b>:Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§10</span>debug 测量工具链</h2>
