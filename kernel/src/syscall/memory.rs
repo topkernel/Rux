@@ -43,6 +43,95 @@ fn round_up_pages_checked(len: usize) -> Option<usize> {
 ///
 /// - RISC-V: 214
 
+// ---- trim quarantine (trimq=1 diagnostic, 2026-11-06) -----------------
+// The gnome-shell trim face: glibc systrim takes the top chunk back
+// (sys_brk shrink -> munmap), then a thread walks/frees INSIDE the
+// trimmed range. To catch the first touch with full forensics, the
+// shrink records the freed range here; the page-fault bad-area path
+// consults the table before delivering SIGSEGV and prints who/what/
+// how-long-since. Gated by the boot param trimq=1; zero cost otherwise.
+
+#[derive(Clone, Copy)]
+struct TrimQEntry {
+    mm: usize,
+    start: usize,
+    end: usize,
+    tick: u64,
+}
+
+static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
+    use crate::sync::spinlock::Spinlock;
+    const INIT: Spinlock<[Option<TrimQEntry>; 16]> = Spinlock::new([None; 16]);
+    INIT
+};
+static TRIMQ_ON: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn trimq_enabled() -> bool {
+    if TRIMQ_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let on = crate::cmdline::get_param("trimq")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if on {
+        TRIMQ_ON.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    on
+}
+
+/// Record a freshly-trimmed range (called from the brk shrink path).
+fn trimq_record(mm: usize, start: usize, end: usize) {
+    if !trimq_enabled() {
+        return;
+    }
+    let tick = crate::drivers::timer::get_jiffies();
+    let mut q = TRIMQ.lock_irqsave();
+    let slot = q.iter_mut().enumerate().find(|(_, e)| e.is_none());
+    match slot {
+        Some((_, e)) => {
+            *e = Some(TrimQEntry { mm, start, end, tick });
+        }
+        None => {
+            // Full: drop the oldest (index 0) by shifting.
+            for i in 0..15 {
+                q[i] = q[i + 1].take();
+            }
+            q[15] = Some(TrimQEntry { mm, start, end, tick });
+        }
+    }
+}
+
+/// Called from the page-fault bad-area path: report an access into a
+/// recently-trimmed range. Returns true when the address was covered
+/// (the caller still delivers SIGSEGV — the region IS unmapped).
+pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool {
+    if !TRIMQ_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let tick = crate::drivers::timer::get_jiffies();
+    let q = TRIMQ.lock_irqsave();
+    for e in q.iter().flatten() {
+        if e.mm == mm && addr >= e.start && addr < e.end {
+            static NH: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NH.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                crate::pr_warn!(
+                    "TRIMQ-HIT {} addr={:#x} rip={:#x} range=[{:#x},{:#x}) age={}j",
+                    if is_write { "WRITE" } else { "READ" },
+                    addr,
+                    rip,
+                    e.start,
+                    e.end,
+                    tick.saturating_sub(e.tick)
+                );
+            }
+            return true;
+        }
+    }
+    false
+}
+
 pub fn sys_brk(args: [u64; 6]) -> i64 {
     use crate::sched;
     use crate::mm::page::PAGE_SIZE;
@@ -111,6 +200,11 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         let _ = addr_space.munmap(
                             crate::mm::page::VirtAddr::new(new_page_end as usize),
                             (current_page_end - new_page_end) as usize,
+                        );
+                        trimq_record(
+                            addr_space as *const _ as usize,
+                            new_page_end as usize,
+                            current_page_end as usize,
                         );
                     }
                 }

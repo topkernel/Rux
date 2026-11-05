@@ -89,9 +89,23 @@ fn in_interrupt() -> bool {
 /// Page fault handling - bad_area path
 ///
 /// Called when address is not in a valid VMA
-fn bad_area(regs: &mut PtRegs, _access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
+fn bad_area(regs: &mut PtRegs, access_type: u32, fault_addr: VirtAddr) -> MmFaultResult {
     // User mode accessing invalid address
     if regs.user_mode() {
+        // Trim-quarantine forensics (trimq=1): report accesses into a
+        // recently-brk-trimmed range before the SIGSEGV lands.
+        if let Some(task) = crate::sched::current() {
+            let mm = task.address_space()
+                .map(|a| a as *const _ as usize)
+                .unwrap_or(0);
+            let is_write = access_type & FaultFlags::WRITE != 0;
+            let _ = crate::syscall::memory::trimq_report(
+                mm,
+                fault_addr.as_usize(),
+                is_write,
+                regs.rip as usize,
+            );
+        }
         send_signal(11, 1, fault_addr.bits(), regs.rip, regs);  // SIGSEGV, SEGV_MAPERR = 1
         return MmFaultResult::Segfault;
     }
