@@ -734,33 +734,24 @@ impl MmStruct {
         let addr_us = addr.as_usize();
         let end_addr = addr_us + aligned_size;
 
-        // VMA-lock convoy bound (the OH service-graph crawl fix): the old
-        // shape collected the surgery for the WHOLE range and then ran the
-        // entire PTE-zap walk under ONE vma_write() hold — a multi-MB unmap
-        // parked every same-mm VMA user (sys_brk above all: VMA-surgery
-        // only, so it waits on exactly this lock) for the full zap PLUS
-        // whatever scheduler starvation the holder suffered while holding
-        // (the 100s-class brk convoy that crawls the OH service graph,
-        // 14-services-by-98s vs the healthy 41-by-41s). The reference
-        // kernel bounds its equivalent hold by detaching per-VMA and
-        // keeping its zap loops resched-friendly. Here the surgery is
-        // CHUNKED: each iteration removes at most MUNMAP_CHUNK_BYTES of
-        // ONE VMA — that piece's surgery AND its PTE zap still share ONE
-        // guard (mm-audit rule below) — then the guard is dropped and
-        // cond_resched() yields the CPU; the tree walk is RE-DERIVED from
-        // scratch each iteration because the tree can change under us
-        // between holds (never cache VMA pointers across the drop).
+        // Design history, kept because the bound still shapes the code:
+        // (1) the ORIGINAL shape ran the whole range's surgery AND PTE
+        // zap under one vma_write() hold — the 100s-class brk convoy
+        // (sys_brk waits on exactly this lock for VMA-surgery only; the
+        // OH service-graph crawl, 14-services-by-98s vs the healthy
+        // 41-by-41s). (2) The chunked rewrite bounded the hold but
+        // introduced the churn races (detached pieces between chunk
+        // guards, tree re-derived from the range start — see the
+        // detach-all pass below; mmap-witness probes, the arena-churn /
+        // fontconfig crash family). (3) The current shape: detach-ALL
+        // under ONE guard with the zap INSIDE it for ranges up to
+        // SINGLE_GUARD_ZAP_LIMIT (the malloc/arena churn class,
+        // 64KB-1MB per call), giant ranges keep the chunked deferred
+        // zap below — the write-lock hold stays O(surgery), never
+        // O(pages), so the convoy bound survives.
         //
-        // mm-audit (unchanged invariant): a racing mmap may only ever land
-        // in a FULLY-CONSISTENT hole. At every guard drop, every page in
-        // the munmap range is either (VMA present AND PTEs live) — the
-        // unprocessed piece — or (VMA gone AND PTEs cleared) — a processed
-        // chunk. Releasing the guard with live PTEs under a VMA-free hole
-        // let a racing mmap's demand-fault installs interleave with the
-        // zap walk (silently zeroed or half-torn fresh mappings); the
-        // per-chunk surgery+zap pairing keeps the two from ever parting.
-        // unmap_pages takes no VMA lock (PTE lock only, nested one-way),
-        // so the hold is safe.
+        // unmap_pages takes no VMA lock (PTE lock only, nested
+        // one-way), so the holds are safe.
         //
         // Pin-table discipline (vm_file semantics): a split FILE VMA's
         // tail starts at a new address, so the pin keyed at the original
@@ -933,6 +924,21 @@ impl MmStruct {
                 crate::sched::cond_resched();
             }
         }
+
+        // ONE TLB flush for the whole munmap (perf-gap-hunt; RESTORED
+        // 2026-11-06 — 5b4a4bc7 dropped this block and the deferred
+        // flushes were never shot down: stale present+writable entries
+        // to FREED frames survived, and after the allocator reused those
+        // frames same-mm accesses silently read/wrote the new owner's
+        // pages — deterministic init #GP on the OH image, mallocng
+        // get_meta consistency check, t=1.2). The chunked unmap_pages
+        // above deferred its flushes — a multi-MB munmap runs ONE IPI
+        // broadcast + CR3 reload instead of one per chunk (~1 µs/chunk
+        // on the bench shape). Cleared-range visibility for user mode is
+        // restored before the syscall returns (the reference batches its
+        // unmapped-range flushes the same way).
+        crate::arch::ipi::flush_tlb_others(addr_us as u64, end_addr as u64);
+        crate::arch::mm::asid::flush_tlb_all();
 
         if mp {
             crate::dfx::mmprof::add(crate::dfx::mmprof::MU_BODY, mp_t0);
