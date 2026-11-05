@@ -28,7 +28,7 @@ DEFAULT_INIT="/bin/sh"
 # build/current-platform.sh (build/.config, Kernel.toml, riscv64).
 PLATFORM="${PLATFORM:-}"
 if [ -z "$PLATFORM" ]; then
-    PLATFORM="$(bash "$SCRIPT_DIR/../build/current-platform.sh")" || exit 1
+    PLATFORM="$(bash "$SCRIPT_DIR/../../build/current-platform.sh")" || exit 1
 fi
 
 case "$PLATFORM" in
