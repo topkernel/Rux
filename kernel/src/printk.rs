@@ -673,6 +673,79 @@ pub fn console_tick_flush() {
     }
 }
 
+/// Idle-loop flush hook (sched cpu_idle_loop, IF=1, nothing runnable):
+/// the flusher of last resort. On a SETTLED machine there are no IF=1
+/// printk writers (services go silent at loglevel=4) and the timer
+/// softirq runs on the inline IF=0 path — console_tick_flush never
+/// fires, so deferred dump/census bytes sit in the queue forever
+/// (con10-gate evidence: every syscost dump after t=120s deferred and
+/// never reached the wire). The reference's analogue: deferred-printk
+/// console output is drained by the console kthread exactly when
+/// nothing else runs. Budget: a 5 ms emit-lock acquire — the idle task
+/// must not spin behind a user writer legitimately sleeping on ring
+/// space (up to 250 ms), and must not delay the next pick.
+pub fn console_idle_flush() {
+    if !crate::console::tx_armed() {
+        return;
+    }
+    let pending = {
+        let q = CONSOLE_DEFER.lock_irqsave();
+        q.head != q.tail
+    };
+    if !pending {
+        return;
+    }
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if CONSOLE_EMIT_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start)
+            >= crate::config::TIMER_CLOCK_FREQ_HZ / 200
+        {
+            return; // lock busy; the next idle pass retries
+        }
+        core::hint::spin_loop();
+    }
+    // Same staging discipline as flush_deferred: whole-run submits
+    // only, leftovers pushed back in order.
+    let mut staged: [u8; 1024] = [0; 1024];
+    let mut flushed: u64 = 0;
+    loop {
+        let mut n = 0usize;
+        {
+            let mut q = CONSOLE_DEFER.lock_irqsave();
+            while n < staged.len() && q.head != q.tail {
+                let head = q.head;
+                staged[n] = q.buf[head];
+                q.head = (head + 1) % CONSOLE_DEFER_SIZE;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        if !emit_locked(&staged[..n]) {
+            let mut q = CONSOLE_DEFER.lock_irqsave();
+            for i in (0..n).rev() {
+                let head = (q.head + CONSOLE_DEFER_SIZE - 1) % CONSOLE_DEFER_SIZE;
+                q.buf[head] = staged[i];
+                q.head = head;
+            }
+            break;
+        }
+        flushed += n as u64;
+    }
+    if flushed > 0 {
+        CONSOLE_DEFER_FLUSHED.fetch_add(flushed, Ordering::Relaxed);
+        crate::dfx::syscost::note_printk_con(flushed as usize);
+    }
+    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+}
+
 /// Console (UART) emission path for printk records.
 ///
 /// Reference-shaped dispatch:

@@ -8412,6 +8412,14 @@ pub fn cpu_idle_loop() -> ! {
         // cpuidle enables IRQs before entering the idle state.
         crate::arch::cpu::restore_irq(true);
 
+        // Console lane (oh-console): last-resort flush of deferred
+        // console bytes. Runs only with IRQs enabled and nothing
+        // runnable — exactly the machine state in which no other
+        // flusher exists (no IF=1 printk writers; the inline softirq
+        // path skips at IF=0). One queue-empty check per idle pass
+        // when nothing is pending.
+        crate::printk::console_idle_flush();
+
         // 1. Try to pick a task from the global RQ
         // SAFETY: called from idle task context; schedule() handles its own locking.
         let my_cpu = crate::arch::cpu_id() as usize;
