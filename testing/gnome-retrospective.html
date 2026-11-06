@@ -60,7 +60,7 @@
     <h1>回溯报告:GNOME 桌面回归</h1>
     <div class="sub">2026-11-06 · 范围:x86_64 GNOME 启动,main@4ed009ac(10-31 验收)→ main@264b6961(11-06)· 原文 docs/test/gnome-regression-retrospective.md(英文)</div>
 
-    <div class="callout"><b>结论状态:</b>三个根因中两个已修复并验证;一个深水项开放;猎捕期间又当场抓到一个同类新回归(§6)。</div>
+    <div class="callout"><b>结论状态:</b>三个根因中两个已修复并验证;一个深水项开放;排查期间又当场发现一个同类新回归(§6)。</div>
 
     <h2 id="accept"><span class="anchor">§1</span>"能跑"当时的验收口径</h2>
     <p>x86 GNOME 里程碑(99% 非黑帧、17 分钟稳定会话)在 main@4ed009ac 由 gnome-x86 工作树验收:每次启动用该线的 fire.py 驱动做人工核验。那是<b>一次性战役验收,不是常设门禁</b> —— 该工作树收线后,常备测试面里没有任何一项再启动 GNOME 桌面。</p>
@@ -87,7 +87,7 @@
     </ul>
     <h3>3.2 ext4 异步批量读填 —— 跨文件页缓存投毒</h3>
     <ul>
-      <li><b>起源</b>:lmbench 读吞吐攻坚(bw_file_rd 50× 归因)把读路径改成异步批量 DMA,带 ReadDst::Discard 缓存预热。</li>
+      <li><b>起源</b>:lmbench 读吞吐优化(bw_file_rd 50× 归因)把读路径改成异步批量 DMA,带 ReadDst::Discard 缓存预热。</li>
       <li><b>洞</b>:完成/缓冲复用归属错位 —— 在新文件的缓存键下供出了上一个读请求的缓冲字节。实测:/bin/bzip2 的 mmap 页携带 /bin/bzexe 的脚本字节,而同一 fd 的 pread 返回正确数据。下游:ld.so 读到垃圾 .dynsym → "undefined symbol" 且符号名为空 → 惰性绑定 NULL+8 → gnome-shell 每次启动死在 fontconfig 初始化。</li>
       <li><b>修复</b>(已入 main):临时门禁禁用异步提交 —— 同步逐块路径的归属是精确的。冷文件探针:3/3 次启动零错配。异步归属 bug 本身已单独立线(cache-poison 分支,完整证据包)。</li>
     </ul>
@@ -109,13 +109,13 @@
 
     <h2 id="factors"><span class="anchor">§5</span>叠加因素(诚实清单)</h2>
     <ol>
-      <li><b>镜像资产丢失</b>:工作树清理带走了 gnome-x86 构建产物;中央镜像库只留了 riscv64 GNOME 盘。无法做旧镜像 + 新内核的 A/B,追猎从零开始。</li>
-      <li><b>两个变量同时变化</b>:重建的镜像拉取了当天的 jammy(733 个包;gjs/mutter 比已验证集合更新),必须先分离"内核回归 vs 版本漂移"才能开始内核追猎。</li>
+      <li><b>镜像资产丢失</b>:工作树清理带走了 gnome-x86 构建产物;中央镜像库只留了 riscv64 GNOME 盘。无法做旧镜像 + 新内核的 A/B,排查从零开始。</li>
+      <li><b>两个变量同时变化</b>:重建的镜像拉取了当天的 jammy(733 个包;gjs/mutter 比已验证集合更新),必须先分离"内核回归 vs 版本漂移"才能开始内核排查。</li>
       <li><b>探针假阳性</b>(两处,当场纠正):一个取证打印解引用了 Arc 句柄而非 File(恒定"同一指针"伪影);一个探针的 CRC 覆盖范围与其校验器不一致(必然报假损坏)。教训入档:先把探针对着已知良好用例验证,再把它的输出当证据。</li>
       <li><b>同窗口的组织性回归</b>:scripts/test 搬迁一次打断 37 个驱动脚本的仓库根锚点;一条未锚定的 <code>debug/</code> gitignore 规则让 36 个模块文件失联、origin 不可构建(由推送后克隆门禁捕获,main@484f2144)。同一种病:搬家/改名只做一半。</li>
     </ol>
 
-    <h2 id="repeat"><span class="anchor">§6</span>追猎期间模式当场重演</h2>
+    <h2 id="repeat"><span class="anchor">§6</span>排查期间模式当场重演</h2>
     <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前搁浅(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭猎捕诊断参数的判别启动同样搁浅 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
 
     <h2 id="open"><span class="anchor">§7</span>开放项</h2>

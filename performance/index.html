@@ -98,10 +98,10 @@
         </tbody>
       </table>
     </div>
-    <h3>落后组(5 项,攻山中)</h3>
+    <h3>落后组(5 项,待优化)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同机 KVM)</th><th>结论</th><th>在途手段</th></tr></thead>
+        <thead><tr><th>用例</th><th class="num">Rux</th><th class="num">Linux(同机 KVM)</th><th>结论</th><th>优化方向</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.6497 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">落后 1.82×</span></td><td>尾部分解(累计已 −15.2%;每 tick 10 ms close 停滞类已修)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.3081 µs</td><td class="num">0.227 µs</td><td><span class="chip bad">落后 1.32×</span></td><td>路径分量分解(185 ns = 4×23 组件 + 70 胶合 + 50 前置)</td></tr>
@@ -292,7 +292,7 @@
       <li><b>lat_syscall null 1.17× / write 1.10×</b>:入口地板与 fill/copy 尾;write 距持平 6 ns。</li>
       <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%)。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
-      <li><b>pbench 主线堆雷</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 腿暂停直到缉获;lmbench 各行不受影响。</li>
+      <li><b>pbench 主线堆问题</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 腿暂停直到定位修复;lmbench 各行不受影响。</li>
       <li><b>补测队列</b>:Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 

@@ -96,10 +96,10 @@
         </tbody>
       </table>
     </div>
-    <h3>Behind (5 cases, being attacked)</h3>
+    <h3>Behind (5 cases, to optimize)</h3>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th><th>Levers in flight</th></tr></thead>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_syscall open</td><td class="num">0.6497 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">behind 1.82×</span></td><td>tail decomposition (−15.2% cumulative; the 10 ms per-tick close-stall class fixed)</td></tr>
           <tr><td class="mono">lat_syscall stat</td><td class="num">0.3081 µs</td><td class="num">0.227 µs</td><td><span class="chip bad">behind 1.32×</span></td><td>path-walk component decomposition (185 ns = 4×23 components + 70 glue + 50 pre)</td></tr>

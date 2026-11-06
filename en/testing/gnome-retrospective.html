@@ -109,13 +109,13 @@
 
     <h2 id="factors"><span class="anchor">§5</span>Compounding factors (honest list)</h2>
     <ol>
-      <li><b>Image artifacts lost</b>: the worktree cleanup took the gnome-x86 build outputs; the central store only kept riscv64 GNOME disks. No old-image + new-kernel A/B was possible; the hunt started from zero.</li>
-      <li><b>Two variables changed at once</b>: the freshly rebuilt image pulls today's jammy (733 packages; gjs/mutter newer than the validated set), so kernel-regression vs version-drift had to be separated before the kernel hunt could start.</li>
+      <li><b>Image artifacts lost</b>: the worktree cleanup took the gnome-x86 build outputs; the central store only kept riscv64 GNOME disks. No old-image + new-kernel A/B was possible; the investigation started from zero.</li>
+      <li><b>Two variables changed at once</b>: the freshly rebuilt image pulls today's jammy (733 packages; gjs/mutter newer than the validated set), so kernel-regression vs version-drift had to be separated before the kernel investigation could start.</li>
       <li><b>Probe false positives</b> (both corrected in-session): one forensic print dereferenced the Arc handle instead of the File (a constant "same pointer" artifact); one probe's CRC covered a different byte range than its checker (guaranteed false corruption). Lesson recorded: validate the probe against a known-good case before treating its output as evidence.</li>
       <li><b>Organizational regressions in the same window</b>: the scripts/test relocation broke 37 drivers' repo-root anchors at once; an unanchored <code>debug/</code> gitignore rule left 36 module files untracked and origin unbuildable (caught by the post-push clone gate, main@484f2144). Same disease: moves and renames applied halfway.</li>
     </ol>
 
-    <h2 id="repeat"><span class="anchor">§6</span>The pattern repeated during the hunt</h2>
+    <h2 id="repeat"><span class="anchor">§6</span>The pattern repeated during the investigation</h2>
     <p>While the two fixes above were being verified, <b>perf-gap-hunt round 7</b> (lease fast gates + memo v2 lockless) landed and the GNOME boot began wedging before the shell (the dbus library-load phase, 55–129 "fdreap close completion stalled" lines per boot, zero shell starts). A discriminator boot on the same tree without the hunt's diagnostic parameter wedged identically — <b>a third regression of the same class, caught the same week by the same sensor</b>. It needs its own bisect lane.</p>
 
     <h2 id="open"><span class="anchor">§7</span>Open items</h2>
