@@ -5414,3 +5414,111 @@ shape).
    usb_host NULL family (§8.5), RCU-GP-BOUND 37 prints.
 4. tcg-watch.py (run/) is reusable for any deterministic user-memory
    word — the freeze VAs repeat across boots (0x7ff082b4c714 et al).
+
+## 54TH SESSION — coordinator redirect: the wedge is STUCK, not slow; the park-chain instrument landed and named the chain to libffrt (2026-11-06 07:1x-08:4x, branch oh-crash @ 5b9db6fb+903f8fa8)
+
+Mission (53rd §5 / coordinator): SA:1301 init is STUCK (OpenSo 926-1162ms
+then NEVER finishes; "SA:1301 init finished" count = 0 on every boot),
+per-op numbers are at reference parity — name the stuck wait.
+
+### 1. THE INSTRUMENT (commits 5b9db6fb, 903f8fa8)
+- ufw/uss: for any S-state task futex-parked in the MAIN-STACK window,
+  walk the user rbp chain (page-table reads, pollfd contract) and scan
+  the user stack for code words classified against exec vmas. rbp-chain
+  frames + the scan give return addresses; a 5/5 e8-call-site
+  brute-force against extracted .so files then pins (lib, base).
+- uvma: one exec-only vma map (start-end off path) per latched tgid —
+  the offline symbolization table. Latch ring + pub
+  latch_park_walk_tgid(); txn_hang_audit latches hung-txn SERVER tgids
+  (samgr's main finished long ago — it never latches via the
+  main-stack rule). Separate dump-once ring (ohc42 walked samgr
+  mapless; ohc43 synced walk+map in the same snapshot).
+- censusd kthread + defer_emit_line (drop-oldest 256): sleep_snapshot
+  printed under the timer softirq with a 100us emit budget and the OH
+  flood ate whole census bursts (ohc36/37: ~30% of map lines lost,
+  /dev/console writes splicing mid-record). Focus lines now emit from
+  task context (2s budget, the mmprofd discipline); the bulk sleepsnap
+  lines stay on the direct path.
+- mm: try_get_vma_file non-blocking variant (diagnostics under the
+  pid-hash bucket must not spin on vma_files).
+- Ohc34-39 iterations documented in the commit messages: first-come
+  latch burned on startup transients; persistence-promotion lost the
+  real gate to the stuck SA pile's candidate churn; direct rule won.
+
+### 2. THE NAMED CHAIN (ohc36/40/42/43, same rig system-lb5+fresh2 KVM)
+```
+distributeddata MAIN (SA:1301)
+  = pthread_cond_clockwait inside LocalAbilityManager::StartPhaseTasks
+    (libsystem_ability_fwk 0x1e3f9 call site; the IMAGE's safwk retries
+    clockwait on ret==0 AND ETIMEDOUT — wait-for-startup loop, ~5ms
+    period — FXRS's val=2 stack-futex family)
+  OnStart pool worker (tid 622-class):
+    KvStoreDataService::OnStart (libdistributeddataservice)
+    -> DeviceManagerAdapter::Init +159/+681 (500ms scheduled retry,
+       nanosleep observed)
+    -> DeviceManagerImpl::InitDeviceManager+687 (libdevicemanagersdk)
+    -> parked in the binder ioctl (libipc_single) 22s..231s+
+device_manager SA:4802 IS UP ("init finished, 887 ms") but its
+handler chain never replies to the store.
+softbus_server SA:4700: started 17.4s, NEVER got its OpenSo (last
+OpenSo in the boot: 15.2s) — its LOAD queues in samgr.
+samgr (pid 329): the LOAD/StartDynamic handler threads (OS_IPC_x,
+4-8 of them) park FOREVER (30s->184s+, untimed futex) in
+  pthread_cond_timedwait <- libc++ std::cv wait <- libffrt.so
+i.e. samgr submits FFRT work and the task never completes. Every
+dynamic SA load queues behind: 8 txns age 20s->240s+ (TXN-HANG
+forever-class); the early 10-15s entries DO resolve.
+samgr FFRT workers (OS_FFRT_2_0 x4): CYCLE (wait word alternates
++0x10 between snapshots) — the pool is ALIVE; the specific task's DAG
+dependency never fires.
+```
+Everything else is a victim of that gate: the pile's members all park
+in the same StartPhaseTasks clockwait; 57-59 SAs DO finish init (they
+have no DM/softbus dependency); timerfd wheels show overdue=0ms on all
+36 sampled fds (the 52nd's acquittal holds); param_watcher idle in its
+binder ioctl.
+
+### 3. What this settles / does not settle
+- SETTLED: the wedge is a USERSPACE dependency cascade gated inside
+  samgr's FFRT task graph. NOT a binder reply loss (no lost wake: the
+  handlers park on a userspace cv; the 33-fix-era reply landmarks are
+  untouched), NOT a kernel futex/timerfd defect (cycling workers,
+  zero overdue timerfds), NOT the console cost mountain (which remains
+  a real, separate per-op tax).
+- NOT SETTLED (55th's entry): the leaf INSIDE libffrt — which
+  dependency of samgr's StartDynamicSystemProcess FFRT task never
+  fires. Entry points: (a) walk samgr's FFRT worker threads' user
+  frames WHILE a handler is parked (they are latched already — the
+  ufw prints their frames; symbolize against samgr's map: libffrt.so
+  named from ohc43's dump); (b) compare with the reference at the same
+  boot second (refu boots: the store serves 1.4s after exec — the
+  same FFRT cv wait must resolve in ms there); (c) the FFRT shared
+  queue-count wake-alls (0x7fffffff) the 53rd saw — the worker cycling
+  pattern suggests the workers poll short-timeout futexes; check
+  whether samgr's task needs a SPECIFIC worker that never wakes.
+- Reusable assets: run/ohsrc54/ (sa_main, samgr, musl, libc++,
+  libsystem_ability_fwk, libdistributeddata*, libdevicemanagersdk,
+  libdevicemanagerservice, libdbinder, libipc_*); the brute-force
+  (lib,base) matcher pattern is in TASK history — e8-call-site 5/5
+  match at page-aligned bases is decisive even without a map.
+
+### 4. Boots this session
+ohc34 (sleepsnap first cut) / ohc35 (queue flood: first-come latch
+burned on transients) / ohc36 (5/5 brute-force: StartPhaseTasks) /
+ohc37 (censusd lane; bulk still flooded the 64-queue) / ohc38
+(focus-queue split; promotion lottery lost to the pile) / ohc39
+(direct walk rule; r10 fix) / ohc40 (FULL chain: DmAdapter ->
+InitDeviceManager+687 -> ioctl park) / ohc41 (txnhunt: TXN-HANG-OWE
+"reply deferred userspace-side"; samgr exec 15-19s class resolving) /
+ohc42 (server latch; samgr walks mapless) / ohc43 (map synced:
+libffrt.so named; workers cycle; 8 forever-txns).
+
+### 5. Queued (unchanged from the 53rd, plus)
+1. THE FFRT LEAF (above) — the launcher gate.
+2. Console/printk IF=0 cuts (53rd §5a) — the tax is real: init alone
+   printed 11k records/698KB/60s; /dev/console writes hold
+   UART.lock_irqsave across THRE polls; census lines splice with
+   [kmsg] records (the emit-lock covers printk only, not the tty
+   console_output path — atomicity gap #2 found this session).
+3. recvmsg 5µs × 1M/min; percpu.rs:126 20.5M hits.
+4. GLOBAL_SEQ per-CPU sequence; usb_host NULL family.
