@@ -967,6 +967,19 @@ impl MmStruct {
         self.vma_manager.read()
     }
 
+    /// Does the VMA covering `addr` allow writes?
+    ///
+    /// The COW write paths ask this before breaking a COW leaf.
+    /// mprotect() drops W from a leaf but keeps its COW bit (so a later
+    /// PROT_WRITE can restore it), so the leaf alone cannot tell "shared
+    /// after fork" from "write-protected by the VMA" — the reference arch
+    /// fault handlers check the VMA (access_error) before do_wp_page.
+    pub fn vma_allows_write(&self, addr: usize) -> bool {
+        self.vma_read()
+            .find(crate::mm::page::VirtAddr::new(addr))
+            .is_some_and(|v| v.flags().is_writable())
+    }
+
     /// Try-acquire VMA read lock (None when contended). Diagnostic
     /// callers in softirq context (the fuxstuck census) skip their
     /// decode on contention instead of spinning IF=0 against a writer.

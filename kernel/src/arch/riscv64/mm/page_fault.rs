@@ -442,6 +442,13 @@ pub fn handle_mm_fault(
         // Check COW
         // SAFETY: root_ppn is a valid page table root. is_cow_page only reads the PTE.
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
+            // A COW leaf in a VMA that no longer allows writes
+            // (mprotect(PROT_READ) after fork, or a MAP_PRIVATE file page
+            // read before the mprotect) is a protection fault, not a COW
+            // break — see AddressSpace::vma_allows_write.
+            if !addr_space.vma_allows_write(fault_addr.as_usize()) {
+                return MmFaultResult::PermissionDenied;
+            }
             crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
             return MmFaultResult::CowPending;
         }
