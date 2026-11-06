@@ -922,7 +922,10 @@ pub fn sys_alarm(args: SyscallArgs) -> i64 {
 
     let mut old_sec = remaining_ns / 1_000_000_000;
     let old_nsec = remaining_ns % 1_000_000_000;
-    if (old_sec == 0 && old_nsec != 0) || old_nsec >= 500_000_000 {
+    // Reference alarm_setitimer rounds UP: any nonzero remainder bumps
+    // the second count ("better return too much than too little" —
+    // kernel/time/itimer.c). alarm(2) with 1.4s pending returns 2, not 1.
+    if old_nsec != 0 {
         old_sec += 1;
     }
     old_sec as i64
