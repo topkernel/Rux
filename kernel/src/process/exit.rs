@@ -1084,7 +1084,15 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::process::task::vfork_wake_parent(current);
 
         // ===== exit_files: Release file descriptor table reference =====
+        // (perf-gap-hunt r11) P_EX_FDDROP: the reference drop runs
+        // FdTable::drop (slot sweep + close decisions) when this was the
+        // last reference — phase-timed to attribute the exit body's
+        // unattributed share.
+        let fp_t_fd = if fp { crate::debug::forkprof::now() } else { 0 };
         (*current).set_fdtable(None);
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_FDDROP, fp_t_fd);
+        }
 
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);

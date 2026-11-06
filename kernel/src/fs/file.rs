@@ -939,7 +939,7 @@ impl FdTable {
     pub fn fork_from(parent: &FdTable) -> Self {
         // Allocate the child BEFORE taking the parent's entry lock (the
         // deepest fork contexts do not need the allocation under it).
-        let mut child = Self::new();
+        let child = Self::new();
         let g = parent.entry.lock_irqsave();
         // Parent slots are immutable for the duration of its entry lock
         // (every writer serializes there), so the child copies raw
@@ -947,14 +947,26 @@ impl FdTable {
         // pass — element-wise, nothing larger than one slot moves (the
         // leg-16 stack-depth discipline). Concurrent lock-free READERS
         // only bump strong counts; no interference with the copy.
-        for i in 0..MAX_FDS {
-            let p = parent.slots[i].0.load(core::sync::atomic::Ordering::Acquire);
-            if !p.is_null() {
-                // SAFETY: p was published by a writer (install/dup/fork)
-                // and the parent table holds its reference for as long
-                // as the entry lock we hold blocks removal.
-                unsafe { Arc::increment_strong_count(p) };
-                child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
+        //
+        // (perf-gap-hunt r11) The walk rides the occupancy bitmap, not a
+        // MAX_FDS slot poll: open_bits is exact under the entry lock
+        // (every publisher/clearer updates it inside the same critical
+        // section), and benchmark tables hold a handful of descriptors
+        // — the 1024-slot poll was most of the measured 910ns
+        // fk_fdtable phase on every fork.
+        for (word_idx, &bits) in g.open_bits.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let i = word_idx * 64 + bits.trailing_zeros() as usize;
+                bits &= !(1u64 << (i % 64));
+                let p = parent.slots[i].0.load(core::sync::atomic::Ordering::Acquire);
+                if !p.is_null() {
+                    // SAFETY: p was published by a writer (install/dup/fork)
+                    // and the parent table holds its reference for as long as
+                    // the entry lock we hold blocks removal.
+                    unsafe { Arc::increment_strong_count(p) };
+                    child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
+                }
             }
         }
         {
@@ -1394,27 +1406,63 @@ impl FdTable {
 
     /// Close all file descriptors with close-on-exec flag set
     pub fn close_cloexec_fds(&self) {
-        // Heap-leak fix (soak: pure-exec loop, double-reproduced OOM): the
-        // previous implementation collected the cloexec fds into a heap
-        // Vec<usize> on EVERY execve. The collect's growth chain (1, 2, ...
-        // 8 KiB worth of allocs and reallocs, ~16 KiB total for a large
-        // table) was never fully returned to the allocator, so each exec
-        // bled ~16 KiB of heap and a 128 MiB heap died in ~64 minutes of
-        // exec load. cloexec_bits is a fixed [u64; MAX_FDS/64] — 128 bytes
-        // for MAX_FDS=1024 — so snapshot it on the STACK under the lock,
-        // then close outside the lock with zero heap traffic.
-        let mut snapshot: [u64; MAX_FDS / 64] = [0; MAX_FDS / 64];
+        // Heap-leak fix history (soak: pure-exec loop, double-reproduced
+        // OOM): the long-ago implementation collected the cloexec fds
+        // into a heap Vec<usize> per execve and bled ~16 KiB each — the
+        // snapshot form fixed that; this sweep form keeps the zero
+        // pre-scan heap traffic (the only allocation grows from the
+        // displaced Arcs themselves).
+        //
+        // (perf-gap-hunt r11) Batch form: ONE entry-lock section removes
+        // every cloexec-marked occupant (slot-null store + metadata),
+        // then ONE grace period covers the whole batch
+        // (fdreap::retire_complete_batch). The per-fd form paid an entry
+        // lock round-trip AND a full grace wait per descriptor — µs each
+        // — which a cloexec-heavy exec (desktop O_CLOEXEC shapes) paid
+        // linearly. A fd marked cloexec but not open contributes nothing
+        // (close_fd on it returned EBADF immediately before); stale
+        // cloexec bits on closed slots stay behind exactly as before and
+        // are cleared on the next install into that number.
+        let mut displaced: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
-            let entry = self.entry.lock_irqsave();
-            snapshot.copy_from_slice(&entry.cloexec_bits);
-        }
-        for (word_idx, &word) in snapshot.iter().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                word &= !(1u64 << bit);
-                let _ = self.close_fd(word_idx * 64 + bit);
+            let mut entry = self.entry.lock_irqsave();
+            // Stack snapshot of the cloexec∧open words (128B, the proven
+            // zero-heap shape) so the metadata mutations below do not
+            // hold a borrow across the iteration.
+            let mut snapshot: [u64; MAX_FDS / 64] = [0; MAX_FDS / 64];
+            let mut total: usize = 0;
+            for (w, snap_w) in snapshot.iter_mut().enumerate() {
+                *snap_w = entry.cloexec_bits[w] & entry.open_bits[w];
+                total += snap_w.count_ones() as usize;
             }
+            // One exact reserve: the walk below runs with IRQs off under
+            // the entry lock and must not grow the Vec there (the
+            // for_each_file discipline).
+            displaced.reserve_exact(total);
+            for (word_idx, &word) in snapshot.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    word &= !(1u64 << bit);
+                    let fd = word_idx * 64 + bit;
+                    // SAFETY: the swap takes the slot's reference; the
+                    // bitmap said occupied, null is belt-and-braces.
+                    let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Release);
+                    if !p.is_null() {
+                        entry.count -= 1;
+                        // put_unused_fd pullback (same invariant as
+                        // close_fd: every fd < next_fd stays busy).
+                        if fd < entry.next_fd {
+                            entry.next_fd = fd;
+                        }
+                        entry.open_bits[fd / 64] &= !(1u64 << (fd % 64));
+                        displaced.push(unsafe { Arc::from_raw(p) });
+                    }
+                }
+            }
+        }
+        if !displaced.is_empty() {
+            crate::fs::fdreap::retire_complete_batch(displaced);
         }
     }
 }
@@ -1431,16 +1479,30 @@ impl Drop for FdTable {
         // Lock-free slots note: at drop no &self borrowers can exist, so
         // no RCU reader can be mid-clone against THIS table — the close
         // decisions run directly, without a grace wait.
+        //
+        // (perf-gap-hunt r11) The sweep rides the occupancy bitmap rather
+        // than swapping all MAX_FDS slots: open_bits is exact under the
+        // entry lock (every publisher/clearer updates it inside the same
+        // critical section), and process exits typically hold a handful
+        // of descriptors — the 1024-xchg poll measured 4.5us per exit
+        // (forkprof ex_fddrop, r11) and sat on the critical path of every
+        // short-lived child (lat_proc fork's exit half).
         let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
             let mut entry = self.entry.lock_irqsave();
-            for fd in 0..MAX_FDS {
-                // SAFETY: the swap takes the slot's reference; null = the
-                // descriptor was not open.
-                let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
-                if !p.is_null() {
-                    entry.count = entry.count.saturating_sub(1);
-                    to_close.push(unsafe { Arc::from_raw(p) });
+            for word_idx in 0..MAX_FDS / 64 {
+                let mut bits = entry.open_bits[word_idx];
+                while bits != 0 {
+                    let fd = word_idx * 64 + bits.trailing_zeros() as usize;
+                    bits &= !(1u64 << (fd % 64));
+                    // SAFETY: the swap takes the slot's reference; null
+                    // (impossible while the bitmap says occupied, but
+                    // kept belt-and-braces) = the descriptor was not open.
+                    let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
+                    if !p.is_null() {
+                        entry.count = entry.count.saturating_sub(1);
+                        to_close.push(unsafe { Arc::from_raw(p) });
+                    }
                 }
             }
         }

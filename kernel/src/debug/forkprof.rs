@@ -75,7 +75,13 @@ pub const P_WAKE_RUN: usize = 28;
 /// fork-enqueue stamp -> the child's first context-switch-IN (the new
 /// task's queue latency; separate slot from real wakes).
 pub const P_CHILD_RUN: usize = 29;
-pub const P_COUNT: usize = 30;
+/// exit_files: dropping the fd-table reference — includes FdTable::drop
+/// (the slot sweep + close decisions) when this was the last reference.
+/// The perf-gap-hunt r11 decomposition slot: the exit body had ~11us
+/// unattributed vs its sub-phases, and the Drop's full-table slot sweep
+/// was the prime suspect.
+pub const P_EX_FDDROP: usize = 30;
+pub const P_COUNT: usize = 31;
 
 /// Per-pid wake stamps (cycle domain) for the wake->run delta. Keyed by
 /// pid & mask; a stamp is consumed (zeroed) by the first switch-in.
@@ -356,6 +362,7 @@ pub fn report() {
         "ctxsw",
         "wake_run",
         "child_run",
+        "ex_fddrop",
     ];
     crate::println!("FORKPROF BEGIN hz={}", hz);
     for (i, name) in names.iter().enumerate() {
@@ -374,12 +381,17 @@ pub fn report() {
         }
         let avg = cyc / c.max(1) / per_us;
         let mx = max / per_us;
+        // ns-resolution average (appended field): the integer-us avg
+        // rounds whole sub-us phases (fk_fdtable, wake_body) to 0, and
+        // the perf lane needs those numbers.
+        let avgns = (cyc / c.max(1)) * 1000 / per_us.max(1);
         crate::println!(
-            "FORKPROF {} n={} avg={}us max={}us",
+            "FORKPROF {} n={} avg={}us max={}us avgns={}ns",
             name,
             c,
             avg,
-            mx
+            mx,
+            avgns
         );
     }
     crate::println!("FORKPROF END");

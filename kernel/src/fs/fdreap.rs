@@ -212,6 +212,91 @@ pub fn retire_complete(file: Arc<File>) {
     }
 }
 
+/// Batch form of [`retire_complete`] for syscall-context sweeps that
+/// displace MANY slots at once (exec's close-on-exec sweep): every
+/// caller completed its slot-null stores under its own entry-lock
+/// section before calling, so ONE grace period covers the whole batch
+/// and the close decisions for all of them complete before returning —
+/// the same reference task_work timing, amortized. The per-file form
+/// costs one grace wait per descriptor (µs each), which a cloexec-heavy
+/// exec paid per fd (perf-gap-hunt r11).
+pub fn retire_complete_batch(files: Vec<Arc<File>>) {
+    let n = files.len();
+    if n == 0 {
+        return;
+    }
+    if !LIVE.load(Ordering::Acquire) || crate::sched::current().is_none() {
+        // Reaper down (spawn failed / pre-init) or no task context:
+        // inline bounded grace for the whole batch here.
+        if crate::sync::rcu::synchronize_rcu_forced(GP_BUDGET_MS, "fdreap-inline") {
+            for f in &files {
+                FdTable::displaced_close_decision(f);
+            }
+            // Drop the batch Arcs in this context (last-reference
+            // IN_CLOSE_* semantics at the syscall boundary).
+            drop(files);
+            return;
+        }
+        // Timed out (monopolist): fall through to the queue.
+    }
+    // Empty-queue bypass (same argument as the per-file form): with
+    // nothing parked, run the ONE grace + all decisions + drops here
+    // directly, skipping the RETIRED round-trips.
+    if RETIRED_DEPTH.load(Ordering::Acquire) == 0 {
+        if crate::sync::rcu::synchronize_rcu_forced_polled(GP_BUDGET_MS, "fdreap-direct") {
+            for f in &files {
+                FdTable::displaced_close_decision(f);
+            }
+            drop(files);
+            return;
+        }
+        GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    let my_ord = {
+        let mut q = RETIRED.lock_irqsave();
+        q.extend(files);
+        PUSHED_SEQ.fetch_add(n, Ordering::AcqRel) + n
+    };
+    RETIRED_DEPTH.fetch_add(n, Ordering::Relaxed);
+    // Completion loop: identical to the per-file form (the whole pushed
+    // prefix drains under one grace; we wait for OUR last ordinal).
+    let mut stalls = 0usize;
+    while PROCESSED_SEQ.load(Ordering::Acquire) < my_ord {
+        let batch = {
+            let mut q = RETIRED.lock_irqsave();
+            core::mem::take(&mut *q)
+        };
+        if batch.is_empty() {
+            crate::sched::schedule();
+            continue;
+        }
+        let bn = batch.len();
+        RETIRED_DEPTH.fetch_sub(bn, Ordering::Relaxed);
+        if crate::sync::rcu::synchronize_rcu_forced_polled(GP_BUDGET_MS, "fdreap-close") {
+            for f in &batch {
+                FdTable::displaced_close_decision(f);
+            }
+            drop(batch);
+            PROCESSED_SEQ.fetch_add(bn, Ordering::AcqRel);
+        } else {
+            GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
+            stalls += 1;
+            if stalls == 8 || stalls % 64 == 0 {
+                crate::pr_warn!(
+                    "fs: fdreap close completion stalled (grace budget exceeded {}x)",
+                    stalls
+                );
+            }
+            RETIRED_DEPTH.fetch_add(bn, Ordering::Relaxed);
+            {
+                let mut q = RETIRED.lock_irqsave();
+                q.extend(batch);
+            }
+            TICKET.up();
+        }
+    }
+}
+
 /// Spawn fdreapd. Late-boot slot (after secondaries online — its sleeps
 /// and wakeups need the scheduler and online CPUs), before the first
 /// userspace close.
