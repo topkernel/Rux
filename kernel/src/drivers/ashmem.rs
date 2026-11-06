@@ -534,12 +534,18 @@ unsafe fn ashmem_ioctl(file: &crate::fs::file::File, request: u32, arg: usize) -
                 return -EINVAL; // Linux: no backing file yet
             }
             let aligned_size = (inner.size + PAGE_SIZE - 1) & !PAGE_MASK;
-            // len == 0 means "everything onward".
+            let offset = pin.offset as usize;
+            // len == 0 means "everything onward". An offset past the area
+            // is EINVAL (the range checks below), not a subtraction
+            // underflow: the reference does this in __u32 and lets the
+            // checks reject the wrapped value; here the underflow panicked.
             let mut len = pin.len as usize;
             if len == 0 {
-                len = aligned_size - pin.offset as usize;
+                len = match aligned_size.checked_sub(offset) {
+                    Some(v) => v,
+                    None => return -EINVAL,
+                };
             }
-            let offset = pin.offset as usize;
             if (offset | len) & PAGE_MASK != 0 {
                 return -EINVAL; // not page-aligned
             }
