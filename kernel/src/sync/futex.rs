@@ -1478,6 +1478,11 @@ pub fn futex_stuck_census() {
     // Whole-boot line budget (a 25 min boot = ~300 bursts x <= 9 lines).
     static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+    // 59th session: run-queue strand census rides the same burst —
+    // pickable-shaped runnable tasks with a frozen exec clock (the
+    // ohc74 close() strand class: linked, claim=-1, unexecuted 290 s).
+    crate::sched::sched::runq_strand_census(now as u64);
+
     // lb343: 3 s bar (was 10 s). The OH boot cascade's decisive parks are
     // 4-5 s class — init's param-service thread sat 5.06 s between
     // hdf_devmgr's ready-set (5.433s) and init's handle (10.496s, lb342),

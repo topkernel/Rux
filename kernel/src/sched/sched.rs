@@ -5140,6 +5140,192 @@ pub fn grq_diag_cfs_linked(task: *mut crate::process::task::Task) -> Option<bool
     Some(guard.cfs_rq.is_linked(task))
 }
 
+/// RUNQ-STRAND census (59th session, ohc74 close() strand): scan every
+/// burst for tasks in the PICKABLE-by-ownership shape — on_rq, state
+/// RUNNING, claim == -1, on_cpu == false, no CPU's current slot — whose
+/// exec clock has been FROZEN since a previous burst. The existing heal
+/// machinery (R85 adjudication, stale-claim/stale-oncpu resets) only
+/// covers ownership-shaped strands; ohc74's terminal state had TWO samgr
+/// threads (main + OS_IPC_0, both mid-`close(16)`) linked, pickable,
+/// and unexecuted for 290 s — a refusal class the scheduler never names
+/// (affinity? cgroup throttle? a pick-path miss). This census prints the
+/// candidate with every refusal input the pick path consults, plus the
+/// incumbent per CPU (with activation length + preempt_count) so a
+/// preempt-disabled monopolist is named in the same line. Runs under
+/// dfx=fuxstuck (the futex census burst calls it); zero cost otherwise.
+pub fn runq_strand_census(now_j: u64) {
+    use core::sync::atomic::Ordering::{Acquire, Release};
+
+    const SLOTS: usize = 16;
+    struct Slot {
+        task: core::sync::atomic::AtomicUsize,
+        exec_ns: core::sync::atomic::AtomicU64,
+        first_j: core::sync::atomic::AtomicU64,
+    }
+    static TABLE: [Slot; SLOTS] = [const {
+        Slot {
+            task: core::sync::atomic::AtomicUsize::new(0),
+            exec_ns: core::sync::atomic::AtomicU64::new(0),
+            first_j: core::sync::atomic::AtomicU64::new(0),
+        }
+    }; SLOTS];
+    static LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    // Report only once the exec clock has been frozen for >= 15 s of
+    // burst time (3 bursts) — transient mid-switch-out windows must not
+    // print. Whole-boot budget keeps a storm bounded.
+    const MIN_AGE_J: u64 = 15 * 100;
+
+    // Phase A: snapshot every pickable-shaped runnable task.
+    let mut cands: [(usize, u64); SLOTS] = [(0, 0); SLOTS];
+    let mut nc = 0usize;
+    crate::sched::for_each_task_try(|task| {
+        if nc >= SLOTS {
+            return;
+        }
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if !tk.sched_entity().is_on_rq() {
+            return;
+        }
+        if tk.state().bits() != crate::process::task::TaskState::RUNNING {
+            return;
+        }
+        if tk.on_cpu() {
+            return;
+        }
+        if tk.running_on_cpu.load(Acquire) != -1 {
+            return;
+        }
+        let mut is_current = false;
+        for c in 0..MAX_CPUS {
+            if cpu_state(c).current == task {
+                is_current = true;
+                break;
+            }
+        }
+        if is_current {
+            return;
+        }
+        let exec = tk
+            .sched_entity()
+            .sum_exec_runtime
+            .load(core::sync::atomic::Ordering::Relaxed);
+        cands[nc] = (task as usize, exec);
+        nc += 1;
+    });
+    // Mark slots not seen this burst dead so a recycled pointer cannot
+    // inherit the age (task pages are recycled).
+    for s in TABLE.iter() {
+        let t = s.task.load(Acquire);
+        if t != 0 && !cands.iter().take(nc).any(|&(c, _)| c == t) {
+            s.task.store(0, Release);
+        }
+    }
+    // Phase B: age the survivors; print the frozen ones with reasons.
+    let mut printed = 0u32;
+    for &(task, exec) in cands.iter().take(nc) {
+        // First observation: claim a free slot (or steal the oldest).
+        let mut slot: Option<&Slot> = None;
+        let mut oldest: Option<(usize, u64)> = None;
+        for (i, s) in TABLE.iter().enumerate() {
+            let t = s.task.load(Acquire);
+            if t == task {
+                slot = Some(s);
+                break;
+            }
+            if t == 0 {
+                if slot.is_none() {
+                    slot = Some(s);
+                }
+                continue;
+            }
+            let fj = s.first_j.load(Acquire);
+            if oldest.map_or(true, |(_, ofj)| fj < ofj) {
+                oldest = Some((i, fj));
+            }
+        }
+        let slot = match slot {
+            Some(s) => s,
+            None => match oldest {
+                Some((i, _)) => &TABLE[i],
+                None => continue,
+            },
+        };
+        let prev_exec = slot.exec_ns.load(Acquire);
+        if slot.task.load(Acquire) != task || prev_exec != exec {
+            slot.task.store(task, Release);
+            slot.exec_ns.store(exec, Release);
+            slot.first_j.store(now_j, Release);
+            continue;
+        }
+        let first_j = slot.first_j.load(Acquire);
+        let age = now_j.saturating_sub(first_j);
+        if age < MIN_AGE_J {
+            continue;
+        }
+        if LINES.load(core::sync::atomic::Ordering::Relaxed) > 400 || printed >= 4 {
+            continue;
+        }
+        LINES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        printed += 1;
+        // SAFETY: task was validated by phase A this burst.
+        let tk = unsafe { &*(task as *mut Task) };
+        let linked = match grq_diag_cfs_linked(task as *mut crate::process::task::Task) {
+            Some(v) => v as u8,
+            None => 2,
+        };
+        let throttled = crate::sched::cgroup::task_cgroup_throttled(task as *const Task);
+        let vr = tk.sched_entity().get_vruntime();
+        let min_vr = match try_grq_lock() {
+            Some(g) => g.cfs_rq.get_min_vruntime(),
+            None => 0,
+        };
+        let mut inc_s = alloc::string::String::new();
+        {
+            use core::fmt::Write as _;
+            for c in 0..MAX_CPUS {
+                let cur = cpu_state(c).current;
+                if cur.is_null() {
+                    let _ = write!(inc_s, " c{}=nil", c);
+                    continue;
+                }
+                // SAFETY: per-CPU current is a valid task or idle.
+                let cur = unsafe { &*cur };
+                let se = cur.sched_entity();
+                let act_ms = se
+                    .sum_exec_runtime
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Relaxed))
+                    / 1_000_000;
+                let _ = write!(
+                    inc_s,
+                    " c{}={}({}/act{}ms/pc{})",
+                    c,
+                    cur.pid(),
+                    core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
+                    act_ms,
+                    cur.preempt_count()
+                );
+            }
+        }
+        // HOTPATH-PRINT: fuxstuck graph-burst gate.
+        crate::pr_warn!(
+            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} vr={:#x} min_vr={:#x} why?{}",
+            tk.pid(),
+            tk.tgid(),
+            core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
+            age / 100,
+            exec / 1_000_000,
+            linked,
+            tk.cpus_allowed(),
+            throttled as u8,
+            vr,
+            min_vr,
+            inc_s
+        );
+    }
+}
+
 /// dfx=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
 /// the nonexistent CPU 7 onto every linked CFS task currently showing the
 /// pickable state {on_cpu=false, claim=-1}. Called from the timer softirq
