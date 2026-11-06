@@ -291,6 +291,7 @@ pub mod ipc_poll;
 pub mod ipc_epoll;
 #[cfg(feature = "unit-test")]
 pub mod ipc_eventfd;
+pub mod io_uring_abi;
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
@@ -614,6 +615,8 @@ pub fn run_all_tests() {
 
     test_group_start("ipc_eventfd");
     ipc_eventfd::test_eventfd();
+    test_group_start("io_uring_abi");
+    io_uring_abi::test_io_uring_abi();
 
     test_group_start("ipc_sysv");
     ipc_sysv::test_ipc_sysv();

@@ -828,7 +828,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                     // inside the handler would be a TOCTOU type confusion.
                     match crate::io_uring::io_uring_mmap_handler(&file, addr, actual_length, offset, prot_flags) {
                         Ok(mapped) => return mapped as i64,
-                        Err(e) => return -(e as i64),
+                        // The handler's errors are already negative errnos.
+                        Err(e) => return e as i64,
                     }
                 }
             }
@@ -852,7 +853,8 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         prot_flags,
                     ) {
                         Ok(mapped) => mapped as i64,
-                        Err(e) => -(e as i64),
+                        // binder_mmap_handler returns negative errnos.
+                        Err(e) => e as i64,
                     };
                 }
             }

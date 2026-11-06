@@ -2877,6 +2877,42 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     }
 }
 
+/// Kernel-side eventfd signal for completion paths that must never sleep
+/// (io_uring CQE posting). Reference fs/eventfd.c eventfd_signal_mask:
+/// add 1 to the counter, saturating at ULLONG_MAX instead of blocking
+/// like write(2), and wake readers. Returns false when `file` is not an
+/// eventfd.
+pub fn eventfd_signal(file: &crate::fs::File) -> bool {
+    if !file
+        .get_ops()
+        .is_some_and(|o| core::ptr::eq(o, &EVENTFD_OPS as *const _))
+    {
+        return false;
+    }
+    // SAFETY: private_data is an UnsafeCell; we hold &File so no concurrent mutable access.
+    let ptr = match unsafe { *file.private_data.get() } {
+        Some(p) => p,
+        None => return false,
+    };
+    // SAFETY: ptr came from Box::into_raw in sys_eventfd2; the caller's
+    // file reference keeps it alive.
+    let efd = unsafe { &*(ptr as *const EventFd) };
+    let mut cur = efd.counter.load(core::sync::atomic::Ordering::Relaxed);
+    while cur < u64::MAX {
+        match efd.counter.compare_exchange_weak(
+            cur,
+            cur + 1,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
+    efd.wait_queue.wake_up_all();
+    true
+}
+
 fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
     if buf.len() < 8 {
         return -errno::EINVAL as isize;

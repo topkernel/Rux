@@ -491,6 +491,24 @@ pub static IO_URING_OPS: FileOps = FileOps::builder()
 
 // ==================== mmap Handler ====================
 
+/// Page-aligned mapping length for a ring mmap of `length` bytes over a
+/// region of `region_size` bytes. The reference
+/// (io_uring_validate_mmap_request) accepts any length up to the region
+/// size: do_mmap page-aligns it first, and liburing maps the rings with
+/// their exact byte sizes (sq_off.array + 4 * entries, cq_off.cqes +
+/// 16 * entries, 64 * entries for the SQEs) — none of them page
+/// multiples. EINVAL for 0 or a length past the region.
+pub fn ring_map_len(length: usize, region_size: usize) -> Result<usize, i32> {
+    let map_len = match length.checked_add(PAGE_SIZE - 1) {
+        Some(v) => v & !(PAGE_SIZE - 1),
+        None => return Err(-22),
+    };
+    if map_len == 0 || map_len > region_size {
+        return Err(-22);
+    }
+    Ok(map_len)
+}
+
 /// Handle mmap on an io_uring fd — maps ring buffers to userspace.
 /// `file` must already be ops-verified as an io_uring file by the caller
 /// (passing the fd here again would re-fetch it — a TOCTOU type confusion).
@@ -522,9 +540,8 @@ pub fn io_uring_mmap_handler(
         _ => return Err(-22), // EINVAL
     };
 
-    if length != region.size {
-        return Err(-22);
-    }
+    let map_len = ring_map_len(length, region.size)?;
+    let map_pages = map_len / PAGE_SIZE;
 
     let current_task = crate::sched::current().ok_or(-12)?; // ENOMEM
     let addr_space = current_task.address_space().ok_or(-12)?;
@@ -534,7 +551,7 @@ pub fn io_uring_mmap_handler(
     // MMAP_START made every SECOND ring mmap collide with the first).
     // find_free_area honors existing VMAs, so repeated NULL mappings stack.
     let vaddr = if addr == 0 {
-        match addr_space.find_free_area(region.size) {
+        match addr_space.find_free_area(map_len) {
             Ok(v) => v.as_usize(),
             Err(_) => return Err(-12), // ENOMEM: no gap left
         }
@@ -548,7 +565,7 @@ pub fn io_uring_mmap_handler(
     // (review NEW-C1 — full privilege escalation).
     {
         let user_end = crate::arch::mm::user_addr::USER_END;
-        let end = vaddr.checked_add(region.size).ok_or(-22)?;
+        let end = vaddr.checked_add(map_len).ok_or(-22)?;
         if end > user_end {
             return Err(-22);
         }
@@ -567,7 +584,7 @@ pub fn io_uring_mmap_handler(
 
     let mut vma = Vma::new(
         PageVirtAddr::new(vaddr),
-        PageVirtAddr::new(vaddr + region.size),
+        PageVirtAddr::new(vaddr + map_len),
         vma_flags,
     );
     vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
@@ -583,7 +600,7 @@ pub fn io_uring_mmap_handler(
         if prot & 0x1 != 0 { pte_flags |= PageTableEntry::R; }
         if prot & 0x2 != 0 { pte_flags |= PageTableEntry::R | PageTableEntry::W; }
 
-        for i in 0..region.npages {
+        for i in 0..map_pages {
             let va = vaddr + i * PAGE_SIZE;
             let pa = region.phys + i * PAGE_SIZE;
             map_page(user_ppn, VirtAddr::new(va as u64), PhysAddr::new(pa as u64), pte_flags);
@@ -621,9 +638,12 @@ fn submit_sqes(ring: &IoUring, to_submit: u32) -> u32 {
         core::ptr::read_volatile(ring.sq_ring.kvirt.add(ring.sq_tail_off) as *const u32)
     };
 
-    // Cap to actual available SQEs
+    // Cap to actual available SQEs — and to the ring size: head and tail
+    // both come from the user-writable SQ ring, so `tail - head` can be
+    // anything up to 2^32-1 (reference io_sqring_entries clamps to
+    // ctx->sq_entries).
     let available = tail.wrapping_sub(head);
-    let batch = core::cmp::min(to_submit, available);
+    let batch = to_submit.min(available).min(ring.sq_entries);
 
     for _ in 0..batch {
         // Read SQE index from the array
@@ -882,7 +902,7 @@ fn io_uring_op_fadvise(_sqe: &IoUringSqe) -> i32 {
 
 /// Post a completion queue entry.
 fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
-    let _lock = ring.cq_lock.lock();
+    let cq_guard = ring.cq_lock.lock();
 
     let head = unsafe {
         core::ptr::read_volatile(ring.cq_ring.kvirt.add(ring.cq_head_off) as *const u32)
@@ -897,7 +917,9 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
         unsafe {
             let overflow_ptr = ring.cq_ring.kvirt.add(ring.cq_overflow_off) as *mut u32;
             let count = core::ptr::read_volatile(overflow_ptr);
-            core::ptr::write_volatile(overflow_ptr, count + 1);
+            // User-writable word: wrap like the reference's u32 counter
+            // instead of tripping the overflow check.
+            core::ptr::write_volatile(overflow_ptr, count.wrapping_add(1));
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         return;
@@ -920,22 +942,15 @@ fn io_uring_post_cqe(ring: &IoUring, user_data: u64, res: i32, flags: u32) {
     }
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
-    // Signal eventfd if registered (use the pinned file reference, not the
-    // raw fd number — the fd may have been closed and reused in between)
-    if let Some(efile) = ring.eventfd_file.lock().clone() {
-        signal_eventfd_file(&efile);
-    }
-}
+    drop(cq_guard);
 
-/// Signal the registered eventfd by writing 1.
-fn signal_eventfd_file(file: &alloc::sync::Arc<File>) {
-    let one: [u8; 8] = 1u64.to_le_bytes();
-    let ops = match file.get_ops() {
-        Some(o) => o,
-        None => return,
-    };
-    if let Some(write_fn) = ops.write {
-        let _ = write_fn(file, &one);
+    // Signal eventfd if registered (use the pinned file reference, not the
+    // raw fd number — the fd may have been closed and reused in between).
+    // Outside cq_lock, and through the non-blocking kernel signal: the
+    // eventfd write op blocks when the counter is near overflow (reference
+    // io_eventfd_signal -> eventfd_signal_mask saturates instead).
+    if let Some(efile) = ring.eventfd_file.lock().clone() {
+        let _ = crate::syscall::misc::eventfd_signal(&efile);
     }
 }
 
@@ -1145,7 +1160,21 @@ pub fn sys_io_uring_register(args: [u64; 6]) -> u64 {
     match opcode {
         IORING_REGISTER_EVENTFD => {
             if nr_args != 1 { return -(22i64) as u64; }
-            let eventfd_fd = arg as i32;
+            // arg points at the eventfd number (reference
+            // io_eventfd_register: copy_from_user(&fd, arg, sizeof(int)));
+            // liburing's io_uring_register_eventfd passes &fd.
+            if arg == 0 || !crate::arch::uaccess::access_ok(arg as usize, 4) {
+                return -(14i64) as u64; // EFAULT
+            }
+            let mut fd_bytes = [0u8; 4];
+            // SAFETY: access_ok-validated; exception-table copy.
+            if unsafe {
+                crate::arch::uaccess::copy_from_user(fd_bytes.as_mut_ptr(), arg as *const u8, 4)
+            } != 0
+            {
+                return -(14i64) as u64; // EFAULT
+            }
+            let eventfd_fd = i32::from_ne_bytes(fd_bytes);
             if eventfd_fd < 0 { return -(9i64) as u64; }
             // Hold the actual file reference (immune to fd reuse) and verify
             // it really is an eventfd — anything else would make completion
