@@ -1291,7 +1291,14 @@ static SZ32_SN: core::sync::atomic::AtomicU64 =
 
 /// Walk 3 frames from the GlobalAlloc router and store the return
 /// addresses (8 slots of 3 frames each, every 5Mth sz32 routing).
+///
+/// (perf-gap-hunt) x86_64-only: the frame-pointer walk's inline asm is
+/// x86 (`mov {}, rbp`; saved-rbp at [fp], return address at [fp+8]).
+/// The ungated version landed with the wedge-hunt battery and broke the
+/// riscv64/aarch64 builds (unrecognized mnemonic "mov a1, rbp"); the
+/// non-x86 stubs keep the buddy call site compiling unchanged.
 #[inline(never)]
+#[cfg(feature = "x86_64")]
 pub fn note_sz32_stack() {
     let n = SZ32_SN.fetch_add(1, Ordering::Relaxed);
     if n % 5_000_000 != 0 {
@@ -1320,6 +1327,12 @@ pub fn note_sz32_stack() {
         }
     }
 }
+
+/// (perf-gap-hunt) Non-x86 stub: keeps the GlobalAlloc router call site
+/// (mm/buddy_allocator.rs) unchanged while the frame walk stays x86.
+#[inline(never)]
+#[cfg(not(feature = "x86_64"))]
+pub fn note_sz32_stack() {}
 
 pub fn on() -> bool {
     match ARMED.load(Ordering::Relaxed) {
