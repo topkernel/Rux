@@ -6081,3 +6081,126 @@ callouts that can park). Next concrete steps:
 2. tid 348's libbeget_pro park: param_watcher/param service interplay.
 ohc54 gates: x86_64/riscv64/aarch64 builds rc=0, riscv64 make test
 ALL TESTS PASSED (same tree as this addendum).
+
+---
+
+## 57TH SESSION — the samgr wedge fully named: processLock frozen by a SUSPENDED code12 LOAD task; in-kernel write watchpoint (fuxwatch) catches the acquire (2026-11-06, branch oh-crash @ 568fea00)
+
+### 0. THE 56TH'S SYMBOLIZATION WAS OFF BY 0x1000 — premise correction
+
+The 56th mapped walk frames onto libffrt by subtracting the VMA BASE,
+missing that the exec segment's ELF vaddr is file-offset+0x1000
+(readelf: LOAD off 0x65754 vaddr 0x66754). Corrected symbolization of
+the SAME walk data (ohc54):
+- "TimerManager::GetTimerStatus+0x167" → **ffrt::mutexPrivate::wait+0x157**
+  (the instruction after `std::condition_variable::wait`).
+- "SetRtgStatus region 0xa0807/0xa0946" → **SExecuteUnit::WorkerIdleAction**
+  (the FFRT worker idle cv — those were worker threads, a different class).
+- The park WORDS are the WAITER'S OWN musl cond stack node (the image's
+  musl cond parks on node.state at rbp-0x3c, value 2 = seq), NOT any
+  lock's state word. **RWFRZ's "word=0x2 readers=2" systematically
+  misread condvar seq words as shared_mutex reader counts — there were
+  never "two frozen readers" to name.** The RWFRZ pandemic rows are
+  parked cv waiters (word=2 = musl waiter state) across 8 processes.
+
+### 1. INSTRUMENTS LANDED (two commits, all dfx-gated)
+
+- **FUX-CHAIN / ffrt_chain_walk**: the park word is a stack node, but
+  pthread_cond_timedwait SPILLS r14 = &wn.cv (a heap pointer —
+  ExecuteCtx is new'd) into its frame; the walk scans the parked
+  task's entry-sp window for heap-class pointers, tests each as a
+  WaitUntilEntry cv/wl spill (node offsets {0x60,0x70,0x88,0x98}),
+  verifies the intrusive LinkedList ring by back-links, walks it, and
+  windows every hop. The ring member with a file-backed vtable at
+  head-0x10 and l∈{1,2} at head-0x8 IS the ffrt::mutexPrivate.
+- **ffrt_lock_holder_scan / ffrt_lock_region_scan**: same-tgid thread
+  stack windows + the top of every large anon region (the FFRT
+  worker/coroutine stack pool) swept for the lock pointer, with frame
+  dumps around each hit.
+- **fuxwatch=0xADDR[,DELAY]**: in-kernel write watchpoint — PTE W-bit
+  cleared on the watched word's page in every mapping mm (censusd
+  kthread); each user write fault logs (tid, rip, pre-write value),
+  restores W, single-steps via TF|RF; the #DB hook re-clears W. Exact-
+  word writes log (page neighbours step silently). This replaced the
+  TCG+gdb hardware-watchpoint idea with something that runs at KVM
+  speed with zero gap.
+- FUX-RUN (samgr runnable threads per burst), SAMGR-THREADEXIT (thread
+  exits in the registered samgr pid), samgr rows exempt from the
+  TXN-HANG-BWR print cap, censusd map dump extended to writable
+  file-backed VMAs (" W" marker).
+
+### 2. THE WEDGE, NAMED END-TO-END (ohc57-ohc69, verdict boot ohc69)
+
+1. **The contested lock**: ONE ffrt::mutexPrivate at heap
+   **0x7ff0004862b8** — DETERMINISTIC across all 8 instrumented boots
+   (same image → same heap layout). Waiter ring: samgr main + every
+   OS_IPC handler (+ late-spawned OS_IPC_9..16), all parked in
+   mutexPrivate::wait (identical frame chain: samgr-bin → libffrt
+   lock+0x34 → wait+0x157 → libc++ cv → musl futex, on their own cv
+   words). In two boots a SECOND ring (B) existed whose waiters held A
+   (nested acquisition, matching the samgr header note "maybe hold
+   listenerMapLock_ and then access onDemandLock_").
+2. **fuxwatch write trace** (0x7ff0004862c0 = &A->l): clean
+   cmpxchg(old=0)/unlock(old=1) pairs through t=66.47; at **66.492
+   tid 362 cmpxchg(old=0) — SUCCESS — l:=1**; 30ms later tid 361's
+   failed cmpxchg(old=1)+xchg(WAIT) sets l:=2; from n=440 every write
+   is a FAILED cmpxchg(old=2) from every handler thread; trace silent
+   forever. **TID 362 IS THE OWNER; IT NEVER UNLOCKED.**
+3. **tid 362** = samgr FFRT-worker binder thread executing txn9092
+   **code12 LOAD_SYSTEM_ABILITY from telephony** (exec 150+s). Its
+   stack walks CPUWorker::WrapDispatch → Dispatch → WorkerJoinTg →
+   WorkerLooper → **WorkerIdleAction+0x157** — the worker is IDLE. The
+   code12 task SUSPENDED (CoWait) inside the critical section: source
+   path HandleLoadAbilityEvent takes the SystemAbilityContext
+   **processLock** across DoLoadSystemAbility → StartingSystemProcess
+   → StartDynamicSystemProcess → beget **ServiceWaitForStatus /
+   ServiceControlWithExtra → SystemSetParameter("ohos.ctl.start")**.
+   All samgr FFRT workers idle-park (verified: the worker-idle musl-cv
+   chain + FUX-RUN shows ZERO runnable samgr threads), so the
+   suspended task never resumes, l stays 2, and every later samgr
+   client (subscribe/load/code7) parks → the pandemic → no SA
+   publishes past ~35-60s → appfwk.ready never set → no pixels.
+4. Exclusions nailed empirically: no thread exited holding (only
+   'Executor'/preferences at t=7.9s, pre-wedge); no runnable spinner;
+   no binder-io_wait holder; no region-stack A-spill outside waiter
+   frames (the suspended task's own coroutine stack was NOT caught by
+   the top-0x40000 sweeps — see §4).
+
+### 3. KERNEL-SIDE STATUS
+
+The chain is now named to the last userspace frame. The remaining
+kernel question: **what does the suspended code12 task wait for that
+resolves in ms on the reference** (reference: launcher.ready 11.7s)?
+Prime suspects, in order: (a) the beget param client's internal sync
+(SystemSetParameter/ServiceWaitForStatus — libbegetutil mutex/cv; the
+56th already caught samgr tid 348 parked in libbeget_pro 0x151df);
+(b) an FFRT queue-internal mutex held by another suspended task (the
+B-ring class); (c) a nested samgr mutex whose holder parks in the
+param client. The +0x8004a4-class parks (ohc64 tids 958-964, holding
+A, parked at a DEEPER cv than mutexPrivate::wait) are the param-wait
+signature — they never reached the FUX census (waiter pool full), so
+their fto (timed vs untimed) is unmeasured.
+
+### 4. HANDED TO THE 58TH (rig ready)
+
+1. **Catch the suspended task's own stack**: widen
+   ffrt_lock_region_scan to sweep the FULL region (or from both ends),
+   or find CPUEUTask structs in the FFRT slab and follow their saved
+   SP; symbolize the frames at the code12/beget boundary. The rig:
+   fuxwatch + chain walks + frame dumps all work; the lock address is
+   deterministic (0x7ff0004862b8) so fuxwatch can arm from t=1.
+2. **fuxwatch the beget param words** once (1) names them: the param
+   client's mutex/cv words are also deterministic per image; a write
+   trace + WAIT/WAKE trace on them decides lost-wake vs
+   never-notified vs timed-wait-that-never-fires.
+3. The 56th's queued TCP/UDP+signalfd epoll_notify_file wiring and the
+   oh-int chunker cherry-pick remain open (§6 of the 56th).
+
+### 5. Boots this session
+ohc55-ohc69 (13 KVM boots, system-lb5 + userdata-fresh2, LOGLEVEL7,
+dfx=fuxstuck,txnhunt,sleepsnap; ohc67-69 + fuxwatch=0x7ff0004862c0,18).
+Gates: x86_64/riscv64/aarch64 builds rc=0; riscv64 make test ALL
+TESTS PASSED (wrapper rc=124 after kernel halt — the 56th's known
+pattern). No stray QEMU left running. No kernel-behavior changes
+outside dfx gates — the fuxwatch page-fault/#DB hooks are one relaxed
+load each when the param is absent.
