@@ -66,9 +66,18 @@ struct TrimQEntry {
     pfns: [u64; TRIMQ_SNAP],
     w0: [u64; TRIMQ_SNAP],
     w1: [u64; TRIMQ_SNAP],
+    /// Present-at-trim bitmap for the WHOLE range (TRIMQ_BM_BITS
+    /// pages = 18 MB per slot): bit i = page i had a live PTE when the
+    /// trim began. A hit on a present page means glibc reclaimed a
+    /// chunk whose data was still resident (the bins chained live
+    /// memory — metadata destroyed earlier); a hit on a non-present
+    /// page means the pointer was wild.
+    present_bits: [u64; TRIMQ_BM_WORDS],
 }
 
 const TRIMQ_SNAP: usize = 256;
+const TRIMQ_BM_BITS: usize = 72 * 64;
+const TRIMQ_BM_WORDS: usize = 72;
 
 static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
     use crate::sync::spinlock::Spinlock;
@@ -104,28 +113,31 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
     let mut pfns = [0u64; TRIMQ_SNAP];
     let mut w0 = [0u64; TRIMQ_SNAP];
     let mut w1 = [0u64; TRIMQ_SNAP];
+    let mut present_bits = [0u64; TRIMQ_BM_WORDS];
     {
         let task = crate::sched::current();
         if let Some(t) = task {
             if let Some(aspace) = unsafe { (*t).address_space() } {
                 let root = aspace.root_ppn();
-                for (i, p) in pfns.iter_mut().enumerate() {
+                let npages = ((end - start) / crate::mm::page::PAGE_SIZE)
+                    .min(TRIMQ_BM_BITS);
+                for i in 0..npages {
                     let va = start + i * crate::mm::page::PAGE_SIZE;
-                    if va >= end {
-                        break;
-                    }
                     if let Some((ppn, _)) = unsafe {
                         crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)
                     } {
-                        *p = ppn as u64;
-                        // SAFETY: linear-map view of a live page frame.
-                        let kv = crate::arch::mm::phys_to_virt(
-                            crate::arch::mm::PhysAddr::new((ppn as u64) << 12),
-                        )
-                        .bits() as *const u64;
-                        unsafe {
-                            w0[i] = *kv;
-                            w1[i] = *kv.add(1);
+                        present_bits[i / 64] |= 1u64 << (i % 64);
+                        if i < TRIMQ_SNAP {
+                            pfns[i] = ppn as u64;
+                            // SAFETY: linear-map view of a live frame.
+                            let kv = crate::arch::mm::phys_to_virt(
+                                crate::arch::mm::PhysAddr::new((ppn as u64) << 12),
+                            )
+                            .bits() as *const u64;
+                            unsafe {
+                                w0[i] = *kv;
+                                w1[i] = *kv.add(1);
+                            }
                         }
                     }
                 }
@@ -134,7 +146,7 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
     }
     let mut q = TRIMQ.lock_irqsave();
     let slot = q.iter_mut().enumerate().find(|(_, e)| e.is_none());
-    let entry = TrimQEntry { mm, start, end, tick, pfns, w0, w1 };
+    let entry = TrimQEntry { mm, start, end, tick, pfns, w0, w1, present_bits };
     match slot {
         Some((_, e)) => {
             *e = Some(entry);
@@ -172,11 +184,18 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
                     e.end,
                     tick.saturating_sub(e.tick)
                 );
-                // Frame forensics: what IS the page at the faulting
-                // address now? Its content + descriptor state tell
-                // whether the freed frame was recycled (by whom) or is
-                // still untouched.
+                // Present-at-trim verdict: did the hit page carry a
+                // live PTE when glibc asked for the trim? present =
+                // the bins chained a chunk with resident data (the
+                // metadata was already destroyed); absent = a wild
+                // pointer into never-allocated pages.
                 let idx = (addr - e.start) / crate::mm::page::PAGE_SIZE;
+                let present = idx < TRIMQ_BM_BITS
+                    && (e.present_bits[idx / 64] >> (idx % 64)) & 1 == 1;
+                crate::pr_warn!(
+                    "TRIMQ-PRESENT idx={} present={}",
+                    idx, present as u8
+                );
                 if idx < TRIMQ_SNAP as usize {
                     let pfn = e.pfns[idx];
                     if pfn != 0 {
