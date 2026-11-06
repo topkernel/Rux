@@ -2182,8 +2182,14 @@ fn devfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
     let cur = file.get_pos() as isize;
     let new = match whence {
         0 => offset,
-        1 => cur + offset,
-        2 => size + offset,
+        1 => match cur.checked_add(offset) {
+            Some(v) => v,
+            None => return -22,
+        },
+        2 => match size.checked_add(offset) {
+            Some(v) => v,
+            None => return -22,
+        },
         _ => return -22,
     };
     if new < 0 {

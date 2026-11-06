@@ -2062,8 +2062,14 @@ fn procfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
             let file_size = content.data.len() as isize;
             let new_offset = match whence {
                 0 => offset,
-                1 => file.get_pos() as isize + offset,
-                2 => file_size + offset,
+                1 => match (file.get_pos() as isize).checked_add(offset) {
+                    Some(v) => v,
+                    None => return -22,
+                },
+                2 => match file_size.checked_add(offset) {
+                    Some(v) => v,
+                    None => return -22,
+                },
                 _ => return -22,
             };
             if new_offset < 0 || new_offset > file_size {

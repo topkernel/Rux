@@ -709,7 +709,10 @@ fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isiz
         2 => size,     // SEEK_END: the buffer size (dma-buf semantics)
         _ => return -22, // EINVAL
     };
-    let target = base + offset as i64;
+    let target = match base.checked_add(offset as i64) {
+        Some(v) => v,
+        None => return -22, // EINVAL
+    };
     if target < 0 || target > size {
         return -22; // EINVAL (dma_buf_llseek)
     }

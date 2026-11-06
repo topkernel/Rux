@@ -1743,7 +1743,10 @@ pub(crate) fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let current = file.get_pos() as i64;
     let new_pos = match whence {
         0 => offset as i64,               // SEEK_SET: absolute entry index
-        1 => current + offset as i64,     // SEEK_CUR
+        1 => match current.checked_add(offset as i64) { // SEEK_CUR
+            Some(v) => v,
+            None => return -22,
+        },
         _ => {
             // SEEK_END on a directory is not supported (entry count is not
             // tracked per open); ESPIPE-like EINVAL, not silence.

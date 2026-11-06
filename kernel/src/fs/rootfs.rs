@@ -1782,8 +1782,14 @@ fn rootfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isiz
     };
     let new_pos = match whence {
         0 => offset,
-        1 => current_pos + offset,
-        2 => file_size + offset,
+        1 => match current_pos.checked_add(offset) {
+            Some(v) => v,
+            None => return -22,
+        },
+        2 => match file_size.checked_add(offset) {
+            Some(v) => v,
+            None => return -22,
+        },
         _ => return -22,
     };
     if new_pos < 0 { return -22; }
