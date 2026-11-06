@@ -2473,6 +2473,18 @@ impl Task {
         // in Task::new covers only the first construction; a cloned
         // thread's Task was reading uninitialized memory (first
         // thread-exit forensics printed garbage nrs).
+        // last_syscall_nr/a0 (diagnostic fields): the clone path must
+        // initialize them like Task::new does — an uninit field reads
+        // allocator poison (observed 0xFFFFFFE0 patterns in the RCU
+        // monopolist namer), poisoning the diagnostics that hunt.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_nr)) as *mut core::sync::atomic::AtomicU32,
+            core::sync::atomic::AtomicU32::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_syscall_a0)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
             [const { AtomicU32::new(0) }; 8],

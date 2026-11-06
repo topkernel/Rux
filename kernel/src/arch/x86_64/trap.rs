@@ -1350,6 +1350,22 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
+    // Tick quiescent report (2026-11-06, the CPU0-qs stall family):
+    // a task interrupted IN USER MODE is outside every RCU read
+    // critical section by construction — report its CPU quiescent for
+    // the current generation right here, the reference's
+    // rcu_check_callbacks user-mode parity. The trap-exit tail report
+    // is the same semantics, but it runs AFTER the handler body — and
+    // an in-handler schedule() (preemption) makes the tail run in the
+    // INCOMING task's frame, whose user_mode may be false; a CPU-bound
+    // user loop that rarely syscalls could then miss reports for the
+    // full sleepy budget (gnome-session monopolist: qs stuck one gen
+    // behind while every wait timed out). The entry report needs no
+    // exit path at all: user_mode(regs) is the interrupted context.
+    if regs.user_mode() {
+        crate::sync::rcu::rcu_note_context_switch();
+    }
+
     // Increment interrupt counter for /proc/interrupts
     crate::fs::procfs::interrupts::timer_inc(cpu);
 

@@ -217,6 +217,7 @@ pub fn synchronize_rcu() {
         // and wastes CPU time on SMP.  schedule() lets other tasks run
         // so they can context-switch and report their quiescent states.
         crate::sched::schedule();
+        WAKE_SPIN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -346,6 +347,14 @@ pub fn synchronize_rcu_forced_polled(max_ms: u64, site: &'static str) -> bool {
 /// INTERRUPTIBLE sleeps armed by a one-shot timer (the khungtaskd
 /// idiom), until every online CPU reports at/after `gen` or the budget
 /// expires. Returns whether the round completed.
+// Wake-storm counter (the fdreap TICKET.up livelock theory): every
+// schedule() return WITHOUT completion means something woke this
+// waiter back into spinning — if these dominate the budget, the waiter
+// never truly sleeps and its CPU never reports quiescent THROUGH this
+// path, feeding the very stall it waits to end.
+static WAKE_SPIN: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
     use crate::process::task::TaskState;
 
@@ -393,21 +402,32 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                             .unwrap_or("?");
                         let nr = unsafe { (*cur).last_syscall_nr.load(Ordering::Relaxed) };
                         let a0 = unsafe { (*cur).last_syscall_a0.load(Ordering::Relaxed) };
+                        // Tick-alive check: this CPU's timer IRQ count vs
+                        // the reporter's — a stalled one-shot LAPIC on the
+                        // stuck CPU means NO tick, hence no QS report site
+                        // at all (the frozen-qs mechanism).
+                        let tc = crate::fs::procfs::interrupts::timer_count(c);
+                        let tick_rip =
+                            crate::interrupt::preempt::TICK_ENTRY_RIP[c]
+                                .load(Ordering::Relaxed);
                         crate::pr_warn!(
-                            "RCU-STUCK-CPU{} task={} pid={} preempt={} lastsys={} a0={:#x}",
+                            "RCU-STUCK-CPU{} task={} pid={} preempt={} lastsys={} a0={:#x} tickn={} trip={:#x}",
                             c,
                             comm_s.split(char::from(0)).next().unwrap_or("?"),
                             unsafe { (*cur).pid() },
                             unsafe { (*cur).preempt_count() },
                             nr,
-                            a0
+                            a0,
+                            tc,
+                            tick_rip
                         );
                     }
                 }
                 crate::pr_warn!(
-                    "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} qs={},{},{},{} on={},{},{},{}",
+                    "RCU-GP-BOUND site={} waited>{}ms (sleepy) wakes={} gen={} qs={},{},{},{} on={},{},{},{}",
                     site,
                     max_ms,
+                    WAKE_SPIN.swap(0, core::sync::atomic::Ordering::Relaxed),
                     gen,
                     q0,
                     q1,

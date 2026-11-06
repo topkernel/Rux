@@ -156,6 +156,25 @@ EndSection
 EOX
 
 # ---------------------------------------------------------------------------
+# Trim the systemd-world leftovers that stall this systemd-less session:
+# - gsd autostart files make gnome-session spawn every SettingsDaemon
+#   plugin as an optional app; each one that needs logind/UPower then
+#   blocks a 25 s dbus activation timeout (the user-visible minute-long
+#   black screen + "respawning too quickly" crash loops). Removing the
+#   autostart entries leaves the shell as the session's only component
+#   (the rux.session RequiredComponents) — gsd-* never spawn.
+# - The dbus system-service declarations for logind/UPower promise a
+#   service nothing will ever provide in a runit image; dropping them
+#   turns the 25 s activation timeouts into immediate ServiceUnknown
+#   for anything that still asks.
+rm -f "$ROOT"/etc/xdg/autostart/org.gnome.SettingsDaemon.*.desktop \
+      "$ROOT"/etc/xdg/autostart/org.gnome.Shell.desktop 2>/dev/null
+rm -f "$ROOT"/usr/share/dbus-1/system-services/org.freedesktop.login1.service \
+      "$ROOT"/usr/share/dbus-1/system-services/org.freedesktop.UPower.service \
+      "$ROOT"/usr/share/dbus-1/system-services/org.freedesktop.hostname1.service \
+      "$ROOT"/usr/share/dbus-1/system-services/org.freedesktop.timedate1.service 2>/dev/null
+
+# ---------------------------------------------------------------------------
 # Pack the image (Rux ext4 constraints: 4K blocks, no metadata_csum).
 # Size: the GNOME chain unpacks to ~2.2G — give the fs 3.5G.
 # ---------------------------------------------------------------------------
