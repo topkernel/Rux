@@ -5452,3 +5452,48 @@ pandemic) is unchanged — those are the 53rd's targets, not this lane's.
   park waits on the vma lock, that park should now SLEEP instead of
   spin — check a vlock kernel boot for hilogd lastsys=9 parks (the
   new HUNG-CTX lastsys= field prints it).
+
+## 5. POST-CLOSE FIX (found in the final review pass): up_read wake bug
+
+The reference's up_read tests the POST-subtraction count
+(atomic_long_add_return_release); the port used fetch_sub (PRE word)
+against the same mask — the last-reader-out wake could never fire. A
+writer queued behind readers was only rescued by the next up_write on
+the same mm (every release pumped the queue); on a quiet mm it could
+strand. This is exactly the vlock1/vlock2 shape (samgr silent after
+binder mmap, 0 OpenSo, no context manager — its mmap writer queued
+behind its own faulting readers, then the mm went quiet) and explains
+why churnier boots (vlock4/5/6) ran the ladder anyway.
+
+Fixed in d36df831 (subtract the bias before testing). Gates rerun on
+the fixed kernel:
+- x86_64 / riscv64 / aarch64 builds rc=0
+  (run/build-x86-vlock4.log, build-rv-vlock3.log, build-a64-vlock2.log).
+- riscv64 make test: 1319/1319 ALL PASSED incl. the rwsem row
+  (run/maketest-vlock4.log; an interim 1318-run was a stale-artifact
+  race with parallel rebuilds, not a missing row).
+- OH boot vlock7 (fixed): context manager registered, 80 OpenSo to
+  39.3s (deepest ladder of the session, near ohc24's 43s), RWSEM-STALL
+  0, RCU-GP-BOUND 200, stuck_total 177, terminal wedge 82f0a25f.
+
+## 6. Final ledger (all boots, system-lb5 + userdata-fresh2, SMP2 KVM,
+   LOGLEVEL7, dfx=fuxstuck,txnhunt)
+
+| boot  | kernel      | OpenSo | last SA | ctx-mgr | RCU-GP | stuck_max | RWSEM-STALL | wedge     |
+|-------|-------------|--------|---------|---------|--------|-----------|-------------|-----------|
+| vlock1| pre-tripwire| 0      | -       | no      | 0      | 52        | n/a         | 82f0a25f  |
+| vlock2| tripwire v1 | 0      | -       | no      | 0      | 51        | n/a         | 82f0a25f  |
+| vlock4| tripwire v1 | 31     | 13.7s   | yes     | 2      | 118       | 0           | 82f0a25f  |
+| vlock5| tripwire v1 | 80     | 33.9s   | yes     | 198    | 193       | 2 (slow holder, granted) | 82f0a25f |
+| vlock6| tripwire v2 | 66     | 26.3s   | yes     | 92     | 187       | 0           | 82f0a25f  |
+| vlock7| up_read fix | 80     | 39.3s   | yes     | 200    | 177       | 0           | 82f0a25f  |
+| (52nd ohc24 baseline: SA to 43.0s, 37 RCU-GP prints, frozen 82f0a25f) |
+
+Read: the up_read fix moves every post-fix boot onto the ladder (the
+0-OpenSo class disappears with the correct wake). The two vlock5 stall
+prints remain the only rwsem-stall observations — behind 10-50s
+vma_write holders (PROTNONE-range teardown / mm exit walks), with the
+grant arriving (waiter later seen in userspace). No lost-grant strand.
+RCU-GP-BOUND and stuck_total stay variance-dominated; the terminal
+wedge class (frozen logo 82f0a25f, hilogd §6a, binder backpressure) is
+unchanged — the 53rd's targets.
