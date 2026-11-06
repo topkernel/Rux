@@ -643,11 +643,18 @@ impl TtyDevice {
         }
     }
 
-    /// Deliver an ISIG signal to this tty's foreground process group
-    /// (falling back to the caller's, like the console path).
+    /// Deliver an ISIG signal to this tty's foreground process group.
+    ///
+    /// No foreground group means no signal (reference n_tty __isig ->
+    /// kill_pgrp only on a non-NULL tty_get_pgrp). Only the console keeps
+    /// the caller fallback: its foreground group lives in the console
+    /// layer (syscall::io::tty_get_fg_pgrp), not in this struct. For a pty
+    /// the caller is the process writing to the MASTER — the terminal
+    /// emulator / sshd / script — so the fallback sent ^C to them instead
+    /// of to the session behind the slave.
     fn send_isig(&self, signo: i32) {
         let mut pgid = self.fg_pgrp.load(Ordering::Acquire);
-        if pgid == 0 {
+        if pgid == 0 && core::ptr::eq(self, console()) {
             pgid = crate::process::current_pgid();
         }
         if pgid != 0 {

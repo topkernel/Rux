@@ -277,6 +277,7 @@ pub mod mkdir_unlink;
 pub mod link;
 #[cfg(feature = "unit-test")]
 pub mod pipe2;
+pub mod pty_hangup;
 #[cfg(feature = "unit-test")]
 pub mod ext4_allocator;
 #[cfg(feature = "unit-test")]
@@ -596,6 +597,8 @@ pub fn run_all_tests() {
 
     test_group_start("pipe2");
     pipe2::test_pipe2();
+    test_group_start("pty_hangup");
+    pty_hangup::test_pty_hangup();
 
     test_group_start("ext4_allocator");
     ext4_allocator::test_ext4_allocator();

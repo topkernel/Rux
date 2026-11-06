@@ -61,6 +61,7 @@ const TCSETAW: u32 = 0x5407;
 const TCSETAF: u32 = 0x5408;
 const TIOCGPGRP: u32 = 0x540F;
 const TIOCSPGRP: u32 = 0x5410;
+const TIOCSCTTY: u32 = 0x540E;
 const TIOCGWINSZ: u32 = 0x5413;
 const TIOCSWINSZ: u32 = 0x5414;
 const FIONREAD: u32 = 0x541B;
@@ -393,15 +394,26 @@ fn ptmx_read(file: &File, buf: &mut [u8]) -> isize {
     let nb = nonblock(file);
 
     loop {
-        // Slave side gone: master read fails with EIO (Linux semantics).
-        if pair.slave_closed.load(Ordering::Acquire) {
-            return -(EIO as isize);
-        }
         let n = pair.master_rx_read(buf);
         if n > 0 {
             // Space freed for slave writers.
             pair.master_space_waitq.wake_up_all();
             return n as isize;
+        }
+        // Slave side gone: EIO — but only once the buffered slave output
+        // has been drained (reference n_tty_read tests TTY_OTHER_CLOSED
+        // only when no input is available). Failing first dropped the
+        // last output of a child that wrote and exited before the master
+        // read it (pty.spawn / script / expect lost the tail).
+        if pair.slave_closed.load(Ordering::Acquire) {
+            // The slave may have written and closed between the read above
+            // and this check: drain once more before reporting EIO.
+            let n = pair.master_rx_read(buf);
+            if n > 0 {
+                pair.master_space_waitq.wake_up_all();
+                return n as isize;
+            }
+            return -(EIO as isize);
         }
         if nb {
             return -(EAGAIN as isize);
@@ -808,6 +820,23 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 }
                 Some(0)
             }
+            TIOCSCTTY if is_slave => {
+                // Controlling-terminal bookkeeping is not modeled (the
+                // generic arm just accepts the request); the part callers
+                // observe is job control: reference tiocsctty ->
+                // __proc_set_tty makes the caller's process group the
+                // tty's foreground group, so ^C/^Z/^\ typed into the
+                // master reach the session the slave now controls
+                // (login_tty, sshd, VTE: setsid + TIOCSCTTY). Seed it only
+                // when unset — an existing TIOCSPGRP choice wins.
+                let _ = pair.tty.fg_pgrp.compare_exchange(
+                    0,
+                    crate::process::current_pgid(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                Some(0)
+            }
             TIOCSPGRP => {
                 if arg == 0 || !access_ok(arg, 4) {
                     return Some(-(EFAULT as i64));
@@ -874,7 +903,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 const O_CLOEXEC: u32 = 0o2000000;
 
                 if pair.master_closed.load(Ordering::Acquire) {
-                    return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64));
+                    return Some(crate::errno::Errno::IOError.as_neg_i32() as i64);
                 }
                 // An owning Arc for the File's private_data (pair_of lends
                 // a &static; the close op reconstructs the Arc from the raw
@@ -882,7 +911,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                 let pair_arc = match PTY_TABLE.lock_irqsave().get(&pair.index).cloned() {
                     Some(p) => p,
                     None => {
-                        return Some(-(crate::errno::Errno::IOError.as_neg_i32() as i64))
+                        return Some(crate::errno::Errno::IOError.as_neg_i32() as i64)
                     }
                 };
                 // Slave descriptions are O_RDWR regardless of `arg`; Linux
@@ -935,7 +964,7 @@ pub fn pty_ioctl(file: &File, request: u32, arg: usize) -> Option<i64> {
                         if pair.slave_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
                             pair.slave_closed.store(true, Ordering::Release);
                         }
-                        Some(-(crate::errno::Errno::TooManyOpenFiles.as_neg_i32() as i64))
+                        Some(crate::errno::Errno::TooManyOpenFiles.as_neg_i32() as i64)
                     }
                 }
             }
