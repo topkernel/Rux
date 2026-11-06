@@ -3330,46 +3330,45 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         let whole_vma = vma_start.as_usize() == old_addr
             && vma_end.as_usize() == old_addr + old_size_aligned;
 
-        // Check if can expand in place (check if next VMA would conflict)
-        let can_expand = whole_vma && {
-            let vma_mgr = address_space.vma_read();
-            if let Some(next_vma) = vma_mgr.find_vma_after(VirtAddr::new(vma_end.as_usize())) {
-                next_vma.start().as_usize() >= new_end
-            } else {
-                true  // No next VMA, can expand
-            }
-        };
-
-        if can_expand {
-            // Expand in place: map extra pages
-            let perm = vma_flags.to_page_perm();
-            match address_space.mmap(
-                VirtAddr::new(vma_end.as_usize()),
-                extra_size,
-                vma_flags,
-                vma_type,
-                perm,
-                map::MAP_FIXED,  // Force at this address
-            ) {
-                Ok(_) => {
-                    // The extension piece is a fresh VMA at vma_end when
-                    // it did not merge (file VMAs never merge here:
-                    // fd=-1 vs the incumbent's real fd); carry the file
-                    // identity onto it with a continuation offset. For a
-                    // merged (anonymous) extension there is no VMA at
-                    // vma_end and nothing to fix.
-                    mremap_carry_file_attrs(
-                        address_space,
-                        vma_end.as_usize(),
-                        vma_off + (vma_end.as_usize() - vma_start.as_usize()),
-                        vma_fd,
-                        vma_fsz,
-                        vma_pin.as_ref(),
-                    );
-                    old_addr as i64
-                }
-                Err(_) => mmap_error::ENOMEM,
-            }
+        // EXPAND: try the in-place extension as ONE atomic check+extend
+        // under a single vma_write hold. The reference kernel holds its
+        // mmap lock across vma_to_resize + the grow; the old shape here
+        // checked can_expand under a read guard, DROPPED it, and
+        // installed the extension with a MAP_FIXED mmap — a same-mm
+        // racer's fresh chunk placed in [old_end, new_end) inside that
+        // window was silently absorbed by the extension surgery: two
+        // live glibc chunks overlapping in VA, each writing the shared
+        // page (heapstress VA-OVERLAP catches t1/b58 vs t2/b63 and
+        // t2/b93 vs t3/b44; the gnome-shell malloc.c:4302 _int_malloc
+        // assert and the trim-face SIGSEGV family — glibc's chunk
+        // bookkeeping says both ranges are live while one page belongs
+        // to both).
+        let mut expanded = false;
+        if whole_vma {
+            let mut vma_mgr = address_space.vma_write();
+            expanded = vma_mgr
+                .mremap_expand(
+                    VirtAddr::new(old_addr),
+                    VirtAddr::new(old_addr + old_size_aligned),
+                    VirtAddr::new(new_end),
+                )
+                .is_ok();
+            drop(vma_mgr);
+        }
+        if expanded {
+            // Accounting parity with the old MAP_FIXED extension path
+            // (which went through address_space.mmap): charge the
+            // extension's pages and raise the highest-end mirror. File
+            // identity needs no carry: the INCUMBENT VMA (already
+            // holding fd/offset/pin) is the one extended, and per-page
+            // file offsets derive from vma.offset() + (va - vma.start()),
+            // so the extension continues the file mapping by
+            // construction (the old path's carry ran for the
+            // non-merging file-VMA extension case, which no longer
+            // exists here).
+            address_space.add_total_vm((extra_size / PAGE_SIZE) as u64);
+            address_space.update_highest_vm_end(new_end);
+            old_addr as i64
         } else if (flags & MREMAP_MAYMOVE) != 0 {
             // Can move: find new location
             let perm = vma_flags.to_page_perm();

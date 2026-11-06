@@ -610,7 +610,7 @@ impl MmStruct {
         // rebuild those leaves; the report names the producer).
         if Self::mmov_enabled() && !is_fixed {
             let (live, first) =
-                count_live_user_ptes(self.pgd, start.as_usize(), aligned_size);
+                Self::count_live_user_ptes(self.pgd, start.as_usize(), aligned_size);
             if live > 0 {
                 static NS: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
