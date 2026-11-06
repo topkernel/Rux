@@ -405,3 +405,39 @@ absents stated plainly. Each absent names what closing looks like.
   Source: main 2d3752a8 (merge), oh-crash lane ohc1-ohc8 battery
   (mallocng 0x3fbf0bb82f: 7/7 boots zero after flush restore vs ~80%
   hit before), /tmp/port-gate + perf-gate Tier1/2 record.
+- Round-5 (2026-11-06, wedge-format lane): the 870k/s sz32 allocation
+  storm / intermittent RCU wedge eliminated — a liveness bug in 100%
+  SAFE code. release_task's straggler-drain loop (kernel/src/process/
+  exit.rs) waited for parked mid-exit thread-group members to reach
+  their terminal DEAD store, but its only "yield" was
+  core::hint::spin_loop() — a PAUSE hint that never gives up the CPU.
+  On boots where the reaper shares the only runnable CPU with the
+  straggler (single-CPU boots; the GNOME full-device rig boots smp1),
+  the preempted member could never finish exiting, so the loop never
+  exited: it re-partitioned the dead list forever at ~435k iterations/s
+  (two 32-byte Vec allocations per iteration = the sz32 storm,
+  100% size-class-32), monopolized the CPU in kernel mode, and never
+  context-switched — so the CPU never reported an RCU quiescent state,
+  freezing grace periods one generation behind (the fdreap
+  close-completion-stall floods). The szcap=1 sampler evidence: every
+  storm sample on wedged AND good boots decoded to
+  sys_wait4 -> do_wait -> release_task -> Vec<*mut Task>::push
+  (grow_one -> 32B), comm = whichever reaper held the CPU (runit on
+  the wedged boots, gmain/sh otherwise). Fix: schedule() at the wait
+  point (the same shape as wait_for_thread_group_death and the fdreap
+  completion loop; the comment had claimed "yield" since e57ab8c3
+  while the code paused). Same-rig A/B (TCG single-thread, q35, full
+  device set incl. virtio-keyboard+tablet, smp1, 300 s boots):
+  pre-fix 3/8 boots wedged (zero GNOME Shell lines, log frozen, storm
+  sample pinned in the loop) and even the 5 "good" boots churned
+  20-25M sz32 allocations per boot; post-fix 5/5 boots PASS (28/28/28/
+  28/19 Shell lines, 0 stall lines, 0 wedges) plus one szcap=1 boot at
+  22 Shell lines whose 5M-stride sampler NEVER re-fired — total sz32
+  traffic collapsed from 20M+/boot to <5M/boot, and the residual
+  sample is early-boot log formatting, not the reap path. Bug-class
+  note for §2: this is a (b)-class logic/liveness defect in safe code
+  — busy-wait for another task's progress — eliminated by making the
+  wait actually deschedule; no memory-safety boundary was involved.
+  Source: wedge-format lane run/w2|w4|w5-serial.log (wedged, pre-fix),
+  run/w1|w3|w6-w8-serial.log (good, pre-fix), run/v1-v5-serial.log +
+  run/f1-serial.log (post-fix), fix commit on branch wedge-format.
