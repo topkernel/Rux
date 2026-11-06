@@ -6081,3 +6081,153 @@ callouts that can park). Next concrete steps:
 2. tid 348's libbeget_pro park: param_watcher/param service interplay.
 ohc54 gates: x86_64/riscv64/aarch64 builds rc=0, riscv64 make test
 ALL TESTS PASSED (same tree as this addendum).
+
+## CONSOLE LANE (oh-console, 2026-11-06) — TX engine verified + gate evidence; three follow-up fixes landed (defer-queue survival, no-lock fallback ladder, boot-table routing); two experiments rejected with evidence
+
+Mission (53rd §5a / 54th §5.2): the 5-17ms IF=0-per-line UART console
+tax (16.7 CPU-s/min, 99% multi-poll) and the /dev/console emit-lock
+bypass (torn records). Branch oh-console = origin/oh-crash (33633056+)
++ console work.
+
+### 0. Session-start inventory (v3 agent)
+- The two dead predecessors left COMMITTED work (the handoff prompt
+  said uncommitted; git was clean): 8d4a2605 (TX ring engine + IF=0
+  deferral + unified user sink), 4d31413d (200µs wall-time drain cap +
+  line-atomic user segments, smoke #5-#7), 17912f8b (drain-quiesce
+  sections; smoke #8: 800/800 flood lines whole, 0 torn, if0 max=1ms
+  avg=110µs, 845ms/60s). Merged origin/oh-crash (7a401d8a, includes
+  33633056) cleanly — probes tarball only.
+- Predecessor gates inherited green: riscv64 make test, pbench events
+  sanity (p1_null 0.291 / p1_clock 0.390 / p2_ctxsw 1.337 vs anchors
+  0.300/0.371/1.242-1.267 — all ±20%), and a Tier-1 gate boot that was
+  still running when the predecessor died.
+
+### 1. Mission metrics (the engine works; numbers vs 53rd baseline)
+- Per-line IF=0 class: smoke boots (synthetic 80KB flood + kmsg flood
+  + DUMP! taskdumps mid-flood): uart if0 max=1ms, avg=109-110µs,
+  919ms/60s INCLUDING the flood (53rd: if0 9986ms + if1 6687ms per
+  60s; one 256B line cost 5-17ms). Max closed cli segment in the uart
+  zone: ≤1ms (band 3-7ms).
+- Torn records: /dev/console + /dev/ttyS0 + kmsg-record writers are
+  whole-run atomic under CONSOLE_EMIT_LOCK (boot-8/9/10 class rigs:
+  60000/60000 user writes, 0 short writes; flood lines 800/800 whole
+  in the passing boots).
+- OH gate boot (con10, final kernel): if0 share over the first 120s
+  ~24.7% of machine (c0 29.2% c1 20.3% — early window includes the
+  provisioning storm; the band 20.4±3pp is a quiet-main baseline) —
+  the UART component fell from 9986ms/60s to ~4.3s+0.5s per 60s of
+  DRAIN work (IRQ-context rep-outsb passes, each capped 512B/200µs).
+
+### 2. Fix landed this session #1: 64KiB console defer queue (693e45c9)
+con8/con9 gate boots (pre-fix): 0/10 dumps printed their ticks/if0/
+uart/contx/syscalls rows; the rip tail arrived 10/10 — drop-oldest
+keeps the newest. The 60s syscost dump (~120 lines, ~10KB) defers
+WHOLE (timer softirq on the inline IF=0 path) and overflowed the 8KiB
+queue before any IF=1 flusher ran. 64KiB = 6x the burst. con10 (final
+kernel): the ticks/if0/uart/contx/syscalls rows are ON THE WIRE at
+t=60s and t=120s — first OH gate boot ever to print them.
+CORRECTION of the predecessor record: boots 10-13 quoted in the fix
+commit messages ran a STALE bzImage (`make build` without PLATFORM=
+built the default riscv64; the x86_64 artifact never updated — the
+flood rig booted the 18:22 pre-fix kernel). The fixes' real evidence
+is con10 + boots 17-21. Triple-arch build discipline now: always
+PLATFORM=x86_64 explicitly.
+
+### 3. Fix landed #2: no-lock fallback ladder (f505c869) + residual class
+boot9 tore one flood line: "...pad" + "AL" + "ding END" at byte 80 (a
+drain burst boundary): the per-byte anomaly tripwires fell back to a
+DIRECT THR write whenever tx_submit_try failed (ring full = common
+under flood) — quiesce keeps the drain from running CONCURRENTLY, but
+the bypass byte lands BETWEEN drain passes while a ring line is
+half-drained. New ladder: ring-try -> defer-try (new try-lock defer
+variants; ordered, flushed later) -> direct (only when BOTH try-locks
+fail: the wedged-machinery case). Residual (named, not fixed): when
+the DEFER lock itself is contended the ladder still falls to direct —
+observed as ~1 splice/boot in the synthetic flood ("SKIPHIST col",
+wakewatch "ms policy=0...", "PARKWA"): the sched/wakewatch tick
+diagnostics print per-byte from IF=0 tick context. Fix shape for the
+wwcensus owner: batch those lines through puts_bytes_no_lock (one
+atomic try) or a bounded retry of the defer try. NOT this lane's
+files; left documented.
+
+### 4. Fix landed #3: print_status rows through the emit path (7651bcb4)
+boot12/17: a flood line spliced with the AP bring-up row
+"timer: lapic tick check: N jiffies/150ms" — print_status_ex wrote
+via console::puts_bytes (direct string-IO THR) on ANY boot stage,
+racing CPU0's live drain. Rows now go through printk::emit_to_console
+(pub): pre-engine direct (unchanged), armed-engine ring/defer under
+the emit lock. The AP-row tear did not recur post-fix (5 boots).
+REJECTED with evidence: also tightening emit_to_console's early_boot
+branch to require !tx_armed() (so the AP row defers instead of direct
+printing). That A+B combination wedged the DUMP!-triggered taskdump
+path 4/4 (both CPUs idle-hlt, ticks dead, probe sleep-timers never
+fire; rig: run/console-wedge.sh + pmemsave state dumps). A alone and
+B alone each survive. Interaction root cause NOT named — do not stack
+them blind; the wedge-catcher rig is in run/ for the next session.
+
+### 5. Fix landed #4: idle-loop flush of the defer queue (8059c072)
+con10: every dump after t=120s vanished (no t=180..720 rows at all).
+On a SETTLED machine no flusher exists: no IF=1 printk writers, the
+inline softirq path skips at IF=0 — deferred bytes sat forever. Same
+loss ate 36/40 early-boot census lines (TERM 4 REFUSED 0 in the log
+vs TERM 8 REFUSED 34 on the pre-engine con8 boot) — that is the
+mechanism behind con10's census-band FAILs (telemetry arrival, not
+scheduler behavior; the sched counters themselves are untouched).
+console_idle_flush() from cpu_idle_loop (IF=1, 5ms lock budget,
+whole-run staging) — the console-kthread shape. Early-boot census
+shedding (first-60s defer storm, 180KB drop-oldest vs 98KB flushed)
+is NOT cured by this — the flusher still loses to the emit-lock
+holders during the storm; queued for next session (priority flush or
+wwcensus rate-limit). Sustained-overload shedding itself is
+reference-parity (the reference also sheds console output under
+IRQ-context print storms; the kmsg ring keeps every record).
+
+### 6. Gates
+- Triple-arch builds rc=0 (final tree, x86_64 19:56-class + riscv64 +
+  aarch64).
+- riscv64 make test: ALL TESTS PASSED (run/maketest-console2.log on
+  fix2 tree; run/maketest-console4.log rerun after the idle-flush
+  commit — see below).
+- pbench events-off sanity: rc=0, medians in band (§0).
+- Tier-1 quiet syscost gates: con8/con9 (pre-fix kernel) census PASS /
+  tables absent; con10 (final, pre-idle-flush) panics/OOM/tick-rate/
+  clock_gettime/nanosleep/GRQ/small_alloc PASS, census 4/0 + volume
+  FAIL — telemetry-loss artifacts (§5). con11 (final + idle flush):
+  panics/OOM/clock_gettime 3µs/n=15.7M@t=300s/nanosleep/GRQ 5764ns/
+  small_alloc 0.1% PASS; FOUR full dumps survived (t=60/180/240/300
+  with ticks+syscalls+if0+contx rows) vs two in con10 — the idle
+  flush roughly doubled dump survival; t=120 and t>=360 still lost.
+  census 2/0 FAIL = early-boot shed (§5, unfixed); tick-rate "cpu0=
+  0.00" FAIL is a parse artifact (a SLOW-TXN line carries a junk
+   Ê.. field -> grep classifies the log binary; the tick rows
+  exist at all four dumps); volume SKIP (last syscalls row t=300s,
+  boot-depth-sensitive). MERGE-GATE JUSTIFICATION (in writing, per
+  the gate rule): the census-band FAIL is console telemetry ARRIVAL
+  under the boot's own diagnostic storm — the pre-engine kernel
+  forced these lines through at 5-17ms IF=0/line, the exact tax this
+  lane was mandated to remove. No scheduler-behavior change is
+  implicated (no sched/ logic touched; the counters print the same
+  events). The arrival fix (flusher priority) is handoff item 2.
+- Smoke-rig caveat: every boot8-rig run after ~20:00 ran under 4-6
+  foreign QEMUs; the rig crawls under that load (72-790/800 lines by
+  the 120s kill) and is not a reliable PASS signal. Quiet-window
+  rerun of run/console-boot8.sh is the handoff item.
+
+### 7. Handoff (next console session, in order)
+1. Quiet-host rerun of run/console-boot8.sh (end-to-end ritual) +
+   confirm the idle-flush boot path (dumps at t=60/120/180 on a quiet
+   boot).
+2. Early-boot census shedding: make the defer flusher win the storm
+   (or rate-limit the wwcensus tick prints) — the gate census rows
+   must arrive in the FIRST 60s too. First attempt at releasing the
+   emit lock around user-writer space-sleeps BROKE the write contract
+   (partial returns made the probe bail at 72 lines) — reverted; the
+   correct shape is a wait-queue/wake when ring space frees.
+3. Name the A+B dump wedge (§4): run/console-wedge.sh catches it with
+   per-CPU regs + pmemsave counter dumps (fix the monitor paths to
+   absolute before rerunning).
+4. Batch the sched/wakewatch per-byte diagnostics (§3 residual).
+5. riscv64 console: the engine is x86_64-only (MMIO sinks accept at
+   host speed; nothing to drain). The riscv64 per-byte puts_batch
+   store loop is its own (unmeasured) row if the riscv64 fleet ever
+   needs it.
