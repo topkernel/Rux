@@ -6403,3 +6403,23 @@ dfx=fuxstuck,txnhunt; fuxwatch=0x7ff0004862c0,1). Serial logs, shots,
 and marker files under run/oh-ohc7[3-6]-*.log. No QEMU left running
 beyond the drivers' own lifetimes; no behavior changes outside dfx
 gates.
+
+### 7. CLOSING ADDENDUM — ohc76/77 final tally; QEMUs cleaned
+
+- ohc76 (dfx on, new tree): stalled PRE-appfwk (only 21 stuck threads,
+  samgr clean, system churning at ~95 wakes/s to the end) — not the
+  classic wedge, a slower early stall.
+- ohc77 (PLAIN, no dfx, no fuxwatch — zero-perturbation sample):
+  stalled pre-appfwk too, ends in appspawn kickdog. So the plain-boot
+  sample did NOT reproduce the appfwk.ready pass.
+- Session tally on the new tree: 2/5 boots reached appfwk.ready
+  (ohc74/75, both instrumented), 3/5 stalled earlier (ohc73 classic
+  wedge on the first build; ohc76/77 pre-appfwk stalls). The classic
+  A-ring wedge was ABSENT from all three new-build boots, but the
+  boot outcome remains highly timing-dependent — treat "wedge
+  recession" as UNRESOLVED (§5 item 2 stands: re-run the wedge rate
+  before drawing conclusions). The launcher-spawn gate (foundation
+  main idle in BWR read-wait, no incoming work — ohc75's 601s lastbwr)
+  is the current frontier either way.
+- All session QEMUs stopped (drivers + the orphaned ohc77 guest,
+  verified by /proc cwd); no other lanes touched.
