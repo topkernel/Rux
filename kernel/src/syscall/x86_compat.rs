@@ -28,17 +28,23 @@ const CLONE_VFORK: u64 = 0x4000;
 /// O_WRONLY | O_CREAT | O_TRUNC (creat(2))
 const O_CREAT_WRONLY_TRUNC: u64 = 0x241;
 
-/// Native x86_64 syscall numbers that exist in the ABI numbering but
-/// have NO implementation on the reference kernel (the number is a
-/// HOLE in its x86_64 table). Unmapped numbers otherwise fall through
-/// to the same-numbered GENERIC syscall, which here would be a
-/// DIFFERENT call (156 hits the generic getsid and answered _sysctl
-/// probes with ESRCH). The dispatcher returns ENOSYS for these, the
-/// reference x86_64's answer.
-pub fn native_enosys_hole(nr: u64) -> bool {
-    // 156 = __NR__sysctl: removed from the x86_64 table; LTP's sysctl
-    // tests TCONF on the reference kernel with exactly this shape.
-    nr == 156
+/// Dispatch number the dispatcher uses for an unmapped x86_64 number:
+/// matches no generic table entry, so it lands in the ENOSYS arm.
+pub const UNMAPPED_NR: i64 = u64::MAX as i64;
+
+/// Generic dispatch number (and arguments) for a native x86_64 syscall:
+/// the translate() entry, or UNMAPPED_NR (ENOSYS) when Rux has no handler
+/// — never the same-numbered generic syscall. The two tables only
+/// coincide from 424 on, so falling through ran an unrelated call: 37
+/// alarm ran linkat, 132 utime sigaltstack, 156 _sysctl getsid (LTP
+/// sysctl01/03/04), 172 iopl getpid (a positive "success"), 215
+/// epoll_wait_old munmap(a0, a1). Same-numbered entries are listed
+/// explicitly in translate().
+pub fn dispatch_target(nr: u64, args: &SyscallArgs) -> (i64, SyscallArgs) {
+    match translate(nr, args) {
+        Some((generic_nr, generic_args)) => (generic_nr as i64, generic_args),
+        None => (UNMAPPED_NR, *args),
+    }
 }
 
 /// Translate an x86_64 syscall number (and ABI-shaped arguments) to the
@@ -406,6 +412,15 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         459 => Some((459, *args)), // lsm_get_self_attr: same nr
         460 => Some((460, *args)), // lsm_set_self_attr: same nr
         461 => Some((461, *args)), // lsm_list_modules: same nr
+        462 => Some((462, *args)), // mseal: same nr
+        463 => Some((463, *args)), // setxattrat: same nr
+        464 => Some((464, *args)), // getxattrat: same nr
+        465 => Some((465, *args)), // listxattrat: same nr
+        466 => Some((466, *args)), // removexattrat: same nr
+        467 => Some((467, *args)), // open_tree_attr: same nr
+        468 => Some((468, *args)), // file_getattr: same nr
+        469 => Some((469, *args)), // file_setattr: same nr
+        470 => Some((470, *args)), // listns: same nr
         _ => None,
     }
 }
