@@ -5403,6 +5403,10 @@ sees futex parks).
   ledger baseline also brackets it), p2_ctxsw +3.6%, pipes/datagrams
   within ±3.5%, p4_fork_exec MISSING both sides (known flaky row).
   NO row regresses >20% → mm gate PASS (run/abpb-ohc25-vlock.txt).
+  RE-RUN on the up_read-fixed kernel (run/abpb-ohc25-vlockfix.txt,
+  3 reps): p3b_fault_cow 8.025 → 8.185 (+2.0%), p2_ctxsw -1.6%,
+  p4_fork_exec +0.3%, p6_unlink -6.4%, all other rows within ±1.2% —
+  gate PASS on the final code (p6_mkdrmdir flaky 1/0 reps, known).
 
 ## 3. OH boots (system-lb5 + userdata-fresh2, SMP2 KVM, LOGLEVEL7,
     dfx=fuxstuck,txnhunt; 52nd baseline = ohc24: 37 RCU-GP-BOUND
