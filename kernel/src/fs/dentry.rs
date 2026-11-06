@@ -225,6 +225,16 @@ fn retire_dentry_arc(a: Arc<Dentry>) {
     DENTRY_RET_DENTRY.lock_irqsave().push(a);
 }
 
+/// (perf-gap-hunt) Retire an Arc that claim-holding readers may still be
+/// reading through a raw pointer loaded from the full-path memo slots
+/// (fs/path_memo.rs): park it and drop it once every reader bank is
+/// quiescent — the same discipline the child-map mutators use for
+/// removed children.
+pub(crate) fn retire_arc_after_claim_readers(a: Arc<Dentry>) {
+    retire_dentry_arc(a);
+    dentry_drain_if_quiescent(true);
+}
+
 /// Park a swapped-out inode (set_inode / clear_inode).
 fn retire_inode_arc(a: Arc<Inode>) {
     DENTRY_RET_INODE.lock_irqsave().push(a);
