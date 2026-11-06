@@ -6600,3 +6600,24 @@ event the bottom task waits for. Recipe:
 aarch64 build rc=0; riscv64 build + make test in the gate logs
 (run/gate-riscv-*.log). All instrument changes are dfx/param-gated;
 zero cost on plain boots.
+
+### 60.1 FINAL ADDENDUM — SMP=4 does not rescue the boot
+
+ohw11 (SMP=4, dfx=fuxstuck,txnhunt): samgr wedged IDENTICALLY (0
+runnable, 24 futex, from the same window). The FFRT worker-pool size
+and the wider interleaving space do NOT break the cycle — the freeze
+is structural under our kernel's event order, not a concurrency-count
+starvation. Also closed this session: the "owner" of the watched word
+(ohw8 tid 342, ufw+uss fully symbolized) was an IDLE WORKER inside
+CPUWorker::WrapDispatch -> Dispatch -> WorkerLooper ->
+SExecuteUnit::WorkerIdleAction — the watched 0/1/2 word is the FFRT
+worker-group dispatch shared_mutex reader-count / version status
+family, NOT a samgr map-mutex l word (the LOCKHEAD shape test
+false-positives on VersionCtx-like objects whose +0 field is a
+file-backed data pointer — the vtable-vs-data-pointer ambiguity is
+the 61st's first fix in the arm filter). WorkerIdleAction is TIMED
+(cv.wait_for 10s) then DEEP-SLEEP (unbounded, predicate
+GetTotalTaskCnt>0): the deep sleep exits only on a push-side notify —
+the push never happened (no ready task), consistent with the graph
+deadlock; no kernel lost-wake signature found (no stuck waiter had a
+wake-to-its-own-word in its birth window).
