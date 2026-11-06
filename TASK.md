@@ -5522,3 +5522,399 @@ libffrt.so named; workers cycle; 8 forever-txns).
    console_output path — atomicity gap #2 found this session).
 3. recvmsg 5µs × 1M/min; percpu.rs:126 20.5M hits.
 4. GLOBAL_SEQ per-CPU sequence; usb_host NULL family.
+
+## TRACEPC SESSION — GLOBAL_SEQ → per-CPU sequence + timestamp merge (2026-11-06, branch oh-tracepc from oh-crash @ 70568e37)
+
+Mission (52nd §8 item 3): the trace framework's GLOBAL_SEQ — ONE atomic
+for ALL records on BOTH CPUs — is a global serialization point the
+reference does not have. Replace with per-CPU sequencing + read-time
+timestamp merge, reference semantics.
+
+### 1. Reference reading (linux-6.6 in oh-robot)
+- kernel/trace/trace_clock.c: trace_clock_local() = sched_clock() with
+  preemption disabled — per-CPU, NOT coherent across CPUs ("the
+  simplest and least coherent tracing clock").
+- kernel/trace/trace.c __find_next_entry: the reader walks every
+  per-CPU buffer and "Pick[s] the entry with the smallest timestamp";
+  strict `ts < next_ts` in a for_each_tracing_cpu(0..N) loop → ties
+  keep the LOWEST cpu. Per-CPU order = the buffer's own ring order.
+- trace.c get_total_entries: entries-written = sum of per-CPU
+  (entries + overrun) — no global counter anywhere.
+- trace_events.c __setup("trace_event="): comma-separated set_event
+  tokens at boot; bad tokens warn and continue.
+- Rux's clock is stronger than the reference's: riscv64 reads the
+  `time` CSR (one system counter), x86_64 TSC + per-CPU offset
+  correction + monotonic ratchet — globally coherent, so a timestamp
+  merge is safe here (the reference tolerates per-CPU skew at merge).
+
+### 2. The change (commits cdc9bd79 + 54100822)
+- TraceRecord.seq: now the RECORDING CPU's own ring counter (was the
+  global one). TraceRing gains `seq: AtomicU64` (per-CPU; record()
+  fetch-adds only its own ring's line — the reference's local_t shape)
+  and `written: AtomicU64` (per-CPU attempted count, never reset —
+  same totals GLOBAL_SEQ produced; summed at read time like the
+  reference's per-CPU entries+overrun).
+- merge_by_timestamp(): snapshot(), drain(), snapshot_records() sort
+  by ts_ns with a STABLE sort. Collect order is cpu0..N, each CPU's
+  records in ring order, so ties break exactly like __find_next_entry
+  (lowest CPU first; ring order within a CPU). Cross-CPU order is
+  timestamp order — the only visible semantic change (was fetch_add
+  arrival order); output FORMAT unchanged.
+- trace_event= boot parameter (reference parity, commit cdc9bd79):
+  apply_event_token extracted from set_event_write (grammar
+  unchanged); init_from_cmdline arms tokens at boot and turns
+  tracing_on on (the reference's tracing_on defaults on; ours starts
+  off — the param flips it for the same net effect). Also the A/B rig
+  enabler: identical arm set at the same instant on both kernels.
+
+### 3. Functional verification (riscv64 minimal rootfs, run/verify-trace.sh + verify-i4/i5)
+- trace_event= armed kmem:kmalloc + raw_syscalls:sys_enter/sys_exit;
+  tracing_on read 1; both CPU rings populated (cpu0 1024 entries +
+  overruns, cpu1 1024+787); entries-written consistent with per-CPU
+  stats sums.
+- MERGE ASSERTION (verify-i5): a 500-record merged window contained 4
+  CPUs ([000] 392, [001] 11, [002] 6, [003] 91) and the merged
+  timestamp sequence was GLOBALLY SORTED (sort -c clean) — the
+  reference's merge semantics on real cross-CPU data.
+- riscv64 regression-boot gate satisfied in the same boots: scripted
+  serial (cat /proc/version, ls, /proc reads), guest marker reached,
+  zero panics.
+
+### 4. Gates
+- Triple-arch builds rc=0 (riscv64, x86_64 bzImage, aarch64).
+- riscv64 make test: ALL PASSED (suite verdict green).
+- Armed OH A/B + events-off census A/B + pbench record-cost A/B:
+  see §5-7 (below, filled as runs complete).
+
+Rig: OH system-lb5 + userdata-fresh2 (symlinks, snapshot boots),
+SMP2/4G q35 KVM, cmdline dfx=txnhunt,fuxstuck unixrd=1 syscost=1
+[+ trace_event=raw_syscalls:sys_enter,raw_syscalls:sys_exit,kmem:kmalloc,kmem:kfree],
+driver run/lb-boot.py (copied from oh-crash), analyzer run/ab-analyze.sh.
+
+### 5. Armed OH boot A/B (900s, system-lb5 + userdata-fresh2, SMP2 KVM,
+    dfx=txnhunt,fuxstuck unixrd=1 syscost=1
+    trace_event=raw_syscalls:sys_enter,raw_syscalls:sys_exit,kmem:kmalloc,kmem:kfree;
+    BEFORE = abp1b = oh-crash @70568e37 + trace_event= commit only;
+    AFTER = abp1a = + per-CPU seq commit)
+- SA ladder: 51 distinct inserts BOTH sides, ceiling 8301 BOTH,
+  last insert 29.58s (B) -> 28.40s (A).
+- appspawn ServiceStart: 6.014s (B) -> 5.571s (A).
+- First FUX-STUCK ~12s both. First RCU-GP-BOUND stall: 22.2s (B) ->
+  38.1s (A); count 52 (B) -> 187 (A) — the print count is the known
+  run-to-run class (52nd saw 37/138/193/200 across identical boots);
+  first-stall LATER on the after side in this pair.
+- Early-window kernel ticks (pre-wedge-divergence, both CPUs summed):
+  t=120s 28591 (B) -> 28201 (A), t=180s 38915 (B) -> 38692 (A).
+- Census classes under ARMED load: TERM 1->0, WAKE-REFUSED 0->0,
+  WAKE-STRANDED 5->3 (organic class, no grid strands either side).
+- Verdict: boot progress NOT regressed (same SA ladder, earlier
+  appspawn, earlier last SA insert), wedge face unchanged.
+
+### 6. Events-off census A/B (780s, same rig minus trace_event)
+- BEFORE abe1b / AFTER abe1a: TERM-DESCHED 0/0, WAKE-REFUSED 0/0,
+  WAKE-STRANDED 7/8 (organic family), zero panics/OOM both, SA
+  ceiling 8301 both, appspawn 5.712s/5.722s, RCU-GP 200/197 (the
+  print-capped family). Events-off census IDENTICAL — the budget rule
+  (dfx-trace3 A/B discipline) holds: with no events armed the seq
+  change is invisible (record() gates out before any changed line).
+
+### 7. pbench record-cost A/B (q35 KVM SMP2/1G, same probe binary,
+    --probe-bin work/pbench-probe; events-off and armed pairs,
+    scripts/test/pbench_boot.py --accel kvm)
+- EVENTS-OFF (disabled-path check): p1_null med 0.290us BOTH,
+  p1_clock med 0.381us BOTH — byte-identical medians.
+- ARMED (sys_enter+sys_exit+kmem:kmalloc+kfree): armed overhead
+  vs off on p1_null = 0.411us per getuid = 2 records/syscall
+  (~205ns/record all-in: comm copy + flags + ts + push + seq).
+  - p1_null: med 0.701 (B) -> 0.701 (A) us; avg 0.735 -> 0.716
+    (-2.6%); p99 1.403 -> 0.741 (-47%).
+  - p1_clock: med 0.801 -> 0.801; avg 0.843 -> 0.816 (-3.2%);
+    p99 1.603 -> 0.832 (-48%).
+  - p2_ctxsw: med 1.898 -> 1.833 (-3.4%), avg 2.655 -> 2.607.
+  - Armed p99 nearly recovers the events-off p99 (0.741 vs 0.300/1.403):
+    the global-seq cost lived in the TAIL (cache-line bounce when the
+    other CPU holds the line), exactly what removing the shared
+    fetch_add predicts on SMP2. Medians unchanged; tails improved.
+- Record-cost class: unchanged at the median, improved in the tail —
+  within the dfx-trace3 13-35ns/record enabled-cost class or better
+  (that lane's worktree is gone; the class could not be re-measured
+  directly, so the same-rig before/after above is the evidence).
+
+### 8. Gates summary
+- Triple-arch builds rc=0; riscv64 make test ALL PASSED; riscv64
+  regression boot (scripted serial, zero panics) PASS; events-off
+  census IDENTICAL; armed A/B no regression with tail improvements.
+
+### 9. Handoff notes
+- The trace_event= boot parameter is generally useful for the
+  campaign: any lane can now arm a fixed event set from t=0
+  (deterministic; no dependence on OH tooling's 3.5s tracefs write).
+- Cross-CPU trace output now reads in TIMESTAMP order (reference
+  contract); any parser that assumed global-seq arrival order must
+  use ts (none exist in-tree; the rendered format is unchanged).
+- probe_open.c appeared in the worktree root with an epoch mtime (a
+  make-rootfs/test tarball-extraction stray); removed uncommitted.
+
+Mission (from the coordinator, 2026-11-06): replace the VMA pure-spinner
+rwlock (52nd's TASK.md §6b evidence) with the reference's sleepable
+rw_semaphore. Branch oh-vlock off origin/oh-crash (70568e37).
+
+## 1. Design (reference: linux-6.6 kernel/locking/rwsem.c)
+
+New primitive `kernel/src/sync/rwsem.rs` (`RwSemaphore` + data-carrying
+`Rwsem<T>`), wired into `MmStruct::vma_manager` (vma_read/vma_write/
+vma_try_read). Semantics ported line-for-line where Rux has the
+machinery:
+
+- count word layout (rwsem.c:117-128): [0] WRITER_LOCKED, [1] WAITERS,
+  [2] HANDOFF, [8..] reader count (bias 1<<8), [63] READFAIL.
+- Reader fast path fetch_add(READER_BIAS); READ_FAILED_MASK blocks new
+  readers once ANY waiter is queued (rwsem.c:241-254) — the reference's
+  anti-barging, no invented fairness.
+- Writer fast path CAS 0→WRITER_LOCKED (rwsem.c:256-266).
+- Waiters sleep UNINTERRUPTIBLE on an internal wait_lock-guarded FIFO
+  list. Reader grant = granter pre-adds bias + removes entry
+  (rwsem_mark_wake 509-567, phase-fair batches ≤0x100); writer grant =
+  woken head re-runs the queued CAS (rwsem_try_write_lock 604-666).
+- HANDOFF protocol: waiter older than RWSEM_WAIT_TIMEOUT (~4ms,
+  DIV_ROUND_UP(HZ,250)) sets the handoff bit; blocks fast paths and
+  steals until the head waiter owns (rwsem.c:604-666, 108-115).
+- up_read wakes on last-reader-out with waiters; up_write always wakes
+  with waiters (rwsem.c:1338-1378).
+- Writer optimistic spinning (rwsem.c:819-935): owner-word spin gated
+  on owner-on-CPU (pid pinned via pid_hash_lookup_pinned — Rux owner
+  word carries pid+flags, not a task pointer), need_resched aborts,
+  reader-phase time budget (20+readers)/2 µs cap 25 µs then
+  NONSPINNABLE latch. Bounded-rounds shape per SleepMutex (no osq in
+  Rux — documented divergence, behavior preserved).
+
+Documented Rust/Rux divergences (all behavior-preserving):
+- Fast-path count RMW + owner publish share one preempt-disable
+  section (rwsem.c:137-139); held sections are preemptible (sleepable
+  lock, sleepable above spinlocks — INV-LOCK-7 order unchanged).
+- Park protocol = Rux state-first + re-check discipline (Task::sleep
+  warning): set UNINTERRUPTIBLE, re-check grant under wait_lock,
+  schedule; grant removal + wake outside wait_lock. No WaitQueueHead:
+  the wait list IS the wake registry.
+- No RT-task branches (one fair class); no lockevents; waiters
+  uninterruptible only (no killable variants, like mmap_lock users).
+- Degradation: no-current-task contexts (early boot/secondary harts)
+  bounded pure-spin instead of refuse (SleepMutex parity).
+
+Preemption-behavior audit of every vma_read/vma_write caller (25 files):
+- All sites are syscall/kernel-thread context; fault paths enter at
+  preempt_count==0 (x86_64 trap.rs "count must be exactly 0" invariant).
+- Nesting is vma-lock-outside-spinlocks everywhere (vma_files write,
+  PTE sections, page_desc) — sanctioned order for a sleepable lock;
+  no site takes a vma lock while holding any spinlock or RCU read
+  side (rcu_read_lock = preempt_disable here).
+- No same-task read-read nesting (R73 restructure already made fault
+  paths drop the guard before fill work; find_vma callers are
+  standalone). The remaining writer-recursion cases would have
+  deadlocked on the spinner too.
+- The mm fork path (mm_ops.rs fork copy) already snapshots under one
+  read era and replays under the child's write lock — unchanged.
+
+Diagnostics added (print-only): RWSEM-STALL-R/W tripwire (3 s parked
+waiter, 1 line/10 s global rate limit — SleepMutex STALL precedent) and
+`lastsys=`/`a0=` in the khungtaskd HUNG-CTX line (names the syscall a
+D-state task is parked in; needed because the fuxstuck census only
+sees futex parks).
+
+## 2. Gates
+
+- Builds: x86_64 / riscv64 / aarch64 all rc=0
+  (run/build-x86-vlock{1,2}.log, run/build-rv-vlock1.log,
+  run/build-a64-vlock1.log).
+- riscv64 make test: ALL PASSED — 1318/1318 (run/maketest-vlock1.log)
+  and 1319/1319 with the new rwsem fast-path protocol row
+  (run/maketest-vlock2.log; the task-308 HUNG reports during the suite
+  are pre-existing — the 52nd's maketest-52.log has the same 4).
+- boot-soak-fast-class minimal smoke (musl rootfs, SMP2): boots, full
+  suite green, no POISONED/KERNPANIC/wedge (run/soak-fast-vlock1.log).
+- pbench Tier-2 (mm) A/B, same rig KVM SMP2 2G, 3 reps interleaved,
+  base = bzImage-ohc25 (52nd final kernel):
+  p3b_fault_cow 7.815 → 8.045 µs (+2.9%, inside ±20%; the 8.075 µs
+  ledger baseline also brackets it), p2_ctxsw +3.6%, pipes/datagrams
+  within ±3.5%, p4_fork_exec MISSING both sides (known flaky row).
+  NO row regresses >20% → mm gate PASS (run/abpb-ohc25-vlock.txt).
+  RE-RUN on the up_read-fixed kernel (run/abpb-ohc25-vlockfix.txt,
+  3 reps): p3b_fault_cow 8.025 → 8.185 (+2.0%), p2_ctxsw -1.6%,
+  p4_fork_exec +0.3%, p6_unlink -6.4%, all other rows within ±1.2% —
+  gate PASS on the final code (p6_mkdrmdir flaky 1/0 reps, known).
+
+## 3. OH boots (system-lb5 + userdata-fresh2, SMP2 KVM, LOGLEVEL7,
+    dfx=fuxstuck,txnhunt; 52nd baseline = ohc24: 37 RCU-GP-BOUND
+    prints, SA ladder to 43.0s, frozen pixels 82f0a25f)
+
+- vlock1 (pre-tripwire kernel): SA ladder 0 OpenSo (samgr parked in a
+  userspace futex at 5.5s right after binder mmap — the §6a pandemic
+  shape), RCU-GP-BOUND 0, stuck_total 52, wedge 82f0a25f.
+- vlock2 (taskdump armed): same shape, 0 OpenSo, 0 RCU-GP-BOUND,
+  stuck_total 51, hung task 306 at 181s (same pid as ohc24's hung
+  306 — pre-existing pandemic family), wedge 82f0a25f.
+- vlock4 (tripwire kernel): CONTEXT MANAGER registered, SA ladder 31
+  OpenSo (last 13.7s — ladder-progress variance; ohc24 reached 43s),
+  RCU-GP-BOUND 2 (vs 37), RWSEM-STALL 0, stuck_total ≤118, wedge
+  82f0a25f.
+- vlock5: 80 OpenSo (last 33.9s; bootanimation.ready marker 29.4s —
+  deeper ladder progress than the baseline description), 198 RCU-GP,
+  stuck_total 193, RWSEM-STALL x2 (below), wedge 82f0a25f.
+- vlock6: 66 OpenSo (26.3s), 92 RCU-GP, stuck_total 187, RWSEM-STALL 0,
+  wedge 82f0a25f.
+
+The two vlock5 stall prints (waiters 348/samgr-thread and 607, waited
+1000j and 4977j behind count=0x7 = WRITER held + HANDOFF demanded,
+queued=1): the grant DID arrive — pid 348 is later seen INTERRUPTIBLE
+in userspace (it left the rwsem and parked on a futex) — so these name
+GENUINELY SLOW vma_write holders (10-50 s sections; candidates: the
+0x80000000-len PROTNONE-range teardowns and mm exit walks), through
+which waiters now SLEEP instead of monopolizing a CPU. The follow-up
+owner-pid tripwire build (vlock6) saw zero stalls. No lost-grant strand
+in 5 boots / ~25 min of wedged-boot exposure.
+
+Reading: the 0-OpenSo boots are the known early-wedge race variance
+(the 51st/52nd documented wedge classes), not an rwsem regression —
+boot 4 with the identical kernel runs the ladder. RWSEM-STALL never
+fired: no lost-grant strand in the new park path. RCU-GP-BOUND
+collapses 37→0-2 — the vma spin monopolist windows were a producer of
+grace-stall prints; the sleepable lock removes them. The terminal
+wedge class (frozen logo 82f0a25f, hilogd §6a park, binder backpressure
+pandemic) is unchanged — those are the 53rd's targets, not this lane's.
+
+## 4. Handoff notes
+
+- The rwsem is generic (`Rwsem<T>`); other RwSpinlock users (vma_files,
+  saved_auxv, GlobalPteLock) deliberately NOT converted — short
+  sections / IRQ-adjacent contexts.
+- If the 53rd's sleepsnap wait-object naming confirms hilogd's mmap
+  park waits on the vma lock, that park should now SLEEP instead of
+  spin — check a vlock kernel boot for hilogd lastsys=9 parks (the
+  new HUNG-CTX lastsys= field prints it).
+
+## 5. POST-CLOSE FIX (found in the final review pass): up_read wake bug
+
+The reference's up_read tests the POST-subtraction count
+(atomic_long_add_return_release); the port used fetch_sub (PRE word)
+against the same mask — the last-reader-out wake could never fire. A
+writer queued behind readers was only rescued by the next up_write on
+the same mm (every release pumped the queue); on a quiet mm it could
+strand. This is exactly the vlock1/vlock2 shape (samgr silent after
+binder mmap, 0 OpenSo, no context manager — its mmap writer queued
+behind its own faulting readers, then the mm went quiet) and explains
+why churnier boots (vlock4/5/6) ran the ladder anyway.
+
+Fixed in d36df831 (subtract the bias before testing). Gates rerun on
+the fixed kernel:
+- x86_64 / riscv64 / aarch64 builds rc=0
+  (run/build-x86-vlock4.log, build-rv-vlock3.log, build-a64-vlock2.log).
+- riscv64 make test: 1319/1319 ALL PASSED incl. the rwsem row
+  (run/maketest-vlock4.log; an interim 1318-run was a stale-artifact
+  race with parallel rebuilds, not a missing row).
+- OH boot vlock7 (fixed): context manager registered, 80 OpenSo to
+  39.3s (deepest ladder of the session, near ohc24's 43s), RWSEM-STALL
+  0, RCU-GP-BOUND 200, stuck_total 177, terminal wedge 82f0a25f.
+
+## 6. Final ledger (all boots, system-lb5 + userdata-fresh2, SMP2 KVM,
+   LOGLEVEL7, dfx=fuxstuck,txnhunt)
+
+| boot  | kernel      | OpenSo | last SA | ctx-mgr | RCU-GP | stuck_max | RWSEM-STALL | wedge     |
+|-------|-------------|--------|---------|---------|--------|-----------|-------------|-----------|
+| vlock1| pre-tripwire| 0      | -       | no      | 0      | 52        | n/a         | 82f0a25f  |
+| vlock2| tripwire v1 | 0      | -       | no      | 0      | 51        | n/a         | 82f0a25f  |
+| vlock4| tripwire v1 | 31     | 13.7s   | yes     | 2      | 118       | 0           | 82f0a25f  |
+| vlock5| tripwire v1 | 80     | 33.9s   | yes     | 198    | 193       | 2 (slow holder, granted) | 82f0a25f |
+| vlock6| tripwire v2 | 66     | 26.3s   | yes     | 92     | 187       | 0           | 82f0a25f  |
+| vlock7| up_read fix | 80     | 39.3s   | yes     | 200    | 177       | 0           | 82f0a25f  |
+| (52nd ohc24 baseline: SA to 43.0s, 37 RCU-GP prints, frozen 82f0a25f) |
+
+Read: the up_read fix moves every post-fix boot onto the ladder (the
+0-OpenSo class disappears with the correct wake). The two vlock5 stall
+prints remain the only rwsem-stall observations — behind 10-50s
+vma_write holders (PROTNONE-range teardown / mm exit walks), with the
+grant arriving (waiter later seen in userspace). No lost-grant strand.
+RCU-GP-BOUND and stuck_total stay variance-dominated; the terminal
+wedge class (frozen logo 82f0a25f, hilogd §6a, binder backpressure) is
+unchanged — the 53rd's targets.
+
+## 54TH SESSION — usb lane: usb_host NULL family CLOSED AS IMAGE-INHERITED; the reference kernel crashes identically (2026-11-06, branch oh-usb @ 70568e37)
+
+Mission (53rd item 5 / 51st §11.5): kill the rip 0x7ff082996bac family
+under the standing rule "reference boots the same image crash-free".
+
+### VERDICT: no divergence exists. The REFERENCE KERNEL'S usb_host
+### segfaults in the identical deterministic crash loop (sig-11 x12-16
+### per reference boot). "Reference = ZERO segfaults" was a census
+### artifact (kernel-side SEGV prints; stock Linux emits none per
+### userspace fault — the crashes are visible in init's SIGCHLD
+### WARNING lines, which the census grep missed).
+
+### 1. Symbolization complete (rip → instruction → source)
+- Faulting r-x VMA (0x7ff08298f000-0x7ff0829aa000, off 0xe000, size
+  0x1b000) = /vendor/lib64/libusb_pnp_manager.z.so (R-E LOAD file
+  0xe49c→vaddr 0xf49c filesz 0x1a464). Fault file offset 0x15bac →
+  ELF vaddr 0x16bac.
+- The code at 0x16b70-0x16bb2: OsalMutexLock(&g_ddkListenerList.
+  listMutex) [no-op, realMutex==NULL] → mov listenerList.next==NULL →
+  DListIsEmpty false → DLIST_FOR_EACH walk → `mov (%rbx),%rax` with
+  rbx=0. = DdkListenerMgrAdd (ddk_pnp_listener_mgr.c:152) with inlined
+  DdkListenerMgrIsExists. head rbp 0x7ff0829acef8 = bias 0x7ff082980000
+  + 0x2cef8 = &g_ddkListenerList.listenerList. pos=container_of(NULL)
+  =-0x10 explains rax=0xffff...fff0 (NOT an EBUSY). Confirmed by the
+  referenced rodata strings (usb_ddk_listener_mgr / add listener
+  repeatedly / DdkListenerMgrAdd).
+### 2. Why the list is never initialized — image determinism
+UsbPnpManagerInit → DdkDevMgrInit(path) must succeed BEFORE
+DdkListenerMgrInit DListHeadInits the list. The path comes from the hcb:
+usb_pnp_manager_device/device0 deviceMatchAttr is EMPTY and
+"gadget_state_path" exists nowhere in hdf_default.hcb (nor in the hcs
+source: vendor/edu/x86_64_virt/hdf_config/uhdf/device_info.hcs:74).
+GetString fails → path NULL → DdkDevMgrInit(NULL)=HDF_ERR_INVALID_PARAM
+→ Init returns before DdkListenerMgrInit → list stays .bss-zero → every
+later DdkListenerMgrAdd walks NULL. No kernel input can change this.
+Crashing caller = UsbDeviceImpl::UsbdEventHandle (usb_device_impl.cpp:342)
+from HdfUsbDeviceInterfaceDriverBind (device1, libusb_device_driver.z.so;
+its impl lib is a DT_NEEDED → Bind needs no dlopen; rsp[0]="true" is
+GetBoolParameter("const.SystemCapability.Driver.ExternalDevice")'s
+buffer). libusb_driver.z.so (usb_device device0) is MISSING from
+/vendor/lib64 — that Bind never runs on either kernel.
+### 3. Empirical confirmation on ours (temp USBTRACE instrument, removed)
+Boot usbh1 (same rig: system-lb5 + userdata-fresh2, KVM SMP2): usb_host
+did 6x faccessat(hcb)=0, 2x faccessat("/dev/hdf/")=-2, then ZERO
+openat/getdents64/socket until the crash — no opendir("/sys/bus/usb/
+devices") (ScanSysfs never ran; path was NULL), no uevent netlink
+socket (DdkUeventInit is ordered after DdkListenerMgrInit). Identical
+rip/rsp/rbp on every init restart — deterministic, not a race.
+(Also note: /dev/hdf/ ENOENT is NOT a divergence — plain Linux has no
+khdf either; the stack falls back and proceeds.)
+### 4. The decisive data (reference logs, oh-launcher/run/)
+- refu1: usb_host sig-11 from t=4.74s, crash→restart→crash ~350ms,
+  bursts of 4, re-triggered 245s/485s → 12/boot. refu2: 12, refu8: 12,
+  refu9: 16. EVERY signal-11 in every reference log is usb_host.
+- refu9: ServiceStart usb_host 4.218s → first sig-11 5.758s → retries
+  through 728s.
+- OURS: 4 SIGDEATH episodes/boot (ohc24/26/29) — FEWER than the
+  reference (our boots wedge before init's later retry bursts). The old
+  "12-18/boot" was rip-HIT counting (3 fault prints + N restarts per
+  episode).
+Same image, same deterministic crash, same loop shape → exact reference
+parity → under the campaign's own rule this is NOT an our-kernel bug,
+and fabricating inputs (e.g. /dev/hdf nodes or config values) to make
+UsbPnpManagerInit succeed would CREATE a divergence.
+### 5. Consequences
+1. Close the family (51st §11.5, 53rd item 5). The 49th's "first
+   domino" theory (usb_host storm feeding the wedge) is dead: the
+   reference carries the same storm and still reaches launcher.ready.
+2. Future reference crash censuses must grep "exit with signal : 11"
+   on the reference serial log, not kernel fault-print patterns.
+3. The devhost death storm feeds samgr load EQUALLY on both kernels;
+   eliminating it is an image-side fix (upstream OH bug:
+   DdkListenerMgrAdd reachable before DdkListenerMgrInit), out of
+   kernel-campaign scope.
+### 6. Housekeeping
+- Kernel source UNTOUCHED (hunt instrument added then removed; git diff
+  empty; no kernel commits, no push, no merge gates triggered).
+- run/: usb-boot.py, oh-usbh1-serial.log, vlib/ (extracted .so),
+  rd2/ (ramdisk), hdf_default.hcb, bzImage-usbhunt1 — gitignored,
+  kept to reproduce §1-§2 with readelf/objdump/debugfs.
+- No stray QEMU from this lane.

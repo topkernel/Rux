@@ -920,6 +920,13 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "diagnostic subsystem", true);
         }
 
+        // The reference's trace_event= boot parameter: comma-separated
+        // set_event tokens applied before the first userspace
+        // instruction (kernel/trace/trace_events.c __setup).
+        {
+            trace::files::init_from_cmdline();
+        }
+
         // Persistent kernel log — /var/log/kmsg, the console tail on
         // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
         // zero cost on the printk hot path — the flusher walks the

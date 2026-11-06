@@ -34,6 +34,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
 use crate::sync::rwlock::RwSpinlock;
+use crate::sync::rwsem::Rwsem;
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
@@ -164,8 +165,16 @@ pub struct MmStruct {
     /// the arch hook `arch::mm::mm_ops::pte_lock_for(&mm)`.
     pte_lock: PteLock,
 
-    /// VMA manager (protected by RwLock for interior mutability)
-    vma_manager: RwSpinlock<VmaManager>,
+    /// VMA manager. SLEEPABLE rwsem (the mmap_lock shape, linux-6.6
+    /// kernel/locking/rwsem.c — see sync/rwsem.rs): mm paths hold
+    /// this across slow work (pagefault COW under a read guard while
+    /// page allocation crawls; VmaManager::add under the write
+    /// guard), and the former pure spinner monopolized CPUs whenever
+    /// a slow reader met a pending writer (the 52nd's §6b evidence).
+    /// Waiters now SLEEP; held sections are preemptible. Position in
+    /// the lock graph is unchanged (INV-LOCK-7: vma lock above the
+    /// PTE section, above page_desc).
+    vma_manager: Rwsem<VmaManager>,
 
     /// Pinned file references for file-backed VMAs, keyed by VMA start
     /// address. Linux's VMA holds vm_file (a refcounted struct file) that
@@ -360,7 +369,7 @@ impl MmStruct {
             pgd,
             asid: AtomicU16::new(0),  // Will be allocated on first use
             pte_lock: PteLock::new(),
-            vma_manager: RwSpinlock::new(vma_manager),
+            vma_manager: Rwsem::new("vma-lock", vma_manager),
             vma_files: RwSpinlock::new(alloc::collections::BTreeMap::new()),
             space_type,
             // Segment ranges
@@ -961,17 +970,22 @@ impl MmStruct {
 
     // ==================== VMA Operations ====================
 
-    /// Acquire VMA read lock
+    /// Acquire VMA read lock. SLEEPABLE (rwsem, the mmap_read_lock
+    /// shape): on contention the caller parks instead of spinning
+    /// preempt-disabled; a held section is preemptible. Task/syscall
+    /// context only.
     #[inline]
-    pub fn vma_read(&self) -> crate::sync::rwlock::RwSpinlockReadGuard<'_, VmaManager> {
+    pub fn vma_read(&self) -> crate::sync::rwsem::RwsemReadGuard<'_, VmaManager> {
         self.vma_manager.read()
     }
 
-    /// Try-acquire VMA read lock (None when contended). Diagnostic
-    /// callers in softirq context (the fuxstuck census) skip their
-    /// decode on contention instead of spinning IF=0 against a writer.
+    /// Try-acquire VMA read lock (None when contended; never sleeps).
+    /// Diagnostic callers in softirq context (the fuxstuck census)
+    /// skip their decode on contention instead of blocking against a
+    /// writer. Refuses while any waiter is queued or handoff is
+    /// pending (down_read_trylock semantics).
     #[inline]
-    pub fn vma_try_read(&self) -> Option<crate::sync::rwlock::RwSpinlockReadGuard<'_, VmaManager>> {
+    pub fn vma_try_read(&self) -> Option<crate::sync::rwsem::RwsemReadGuard<'_, VmaManager>> {
         self.vma_manager.try_read()
     }
 
@@ -1004,7 +1018,12 @@ impl MmStruct {
         m.get(&vma_start).cloned()
     }
 
-    pub fn vma_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, VmaManager> {
+    /// Acquire VMA write lock. SLEEPABLE (rwsem, the mmap_write_lock
+    /// shape): a contended writer first tries bounded optimistic
+    /// spinning (only while the owner is on-CPU) and then parks
+    /// uninterruptibly — it never spins the CPU away. Task/syscall
+    /// context only.
+    pub fn vma_write(&self) -> crate::sync::rwsem::RwsemWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }
 
