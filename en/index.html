@@ -11,16 +11,16 @@
 
 <nav class="nav">
   <div class="nav-inner">
-    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <a class="nav-logo" href="index.html"><span class="crab">🦀</span>Rux</a>
     <div class="nav-links">
-      <a href="../index.html">Home</a>
-      <a href="../architecture/design.html">Architecture</a>
-      <a href="../performance/index.html">Performance</a>
-      <a href="../security/index.html">Security</a>
-      <a href="../testing/index.html">Testing</a>
-      <a href="../guides/getting-started.html">Getting started</a>
-      <a href="../progress/roadmap.html">Progress</a>
-      <span class="lang-sw"><a href="../index.html">中文</a><a class="on" href="index.html">EN</a></span>
+      <a href="index.html">Home</a>
+      <a href="architecture/design.html">Architecture</a>
+      <a href="performance/index.html">Performance</a>
+      <a href="security/index.html">Security</a>
+      <a href="testing/index.html">Testing</a>
+      <a href="guides/getting-started.html">Getting started</a>
+      <a href="progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a class="on" href="../index.html">中文</a><a href="index.html">EN</a></span>
       <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
     </div>
   </div>
@@ -42,8 +42,8 @@
         <span class="chip">ext4 / binder / ELF</span>
       </div>
       <div class="hero-actions">
-        <a class="btn btn-primary" href="../guides/getting-started.html">Get started →</a>
-        <a class="btn btn-ghost" href="../architecture/design.html">Architecture &amp; design</a>
+        <a class="btn btn-primary" href="guides/getting-started.html">Get started →</a>
+        <a class="btn btn-ghost" href="architecture/design.html">Architecture &amp; design</a>
         <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
       </div>
       <a class="repo-addr" href="https://github.com/topkernel/Rux">git clone https://github.com/topkernel/Rux.git</a>
@@ -145,13 +145,13 @@
         <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
         <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
         <div class="nums">345+ syscalls · LTP <b>1084/1869</b></div>
-        <a class="more" href="../architecture/design.html#divergences">Divergence register →</a>
+        <a class="more" href="architecture/design.html#divergences">Divergence register →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Rust safety, with a ledger</h3>
         <p>All-Rust kernel (no_std). All 34 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 11 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
         <div class="nums">unsafe lines 12.9% · Kani 157 proofs</div>
-        <a class="more" href="../security/index.html">Security section →</a>
+        <a class="more" href="security/index.html">Security section →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🤖</span>Parallel AI engineering</h3>
@@ -162,7 +162,7 @@
         <h3><span class="ico">⚡</span>Performance is a gate</h3>
         <p>Every merge is reviewed for both function and performance: three gate tiers + six guarded domains (memory/scheduler/fs/IRQ/IPC/binder) — no merge without measurement.</p>
         <div class="nums">GRQ hold <b>~2.8 µs</b> measured</div>
-        <a class="more" href="../performance/index.html">Performance section →</a>
+        <a class="more" href="performance/index.html">Performance section →</a>
       </div>
     </div>
   </div>
@@ -180,49 +180,49 @@
         <h3><span class="ico">🧮</span>Scheduler</h3>
         <p>A single global run queue (GRQ): for the 2–4 vCPU target it eliminates load balancing and task stealing entirely; wakeup paths go direct.</p>
         <div class="nums">hold <b>~2.8µs</b> · census 8/32 in band</div>
-        <a class="more" href="../architecture/design.html#sched">Design →</a>
+        <a class="more" href="architecture/design.html#sched">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧠</span>Memory management</h3>
         <p>Buddy allocator + magazine small-object allocation, global page cache, per-task VMAs; the munmap churn-race family fully closed.</p>
         <div class="nums">class-lock sections <b>19.7M</b>/boot · gate ≤25M</div>
-        <a class="more" href="../architecture/design.html#mm">Design →</a>
+        <a class="more" href="architecture/design.html#mm">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">💾</span>File systems</h3>
         <p>ext4 (rw) + async batched block reads + buffer-cache hit-rate protection; pbench filesystem medians all in band.</p>
         <div class="nums">buffer cache hit rate <b>99.1%</b></div>
-        <a class="more" href="../architecture/design.html#fs">Design →</a>
+        <a class="more" href="architecture/design.html#fs">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📡</span>IPC &amp; binder</h3>
         <p>A complete OpenHarmony-compatible binder, unix sockets, pipes, SysV IPC; the cross-process deadlock family fixed and regressed.</p>
         <div class="nums">pipe round trip <b>µs class</b> · full OH service mesh</div>
-        <a class="more" href="../architecture/design.html#ipc">Design →</a>
+        <a class="more" href="architecture/design.html#ipc">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🌐</span>Network stack</h3>
         <p>Hand-written TCP/IP stack: socket API semantics aligned; loopback and local paths continuously verified by LTP socket families and benchmarks.</p>
         <div class="nums">socket families growing in LTP</div>
-        <a class="more" href="../architecture/design.html#net">Design →</a>
+        <a class="more" href="architecture/design.html#net">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🔌</span>Drivers</h3>
         <p>virtio-blk (PCI/MMIO, async completion rings), serial console, input; the display path carries GNOME and OH rendering.</p>
         <div class="nums">completion path rebuilt through several concurrency rounds</div>
-        <a class="more" href="../architecture/design.html#drivers">Design →</a>
+        <a class="more" href="architecture/design.html#drivers">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🔍</span>Observability</h3>
         <p>A unified trace-event framework + tracefs (semantics aligned with Linux), syscost census, kallsyms, task dumps, watchdog.</p>
         <div class="nums">new observability is <b>tracepoint</b>-only</div>
-        <a class="more" href="../architecture/design.html#trace">Design →</a>
+        <a class="more" href="architecture/design.html#trace">Design →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🧭</span>Arch port layer</h3>
         <p>Boot protocols (bzImage / image headers), trap entry, context switch, TLB management; ~90% of the kernel is arch-independent.</p>
         <div class="nums">x86_64 / riscv64 / aarch64</div>
-        <a class="more" href="../architecture/design.html#archs">Design →</a>
+        <a class="more" href="architecture/design.html#archs">Design →</a>
       </div>
     </div>
   </div>
@@ -240,25 +240,25 @@
         <h3><span class="ico">🧪</span>LTP compliance</h3>
         <p>The full 1,869-case scan grew from 35 early passes to 1,084; every round is archived and new failures are isolated-rerun twice before being called regressions.</p>
         <div class="nums">current <b>1084 / 1869</b> (r27)</div>
-        <a class="more" href="../testing/ltp.html">LTP scan →</a>
+        <a class="more" href="testing/ltp.html">LTP scan →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
         <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; a standing 11-QEMU concurrent stress cluster (randomized/fuzz/memstorm).</p>
         <div class="nums">make test <b>1267/1267</b> · 2100s zero panic</div>
-        <a class="more" href="../testing/stability.html">Stability →</a>
+        <a class="more" href="testing/stability.html">Stability →</a>
       </div>
       <div class="card">
         <h3><span class="ico">📊</span>Performance</h3>
         <p>Three gate tiers + six guarded domains. Same-rig KVM-vs-KVM vs Linux: 14 paired cases, 9 ahead (page fault 2.26–2.45×, mmap 4.2×, pipe 3.56×), 5 behind (worst 1.82×); Geekbench MC +4.3%, SC +5.1%.</p>
         <div class="nums">14 paired cases · full ledger</div>
-        <a class="more" href="index.html">Performance →</a>
+        <a class="more" href="performance/index.html">Performance →</a>
       </div>
       <div class="card">
         <h3><span class="ico">🔐</span>Security</h3>
         <p>All 34 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 11 safe ownership-class), zero pointer-expression defects in safe code; 157 Kani harnesses prove the core unsafe code for all inputs.</p>
         <div class="nums">unsafe lines 12.9% · gaps stated plainly</div>
-        <a class="more" href="../security/index.html">Security →</a>
+        <a class="more" href="security/index.html">Security →</a>
       </div>
     </div>
   </div>
@@ -269,7 +269,7 @@
     <div class="sec-head">
       <span class="kicker">Quickstart</span>
       <h2>Three commands</h2>
-      <p>A Linux host + QEMU is all you need. Full requirements, toolchains and troubleshooting in <a href="../guides/getting-started.html">Getting started</a>.</p>
+      <p>A Linux host + QEMU is all you need. Full requirements, toolchains and troubleshooting in <a href="guides/getting-started.html">Getting started</a>.</p>
     </div>
     <div class="card-grid grid-3">
       <div class="card">
@@ -303,34 +303,34 @@ make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME desktop</span></code></
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🏛️</span>Architecture</h3>
-        <a href="../architecture/design.html">Architecture &amp; module design (sched/mm/fs/IPC/net/drivers/observability)</a>
-        <a href="../architecture/structure.html">Code layout</a>
-        <a href="../architecture/boot.html">Boot flow (bzImage / image headers / three archs)</a>
-        <a href="../architecture/memory.html">Memory management</a>
-        <a href="../architecture/riscv64.html">Porting guide</a>
-        <a href="../architecture/kernel-lock.html">Lock ordering invariants</a>
+        <a href="architecture/design.html">Architecture &amp; module design (sched/mm/fs/IPC/net/drivers/observability)</a>
+        <a href="architecture/structure.html">Code layout</a>
+        <a href="architecture/boot.html">Boot flow (bzImage / image headers / three archs)</a>
+        <a href="architecture/memory.html">Memory management</a>
+        <a href="architecture/riscv64.html">Porting guide</a>
+        <a href="architecture/kernel-lock.html">Lock ordering invariants</a>
       </div>
       <div class="card">
         <h3><span class="ico">🔬</span>Quality sections</h3>
-        <a href="index.html">Performance (gates / lmbench / Geekbench / queue)</a>
-        <a href="../security/index.html">Security &amp; formal verification (taxonomy / Kani / gaps)</a>
-        <a href="../testing/index.html">Testing overview</a>
-        <a href="../testing/ltp.html">LTP scan</a>
-        <a href="../testing/ltp-full.html">LTP full case list (1,869)</a>
-        <a href="../testing/stability.html">Stability</a>
-        <a href="../testing/stress.html">Stress</a>
+        <a href="performance/index.html">Performance (gates / lmbench / Geekbench / queue)</a>
+        <a href="security/index.html">Security &amp; formal verification (taxonomy / Kani / gaps)</a>
+        <a href="testing/index.html">Testing overview</a>
+        <a href="testing/ltp.html">LTP scan</a>
+        <a href="testing/ltp-full.html">LTP full case list (1,869)</a>
+        <a href="testing/stability.html">Stability</a>
+        <a href="testing/stress.html">Stress</a>
       </div>
       <div class="card">
         <h3><span class="ico">🛠️</span>Guides</h3>
-        <a href="../guides/getting-started.html">Getting started: environment → build → run</a>
-        <a href="../guides/development.html">Contributing: workflow / gates / debugging</a>
-        <a href="../guides/configuration.html">Kernel configuration (Kernel.toml)</a>
+        <a href="guides/getting-started.html">Getting started: environment → build → run</a>
+        <a href="guides/development.html">Contributing: workflow / gates / debugging</a>
+        <a href="guides/configuration.html">Kernel configuration (Kernel.toml)</a>
       </div>
       <div class="card">
         <h3><span class="ico">📈</span>Progress</h3>
-        <a href="../progress/roadmap.html">Milestones &amp; roadmap</a>
-        <a href="../progress/changelog.html">Changelog highlights</a>
-        <a href="../progress/quickref.html">Command reference</a>
+        <a href="progress/roadmap.html">Milestones &amp; roadmap</a>
+        <a href="progress/changelog.html">Changelog highlights</a>
+        <a href="progress/quickref.html">Command reference</a>
       </div>
     </div>
   </div>
