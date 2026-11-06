@@ -1284,23 +1284,51 @@ pub fn note_sz32_caller(loc: *const u8) {
     }
 }
 
-pub static SZ32_STACK: [core::sync::atomic::AtomicUsize; 64] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+/// Latest-wins single sample: the rbp walk overwrites these 24 slots
+/// every 5Mth sz32 routing. (The first design filed 4x16 slots and
+/// stopped capturing after 20M routings — every dump after that printed
+/// the n=0 EARLY-BOOT sample, never the storm sample. Latest-wins keeps
+/// the freshest storm context instead.)
+pub static SZ32_STACK: [core::sync::atomic::AtomicUsize; 24] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 24];
+/// Task comm at sampling time — WHO was running when the storm
+/// allocated (raw bytes, dump prints them printable-escaped).
+pub static SZ32_COMM: [core::sync::atomic::AtomicU8; 16] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 16];
 static SZ32_SN: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+/// Routing index of the last stored sample (printed so the dump reader
+/// knows which 5M-stride snapshot it is looking at).
+static SZ32_SAMPLE_N: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
 
-/// Walk 3 frames from the GlobalAlloc router and store the return
-/// addresses (8 slots of 3 frames each, every 5Mth sz32 routing).
+/// Walk 24 frames from the GlobalAlloc router and store the return
+/// addresses plus the current task comm, every 5Mth sz32 routing
+/// (latest sample wins). The fmt machinery is ~8 frames deep; the
+/// format! CALLER above it sits at frames 17-20 — 16 frames never
+/// reached it.
 #[inline(never)]
 pub fn note_sz32_stack() {
     let n = SZ32_SN.fetch_add(1, Ordering::Relaxed);
     if n % 5_000_000 != 0 {
         return;
     }
-    let slot = ((n / 5_000_000) * 16) as usize;
-    if slot + 15 >= 64 {
-        return;
+    // comm at sampling time (raw byte copy, no formatting here).
+    match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => {
+            let comm: &[u8; 16] = unsafe { (*t).comm() };
+            for j in 0..16 {
+                SZ32_COMM[j].store(comm[j], Ordering::Relaxed);
+            }
+        }
+        None => {
+            for j in 0..16 {
+                SZ32_COMM[j].store(b'-', Ordering::Relaxed);
+            }
+        }
     }
+    SZ32_SAMPLE_N.store(n, Ordering::Relaxed);
     // SAFETY: frame-pointer walk over our own stack; reads only.
     unsafe {
         #[cfg(target_arch = "x86_64")]
@@ -1310,7 +1338,7 @@ pub fn note_sz32_stack() {
         #[cfg(not(target_arch = "x86_64"))]
         let mut rbp: usize = 0;
         // rbp -> [rbp] = saved rbp, [rbp+8] = return address
-        for i in 0..16usize {
+        for i in 0..24usize {
             if rbp == 0 || rbp & 7 != 0 {
                 break;
             }
@@ -1319,7 +1347,7 @@ pub fn note_sz32_stack() {
             if ra < 0xffffffff_8000_0000 {
                 break;
             }
-            SZ32_STACK[slot + i].store(ra, Ordering::Relaxed);
+            SZ32_STACK[i].store(ra, Ordering::Relaxed);
             rbp = nr;
         }
     }
@@ -1687,13 +1715,24 @@ pub fn dump() {
             "sz32-callers: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
             c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
         );
-        let st: [usize; 64] = core::array::from_fn(|i| {
+        let st: [usize; 24] = core::array::from_fn(|i| {
             SZ32_STACK[i].load(Ordering::Relaxed)
         });
         crate::pr_warn!(
-            "sz32-stack: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+            "sz32-stack: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
             st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-            st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15]
+            st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15],
+            st[16], st[17], st[18], st[19], st[20], st[21], st[22], st[23]
+        );
+        let mut comm = [b'.'; 16];
+        for j in 0..16 {
+            let b = SZ32_COMM[j].load(Ordering::Relaxed);
+            comm[j] = if (0x20..0x7f).contains(&b) { b } else { b'.' };
+        }
+        crate::pr_warn!(
+            "sz32-comm: {} n={}",
+            core::str::from_utf8(&comm[..16]).unwrap_or("................"),
+            SZ32_SAMPLE_N.load(Ordering::Relaxed)
         );
         return;
     }
