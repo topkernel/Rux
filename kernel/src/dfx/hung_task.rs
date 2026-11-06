@@ -215,7 +215,7 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
         let vfork_ppid = t.vfork_parent_ptr().map(|p| unsafe { (*p).pid() }).unwrap_or(0);
         let _ = write!(
             w,
-            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={}\n",
+            "      HUNG-CTX pid={} state={:#x} oncpu={} claim={} pk={} ti_cpu={} onrq={} vfork_ppid={} lastsys={} a0={:#x}\n",
             t.pid(),
             t.state().bits(),
             t.on_cpu() as u8,
@@ -224,6 +224,8 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             t.ti_cpu(),
             t.sched_entity().is_on_rq() as u8,
             vfork_ppid,
+            t.last_syscall_nr.load(Ordering::Relaxed),
+            t.last_syscall_a0.load(Ordering::Relaxed),
         );
         let thsp = t.thread().sp;
         if (thsp >> 48) == 0xffff && (thsp & 7) == 0 && thsp > 0x1000 {
