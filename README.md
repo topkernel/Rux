@@ -2,13 +2,13 @@
 
 <div align="center">
 
-**A Linux-compatible kernel, ~330,000 lines of Rust — written entirely by AI.**
+**A Linux-compatible kernel, ~344,000 lines of Rust — written entirely by AI.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64%20%7C%20aarch64-informational.svg)](#platforms)
 [![Tests](https://img.shields.io/badge/tests-4%2C200%2B%20cases-brightgreen.svg)](#numbers)
-[![Code](https://img.shields.io/badge/code-~330%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Code](https://img.shields.io/badge/code-~344%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 Unmodified Ubuntu 22.04 boots to a GNOME Shell desktop.
 Unmodified OpenHarmony boots its full 135+ services.
@@ -164,7 +164,7 @@ make verify && make kani          # proofs
 
 | | |
 |---|---|
-| Kernel source | ~330,000 lines, 432 files |
+| Kernel source | ~344,000 lines, 436 files |
 | Syscalls dispatched | 345+ |
 | Kernel unit tests | 1,122 (riscv64) · 1,119 (aarch64), all green |
 | Formal verification | 1,116+ functions · 157 Kani proofs · 4 SPIN models |
