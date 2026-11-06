@@ -5335,25 +5335,45 @@ pub fn runq_strand_census(now_j: u64) {
                         on_cpu: false,
                         claim: 0,
                         aff: 0,
+                        skips: 0,
+                        why: 0,
                     };
                     8
                 ];
-                let (below, total, filled) = g.cfs_rq.strand_wall_probe(task as *mut Task, &mut rows);
+                let mut st_hist = [0usize; 3];
+                let (below, total, filled) =
+                    g.cfs_rq.strand_wall_probe(task as *mut Task, &mut rows, &mut st_hist);
                 let _ = write!(
                     wall_s,
-                    " ovf={} skipall={} below={} total={}",
-                    ovf, skipall, below, total
+                    " ovf={} skipall={} below={} total={} wallst=run{}/slp{}/oth{}",
+                    ovf, skipall, below, total, st_hist[0], st_hist[1], st_hist[2]
                 );
+                // 61st: the wall rows go on their OWN line — the main
+                // strand line blows the printk record cap at the first
+                // row (ohw12/15 kept only |858 / |321) and the wall
+                // identities (who is stuck on_cpu at pick time) are the
+                // refusal input the census exists to name.
+                let mut wr = alloc::string::String::new();
                 for r in rows.iter().take(filled) {
                     let _ = write!(
-                        wall_s,
-                        " |{}p{}vr{:#x}oc{}cl{}af{:#x}",
-                        r.pid, r.policy, r.vruntime, r.on_cpu as u8, r.claim, r.aff
+                        wr,
+                        " |{}p{}vr{:#x}oc{}cl{}af{:#x}sk{}wh{}",
+                        r.pid, r.policy, r.vruntime, r.on_cpu as u8, r.claim, r.aff, r.skips, r.why
                     );
                 }
                 if below > filled {
-                    let _ = write!(wall_s, " |+{}", below - filled);
+                    let _ = write!(wr, " |+{}", below - filled);
                 }
+                if !wr.is_empty() {
+                    // HOTPATH-PRINT: fuxstuck graph-burst gate.
+                    crate::pr_warn!(
+                        "STRAND-WALL vid={} tid={} {}",
+                        tk.pid(),
+                        tk.pid(),
+                        wr
+                    );
+                }
+                let _ = wall_s;
             }
             {
                 use core::fmt::Write as _;

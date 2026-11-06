@@ -617,6 +617,13 @@ pub struct StrandWallRow {
     pub on_cpu: bool,
     pub claim: i32,
     pub aff: u32,
+    /// 61st: the entry's pick-walk refusal history — a wall of entries
+    /// with growing skip counts explains a victim deeper in the tree
+    /// that is never even VISITED (the 32-slot stash never gets past a
+    /// permanently-refused left edge; no overflow fires because the
+    /// pick succeeds at position <= 33).
+    pub skips: u32,
+    pub why: u32,
 }
 
 // R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
@@ -1083,10 +1090,14 @@ impl CfsRunQueue {
     /// the census prints them so the refusal shape is named in the
     /// same line as the victim. GRQ-HELD. Read-only: the tree is not
     /// modified; only a stable snapshot of POD fields is copied.
+    /// 61st: `state_hist` (3 cells) collects the wall's task-state
+    /// histogram [RUNNING, sleeping(INTERRUPTIBLE|UNINTERRUPTIBLE|
+    /// STOPPED-ish low bits), other] when non-NULL.
     pub fn strand_wall_probe(
         &mut self,
         victim: *mut crate::process::Task,
         rows: &mut [StrandWallRow],
+        state_hist: &mut [usize; 3],
     ) -> (usize, usize, usize) {
         let victim_key = if victim.is_null() {
             None
@@ -1097,6 +1108,9 @@ impl CfsRunQueue {
         let mut below = 0usize;
         let mut total = 0usize;
         let mut filled = 0usize;
+        let mut wall_running = 0usize;
+        let mut wall_sleeping = 0usize;
+        let mut wall_other = 0usize;
         for (&k, &t) in self.tasks_timeline.iter() {
             total += 1;
             let is_below = match victim_key {
@@ -1105,11 +1119,45 @@ impl CfsRunQueue {
             };
             if is_below {
                 below += 1;
+                // 61st (ohw12 ghost class): the wall's TASK-STATE
+                // histogram — a wall of PARKED (INTERRUPTIBLE) entries
+                // that never run names the dequeue-integrity bug (a
+                // sleeper left linked = a permanent left-edge wall every
+                // pick must digest before reaching real work); a wall of
+                // RUNNING entries points at the pick-refusal class
+                // instead.
+                let st = unsafe { (*t).state().bits() };
+                if st & 0x3 != 0 {
+                    wall_sleeping += 1;
+                } else if st == 0 {
+                    wall_running += 1;
+                } else {
+                    wall_other += 1;
+                }
                 if filled < rows.len() {
                     // SAFETY: the map holds valid Task pointers; the GRQ
                     // we hold pins them against dequeue for the read.
                     let (policy, on_cpu, claim, aff) = unsafe {
                         ((*t).policy() as u8 as u64, (*t).on_cpu(), (*t).running_on_cpu.load(Ordering::Acquire), (*t).cpus_allowed())
+                    };
+                    // 61st: refusal history of the wall entry itself
+                    // (non-destructive; only meaningful under
+                    // dfx=schedtrace — otherwise (0, 0)). why = the
+                    // reason code with the highest count (1 on_cpu-mark,
+                    // 2 foreign-claim, 3 affinity, 4 throttle, 5 heal).
+                    let (skips, why) = match peek_skip_history(t) {
+                        Some((n, w)) => {
+                            let mut best = 0u64;
+                            let mut bi = 0u32;
+                            for (i, c) in w.iter().enumerate() {
+                                if *c > best {
+                                    best = *c;
+                                    bi = i as u32;
+                                }
+                            }
+                            (n as u32, bi)
+                        }
+                        None => (0, 0),
                     };
                     rows[filled] = StrandWallRow {
                         vruntime: k.vruntime,
@@ -1118,11 +1166,16 @@ impl CfsRunQueue {
                         on_cpu,
                         claim,
                         aff,
+                        skips,
+                        why,
                     };
                     filled += 1;
                 }
             }
         }
+        state_hist[0] = wall_running;
+        state_hist[1] = wall_sleeping;
+        state_hist[2] = wall_other;
         (below, total, filled)
     }
 

@@ -755,12 +755,28 @@ pub fn ffrt_chain_walk(
                     None => false,
                 }
             };
+            // 61st (LOCKHEAD vtable-vs-data disambiguation): a REAL C++
+            // object's +0 slot points at a VTABLE whose first slot is a
+            // FUNCTION pointer into an exec mapping; a VersionCtx-class
+            // false positive (+0 = a file-backed DATA pointer) fails the
+            // deref test. ohw8/9's auto-arm fired on the data-pointer
+            // class and the walk then "decoded" version-chain churn as
+            // mutex traffic; require the deref hit here.
+            let exec_ptr = |va: u64| -> bool {
+                match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+                    Some(vma) => vma.flags().is_executable(),
+                    None => false,
+                }
+            };
+            let vtable_like = |v: u64| -> bool {
+                filebacked(v) && rd(v).map_or(false, exec_ptr)
+            };
             let lock_shape = |hop: u64| -> bool {
                 match (rd(hop.wrapping_sub(0x10)), rd(hop.wrapping_sub(0x8))) {
                     (Some(v), Some(l)) => {
                         // l low32: 1 = LOCK (held, no waiters flagged yet),
                         // 2 = WAIT (held with waiters); 0 = free.
-                        filebacked(v)
+                        vtable_like(v)
                             && ((l & 0xffff_ffff) == 1 || (l & 0xffff_ffff) == 2)
                     }
                     _ => false,
@@ -864,6 +880,155 @@ pub fn ffrt_chain_walk(
         }
     }
     None
+}
+
+/// 61st (ohw12): OWNER-directed mutex scan — the ffrt_chain_walk starts
+/// from a WAITER's ring and finds the contested lock; this scan starts
+/// from the OWNER's own frame spills and names the locks the owner
+/// touches: the suspended critical-section task still holds `this` of
+/// the NEXT mutex it tried (mutexPrivate::wait's frame spills rdi=M2)
+/// or of the mutex it holds. Scans the parked task's entry-sp window
+/// (256 words) for heap pointers that shape-test as mutexPrivate
+/// objects (vtable-deref + l∈{1,2} at +0x8), walks each hit's waiter
+/// ring, and prints the mutex VA + l + ring so the M2→M3 chain can be
+/// assembled across threads. Walker-only reads of the pinned task's
+/// frozen mm; dfx-gated by the caller. Returns None when nothing in
+/// the window shape-tests (plain cond/mutex parks).
+pub fn ffrt_mutex_scan(task: *mut crate::process::Task) -> Option<alloc::string::String> {
+    use core::fmt::Write as _;
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: diagnostic reads of the parked task under the
+    // for_each/try contract; the task is pinned by the caller's pid
+    // lookup and parked in the futex this scan decodes.
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top_checked()?;
+    #[cfg(feature = "x86_64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::x86_64::pt_regs::PtRegs))
+        .rsp as u64
+    };
+    #[cfg(feature = "riscv64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::riscv64::pt_regs::PtRegs))
+        .sp as u64
+    };
+    #[cfg(feature = "aarch64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::aarch64::pt_regs::PtRegs))
+        .sp as u64
+    };
+    if usp == 0 {
+        return None;
+    }
+    let aspace = tk.address_space()?;
+    let root = aspace.root_ppn();
+    let mgr = aspace.vma_try_read()?;
+    let rd = |va: u64| -> Option<u64> {
+        // SAFETY: read-only page-table walk of the parked task's mm.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+                );
+                // SAFETY: linear-mapped RAM word.
+                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            }
+            _ => None,
+        }
+    };
+    let heapish = |va: u64| -> bool {
+        if va <= 0x10000 || (va >> 47) != 0 {
+            return false;
+        }
+        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+            Some(vma) => {
+                !vma.flags().is_executable()
+                    && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+            }
+            None => false,
+        }
+    };
+    let exec_ptr = |va: u64| -> bool {
+        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+            Some(vma) => vma.flags().is_executable(),
+            None => false,
+        }
+    };
+    // mutexPrivate shape at base B (DWARF-verified): +0 = vtable ptr
+    // (file-backed, derefs to exec), +0x8 = l word in {1,2}, +0x10/+0x18
+    // = waiter LinkedList {prev,next} — self-linked when idle, otherwise
+    // a closed ring whose first node's prev points back at B+0x10.
+    // 61st (ohw14): ExecuteCtx ALSO has a vtable (virtual dtor) and its
+    // +0x8 QoS (value 1 or 2) mimics the l word — the first cut matched
+    // every parked thread's own ctx (m1=...l2 with an empty ring). The
+    // ctx's +0x10 is the task ptr and +0x18 the 8-byte-hole garbage —
+    // both fail the ring-head test below.
+    let mutex_at = |b: u64| -> bool {
+        match (rd(b), rd(b + 0x8), rd(b + 0x10), rd(b + 0x18)) {
+            (Some(v), Some(l), Some(p), Some(n)) => {
+                ((l & 0xffff_ffff) == 1 || (l & 0xffff_ffff) == 2)
+                    && heapish(v)
+                    && rd(v).map_or(false, exec_ptr)
+                    && ((p == b + 0x10 && n == b + 0x10)
+                        || (heapish(n) && rd(n) == Some(b + 0x10)))
+            }
+            _ => false,
+        }
+    };
+    let mut out = alloc::string::String::new();
+    let mut nhit = 0usize;
+    let mut seen_locks: [u64; 4] = [0; 4];
+    for wi in 0..256u64 {
+        if nhit >= 4 {
+            break;
+        }
+        let Some(w) = rd(usp + 8 * wi) else {
+            continue;
+        };
+        if !heapish(w) {
+            continue;
+        }
+        // The frame may spill &m (mutexPrivate*) or &m->l — test both.
+        for &b in &[w, w.wrapping_sub(0x8)] {
+            if seen_locks.contains(&b) || !heapish(b) {
+                continue;
+            }
+            if !mutex_at(b) {
+                continue;
+            }
+            seen_locks[nhit % 4] = b;
+            nhit += 1;
+            let l = rd(b + 0x8).unwrap_or(0) & 0xffff_ffff;
+            let _ = write!(out, " m{nhit}={:#x}l{l}(", b);
+            // Waiter ring: head node at b+0x10 (next at +0x0, prev +0x8).
+            let head = b + 0x10;
+            let mut cur = head;
+            let mut hops = 0;
+            for _ in 0..12 {
+                let Some(nxt) = rd(cur) else { break };
+                if nxt == head {
+                    break;
+                }
+                if nxt == 0 || !heapish(nxt) || hops >= 8 {
+                    break;
+                }
+                let _ = write!(out, "{}{:#x}", if hops == 0 { "" } else { "," }, nxt);
+                cur = nxt;
+                hops += 1;
+            }
+            let _ = write!(out, ") ");
+            break;
+        }
+    }
+    if nhit == 0 {
+        return None;
+    }
+    Some(out)
 }
 
 // sc57 (57th): kernel-side write watchpoint (the coordinator's TCG
@@ -1155,6 +1320,41 @@ pub fn fuxwatch_addr() -> u64 {
 /// contested lock pointer mid-stack while no thread does. Sweep the
 /// top of every large anonymous region of the tgid's mm for the lock
 /// range once per boot per lock; print region+offset hits.
+/// 61st: single-word read through a task's page tables (walker-only,
+/// diagnostic). Shared by the region scan's M3 shape test.
+fn rd_word(root: u64, va: u64) -> Option<u64> {
+    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+            let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+            );
+            // SAFETY: linear-mapped RAM word.
+            Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+        }
+        _ => None,
+    }
+}
+
+/// 61st: heap-class pointer test against a task's VMA map (non-exec,
+/// non-growdown, canonical userspace). Same rule as the chain walks.
+/// `M` is the guard type returned by `vma_try_read` (derefs to the
+/// VmaManager).
+fn heap_class<M>(va: u64, mgr: &M) -> bool
+where
+    M: core::ops::Deref<Target = crate::mm::vma::VmaManager>,
+{
+    if va <= 0x10000 || (va >> 47) != 0 {
+        return false;
+    }
+    match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+        Some(vma) => {
+            !vma.flags().is_executable()
+                && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+        }
+        None => false,
+    }
+}
+
 pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
     use core::fmt::Write as _;
     use core::sync::atomic::Ordering::Relaxed;
@@ -1255,11 +1455,26 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     // show mutexPrivate::wait/libc++/futex; a suspended
                     // coroutine holding the lock shows its mid-section
                     // call chain (IPC/binder/queue frames).
+                    // 61st: ALSO shape-test the window words as
+                    // mutexPrivate objects — the suspended critical
+                    // section's INNERMOST lock attempt (M3: the
+                    // PostTask/handler-queue lock A waits on while
+                    // holding THIS lock) spills its pointer in the same
+                    // frames. Naming M3 here closes the M2→M3 hop
+                    // without another boot.
                     let mut fr = alloc::string::String::new();
+                    let mut m3: Option<u64> = None;
                     // window biased ABOVE the hit (older frames — the
                     // guard's callers: the code12/beget path)
-                    for k in 0..72u64 {
-                        let fa = va.wrapping_sub(0x40) + 8 * k;
+                    // 61st: the window covers BOTH directions now — the
+                    // frames ABOVE the hit are the outer callers, and the
+                    // frames BELOW it (newer, deeper) hold the suspension
+                    // site: when the task holds THIS lock and waits on an
+                    // INNER mutex (M3 = the PostTask/queue lock), M3's
+                    // pointer spill sits below the outer lock()'s rdi
+                    // spill. 0x400 down covers the wait/lock frames.
+                    for k in -128i64..72 {
+                        let fa = (va as i64 + 8 * k - 0x40) as u64;
                         let Some(x) = (|| {
                             match unsafe {
                                 crate::arch::mm::mm_ops::PageTableWalker::walk(root, fa)
@@ -1287,6 +1502,40 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                             Some(v2) if v2.flags().is_executable()
                         ) {
                             let _ = write!(fr, " {:#x}", x);
+                            continue;
+                        }
+                        // mutexPrivate shape at x or x-8 (DWARF layout:
+                        // vtable +0, l +8, ring head +0x10/+0x18;
+                        // ExecuteCtx excluded by the ring-head test).
+                        for &b in &[x, x.wrapping_sub(0x8)] {
+                            if b == lock || !heap_class(b, &mgr) {
+                                continue;
+                            }
+                            let (Some(vt), Some(lw), Some(pv), Some(nx)) = (
+                                rd_word(root, b),
+                                rd_word(root, b + 0x8),
+                                rd_word(root, b + 0x10),
+                                rd_word(root, b + 0x18),
+                            ) else {
+                                continue;
+                            };
+                            let l = lw & 0xffff_ffff;
+                            if !(l == 1 || l == 2) {
+                                continue;
+                            }
+                            let vt_ok = heap_class(vt, &mgr)
+                                && rd_word(root, vt)
+                                    .map_or(false, |f| {
+                                        matches!(
+                                            mgr.find(crate::mm::vma::VirtAddr::new(f as usize)),
+                                            Some(v3) if v3.flags().is_executable()
+                                        )
+                                    });
+                            let ring_ok = (pv == b + 0x10 && nx == b + 0x10)
+                                || (heap_class(nx, &mgr) && rd_word(root, nx) == Some(b + 0x10));
+                            if vt_ok && ring_ok && m3.is_none() {
+                                m3 = Some(b);
+                            }
                         }
                     }
                     let _ = write!(
@@ -1297,6 +1546,16 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                         w,
                         fr
                     );
+                    if let Some(mb) = m3 {
+                        let ml = rd_word(root, mb + 0x8).unwrap_or(0) & 0xffff_ffff;
+                        let _ = write!(out, " M3={:#x}l{}", mb, ml);
+                        // One holder scan per M3 per boot (the same
+                        // stack/region sweep the walk uses for M2).
+                        let hs = ffrt_lock_holder_scan(tgid, mb);
+                        if !hs.is_empty() {
+                            let _ = write!(out, " M3h[{}]", hs);
+                        }
+                    }
                     hits += 1;
                 }
                 va += 8;

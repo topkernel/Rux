@@ -3689,6 +3689,22 @@ pub fn sleep_snapshot() {
                     unsafe { ((*regs).rbp, (*regs).rsp, (*regs).r10) };
                 let main_stack_futex =
                     sys == 202 && a0 >= 0x7fff_ff00_0000 && a0 < 0x8000_0000_0000;
+                // 61st (ohw12 tid 344): the OTHER musl-cv park class — the
+                // waiter node on the thread's OWN mmap'd stack (musl
+                // pthread_cond_timedwait parks on node.state inside its
+                // frame, within a few KB of the entry rsp). The FFRT
+                // mutexPrivate::wait BLOCK_THREAD arm parks exactly here
+                // (ctx->wn.cv.wait), and the wedge's owner-of-record sat
+                // in this class for 280 s without EVER getting a frame
+                // walk: the park word is outside the main-stack window and
+                // the tgid latch fired too late. Own-stack test: the park
+                // word within 64 KB of the entry rsp (same frame region;
+                // heap/condvar words and other threads' stacks are far
+                // away or grow the other way).
+                let own_stack_futex = sys == 202
+                    && a0 >= 0x1000
+                    && ursp >= 0x10000
+                    && (a0.abs_diff(ursp) < 0x1_0000);
                 let my_tgid = tk.tgid();
                 // Direct rule (ohc35-39 lessons: first-come latch burned
                 // on transients; promotion lottery lost the real gate to
@@ -3715,45 +3731,68 @@ pub fn sleep_snapshot() {
                     let done = VMA_DUMPED_DONE.iter().any(|v| {
                         v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
                     });
-                    if my_tgid != 0 && (main_stack_futex || latched) && !done {
+                    if my_tgid != 0 && (main_stack_futex || own_stack_futex || latched) && !done {
                         // 55th: a main-stack UNTIMED park is the wedge
                         // signature — sticky-latch it so the audit churn
                         // cannot evict it before the walk-gate scan.
-                        if main_stack_futex && ua3 == 0 {
+                        // 61st: an own-stack UNTIMED park (the musl cv
+                        // waiter node class, mutexPrivate::wait's
+                        // BLOCK_THREAD arm) is the same forever signature.
+                        if (main_stack_futex || own_stack_futex) && ua3 == 0 {
                             latch_park_walk_tgid_sticky(my_tgid);
                         }
                         latch_park_walk_tgid(my_tgid);
+                        // 61st (ohw13): cap map dumps at 2 tgids per 5 s
+                        // window — the wedge mass-latch enqueued ~50
+                        // dumps in one burst and flooded the deferred
+                        // lane (2811 focus drops/burst), evicting the
+                        // walk lines. The dump is deferred to a later
+                        // burst (the done-mark stays unset); the walk
+                        // below is NOT gated on this.
+                        static DUMP_BURST: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        static DUMP_N: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let now_j = crate::drivers::timer::get_jiffies() as u32;
+                        let bid = now_j / 500;
+                        if DUMP_BURST.load(core::sync::atomic::Ordering::Relaxed) != bid {
+                            DUMP_BURST.store(bid, core::sync::atomic::Ordering::Relaxed);
+                            DUMP_N.store(0, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        let dump_budget = DUMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2;
                         // 55th: mark done ONLY after a successful dump —
                         // ohc44 latched samgr but the first visiting thread
                         // lost the vma read (non-blocking under contention),
                         // the done mark suppressed every retry, and the
                         // whole boot walked mapless.
                         let mut dumped_ok = false;
-                        if let Some(aspace) = tk.address_space() {
-                            if let Some(vm) = aspace.vma_try_read() {
-                                for v in vm.iter() {
-                                    if !v.flags().is_executable() {
-                                        continue;
-                                    }
-                                    let path = aspace
-                                        .try_get_vma_file(v.start().as_usize())
-                                        .map(|f| f.path())
-                                        .unwrap_or_default();
-                                    let _ = writeln!(
-                                        outf,
-                                        "uvma: tgid {} {:x}-{:x} off={:#x} {}",
-                                        my_tgid,
-                                        v.start().as_usize(),
-                                        v.end().as_usize(),
-                                        v.offset(),
-                                        if path.is_empty() {
-                                            alloc::string::String::from("-")
-                                        } else {
-                                            path.chars().take(60).collect::<alloc::string::String>()
+                        if dump_budget {
+                            if let Some(aspace) = tk.address_space() {
+                                if let Some(vm) = aspace.vma_try_read() {
+                                    for v in vm.iter() {
+                                        if !v.flags().is_executable() {
+                                            continue;
                                         }
-                                    );
+                                        let path = aspace
+                                            .try_get_vma_file(v.start().as_usize())
+                                            .map(|f| f.path())
+                                            .unwrap_or_default();
+                                        let _ = writeln!(
+                                            outf,
+                                            "uvma: tgid {} {:x}-{:x} off={:#x} {}",
+                                            my_tgid,
+                                            v.start().as_usize(),
+                                            v.end().as_usize(),
+                                            v.offset(),
+                                            if path.is_empty() {
+                                                alloc::string::String::from("-")
+                                            } else {
+                                                path.chars().take(60).collect::<alloc::string::String>()
+                                            }
+                                        );
+                                    }
+                                    dumped_ok = true;
                                 }
-                                dumped_ok = true;
                             }
                         }
                         if dumped_ok {
@@ -3800,9 +3839,20 @@ pub fn sleep_snapshot() {
                 if tgid_latched && sys == 202 && ua3 == 0 && a0 != 0 {
                     crate::sync::futex::fxrs_word_add(a0 as usize);
                 }
-                if main_stack_futex || tgid_latched {
-                    static UFW_SEEN: [core::sync::atomic::AtomicU64; 64] =
-                        [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+                if main_stack_futex || own_stack_futex || tgid_latched {
+                    // 61st (ohw12 starvation): the old 64-slot table keyed
+                    // ((tid<<44)|rip&0xfff_ffff_fff) mapped EVERY thread
+                    // parking at the same musl futex rip (0x3fbf116dea —
+                    // the pandemic's shared park rip) to the SAME slot
+                    // (tid<<44 mod 64 == 0 for all tid): the first insert
+                    // won, the other hundreds were "seen_recent" forever,
+                    // and the wedge owner (tid 344) never got ONE frame
+                    // walk in 340 s. Direct-map one slot per TID instead
+                    // (tid is system-unique; 1024 slots cover every
+                    // thread a boot spawns concurrently) — the time-based
+                    // rewalk then works per-thread exactly as designed.
+                    static UFW_SEEN: [core::sync::atomic::AtomicU64; 1024] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; 1024];
                     // 55th: time-aware dedup. ohc43/44's forever-parked
                     // threads (samgr's FFRT workers and early handlers)
                     // parked/unparked at the same rip during the healthy
@@ -3812,27 +3862,23 @@ pub fn sleep_snapshot() {
                     // its last walk is older than UFW_REWALK_100MS (in
                     // 100ms jiffies units, HZ=100 → ~90 s): transients do
                     // not spam, forever parks re-print every ~90 s.
-                    static UFW_SEEN_T: [core::sync::atomic::AtomicU32; 64] =
-                        [const { core::sync::atomic::AtomicU32::new(0) }; 64];
+                    static UFW_SEEN_T: [core::sync::atomic::AtomicU32; 1024] =
+                        [const { core::sync::atomic::AtomicU32::new(0) }; 1024];
                     const UFW_REWALK_100MS: u32 = 300;
                     let key = ((tk.pid() as u64) << 44) | (rip & 0xfff_ffff_fff);
+                    let idx = (tk.pid() as usize) % UFW_SEEN.len();
                     let now100 = (crate::drivers::timer::get_jiffies() / 10) as u32;
-                    let mut seen_idx = usize::MAX;
-                    for (i, k) in UFW_SEEN.iter().enumerate() {
-                        if k.load(core::sync::atomic::Ordering::Relaxed) == key {
-                            seen_idx = i;
-                            break;
-                        }
-                    }
+                    let seen_idx = if UFW_SEEN[idx].load(core::sync::atomic::Ordering::Relaxed)
+                        == key
+                    {
+                        idx
+                    } else {
+                        usize::MAX
+                    };
                     let seen_recent = seen_idx != usize::MAX && now100
                         .wrapping_sub(UFW_SEEN_T[seen_idx].load(core::sync::atomic::Ordering::Relaxed))
                         < UFW_REWALK_100MS;
                     if !seen_recent {
-                        let idx = if seen_idx != usize::MAX {
-                            seen_idx
-                        } else {
-                            (key as usize) % UFW_SEEN.len()
-                        };
                         UFW_SEEN[idx].store(key, core::sync::atomic::Ordering::Relaxed);
                         UFW_SEEN_T[idx].store(now100, core::sync::atomic::Ordering::Relaxed);
                         if let Some(aspace) = tk.address_space() {
@@ -3877,8 +3923,8 @@ pub fn sleep_snapshot() {
                             }
                             let _ = writeln!(
                                 outf,
-                                "ufw: tgid {} tid {} sys={} a3={:#x} rbp={:#x} rsp={:#x}: {}",
-                                my_tgid, tk.pid(), sys, ua3, urbp, ursp, chain
+                                "ufw: tgid {} tid {} sys={} a0={:#x} a3={:#x} rbp={:#x} rsp={:#x}: {}",
+                                my_tgid, tk.pid(), sys, a0, ua3, urbp, ursp, chain
                             );
                             // Stack scan fallback (frame-pointer-less
                             // builds): the first code-looking words above
@@ -5263,9 +5309,51 @@ pub fn bwr_park_audit() {
         } else {
             alloc::string::String::new()
         };
+        // 61st (ohw12): OWNER-directed scan — for the H3 class (parked in
+        // a futex WHILE owing/processing a transaction: the suspended
+        // critical-section owner, e.g. tid 344 holding the map mutex
+        // through a code=6 handler) and for the registered samgr's futex
+        // parks generally, scan the parker's OWN frame spills for
+        // mutexPrivate-shaped objects and print each hit's l + waiter
+        // ring: the owner's next-acquisition target (M2) is named, so
+        // the M2→M3 chain assembles across threads. Bounded: the scan
+        // walks one page-table window; budget 3 prints per burst.
+        let mscan_txt = {
+            static MS_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            static MS_BURST: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            // Per-BURST budget (the audit runs one burst per 5 s): reset
+            // the counter whenever the burst id moves — the first cut
+            // (3 per BOOT) spent the whole budget on the first burst's
+            // three H3 victims and never scanned the FFRT-worker holders
+            // in later bursts.
+            let burst_id = now / 500;
+            let prev_burst = MS_BURST.load(core::sync::atomic::Ordering::Relaxed);
+            if burst_id != prev_burst {
+                MS_BURST.store(burst_id, core::sync::atomic::Ordering::Relaxed);
+                MS_N.store(0, core::sync::atomic::Ordering::Relaxed);
+            }
+            let eligible = park == "FUTEX"
+                && !task.is_null()
+                && (!s.stack.is_empty() || s.pid as u32 == crate::ipc::binder::binder_sareg_samgr_pid());
+            if eligible
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+                && MS_N
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                    < 3
+            {
+                match crate::sync::futex::ffrt_mutex_scan(task) {
+                    Some(t) => alloc::format!(" mscan[{}]", t),
+                    None => alloc::string::String::new(),
+                }
+            } else {
+                alloc::string::String::new()
+            }
+        };
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}",
             s.pid,
             s.tid,
             comm_of(task),
@@ -5283,7 +5371,8 @@ pub fn bwr_park_audit() {
             rwait,
             s.stack.len(),
             stx,
-            chain_txt
+            chain_txt,
+            mscan_txt
         );
     }
     if printed > 0 {

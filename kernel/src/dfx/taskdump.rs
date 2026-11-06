@@ -1176,9 +1176,15 @@ pub fn defer_emit_line(line: alloc::string::String) {
     }
     // 55th: park-chain evidence lines go to the focus ring (see its
     // declaration) so the bulk census flood cannot evict them.
+    // 61st (ohw13): uvma map dumps move to the BULK ring — the wedge
+    // window mass-latches ~50 tgids whose ONE-TIME dumps enqueue
+    // thousands of lines in a single burst, filling the 512-slot focus
+    // ring and evicting exactly the walk lines the ring exists for
+    // (ohw13: 2811 focus drops per burst, tid 344's frames never
+    // printed). The dump tables are deterministic per image and
+    // reconstructible from any boot; walk lines are not.
     let focus = line.starts_with("ufw:")
         || line.starts_with("uss:")
-        || line.starts_with("uvma:")
         || line.starts_with("uhp:");
     if focus {
         let mut q = DEFER_FOCUS_Q.lock_irqsave();

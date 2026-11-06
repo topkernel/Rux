@@ -6621,3 +6621,190 @@ GetTotalTaskCnt>0): the deep sleep exits only on a push-side notify —
 the push never happened (no ready task), consistent with the graph
 deadlock; no kernel lost-wake signature found (no stuck waiter had a
 wake-to-its-own-word in its birth window).
+
+### 61. 61ST SESSION (2026-11-07) — the wedge decoded to the LAST userspace
+### frame: A2 = the code=6 task holding listenerMapLock_ suspended inside
+### PostTask's ffrt-internal lock; the M2 word PROVEN a real mutexPrivate;
+### the census pipeline unflooded; the strand wall histogram closes the
+### ghost theory
+
+Boots this session: ohw12-ohw17 (6 KVM boots, system-lb5 +
+userdata-fresh2, LOGLEVEL7; dfx=fuxstuck,txnhunt,sleepsnap[,schedtrace],
+fuxwatch=0x7ff0004862c0,0). All 6 wedged identically (FW freeze at
+52.7 / 13.0 / 50.5 / 20.1 / 55.2 / 18.4 s — same word, same churn);
+tally contribution 0/6 appfwk.ready.
+
+#### 1. THE WATCHED WORD IS A REAL ffrt::mutexPrivate (the 60th's
+#### VersionCtx decode does not hold for the manual-param address)
+
+The ohw12 FW rips (0x7ff0008cdf8a / 0x7ff0008cdfa9 / 0x7ff0008ce9c0)
+symbolize against the boot's OWN libffrt base (0x7ff000866000, verified
+by BOTH the exec-mapping containment of the rips AND the vtable pointer
+0x7ff0008f19d0 = libffrt vaddr 0xF19D0, whose relocations are
+mutexPrivate::lock/unlock/try_lock + dtor pair) to:
+  df8a = mutexPrivate::lock+0x1a  (the lock cmpxchg — a FAILED cmpxchg
+        still write-cycles the line, so the watch sees old=l unchanged)
+  dfa9 = lock+0x39                (the xchg %eax(2),l — the WAIT set)
+  e9c0 = mutexPrivate::unlock     (l:1→0)
+Object layout (DWARF, libffrt unstripped): vtable +0, l +8,
+LinkedList list {prev,next} +0x10/+0x18 — self-linked when idle. The
+heap object 0x7ff0004862b8 is IDENTICAL across all six boots (the image
+is deterministic; per-boot ASLR moves only the libs, not the heap).
+
+The freeze micro-sequence (ohw13, sharpest): n=176 acquire(tid338) /
+n=177 unlock(tid338) / n=178 ACQUIRE(tid344, l:0→1) / n=179 FAILED
+cmpxchg(tid344, old=1) / n=180 xchg WAIT(tid344, l:1→2) → parks; every
+later write is old=2 pile-in. Same shape in ohw12 (tid 344 owner),
+ohw14 (tid 344), ohw15 (tid 347), ohw17 (tid 345) — the failed-cmpxchg
++xchg pair from the ACQUIRING TID ITSELF 0.2-4 ms after its own
+acquire = the worker's NEXT task re-attempting the same lock while the
+previous task still holds it (the cross-task re-entry, see §3).
+
+#### 2. THE CYCLE, NAMED END-TO-END (all six boots agree)
+
+- THE OWNER (A2): an FFRT worker's task executing code=6
+  SUBSCRIBE_SYSTEM_ABILITY (SYNC-IN from a service) — TXN-HANG-BWR
+  shows the worker park=FUTEX with stack=[txnN code6 SYNC-IN] and
+  wcmd=BC_TRANSACTION. The fuxwatch stream shows ITS tid as the last
+  successful acquirer of M2=0x7ff0004862c0 (listenerMapLock_-class,
+  per the 57th's ohc70 CheckListenerNotify decode) with NO matching
+  unlock ever.
+- THE SUSPENSION SITE: the region scan (ffrt_lock_region_scan) finds
+  M2's pointer on a coroutine-stack-pool region
+  (0x7ff0822a9000+0x8001c0 class, same +0x8001c0 offset every boot)
+  with the frame window: musl cond ← libc++ cv ← mutexPrivate::wait
+  (0xce0c7 = wait+0x157) ← mutexPrivate::lock (0xcdfa4 = lock+0x34) ←
+  0xcef6e ← samgr 0x82127 (the workHandler_->PostTask call site —
+  NotifySystemAbilityAddedByAsync inlined into SubscribeSystemAbility;
+  addr2line attributes it into the AddSystemAbility region by
+  identical-code-folding) ← libsamgr_common (FFRTHandler::PostTask) ←
+  SubscribeSystemAbility-thunk ← SubsSystemAbilityInner.
+  NO other mutexPrivate exists in ±0x400 of the spill (ohw17's widened
+  window) — the wait/lock frames BELOW the M2 spill are M2's OWN wait
+  path: this stack is a WAITER (A1), not the holder.
+- THE WAITERS: 17-25 threads (samgr main + every OS_IPC handler +
+  late-spawned workers) — two park classes: OS_IPC threads BLOCK_THREAD
+  on their own-stack musl cv nodes (ufw now walks them — see §4); FFRT
+  tasks CoWait-parked in M2's ring (the chain walks close on
+  0x7ff0004862c8 = M2+0x10, ring of 8 waiters whose nodes are the
+  waiters' ExecuteCtx wn.nodes at ctx+0x20).
+- THE PANDEMIC: failed cmpxchg old=2 pile-ins forever; samgr zero
+  runnable (FUX-RUN), all client sync txns (Publish code=3, code=2,
+  Subscribe code=6) sit in samgr's PROC queue undrained
+  (TXN-HANG: `stack=1 [txnN codeX SYNC-OUT .../330.0/queue ...]` with
+  `todo=1 head=[txn-complete]` — the clients correctly parked in their
+  BWR read per the deferred-tcomplete protocol, waiting for replies
+  that can never come). The FFRT workers idle-park with ever_word=0 on
+  their worker-idle cv words (FUXW-CTX) — NO ready task was ever
+  notified; the version chain freezes at CONSUMED as the 60th decoded.
+- WHY the cycle is structural: A2 holds listenerMapLock_ inside
+  CheckListenerNotify (:887 scope — the source DOES hold it across
+  NotifySystemAbilityAddedByAsync → workHandler_->PostTask) and
+  CoWait-suspends on the FFRT-internal lock (L3 = the handler/queue
+  mutex in the submit path). L3's holder never releases; everything
+  behind M2 waits on A2. The reference resolves the same code in ms —
+  the divergence that decides WHO holds L3 and WHY it never releases
+  is still ours (next instrument: the region-scan M3 decode widened to
+  the holder side, landed this session but the ±0x400 window proved
+  the waiter-stack reading — the L3 hunt needs A2's OWN coroutine
+  stack, which sits below the top-0x40000 sweep window).
+
+#### 3. DEFERRED-TCOMPLETE (mission candidate c) — VERIFIED CLEAN
+
+Checked our binder against reference binder.c:3683/586-593: the sync
+sender's tcomplete is queued WITHOUT process_todo (binder.rs:9786-92),
+has_work matches 6.6 exactly (411583b2's revert stands), the reply
+push sets process_todo + exact-thread wake (binder.rs:9528-58), and
+the parked-clients-with-todo=1-txn-complete rows are the CORRECT
+protocol state (the replies cannot come because samgr is wedged, not
+because the kernel lost them). OH's ipc_single uses plain blocking BWR
+(ioctl, TransactWithDriver) — no epoll/eventfd wraps the binder fd
+(mission candidate b: the epoll edge class is N/A for this path).
+
+#### 4. CENSUS PIPELINE FIXES (why ohw12 never saw tid 344's frames)
+
+- UFW_SEEN dedup COLLISION (the starvation bug): the 64-slot table
+  keyed (tid<<44)|rip&0xfff_ffff_fff mapped EVERY thread parking at
+  the same musl rip to ONE slot (tid<<44 mod 64 == 0 for all tid) —
+  the first insert won and the wedge owner never got ONE walk in 340 s.
+  Now 1024 direct-mapped per-TID slots.
+- Own-stack futex arm: park word within 64 KB of the entry rsp = the
+  musl cv waiter-node class (mutexPrivate::wait's BLOCK_THREAD arm)
+  — latches + walks IMMEDIATELY, not via the tgid-latch lottery
+  (ohw13: tid 344's frames printed at 6.3 s).
+- Focus-queue flood: the wedge mass-latch enqueued ~50 one-time VMA
+  dumps (thousands of lines) in one burst — 2811 focus-line drops per
+  burst, walk lines evicted. uvma moved to the bulk ring; dumps capped
+  2 tgids per 5 s window.
+- mscan (ffrt_mutex_scan, NEW): scans a parked thread's frame spills
+  for mutexPrivate-shaped objects (DWARF layout: vtable-deref-exec +
+  l∈{1,2} + ring-head self-or-backlink at +0x10/+0x18 — the ExecuteCtx
+  false positive (vtable + QoS∈{1,2} at +8) is excluded by the ring
+  test); wired into TXN-HANG for park=FUTEX with stacked txn or
+  samgr-tgid parks, 3 per burst. ohw15: 153 scans, every one names
+  exactly M2 in the waiters' frames.
+- Region-scan M3 decode: the ±0x400 window around each lock-pointer
+  hit now shape-tests for OTHER mutexPrivates (M3) + holder-scans
+  them; proved the waiter-stack reading (no inner mutex on THAT stack).
+
+#### 5. THE STRAND WALL (mission item 2) — real, histogrammed, ghost
+#### theory DEAD
+
+- RUNQ-STRAND caught censusd linked+pickable exec-frozen 200 s+,
+  khungtaskd 155-160 s, and OS_FFRT_Delay_S (tgid 314) age 300 s with
+  exec_frozen=0 ms — a USERSPACE producer class, never picked once.
+- The strand wall probe (below=51-59 of total=53-61 entries) with the
+  new TASK-STATE HISTOGRAM (ohw15): wallst=run19/slp0/oth0,
+  run4/slp0/oth0 — **the wall entries are ALL RUNNING-state; the
+  parked-ghost (dequeue-failure) theory is dead.**
+- skipall=752 in ohw15 (9 in ohw12): the CPUs went empty-handed with
+  entries linked 752 times; the 3 printed canaries show skipped=1
+  why=1 (on_cpu-mark transient, owner_live). The strand victims are
+  NEVER refused (skips=U64MAX — the pick's stash-refuse loop never
+  reaches them past the wall).
+- The wall identities truncate at the printk cap (only |858/|321
+  survive) — STRAND-WALL is now a separate line (landed, not yet
+  booted). pid 858 (DNS_DIAG_WORK_T) sat at the wall with a vr that
+  NEVER moved for 200 s while sitting BELOW min_vr — the frozen-vr
+  wall entry is the refusal input to hunt next (a task picked but
+  whose context switch never completed leaves on_cpu=1+slot=itself;
+  owner_live then legitimately blocks every pick — the R56d heal only
+  fires from the idle-loop re-entry path).
+- censusd strand kills the deferred print lane (ohw12: last ufw line
+  at 138.7 s, lane dead after) — the evidence pipeline depends on it.
+
+#### 6. Binder round-trip (mission item 3) — measured proxy, verdict
+
+The reference has no SAREG/SLRD instruments, so a direct round-trip
+A/B is impossible; our in-log proxy (SLRD read → next SACB code1/2
+notify send, 287 pairs): p90 2.9 ms, first-gap class 1-3 ms. The
+"2-3x slower round-trip" hypothesis is UNVERIFIED and MOOTED by the
+direct decode: the wedge is the critical-section-suspend cycle, not a
+uniform per-op slowdown.
+
+#### 7. For the 62nd
+
+1. **Find A2's OWN coroutine stack** (the holder's suspension site —
+   what L3 is and who holds it): the region sweep covers top-0x40000
+   per pool region; A2's saved SP sits deeper. Sweep from BOTH ends or
+   find the CoTask slab: worker tid (from the FW owner) → its
+   ExecuteCtx is ctx-shaped at the KNOWN per-boot heap addresses — but
+   ExecuteTask nulls ctx->task on suspend; instead scan the FFRT slab
+   for CoTask structs (TaskBase gid/status at DWARF offsets,
+   coRoutine+24 = saved fctx) whose status is suspended and whose
+   stack window shape-tests as mutexPrivate-bearing.
+2. **STRAND-WALL line**: ohw17 did not strand censusd (boot-to-boot
+   variance); the split wall line is landed for the next strand boot —
+   name the frozen-vr wall entries (858-class) and their slot CPUs.
+3. If L3's holder is itself a strand victim, the scheduler wall (5)
+   is the root fix; if it is a legitimate kernel-event waiter (binder
+   BWR on a txn that never completes because ITS server is behind M2),
+   the cycle is pure userspace AB-BA and the fix is the event ORDER
+   (the binder interleaving) — the TXN-HANG `queue` rows are the map
+   of who is waiting on whom.
+
+Boots this session: ohw12-ohw17. Gates: x86_64 builds rc=0 (6
+iterations); aarch64 build rc=0 (run/gate-a64-61.rc); riscv64 build +
+make test ALL TESTS PASSED on the final tree (run/test-rv-61c.log).
+All changes dfx/param gated or print-path only; zero cost on plain
+boots.
