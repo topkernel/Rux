@@ -2994,6 +2994,10 @@ struct TimerFd {
     expiration_count: core::sync::atomic::AtomicU64,
     /// Readers blocked until the timer fires
     wait_queue: crate::process::wait::WaitQueueHead,
+    /// Owning File's generation id (0 until create finishes) — the
+    /// expiry path notifies the epoll registry with it (the EPOLLET
+    /// lost-edge fix; see timerfd_expire_notify).
+    file_id: u64,
 }
 
 impl TimerFd {
@@ -3004,6 +3008,7 @@ impl TimerFd {
             interval_jiffies: 0,
             expiration_count: core::sync::atomic::AtomicU64::new(0),
             wait_queue: crate::process::wait::WaitQueueHead::new(),
+            file_id: 0,
         }
     }
 }
@@ -3906,6 +3911,18 @@ fn sys_timerfd_create_inner(args: SyscallArgs) -> i64 {
     let file = alloc::sync::Arc::new(crate::fs::File::new(crate::fs::file::FileFlags::new(file_flags)));
     file.set_ops(&TIMERFD_OPS);
     file.set_private_data(tfd_ptr);
+    // Bind the TimerFd to its File's generation id so the expiry path
+    // can notify the epoll registry (the EPOLLET lost-edge fix: without
+    // this notify, an expiry that lands while NO task sleeps in
+    // epoll_wait never re-armed the ET edge — last_reported stayed set,
+    // and every later epoll_wait suppressed the readable fd. Reproduced
+    // by test/tfd_et_probe: FFRT's DelayedWorker pattern, 59/60
+    // after-gap expiries lost; Linux reports 300/300).
+    // SAFETY: tfd_ptr is the Box::into_raw TimerFd created above; the
+    // File is not yet shared (no fd installed), so no concurrent access.
+    unsafe {
+        (*(tfd_ptr as *mut TimerFd)).file_id = file.file_id;
+    }
 
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
@@ -4164,6 +4181,21 @@ pub fn timerfd_expire_notify(tfd_addr: u64) {
         let tfd = &*(tfd_addr as *const TimerFd);
         tfd.expiration_count.fetch_add(1, core::sync::atomic::Ordering::Release);
         tfd.wait_queue.wake_up_all();
+        // EPOLLET lost-edge fix (2026-11-06): the wait_queue wake above
+        // only reaches tasks REGISTERED on this fd's queue (an
+        // epoll_wait sleeper via timerfd_poll_wait). An expiry that
+        // lands while NOBODY waits must still re-arm the edge-triggered
+        // interests and wake epoll sleepers — the reference's
+        // ep_poll_callback runs from wake_up_poll on the file's wait
+        // queue unconditionally. Without this notify, the ET entry's
+        // last_reported mask stayed set and every later epoll_wait
+        // suppressed the readable fd (the FFRT DelayedWorker pattern:
+        // timerfd NONBLOCK + EPOLLET + never read + expiry between
+        // waits — 59/60 lost; Linux 300/300). Same notify discipline as
+        // the unix-socket readiness sites.
+        if tfd.file_id != 0 {
+            crate::syscall::misc::epoll_notify_file(tfd.file_id);
+        }
     }
 }
 
