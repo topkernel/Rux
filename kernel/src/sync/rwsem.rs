@@ -383,7 +383,13 @@ impl RwSemaphore {
     #[inline]
     pub fn up_read(&self) {
         preempt_disable();
-        let tmp = self.count.fetch_sub(READER_BIAS, Ordering::Release);
+        // Reference compares the POST-subtraction word
+        // (atomic_long_add_return); fetch_sub returns the PRE word —
+        // subtract the bias before testing (the first version compared
+        // the pre word and never fired the wake: a writer queued behind
+        /// readers could then strand on a quiet mm until some later
+        /// up_write pumped the queue).
+        let tmp = self.count.fetch_sub(READER_BIAS, Ordering::Release) - READER_BIAS;
         if tmp & (LOCK_MASK | FLAG_WAITERS) == FLAG_WAITERS {
             self.clear_nonspinnable();
             self.rwsem_wake();
