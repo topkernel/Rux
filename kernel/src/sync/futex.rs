@@ -1064,8 +1064,10 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     // coroutine holding the lock shows its mid-section
                     // call chain (IPC/binder/queue frames).
                     let mut fr = alloc::string::String::new();
-                    for k in 0..24u64 {
-                        let fa = va.wrapping_sub(0x60) + 8 * k;
+                    // window biased ABOVE the hit (older frames — the
+                    // guard's callers: the code12/beget path)
+                    for k in 0..72u64 {
+                        let fa = va.wrapping_sub(0x40) + 8 * k;
                         let Some(x) = (|| {
                             match unsafe {
                                 crate::arch::mm::mm_ops::PageTableWalker::walk(root, fa)
