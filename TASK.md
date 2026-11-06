@@ -5319,3 +5319,135 @@ c) cpu slots line in every dump: init or a fresh init child (fork
    SetBundleQuota → launcher). Reference timings: oh-roll ledger
    ~1390 (creation 8.3s, launcher.ready 11.7s).
 5. usb_host NULL family (51st §11.5) still queued.
+
+## TRACEPC SESSION — GLOBAL_SEQ → per-CPU sequence + timestamp merge (2026-11-06, branch oh-tracepc from oh-crash @ 70568e37)
+
+Mission (52nd §8 item 3): the trace framework's GLOBAL_SEQ — ONE atomic
+for ALL records on BOTH CPUs — is a global serialization point the
+reference does not have. Replace with per-CPU sequencing + read-time
+timestamp merge, reference semantics.
+
+### 1. Reference reading (linux-6.6 in oh-robot)
+- kernel/trace/trace_clock.c: trace_clock_local() = sched_clock() with
+  preemption disabled — per-CPU, NOT coherent across CPUs ("the
+  simplest and least coherent tracing clock").
+- kernel/trace/trace.c __find_next_entry: the reader walks every
+  per-CPU buffer and "Pick[s] the entry with the smallest timestamp";
+  strict `ts < next_ts` in a for_each_tracing_cpu(0..N) loop → ties
+  keep the LOWEST cpu. Per-CPU order = the buffer's own ring order.
+- trace.c get_total_entries: entries-written = sum of per-CPU
+  (entries + overrun) — no global counter anywhere.
+- trace_events.c __setup("trace_event="): comma-separated set_event
+  tokens at boot; bad tokens warn and continue.
+- Rux's clock is stronger than the reference's: riscv64 reads the
+  `time` CSR (one system counter), x86_64 TSC + per-CPU offset
+  correction + monotonic ratchet — globally coherent, so a timestamp
+  merge is safe here (the reference tolerates per-CPU skew at merge).
+
+### 2. The change (commits cdc9bd79 + 54100822)
+- TraceRecord.seq: now the RECORDING CPU's own ring counter (was the
+  global one). TraceRing gains `seq: AtomicU64` (per-CPU; record()
+  fetch-adds only its own ring's line — the reference's local_t shape)
+  and `written: AtomicU64` (per-CPU attempted count, never reset —
+  same totals GLOBAL_SEQ produced; summed at read time like the
+  reference's per-CPU entries+overrun).
+- merge_by_timestamp(): snapshot(), drain(), snapshot_records() sort
+  by ts_ns with a STABLE sort. Collect order is cpu0..N, each CPU's
+  records in ring order, so ties break exactly like __find_next_entry
+  (lowest CPU first; ring order within a CPU). Cross-CPU order is
+  timestamp order — the only visible semantic change (was fetch_add
+  arrival order); output FORMAT unchanged.
+- trace_event= boot parameter (reference parity, commit cdc9bd79):
+  apply_event_token extracted from set_event_write (grammar
+  unchanged); init_from_cmdline arms tokens at boot and turns
+  tracing_on on (the reference's tracing_on defaults on; ours starts
+  off — the param flips it for the same net effect). Also the A/B rig
+  enabler: identical arm set at the same instant on both kernels.
+
+### 3. Functional verification (riscv64 minimal rootfs, run/verify-trace.sh + verify-i4/i5)
+- trace_event= armed kmem:kmalloc + raw_syscalls:sys_enter/sys_exit;
+  tracing_on read 1; both CPU rings populated (cpu0 1024 entries +
+  overruns, cpu1 1024+787); entries-written consistent with per-CPU
+  stats sums.
+- MERGE ASSERTION (verify-i5): a 500-record merged window contained 4
+  CPUs ([000] 392, [001] 11, [002] 6, [003] 91) and the merged
+  timestamp sequence was GLOBALLY SORTED (sort -c clean) — the
+  reference's merge semantics on real cross-CPU data.
+- riscv64 regression-boot gate satisfied in the same boots: scripted
+  serial (cat /proc/version, ls, /proc reads), guest marker reached,
+  zero panics.
+
+### 4. Gates
+- Triple-arch builds rc=0 (riscv64, x86_64 bzImage, aarch64).
+- riscv64 make test: ALL PASSED (suite verdict green).
+- Armed OH A/B + events-off census A/B + pbench record-cost A/B:
+  see §5-7 (below, filled as runs complete).
+
+Rig: OH system-lb5 + userdata-fresh2 (symlinks, snapshot boots),
+SMP2/4G q35 KVM, cmdline dfx=txnhunt,fuxstuck unixrd=1 syscost=1
+[+ trace_event=raw_syscalls:sys_enter,raw_syscalls:sys_exit,kmem:kmalloc,kmem:kfree],
+driver run/lb-boot.py (copied from oh-crash), analyzer run/ab-analyze.sh.
+
+### 5. Armed OH boot A/B (900s, system-lb5 + userdata-fresh2, SMP2 KVM,
+    dfx=txnhunt,fuxstuck unixrd=1 syscost=1
+    trace_event=raw_syscalls:sys_enter,raw_syscalls:sys_exit,kmem:kmalloc,kmem:kfree;
+    BEFORE = abp1b = oh-crash @70568e37 + trace_event= commit only;
+    AFTER = abp1a = + per-CPU seq commit)
+- SA ladder: 51 distinct inserts BOTH sides, ceiling 8301 BOTH,
+  last insert 29.58s (B) -> 28.40s (A).
+- appspawn ServiceStart: 6.014s (B) -> 5.571s (A).
+- First FUX-STUCK ~12s both. First RCU-GP-BOUND stall: 22.2s (B) ->
+  38.1s (A); count 52 (B) -> 187 (A) — the print count is the known
+  run-to-run class (52nd saw 37/138/193/200 across identical boots);
+  first-stall LATER on the after side in this pair.
+- Early-window kernel ticks (pre-wedge-divergence, both CPUs summed):
+  t=120s 28591 (B) -> 28201 (A), t=180s 38915 (B) -> 38692 (A).
+- Census classes under ARMED load: TERM 1->0, WAKE-REFUSED 0->0,
+  WAKE-STRANDED 5->3 (organic class, no grid strands either side).
+- Verdict: boot progress NOT regressed (same SA ladder, earlier
+  appspawn, earlier last SA insert), wedge face unchanged.
+
+### 6. Events-off census A/B (780s, same rig minus trace_event)
+- BEFORE abe1b / AFTER abe1a: TERM-DESCHED 0/0, WAKE-REFUSED 0/0,
+  WAKE-STRANDED 7/8 (organic family), zero panics/OOM both, SA
+  ceiling 8301 both, appspawn 5.712s/5.722s, RCU-GP 200/197 (the
+  print-capped family). Events-off census IDENTICAL — the budget rule
+  (dfx-trace3 A/B discipline) holds: with no events armed the seq
+  change is invisible (record() gates out before any changed line).
+
+### 7. pbench record-cost A/B (q35 KVM SMP2/1G, same probe binary,
+    --probe-bin work/pbench-probe; events-off and armed pairs,
+    scripts/test/pbench_boot.py --accel kvm)
+- EVENTS-OFF (disabled-path check): p1_null med 0.290us BOTH,
+  p1_clock med 0.381us BOTH — byte-identical medians.
+- ARMED (sys_enter+sys_exit+kmem:kmalloc+kfree): armed overhead
+  vs off on p1_null = 0.411us per getuid = 2 records/syscall
+  (~205ns/record all-in: comm copy + flags + ts + push + seq).
+  - p1_null: med 0.701 (B) -> 0.701 (A) us; avg 0.735 -> 0.716
+    (-2.6%); p99 1.403 -> 0.741 (-47%).
+  - p1_clock: med 0.801 -> 0.801; avg 0.843 -> 0.816 (-3.2%);
+    p99 1.603 -> 0.832 (-48%).
+  - p2_ctxsw: med 1.898 -> 1.833 (-3.4%), avg 2.655 -> 2.607.
+  - Armed p99 nearly recovers the events-off p99 (0.741 vs 0.300/1.403):
+    the global-seq cost lived in the TAIL (cache-line bounce when the
+    other CPU holds the line), exactly what removing the shared
+    fetch_add predicts on SMP2. Medians unchanged; tails improved.
+- Record-cost class: unchanged at the median, improved in the tail —
+  within the dfx-trace3 13-35ns/record enabled-cost class or better
+  (that lane's worktree is gone; the class could not be re-measured
+  directly, so the same-rig before/after above is the evidence).
+
+### 8. Gates summary
+- Triple-arch builds rc=0; riscv64 make test ALL PASSED; riscv64
+  regression boot (scripted serial, zero panics) PASS; events-off
+  census IDENTICAL; armed A/B no regression with tail improvements.
+
+### 9. Handoff notes
+- The trace_event= boot parameter is generally useful for the
+  campaign: any lane can now arm a fixed event set from t=0
+  (deterministic; no dependence on OH tooling's 3.5s tracefs write).
+- Cross-CPU trace output now reads in TIMESTAMP order (reference
+  contract); any parser that assumed global-seq arrival order must
+  use ts (none exist in-tree; the rendered format is unchanged).
+- probe_open.c appeared in the worktree root with an epoch mtime (a
+  make-rootfs/test tarball-extraction stray); removed uncommitted.
