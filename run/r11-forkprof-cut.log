@@ -1,0 +1,198 @@
+R[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
+
+[0march: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+mm: x86_64 4-level page tables (building real PML4)
+mm: switched CR3 to real PML4 (phys 0x1086000), image 0xffffffff80200000-0xffffffff81200000
+mm: PCID off (no CPUID PCID/INVPCID)
+e820[0] 0x0-0x9fc00 usable=true
+e820[1] 0x9fc00-0xa0000 usable=false
+e820[2] 0xf0000-0x100000 usable=false
+e820[3] 0x100000-0x7ffdc000 usable=true
+e820[4] 0x7ffdc000-0x80000000 usable=false
+e820[5] 0xb0000000-0xc0000000 usable=false
+e820[6] 0xfed1c000-0xfed20000 usable=false
+e820[7] 0xfeffc000-0xff000000 usable=false
+e820[8] 0xfffc0000-0x100000000 usable=false
+e820[9] 0xfd00000000-0x10000000000 usable=false
+boot: static regions phys_end=0x7ffdc000 heap_region_end=0x7ffdc000 heap=0x40000000+0x3d000000 slab=0x7d000000+0x1000000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 1024MB @ 0x40000000    [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             multiboot cmdline + e820 parsed    [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 2047 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x200000-0x400000   [ok]
+mm:               layout: heap=0x40000000-0x7d0000   [ok]
+page_desc: marked 97 non-RAM hole pages Reserved (0 MB)
+mm:               524252 page descriptors (span 20   [ok]
+page_alloc: zone Normal span=524252 pages (2047 MB), seeded=246203 (961 MB), unmanaged-in-span=278049 (1086 MB)
+mm:               zone allocator initialized (5242   [ok]
+memblock:         total 2047MB, available 961MB      [ok]
+mm:               device mappings created            [ok]
+hpet: TSC timekeeper promoted (tsc 4291953819 Hz, mult 10007021, 20ms window)
+timer:            HPET-calibrated TSC timekeeper (   [ok]
+irq:              irq_desc array initialized         [ok]
+timer:            TSC 4292 MHz, LAPIC 62 MHz (x2 A   [ok]
+TICKARM-RING va=0xffffffff810128f8 phys=0x10128f8 slots=16 stride=40
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+negmemo: off (cmdline negmemo param = None)
+fs:               tracefs mounted /sys/kernel/trac   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+virtio-pci: INTx pin 1 routed to PIC line 11 (shared dispatch)
+driver:           vda virtio-blk 1433600 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             page built; mapping off            [done]
+security:         capability LSM initialized         [ok]
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+debug:            diagnostic subsystem               [ok]
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 1 online (lapic 0x1)
+affinity: 7 of 7 task(s) default mask -> 0x3
+smp:              2 CPUs online                      [ok]
+virtio-pci: first PCI INTx interrupt delivered
+smp:              IPI selftest 1/1 calls, 0 remote   [ok]
+cctx: off (cmdline cctx param = None)
+softirq:          ksoftirqd per-CPU threads          [ok]
+debug:            khungtaskd hung-task detector      [ok]
+fs: fdreapd retire reaper started
+fs:               fdreapd fd retire reaper           [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+driver:           evdev nodes (no input hw)          [done]
+driver:           no keyboard (headless)             [done]
+driver:           no pointer (headless)              [done]
+init:             ELF /test/lmbench_run loaded       [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+SCHED-IRQOFF caller=kernel/src/mm/kswapd.rs:83 pid=300 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:104 pid=304 pc=0x0
+LMBENCH RUN lat_proc
+PARKWALK-ARMED
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+SCHED-IRQOFF caller=kernel/src/sched/sched.rs:2241 pid=307 pc=0x0
+timer:            lapic tick check: 15 jiffies / 1   [ok]
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff8880783a0000 freeing_pid=532
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff8880785a0000 freeing_pid=630
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888079120000 freeing_pid=1223
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff88807ae20000 freeing_pid=2705
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff88807b460000 freeing_pid=3027
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff88807b920000 freeing_pid=3262
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070720000 freeing_pid=4003
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=9985
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=12317
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=16253
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=16799
+
+STACKFREE-LIVE-RSP0 cpu=0 top=0xffff888070f20000 freeing_pid=23900
+
+STACKFREE-LIVE-RSP0 cpu=0 top=0xffff888070f20000 freeing_pid=28496
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=29838
+
+STACKFREE-LIVE-RSP0 cpu=0 top=0xffff888070f20000 freeing_pid=3389
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=3390
+
+STACKFREE-LIVE-RSP0 cpu=0 top=0xffff888070f20000 freeing_pid=5164
+
+STACKFREE-LIVE-RSP0 cpu=1 top=0xffff888070f20000 freeing_pid=13711
+Process fork+exit: 61.3875 microseconds
+LMBENCH DONE lat_proc
+unixrd: off (cmdline unixrd param = None)
+reboot: syncing filesystems
+FORKPROF BEGIN hz=4292218720
+FORKPROF fk_total n=51287 avg=12us max=271us avgns=12018ns
+FORKPROF fk_alloc n=51287 avg=1us max=220us avgns=1176ns
+FORKPROF fk_copythread n=51287 avg=0us max=30us avgns=134ns
+FORKPROF fk_fdtable n=51287 avg=0us max=32us avgns=574ns
+FORKPROF fk_mmfork n=51287 avg=7us max=266us avgns=7622ns
+FORKPROF fk_enqueue n=51287 avg=0us max=15us avgns=340ns
+FORKPROF mm_snapshot n=51287 avg=0us max=27us avgns=246ns
+FORKPROF mm_cow n=51287 avg=5us max=264us avgns=5473ns
+FORKPROF mm_replay n=51287 avg=1us max=89us avgns=1284ns
+FORKPROF ex_total n=51287 avg=14us max=10135us avgns=14784ns
+FORKPROF ex_mmdrop n=51287 avg=4us max=10118us avgns=4855ns
+FORKPROF drop_vmafree n=51288 avg=0us max=28us avgns=472ns
+FORKPROF drop_rcu n=51288 avg=0us max=10106us avgns=248ns
+FORKPROF drop_ptfree n=51288 avg=3us max=34us avgns=3719ns
+FORKPROF ex_reparent n=51287 avg=0us max=26us avgns=239ns
+FORKPROF ex_notify n=51287 avg=0us max=12us avgns=175ns
+FORKPROF exec_total n=1 avg=4519us max=4519us avgns=4519668ns
+FORKPROF s_forks_vmas scalar=359007
+FORKPROF s_cow_ptes scalar=4205496
+FORKPROF s_cow_tables scalar=153860
+FORKPROF s_mm_drops scalar=51288
+FORKPROF wt_body n=51287 avg=28us max=10151us avgns=28911ns
+FORKPROF wt_sched n=50931 avg=14us max=10144us avgns=14415ns
+FORKPROF wt_reap n=51287 avg=2us max=958us avgns=2085ns
+FORKPROF sched_notify n=51287 avg=1us max=33us avgns=1537ns
+FORKPROF wake_body n=52190 avg=0us max=27us avgns=512ns
+FORKPROF wake_run n=52173 avg=0us max=843us avgns=884ns
+FORKPROF child_run n=50808 avg=17us max=77154us avgns=17306ns
+FORKPROF ex_fddrop n=51287 avg=0us max=256us avgns=825ns
+FORKPROF END
+reboot: Power down
