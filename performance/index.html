@@ -189,8 +189,43 @@
     </div>
     <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
+    <!-- ================= fio ================= -->
+    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 存储 I/O 压测(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
+    <p style="font-size:13.5px">来源:qa-suites 线台账 run/qa-suites-findings.md(内核 9f2c1cc6)。机位:x86_64 + KVM q35 2G/2cpu,fio 3.36 静态 musl 构建(libaio 引擎内建),每类负载一次独立启动,共 20 次启动。全部启动零 KERNPANIC / 零 DEADLOCK / 零 ALLOCTHROW。</p>
+    <h3>引擎枚举(单启动顺序小作业)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>引擎</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span>(各 rc=0)</td></tr>
+          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> —— O_DIRECT 路径可用</td></tr>
+          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>:1/6 概率启动挂起(fdreap RCU grace 停滞,竞态类;4 次复现尝试未捕获)</td></tr>
+          <tr><td class="mono">libaio</td><td><span class="chip bad">缺口</span>:io_setup/io_submit 返回 ENOSYS;fio 干净退出 err=38,errno 语义正确</td></tr>
+          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>:环形语义不完整致 fio 用户态 SIGSEGV(setup 成功、mmap 成功,进入 enter 契约后崩溃;内核存活)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>压力类(每类独立启动)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>类</th><th>负载</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">seqrw</td><td>1M 顺序写 64M + 1M 顺序读 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">randrw</td><td>4k 随机读 64M + 4k 随机写 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">fsync</td><td>4k 随机写 8M + fsync=1(2048 个持久化点)</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">mmaprwn</td><td>mmap 引擎 4k 随机读写 64M</td><td><span class="chip ok">PASS</span>(8160 读 + 8224 写)</td></tr>
+          <tr><td class="mono">direct</td><td>4k 随机读/写 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">verify</td><td>8k 随机写 32M + crc32 回读校验</td><td><span class="chip ok">PASS</span> —— 4096+4096 全矩阵<b>零校验错误</b></td></tr>
+          <tr><td class="mono">multi</td><td>同文件 4 作业竞争(2 随机读 + 随机写 + 顺序写)</td><td><span class="chip ok">PASS</span> —— 组级 <b>读 64MiB @711MiB/s / 写 64MiB @688MiB/s</b></td></tr>
+          <tr><td class="mono">bigfile</td><td>256M 写 + 256M 读 + crc32 全量校验</td><td><span class="chip ok">PASS</span> —— 256M 全量校验干净</td></tr>
+          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>创建/删除churn ×40 · 4k fsync=4 持续 240 s · direct=1 numjobs=4 随机读写 128M(16.3k 读 + 16.4k 写)</td><td><span class="chip ok">PASS</span>(各启动)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">吞吐口径:multi 组级 ~700 MiB/s(KVM,页缓存吸收类);引擎枚举作业极小(256k),只枚举系统调用路径支持,不代表吞吐。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
+
     <!-- ================= 方法 ================= -->
-    <h2 id="method"><span class="anchor">§4</span>方法与 rig</h2>
+    <h2 id="method"><span class="anchor">§5</span>方法与 rig</h2>
     <ul>
       <li><b>同机同加速</b>:两侧同一宿主、同一 QEMU q35 + KVM(<code>-accel kvm -cpu host</code>)、同一 Ubuntu rootfs 形状、同一静态基准二进制;每启动一个用例(串口与长基准并发打印,单用例单次启动是唯一干净采集),runner 为 PID 1,35 秒 in-guest 预算(特殊用例单独注明)。</li>
       <li><b>类内可比铁律</b>:debug 与 release-strong 不可跨类比(strong 在下限类指标低 10–30×);TCG 与 KVM 不可跨类比。</li>
@@ -198,7 +233,7 @@
     </ul>
 
     <!-- ================= 门禁 ================= -->
-    <h2 id="gate"><span class="anchor">§5</span>合并门性能维度(三层 + 六域)</h2>
+    <h2 id="gate"><span class="anchor">§6</span>合并门性能维度(三层 + 六域)</h2>
     <p>每次合并同时审查功能与性能;基线只能由通过了自身层级的合并更新,回归阻塞合并直至修复或带数字书面论证。流程细节见<a href="../guides/development.html#gate">参与开发 §3</a>。</p>
     <div class="tbl-wrap">
       <table>
@@ -226,7 +261,7 @@
     </div>
     <div class="callout"><b>总原则:</b>任何可能影响性能的子系统都必须处于门禁测量范围之内 —— 如果现有工具测不了它,应为其新增 debug 观测工具(默认关闭)。测量是变更的组成部分,而非事后补充。</div>
 
-    <h2 id="t1"><span class="anchor">§6</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
+    <h2 id="t1"><span class="anchor">§7</span>Tier 1:静默 syscost 启动普查带(KVM q35 smp2/4G,780s 窗)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>指标</th><th>基线 / 带</th></tr></thead>
@@ -245,7 +280,7 @@
       </table>
     </div>
 
-    <h2 id="t2"><span class="anchor">§7</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重锚定)</h2>
+    <h2 id="t2"><span class="anchor">§8</span>Tier 2:pbench P1–P7 全锚(KVM debug 类,2026-11-03 三板重锚定)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>组</th><th>内容(test/pbench.c)</th><th class="num">锚(KVM debug,µs)</th></tr></thead>
@@ -263,7 +298,7 @@
     <p style="font-size:13px;color:var(--text-3)">重锚定过程:KVM debug 锚 = 三块完整板中位数(每板 PBENCH DONE rc=0,板间 ±1%),详见基线文件 SP-7 节。旧 TCG 列仅存档作溯源。</p>
 
     <!-- ================= 优化记录 ================= -->
-    <h2 id="campaigns"><span class="anchor">§8</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
+    <h2 id="campaigns"><span class="anchor">§9</span>已落地的性能优化(同机同加速 A/B 实测)</h2>
     <p>以下优化均以同机同加速 A/B 测量归因,收益与代价同表记录(详见 <code>docs/architecture/rust-native-register.md</code>):</p>
     <div class="tbl-wrap">
       <table>
@@ -285,7 +320,7 @@
       </table>
     </div>
 
-    <h2 id="queue"><span class="anchor">§9</span>优化队列(开放差距,按优先序)</h2>
+    <h2 id="queue"><span class="anchor">§10</span>优化队列(开放差距,按优先序)</h2>
     <ul>
       <li><b>lat_syscall open 1.82× / stat 1.32×</b>:路径解析尾部分解(campaign 已落 open 累计 −15.2%、stat −4.6%,继续攻)。</li>
       <li><b>lat_proc fork 1.11×</b>:retire batch-park 在途。</li>
@@ -296,7 +331,7 @@
       <li><b>补测队列</b>:Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 
-    <h2 id="tools"><span class="anchor">§10</span>debug 测量工具链</h2>
+    <h2 id="tools"><span class="anchor">§11</span>debug 测量工具链</h2>
     <ul>
       <li><b>syscost</b>:启动普查(系统调用量、census 计数、tick 率、每操作均值)—— Tier 1 的采集器。</li>
       <li><b>pbench</b>(test/pbench.c):P1–P7 七组微基准探针 —— Tier 2 的采集器。</li>

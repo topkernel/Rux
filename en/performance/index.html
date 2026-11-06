@@ -185,14 +185,48 @@
     </div>
     <p style="font-size:13px;color:var(--text-3)">The multi-core split: the +4.3% total is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
 
-    <h2 id="method"><span class="anchor">§4</span>Method and rig</h2>
+    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 storage-IO stress (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
+    <p style="font-size:13.5px">Source: the qa-suites lane ledger run/qa-suites-findings.md (kernel 9f2c1cc6). Rig: x86_64 + KVM q35 2G/2cpu, fio 3.36 static musl (libaio engine builtin), one family per boot, 20 boots total. Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all boots.</p>
+    <h3>Engine survey (tiny sequential jobs, one boot)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Engine</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">sync / psync / vsync / pvsync2 / mmap / splice</td><td><span class="chip ok">PASS</span> (rc=0 each)</td></tr>
+          <tr><td class="mono">sync + direct=1</td><td><span class="chip ok">PASS</span> — the O_DIRECT path works</td></tr>
+          <tr><td class="mono">posixaio</td><td><span class="chip warn">F-6</span>: 1-in-6 boot wedge (fdreap RCU-grace stall, a race class; 4 reproduction attempts, no capture)</td></tr>
+          <tr><td class="mono">libaio</td><td><span class="chip bad">GAP</span>: io_setup/io_submit return ENOSYS; fio exits cleanly with err=38, correct errno discipline</td></tr>
+          <tr><td class="mono">io_uring</td><td><span class="chip bad">F-7</span>: incomplete ring semantics crash fio in userspace (setup ok, mmap ok, SIGSEGV entering the enter contract; the kernel stays alive)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Stress classes (one family per boot)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Load</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">seqrw</td><td>1M sequential write 64M + 1M read 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">randrw</td><td>4k randread 64M + randwrite 64M</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">fsync</td><td>4k randwrite 8M fsync=1 (2,048 durability points)</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">mmaprwn</td><td>mmap engine 4k randrw 64M</td><td><span class="chip ok">PASS</span> (8,160 reads + 8,224 writes)</td></tr>
+          <tr><td class="mono">direct</td><td>4k randread/randwrite 64M direct=1</td><td><span class="chip ok">PASS</span></td></tr>
+          <tr><td class="mono">verify</td><td>8k randwrite 32M + crc32 read-back</td><td><span class="chip ok">PASS</span> — 4096+4096 full matrix, <b>zero verify errors</b></td></tr>
+          <tr><td class="mono">multi</td><td>4-job same-file contention (2 randread + randwrite + seq write)</td><td><span class="chip ok">PASS</span> — group <b>read 64MiB @711MiB/s, write 64MiB @688MiB/s</b></td></tr>
+          <tr><td class="mono">bigfile</td><td>256M write + 256M read + full crc32 verify</td><td><span class="chip ok">PASS</span> — 256M full-matrix verify clean</td></tr>
+          <tr><td class="mono">churn / fsyncburn / deepdirect</td><td>create/unlink churn ×40 · 4k fsync=4 sustained 240 s · direct=1 numjobs=4 randrw 128M (16.3k reads + 16.4k writes)</td><td><span class="chip ok">PASS</span> (each boot)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Throughput basis: the multi group ran ~700 MiB/s (KVM, page-cache-absorbed class); the engine-survey jobs are tiny (256k) and enumerate syscall-path support, not throughput. Post-completion note: the numjobs process-group reaping phase showed F-8 (the F-5 family: parked forker + KOT-KILL cascade, a scheduler-handoff issue handed to the sched lane); fio's own results are unaffected (rc=0, data correct). netperf / iperf3 / sockperf network benchmarks are on the qa-suites charter but have not run yet.</p>
+
+        <h2 id="method"><span class="anchor">§5</span>Method and rig</h2>
     <ul>
       <li><b>Same host, same accelerator</b>: both sides on the same host, the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same Ubuntu rootfs shape, the same static benchmark binaries; one case per boot (the serial console interleaves with long sweeps, so a single-case boot is the only clean collection), PID 1 runner, 35 s in-guest budget (exceptions noted per case).</li>
       <li><b>Comparable-class rule</b>: debug vs release-strong never cross-compared (strong reads 10–30× lower on the floor families); TCG vs KVM never cross-compared.</li>
       <li><b>Anchor provenance</b>: gate anchors read only Rux's own medians — the Linux column never enters a Rux gate anchor (leg 32 found four cells transcribed from the Linux column; corrected and filed).</li>
     </ul>
 
-    <h2 id="gate"><span class="anchor">§5</span>The merge-gate performance dimension (three tiers + six domains)</h2>
+    <h2 id="gate"><span class="anchor">§6</span>The merge-gate performance dimension (three tiers + six domains)</h2>
     <p>Every merge is reviewed for both function and performance; baselines move only through merges that passed their own tier; a regression blocks the merge until fixed or justified in writing. Workflow details: <a href="../../guides/development.html#gate">Contributing §3</a>.</p>
     <div class="tbl-wrap">
       <table>
@@ -220,7 +254,7 @@
     </div>
     <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, add a debug observability tool (gated off by default). Measurement is part of the change, not an afterthought.</div>
 
-    <h2 id="t1"><span class="anchor">§6</span>Tier 1: quiet syscost boot census (KVM q35 smp2/4G, 780 s window)</h2>
+    <h2 id="t1"><span class="anchor">§7</span>Tier 1: quiet syscost boot census (KVM q35 smp2/4G, 780 s window)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
@@ -239,7 +273,7 @@
       </table>
     </div>
 
-    <h2 id="t2"><span class="anchor">§7</span>Tier 2: pbench P1–P7 anchors (KVM debug class, re-anchored 2026-11-03 across three boards)</h2>
+    <h2 id="t2"><span class="anchor">§8</span>Tier 2: pbench P1–P7 anchors (KVM debug class, re-anchored 2026-11-03 across three boards)</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (KVM debug, µs)</th></tr></thead>
@@ -256,7 +290,7 @@
     </div>
     <p style="font-size:13px;color:var(--text-3)">Re-anchor: the KVM debug anchor is the median of three full boards (each PBENCH DONE rc=0, boards within ±1%). Old TCG columns remain in the baseline file for provenance only.</p>
 
-    <h2 id="campaigns"><span class="anchor">§8</span>Landed performance work (same-rig A/B measured)</h2>
+    <h2 id="campaigns"><span class="anchor">§9</span>Landed performance work (same-rig A/B measured)</h2>
     <p>Each item below was attributed with a same-rig A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
     <div class="tbl-wrap">
       <table>
@@ -278,7 +312,7 @@
       </table>
     </div>
 
-    <h2 id="queue"><span class="anchor">§9</span>Optimization queue (open gaps, priority order)</h2>
+    <h2 id="queue"><span class="anchor">§10</span>Optimization queue (open gaps, priority order)</h2>
     <ul>
       <li><b>Syscall entry and fill/copy tail</b>: null 1.17× / open 1.82× / stat 1.32× / write 1.10× (same-rig) — entry-floor and fill/copy tail (SMAP AC brackets); fd lookup is no longer the bottleneck (fstat already ahead).</li>
       <li><b>lat_proc fork 1.11×</b>: retire batch-park in flight.</li>
@@ -287,7 +321,7 @@
       <li><b>Backfill queue</b>: same-rig KVM Linux comparisons for the remaining lmbench cases (lat_mmap family is already paired) and for Geekbench; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>
 
-    <h2 id="tools"><span class="anchor">§10</span>debug measurement toolchain</h2>
+    <h2 id="tools"><span class="anchor">§11</span>debug measurement toolchain</h2>
     <ul>
       <li><b>syscost</b>: boot census (syscall volume, census counts, tick rate, per-op averages) — the Tier 1 collector.</li>
       <li><b>pbench</b> (test/pbench.c): the P1–P7 microbenchmark probes — the Tier 2 collector.</li>
