@@ -230,6 +230,18 @@ struct FlockEntry {
 
 /// Global flock table (design note in module header).
 static FILE_LOCK_TABLE: Spinlock<Vec<FlockEntry>> = Spinlock::new(Vec::new());
+/// (perf-gap-hunt) Live-flock mirror: stored under the FILE_LOCK_TABLE
+/// lock at every mutation site, so 0 means no flock exists anywhere and
+/// File::drop (flock_release_file) skips the global lock entirely —
+/// the same empty-table fast gate as RECORD_LOCK_COUNT / WATCH_COUNT.
+static FLOCK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_flock_len(table: &Vec<FlockEntry>) {
+    FLOCK_COUNT.store(table.len(), core::sync::atomic::Ordering::Release);
+}
+
 /// All flock waiters (wake-all-and-recheck on every release/conversion).
 static FLOCK_WAIT_QUEUE: WaitQueueHead = WaitQueueHead::new();
 
@@ -262,6 +274,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
             let before = table.len();
             table.retain(|e| !(e.key == key && e.file_id == file_id));
             if table.len() != before {
+                note_flock_len(&table);
                 drop(table);
                 FLOCK_WAIT_QUEUE.wake_up_all();
             }
@@ -285,6 +298,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno
                             owner_pid,
                             exclusive,
                         });
+                        note_flock_len(&table);
                         true
                     }
                 };
@@ -330,10 +344,17 @@ fn flock_conflicts_locked(
 /// `File::drop` — the exact moment the last fd (possibly across fork
 /// copies and in-flight syscall clones) goes away.
 pub fn flock_release_file(file_id: u64) {
+    // closegap: empty-table fast path — see FLOCK_COUNT (RECORD_LOCK_COUNT
+    // precedent): the common close never used flock(2), so it pays one
+    // Acquire load instead of the global lock + retain scan.
+    if FLOCK_COUNT.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return;
+    }
     let mut table = FILE_LOCK_TABLE.lock();
     let before = table.len();
     table.retain(|e| e.file_id != file_id);
     if table.len() != before {
+        note_flock_len(&table);
         drop(table);
         FLOCK_WAIT_QUEUE.wake_up_all();
     }
