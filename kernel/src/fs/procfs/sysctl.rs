@@ -377,30 +377,71 @@ pub fn generate_threads_max() -> Vec<u8> {
     alloc::format!("31418\n").into_bytes()
 }
 
-/// /proc/sys/kernel/printk — four loglevels as on Linux:
-/// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
-/// <default_console_loglevel>`. The first number is live: syslog(2)
-/// actions 6/7/8 store into the same CONSOLE_LOGLEVEL this reads, so LTP
-/// syslog11 can observe level changes through the file.
+/// /proc/sys/kernel/printk — the reference's four loglevel numbers:
+/// `console_loglevel  default_message_loglevel  minimum_console_loglevel
+/// default_console_loglevel`, TAB-separated like proc_dointvec's read
+/// side. The first number is live: it gates console emission only (the
+/// printk ring still records everything at KERN_INFO or higher), and
+/// syslog(2) actions 6/7/8 and `loglevel=`/`quiet` all store into the
+/// same value this reads — LTP syslog11 observes level changes through
+/// the file, sysctl(8) save/restore round-trips it.
 pub fn generate_printk() -> Vec<u8> {
-    let cur = crate::printk::get_console_loglevel();
-    alloc::format!("{} 4 1 7\n", cur).into_bytes()
+    alloc::format!(
+        "{}\t{}\t{}\t{}\n",
+        crate::printk::get_console_loglevel(),
+        crate::printk::default_message_loglevel(),
+        crate::printk::minimum_console_loglevel(),
+        crate::printk::default_console_loglevel(),
+    )
+    .into_bytes()
 }
 
-/// Write side: the first integer sets the console loglevel (Linux
-/// printk_sysctl bounds 1..=15; single-number writes are what sysctl(8)
-/// and LTP's save/restore emit).
+/// Write side: proc_dointvec shape — up to four whitespace/tab-separated
+/// integers; a short write updates only the leading values and leaves
+/// the rest unchanged (writing "3" lowers console_loglevel, writing
+/// "3 4 1 3" like sysctl.d's `kernel.printk = 3 4 1 3` sets all four).
+/// Each value is bounded 0..=15 (the reference's plain proc_dointvec
+/// takes any int; the u8 storage plus loglevel semantics cap the useful
+/// range — recorded divergence).
 pub fn write_printk(input: &[u8]) -> i32 {
-    match parse_u64(input) {
-        Ok(v) => {
-            if !(1..=15).contains(&v) {
-                return -(crate::errno::constants::EINVAL as i32);
-            }
-            crate::printk::set_console_loglevel(v as u8);
-            0
+    let s: &[u8] = if input.last() == Some(&b'\n') {
+        &input[..input.len() - 1]
+    } else {
+        input
+    };
+    let mut vals: [Option<u8>; 4] = [None; 4];
+    let mut nvals = 0usize;
+    for tok in s.split(|&b| b == b' ' || b == b'\t') {
+        if tok.is_empty() {
+            continue;
         }
-        Err(e) => e,
+        if nvals == 4 {
+            return -(crate::errno::constants::EINVAL as i32);
+        }
+        match parse_u64(tok) {
+            Ok(v) if v <= 15 => {
+                vals[nvals] = Some(v as u8);
+                nvals += 1;
+            }
+            _ => return -(crate::errno::constants::EINVAL as i32),
+        }
     }
+    if nvals == 0 {
+        return -(crate::errno::constants::EINVAL as i32);
+    }
+    if let Some(v) = vals[0] {
+        crate::printk::set_console_loglevel(v);
+    }
+    if let Some(v) = vals[1] {
+        crate::printk::set_default_message_loglevel(v);
+    }
+    if let Some(v) = vals[2] {
+        crate::printk::set_minimum_console_loglevel(v);
+    }
+    if let Some(v) = vals[3] {
+        crate::printk::set_default_console_loglevel(v);
+    }
+    0
 }
 
 /// /proc/sys/kernel/shmmax — max segment size. Live: the shmget size
