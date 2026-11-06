@@ -220,14 +220,38 @@ fn sys_openat_impl(args: SyscallArgs) -> i64 {
     if not_rooted
         && !pathname_ptr.is_null()
         && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-        && unsafe {
-            crate::arch::uaccess::copy_from_user(
-                probe.as_mut_ptr(), pathname_ptr, probe.len())
-        } == 0
     {
+        // (perf-gap-hunt) two-tier capture: the common path is short
+        // (tens of bytes), so copy the first half first and only pay
+        // the second half when no nul landed in it — the full-128 copy
+        // was the largest measured piece of the open PRE phase after
+        // the chroot-verdict reuse. Failure of either tier keeps
+        // probe_str None (the resolve_user_path fallback owns errors).
+        let tier = 64;
+        let mut ok = unsafe {
+            crate::arch::uaccess::copy_from_user(
+                probe.as_mut_ptr(), pathname_ptr, tier)
+        } == 0;
+        let mut len = if ok {
+            probe[..tier].iter().position(|&b| b == 0)
+        } else {
+            None
+        };
+        if ok && len.is_none() {
+            ok = unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe[tier..].as_mut_ptr(),
+                    pathname_ptr.wrapping_add(tier),
+                    probe.len() - tier,
+                )
+            } == 0;
+            if ok {
+                len = probe[tier..].iter().position(|&b| b == 0).map(|l| l + tier);
+            }
+        }
         // nul_found gate: never walk a probe-TRUNCATED prefix of a
         // longer path (falls back to resolve_user_path instead).
-        if let Some(len) = probe.iter().position(|&b| b == 0) {
+        if let Some(len) = len {
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 if p.starts_with('/') {
                     probe_str = Some(p);
@@ -938,12 +962,33 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     let mut probe_str: Option<&str> = None;
     if !pathname_ptr.is_null()
         && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
-        && unsafe {
-            crate::arch::uaccess::copy_from_user(
-                probe.as_mut_ptr(), pathname_ptr, probe.len())
-        } == 0
     {
-        if let Some(len) = probe.iter().position(|&b| b == 0) {
+        // (perf-gap-hunt) two-tier capture, same shape as sys_openat's
+        // probe: pay the second 64 bytes only when no nul landed in the
+        // first — short paths dominate every stat-shaped workload.
+        let tier = 64;
+        let mut ok = unsafe {
+            crate::arch::uaccess::copy_from_user(
+                probe.as_mut_ptr(), pathname_ptr, tier)
+        } == 0;
+        let mut len = if ok {
+            probe[..tier].iter().position(|&b| b == 0)
+        } else {
+            None
+        };
+        if ok && len.is_none() {
+            ok = unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe[tier..].as_mut_ptr(),
+                    pathname_ptr.wrapping_add(tier),
+                    probe.len() - tier,
+                )
+            } == 0;
+            if ok {
+                len = probe[tier..].iter().position(|&b| b == 0).map(|l| l + tier);
+            }
+        }
+        if let Some(len) = len {
             if let Ok(p) = core::str::from_utf8(&probe[..len]) {
                 probe_str = Some(p);
             }
