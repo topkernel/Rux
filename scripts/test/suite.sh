@@ -130,7 +130,7 @@ ORIG_ARGS=("$@")
 # The repository root. RUX_ROOT lets the detached daemon run from a
 # snapshot copy of this script (kept next to the records) without losing
 # the root it belongs to.
-ROOT="${RUX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT="${RUX_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cd "$ROOT"
 
 # C probe sources are tarball-packed, not git-tracked; make sure they
