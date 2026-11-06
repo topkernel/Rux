@@ -57,12 +57,18 @@ struct TrimQEntry {
     start: usize,
     end: usize,
     tick: u64,
-    /// PFN snapshots of the first TRIMQ_SNAP pages of the trimmed range,
-    /// taken BEFORE the munmap (0 = page had no PTE / beyond cap).
+    /// PFN + first-16-bytes snapshots of the first TRIMQ_SNAP pages of
+    /// the trimmed range, taken BEFORE the munmap (pfn 0 = page had no
+    /// PTE / beyond cap). The trim-time content is the discriminator:
+    /// valid glibc chunk headers at trim time = the trim was legitimate
+    /// and the later walk is stale-pointer; already-zeroed/garbage
+    /// headers = the corruption predates the trim.
     pfns: [u64; TRIMQ_SNAP],
+    w0: [u64; TRIMQ_SNAP],
+    w1: [u64; TRIMQ_SNAP],
 }
 
-const TRIMQ_SNAP: usize = 64;
+const TRIMQ_SNAP: usize = 32;
 
 static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
     use crate::sync::spinlock::Spinlock;
@@ -96,6 +102,8 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
     // state, which discriminates "frame recycled by another mapping"
     // (aliasing) from "frame untouched, only the pointers were stale".
     let mut pfns = [0u64; TRIMQ_SNAP];
+    let mut w0 = [0u64; TRIMQ_SNAP];
+    let mut w1 = [0u64; TRIMQ_SNAP];
     {
         let task = crate::sched::current();
         if let Some(t) = task {
@@ -110,6 +118,15 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
                         crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)
                     } {
                         *p = ppn as u64;
+                        // SAFETY: linear-map view of a live page frame.
+                        let kv = crate::arch::mm::phys_to_virt(
+                            crate::arch::mm::PhysAddr::new((ppn as u64) << 12),
+                        )
+                        .bits() as *const u64;
+                        unsafe {
+                            w0[i] = *kv;
+                            w1[i] = *kv.add(1);
+                        }
                     }
                 }
             }
@@ -117,7 +134,7 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
     }
     let mut q = TRIMQ.lock_irqsave();
     let slot = q.iter_mut().enumerate().find(|(_, e)| e.is_none());
-    let entry = TrimQEntry { mm, start, end, tick, pfns };
+    let entry = TrimQEntry { mm, start, end, tick, pfns, w0, w1 };
     match slot {
         Some((_, e)) => {
             *e = Some(entry);
@@ -175,10 +192,11 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
                             crate::arch::mm::PhysAddr::new(pfn << 12),
                         )
                         .bits() as *const u64;
-                        let (w0, w1) = unsafe { (*kv, *kv.add(1)) };
+                        let (now0, now1) = unsafe { (*kv, *kv.add(1)) };
+                        let changed = now0 != e.w0[idx] || now1 != e.w1[idx];
                         crate::pr_warn!(
-                            "TRIMQ-FRAME pfn={:#x} state={} w0={:#016x} w1={:#016x}",
-                            pfn, flags_desc, w0, w1
+                            "TRIMQ-FRAME pfn={:#x} state={} changed={} trimw0={:#016x} noww0={:#016x}",
+                            pfn, flags_desc, changed as u8, e.w0[idx], now0
                         );
                     } else {
                         crate::pr_warn!("TRIMQ-FRAME pfn=0 (page was not present at trim)");
@@ -256,14 +274,18 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 // Unmap pages that are no longer needed
                 if new_page_end < current_page_end {
                     if let Some(addr_space) = current_task.address_space() {
-                        let _ = addr_space.munmap(
-                            crate::mm::page::VirtAddr::new(new_page_end as usize),
-                            (current_page_end - new_page_end) as usize,
-                        );
+                        // Record BEFORE the munmap: the PFN + content
+                        // snapshot must see the pages while they are
+                        // still mapped (after unmap_pages the leaf
+                        // tables are gone).
                         trimq_record(
                             addr_space as *const _ as usize,
                             new_page_end as usize,
                             current_page_end as usize,
+                        );
+                        let _ = addr_space.munmap(
+                            crate::mm::page::VirtAddr::new(new_page_end as usize),
+                            (current_page_end - new_page_end) as usize,
                         );
                     }
                 }
