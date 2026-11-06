@@ -682,7 +682,7 @@ pub fn console_tick_flush() {
 /// - otherwise -> flush older deferred lines first, then whole-record
 ///   emit under CONSOLE_EMIT_LOCK. A full TX ring defers the line
 ///   instead of blocking — printk never sleeps.
-fn emit_to_console(text: &[u8]) {
+pub fn emit_to_console(text: &[u8]) {
     if crate::dfx::pstore::sink_armed() || crate::dfx::oops::oops_entered() {
         emit_direct_crash(text);
         return;
