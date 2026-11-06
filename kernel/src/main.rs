@@ -100,7 +100,7 @@ pub fn print_status_ex(module: &str, desc: &str, success: Option<bool>) {
     }
 
     push(&mut line, &mut n, b"\n");
-    crate::console::puts_bytes(&line[..n]);
+    crate::printk::emit_to_console(&line[..n]);
 }
 
 #[cfg(feature = "riscv64")]

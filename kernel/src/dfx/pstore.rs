@@ -242,6 +242,13 @@ pub fn arm_sink() {
     SINK_ARMED.store(true, Ordering::Release);
 }
 
+/// Whether the panic staging sink is armed — the console lane's crash-
+/// context discriminator (console TX must take the synchronous direct
+/// path from here on: deferral queues and IRQ drains may be dead).
+pub fn sink_armed() -> bool {
+    SINK_ARMED.load(Ordering::Acquire)
+}
+
 /// One byte of panic output (ConsoleWriter pushes every byte here).
 /// Lock-free by construction: plain atomic stores into a static ring.
 pub fn sink(byte: u8) {

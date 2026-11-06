@@ -783,16 +783,19 @@ impl TtyDevice {
 /// (port-IO VM exits); diverting them keeps dmesg complete while the UART
 /// stays idle during the race. The printk console path (loglevel-gated) and
 /// the raw DFX sinks are unaffected.
+///
+/// Console lane (oh-console): the non-quiet path routes through
+/// printk::console_emit_user — the unified console TX sink that
+/// serializes against printk records under CONSOLE_EMIT_LOCK (this sink
+/// used to bypass it and splice mid-record) and never holds IF=0
+/// across UART polls (the old puts_bytes ran the whole batch under
+/// UART.lock_irqsave: 5-17 ms IRQ-off per line under the OH flood).
 fn console_output(_ctx: usize, bytes: &[u8]) {
     if CONSOLE_SINK_QUIET.load(Ordering::Acquire) {
         crate::printk::ring_stash_console(bytes);
         return;
     }
-    // Batched TX (perf-console): one lock acquisition + one batched pass
-    // for the whole slice — the old per-byte putchar paid the full
-    // lock_irqsave pair AND per-byte 16550 register traffic on every
-    // echo/mirror byte.
-    crate::console::puts_bytes(bytes);
+    crate::printk::console_emit_user(bytes);
 }
 
 /// Whether /dev/console output is diverted to the printk ring (set by the

@@ -86,23 +86,20 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
     bytes_read as isize
 }
 
-/// Task-context console TX over a kernel-owned slice: 32-byte chunked
-/// locking (R20-4 atomicity / 2026-10-20 IRQ-off window bounds), batched
-/// register traffic per chunk (perf-console), cond_resched between
-/// chunks (leg-32B discipline). See `uart_write` for the history.
+/// Task-context console TX over a kernel-owned slice.
+///
+/// Console lane (oh-console): routes through printk::console_emit_user —
+/// the unified console TX sink that serializes against printk records
+/// under CONSOLE_EMIT_LOCK (this path used to bypass it) and paces
+/// through the x86_64 TX-ring engine (IRQ drain) instead of polling
+/// LSR.THRE under console::lock() (UART.lock_irqsave). The old
+/// 32-byte-chunked locking existed to bound the IRQ-off windows those
+/// polls created (R20-4 / 2026-10-20); with the IRQ-off holds gone the
+/// sink chunks at 256 bytes — still atomic for every status marker the
+/// test suites grep (PIPE-OK\n, PASS/FAIL lines) — and cond_rescheds
+/// between chunks (leg-32B discipline).
 pub fn uart_write_kernel(slice: &[u8]) -> isize {
-    const UART_TX_CHUNK: usize = 32;
-    let mut idx = 0usize;
-    while idx < slice.len() {
-        let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
-        {
-            let uart = console::lock();
-            uart.puts_batch(&slice[idx..end]);
-        }
-        idx = end;
-        crate::sched::cond_resched();
-    }
-    slice.len() as isize
+    crate::printk::console_emit_user(slice)
 }
 
 pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {

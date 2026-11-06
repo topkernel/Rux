@@ -963,6 +963,14 @@ pub fn timer_softirq_handler(_nr: usize) {
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
     crate::dfx::syscost::tick(current);
 
+    // Console lane (oh-console): flush console bytes deferred by IF=0
+    // printk contexts and re-arm the TX drain if an edge was lost.
+    // Skips itself on the inline irq-exit path (IF=0 there — flushing
+    // would recreate the IF=0 emission this hook exists to retire);
+    // ksoftirqd entries (IF=1) do the work. One EFLAGS read + atomic
+    // loads when idle.
+    crate::printk::console_tick_flush();
+
     // vm-op stage profiler (cmdline `mmprof=1`, oh-launcher perf
     // handoff): mmap/munmap/mprotect stage table, same 60s cadence.
     crate::dfx::mmprof::tick(current);

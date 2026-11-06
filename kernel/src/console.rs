@@ -211,6 +211,671 @@ impl UartRxBuf {
 /// Global UART RX ring buffer
 static UART_RX_BUF: UartRxBuf = UartRxBuf::new();
 
+// ============================================================================
+// TX ring engine (console lane, oh-console; x86_64)
+// ============================================================================
+//
+// Reference parity (linux-6.6 drivers/tty/serial/8250): the reference's
+// tty/console write paths NEVER poll LSR.THRE in the writer's context —
+// `uart_write` only copies bytes into the port xmit buffer under
+// `port->lock` (microseconds of IRQ-off) and enables the TX-holding-
+// register-empty interrupt; the byte pacing happens in the TX-complete
+// IRQ handler. Only the printk console path (`serial8250_console_write`)
+// polls, and its `wait_for_lsr` is bounded per byte.
+//
+// Before this engine every console TX writer (printk record emit,
+// /dev/console tty writes, /dev/ttyS0, exec stdio) polled THRE in the
+// WRITER's context — and the /dev/console and stdio paths held
+// `UART.lock_irqsave` across those polls, so one 256-byte line cost
+// 5-17 ms of interrupts-off under the OH log flood (53rd session §3:
+// if0 9986ms + if1 6687ms per 60 s; 90-99% of writes multi-poll).
+// This engine mirrors the reference shape:
+//
+//   - writers COPY into a 32 KiB FIFO ring (IRQ-off for the memcpy only)
+//     and never touch LSR from task context;
+//   - the UART IRQ drains the ring at whatever pace the emulated 16550
+//     accepts (THRE-gated bursts, no waiting in the handler);
+//   - task-context user writes sleep on a timer when the ring is full
+//     (tty_write blocking semantics) instead of spinning;
+//   - printk keeps its whole-record atomicity via CONSOLE_EMIT_LOCK and
+//     never blocks: a full ring defers the line (printk.rs defer queue).
+//
+// riscv64/aarch64 keep the synchronous store path: their MMIO sinks
+// accept every byte at host speed (no THRE backpressure exists there),
+// so there is nothing to drain.
+
+/// TX ring size (power of two). ~2.8 s of 115200-emulation drain: burst
+/// floods buffer, sustained overload is handled by the printk defer
+/// queue and blocking user writers instead of IRQ-off polling.
+#[cfg(feature = "x86_64")]
+const UART_TX_RING_SIZE: usize = 32 * 1024;
+#[cfg(feature = "x86_64")]
+const UART_TX_RING_MASK: usize = UART_TX_RING_SIZE - 1;
+
+/// Pop size for one IRQ drain pass: matches the 16550 TX FIFO depth
+/// with FCR enabled (THRE means the FIFO can take a full burst).
+#[cfg(feature = "x86_64")]
+const UART_TX_BURST: usize = 16;
+
+#[cfg(feature = "x86_64")]
+struct TxRing {
+    data: core::cell::UnsafeCell<[u8; UART_TX_RING_SIZE]>,
+    /// Consumer index (IRQ drain side).
+    head: usize,
+    /// Producer index (submit side).
+    tail: usize,
+}
+
+// SAFETY: the ring's data is only touched while holding TX_RING's
+// spinlock; head/tail are the lock's own fields.
+#[cfg(feature = "x86_64")]
+unsafe impl Send for TxRing {}
+#[cfg(feature = "x86_64")]
+unsafe impl Sync for TxRing {}
+
+#[cfg(feature = "x86_64")]
+static TX_RING: Spinlock<TxRing> = Spinlock::new(TxRing {
+    data: core::cell::UnsafeCell::new([0; UART_TX_RING_SIZE]),
+    head: 0,
+    tail: 0,
+});
+
+/// Set once the line-4 handler is registered AND the TX drain is wired:
+/// from here on, console TX goes through the ring (crash paths excepted).
+#[cfg(feature = "x86_64")]
+static UART_TX_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Console bytes accepted into the TX ring (syscost probe).
+#[cfg(feature = "x86_64")]
+static TX_SUBMITTED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Console bytes pushed to THR by the IRQ drain (syscost probe).
+#[cfg(feature = "x86_64")]
+static TX_IRQ_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// IRQ drain passes that moved at least one burst.
+#[cfg(feature = "x86_64")]
+static TX_IRQ_DRAINS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether the interrupt-driven TX engine owns console TX (x86_64 after
+/// `init_irq`; always false on the other arches).
+#[cfg(feature = "x86_64")]
+pub fn tx_armed() -> bool {
+    UART_TX_ARMED.load(Ordering::Acquire)
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_armed() -> bool {
+    false
+}
+
+/// Copy as many bytes as fit into the TX ring and (re)arm the TX
+/// interrupt. Returns the number accepted. No device polling here —
+/// this is the whole point of the engine (IRQ-off holds are the
+/// memcpy-length lock sections only).
+#[cfg(feature = "x86_64")]
+pub fn tx_submit(bytes: &[u8]) -> usize {
+    use core::sync::atomic::Ordering::Relaxed;
+    if bytes.is_empty() {
+        return 0;
+    }
+    // pstore-lite must still see every console byte (plain stores; one
+    // relaxed load per call when disarmed).
+    if crate::dfx::pstore::sink_armed() {
+        for &b in bytes {
+            crate::dfx::pstore::sink(b);
+        }
+    }
+    let mut r = TX_RING.lock_irqsave();
+    let mut done = 0usize;
+    while done < bytes.len() {
+        let next = (r.tail + 1) & UART_TX_RING_MASK;
+        if next == r.head {
+            break; // full
+        }
+        // SAFETY: tail is masked in-range; the lock serializes access.
+        unsafe {
+            (*r.data.get())[r.tail] = bytes[done];
+        }
+        r.tail = next;
+        done += 1;
+    }
+    if r.tail != r.head {
+        // Ring non-empty: make sure ETBEI is set so a THRE edge drains
+        // it. IER RMW stays under the ring lock so it can never race
+        // the drain side's clear (the classic lost-wake shape).
+        // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
+        unsafe {
+            let ier = read_reg(COM1_BASE, UART_IER);
+            if ier & IER_TX_ENABLE == 0 {
+                write_reg(COM1_BASE, UART_IER, ier | IER_TX_ENABLE);
+            }
+        }
+    }
+    drop(r);
+    if done > 0 {
+        TX_SUBMITTED.fetch_add(done as u64, Ordering::Relaxed);
+    }
+    done
+}
+
+/// Bytes currently queued in the TX ring.
+#[cfg(feature = "x86_64")]
+pub fn tx_queued() -> usize {
+    let r = TX_RING.lock_irqsave();
+    (r.tail + UART_TX_RING_SIZE - r.head) & UART_TX_RING_MASK
+}
+
+/// Whole-run submit: copies `bytes` only if the ENTIRE slice fits, in
+/// one ring-lock hold (atomic against every other submitter, including
+/// the lock-free one-byte echo submits). Returns false when it did not
+/// fit — the caller defers or retries later. A record that enters the
+/// ring partially could be split mid-line by another writer's bytes,
+/// hence the all-or-nothing contract.
+#[cfg(feature = "x86_64")]
+pub fn tx_submit_whole(bytes: &[u8]) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if bytes.is_empty() {
+        return true;
+    }
+    // pstore-lite must still see every console byte (plain stores; one
+    // relaxed load per call when disarmed).
+    if crate::dfx::pstore::sink_armed() {
+        for &b in bytes {
+            crate::dfx::pstore::sink(b);
+        }
+    }
+    let mut r = TX_RING.lock_irqsave();
+    let free = (r.head + UART_TX_RING_SIZE - 1 - r.tail) & UART_TX_RING_MASK;
+    if free < bytes.len() {
+        return false;
+    }
+    for &b in bytes {
+        // SAFETY: tail is masked in-range; the lock serializes access.
+        unsafe {
+            (*r.data.get())[r.tail] = b;
+        }
+        r.tail = (r.tail + 1) & UART_TX_RING_MASK;
+    }
+    // SAFETY: COM1 IER, lock-held RMW (see tx_submit).
+    unsafe {
+        let ier = read_reg(COM1_BASE, UART_IER);
+        if ier & IER_TX_ENABLE == 0 {
+            write_reg(COM1_BASE, UART_IER, ier | IER_TX_ENABLE);
+        }
+    }
+    drop(r);
+    TX_SUBMITTED.fetch_add(bytes.len() as u64, Relaxed);
+    true
+}
+
+/// Free space in the TX ring. Whole-record submitters check this first:
+/// a record must enter the ring in ONE contiguous run or not at all
+/// (a partial submit would let another writer's line split it).
+#[cfg(feature = "x86_64")]
+pub fn tx_free() -> usize {
+    let r = TX_RING.lock_irqsave();
+    (r.head + UART_TX_RING_SIZE - 1 - r.tail) & UART_TX_RING_MASK
+}
+
+/// Whether the chardev-stall latch is set (the IRQ drain cannot make
+/// progress; user writers should not wait for ring space).
+#[cfg(feature = "x86_64")]
+pub fn tx_stalled() -> bool {
+    TX_STALLED.load(Ordering::Acquire)
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_free() -> usize {
+    usize::MAX // synchronous path: always "fits"
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_stalled() -> bool {
+    false
+}
+
+/// Per-invocation drain budget. With a fast host-side sink (chardev
+/// never backpressures) THRE stays asserted and a flood keeps refilling
+/// the ring — an unbounded loop here was 427 ms of IF=0 in a single IRQ
+/// pass (oh-console smoke boot #2). Two caps, then self-retrigger (with
+/// THRE=1 and ETBEI already set there is no future edge, so the handler
+/// toggles ETBEI off/on under the ring lock to manufacture one):
+/// - WALL-TIME cap (primary, 200 µs): one `rep outsb` burst costs what
+///   the host chardev write costs — measured 1.43 ms avg / 7 ms max per
+///   512 B pass on KVM (smoke #5), i.e. the byte cap alone let a single
+///   closed cli segment ride the top of the 3-7 ms guarded band. A time
+///   cap makes the segment bound independent of host IO cost.
+/// - BYTE cap (secondary, 512 B): bounds the pass when the clock domain
+///   is not fine-grained yet (pre-TSC-calibration read_time is
+///   jiffies-derived — 0 delta — so the time cap cannot fire; the byte
+///   cap keeps the pass bounded regardless).
+#[cfg(feature = "x86_64")]
+const UART_TX_DRAIN_BUDGET: u64 = 512;
+
+/// Wall-time budget per drain pass: 200 µs in the read_time() domain.
+#[cfg(feature = "x86_64")]
+const UART_TX_DRAIN_TIME: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 5_000;
+
+/// Single-drain guard: with a fast host sink THRE re-asserts MID-PASS
+/// (each burst drains instantly), raising a new edge while the first
+/// handler is still looping — the second CPU's handler then races THR
+/// writes against the first and the 16550 silently drops the overflow
+/// (oh-console smoke #3: 5.4 KB of drained-but-lost bytes at -smp 2,
+/// zero at -smp 1). Only one CPU may drain; a losing entrant returns
+/// immediately — the active drain's loop picks the new bytes up.
+#[cfg(feature = "x86_64")]
+static TX_DRAIN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// IRQ-context drain: push bursts from the ring to THR while THRE says
+/// the FIFO can take them. NEVER waits — if THRE is clear the chardev
+/// is backpressured and the next THRE edge re-enters here. Clears
+/// ETBEI under the ring lock once the ring empties.
+#[cfg(feature = "x86_64")]
+pub fn tx_irq_drain() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if tx_quiesced() {
+        return; // a bypass reporter owns THR (see TxQuiesce)
+    }
+    if TX_DRAIN_ACTIVE
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // another CPU is mid-drain; its loop takes our bytes
+    }
+    if tx_quiesced() {
+        // A quiesce section began while we were entering: release the
+        // guard and leave THR to the reporter (the tick net re-arms).
+        TX_DRAIN_ACTIVE.store(false, Ordering::Release);
+        return;
+    }
+    let probe = crate::dfx::syscost::on();
+    let t0 = if probe { crate::arch::cpu::read_counter() } else { 0 };
+    let if0 = probe && !crate::arch::cpu::get_interrupts_state();
+    if if0 {
+        crate::dfx::syscost::zone_uart_push();
+    }
+    let mut polls: u64 = 0;
+    let mut moved: u64 = 0;
+    let mut passes: u64 = 0;
+    let mut buf = [0u8; UART_TX_BURST];
+    let mut budget = UART_TX_DRAIN_BUDGET;
+    let mut budget_out = false;
+    let wt0 = crate::arch::cpu::read_time();
+    loop {
+        polls += 1;
+        if read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+            break; // FIFO busy: the next THRE edge re-enters
+        }
+        let n = {
+            let mut r = TX_RING.lock_irqsave();
+            if r.head == r.tail {
+                // Ring empty: disable ETBEI (under the lock — see
+                // tx_submit for the race this closes).
+                // SAFETY: COM1 IER is the standard 8250 port.
+                unsafe {
+                    let ier = read_reg(COM1_BASE, UART_IER);
+                    write_reg(COM1_BASE, UART_IER, ier & !IER_TX_ENABLE);
+                }
+                0
+            } else {
+                let mut n = 0usize;
+                while n < UART_TX_BURST && r.head != r.tail {
+                    // SAFETY: head is masked in-range; lock-held access.
+                    buf[n] = unsafe { (*r.data.get())[r.head] };
+                    r.head = (r.head + 1) & UART_TX_RING_MASK;
+                    n += 1;
+                }
+                n
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        // SAFETY: COM1 THR is the standard 8250 data port; THRE was
+        // observed above and only this drain writes THR (the single-
+        // drain guard makes that exclusive).
+        unsafe {
+            core::arch::asm!(
+                "cld",
+                "rep outsb",
+                in("dx") COM1_BASE,
+                in("rcx") n as u64,
+                in("rsi") buf.as_ptr(),
+                lateout("rcx") _,
+                lateout("rsi") _,
+                options(nostack)
+            );
+        }
+        moved += n as u64;
+        passes += 1;
+        budget = budget.saturating_sub(n as u64);
+        if budget == 0 {
+            budget_out = true;
+            break;
+        }
+        // Wall-time cap (primary): one RDTSC-class read per burst; see
+        // UART_TX_DRAIN_TIME. Saturating delta keeps the check true even
+        // if the clock ratchets the read backward mid-pass.
+        if crate::arch::cpu::read_time().saturating_sub(wt0) >= UART_TX_DRAIN_TIME {
+            budget_out = true;
+            break;
+        }
+    }
+    if if0 {
+        crate::dfx::syscost::zone_uart_pop();
+    }
+    if probe {
+        let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+        crate::dfx::syscost::uart_putc_note(dt, polls, if0);
+    }
+    if moved > 0 {
+        TX_IRQ_BYTES.fetch_add(moved, Relaxed);
+        TX_IRQ_DRAINS.fetch_add(passes, Relaxed);
+    }
+    // Release the guard BEFORE manufacturing the retrigger edge: the
+    // new IRQ's handler must win the guard, or the remaining ring
+    // bytes would wait for the tick safety net.
+    TX_DRAIN_ACTIVE.store(false, Ordering::Release);
+    if budget_out {
+        r_ring_nonempty_and_retrigger();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drain quiesce: exclusive THR access for direct (bypass) writers
+// (console lane, oh-console; smoke boot #7 finding)
+//
+// The IRQ drain is the ONLY context that may write THR while the engine
+// is armed — EXCEPT the bypass writers: crash/diagnostic reporters
+// (panic/oops via ConsoleWriter and emit_direct_crash, the taskdump
+// wedge dumps, per-byte anomaly tripwires) that must reach the wire
+// without depending on the ring, the emit lock, or a live drain. A
+// bypass writer racing a live drain pass interleaves at CHARACTER
+// granularity — smoke #7 caught a 3-way splice (KMSGFLUSH 000179 +
+// FROZEN-CPU truth + syscost FROZEN lines) exactly there. While a
+// quiesce section is held, the drain refuses to enter, so the bypass
+// writer owns THR alone.
+//
+// Lock-free by construction: the section is one atomic counter plus a
+// BOUNDED wait for an in-flight pass to end (passes are hard-capped at
+// 200 µs of read_time plus one `rep outsb` — a wedged pass still ends;
+// the wait gives up after TX_QUIESCE_WAIT and proceeds, accepting the
+// race rather than hanging the reporter). Drop does NOT re-kick the
+// drain: bytes submitted during the section wait for the 100 Hz tick
+// safety net (tx_kick) — bounded, and these sections are one-shot
+// reports, not throughput paths.
+// ---------------------------------------------------------------------------
+
+/// Depth of nested drain-quiesce sections (0 = drain may run).
+#[cfg(feature = "x86_64")]
+static TX_QUIESCE_DEPTH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Bound for waiting out an in-flight drain pass at section entry.
+/// A pass is capped at ~200 µs of wall time plus one string-IO burst;
+/// 50 ms covers any host-scheduling outlier without hanging a reporter
+/// that runs with IRQs off (the spinlock watchdog context).
+#[cfg(feature = "x86_64")]
+const TX_QUIESCE_WAIT: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 20;
+
+/// Whether a drain-quiesce section is currently held (bypass writers
+/// own THR; the IRQ drain must not enter). Acquire pairs with the
+/// drain's Release store of TX_DRAIN_ACTIVE: a section that waited out
+/// an in-flight pass sees its THR writes complete.
+#[cfg(feature = "x86_64")]
+fn tx_quiesced() -> bool {
+    TX_QUIESCE_DEPTH.load(Ordering::Acquire) != 0
+}
+
+/// Exclusive THR section for a bypass (direct-write) console reporter.
+/// See the block comment above. Nesting is supported: only the 0→1
+/// transition waits out an in-flight drain pass.
+#[cfg(feature = "x86_64")]
+pub struct TxQuiesce {
+    /// Set when THIS instance performed the 0→1 transition (its Drop is
+    /// the one that may return depth to 0 — purely informational; the
+    /// counter itself is the truth).
+    _entered: bool,
+}
+
+#[cfg(feature = "x86_64")]
+impl TxQuiesce {
+    pub fn new() -> Self {
+        let prev = TX_QUIESCE_DEPTH.fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            // Wait out any in-flight pass: it will not re-enter (the
+            // entry check below sees depth != 0), and its budget-exit
+            // retrigger edge lands in a handler that also refuses to
+            // enter. Bounded so a reporter in IRQ context never hangs.
+            let start = crate::arch::cpu::read_time();
+            while TX_DRAIN_ACTIVE.load(Ordering::Acquire) {
+                if crate::arch::cpu::read_time().saturating_sub(start) >= TX_QUIESCE_WAIT {
+                    break; // pathological pass; proceed (accept the race)
+                }
+                core::hint::spin_loop();
+            }
+        }
+        TxQuiesce { _entered: prev == 0 }
+    }
+}
+
+#[cfg(feature = "x86_64")]
+impl Default for TxQuiesce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "x86_64")]
+impl Drop for TxQuiesce {
+    fn drop(&mut self) {
+        TX_QUIESCE_DEPTH.fetch_sub(1, Ordering::Release);
+        // No tx_kick here: the 100 Hz tick net re-arms a lost edge
+        // within 10 ms, and taking the ring lock from Drop would give
+        // the "lock-free for crash contexts" contract a lock back.
+    }
+}
+
+/// Other arches: the drain engine does not exist; sections are no-ops.
+#[cfg(not(feature = "x86_64"))]
+pub struct TxQuiesce;
+
+#[cfg(not(feature = "x86_64"))]
+impl TxQuiesce {
+    pub fn new() -> Self {
+        TxQuiesce
+    }
+}
+
+#[cfg(not(feature = "x86_64"))]
+impl Default for TxQuiesce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wedge-safe ordered submit for lock-free diagnostic writers (per-byte
+/// anomaly tripwires: preempt-underflow, KSO-CENSUS, WW latefire).
+/// The byte joins the TX ring — ordered and atomic against every other
+/// console writer — IF the ring lock is immediately free and the whole
+/// slice fits. Returns false otherwise; the caller falls back to a
+/// direct write inside a TxQuiesce section (evidence beats ordering in
+/// the doubly-pathological case: a ring lock wedged by a dying CPU).
+#[cfg(feature = "x86_64")]
+pub fn tx_submit_try(bytes: &[u8]) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if bytes.is_empty() {
+        return true;
+    }
+    if crate::dfx::pstore::sink_armed() {
+        for &b in bytes {
+            crate::dfx::pstore::sink(b);
+        }
+    }
+    let Some(mut r) = TX_RING.try_lock_irqsave() else {
+        return false;
+    };
+    let free = (r.head + UART_TX_RING_SIZE - 1 - r.tail) & UART_TX_RING_MASK;
+    if free < bytes.len() {
+        return false;
+    }
+    for &b in bytes {
+        // SAFETY: tail is masked in-range; the lock serializes access.
+        unsafe {
+            (*r.data.get())[r.tail] = b;
+        }
+        r.tail = (r.tail + 1) & UART_TX_RING_MASK;
+    }
+    // SAFETY: COM1 IER, lock-held RMW (see tx_submit).
+    unsafe {
+        let ier = read_reg(COM1_BASE, UART_IER);
+        if ier & IER_TX_ENABLE == 0 {
+            write_reg(COM1_BASE, UART_IER, ier | IER_TX_ENABLE);
+        }
+    }
+    drop(r);
+    TX_SUBMITTED.fetch_add(bytes.len() as u64, Relaxed);
+    true
+}
+
+/// Non-x86_64 stub (tx_armed() is false, so callers never reach it).
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_submit_try(_bytes: &[u8]) -> bool {
+    false
+}
+
+/// Budget-exhaustion helper (under the ring lock): if the ring still
+/// holds bytes, toggle ETBEI off/on to manufacture a THRE edge (with
+/// THRE=1 and ETBEI continuously set there is no future edge — the
+/// line never drops). No-op when the ring emptied concurrently (the
+/// natural submit-side re-arm covers it).
+#[cfg(feature = "x86_64")]
+fn r_ring_nonempty_and_retrigger() {
+    let mut r = TX_RING.lock_irqsave();
+    if r.head == r.tail {
+        return;
+    }
+    // SAFETY: COM1 IER is the standard 8250 port; lock-held RMW.
+    unsafe {
+        let ier = read_reg(COM1_BASE, UART_IER);
+        write_reg(COM1_BASE, UART_IER, ier & !IER_TX_ENABLE);
+        let ier2 = read_reg(COM1_BASE, UART_IER);
+        write_reg(COM1_BASE, UART_IER, ier2 | IER_TX_ENABLE);
+    }
+}
+
+/// Best-effort synchronous drain of the TX ring (crash contexts only:
+/// panic/oops printers must reach the wire even with IRQs dead or the
+/// line handler wedged). Bounded: give up after ~200 ms of wall time
+/// (the ring may hold ~3 s of baud backlog; a crashed box cannot pay
+/// that) and let the caller's direct polling writes take over.
+#[cfg(feature = "x86_64")]
+pub fn tx_drain_poll() {
+    let start = crate::arch::cpu::read_time();
+    const BUDGET_TICKS: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 5;
+    loop {
+        let mut buf = [0u8; UART_TX_BURST];
+        let n = {
+            let mut r = TX_RING.lock_irqsave();
+            let mut n = 0usize;
+            while n < UART_TX_BURST && r.head != r.tail {
+                // SAFETY: head is masked in-range; lock-held access.
+                buf[n] = unsafe { (*r.data.get())[r.head] };
+                r.head = (r.head + 1) & UART_TX_RING_MASK;
+                n += 1;
+            }
+            n
+        };
+        if n == 0 {
+            return;
+        }
+        // Bounded THRE wait per burst (putc's wall-clock budget).
+        let burst_start = crate::arch::cpu::read_time();
+        while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+            if crate::arch::cpu::read_time().saturating_sub(burst_start)
+                >= UART_THRE_WAIT_TICKS
+            {
+                return; // stalled chardev: leave the rest, caller prints over
+            }
+            core::hint::spin_loop();
+        }
+        // SAFETY: COM1 THR is the standard 8250 data port; THRE observed.
+        unsafe {
+            core::arch::asm!(
+                "cld",
+                "rep outsb",
+                in("dx") COM1_BASE,
+                in("rcx") n as u64,
+                in("rsi") buf.as_ptr(),
+                lateout("rcx") _,
+                lateout("rsi") _,
+                options(nostack)
+            );
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start) >= BUDGET_TICKS {
+            return;
+        }
+    }
+}
+
+/// Tick safety net (100 Hz): if the ring holds bytes with no live drain
+/// — a lost edge, or a retrigger edge whose handler lost the drain
+/// guard to a mid-epilogue holder — toggle ETBEI under the ring lock to
+/// manufacture a fresh edge. With a drained ring or a live drain in
+/// progress this is a no-op beyond the ring-lock peek.
+#[cfg(feature = "x86_64")]
+pub fn tx_kick() {
+    if !UART_TX_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let r = TX_RING.lock_irqsave();
+    if r.head != r.tail {
+        // SAFETY: COM1 IER, lock-held RMW (see tx_submit).
+        unsafe {
+            let ier = read_reg(COM1_BASE, UART_IER);
+            write_reg(COM1_BASE, UART_IER, ier & !IER_TX_ENABLE);
+            let ier2 = read_reg(COM1_BASE, UART_IER);
+            write_reg(COM1_BASE, UART_IER, ier2 | IER_TX_ENABLE);
+        }
+    }
+}
+
+/// TX engine counters for the syscost dump.
+pub fn tx_stats() -> (u64, u64, u64) {
+    #[cfg(feature = "x86_64")]
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        (
+            TX_SUBMITTED.load(Relaxed),
+            TX_IRQ_BYTES.load(Relaxed),
+            TX_IRQ_DRAINS.load(Relaxed),
+        )
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        (0, 0, 0)
+    }
+}
+
+/// Non-x86_64: no ring to drain (synchronous sink) — crash-context no-op.
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_drain_poll() {}
+
+/// Non-x86_64: no TX interrupt engine — tick no-op.
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_kick() {}
+
+/// Non-x86_64 stub (tx_armed() is false, so callers never reach it).
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_submit(_bytes: &[u8]) -> usize {
+    0
+}
+
+/// Non-x86_64 stub (tx_armed() is false, so callers never reach it).
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_submit_whole(_bytes: &[u8]) -> bool {
+    true
+}
+
 /// Set once init_irq() has registered the RX IRQ handler. While clear,
 /// task-context code may poll RBR directly (early boot); once set, the
 /// IRQ handler is the ONLY context allowed to consume hardware RX —
@@ -636,9 +1301,12 @@ pub fn init_irq() {
     }
 }
 
-/// x86_64: interrupt-driven RX on PIC line 4 (COM1). Same contract as the
-/// riscv64 twin — once armed, the IRQ handler is the only context that
-/// consumes hardware RX; task-context readers go through the ring.
+/// x86_64: interrupt-driven RX on PIC line 4 (COM1), plus the TX ring
+/// drain (console lane, oh-console). Same contract as the riscv64 twin
+/// for RX — once armed, the IRQ handler is the only context that
+/// consumes hardware RX; task-context readers go through the ring. TX:
+/// the handler also pushes queued console bytes to THR on THRE edges
+/// (the reference 8250 serialx250_handle_irq TX half).
 #[cfg(feature = "x86_64")]
 pub fn init_irq() {
     fn uart4_irq_line() {
@@ -659,12 +1327,18 @@ pub fn init_irq() {
         if received > 0 {
             UART_READ_WAITQ.wake_up_one();
         }
+        // TX half: drain queued console bytes (no-op when the ring is
+        // empty — one LSR read).
+        tx_irq_drain();
     }
 
     if crate::arch::trap::request_irq_line_named(4, "serial", uart4_irq_line) {
         // SAFETY: COM1 IER is the standard 8250 interrupt-enable port.
         unsafe { write_reg(COM1_BASE, UART_IER, IER_RX_ENABLE) };
         UART_IRQ_ARMED.store(true, Ordering::Release);
+        // TX engine owns console TX only after the handler that drains
+        // it is live (emit paths check this before using the ring).
+        UART_TX_ARMED.store(true, Ordering::Release);
     }
 }
 
@@ -902,6 +1576,38 @@ fn tty_isig_deliver(signo: i32) {
 
 /// Write single character (SMP safe, IRQ safe)
 pub fn putchar(c: u8) {
+    // TX engine: every non-crash byte joins the queue (or the defer
+    // queue when the ring is full) — no THRE poll and no IRQ-off
+    // section in the writer. This includes HARDIRQ writers (the WW
+    // diagnostics in arch trap print per-byte from the timer IRQ):
+    // their old direct-poll path interleaved byte-for-byte with the
+    // IRQ drain's THR bursts (observed in the oh-console smoke boot).
+    // Crash contexts (panic/oops, where the drain may be dead) and the
+    // pre-engine window keep the direct poll path.
+    #[cfg(feature = "x86_64")]
+    if tx_armed()
+        && !crate::dfx::pstore::sink_armed()
+        && !crate::dfx::oops::oops_entered()
+    {
+        if tx_submit(&[c]) == 1 {
+            return;
+        }
+        // Ring full (sustained flood): defer the byte for the IF=1
+        // flusher instead of racing the drain with a direct write.
+        crate::printk::defer_byte(c);
+        return;
+    }
+    // Crash context with the engine armed: direct polling write, but
+    // inside a quiesce section — a live drain on another CPU must not
+    // interleave with the panic/oops report (smoke #7's 3-way splice
+    // class; the emit lock alone does not stop the drain).
+    #[cfg(feature = "x86_64")]
+    if tx_armed() {
+        let _q = TxQuiesce::new();
+        let uart = UART.lock_irqsave();
+        uart.putc(c);
+        return;
+    }
     // Use lock_irqsave: putchar may be called from interrupt context
     // (panic from IRQ, oops, etc.). A plain lock() would self-deadlock
     // if an interrupt fires while UART lock is held on the same CPU.
@@ -935,19 +1641,73 @@ pub fn lock() -> SpinlockIrqGuard<'static, Uart> {
 
 /// Interrupt-safe character output (no lock)
 pub fn putchar_no_lock(c: u8) {
+    // TX engine armed (x86_64): the byte must not race the IRQ drain's
+    // THR writes. Preferred: join the ring (ordered, atomic against
+    // every console writer) when the ring lock is immediately free —
+    // these callers are per-byte anomaly tripwires (preempt-underflow,
+    // KSO-CENSUS, WW latefire, the taskdump dumps) whose lock-free
+    // contract forbids spinning on any lock, and try-lock never spins.
+    // Ring busy/full (healthy state): the printk defer queue (also a
+    // try-lock) — a direct THR write here would land between the
+    // drain's bursts and splice a ring-resident line mid-text (boot-9's
+    // "…pad" + "AL" + "ding END"). Only when BOTH try-locks fail (the
+    // doubly-pathological wedged-machinery case) does the byte go
+    // direct under a per-byte quiesce — evidence beats ordering there.
+    #[cfg(feature = "x86_64")]
+    if tx_armed()
+        && !crate::dfx::pstore::sink_armed()
+        && !crate::dfx::oops::oops_entered()
+        && !tx_quiesced()
+    {
+        if tx_submit_try(&[c]) {
+            return;
+        }
+        if crate::printk::defer_byte_try(c) {
+            return;
+        }
+        let _q = TxQuiesce::new();
+        Uart::new().putc(c);
+        return;
+    }
+    // Crash contexts, non-x86_64, and pre-engine: direct write.
     let uart = Uart::new();
     uart.putc(c);
 }
 
 /// Interrupt-safe string output (no lock) — batched TX (leg-54 item C).
 pub fn puts_no_lock(s: &str) {
-    let uart = Uart::new();
-    uart.puts_batch(s.as_bytes());
+    puts_bytes_no_lock(s.as_bytes());
 }
 
 /// Interrupt-safe byte output (no lock) — batched TX, `puts_no_lock`
 /// for byte slices (crash-context writers stage expanded bytes).
+/// TX-engine armed: whole-run ring submit when the ring lock is free
+/// (ordered, atomic); ring busy/full: whole-slice defer-queue push
+/// (try-lock, ordered — spares ring-resident lines the mid-text splice
+/// a direct THR write would cause at drain burst boundaries); only when
+/// both try-locks fail: direct batched write inside a quiesce section
+/// (exclusive vs. the IRQ drain — see putchar_no_lock).
 pub fn puts_bytes_no_lock(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    #[cfg(feature = "x86_64")]
+    if tx_armed()
+        && !crate::dfx::pstore::sink_armed()
+        && !crate::dfx::oops::oops_entered()
+        && !tx_quiesced()
+    {
+        if tx_submit_try(bytes) {
+            return;
+        }
+        if crate::printk::defer_bytes_try(bytes) {
+            return;
+        }
+        let _q = TxQuiesce::new();
+        let uart = Uart::new();
+        uart.puts_batch(bytes);
+        return;
+    }
     let uart = Uart::new();
     uart.puts_batch(bytes);
 }
