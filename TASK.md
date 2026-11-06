@@ -6243,3 +6243,20 @@ queue-internal dependency (its cv word) is then one watch away. All
 addresses deterministic per image.
 
 ohc70 gates unchanged (same tree as ohc69 verdict commits).
+
+### 7. SECOND ADDENDUM (ohc71/72) — dual watch + the pandemic's shape
+
+- The auto-armed second watch (FUXWATCH2) initially armed a FOREIGN
+  process's hot mutex and crawled the boot (every write = fault+TF+#DB);
+  now pid-gated to the registered samgr's walks.
+- **ohc72's trace: the SAME VA (0x7ff0004862c0) is frozen at l=2 in
+  MANY processes' own heaps** (tids 691/562/681/751/692/693/714/752/753/803
+  — softbus-class processes — all failed cmpxchg old=2, 21-29s). Every
+  process maps an FFRT mutex at the same heap offset (identical image +
+  allocation order), and the wedge hits that mutex class per-process —
+  consistent with §6's FFRT-queue-internal lock: the queue submit path
+  wedges in every FFRT-using service simultaneously.
+- The 58th's decisive rig is fully in-tree: fuxwatch (dual slot,
+  pid-gated auto-arm) + FUX-CHAIN shape detection; arm from t=1 to
+  catch samgr's own A-trace before the wedge (ohc72's wedge beat the
+  18s delay).
