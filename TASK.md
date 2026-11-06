@@ -6204,3 +6204,42 @@ TESTS PASSED (wrapper rc=124 after kernel halt — the 56th's known
 pattern). No stray QEMU left running. No kernel-behavior changes
 outside dfx gates — the fuxwatch page-fault/#DB hooks are one relaxed
 load each when the param is absent.
+
+### 6. SAME-SESSION ADDENDUM (ohc70) — the critical-section suspend SITE decoded
+
+ohc70's fuxwatch verdict: owner = tid 344, acquired at t=34.038
+handling txn3282 **code6 SUBSCRIBE_SYSTEM_ABILITY from av_session**
+(the owner's txn code varies per boot — code6/code12 both land on the
+same mutex). The widened region-hit frame window (72 words biased
+above the hit) caught the critical-section path on a stack-pool
+region:
+```
+libffrt lock+0x34 / +0xef6e          <- innermost: ANOTHER ffrt mutex attempt
+samgr 0x82127  = the return of `call ffrt_mutex_lock@plt` at
+                 0x82122 with `lea 0x268(%rbx),%r14` — the lock-taker
+                 in samgr code, identified by the adjacent rodata
+                 string "NotifyAddSA:%d,%d_%d" = **CheckListenerNotify**
+                 (system_ability_manager.cpp:887 — listenerMapLock_)
+libc++ 0x8f6cba                       <- cv/mutex internals
+samgr 0x8268a   = return of `call _Znwm` — the task-lambda alloc in
+                  NotifySystemAbilityAddedByAsync
+samgr 0x9d49a   = `call *0x38(%rbp)` — the virtual PostTask call
+lib    0xba0ad8 (queue runtime, past the 24-entry map dump) — the FFRT
+                  queue submit path
+samgr 0xb81b8 / 0x5555555eed7 — deeper subscribe-path frames
+```
+**So: A = listenerMapLock_. The owner task takes it in
+CheckListenerNotify (SubscribeSystemAbility's tail) and, INSIDE the
+lock, calls workHandler_->PostTask (FFRTHandler → ffrt::queue
+submit_h); the PostTask itself blocks taking an FFRT-queue-internal
+mutex (the innermost lock+0x34 frames) — that internal mutex is the
+"B" ring of ohc57/58 (0x7ff0004dac08-class, whose waiters held A).
+The recursion bottoms at the first queue submit that suspended.**
+
+The 58th's sharpest entry: fuxwatch BOTH l words (A=0x7ff0004862c0
+and the B word — find it once via the chain walk's shape test on the
+B ring) plus FUX-CHAIN on the queue-runtime region; the
+queue-internal dependency (its cv word) is then one watch away. All
+addresses deterministic per image.
+
+ohc70 gates unchanged (same tree as ohc69 verdict commits).
