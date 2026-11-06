@@ -679,7 +679,10 @@ pub fn ffrt_chain_walk(
             let lock_shape = |hop: u64| -> bool {
                 match (rd(hop.wrapping_sub(0x10)), rd(hop.wrapping_sub(0x8))) {
                     (Some(v), Some(l)) => {
-                        filebacked(v) && (l & 0xffff_ffff) == 2
+                        // l low32: 1 = LOCK (held, no waiters flagged yet),
+                        // 2 = WAIT (held with waiters); 0 = free.
+                        filebacked(v)
+                            && ((l & 0xffff_ffff) == 1 || (l & 0xffff_ffff) == 2)
                     }
                     _ => false,
                 }
@@ -735,6 +738,223 @@ pub fn ffrt_chain_walk(
         }
     }
     None
+}
+
+// sc57 (57th): kernel-side write watchpoint (the coordinator's TCG
+// hardware-watchpoint rig, in-kernel and KVM-fast). fuxwatch=0xADDR
+// names a userspace word whose address is deterministic per image
+// (the ffrt mutexPrivate `l` word of the wedge's contested lock has
+// been 0x7ff0004862b8+8 in every boot); the censusd kthread clears
+// the PTE W bit on every mm that maps it; the write-fault path logs
+// the write (tid, rip), restores W, single-steps the writer via TF
+// (the #DB hook re-clears W), so EVERY write to the word is logged
+// with zero gap. The last write before the freeze names the owner
+// that never unlocked. All zero-cost without the boot param.
+pub static FUXWATCH_ADDR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FUXWATCH_DELAY_S: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+// step-marker SET: two CPUs can fault+step concurrently; a single
+// marker would lose one thread's #DB → SIGTRAP → thread killed.
+static FUXWATCH_STEP_TIDS: [core::sync::atomic::AtomicU32; 4] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 4];
+static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 16] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+const FUXWATCH_BUDGET: usize = 4096;
+use core::sync::atomic::Ordering as Relaxed2;
+
+/// Parse fuxwatch=0xADDR[,DELAYSEC] once at boot (called from the dfx
+/// init path). Empty/absent leaves the watch off.
+pub fn fuxwatch_parse() {
+    let Some(v) = crate::cmdline::get_param("fuxwatch") else {
+        return;
+    };
+    let mut it = v.split(',');
+    let addr = it.next().and_then(|s| {
+        let t = s.trim_start_matches("0x");
+        u64::from_str_radix(t, 16).ok()
+    });
+    let delay = it.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    if let Some(a) = addr {
+        if a > 0x1000 {
+            FUXWATCH_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
+            FUXWATCH_DELAY_S.store(delay, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!("fuxwatch armed target={:#x} delay={}s", a, delay);
+        }
+    }
+}
+
+/// Arm round (censusd kthread context): clear W on the watched word's
+/// page in every mm that maps it. Re-run cheaply; each mm armed once
+/// (the fault/#DB dance keeps W cleared afterwards).
+#[cfg(feature = "x86_64")]
+pub fn fuxwatch_arm_round() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let addr = FUXWATCH_ADDR.load(Relaxed);
+    if addr == 0
+        || FUXWATCH_HITS.load(Relaxed) >= FUXWATCH_BUDGET
+        || crate::drivers::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
+    {
+        return;
+    }
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        let root = aspace.root_ppn();
+        if root == 0 {
+            return;
+        }
+        if FUXWATCH_MM_DONE
+            .iter()
+            .any(|d| d.load(Relaxed) == root)
+        {
+            return;
+        }
+        // page present and writable?
+        // SAFETY: read-only walk of the task's page tables.
+        let leaf_w = unsafe {
+            crate::arch::mm::mm_ops::PageTableWalker::walk(root, addr)
+        }
+        .map(|(_, bits)| bits & 0x2 != 0)
+        .unwrap_or(false);
+        if !leaf_w {
+            return;
+        }
+        let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+        // SAFETY: root is a live user page-table root; one page,
+        // R-only (heap data page — no exec).
+        unsafe {
+            crate::arch::mm::mm_ops::mprotect_pte_range(
+                root,
+                addr & !0xfff,
+                1,
+                0x1,
+            )
+        };
+        drop(g);
+        crate::arch::x86_64::mm::asid::flush_tlb_all();
+        for d in FUXWATCH_MM_DONE.iter() {
+            if d
+                .compare_exchange(0, root, Relaxed, Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        // HOTPATH-PRINT: one line per armed mm (dfx-gated by the param).
+        crate::pr_warn!(
+            "FUXWATCH-ARM tgid={} root={:#x} page={:#x}",
+            tk.tgid(),
+            root,
+            addr & !0xfff
+        );
+    });
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub fn fuxwatch_arm_round() {}
+
+/// Fault-path predicates/helpers (called from the x86_64 fault hook).
+#[inline]
+pub fn fuxwatch_page_matches(fault_addr: u64) -> bool {
+    let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    a != 0 && (fault_addr & !0xfff) == (a & !0xfff)
+}
+
+/// True only for mms WE armed (the done-set) — a fork-COW write fault
+/// on the same VA in an un-armed mm must take the normal COW path,
+/// never be granted W by the watchpoint.
+#[inline]
+pub fn fuxwatch_mm_armed(root_ppn: u64) -> bool {
+    root_ppn != 0
+        && FUXWATCH_MM_DONE
+            .iter()
+            .any(|d| d.load(core::sync::atomic::Ordering::Relaxed) == root_ppn)
+}
+
+#[inline]
+pub fn fuxwatch_over_budget() -> bool {
+    FUXWATCH_HITS.load(core::sync::atomic::Ordering::Relaxed) >= FUXWATCH_BUDGET
+}
+
+/// Log the write and arm the single-step marker; false = step must not
+/// be armed (budget). `exact` — the faulting address is the watched
+/// WORD itself (cr2 gives byte precision): only those log; same-page
+/// neighbours of other heap objects step silently (they must not reach
+/// do_page_fault, which would install W and kill the watch).
+pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32) -> bool {
+    let claim = |tid: u32| {
+        for s in FUXWATCH_STEP_TIDS.iter() {
+            if s.load(core::sync::atomic::Ordering::Relaxed) == tid {
+                return; // already stepping
+            }
+        }
+        for s in FUXWATCH_STEP_TIDS.iter() {
+            if s
+                .compare_exchange(0, tid, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    };
+    if !exact {
+        claim(tid);
+        return true;
+    }
+    let n = FUXWATCH_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n >= FUXWATCH_BUDGET {
+        return false;
+    }
+    // HOTPATH-PRINT: compact per-write line; the wedge window carries
+    // at most a few hundred.
+    crate::pr_warn!("FW tid={} rip={:#x} old={} n={}", tid, rip, old_word, n);
+    claim(tid);
+    true
+}
+
+/// Read the watched word's CURRENT value through the walker (fault
+/// context: the word still holds its pre-write value).
+pub fn fuxwatch_read_word(root_ppn: u64) -> u32 {
+    let addr = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    if addr == 0 {
+        return 0xffff_ffff;
+    }
+    // SAFETY: read-only walk of the current mm.
+    match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, addr) } {
+        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+            let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (addr & 0xfff)),
+            );
+            // SAFETY: linear-mapped RAM word.
+            unsafe { core::ptr::read_volatile(kv.as_usize() as *const u32) }
+        }
+        _ => 0xffff_ffff,
+    }
+}
+
+/// #DB hook: true when this trap is our single step (marker consumed).
+#[inline]
+pub fn fuxwatch_take_step(tid: u32) -> bool {
+    for s in FUXWATCH_STEP_TIDS.iter() {
+        if s
+            .compare_exchange(tid, 0, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+pub fn fuxwatch_addr() -> u64 {
+    FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// sc57 (57th): one-shot region scan — a SUSPENDED FFRT coroutine's
@@ -795,7 +1015,7 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
         };
         let root = aspace.root_ppn();
         for vma in mgr.iter() {
-            if scanned_regions >= 48 {
+            if scanned_regions >= 160 {
                 break;
             }
             let start = vma.start().as_usize() as u64;
@@ -809,10 +1029,12 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                 continue;
             }
             scanned_regions += 1;
-            // sweep the top 0x10000 (the active end of a pool stack)
+            // sweep the top 0x40000 (the active end of a pool stack;
+            // a deep task chain — listener loops over IPC sends — runs
+            // far below the top)
             let mut hits = 0;
-            let mut va = end - 0x10000;
-            while va < end && hits < 6 {
+            let mut va = end - 0x40000;
+            while va < end && hits < 12 {
                 // SAFETY: walker read of the frozen user region.
                 let Some(w) = (|| {
                     match unsafe {
@@ -836,7 +1058,51 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     continue;
                 };
                 if w >= lo && w < hi {
-                    let _ = write!(out, " r[{:#x}]+{:#x}(={:#x})", start, va - start, w);
+                    // sc57: dump return-address candidates around the
+                    // hit (words in executable VMAs) — a waiter's frames
+                    // show mutexPrivate::wait/libc++/futex; a suspended
+                    // coroutine holding the lock shows its mid-section
+                    // call chain (IPC/binder/queue frames).
+                    let mut fr = alloc::string::String::new();
+                    for k in 0..24u64 {
+                        let fa = va.wrapping_sub(0x60) + 8 * k;
+                        let Some(x) = (|| {
+                            match unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(root, fa)
+                            } {
+                                Some((ppn2, bits2))
+                                    if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
+                                {
+                                    let kv2 = crate::arch::mm::memory_layout::phys_to_virt(
+                                        crate::arch::mm::memory_layout::PhysAddr::new(
+                                            (ppn2 << 12) | (fa & 0xfff),
+                                        ),
+                                    );
+                                    // SAFETY: linear-mapped RAM word.
+                                    Some(unsafe {
+                                        core::ptr::read_volatile(kv2.as_usize() as *const u64)
+                                    })
+                                }
+                                _ => None,
+                            }
+                        })() else {
+                            continue;
+                        };
+                        if matches!(
+                            mgr.find(crate::mm::vma::VirtAddr::new(x as usize)),
+                            Some(v2) if v2.flags().is_executable()
+                        ) {
+                            let _ = write!(fr, " {:#x}", x);
+                        }
+                    }
+                    let _ = write!(
+                        out,
+                        " r[{:#x}]+{:#x}(={:#x}) fr:{}",
+                        start,
+                        va - start,
+                        w,
+                        fr
+                    );
                     hits += 1;
                 }
                 va += 8;
@@ -896,7 +1162,7 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             return;
         };
         let root = aspace.root_ppn();
-        for wi in 0..512u64 {
+        for wi in 0..2048u64 {
             // SAFETY: walker read of the parked task's frozen user
             // stack page.
             let Some(w) = (|| {
@@ -919,6 +1185,80 @@ pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
             };
             if w >= lo && w < hi {
                 let _ = write!(out, " tid{}+{:#x}(={:#x})", tk.pid(), 8 * wi, w);
+                // sc57: dump the hitting thread's frame candidates —
+                // the holder's park site symbolizes directly. Bounded
+                // to the first 6 hitting tids.
+                {
+                    // per-TID budget (a waiter thread hits the range at
+                    // several spill slots; without this the first
+                    // thread's repeats burn the whole budget)
+                    static HOLDER_FRAMED_TIDS: [core::sync::atomic::AtomicU32; 8] =
+                        [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+                    let tno = tk.pid();
+                    if HOLDER_FRAMED_TIDS.iter().any(|t| {
+                        t.load(core::sync::atomic::Ordering::Relaxed) == tno as u32
+                    }) {
+                        return; // already framed
+                    } else {
+                        let mut claimed = false;
+                        for t in HOLDER_FRAMED_TIDS.iter() {
+                            if t.compare_exchange(
+                                0,
+                                tno as u32,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                            {
+                                claimed = true;
+                                break;
+                            }
+                        }
+                        if !claimed {
+                            return;
+                        }
+                    }
+                    let Some(aspace2) = tk.address_space() else {
+                        return;
+                    };
+                    let root2 = aspace2.root_ppn();
+                    let Some(_mgr2) = aspace2.vma_try_read() else {
+                        return;
+                    };
+                    let mut fr = alloc::string::String::new();
+                    for k in 0..96u64 {
+                        let fa = usp + 8 * k;
+                        let Some(x) = (|| {
+                            match unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(root2, fa)
+                            } {
+                                Some((ppn2, bits2))
+                                    if bits2 & 1 != 0 && bits2 & 0x4 != 0 && ppn2 != 0 =>
+                                {
+                                    let kv2 = crate::arch::mm::memory_layout::phys_to_virt(
+                                        crate::arch::mm::memory_layout::PhysAddr::new(
+                                            (ppn2 << 12) | (fa & 0xfff),
+                                        ),
+                                    );
+                                    // SAFETY: linear-mapped RAM word.
+                                    Some(unsafe {
+                                        core::ptr::read_volatile(kv2.as_usize() as *const u64)
+                                    })
+                                }
+                                _ => None,
+                            }
+                        })() else {
+                            continue;
+                        };
+                        if matches!(
+                            _mgr2.find(crate::mm::vma::VirtAddr::new(x as usize)),
+                            Some(v2) if v2.flags().is_executable()
+                        ) {
+                            let _ = write!(fr, " {:#x}", x);
+                        }
+                    }
+                    let _ = write!(out, " tid{}fr:{}", tk.pid(), fr);
+                }
             }
         }
     });
@@ -1991,6 +2331,47 @@ pub fn futex_stuck_census() {
             });
         }
         if samgr_pid != 0 {
+            // sc57: name the samgr pid's RUNNABLE threads each burst —
+            // an owner stuck in a userspace spin (e.g. the TimerManager
+            // spin-yield loops) never parks, so every park-based census
+            // is blind to it; a persistent runnable tid is the spin
+            // signature.
+            {
+                use core::fmt::Write as _;
+                let mut run_s = alloc::string::String::new();
+                let mut nf = 0u32;
+                let mut ni = 0u32;
+                crate::sched::for_each_task_try(|task| {
+                    // SAFETY: diagnostic reads under the for_each_task
+                    // contract.
+                    let tk = unsafe { &*task };
+                    if tk.tgid() as u32 != samgr_pid {
+                        return;
+                    }
+                    let st_bits = tk.state().bits();
+                    let run = st_bits == crate::process::task::TaskState::RUNNING
+                        || tk.on_cpu()
+                        || tk.sched_entity().is_on_rq();
+                    if run {
+                        let comm = core::str::from_utf8(tk.comm())
+                            .unwrap_or("")
+                            .trim_end_matches('\0');
+                        let _ = write!(run_s, " {}({})", tk.pid(), comm);
+                    } else if tk.futex_wait_enqueued.load(Relaxed) {
+                        nf += 1;
+                    } else if st_bits & 0x1 != 0 {
+                        ni += 1;
+                    }
+                });
+                // HOTPATH-PRINT: fuxstuck graph-burst gate.
+                crate::pr_warn!(
+                    "FUX-RUN samgr_pid={} run:{} futex={} int={}",
+                    samgr_pid,
+                    run_s,
+                    nf,
+                    ni
+                );
+            }
             let mut graph_lines = 0usize;
             for g in groups.iter() {
                 if g.tgid != samgr_pid {

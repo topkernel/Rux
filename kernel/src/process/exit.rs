@@ -692,6 +692,36 @@ pub fn do_exit(exit_code: i32) -> ! {
     let dying_pid = unsafe { (*current).pid() };
     crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
 
+    // sc57 (57th session): thread-exit forensics for the OH wedge —
+    // an FFRT/binder worker that exits while holding a userspace
+    // ffrt::mutex leaves every later locker parked forever with no
+    // kernel-visible holder (the mutex has no owner field in the
+    // image's libffrt). dfx=txnhunt prints every NON-LEADER exit in
+    // the registered samgr pid, bounded to 64/boot.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        static THEXIT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let tgid = unsafe { (*current).tgid() };
+        let is_leader = dying_pid == tgid;
+        if !is_leader
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang)
+            && tgid != 0
+            && tgid == crate::ipc::binder::binder_sareg_samgr_pid()
+            && THEXIT_N.fetch_add(1, Relaxed) < 64
+        {
+            let comm = core::str::from_utf8(unsafe { (*current).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            // HOTPATH-PRINT: dfx=txnhunt-gated samgr thread exit line.
+            crate::pr_warn!(
+                "SAMGR-THREADEXIT tid={} comm='{}' code={}",
+                dying_pid,
+                comm,
+                exit_code
+            );
+        }
+    }
     // 50th (crash-storm hunt): failed-spawn forensics — a process LEADER
     // that exits without ever having execve'd forked and died pre-exec
     // (the OH 337->588->589 chain: 588 exits 512/code 2, 589 exits 0,

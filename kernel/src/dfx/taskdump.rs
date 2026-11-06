@@ -1236,6 +1236,10 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // this pass drains. Cheap when nothing is pending: two ring
         // scans of atomics.
         crate::ipc::binder::dump_latched_maps_taskctx();
+        // sc57 (57th): fuxwatch arm round — clears W on the watched
+        // word's page in every mapping mm (kthread context; TLB
+        // shootdown via flush_tlb_all is safe here).
+        crate::sync::futex::fuxwatch_arm_round();
         // Drain everything queued first: focus lines (park-chain
         // evidence) take priority over bulk census.
         loop {

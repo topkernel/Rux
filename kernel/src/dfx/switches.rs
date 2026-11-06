@@ -888,6 +888,10 @@ pub fn set(switch: DfxSwitch, on: bool) {
 /// Parse `dfx=` from the kernel command line. Unknown names are ignored
 /// with a warning rather than failing the boot.
 pub fn init_from_cmdline() {
+    // sc57: the fuxwatch write-watchpoint target is its own boot param
+    // (fuxwatch=0xADDR[,DELAYSEC]) — parsed here so it is live from the
+    // first censusd round.
+    crate::sync::futex::fuxwatch_parse();
     let raw = match crate::cmdline::get_param("dfx") {
         Some(v) => v,
         None => return,

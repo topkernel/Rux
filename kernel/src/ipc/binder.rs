@@ -5170,7 +5170,11 @@ pub fn bwr_park_audit() {
             idle_readers += 1;
             continue;
         }
-        if printed >= 24 {
+        // sc57: the registered samgr pid's rows never consume the
+        // print budget — on a wedged boot the pandemic's peripheral
+        // parks crowd out exactly the rows the chain walk needs.
+        let samgr_row = s.pid == crate::ipc::binder::binder_sareg_samgr_pid();
+        if printed >= 24 && !samgr_row {
             continue;
         }
         printed += 1;

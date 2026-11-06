@@ -1911,7 +1911,37 @@ fn handle_device_not_available() {
 /// #DB — hardware single-step (TF) or debug-register trap.
 fn handle_debug(regs: &mut PtRegs) {
     const TF: u64 = 1 << 8;
+    const RF: u64 = 1 << 16;
     if regs.user_mode() {
+        // sc57: fuxwatch single-step retirement — the store completed;
+        // re-protect the watched page (W off again for the next write)
+        // and continue silently.
+        let tid = crate::sched::get_current_pid() as u32;
+        if crate::sync::futex::fuxwatch_take_step(tid) {
+            regs.rflags &= !(TF | RF);
+            let addr = crate::sync::futex::fuxwatch_addr();
+            if addr != 0 {
+                if let Some(tk) = crate::sched::current() {
+                    // SAFETY: current task accessor.
+                    if let Some(aspace) = unsafe { (*tk).address_space() } {
+                        let root = aspace.root_ppn();
+                        let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+                        // SAFETY: current mm's live root; one page, R.
+                        unsafe {
+                            crate::arch::mm::mm_ops::mprotect_pte_range(
+                                root,
+                                addr & !0xfff,
+                                1,
+                                0x1,
+                            );
+                        }
+                        drop(g);
+                        super::mm::asid::flush_tlb_page(addr);
+                    }
+                }
+            }
+            return;
+        }
         // Stop stepping before delivering anything, or iretq/sysret
         // would re-trap on the first handler/user instruction.
         regs.rflags &= !TF;
@@ -2601,6 +2631,53 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 event,
                 [fault_addr, regs.rip, error_code, 0, 0, 0, 0, 0, 0, 0],
             );
+        }
+    }
+
+    // sc57 (57th): fuxwatch write watchpoint — a user WRITE fault on
+    // the watched page logs the writer, restores W for the retried
+    // instruction, and single-steps it via TF; the #DB hook re-clears
+    // W so the next write traps again. Zero cost when the param is
+    // absent (one relaxed load).
+    if access & crate::arch::mm::page_fault::FaultFlags::WRITE != 0
+        && access & crate::arch::mm::page_fault::FaultFlags::USER != 0
+        && crate::sync::futex::fuxwatch_page_matches(fault_addr)
+        && !crate::sync::futex::fuxwatch_over_budget()
+    {
+        let tid = crate::sched::get_current_pid() as u32;
+        let rip = regs.rip;
+        // Handle only mms WE armed (a fork-COW write fault on this VA
+        // in an un-armed mm falls through to the normal path).
+        let handled = crate::sched::current().and_then(|tk| {
+            // SAFETY: current task accessor.
+            let aspace = unsafe { (*tk).address_space() }?;
+            let root = aspace.root_ppn();
+            if !crate::sync::futex::fuxwatch_mm_armed(root) {
+                return None;
+            }
+            let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+            // SAFETY: current mm's live root; one page, RW.
+            unsafe {
+                crate::arch::mm::mm_ops::mprotect_pte_range(
+                    root,
+                    fault_addr & !0xfff,
+                    1,
+                    0x3,
+                );
+            }
+            drop(g);
+            super::mm::asid::flush_tlb_page(fault_addr);
+            let exact = (fault_addr & !0x3) == (crate::sync::futex::fuxwatch_addr() & !0x3);
+            let old_word = crate::sync::futex::fuxwatch_read_word(root);
+            if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word) {
+                // Step the writer: TF traps right after the store;
+                // RF masks fault-class re-entry for this insn.
+                regs.rflags |= (1 << 8) | (1 << 16);
+            }
+            Some(())
+        });
+        if handled.is_some() {
+            return; // retry the instruction
         }
     }
 
