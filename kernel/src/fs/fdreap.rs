@@ -116,6 +116,28 @@ pub fn retire_complete(file: Arc<File>) {
         // reaper is up it retries, and if it never comes up the final
         // table Drop re-runs the decision.
     }
+    // (perf-gap-hunt) Empty-queue bypass: when nothing is parked, the
+    // closer runs the SAME grace + decision + drop on its own file
+    // directly, skipping the two RETIRED lock round-trips (push, then
+    // the completion loop's take) and the ord/depth atomics — ~30ns of
+    // the measured ~88ns close(2). Single-closer workloads (every
+    // open/close benchmark shape) hit this every time; correctness is
+    // identical to the drained-batch arm: the grace still proves no
+    // lock-free reader is mid-clone before the count==1 decision, the
+    // decision + Arc drop run in the closer's context (the userspace
+    // -observable semantics), and we never pushed, so there is no
+    // completion wait to owe. A park racing this check (pushed under
+    // the lock, RETIRED_DEPTH not yet stored) is harmless: that file
+    // belongs to ITS closer's completion loop or fdreapd, both
+    // unchanged. Grace-budget exhaustion falls through to the queue so
+    // the requeue path (fdreapd retry) still owns monopolists.
+    if RETIRED_DEPTH.load(Ordering::Acquire) == 0 {
+        if crate::sync::rcu::synchronize_rcu_forced_polled(GP_BUDGET_MS, "fdreap-direct") {
+            FdTable::displaced_close_decision(&file);
+            return;
+        }
+        GRACE_STALLS.fetch_add(1, Ordering::Relaxed);
+    }
     let my_ord = {
         let mut q = RETIRED.lock_irqsave();
         q.push(file);
