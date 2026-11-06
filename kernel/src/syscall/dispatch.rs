@@ -161,13 +161,15 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 /// Diverging paths (do_exit on exit_group / fatal signals) skip the
 /// exit hook, so those calls are undercounted — acceptable for a
 /// ranking probe.
-/// Whether the per-task LASTSYS latch runs on every syscall (perf:
-/// 1 per-CPU load + 3 stores; the reference carries this in
-/// thread_info flags that are only set under ptrace/audit). Turned on
-/// by taskdump / debug when a dump is requested; off = zero cost.
-static LASTSYS_LATCH_ON: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
+/// (perf-gap-hunt) The per-task LASTSYS latch gate that stood here was
+/// dead code — its AtomicBool had no setter anywhere in the tree (the
+/// comment pointed at taskdump, which never stores it), so every syscall
+/// paid one always-false atomic load plus the branch.  Removed.  A
+/// mask-consolidation of the remaining armed() checks was also tried and
+/// REVERTED: 6 relaxed loads collapsed to 3 measured +-0.2% on the
+/// lmbench null row (run/abpf-rofsentry-entry.txt) — the independent
+/// loads were hidden by out-of-order execution, so the extra mask
+/// invariant (every arming funnel must refresh) bought nothing.
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
     let sc_t0 = crate::debug::syscost::enter();
@@ -211,29 +213,12 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let mut args = syscall_get_arguments(regs);
 
-    // LASTSYS latch at the very top — BEFORE the x86_64 legacy early
-    // returns (arch_prctl 158, poll 7, select 23, dup2 33, pause 34,
-    // epoll_create 213, epoll_wait 232): glibc's epoll_wait() issues the
-    // NATIVE 232, so a task parked in an event loop latched under the
-    // later entry point showed its PREVIOUS syscall (a prctl!) instead
-    // of the epoll_wait it is sleeping in. The raw native number is
-    // stored; decode against the x86_64 table.
-    // LASTSYS latch: serves taskdump lastsys attribution (parked tasks).
-    // Gated by a static AtomicBool (set by taskdump when it runs; zero
-    // cost on the fast path when no dump has been requested — saves a
-    // per-CPU load + 3 stores per syscall).
-    if LASTSYS_LATCH_ON.load(core::sync::atomic::Ordering::Relaxed) {
-        let cur = crate::sched::current();
-        if let Some(cur) = cur {
-            use core::sync::atomic::Ordering::Relaxed;
-            // SAFETY: cur is the running task.
-            unsafe {
-                (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
-                (*cur).last_syscall_a0.store(args[0], Relaxed);
-                (*cur).last_syscall_a1.store(args[1], Relaxed);
-            }
-        }
-    }
+    // (perf-gap-hunt) The LASTSYS latch gate here was dead code: its
+    // AtomicBool had no setter anywhere in the tree (the comment pointed
+    // at taskdump, which never stores it), so every syscall paid one
+    // always-false atomic load plus the branch.  Removed; the ring-side
+    // latch below (debug=sysforensic) still serves parked-task
+    // attribution when that hunt is armed.
 
     // x86_64: translate the native number/ABI onto the generic table
     // (identity for same-numbered entries, argument remaps for the
