@@ -1303,8 +1303,12 @@ pub fn note_sz32_stack() {
     }
     // SAFETY: frame-pointer walk over our own stack; reads only.
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         let mut rbp: usize;
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("mov {}, rbp", out(reg) rbp);
+        #[cfg(not(target_arch = "x86_64"))]
+        let mut rbp: usize = 0;
         // rbp -> [rbp] = saved rbp, [rbp+8] = return address
         for i in 0..16usize {
             if rbp == 0 || rbp & 7 != 0 {

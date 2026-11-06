@@ -146,7 +146,9 @@ pub fn test_fileops_caps() {
     check(
         "ext4 file caps",
         &crate::fs::ext4::file::EXT4_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+        // poll: true since the EOF-aware ext4 poll (bd112281) — same
+        // lesson as procfs 6ecb2c23: the fallback lies at EOF.
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: true },
     );
     check(
         "tmpfs file caps",
