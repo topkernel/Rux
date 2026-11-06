@@ -132,6 +132,12 @@ pub mod lostpark;
 /// lane): NS-sum brackets for the __schedule, context_switch, wake and
 /// semop/pipe/unix bodies, dumped at shutdown; see debug/cctx.rs.
 pub mod cctx;
+/// lockdep-lite P0 (debug=lockdep): the static lock-order registry —
+/// the machine-readable mirror of docs/architecture/lock-ordering.md —
+/// plus its boot-time validation and the /proc/lockdep declared view;
+/// runtime acquire tracking is the P1 phase per
+/// docs/development/lockdep-lite-design.md.
+pub mod lockdep;
 
 /// Initialize the debug subsystem.
 ///
@@ -154,6 +160,10 @@ pub fn init() {
     // Publish the instrument switches in debugfs so they can be armed
     // and disarmed while the system runs.
     register_debugfs_knobs();
+    // lockdep-lite P0: validate the declared lock-order registry
+    // (debug=lockdep gates the check and its report; no hot-path code
+    // exists at this phase).
+    lockdep::boot_validate();
     // Publish the tracepoint control surface (tracefs).
     crate::trace::files::register();
 

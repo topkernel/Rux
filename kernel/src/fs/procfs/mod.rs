@@ -570,6 +570,9 @@ impl ProcFSSuperBlock {
         // Cached-read cost anatomy (debug=filerd probe; counters are inert
         // unless the switch armed them).
         self.create_dynamic_file("filerd", crate::debug::filerd::generate);
+        // Lock-dependency registry, the reference /proc/lockdep layout
+        // (lockdep-lite P0: the declared view; live counts join in P1).
+        self.create_dynamic_file("lockdep", crate::debug::lockdep::generate_proc_lockdep);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).
