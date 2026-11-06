@@ -24,7 +24,7 @@ pub fn is_64bit_memory_bar(bar_raw: u32) -> bool { (bar_raw & 0x06) == 0x04 }
 #[kani::proof]
 fn verify_command_bits_distinct() {
     let bits = [command::IO_SPACE, command::MEMORY_SPACE, command::BUS_MASTER];
-    let mut seen = u16::MAX;
+    let mut seen = 0u16;
     for &b in &bits {
         assert!(b > 0 && (b & (b - 1)) == 0);
         assert_eq!(seen & b, 0);
