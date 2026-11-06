@@ -240,7 +240,10 @@ pub fn test_fileops_caps() {
     check(
         "procfs file caps",
         &crate::fs::procfs::PROCFS_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+        // poll: true since the EOF-aware procfs poll (6ecb2c23) — the
+        // unconditional-POLLIN fallback lied at EOF and glib's main
+        // loop spun poll->read(0) at ~870k/s (the monopolist storm).
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: false },
     );
     check(
         "sysfs file caps",
