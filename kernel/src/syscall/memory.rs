@@ -68,7 +68,7 @@ struct TrimQEntry {
     w1: [u64; TRIMQ_SNAP],
 }
 
-const TRIMQ_SNAP: usize = 32;
+const TRIMQ_SNAP: usize = 256;
 
 static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
     use crate::sync::spinlock::Spinlock;
