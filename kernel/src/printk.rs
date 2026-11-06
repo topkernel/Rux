@@ -398,7 +398,16 @@ pub fn console_emit_unlock() {
 /// Deferred console bytes produced by IF=0 printk contexts. Drop-oldest
 /// byte ring: sustained overload sheds oldest bytes first; the dropped
 /// counter keeps the loss visible (dmesg still has every record).
-const CONSOLE_DEFER_SIZE: usize = 8192;
+///
+/// Size: 64 KiB — the queue must hold the LARGEST single-context burst
+/// whole, or drop-oldest eats that burst's head. The syscost 60s dump
+/// is ~120 lines / ~10 KiB, ALL deferred when the timer softirq runs on
+/// the inline irq-exit path (IF=0); the first 8 KiB queue left only the
+/// dump's TAIL alive on every OH gate boot (con9 evidence: ticks/if0/
+/// uart/syscalls rows 0/10 dumps, rip tail 10/10 — drop-oldest keeps
+/// the newest). 64 KiB = 6x the dump burst (the reference's own printk
+/// ring floor is 128 KiB — __LOG_BUF_LEN).
+const CONSOLE_DEFER_SIZE: usize = 64 * 1024;
 
 struct ConsoleDefer {
     buf: [u8; CONSOLE_DEFER_SIZE],
@@ -477,6 +486,53 @@ fn defer_push(bytes: &[u8]) {
 /// not race the IRQ drain with a direct THR write).
 pub(crate) fn defer_byte(b: u8) {
     defer_push(&[b]);
+}
+
+/// Try-lock variant of `defer_byte` for lock-free diagnostic writers
+/// (console.rs putchar_no_lock family). Never spins: returns false when
+/// the defer lock is contended, leaving the caller its direct-write
+/// last resort. This is the HEALTHY-state fallback when tx_submit_try
+/// fails (ring full or drain holding the ring lock): the byte joins the
+/// ordered queue — flushed by the next IF=1 writer — instead of writing
+/// THR between the drain's bursts, which spliced ring-resident lines at
+/// burst boundaries (boot-9: "…pad" + "AL" + "ding END").
+pub(crate) fn defer_byte_try(b: u8) -> bool {
+    let Some(mut q) = CONSOLE_DEFER.try_lock_irqsave() else {
+        return false;
+    };
+    let tail = q.tail;
+    let next = (tail + 1) % CONSOLE_DEFER_SIZE;
+    if next == q.head {
+        q.head = (q.head + 1) % CONSOLE_DEFER_SIZE;
+        CONSOLE_DEFER_DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    q.buf[tail] = b;
+    q.tail = next;
+    true
+}
+
+/// Whole-slice try-lock defer push (puts_bytes_no_lock family): the run
+/// enters the queue atomically or not at all — a partial push would let
+/// another producer's bytes split it. Drop-oldest on overflow is NOT
+/// used here (the caller's slice is the anomaly evidence; shedding
+/// middle bytes would garble it more than losing it whole).
+pub(crate) fn defer_bytes_try(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(mut q) = CONSOLE_DEFER.try_lock_irqsave() else {
+        return false;
+    };
+    let free = (q.head + CONSOLE_DEFER_SIZE - 1 - q.tail) % CONSOLE_DEFER_SIZE;
+    if free < bytes.len() {
+        return false;
+    }
+    for &b in bytes {
+        let tail = q.tail;
+        q.buf[tail] = b;
+        q.tail = (tail + 1) % CONSOLE_DEFER_SIZE;
+    }
+    true
 }
 
 /// Flush deferred console bytes to the console. Never sleeps: staged
