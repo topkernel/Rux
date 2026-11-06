@@ -149,6 +149,50 @@ static volatile unsigned char *g_corrupt_at;
 
 static void forensic_dump(void) {
     conprint("[heapstress] FORENSIC: target=%p\n", (void *)g_corrupt_at);
+    // Victim chunk header (glibc malloc_chunk: prev_size, size) — an
+    // intact size field means the chunk STRUCTURE was fine and the
+    // corruption arrived from outside (frame aliasing), while a smashed
+    // header points at metadata corruption (the first-bad-write family).
+    if (g_corrupt_at) {
+        const unsigned char *h = g_corrupt_at - 16;
+        conprint("[heapstress] FORENSIC: victim header: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                 h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],
+                 h[8],h[9],h[10],h[11],h[12],h[13],h[14],h[15]);
+    }
+    // Identify the WRITER: whose canary landed in the victim? Recover
+    // the seed from the first foreign word (pat is invertible) and scan
+    // every live block for a block whose CURRENT data starts with that
+    // same pattern — that block's owner wrote the victim's page.
+    if (g_corrupt_at && g_got) {
+        // forward-inverse of pat(seed, 0):
+        // c = ((s ^ (s>>13)) * K) ^ (((s ^ (s>>13)) * K) >> 15)
+        unsigned d = g_got;
+        unsigned x = d; for (int i = 0; i < 6; i++) x = d ^ (x >> 15);
+        unsigned c = x;
+        unsigned K = 0x5bd1e995u, Kinv = 0;
+        // modular inverse of K mod 2^32 by brute exponentiation
+        unsigned long long acc = 1, base = K, e = 0xffffffffULL;
+        while (e) { if (e & 1) acc = (acc * base) & 0xffffffffULL; base = (base * base) & 0xffffffffULL; e >>= 1; }
+        Kinv = (unsigned)acc;
+        unsigned b = (c * Kinv) & 0xffffffffu;
+        unsigned y = b; for (int i = 0; i < 6; i++) y = b ^ (y >> 13);
+        unsigned seed = y;
+        conprint("[heapstress] FORENSIC: foreign seed=%08x (victim w0=%08x want=%08x)\n",
+                 seed, g_got, g_want);
+        for (int t = 0; t < NTHREADS; t++) {
+            for (int i = 0; i < NBLOCKS; i++) {
+                unsigned char *p = g_blocks[t][i];
+                if (!p) continue;
+                unsigned w;
+                memcpy(&w, p, 4);
+                if (w == g_got) {
+                    long d2 = (long)p - (long)g_corrupt_at;
+                    conprint("[heapstress] FORENSIC: WRITER-RESIDENT t%d blk=%d p=%p sz=%zu delta=%ld (first-word match)\n",
+                             t, i, (void *)p, g_sizes[t][i], d2);
+                }
+            }
+        }
+    }
     for (int t = 0; t < NTHREADS; t++) {
         for (int i = 0; i < NBLOCKS; i++) {
             unsigned char *p = g_blocks[t][i];
@@ -170,6 +214,27 @@ static void forensic_dump(void) {
                         conprint("[heapstress] FORENSIC: DUPLICATE ptr %p t%d/b%d AND t%d/b%d\n",
                                  (void *)a, t1, i1, t2, i2);
         }
+    // VA-overlap audit among ALL live blocks: glibc handing overlapping
+    // chunks = bin-metadata corruption; disjoint VAs sharing bytes =
+    // frame aliasing.
+    {
+        int overlaps = 0;
+        for (int t1 = 0; t1 < NTHREADS && overlaps < 8; t1++)
+            for (int i1 = 0; i1 < NBLOCKS && overlaps < 8; i1++) {
+                unsigned char *a = g_blocks[t1][i1]; if (!a) continue;
+                for (int t2 = t1; t2 < NTHREADS && overlaps < 8; t2++)
+                    for (int i2 = (t2 == t1 ? i1 + 1 : 0); i2 < NBLOCKS && overlaps < 8; i2++) {
+                        unsigned char *b = g_blocks[t2][i2]; if (!b) continue;
+                        if (a < b + g_sizes[t2][i2] && b < a + g_sizes[t1][i1]) {
+                            conprint("[heapstress] FORENSIC: VA-OVERLAP %p(+%zu) t%d/b%d AND %p(+%zu) t%d/b%d\n",
+                                     (void*)a, g_sizes[t1][i1], t1, i1,
+                                     (void*)b, g_sizes[t2][i2], t2, i2);
+                            overlaps++;
+                        }
+                    }
+            }
+        if (!overlaps) conprint("[heapstress] FORENSIC: no VA overlaps among live blocks\n");
+    }
     int fd = open("/proc/self/maps", O_RDONLY);
     if (fd >= 0) {
         static char b[512]; ssize_t r;

@@ -170,6 +170,37 @@ int main(void) {
     setenv("GALLIUM_DRIVER", "llvmpipe", 1);
     mkdir("/tmp/xdg", 0700);
 
+    // Diagnostic env hook: every NAME=VALUE line in /etc/runit-env is
+    // exported to the whole session chain (children inherit). Lets a
+    // hunting boot stage glibc tunables (MALLOC_MMAP_THRESHOLD_,
+    // MALLOC_PERTURB_, ...) WITHOUT recompiling runit — stage the file
+    // with debugfs into a reflink image copy (see scripts/test/gnome-diag).
+    // Absent file = no behavior change.
+    {
+        int ef = open("/etc/runit-env", O_RDONLY);
+        if (ef >= 0) {
+            static char ebuf[4096];
+            ssize_t n = read(ef, ebuf, sizeof ebuf - 1);
+            close(ef);
+            if (n > 0) {
+                ebuf[n] = 0;
+                char *p = ebuf;
+                while (*p) {
+                    char *line = p;
+                    while (*p && *p != '\n') p++;
+                    if (*p) *p++ = 0;
+                    // trim \r and blanks; skip comments/empty lines
+                    char *e = line + strlen(line);
+                    while (e > line && (e[-1] == '\r' || e[-1] == ' ')) *--e = 0;
+                    if (*line && *line != '#') {
+                        putenv(line);
+                        printf("[runit] env: %s\n", line);
+                    }
+                }
+            }
+        }
+    }
+
     // auto-clear stale X locks (an unclean prior run would wedge Xorg)
     unlink("/tmp/.X0-lock");
     unlink("/tmp/.X11-unix/X0");
