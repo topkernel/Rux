@@ -122,6 +122,85 @@ pub fn fxrs_word_watched(uaddr: usize) -> bool {
     }
     false
 }
+
+// sc58 (58th session): the wake-side verdict ring. Every wedge census so
+// far shows the same shape on the stuck words — anywoken=0 and (FXRS)
+// total futex-syscall silence AFTER the word went stuck — but FXRS only
+// arms once the census prints a word (park age >= 3 s), so the decisive
+// moment, the park's BIRTH, is unobserved: the wake that was lost (or
+// never sent) happened in that gap. This ring records every WAKE-class
+// futex syscall (WAKE / WAKE_BITSET / WAKE_OP / CMP_REQUEUE) system-wide
+// from t=0 with its return value; the stuck census then dumps the window
+// around the OLDEST stuck parks' birth (park_j-2s .. park_j+5s):
+//   - a WAKE on the word with ret>=1 while the waiter never returned
+//     names a kernel wake drop (delivery bug);
+//   - a WAKE with ret==0 while the waiter WAS linked at that jiffy
+//     names a wake-scan miss;
+//   - no WAKE near the birth at all names the never-sent branch
+//     (userspace ordering — reference-diff territory).
+// dfx=fuxstuck-gated push (one lock+copy per wake op); zero cost off.
+#[derive(Clone, Copy)]
+pub struct FuxWakeOp {
+    pub j: u64,
+    pub tid: u32,
+    pub tgid: u32,
+    pub uaddr: u64,
+    pub op: u8, // raw FUTEX cmd byte (FUTEX_WAKE=1 etc.)
+    pub ret: i32,
+}
+const FUXW_RING_SZ: usize = 16384; // per CPU: ~6 s of coverage at the OH boot's ~10k wake syscalls/s
+const FUXW_NRINGS: usize = 4; // cpu_id % 4 — collision-free on <= 4-CPU boots
+const FUXW_ZERO: FuxWakeOp = FuxWakeOp {
+    j: 0,
+    tid: 0,
+    tgid: 0,
+    uaddr: 0,
+    op: 0,
+    ret: 0,
+};
+pub static FUXW_RINGS: [Spinlock<(usize, [FuxWakeOp; FUXW_RING_SZ])>; FUXW_NRINGS] = [
+    Spinlock::new((0, [FUXW_ZERO; FUXW_RING_SZ])),
+    Spinlock::new((0, [FUXW_ZERO; FUXW_RING_SZ])),
+    Spinlock::new((0, [FUXW_ZERO; FUXW_RING_SZ])),
+    Spinlock::new((0, [FUXW_ZERO; FUXW_RING_SZ])),
+];
+
+/// Record one completed WAKE-class futex syscall (sc58). Called from
+/// do_futex after the op returned. Per-CPU ring: the push must not
+/// serialize wake syscalls across CPUs — the wedge it measures is
+/// timing-sensitive, and a global lock here changed the boot's shape
+/// (ohc74 booted past appfwk.ready with it, the only such boot in the
+/// campaign).
+pub fn fuxw_push(cmd: u8, uaddr: u64, ret: i32) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck) {
+        return;
+    }
+    let (tid, tgid) = match crate::sched::current() {
+        Some(t) => unsafe { ((*t).pid(), (*t).tgid() as u32) },
+        None => (0, 0),
+    };
+    let r = crate::arch::cpu_id() as usize % FUXW_NRINGS;
+    let mut g = FUXW_RINGS[r].lock();
+    let (idx, arr) = &mut *g;
+    arr[*idx] = FuxWakeOp {
+        j: crate::drivers::timer::get_jiffies(),
+        tid,
+        tgid,
+        uaddr,
+        op: cmd,
+        ret,
+    };
+    *idx = (*idx + 1) % FUXW_RING_SZ;
+}
+
+// sc58: waiter-pool occupancy maintained at alloc/free (the census reads
+// it O(1) — a census-time sweep of 8192 irqsave locks ran in the timer
+// tick and was its own timing pollution); jiffies of the last pool
+// exhaustion (alloc_waiter None).
+pub static FUX_POOL_USED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+pub static FUX_POOL_FULL_J: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 // sc209 postmortem: 600 ops died inside RS's own init (EGL/composer
 // setup is hundreds of condvar broadcasts), two dozen ops short of the
 // HGM window. 4000 ops (~8000 short lines, ~1 min of UART across a
@@ -794,10 +873,14 @@ static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 16] =
 const FUXWATCH_BUDGET: usize = 4096;
 use core::sync::atomic::Ordering as Relaxed2;
 
-/// Parse fuxwatch=0xADDR[,DELAYSEC] once at boot (called from the dfx
-/// init path). Empty/absent leaves the watch off.
+/// Parse fuxwatch=0xADDR[,DELAYSEC] (and sc58: fuxwatch2=0xADDR) once at
+/// boot (called from the dfx init path). Empty/absent leaves the watch
+/// off. fuxwatch2 pre-arms the second slot (the census/chain-walk
+/// auto-arm only fills it when free).
 pub fn fuxwatch_parse() {
     let Some(v) = crate::cmdline::get_param("fuxwatch") else {
+        // fuxwatch2 is independent of slot 1
+        fuxwatch2_parse();
         return;
     };
     let mut it = v.split(',');
@@ -811,6 +894,31 @@ pub fn fuxwatch_parse() {
             FUXWATCH_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
             FUXWATCH_DELAY_S.store(delay, core::sync::atomic::Ordering::Relaxed);
             crate::pr_warn!("fuxwatch armed target={:#x} delay={}s", a, delay);
+            // sc58: the arm rounds run in the censusd kthread, which was
+            // only spawned lazily on the first DEFERRED print — ohc73/74
+            // never queued one before the wedge window, so the watch
+            // words never armed (0 FW lines with FUXWATCH2-AUTO armed).
+            // Spawn censusd now (parse runs in early-boot task context).
+            crate::dfx::taskdump::ensure_defer_thread();
+        }
+    }
+    fuxwatch2_parse();
+}
+
+fn fuxwatch2_parse() {
+    let Some(v) = crate::cmdline::get_param("fuxwatch2") else {
+        return;
+    };
+    let addr = v.split(',').next().and_then(|s| {
+        let t = s.trim_start_matches("0x");
+        u64::from_str_radix(t, 16).ok()
+    });
+    if let Some(a) = addr {
+        if a > 0x1000 {
+            FUXWATCH2_ADDR.store(a, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!("fuxwatch2 armed target={:#x}", a);
+            // sc58: censusd must exist for the arm rounds (see slot 1).
+            crate::dfx::taskdump::ensure_defer_thread();
         }
     }
 }
@@ -960,6 +1068,12 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     }
     let which2 = w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3);
     let n = FUXWATCH_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if which2 {
+        // sc58: slot 2 keeps its own budget accounting (arm_round tests
+        // both counters; a shared counter let slot-2 writes retire BOTH
+        // slots early).
+        FUXWATCH2_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     if n >= FUXWATCH_BUDGET {
         return false;
     }
@@ -2319,6 +2433,174 @@ pub fn futex_stuck_census() {
         );
     }
 
+    // ---- sc58 (58th): the wake-side verdict pass. Three additions, all
+    // under this same 5 s burst:
+    //   (a) waiter-pool occupancy + last-exhaustion stamp (a wedge-time
+    //       pool-full makes every later FUTEX_WAIT spin in backoff
+    //       retries — invisible to the bucket-walk census above);
+    //   (b) the FUXW ring birth-window dump: WAKE-class syscalls recorded
+    //       around the OLDEST stuck parks' births (park_j-2s .. +5s) —
+    //       closes the FXRS arming gap (FXRS starts watching a word only
+    //       3+ s after it parked; the lost wake happens at birth);
+    //   (c) auto-arm fuxwatch slot 2 on the first stuck FFRT-worker park
+    //       word in the registered samgr pid — that word IS the FFRT
+    //       queue-internal mutex's musl lock word (fval=0x80000010 =
+    //       held|waiters): its write trace decides "unlock happens but
+    //       waiter never wakes" (kernel drop) from "no unlock ever"
+    //       (holder never runs — reference-diff branch).
+    {
+        use core::fmt::Write as _;
+        // (a) pool stats — O(1) counter (see FUX_POOL_USED).
+        let pool_used = FUX_POOL_USED.load(Relaxed);
+        let last_full = FUX_POOL_FULL_J.load(Relaxed);
+        // (c) slot-2 auto-arm on the first stuck samgr FFRT-worker word.
+        let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
+        if samgr_pid != 0 && FUXWATCH2_ADDR.load(Relaxed) == 0 {
+            for g in groups.iter() {
+                if g.tgid == samgr_pid && g.rep_comm[..7] == *b"OS_FFRT" {
+                    let w2 = g.uaddr as u64;
+                    if FUXWATCH2_ADDR
+                        .compare_exchange(0, w2, Relaxed, Relaxed)
+                        .is_ok()
+                    {
+                        crate::pr_warn!(
+                            "FUXWATCH2-AUTO word={:#x} tid={} park={}s",
+                            w2,
+                            g.rep_tid,
+                            g.max_age
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        // (b cont.) pick the dump targets first (top-3 by max_age plus
+        // any samgr FFRT group), then snapshot ONLY matching entries —
+        // the ring is 64k entries; copying it whole every 5 s would be
+        // a 2 MB alloc churn under its lock.
+        static CTX_LINES: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        {
+            let mut order2: alloc::vec::Vec<usize> = (0..groups.len()).collect();
+            order2.sort_by(|&a, &b| groups[b].max_age.cmp(&groups[a].max_age));
+            let mut picks: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+            for &gi in order2.iter().take(3) {
+                picks.push(gi);
+            }
+            for (gi, g) in groups.iter().enumerate() {
+                if picks.len() >= 4 {
+                    break;
+                }
+                if !picks.contains(&gi)
+                    && g.tgid == samgr_pid
+                    && g.rep_comm[..7] == *b"OS_FFRT"
+                {
+                    picks.push(gi);
+                }
+            }
+            if picks.is_empty() || CTX_LINES.load(Relaxed) > 420 {
+                crate::pr_warn!(
+                    "FUXW-SUM pool={}/{} last_full_j={} (no dump targets)",
+                    pool_used,
+                    WAITER_POOL_SIZE,
+                    if last_full == 0 { -1i64 } else { last_full as i64 },
+                );
+            } else {
+                // windows + word set for the filter pass
+                let wins: alloc::vec::Vec<(u64, u64, u64)> = picks
+                    .iter()
+                    .map(|&gi| {
+                        let g = &groups[gi];
+                        let birth = now.saturating_sub(g.max_age as u64 * 100);
+                        (
+                            birth.saturating_sub(200),
+                            birth + 500,
+                            g.uaddr as u64,
+                        )
+                    })
+                    .collect();
+                let mut oldest_j = u64::MAX;
+                let mut newest_j = 0u64;
+                let mut ring_n = 0u64;
+                let mut snap: alloc::vec::Vec<FuxWakeOp> = alloc::vec::Vec::new();
+                for ring in FUXW_RINGS.iter() {
+                    let g = ring.lock();
+                    let (idx, arr) = &*g;
+                    for k in 0..FUXW_RING_SZ {
+                        let i = (*idx + k) % FUXW_RING_SZ;
+                        let e = arr[i];
+                        if e.j == 0 {
+                            continue;
+                        }
+                        ring_n += 1;
+                        oldest_j = oldest_j.min(e.j);
+                        newest_j = newest_j.max(e.j);
+                        if wins
+                            .iter()
+                            .any(|&(lo, hi, w)| (e.j >= lo && e.j <= hi) || e.uaddr == w)
+                        {
+                            snap.push(e);
+                        }
+                    }
+                }
+                snap.sort_by_key(|e| e.j);
+                crate::pr_warn!(
+                    "FUXW-SUM pool={}/{} last_full_j={} ring={} oldest={} newest={}",
+                    pool_used,
+                    WAITER_POOL_SIZE,
+                    if last_full == 0 { -1i64 } else { last_full as i64 },
+                    ring_n,
+                    if oldest_j == u64::MAX { -1i64 } else { oldest_j as i64 },
+                    newest_j
+                );
+                for (pi, &gi) in picks.iter().enumerate() {
+                    let g = &groups[gi];
+                    let birth = now.saturating_sub(g.max_age as u64 * 100);
+                    let (win_lo, win_hi) = (wins[pi].0, wins[pi].1);
+                    let in_win: alloc::vec::Vec<&FuxWakeOp> = snap
+                        .iter()
+                        .filter(|e| e.j >= win_lo && e.j <= win_hi)
+                        .collect();
+                    let ever_word =
+                        snap.iter().filter(|e| e.uaddr == g.uaddr as u64).count();
+                    if in_win.is_empty() && ever_word == 0 {
+                        continue;
+                    }
+                    use core::fmt::Write as _;
+                    let mut hdr = alloc::string::String::new();
+                    let _ = write!(
+                        hdr,
+                        "FUXW-CTX tid={} ({}) word={:#x} birth_j={} win={}..{} in_win={} ever_word={}",
+                        g.rep_tid,
+                        core::str::from_utf8(&g.rep_comm).unwrap_or("").trim_end_matches('\0'),
+                        g.uaddr,
+                        birth,
+                        win_lo,
+                        win_hi,
+                        in_win.len(),
+                        ever_word
+                    );
+                    crate::pr_warn!("{}", hdr);
+                    for e in in_win.iter().take(12) {
+                        if CTX_LINES.fetch_add(1, Relaxed) > 420 {
+                            break;
+                        }
+                        crate::pr_warn!(
+                            "FUXW j={} tid={} tgid={} op={} uaddr={:#x} ret={}",
+                            e.j,
+                            e.tid,
+                            e.tgid,
+                            e.op,
+                            e.uaddr,
+                            e.ret
+                        );
+                    }
+                    CTX_LINES.fetch_add(1, Relaxed);
+                }
+            }
+        }
+    }
+
     // ---- Phase D (48th session): FUX-GRAPH — the complete samgr park
     // graph every 6th burst (~30 s). The 8-line sample above cannot name
     // the listenerMapLock_ holder: the wedge's decisive parks (FFRT
@@ -2563,9 +2845,17 @@ fn alloc_waiter() -> Option<usize> {
                 bucket: 0,
                 next: None,
             });
+            FUX_POOL_USED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return Some(i);
         }
     }
+    // sc58: stamp the exhaustion moment — the census reports it; a
+    // wedge-time pool-full means FUTEX_WAITs spin in backoff retries,
+    // invisible to the bucket-walk census.
+    FUX_POOL_FULL_J.store(
+        crate::drivers::timer::get_jiffies(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     None
 }
 
@@ -2573,6 +2863,8 @@ fn alloc_waiter() -> Option<usize> {
 fn free_waiter(index: usize) {
     let mut slot = WAITER_POOL[index].lock_irqsave();
     *slot = None;
+    // sc58: occupancy counter (census reads it O(1)).
+    FUX_POOL_USED.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Back off one jiffy when the waiter pool is exhausted (see
@@ -3138,6 +3430,8 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     // Woken: the waker unlinked us from the chain and left the
                     // slot for us to free.
                     *slot = None;
+                    // sc58: occupancy counter (paired with alloc_waiter).
+                    FUX_POOL_USED.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                     // Residency flag (see Task::futex_wait_enqueued): the
                     // waker's unlink left the flag set for us to clear here.
                     unsafe {
@@ -4142,7 +4436,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         taskdump_raw_line(b"\n");
     }
 
-    match cmd {
+    let ret = match cmd {
         FUTEX_WAIT => {
             // R7-A9: plain FUTEX_WAIT keeps a RELATIVE timeout even with
             // FUTEX_CLOCK_REALTIME set (Linux futex_init_timeout adds
@@ -4202,7 +4496,18 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             // PI-related operations not yet supported
             -ENOSYS as i64
         }
+    };
+    // sc58: record completed WAKE-class ops in the verdict ring (the
+    // census dumps the window around stuck parks' births). Includes the
+    // error returns — a rejected op is also a "fired but delivered
+    // nothing" data point.
+    if matches!(
+        cmd,
+        FUTEX_WAKE | FUTEX_WAKE_BITSET | FUTEX_WAKE_OP | FUTEX_REQUEUE | FUTEX_CMP_REQUEUE
+    ) {
+        fuxw_push(cmd as u8, uaddr as u64, ret as i32);
     }
+    ret
 }
 
 /// sys_futex system call entry point
