@@ -46,6 +46,7 @@ pub static PGALLOC_DMA: AtomicU64 = AtomicU64::new(0);
 
 /// Count one page fault.
 pub fn note_fault() {
+    crate::debug::syscost::note_fault_comm();
     PGFAULT.fetch_add(1, Ordering::Relaxed);
 }
 

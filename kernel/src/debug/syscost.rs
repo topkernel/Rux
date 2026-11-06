@@ -1221,7 +1221,106 @@ pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
 }
 
 
-#[inline]
+/// Fault-by-comm census (monopolist hunt): 12 slots keyed by comm.
+pub struct FaultCommRow {
+    pub comm: [core::sync::atomic::AtomicU8; 16],
+    pub n: core::sync::atomic::AtomicU64,
+}
+const FAULT_ROW_INIT: FaultCommRow = FaultCommRow {
+    comm: [const { core::sync::atomic::AtomicU8::new(0) }; 16],
+    n: core::sync::atomic::AtomicU64::new(0),
+};
+static FAULT_BY_COMM: [FaultCommRow; 12] =
+    [const { FAULT_ROW_INIT }; 12];
+
+/// Record a user page fault against the current task's comm (armed
+/// boots only; one relaxed load when unarmed).
+pub fn note_fault_comm() {
+    if ARMED.load(Ordering::Relaxed) != 2 {
+        return;
+    }
+    if let Some(t) = crate::sched::current() {
+        let comm: &[u8; 16] = unsafe { (*t).comm() };
+        if comm[0] == 0 {
+            return;
+        }
+        for e in FAULT_BY_COMM.iter() {
+            let same = (0..16).all(|j| {
+                e.comm[j].load(Ordering::Relaxed) == comm[j]
+            });
+            if same {
+                e.n.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        for e in FAULT_BY_COMM.iter() {
+            if e.n.load(Ordering::Relaxed) == 0 {
+                for j in 0..16 {
+                    e.comm[j].store(comm[j], Ordering::Relaxed);
+                }
+                e.n.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+}
+
+pub static SZ32_CALLERS: [core::sync::atomic::AtomicUsize; 8] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 8];
+static SZ32_N: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static SZ32_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// sz32 caller capture: raw pointer store only (no formatting in the
+/// hot path). The dump prints them; addr2line resolves.
+pub fn note_sz32_caller(loc: *const u8) {
+    let n = SZ32_N.fetch_add(1, Ordering::Relaxed);
+    if n % 5_000_000 == 0 {
+        let slot = (n / 5_000_000) as usize;
+        if slot < 8 {
+            SZ32_CALLERS[slot].store(loc as usize, Ordering::Relaxed);
+        }
+    }
+}
+
+pub static SZ32_STACK: [core::sync::atomic::AtomicUsize; 64] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; 64];
+static SZ32_SN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Walk 3 frames from the GlobalAlloc router and store the return
+/// addresses (8 slots of 3 frames each, every 5Mth sz32 routing).
+#[inline(never)]
+pub fn note_sz32_stack() {
+    let n = SZ32_SN.fetch_add(1, Ordering::Relaxed);
+    if n % 5_000_000 != 0 {
+        return;
+    }
+    let slot = ((n / 5_000_000) * 16) as usize;
+    if slot + 15 >= 64 {
+        return;
+    }
+    // SAFETY: frame-pointer walk over our own stack; reads only.
+    unsafe {
+        let mut rbp: usize;
+        core::arch::asm!("mov {}, rbp", out(reg) rbp);
+        // rbp -> [rbp] = saved rbp, [rbp+8] = return address
+        for i in 0..16usize {
+            if rbp == 0 || rbp & 7 != 0 {
+                break;
+            }
+            let ra = *(rbp as *const usize).add(1);
+            let nr = *(rbp as *const usize);
+            if ra < 0xffffffff_8000_0000 {
+                break;
+            }
+            SZ32_STACK[slot + i].store(ra, Ordering::Relaxed);
+            rbp = nr;
+        }
+    }
+}
+
 pub fn on() -> bool {
     match ARMED.load(Ordering::Relaxed) {
         2 => true,
@@ -1244,6 +1343,10 @@ pub fn on() -> bool {
                 }
             };
             ARMED.store(v, Ordering::Relaxed);
+SZ32_ARMED.store(
+                crate::cmdline::get_param("szcap").as_deref() == Some("1"),
+                Ordering::Relaxed,
+            );
             v == 2
         }
     }
@@ -1548,7 +1651,7 @@ fn rip_sample(rip: u64) {
 
 /// Periodic dump from the timer softirq. Cheap when off.
 pub fn tick(now_jiffies: u64) {
-    if !on() {
+    if !on() && !SZ32_ARMED.load(Ordering::Relaxed) {
         return;
     }
     if now_jiffies.saturating_sub(LAST_DUMP.load(Ordering::Relaxed))
@@ -1562,6 +1665,34 @@ pub fn tick(now_jiffies: u64) {
 
 /// Print the full report (also usable from a debug trigger).
 pub fn dump() {
+    // szcap=1 boots dump only the sz32-callers row (the monopolist
+    // hunt) without the full syscost probe load, which itself perturbs
+    // the race away.
+    if !on() && SZ32_ARMED.load(Ordering::Relaxed) {
+        let c: [usize; 8] = [
+            SZ32_CALLERS[0].load(Ordering::Relaxed),
+            SZ32_CALLERS[1].load(Ordering::Relaxed),
+            SZ32_CALLERS[2].load(Ordering::Relaxed),
+            SZ32_CALLERS[3].load(Ordering::Relaxed),
+            SZ32_CALLERS[4].load(Ordering::Relaxed),
+            SZ32_CALLERS[5].load(Ordering::Relaxed),
+            SZ32_CALLERS[6].load(Ordering::Relaxed),
+            SZ32_CALLERS[7].load(Ordering::Relaxed),
+        ];
+        crate::pr_warn!(
+            "sz32-callers: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
+        );
+        let st: [usize; 64] = core::array::from_fn(|i| {
+            SZ32_STACK[i].load(Ordering::Relaxed)
+        });
+        crate::pr_warn!(
+            "sz32-stack: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+            st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7],
+            st[8], st[9], st[10], st[11], st[12], st[13], st[14], st[15]
+        );
+        return;
+    }
     // Nominal domain: 10 ticks per microsecond by definition.
     const US: u64 = 10;
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
@@ -2011,6 +2142,48 @@ pub fn dump() {
             n,
             core::str::from_utf8(&path[..plen]).unwrap_or("?")
         );
+    }
+
+    // slab per-cache distribution (the monopolist storm attribution):
+    // alloc/free counts per size class name the allocating family.
+    {
+        let st = crate::mm::slab::slab_stats();
+        let mut total_a = 0usize;
+        let mut total_f = 0usize;
+        let mut parts: alloc::string::String = alloc::string::String::new();
+        for c in st.cache_stats.iter() {
+            if c.alloc_count == 0 {
+                continue;
+            }
+            total_a = total_a.saturating_add(c.alloc_count);
+            total_f = total_f.saturating_add(c.free_count);
+            use core::fmt::Write;
+            let _ = core::write!(
+                &mut parts,
+                " sz{}:{}/{}",
+                c.object_size, c.alloc_count, c.free_count
+            );
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s slab: alloc={} free={}{}",
+            secs, total_a, total_f, parts
+        );
+        {
+            let c: [usize; 8] = [
+                SZ32_CALLERS[0].load(Ordering::Relaxed),
+                SZ32_CALLERS[1].load(Ordering::Relaxed),
+                SZ32_CALLERS[2].load(Ordering::Relaxed),
+                SZ32_CALLERS[3].load(Ordering::Relaxed),
+                SZ32_CALLERS[4].load(Ordering::Relaxed),
+                SZ32_CALLERS[5].load(Ordering::Relaxed),
+                SZ32_CALLERS[6].load(Ordering::Relaxed),
+                SZ32_CALLERS[7].load(Ordering::Relaxed),
+            ];
+            crate::pr_warn!(
+                "SYSCOST t={}s sz32-callers: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                secs, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]
+            );
+        }
     }
 
     // pa9 positive-read census table (which fd returns the data).

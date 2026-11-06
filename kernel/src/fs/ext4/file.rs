@@ -2638,8 +2638,34 @@ fn ext4_file_close(file: &File) -> i32 {
 }
 
 /// Ext4 file operations structure
+/// ext4 file poll: EOF-aware (the procfs twin's lesson, 6ecb2c23 —
+/// the no-poll fallback reports POLLIN unconditionally, which LIES at
+/// EOF and made glib's main loop spin poll->read(0) at ~870k/s). A
+/// regular file reports POLLIN only while unread bytes remain, plus
+/// POLLRDHUP at EOF; never blocks on write while the fs has space.
+pub fn ext4_file_poll(file: &File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    // SAFETY: inode written at open time; size is an atomic read.
+    let inode = unsafe { (*file.inode.get()).clone() };
+    let Some(ino) = inode else { return POLLERR };
+    let size = ino.get_size() as u64;
+    let at_eof = file.get_pos() >= size;
+    let mut r = 0u16;
+    if events & POLLIN != 0 && !at_eof {
+        r |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLRDHUP != 0 && at_eof {
+        r |= POLLRDHUP;
+    }
+    if events & POLLOUT != 0 {
+        r |= POLLOUT | POLLWRNORM;
+    }
+    r
+}
+
 pub static EXT4_FILE_OPS: FileOps = FileOps::builder()
     .read(ext4_file_read_vfs)
+    .poll(ext4_file_poll)
     .write(ext4_file_write_vfs)
     .lseek(reg_file_lseek)
     .close(ext4_file_close)

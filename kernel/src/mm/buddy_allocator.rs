@@ -1660,6 +1660,18 @@ unsafe impl GlobalAlloc for CombinedAllocator {
         // pinned a whole 4KB buddy page — a 30K-object workload exhausted the
         // 128MB heap (LTP inode02 ALLOCTHROW storm).
         if size <= 4096 && layout.align() <= 8 && crate::mm::slab::is_slab_initialized() {
+            // sz32 storm attribution (szcap=1): every 5Mth sz32 routing,
+            // walk three stack frames and store the return addresses —
+            // the Rust Box/Arc/Vec callsite is 2-3 frames up. Raw
+            // stores only; the syscost dump prints them.
+            if size > 16
+                && size <= 32
+                && crate::debug::syscost::SZ32_ARMED.load(
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+            {
+                crate::debug::syscost::note_sz32_stack();
+            }
             let ptr = crate::mm::kmalloc(size);
             if !ptr.is_null() {
                 return ptr;
