@@ -2102,9 +2102,49 @@ unsafe fn procfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i
     errno::Errno::OperationNotPermitted.as_neg_i32()
 }
 
+/// ProcFS file poll: EOF-aware. The generic no-poll fallback reports
+/// POLLIN unconditionally, which LIES for a dynamic file whose reader
+/// is at EOF — glib's main loop (gmain) then spins poll-wake ->
+/// read()==0 -> poll-wake at ~870k/s, and every read() re-enters the
+/// generator path (the monopolist allocation storm: CPU0 90% kernel,
+/// 52M slab-lock acquisitions per minute, RCU grace periods starved,
+/// the whole fdreap close-stall family). The reference semantics: a
+/// regular file at EOF is not readable; report POLLIN only while
+/// unread bytes remain, plus POLLRDHUP at EOF so edge-triggered
+/// epoll users learn the stream ended.
+fn procfs_file_poll(file: &crate::fs::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    // SAFETY: same private_data contract as procfs_file_read.
+    unsafe {
+        let data_opt = &*file.private_data.get();
+        if (*data_opt).is_none() {
+            return POLLERR;
+        }
+        if let Some(content_ptr) = *data_opt {
+            let content = &*(content_ptr as *const ProcfsFileContent);
+        let at_eof = file.get_pos() as usize >= content.data.len();
+        let mut r = 0u16;
+        if events & POLLIN != 0 && !at_eof {
+            r |= POLLIN | POLLRDNORM;
+        }
+        if events & POLLRDHUP != 0 && at_eof {
+            r |= POLLRDHUP;
+        }
+        if events & POLLOUT != 0 {
+            // procfs writes never block (they either apply or EINVAL).
+            r |= POLLOUT | POLLWRNORM;
+        }
+        r
+        } else {
+            POLLERR
+        }
+    }
+}
+
 /// ProcFS file operations table
 pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(procfs_file_read)
+    .poll(procfs_file_poll)
     .write(procfs_file_write)
     .lseek(procfs_file_lseek)
     .close(procfs_file_close)
