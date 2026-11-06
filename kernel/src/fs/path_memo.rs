@@ -206,9 +206,27 @@ static TABLE: [Slot; SLOTS] = {
 
 #[inline]
 fn hash(root: *const Dentry, path: &str) -> usize {
+    // (perf-gap-hunt) word-at-a-time FNV: the byte-at-a-time loop is a
+    // serial imul dependency chain (~4 cyc/byte — ~20ns for a 20-byte
+    // path, the largest single piece of the measured 80-90ns memo hit).
+    // Folding 8-byte words cuts the chain to len/8 multiplies; tail
+    // bytes zero-padded into one final round. Slot mapping changes vs
+    // the old hash — harmless, the table is never persisted and a
+    // collision only costs a miss (payload compare rejects).
+    let b = path.as_bytes();
     let mut h: u64 = 0xcbf29ce484222325 ^ (root as u64);
-    for b in path.as_bytes() {
-        h ^= *b as u64;
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let mut w = [0u8; 8];
+        w.copy_from_slice(&b[i..i + 8]);
+        h ^= u64::from_le_bytes(w);
+        h = h.wrapping_mul(0x100000001b3);
+        i += 8;
+    }
+    if i < b.len() {
+        let mut w = [0u8; 8];
+        w[..b.len() - i].copy_from_slice(&b[i..]);
+        h ^= u64::from_le_bytes(w);
         h = h.wrapping_mul(0x100000001b3);
     }
     (h as usize) & SLOT_MASK

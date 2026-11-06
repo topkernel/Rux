@@ -1946,11 +1946,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                 // component inode_permission re-fetches it each hop.
                 let cred = crate::sched::current()
                     .map(|t| unsafe { (*t).cred() });
-                if let Some((dentry, inode)) = crate::fs::path_memo::lookup(
+                let pc_memo = crate::debug::fsw::pc_now();
+                let memo_res = crate::fs::path_memo::lookup(
                     &start,
                     normalized.as_ref(),
                     cred,
-                ) {
+                );
+                crate::debug::fsw::pc_add(&crate::debug::fsw::MEMO_NS, pc_memo);
+                if let Some((dentry, inode)) = memo_res {
                     // Trailing-slash demands a directory — the same
                     // expression the walk tail applies (LTP acct01
                     // "./tmpfile/" shape).
@@ -4569,6 +4572,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // (Linux handle_truncate runs only when the open did NOT create
         // the file — a fresh O_CREAT inode starts empty and stays silent).
         let mut existed_before_trunc = false;
+        let pc_lk = crate::debug::fsw::pc_now();
         let (inode, opened_dentry) = match path_lookup(filename, lookup_flags) {
             Ok(vpath) => {
                 if o_excl && o_creat {
@@ -4724,21 +4728,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             }
             Err(e) => return Err(e),
         };
-
-        // Directory -> redirect to opendir
-        if inode.mode.is_directory() {
-            // Linux: opening a directory for WRITING (O_RDWR/O_WRONLY)
-            // fails with EISDIR before anything else (LTP open08) — only
-            // O_RDONLY (optionally |O_DIRECTORY) is legal on a dir.
-            let accmode = flags & FileFlags::O_ACCMODE;
-            if accmode != FileFlags::O_RDONLY {
-                return Err(errno::Errno::IsADirectory.as_neg_i32());
-            }
-            return file_opendir(
-                filename,
-                flags | crate::fs::file::FileFlags::O_DIRECTORY,
-            );
-        }
+        crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_LK_NS, pc_lk);
+        let pc_chk = crate::debug::fsw::pc_now();
 
         // Directory -> redirect to opendir
         if inode.mode.is_directory() {
@@ -4846,6 +4837,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         }
 
         // Create File object
+        crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_CHK_NS, pc_chk);
+        let pc_fil = crate::debug::fsw::pc_now();
         let file_flags = FileFlags::new(flags);
         let file = Arc::new(File::new(file_flags));
         file.set_inode(Arc::clone(&inode));
@@ -4886,6 +4879,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
             trunc_modified = existed_before_trunc;
         }
 
+        crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_FIL_NS, pc_fil);
+        let pc_ins = crate::debug::fsw::pc_now();
         match get_file_fd_install(Arc::clone(&file)) {
             Some(fd) => {
                 // inotify: successful open → IN_OPEN (parent watches get
@@ -4895,6 +4890,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                 if trunc_modified {
                     crate::fs::inotify::notify_file(&file, ino::IN_MODIFY);
                 }
+                crate::debug::fsw::pc_add(&crate::debug::fsw::OPEN_INS_NS, pc_ins);
                 Ok(fd)
             }
             None => Err(errno::Errno::TooManyOpenFiles.as_neg_i32()),

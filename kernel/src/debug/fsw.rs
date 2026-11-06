@@ -185,6 +185,17 @@ pub static NEGHIT: AtomicU64 = AtomicU64::new(0);
 /// Stale negative memos discarded (parent mutated since insert).
 pub static NEGSTALE: AtomicU64 = AtomicU64::new(0);
 
+// === open tail anatomy (perf-gap-hunt 10th) ================================
+// OPEN_TAIL split: the full-path memo lookup itself, the path_lookup call
+// around it (lk - memo = walk prologue + VfsPath build), the post-lookup
+// checks (directory/device/DAC/lease/fifo), File Arc construction + ops
+// resolution, and the fdtable install + inotify gate. Divisor = OPEN_N.
+pub static MEMO_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_LK_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_CHK_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_FIL_NS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_INS_NS: AtomicU64 = AtomicU64::new(0);
+
 // === open() wall-vs-exec anatomy (21st successor) =========================
 // syscost's open row is WALL time per syscall — under the OH boot's load
 // it conflates kernel CPU with deschedule + spin-wait. These brackets
@@ -749,5 +760,38 @@ pub fn dump() {
             0
         },
         v(&OPEN_EXEC_MAX_NS) / 1000,
+    );
+    crate::pr_warn!(
+        // perf-gap-hunt 10th, open tail anatomy (all /OPEN_N, ns avg):
+        // memo = the full-path memo lookup call itself, lk = the whole
+        // path_lookup, chk = post-lookup checks, fil = File Arc + ops,
+        // ins = fdtable install + inotify gate.
+        "PC3 t={}s memo={} lk={} chk={} fil={} ins={}",
+        secs,
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&MEMO_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&OPEN_LK_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&OPEN_CHK_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&OPEN_FIL_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
+        if OPEN_N.load(Ordering::Relaxed) > 0 {
+            v(&OPEN_INS_NS) / v(&OPEN_N)
+        } else {
+            0
+        },
     );
 }
