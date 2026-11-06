@@ -694,35 +694,58 @@ pub fn console_emit_user(bytes: &[u8]) -> isize {
     if bytes.is_empty() {
         return 0;
     }
-    const USER_CHUNK: usize = 256;
+    // Atomic-segment cap. Segments are LINES (bytes up to and including
+    // the next '\n'): a line enters the TX ring in ONE contiguous run
+    // (tx_submit_whole), so no printk record and no other user writer
+    // can splice it — the torn-instrument-line guarantee the OH rig
+    // needs. A "line" longer than the cap (binary blob / pathological
+    // producer) cannot be atomic at ring granularity anyway and falls
+    // back to streaming chunks (the reference uart_write shape).
+    const USER_SEG_MAX: usize = 1024;
     let mut done = 0usize;
     while done < bytes.len() {
-        let end = (done + USER_CHUNK).min(bytes.len());
-        let chunk = &bytes[done..end];
+        let lim = (done + USER_SEG_MAX).min(bytes.len());
+        let seg_end = match bytes[done..lim].iter().position(|&b| b == b'\n') {
+            Some(i) => done + i + 1,
+            None => lim,
+        };
         flush_deferred();
         if !acquire_emit_lock_task() {
             CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
             crate::printk::ring_stash_console(&bytes[done..]);
             return done as isize;
         }
+        let seg = &bytes[done..seg_end];
+        let whole_line = seg.last() == Some(&b'\n');
         let mut at = 0usize;
-        let mut bailed = false;
-        while at < chunk.len() {
+        let mut bail_reason: Option<&'static str> = None;
+        while at < seg.len() {
             if !crate::console::tx_armed() {
                 // Synchronous path (riscv64/aarch64/pre-engine x86):
                 // one batched pass, no waiting.
                 let uart = crate::console::Uart::new();
-                uart.puts_batch(&chunk[at..]);
-                crate::dfx::syscost::note_printk_con(chunk.len() - at);
-                at = chunk.len();
+                uart.puts_batch(&seg[at..]);
+                crate::dfx::syscost::note_printk_con(seg.len() - at);
+                at = seg.len();
                 break;
             }
-            let took = crate::console::tx_submit(&chunk[at..]);
-            if took > 0 {
-                crate::dfx::syscost::note_printk_con(took);
-                at += took;
+            if whole_line {
+                // All-or-nothing: the line either lands whole or we
+                // sleep for ring space and retry. A partial submit here
+                // is what spliced CONFLUSH 000324 (oh-console smoke
+                // #6: "…-padd" + timer record + "ing END").
+                if crate::console::tx_submit_whole(&seg[at..]) {
+                    crate::dfx::syscost::note_printk_con(seg.len() - at);
+                    at = seg.len();
+                }
+            } else {
+                let took = crate::console::tx_submit(&seg[at..]);
+                if took > 0 {
+                    crate::dfx::syscost::note_printk_con(took);
+                    at += took;
+                }
             }
-            if at < chunk.len() {
+            if at < seg.len() {
                 // Ring full: bounded SLEEPING wait for drain space (IF=1,
                 // preemptible) — the reference tty write's behavior
                 // against a full xmit buffer.
@@ -732,32 +755,36 @@ pub fn console_emit_user(bytes: &[u8]) -> isize {
                 {
                     // One-shot diagnosis of the FIRST bail (stall latch
                     // vs timer-pool exhaustion vs timeout vs signal —
-                    // the drop shape differs per cause).
+                    // the drop shape differs per cause). Recorded here,
+                    // PRINTED after the lock release below: pr_warn
+                    // under a self-held CONSOLE_EMIT_LOCK would spin
+                    // printk's acquire budget (2 s) against us.
                     static BAIL_REPORTED: AtomicBool = AtomicBool::new(false);
                     if !BAIL_REPORTED.swap(true, Ordering::Relaxed) {
-                        let why = if crate::console::tx_stalled() {
+                        bail_reason = Some(if crate::console::tx_stalled() {
                             "tx_stalled"
                         } else if crate::signal::signal_pending() {
                             "signal"
                         } else {
                             "wait_timeout_or_no_timer"
-                        };
-                        crate::pr_warn!(
-                            "console: user TX bail ({}); line continues from printk ring",
-                            why
-                        );
+                        });
                     }
-                    bailed = true;
                     break;
                 }
             }
         }
         CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
-        if bailed {
+        if let Some(why) = bail_reason {
+            crate::pr_warn!(
+                "console: user TX bail ({}); line continues from printk ring",
+                why
+            );
+        }
+        if bail_reason.is_some() {
             crate::printk::ring_stash_console(&bytes[done + at..]);
             return (done + at) as isize;
         }
-        done = end;
+        done = seg_end;
         crate::sched::cond_resched();
     }
     bytes.len() as isize

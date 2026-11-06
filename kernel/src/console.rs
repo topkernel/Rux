@@ -433,17 +433,27 @@ pub fn tx_stalled() -> bool {
     false
 }
 
-/// Per-invocation drain budget (bytes). With a fast host-side sink
-/// (chardev never backpressures) THRE stays asserted and a flood keeps
-/// refilling the ring — an unbounded loop here was 427 ms of IF=0 in a
-/// single IRQ pass (oh-console smoke boot #2). Bound each pass, then
-/// self-retrigger: with THRE=1 and ETBEI already set there is no future
-/// edge, so the handler toggles ETBEI off/on (under the ring lock) to
-/// manufacture one. 512 B ≈ 64 VM exits ≈ ~130 µs of IF=0 per pass —
-/// well inside the interrupts guarded domain band — while sustaining
-/// multi-MB/s aggregate drain via the retrigger chain.
+/// Per-invocation drain budget. With a fast host-side sink (chardev
+/// never backpressures) THRE stays asserted and a flood keeps refilling
+/// the ring — an unbounded loop here was 427 ms of IF=0 in a single IRQ
+/// pass (oh-console smoke boot #2). Two caps, then self-retrigger (with
+/// THRE=1 and ETBEI already set there is no future edge, so the handler
+/// toggles ETBEI off/on under the ring lock to manufacture one):
+/// - WALL-TIME cap (primary, 200 µs): one `rep outsb` burst costs what
+///   the host chardev write costs — measured 1.43 ms avg / 7 ms max per
+///   512 B pass on KVM (smoke #5), i.e. the byte cap alone let a single
+///   closed cli segment ride the top of the 3-7 ms guarded band. A time
+///   cap makes the segment bound independent of host IO cost.
+/// - BYTE cap (secondary, 512 B): bounds the pass when the clock domain
+///   is not fine-grained yet (pre-TSC-calibration read_time is
+///   jiffies-derived — 0 delta — so the time cap cannot fire; the byte
+///   cap keeps the pass bounded regardless).
 #[cfg(feature = "x86_64")]
 const UART_TX_DRAIN_BUDGET: u64 = 512;
+
+/// Wall-time budget per drain pass: 200 µs in the read_time() domain.
+#[cfg(feature = "x86_64")]
+const UART_TX_DRAIN_TIME: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 5_000;
 
 /// Single-drain guard: with a fast host sink THRE re-asserts MID-PASS
 /// (each burst drains instantly), raising a new edge while the first
@@ -480,6 +490,7 @@ pub fn tx_irq_drain() {
     let mut buf = [0u8; UART_TX_BURST];
     let mut budget = UART_TX_DRAIN_BUDGET;
     let mut budget_out = false;
+    let wt0 = crate::arch::cpu::read_time();
     loop {
         polls += 1;
         if read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
@@ -529,6 +540,13 @@ pub fn tx_irq_drain() {
         passes += 1;
         budget = budget.saturating_sub(n as u64);
         if budget == 0 {
+            budget_out = true;
+            break;
+        }
+        // Wall-time cap (primary): one RDTSC-class read per burst; see
+        // UART_TX_DRAIN_TIME. Saturating delta keeps the check true even
+        // if the clock ratchets the read backward mid-pass.
+        if crate::arch::cpu::read_time().saturating_sub(wt0) >= UART_TX_DRAIN_TIME {
             budget_out = true;
             break;
         }
