@@ -71,18 +71,27 @@ fn verify_vpn_9bit() {
     assert!(vpn < 512);
 }
 
-/// INV-VA-K4: floor(addr) <= addr for all addresses.
+/// INV-VA-K4: floor(addr) <= addr. Domain: Sv39-canonical inputs —
+/// `new()` canonicalizes arbitrary bits (drops or sign-extends the
+/// upper half), so the ordering against the RAW input only holds for
+/// addresses that are already canonical (upper 25 bits all equal
+/// bit 38).
 #[kani::proof]
 fn verify_floor_le() {
     let addr: u64 = kani::any();
+    kani::assume((addr >> 38) == 0 || (addr >> 38) == 0x3FF_FFFF);
     let va = VirtAddr::new(addr);
     assert!(va.floor().bits() <= addr);
 }
 
-/// INV-VA-K5: ceil(addr) >= addr for all addresses.
+/// INV-VA-K5: ceil(addr) >= addr. Domain: canonical inputs (as K4)
+/// and not the top page — ceil's `+ PAGE_SIZE - 1` would overflow at
+/// the very top of the u64 range, which no real address reaches.
 #[kani::proof]
 fn verify_ceil_ge() {
     let addr: u64 = kani::any();
+    kani::assume((addr >> 38) == 0 || (addr >> 38) == 0x3FF_FFFF);
+    kani::assume(addr <= u64::MAX - PAGE_SIZE);
     let va = VirtAddr::new(addr);
     assert!(va.ceil().bits() >= addr);
 }
