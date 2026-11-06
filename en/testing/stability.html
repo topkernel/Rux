@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stability · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Stability</h1>
+    <div class="sub">Functional-correctness base · runtime gates · self-correction · adjudication discipline</div>
+
+    <h2 id="suite"><span class="anchor">§1</span>Functional-correctness base</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Architecture</th><th>Result</th><th class="num">Scale</th></tr></thead>
+        <tbody>
+          <tr><td>riscv64 (TCG, 4 CPU)</td><td><span class="chip ok"><span class="dot g"></span>ALL PASSED</span></td><td class="num">1267</td></tr>
+          <tr><td>x86_64 (KVM)</td><td><span class="chip ok"><span class="dot g"></span>ALL PASSED</span></td><td class="num">1263</td></tr>
+          <tr><td>aarch64 (TCG, virt)</td><td><span class="chip ok"><span class="dot g"></span>green</span></td><td class="num">1119 (last recorded; grew since, unarchived)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li>73 test files across memory / process+scheduler / fs / ipc / signal / network / driver / syscall.</li>
+      <li>All assertions run inside the QEMU guest (a kernel crate cannot host host-side <code>#[cfg(test)]</code> — a no_std + own-panic-path constraint).</li>
+      <li><b>CI smoke gate</b> (smoke.yml): the riscv64 suite leg + proptest on every push; the GUI carries a separate 23-check pixel/serial gate.</li>
+      <li><b>Integration fleet</b>: multi-leg unattended runs + probe matrix (integration-test-report.md).</li>
+      <li>Formal verification standing (157 Kani harnesses / 1104 proptests / 4 SPIN models / Miri) — see the <a href="../security/index.html#formal">Security section §4</a>.</li>
+    </ul>
+
+    <h2 id="uptime"><span class="anchor">§2</span>Runtime and desktop session gates</h2>
+    <ul>
+      <li>The full GNOME session <b>2,100-second gate</b> (M1–M5 milestones, zero panic) reproduced across <b>three independent boots</b> (2026-10-27).</li>
+      <li>The desktop session held <b>45 minutes with zero panics</b> (the end-to-end GDM chain, 2026-11-01); boot-to-login ~4.5 s (4 vCPU MTTCG).</li>
+      <li>The GUI verifier (<code>test/ubuntu-gui/verify.py</code>): <b>23 pixel/serial checks per boot</b>; typed terminal conversations pixel-identical across two independent boots (convcheck).</li>
+      <li>OH side: bootanimation → SystemUI lock screen → the 135+ service set, continuously walked by the fleet's monkey members (see Stress).</li>
+    </ul>
+
+    <h2 id="heal"><span class="anchor">§3</span>Self-correction (census + heal)</h2>
+    <ul>
+      <li>Per-task per-field tick observation + phantom preempt-count adjudication (200 consecutive ticks; legitimate brackets are microsecond-scale) + a 20 ms starvation bound + a softirq dispatch-latency gate.</li>
+      <li>Measured: 64.5k/52.1k heals totaling 605 ms, <b>model-vs-reality MISS=0</b>; IF=0 share 25.7% → <b>20.4%</b>; longest closed cli segment 594–599 ms one-shot → <b>6–9 ms</b>; WAKE-STRANDED <b>233 → 31</b>.</li>
+      <li>Every qualified quiet boot reads the same census exactly (TERM-DESCHED 8, WAKE-REFUSED 32) — stability itself is a gated standing metric.</li>
+    </ul>
+
+    <h2 id="policy"><span class="anchor">§4</span>Adjudication discipline</h2>
+    <ul>
+      <li><b>Flake isolation</b>: new failures isolated-rerun 2× before adjudication (host-load timeout/precision families: accept02, getrusage04, kill02, genfmod, rename/statfs); the perf gate follows the same rule (rerun once before calling a regression).</li>
+      <li><b>NOT-OURS ledger</b>: the same binaries run on the host Linux kernel; identical failures are test/environment issues.</li>
+      <li><b>Instrument misdiagnoses archived</b>: PTGUARD/FREEGUARD false positives (mapcount=−1 is the PAGE_MAPCOUNT_BIAS sentinel), the first PT_LEDGER false double-free + a real frame leak, a GRQ race theory that was wrong — negative results with receipts stay in the record.</li>
+      <li><b>The panic surface is designed</b>: every fired panic instance retired with a regression test (the UTF-8 printer family, negative-memo null deref, mmprof slot namespace, and more) — see the <a href="../security/index.html#panic">Security section §6</a>.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

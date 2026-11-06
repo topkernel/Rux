@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Porting guide · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Arch porting guide</h1>
+    <div class="sub">Hot-path design per architecture: traps, context switch, uaccess, interrupt controllers — source: docs/architecture/riscv64.md / aarch64.md</div>
+
+    <h2 id="rv-trap"><span class="anchor">§1</span>riscv64: the trap path</h2>
+    <ul>
+      <li><b>Origin detection</b>: the sscratch/tp swap — kernel mode has sscratch=0 and tp=Task; user mode the reverse (early boots fall back to sstatus.SPP while tp=hartid&lt;0x1000).</li>
+      <li><b>A 288-byte PtRegs</b> repr(C): x1–x31 in order + status/badaddr/cause/<b>orig_a0</b> (syscall rollback).</li>
+      <li>Kernel traps switch to a <b>per-CPU interrupt stack</b> (16KB/CPU); user traps take the kernel stack from <code>ti_kernel_sp</code> (task+0x08).</li>
+      <li><b>The big-lock protocol</b>: entry takes the kernel big lock with <code>amoswap.d.aq</code>, exit releases with <code>amoswap.d.rl</code>; before exit <code>sc.d</code> clears any LR/SC reservation (preventing cross-context leaks) + <code>fence iorw,iorw</code>.</li>
+      <li>Hard-coded task offsets (flags 0x00 / preempt 0x04 / kernel_sp 0x08 / user_sp 0x10 / cpu 0x18 / state 0x20 / pid 0x24).</li>
+    </ul>
+    <h3>Context switch (reference order)</h3>
+    <pre><code>fpu_save_for_switch   <span class="c"># save f0-f31+fcsr only if FS==DIRTY, set OFF</span>
+set_prev → switch_mm  <span class="c"># sfence.vma before and after satp (ASID=0, not embedded)</span>
+__switch_to           <span class="c"># ra/sp/s0-s11/SUM, tp=next</span>
+restore_fpu           <span class="c"># enable only if fs != OFF</span></code></pre>
+    <h3>uaccess</h3>
+    <ul>
+      <li>SUM-bit brackets (Rust + assembly implementations, returning the uncopied byte count); an <code>.ex_table</code> insn,fixup exception table.</li>
+      <li>Three-phase copy: aligned bytes → an 8× unrolled 64B/iteration word copy with shifts (threshold WORD_COPY_MIN=71) → tail bytes.</li>
+    </ul>
+    <h3>ASID / TLB / IPI</h3>
+    <ul>
+      <li>Sv39 9-bit ASIDs: 0=kernel, 1=reserved, 2–511 user; an atomic bitmap with CAS retry, linear scan on exhaustion; the flush family all/asid/page/range/kernel.</li>
+      <li>IPIs: 0=reschedule, 1=halt, received via SSIP.</li>
+    </ul>
+
+    <h2 id="x86-perf"><span class="anchor">§2</span>x86_64: the three hot-path levers</h2>
+    <ul>
+      <li><b>FSGSBASE</b>: rdfsbase/wrfsbase instead of the FS/GS MSR pair — measured <b>393 ns/switch</b>.</li>
+      <li><b>Lazy FPU</b>: xsaveopt moved into the #NM handler (the kernel binary verified free of compiler FP).</li>
+      <li><b>PCID</b>: CPUID-gated enable, per-mm tags + invlpg shootdowns (armed only on CPUs reporting the bit — the "arm everywhere" #GP bug is fixed).</li>
+      <li>Combined: <code>lat_ctx -s64 2</code> <b>4.97→2.07 µs (−58%)</b>.</li>
+    </ul>
+    <h3>x86_64 specifics</h3>
+    <ul>
+      <li><b>SMAP (divergence D-18)</b>: CR4.SMAP enabled; usercopy uses <b>pushfq/orq/popfq AC brackets</b> instead of STAC/CLAC — which unconditionally #UD under QEMU TCG (convicted by paired trials); ~55 ns per bracket; SMAP-VIOL beacons silent across the suite.</li>
+      <li><b>Syscall face</b>: MSR entry; SYSRET eligibility falls back to iret on TF|RF; a dirty EFLAGS.DF entering the kernel once reversed rep movsb (fixed); CR0.WP set from the earliest boot.</li>
+      <li><b>Userspace W^X</b>: NX mappings, PT_GNU_STACK, READ_IMPLIES_EXEC.</li>
+    </ul>
+
+    <h2 id="aa-port"><span class="anchor">§3</span>aarch64: porting notes</h2>
+    <ul>
+      <li><b>Per-task state</b>: <b>TPIDR_EL0 is the task TLS state</b> (user-writable, no set-tls syscall; saved/installed at the __switch_to commit point, inherited on fork, double-cleared on exec) — losing it killed the first fork.</li>
+      <li><b>FPSIMD</b>: prebuilt libraries' NEON dirties user FP during syscalls — EL0 vector traps capture live registers into <code>thread.user_fpsimd</code> and reinstall before eret; signal frames read from that buffer.</li>
+      <li><b>The SVC semantics difference</b>: after SVC, ELR points <b>past</b> the instruction (ecall stays on it) — the syscall path never advances PC, ERESTARTSYS rewinds pc−=4.</li>
+      <li><b>GICv3</b>: with DS=1, GICD_CTLR bit1 = Grp1NS enable; IGROUPR at 0x0080; ICC_SGI1R encoding; the virtual timer PPI 11 = INTID 27; PL011 RX needs both RX|receive-timeout interrupts armed; unblocking takes both legs (the GIC CPU interface + clearing PSTATE.DAIF.I).</li>
+      <li><b>Memory map</b>: PAGE_OFFSET=0xffff_c000_0000_0000, TASK_SIZE=<b>256GB</b> (a 1TiB constant once pushed the mmap base outside the walker subtree), TCR_EL1.IPS=<b>44-bit</b> (the 32-bit default turns ≥4GB translations into address-size aborts instead of translation faults).</li>
+      <li><b>The ASID fix</b>: NEXT_ASID monotonic without an in-use check → permanent None after 254 mms, everything falling to ASID 0 with full flushes; ported riscv64's bitmap over a 256-entry pool.</li>
+    </ul>
+    <h3>Current edges (stated plainly)</h3>
+    <ul>
+      <li>A 1/9 boot flake (the trap frame lands exactly past the linear-map end — a kernel-stack-top problem, under investigation).</li>
+      <li>LTP-on-aarch64 not started (cross-build + serial-fed smoke subset laid down).</li>
+      <li>debug= boot flags unavailable (the EL2 trampoline destroys the DTB pointer before cmdline parsing) — compile-time feature gating instead.</li>
+    </ul>
+
+    <h2 id="newarch"><span class="anchor">§4</span>Checklist for a new port</h2>
+    <ol>
+      <li>Boot protocol and early mapping (the three-stage page-table pages before memblock).</li>
+      <li>Trap entry: origin detection, PtRegs, per-CPU interrupt stacks, the big-lock aq/rl pair, LR/SC (or equivalent) cleanup.</li>
+      <li>The context-switch order (FPU state, address-space switch + TLB caveats).</li>
+      <li>uaccess (SUM/AC-class mechanisms + the exception table).</li>
+      <li>Interrupt controller + timer (Sstc / APIC timer / GICv3 PPIs).</li>
+      <li>Per-CPU areas and the tp/TPIDR-class registers.</li>
+      <li>Integration with INV-LOCK-7 (per-mm PTE locks) and D-17 (the MMIO arena, no identity window).</li>
+    </ol>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

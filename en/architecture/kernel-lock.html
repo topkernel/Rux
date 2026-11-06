@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lock ordering invariants · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Lock ordering invariants</h1>
+    <div class="sub">Required reading before touching any lock nesting — authoritative source: docs/architecture/lock-ordering.md (INV-LOCK-*)</div>
+
+    <h2 id="order"><span class="anchor">§1</span>The global lock-order table</h2>
+    <pre><code>Level 0  IRQ (interrupt-disabled state)
+Level 1  preempt (the preemption counter)
+Level 2a GRQ (the global run queue)
+           ├─ Level 3a  zone (buddy)
+           └─ Level 3b  futex buckets → Level 4  wait slots
+Level 2b the process tree    Level 2c  inode    Level 2d  dcache</code></pre>
+    <ul>
+      <li>Same-level branches (2a/2b/2c/2d) never nest; vertical acquisition only from lower to higher numbers.</li>
+      <li><b>SleepMutexes sit outside the layers</b>: <code>VFS_MUTATION_LOCK → EXT4_BIG_LOCK</code> is the only legal sleeping-lock order (INV-LOCK-8).</li>
+      <li><b>virtio</b>: read this page and the in-source comments before touching any virtio path — net's one-way <code>{rx|tx}_queue → stats</code> order (INV-LOCK-6) was once convicted by an AB-BA of two CPUs spinning against each other.</li>
+    </ul>
+
+    <h2 id="invs"><span class="anchor">§2</span>Named invariants (INV-LOCK-*)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Content</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">INV-LOCK-5/6</td><td>driver-queue locks → stats locks, one way; watchdog-guarded (a poll holding stats across refill once spun two CPUs against each other)</td></tr>
+          <tr><td class="mono">INV-LOCK-7</td><td>per-mm PTE locks: a global epoch (RwSpinlock reads) + per-mm spinlock split mode; ordered after vma_manager, before page_desc; uniform across the three architectures</td></tr>
+          <tr><td class="mono">INV-LOCK-8</td><td>the only sleeping-lock order: VFS_MUTATION_LOCK → EXT4_BIG_LOCK</td></tr>
+          <tr><td class="mono">INV-LOCK-PI-1</td><td>the new PI-futex class: plain buckets → PI buckets → PI pool slots</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="typed"><span class="anchor">§3</span>Typed lock keys (divergence D-11): nesting is a compile-time fact</h2>
+    <ul>
+      <li>Zero-sized key types (GrqKey / FutexBucketKey / NetQueueKey / WaiterSlotKey…); the nesting relation is a <code>CanNestInside</code> trait-impl table.</li>
+      <li>The outer guard casts a <code>NestProof</code>; the inner <code>lock_nested(&amp;proof)</code> consumes it — <b>reverse acquisition does not compile, zero runtime cost</b>.</li>
+      <li>Cautionary tale: the first GRQ protocol wrapper let <code>lock()</code>'s returned guard drop as a bare statement, so no critical section was mutually excluded — withdrawn after a 13-boot paired measurement; both keyed guard types are now <code>#[must_use]</code> and protocol callers use <code>lock_claim()</code>.</li>
+      <li>Adopted by: the GRQ itself, the futex HASH_HEADS buckets, the WAITER_POOL slots (futex_wake's wakeup chain asks for the proof at every hop).</li>
+    </ul>
+
+    <h2 id="guards"><span class="anchor">§4</span>The runtime guard net</h2>
+    <ul>
+      <li><b>Four SPIN models</b>: futex_wait_wake / lock_ordering / interrupt_preempt / sched_enqueue_dequeue — <code>make spin</code>.</li>
+      <li><b>The S-1 loom/Kani mirror</b>: the SleepMutex state machine proves INV-M1..M5; it caught a real pid-0 recursion bug within its first 90 seconds of operation.</li>
+      <li><b>The spinlock watchdog</b> (debug=watchdog, legacy): deadlock warnings trigger a full task snapshot automatically, output carries the key name.</li>
+      <li><b>census + heal</b>: per-task per-field tick observation, phantom-preempt adjudication after 200 ticks; model-vs-reality MISS=0 (64.5k/52.1k heals measured).</li>
+      <li><b>allocwatch</b>: cross-CPU lock-holder naming (the waiter cannot self-report — printing allocates, and it is stuck inside the allocator).</li>
+    </ul>
+
+    <h2 id="semantics"><span class="anchor">§5</span>Lock-semantics policy</h2>
+    <div class="callout"><b>Lock/synchronization-primitive semantics follow the reference kernel exactly; nothing is invented here.</b> "A non-sleeping caller holding the lock" is fixed at the call site (trylock/deferral), never by changing the lock's path. Fairness experiments (e.g. "spin 2 s then steal") were adjudicated and rejected — those branches never merge.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTP compliance scan · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>LTP compliance scan</h1>
+    <div class="sub">1,869 cases · two rigs · per-case verdicts in the full case list — reports: docs/test/ltp-report.md, ltp-tracking.md</div>
+
+    <p>A full scan of the 1,869-case LTP list (1,838 official binaries cross-compiled with musl, a 101% build rate). <b>Latest round r27 (x86_64 + KVM, 2026-11-05): PASS 1,084 (58.0%).</b> Per-case verdicts: the <a href="ltp-full.html">full case list</a> (1,869 rows, searchable).</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>PASS</th><th>TCONF</th><th>FAIL</th><th>CRASH</th><th>EXECFAIL</th><th>TIMEOUT</th><th>WARN</th><th>WEDGE</th></tr></thead>
+        <tbody>
+          <tr><td class="num"><b>1084</b></td><td class="num">497</td><td class="num">228</td><td class="num">28</td><td class="num">17</td><td class="num">13</td><td class="num">1</td><td class="num">1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">TCONF is mostly unimplemented feature classes (hugemmap/fanotify/quotactl — not failures); FAIL/CRASH/TIMEOUT are the active fronts. r27 vs r26: +17 (19 flipped to PASS, 2 to FAIL then re-adjudicated).</p>
+
+    <h2 id="trend"><span class="anchor">§1</span>Trend (full scans)</h2>
+    <div class="trend">
+      <div class="bar" style="height:3.2%"><span class="bv">35</span></div>
+      <div class="bar" style="height:48.3%"><span class="bv">524</span></div>
+      <div class="bar" style="height:60.8%"><span class="bv">659</span></div>
+      <div class="bar" style="height:73.9%"><span class="bv">801</span></div>
+      <div class="bar" style="height:87.2%"><span class="bv">945</span></div>
+      <div class="bar" style="height:92.7%"><span class="bv">1005</span></div>
+      <div class="bar" style="height:94.8%"><span class="bv">1028</span></div>
+      <div class="bar" style="height:93.2%"><span class="bv">1010</span></div>
+      <div class="bar" style="height:97.7%"><span class="bv">1059</span></div>
+      <div class="bar acc" style="height:100%"><span class="bv">1084</span></div>
+    </div>
+    <div class="trend-x">
+      <span>r1</span><span>r2</span><span>r3</span><span>r9</span><span>r14</span><span>r15</span><span>r20</span><span>r21</span><span>r23</span><span>r27</span>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-3)">r1–r10 (riscv64·TCG, previous host) → r14–r20 (same rig, closing at 1028) → r21 onward the x86_64+KVM standing rig (first round 1010 → r27 1084). Mid-series dips were mostly host-load noise, recovered through isolated re-runs.</p>
+
+    <h2 id="method"><span class="anchor">§2</span>Methodology</h2>
+    <ul>
+      <li><b>Flake isolation</b>: new full-scan failures are isolated-rerun twice before being called regressions — host load produces timeout/precision flakes (known: accept02, getrusage04, kill02, genfmod, rename/statfs families).</li>
+      <li><b>NOT-OURS ledger</b>: the same musl LTP binaries run on the host Linux kernel; identical failures are recorded as test/environment issues rather than kernel gaps (decoded case by case in verdicts-r27.txt).</li>
+      <li><b>WEDGE rescue</b>: 51 WEDGE/POISON rows from the raw r27 scan were rescued via isolation boots and spliced back; 6 stubborn rows re-ran one-case-per-boot; mmap1 stays WEDGE per the standing adjudication.</li>
+      <li>Every round's full results, deltas and verdicts are archived in the ltp-r27 lane's results/ directory; TIMEOUT-class cases get top-priority dedicated lanes.</li>
+    </ul>
+
+    <h2 id="rigs"><span class="anchor">§3</span>Rigs</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Rig</th><th>Latest</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>x86_64 + KVM (standing rig)</td><td class="num">r27 = 1084/1869</td><td>the standard test rig since 2026-11-01; first round r21 = 1010</td></tr>
+          <tr><td>riscv64 · TCG</td><td class="num">r20 = 1028/1869</td><td>closing round 2026-10-31; r14=945 → r15=1005 (do_exit fix)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

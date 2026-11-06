@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Command reference · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Command reference</h1>
+    <div class="sub">The common commands — the root Makefile is authoritative</div>
+
+    <h2 id="make"><span class="anchor">§1</span>make targets</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Target</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">make build</td><td>build the kernel (riscv64 default; PLATFORM=x86_64 / aarch64 to switch)</td></tr>
+          <tr><td class="mono">make run</td><td>boot the minimal rootfs in QEMU (mrsh, /bin/sh)</td></tr>
+          <tr><td class="mono">make ubuntu-run</td><td>build + boot the Ubuntu GNOME desktop in an SDL window (KVM, root/rux)</td></tr>
+          <tr><td class="mono">make test</td><td>the in-kernel test suite (PLATFORM= switches architecture)</td></tr>
+          <tr><td class="mono">make rootfs</td><td>build the minimal rootfs image (needs user+toybox+mrsh)</td></tr>
+          <tr><td class="mono">make user / toybox / mrsh / sdk</td><td>userspace programs / the 200+ tool box / a POSIX shell / the musl SDK</td></tr>
+          <tr><td class="mono">make ltp</td><td>build the LTP suite (needs sdk)</td></tr>
+          <tr><td class="mono">make verify / kani / spin / miri</td><td>the four formal-verification layers</td></tr>
+          <tr><td class="mono">make config / menuconfig</td><td>view / interactively configure the kernel (Kernel.toml)</td></tr>
+          <tr><td class="mono">make debug</td><td>debug the kernel with GDB</td></tr>
+          <tr><td class="mono">make bin / info / clean</td><td>produce binaries / project info / clean</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="dbg"><span class="anchor">§2</span>Debugging commands</h2>
+    <pre><code><span class="c"># symbolize a panic address</span>
+riscv64-linux-gnu-addr2line -e &lt;kernel&gt; -f -C &lt;addr&gt;
+
+<span class="c"># extract guest logs offline (debugfs, on a copied image)</span>
+debugfs -R &quot;cat /var/log/kmsg&quot; rootfs-copy.img
+
+<span class="c"># deadlock/hang capture (auto holder-annotated build + stress injection + on-site capture)</span>
+./test/hunt-wedge.sh [rounds]
+
+<span class="c"># tracefs (unified tracepoints)</span>
+mount -t tracefs none /sys/kernel/tracing
+echo 1 &gt; /sys/kernel/tracing/events/sched/sched_wakeup/enable
+cat /sys/kernel/tracing/trace
+
+<span class="c"># the kmsg ring buffer</span>
+dmesg            <span class="c"># inside the guest</span>
+dmesg -n 7       <span class="c"># reopen full console logging</span></code></pre>
+
+    <h2 id="env"><span class="anchor">§3</span>Paths and environment</h2>
+    <pre><code>/home/william/rux-images/    <span class="c"># all disk images (worktrees symlink only)</span>
+/home/william/rux-agents/&lt;name&gt;/  <span class="c"># one worktree per task</span>
+docs/architecture/lock-ordering.md   <span class="c"># required before lock nesting</span>
+docs/development/perf-gate-baseline.md  <span class="c"># the performance gate baseline</span>
+docs/test/README.md          <span class="c"># the test-report index</span></code></pre>
+
+    <h2 id="rules"><span class="anchor">§4</span>Operating discipline</h2>
+    <ul>
+      <li>Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code>.</li>
+      <li>Kill only QEMU processes you started; tests default to <code>-smp 2 -m 1G</code>.</li>
+      <li>Never hand-write QEMU commands for standard flows (the parameters live in the Makefile / driver scripts).</li>
+      <li>Commit messages in English; no temp files in the main repository root (use your worktree's run/).</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

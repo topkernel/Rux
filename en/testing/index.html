@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Testing · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Testing</h1>
+    <div class="sub">Five sub-pages: compliance scan / full case list / stability / stress / retrospective — data as of 2026-11-06</div>
+
+    <h2 id="map"><span class="anchor">§1</span>Section map</h2>
+    <div class="card-grid grid-2">
+      <div class="card">
+        <h3><span class="ico">🧪</span>LTP compliance scan</h3>
+        <p>The full 1,869-case LTP scan: r27 = <b>1084/1869</b> (x86_64+KVM, 58.0%). Distribution, ten-round trend, WEDGE rescue and the NOT-OURS adjudication methodology.</p>
+        <a class="more" href="ltp.html">Open →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📋</span>LTP full case list</h3>
+        <p><b>All 1,869 cases individually</b>, grouped into 838 families with a search filter. Each row: idx / case / verdict / rc.</p>
+        <a class="more" href="ltp-full.html">Open →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛡️</span>Stability</h3>
+        <p>Kernel suite (riscv64 1267 / x86_64 1263 all green), formal verification standing, desktop session gates (2100 s ×3, 45 minutes zero panic), census/heal self-correction.</p>
+        <a class="more" href="stability.html">Open →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔥</span>Stress</h3>
+        <p>The standing stress-fleet (11 QEMUs): LTP members ×4 + monkey ×2 + memstorm + fsfuzz + a control member; root-caused classes, the watch list and the fleet queue.</p>
+        <a class="more" href="stress.html">Open →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔎</span>Retrospective</h3>
+        <p>GNOME desktop regression retrospective (2026-11-06): how 2,825 commits of silent accumulation slipped past every gate; the two root causes fixed (munmap races, page-cache poisoning) and three anti-recurrence gate changes.</p>
+        <a class="more" href="gnome-retrospective.html">Open →</a>
+      </div>
+    </div>
+    <div class="callout">Sister sections: <a href="../performance/index.html"><b>Performance</b></a> (census / pbench anchors / lmbench / Geekbench / queue) and <a href="../security/index.html"><b>Security</b></a> (taxonomy / Kani / gap register) stand on their own.</div>
+
+    <h2 id="reports"><span class="anchor">§2</span>Report directory</h2>
+    <p>The standing reports in <code>docs/test/</code> (each a dated snapshot of a measured result; raw records live outside git in run/ directories):</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Report</th><th>What it measures</th><th>Latest</th></tr></thead>
+        <tbody>
+          <tr><td>unit-test-report.md</td><td>In-kernel guest suite (make test), per architecture</td><td class="mono">1267/1267 riscv64 · 1263/1263 x86_64 · 2026-11-01</td></tr>
+          <tr><td>integration-test-report.md</td><td>Multi-leg unattended fleet, probes, CI smoke gate</td><td class="mono">2026-11-01</td></tr>
+          <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP compatibility, both rigs (riscv64 TCG / x86_64 KVM)</td><td class="mono">r27 1084/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
+          <tr><td>lmbench-report.md</td><td>lmbench per-case: Rux vs Linux (same rig)</td><td class="mono">2026-11-06 campaign table → Performance section</td></tr>
+          <tr><td>geekbench-report.md</td><td>Geekbench 5: all 21 workloads vs Linux</td><td class="mono">MC 7332/7027 · SC 2274/2165</td></tr>
+          <tr><td>stress-fleet.md</td><td>Stress/stability/monkey/fuzz fleet design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
+          <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri standing</td><td class="mono">157 harnesses · 1104 proptests</td></tr>
+          <tr><td>test-coverage.md</td><td>Coverage ledger (regenerated per change)</td><td class="mono">rolling</td></tr>
+          <tr><td>gnome-regression-retrospective.md</td><td>GNOME desktop regression retrospective: root causes, gate blind spots, anti-recurrence</td><td class="mono">2026-11-06 → retrospective sub-page</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="forms"><span class="anchor">§3</span>Test forms</h2>
+    <ul>
+      <li><b>In-kernel suite (make test)</b>: 73 test files across eight domains (memory / process / fs / ipc / signal / network / driver / syscall); all assertions run inside the QEMU guest (a kernel crate cannot host host-side <code>#[cfg(test)]</code>). The CI smoke gate (smoke.yml) runs the riscv64 leg on every push.</li>
+      <li><b>Integration fleet</b>: multi-leg unattended runs + probe matrix (integration-test-report.md); the GUI has a 23-check pixel/serial gate (<code>test/ubuntu-gui/verify.py</code>) with pixel-identical cross-boot comparison (convcheck).</li>
+      <li><b>Formal verification</b>: 1104 proptests binding on every push; Kani (157 harnesses) / SPIN / Miri nightly (see the <a href="../security/index.html#formal">Security section</a>).</li>
+      <li><b>4,200+ test cases</b> in the repository (suite + probes + benchmarks + proofs).</li>
+    </ul>
+
+    <h2 id="discipline"><span class="anchor">§4</span>Method and adjudication discipline</h2>
+    <ul>
+      <li><b>Every number carries its rig</b>: architecture, accelerator, kernel profile, host-load discipline — a number without a rig is not a result.</li>
+      <li><b>Append-only reports</b>: a new run appends a section or refreshes the standing table with its date; history is never silently rewritten.</li>
+      <li><b>Flake isolation</b>: new full-scan failures are isolated-rerun twice before being called regressions (known flake families: accept02, getrusage04, kill02, genfmod, rename/statfs).</li>
+      <li><b>NOT-OURS ledger</b>: the same musl LTP binaries run on the host Linux kernel; failures that reproduce there are recorded as test/environment issues, not kernel gaps.</li>
+      <li><b>Instrument misdiagnoses are archived too</b>: PTGUARD/FREEGUARD false positives (mapcount=−1 is a sentinel), the first PT_LEDGER double-free — negative results with receipts stay in the record.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

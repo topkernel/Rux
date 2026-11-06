@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory management · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Memory management</h1>
+    <div class="sub">From memblock to vmemmap, buddy, small_alloc and the page cache — source: docs/architecture/memory.md + the mm/ sources</div>
+
+    <h2 id="layout"><span class="anchor">§1</span>Address-space layout</h2>
+    <p>The virtual-layout constants match the reference item by item, keeping userspace ELF loaders and the /proc view compatible. Sv39 (riscv64) as the example:</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Region</th><th>Address / size</th></tr></thead>
+        <tbody>
+          <tr><td>Linear map PAGE_OFFSET</td><td class="mono">0xFFFFFFD600000000</td></tr>
+          <tr><td>vmalloc region</td><td class="mono">64 GB</td></tr>
+          <tr><td>vmemmap (page descriptors)</td><td class="mono">4 GB</td></tr>
+          <tr><td>Kernel link base</td><td class="mono">0xFFFFFFFF80000000 (phys 0x80200000)</td></tr>
+          <tr><td>TASK_SIZE (userspace)</td><td class="mono">256 GB</td></tr>
+          <tr><td>User/kernel PGD split</td><td class="mono">256 / 256 entries</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="boot"><span class="anchor">§2</span>The three-stage boot</h2>
+    <p><b>memblock → fixmap → zone/buddy</b>: memblock maintains memory + reserved dual-region tables (128-region cap); page-table pages go through three stages (static BSS EARLY_PMD×8/EARLY_PTE×128 → memblock → zone). The allocator-off world is strictly separated from the allocator-on world.</p>
+
+    <h2 id="desc"><span class="anchor">§3</span>Page descriptors and buddy</h2>
+    <ul>
+      <li><b>vmemmap</b>: one 64-byte cache-line-aligned <code>Page</code> per physical page (flags/mapcount/refcount/private/mapping/index/type/next_free); pfn↔page O(1). Refcount semantics: fork shares +1, a COW write fault +2; freeing only at 0.</li>
+      <li><b>zone/buddy</b>: MAX_ORDER=10 (4 MB blocks max), free lists on <code>Page.next_free</code>, release merges via <code>buddy_pfn = pfn ^ (1&lt;&lt;order)</code>; Unmovable/Movable/Reclaimable migrate types.</li>
+      <li><b>PCP (per-CPU pageset)</b>: order-0 allocations take the per-CPU fast path with zero zone locks; high/batch watermarks refill in batches.</li>
+      <li><b>kswapd / OOM</b>: woken at WMARK_HIGH; 16 consecutive failed passes trigger the OOM killer; LRU lists + referenced rotation + rmap + compaction (two-pointer scan + migration).</li>
+    </ul>
+
+    <h2 id="kheap"><span class="anchor">§4</span>The three-tier kernel heap</h2>
+    <pre><code>kmalloc
+  ├─ ≤1024 B  → small_alloc (a SLUB-style packed small-object layer)
+  ├─ 8..4096  → slab.rs (ten classes, separate path)
+  └─ &gt;4 KB    → buddy (standalone, orders 0–20)</code></pre>
+    <h3>small_alloc: the magazine cache</h3>
+    <ul>
+      <li>8 power-of-two classes (8..1024B); 16-byte slab-page headers (magic 0x5142), <code>FIRST_OFF(S)=max(16,S)</code> for object alignment.</li>
+      <li><b>Per-CPU magazine (depth 16)</b>: alloc/free hit the magazine; class locks are taken only for batched refill/flush — the source of the "class-lock sections ≤25M/boot" gate row (measured 19.7M, latest board 6.0M).</li>
+      <li><b>Free-bit routing + sentinel</b>: one bit per slab page routes frees; the bit is cleared before the page returns — a stale pointer lands on the buddy-side sentinel rather than corrupting silently.</li>
+      <li><b>Lock order</b>: class lock → buddy lock.</li>
+      <li><b>Origin</b>: OH's first frame left ~213k live 1B–1KB objects (23.2M allocs/23.0M frees), each pinning a 4KiB buddy block = 852MB of a 992MB window — the allocator died during first-frame composition, and the magazine was built for it.</li>
+    </ul>
+    <h3>The packed kernel-stack slab (divergence D-2, x86_64)</h3>
+    <p>Three kernel stacks packed per 256KB order-6 block (80KB slots) + a slot side table + empty-block recycling: <b>85.3KB/stack vs 128KB</b> (saving ~115MB where stacks were 42% of a 904MB budget), <b>99.9% slot packing</b>, deepest recorded <b>3,445 live tasks</b> with zero canary hits. Non-gated architectures compile it out (the 80KB slack is an x86_64 measurement).</p>
+
+    <h2 id="pcache"><span class="anchor">§5</span>Page cache</h2>
+    <ul>
+      <li><b>Key</b>: <code>((fs_id, inode), page_index)</code> — without fs_id pages cross file systems.</li>
+      <li><b>Lock model (pcache option B)</b>: lockless global slot-table reads (reader-bank SeqCst RMW + Acquire slot probes) + per-inode spinlocks; <code>wlock</code> only inserts/evicts; whole-slot removal goes tombstone + wait for banks to drain before drop.</li>
+      <li><b>Capacity</b>: floor 8,192 pages (32MB), soft cap half of managed RAM. The old fixed 32MB cap made OH library loads cost ~1.5 s per fault (<code>SA:3002 OpenSo 802166ms</code>).</li>
+      <li><b>Window batch fill (divergence D-12)</b>: one round trip fills the whole miss window (demand + sequential readahead, or a 16-page fault-around cluster); contiguous physical segments merge into single multi-block requests (bio::bread_async_multi, ≤64 blocks/128KiB); the consistency guard cuts the run at the first cached block (DMA must not bypass live dirty buffers).</li>
+    </ul>
+
+    <h2 id="reclaim"><span class="anchor">§6</span>Deferral and concurrency control</h2>
+    <ul>
+      <li><b>The deferred-free ring (D-16)</b>: MmStruct/Task free into a 16,384-slot global ring drained on a 1500 ms wall clock — bounded reclamation latency independent of scheduling (QSBR RCU cannot see procfs walkers' unaccounted borrows, hence the wall clock).</li>
+      <li><b>Per-mm PTE locks (INV-LOCK-7, uniform across archs)</b>: a global epoch (RwSpinlock reads) + per-mm spinlock split mode, replacing the global PTE lock that let fork-walks monopolize the machine.</li>
+      <li><b>Leaf-table direct unmap</b>: ownership makes the per-page walker allocation-free; the upper chain resolves once per 2MiB block and iterates leaf PTEs directly. Measured: mmap avg <b>72 µs→27–32 µs</b> (max 749 ms→2.1–3 ms), munmap body <b>177–185→52 µs</b>, &gt;16MiB mmap median <b>5.6 ms→415–427 µs</b>; OH workload vm-op family <b>~15 s→~5 s/CPU-min</b>.</li>
+      <li><b>Anon reclaim (SP-7)</b>: reclaim check rate <b>35%→82–89%</b>, swap writes +75%.</li>
+    </ul>
+
+    <h2 id="fault"><span class="anchor">§7</span>The page-fault path</h2>
+    <pre><code>FaultFlags (READ/WRITE/EXEC/USER/KERNEL)
+Kernel mode: stack overflow → panic | exception-table fixup | else KernelPanic
+User mode:   VMA lookup → permission check → stack growth (GROWSDOWN)
+             → anon page: zero-page allocation
+             → COW: PTE bit 8 software flag; refcount==1 flips W in place, &gt;1 copies
+             → out of bounds: SIGSEGV / SIGKILL dispatch</code></pre>
+
+    <h2 id="lessons"><span class="anchor">§8</span>Historical lessons (taxonomy excerpts)</h2>
+    <ul>
+      <li>buddy split not marking allocated → the same block handed out twice (016b3fa1).</li>
+      <li>vmscan <code>refcount&lt;=0</code> underflow arm double-free; page_cache double-invalidation double-put (f4b67f66, R14-16) — two instances of the "typed Refcount" gap.</li>
+      <li>The first CpuLocal landed in a non-mut static → LLVM placed it in .rodata → at opt≥1 every store was deleted (15.9M objects / 2 lock holds of silent catastrophe); the UnsafeCell re-landing verified the stores in disassembly.</li>
+      <li>copy_kernel_mappings copied a kernel L1 entry pointing at a user L0 → execve overwrote the parent's PTEs (7a497838).</li>
+      <li>The munmap chunked rework lost the tail TLB flush (fixed in c4a548d7; caught within hours by the OH battery — the synthetic probe was structurally blind because it read back the same stale state).</li>
+    </ul>
+    <div class="callout">Every entry above is in the bug taxonomy of <code>docs/architecture/safety-and-performance.md</code>, with fix commits and reproduction/regression evidence.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

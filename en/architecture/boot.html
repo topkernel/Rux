@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boot flow · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Boot flow</h1>
+    <div class="sub">Firmware handshake to init, per architecture — source: docs/architecture/boot.md and the arch/ sources</div>
+
+    <h2 id="rv"><span class="anchor">§1</span>riscv64</h2>
+    <pre><code>QEMU -kernel rux
+  └─ OpenSBI (fw_dynamic)   M-mode
+       └─ S-mode _start      a0=hartid, a1=DTB, other harts parked
+            ├─ early stvec, tp (per-CPU area), Sv39 kernel page table
+            └─ boot hart initializes every subsystem → others wfi for SMP_INIT_DONE</code></pre>
+    <ul>
+      <li>SBI calls used: PUT_CHAR / SHUTDOWN / HART_START (0x48534D) / SEND_IPI (0x735049).</li>
+      <li>Timer: the Sstc extension writes <code>stimecmp</code> directly (no per-tick SBI ecall).</li>
+    </ul>
+
+    <h2 id="x86"><span class="anchor">§2</span>x86_64 (q35)</h2>
+    <pre><code>multiboot1 ELF → 64-bit stub → rust_main
+  └─ SIPI trampoline wakes the APs
+       ├─ bzImage boot protocol: the same image boots on loaders expecting it
+       └─ the bootstrap PML4's low identity window is UNLINKed right after the
+          boot-stack switch (divergence D-17)</code></pre>
+
+    <h2 id="aa"><span class="anchor">§3</span>aarch64 (QEMU virt)</h2>
+    <pre><code>QEMU -M virt,gic-version=3 -kernel rux   <span class="c"># bare ELF, no boot protocol</span>
+  └─ a complete QEMU-virt DTB blob embedded (exported by build.rs)
+       ├─ EL2 → EL1h: HCR_EL2=RW, interrupts routed to EL1, both timers enabled,
+       │  CPACR_EL1.FPEN
+       └─ the early TTBR0 identity window (phys [0,2GB)) is torn down after SMP starts</code></pre>
+    <div class="callout warn"><b>aarch64 requires <code>-M virt,gic-version=3</code></b>; the cmdline comes from the embedded DTB's /chosen/bootargs.</div>
+
+    <h2 id="sig"><span class="anchor">§4</span>Serial markers of a successful boot</h2>
+    <p>Minimal system: the OpenSBI banner → the Rux ASCII banner → the module init table (console/trap/mm/sched/fs/driver/smp all <code>[ok]</code>) → <code>init: loading /bin/sh</code> → the shell prompt.</p>
+    <p>x86_64 Ubuntu: init complete → framebuffer resolution → login screen ready; boot-to-login ~4.5 s on 4 vCPUs MTTCG.</p>
+
+    <h2 id="cmd"><span class="anchor">§5</span>Boot parameters and image discipline</h2>
+    <ul>
+      <li>A typical kernel cmdline: <code>root=/dev/vda rw init=/sbin/init console=ttyS0</code> (+ optional <code>debug=</code> flags, effective on riscv64/x86_64; not available on aarch64 because the EL2 trampoline destroys the DTB pointer before cmdline parsing — compile-time features instead).</li>
+      <li>Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code>; never hand-write QEMU commands for standard flows — the parameters live in the Makefile and the existing driver scripts.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

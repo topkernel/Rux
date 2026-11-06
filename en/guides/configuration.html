@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kernel configuration · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Kernel configuration (Kernel.toml)</h1>
+    <div class="sub">Build-time configuration, zero runtime cost — mirrors docs/guides/configuration.md</div>
+
+    <h2 id="flow"><span class="anchor">§1</span>How configuration takes effect</h2>
+    <p>The configuration file is <code>Kernel.toml</code> at the repository root. At build time <code>build.rs</code> parses it and generates <code>kernel/src/config.rs</code>; kernel code consumes the constants via <code>use crate::config::*</code>.</p>
+    <pre><code>Kernel.toml  --build.rs-->  kernel/src/config.rs  --use-->  kernel modules</code></pre>
+    <div class="callout warn"><b>Two iron rules:</b> ① <code>kernel/src/config.rs</code> is generated — <b>never hand-edit it</b>; ② editing <code>Kernel.toml</code> triggers a rebuild automatically; if it does not take effect, <code>cargo clean</code> and rebuild.</div>
+
+    <h2 id="tools"><span class="anchor">§2</span>Viewing and editing</h2>
+    <pre><code>make config        <span class="c"># view the current configuration (cat Kernel.toml)</span>
+make menuconfig    <span class="c"># TUI configuration (needs whiptail)</span></code></pre>
+    <p><code>make menuconfig</code> offers 12 categories: Memory / SMP / Scheduler / Network / Sub-features / Drivers / Boot / Debug / Performance / Security / View / Save.</p>
+
+    <h2 id="keys"><span class="anchor">§3</span>Common configuration sections</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Section</th><th>Common keys</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">[platform]</td><td class="mono">default_platform</td><td>the default build architecture (e.g. "riscv64")</td></tr>
+          <tr><td class="mono">[memory]</td><td class="mono">kernel_heap_size / physical_memory / page_size / user_stack_size</td><td>kernel heap, physical memory (MB), page size, user stack (MB)</td></tr>
+          <tr><td class="mono">[smp]</td><td class="mono">enable_smp / max_cpus</td><td>SMP switch and the CPU-count cap</td></tr>
+          <tr><td class="mono">[network]</td><td class="mono">eth_mtu / tcp_socket_table_size</td><td>NIC MTU, TCP socket table capacity</td></tr>
+          <tr><td class="mono">[printk]</td><td class="mono">ring_buffer_size / log_level</td><td>kmsg ring buffer and the default log level</td></tr>
+          <tr><td class="mono">[performance]</td><td class="mono">opt_level / lto</td><td>optimization level and LTO</td></tr>
+          <tr><td class="mono">[mount] [filesystem] [process] [sync] [graphics]</td><td>—</td><td>other sections: see the comments in <code>Kernel.toml</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>The repository's current values win</b>: a few keys move with stage needs (e.g. the kernel heap size was raised for heavy userspace); this page lists names and meanings only — where doc defaults conflict with <code>Kernel.toml</code>, the latter wins.</div>
+
+    <h2 id="use"><span class="anchor">§4</span>Using it in kernel code</h2>
+    <pre><code>use crate::config::*;
+
+let heap = <span class="k">KERNEL_HEAP_SIZE</span>;
+let cpus = <span class="k">MAX_CPUS</span>;
+let mtu  = <span class="k">ETH_MTU</span>;
+<span class="c">// common: ENABLE_SMP, KERNEL_HEAP_SIZE, PAGE_SIZE,</span>
+<span class="c">//         USER_STACK_TOP, ENABLE_NETWORK, DEFAULT_TIME_SLICE_MS ...</span></code></pre>
+    <p>Verify the generated result: <code>cat kernel/src/config.rs</code> or <code>grep "MAX_CPUS\|USER_STACK" kernel/src/config.rs</code>.</p>
+
+    <h2 id="errors"><span class="anchor">§5</span>Common errors</h2>
+    <ul>
+      <li>Build fails with <code>Error: Configuration file parsing failed</code> — a TOML syntax error in <code>Kernel.toml</code> (format, type, missing quotes); fix where build.rs points.</li>
+      <li>Configuration changed but behavior did not — confirm you edited <code>Kernel.toml</code> rather than the generated file; <code>cargo clean && cargo build --package rux --features riscv64</code> forces regeneration.</li>
+      <li><code>make menuconfig</code> reports missing whiptail — <code>sudo apt-get install whiptail</code> (RHEL: <code>sudo yum install newt</code>).</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

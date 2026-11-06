@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Performance · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Performance</h1>
+    <div class="sub">Verdict first, data right after: vs Linux on the same host and the same accelerator (QEMU q35 + KVM) · data as of 2026-11-06 · baseline file docs/development/perf-gate-baseline.md</div>
+
+    <h2 id="verdict"><span class="anchor">§1</span>Verdict: where we lead and lag vs Linux</h2>
+    <p>Every comparison against Linux on this page is <b>same-host, same-accelerator</b>: the same host (9950X), the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same image shape, the same static benchmark binaries. No native columns.</p>
+    <div class="card-grid grid-2">
+      <div class="card">
+        <h3><span class="ico">📏</span>lmbench same-rig: 9 of 14 paired cases ahead, 5 behind</h3>
+        <p><b>Ahead</b>: page fault <b>2.26–2.45×</b>, lat_mmap <b>4.2×</b>, pipe <b>3.56×</b>, context switch <b>3.39×</b>, lat_unix <b>3.14×</b>, lat_sem <b>2.62×</b>, bw_pipe <b>2.68×</b>, bw_unix <b>1.88×</b>, read <b>1.02×</b>.</p>
+        <p><b>Behind</b> (Rux/Linux): open <b>1.82×</b>, stat <b>1.32×</b>, null <b>1.17×</b>, fork <b>1.11×</b>, write <b>1.10×</b>.</p>
+        <div class="nums">best lead 4.2× · worst lag 1.82× · data in §2</div>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🏁</span>Geekbench 5: multi-core +4.3%, single-core +5.1%</h3>
+        <p>Multi-core total <b>7332 vs 7027 (+4.3%)</b>: 8 workloads ahead / 5 parity / 8 behind. Single-core total quiet best <b>2274 vs 2165 (+5.1%)</b>: 12 ahead / 3 parity / 6 behind.</p>
+        <div class="nums">per-workload data in §3 · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
+      </div>
+    </div>
+    <div class="callout"><b>Gap structure:</b> the wins concentrate in the scheduler/wakeup paths (context switch, pipe) — Linux's cross-vCPU wakeup IPIs are expensive under virtualization while Rux's single global run queue produces no cross-core reschedule storms — and now also in page fault / mapping (seven campaign rounds turned the page fault from the worst deficit into a 2.26–2.45× lead). The remaining deficits are syscall entry and path resolution (open 1.82×, stat 1.32×) and fork (1.11×) — write is 6 ns from parity and read is already ahead. Data: the perf-gap-hunt seven-round campaign (interleaved same-window A/B per row, med-of-3+3).</div>
+
+    <h2 id="lmb"><span class="anchor">§2</span>lmbench data (same-rig KVM, all 14 paired cases)</h2>
+    <p style="font-size:13.5px">Source: lmbench-report.md "Campaign standings" (2026-11-06, perf-gap-hunt rounds 1–7, kernel 53f4a4f6 → 7fed9179) — the current authoritative table; every row is an interleaved same-window A/B, med-of-3+3. Method: one case per boot, 35 s in-guest timeout, PID 1 runner; the Linux column runs the same static binary on the <b>same KVM rig</b>.</p>
+    <h3>Ahead (9 cases)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_mmap 1m</td><td class="num">1.049 µs</td><td class="num">4.41 µs</td><td><span class="chip ok">ahead 4.2×</span></td></tr>
+          <tr><td class="mono">lat_pipe</td><td class="num">3.74 µs</td><td class="num">13.30 µs</td><td><span class="chip ok">ahead 3.56×</span> (hook-call tax inlined away)</td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">1.98 µs (quiet)</td><td class="num">6.71 µs</td><td><span class="chip ok">ahead 3.39×</span></td></tr>
+          <tr><td class="mono">lat_unix</td><td class="num">3.96–4.27 µs</td><td class="num">12.89 µs</td><td><span class="chip ok">ahead 3.14×</span> (Linux anchor re-measured same-rig)</td></tr>
+          <tr><td class="mono">lat_pagefault</td><td class="num">0.0287–0.0312 µs</td><td class="num">0.0702 µs</td><td><span class="chip ok">ahead 2.26–2.45×</span> (16.1× vs the 0.468 starting point)</td></tr>
+          <tr><td class="mono">bw_pipe</td><td class="num">28,030 MB/s</td><td class="num">10,443 MB/s</td><td><span class="chip ok">ahead 2.68×</span></td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">0.788 µs</td><td class="num">2.065 µs</td><td><span class="chip ok">ahead 2.62×</span> (anchor re-measured same-rig)</td></tr>
+          <tr><td class="mono">bw_unix</td><td class="num">42,885 MB/s</td><td class="num">22,783 MB/s</td><td><span class="chip ok">ahead 1.88×</span> (unix staging eliminated)</td></tr>
+          <tr><td class="mono">lat_syscall read</td><td class="num">0.0646 µs</td><td class="num">0.066 µs</td><td><span class="chip ok">ahead 1.02×</span> (flipped)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Behind (5 cases, being attacked)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th><th>Levers in flight</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.6497 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">behind 1.82×</span></td><td>tail decomposition (−15.2% cumulative; the 10 ms per-tick close-stall class fixed)</td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.3081 µs</td><td class="num">0.227 µs</td><td><span class="chip bad">behind 1.32×</span></td><td>path-walk component decomposition (185 ns = 4×23 components + 70 glue + 50 pre)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0491 µs</td><td class="num">0.042 µs</td><td><span class="chip bad">behind 1.17×</span></td><td>entry floor: dispatch flattening, armed()-residue merge</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">59.9 µs</td><td class="num">53.99 µs</td><td><span class="chip bad">behind 1.11×</span></td><td>retire batch-park</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.0636 µs</td><td class="num">0.058 µs</td><td><span class="chip bad">behind 1.10×</span></td><td>6 ns from parity</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup paths — Linux's cross-vCPU wakeup IPIs are expensive under virtualization while Rux's single global run queue creates no cross-core reschedule storms. Syscall-latency rows run the guest's own entry (no vmexit), so both sides carry almost no virtualization overhead — the gaps are real kernel differences. fstat (ahead 1.37×, RCU fd lookup) and exec (ahead 1.32×) also lead in the same-rig table — see the standing table in lmbench-report.md.</p>
+
+    <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel, 2026-11-04)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th class="num">Rux</th><th class="num">Linux (4-CPU pin)</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td><b>Multi-core total</b></td><td class="num">7332</td><td class="num">7027</td><td><span class="chip ok">ahead 4.3%</span></td></tr>
+          <tr><td><b>Single-core total</b></td><td class="num"><b>2274</b> (quiet best)</td><td class="num">2165</td><td><span class="chip ok">ahead 5.1%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Rig note: the Linux side is the host-native <code>taskset -c 0-3</code> pin (topology-matched to the guest's 4 vCPUs; a same-rig KVM Linux comparison is queued). Single-core caveat: two native self-runs differ by ~15% (2549 vs 2165) — deltas within ±15% are noise. The per-workload tables come from the 2026-11-04 full capture (that round's SC total was 2115; the quiet best is 2274 — same noise band).</p>
+
+    <h3>Single-core, per workload (all 21)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num"><b>8140</b> (re-run)</td><td class="num">7643</td><td class="num"><span class="chip ok">106%</span></td></tr>
+          <tr><td>Integer</td><td>Text Compression</td><td class="num">1446</td><td class="num">1536</td><td class="num">94%</td></tr>
+          <tr><td>Integer</td><td>Image Compression</td><td class="num">1901</td><td class="num">1813</td><td class="num"><span class="chip ok">105%</span></td></tr>
+          <tr><td>Integer</td><td>Navigation</td><td class="num">1416</td><td class="num">1753</td><td class="num"><span class="chip bad">81%</span></td></tr>
+          <tr><td>Integer</td><td>HTML5</td><td class="num">1991</td><td class="num">1651</td><td class="num"><span class="chip ok">121%</span></td></tr>
+          <tr><td>Integer</td><td>SQLite</td><td class="num">1833</td><td class="num">1480</td><td class="num"><span class="chip ok">124%</span></td></tr>
+          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">1758</td><td class="num">2074</td><td class="num"><span class="chip bad">85%</span></td></tr>
+          <tr><td>Integer</td><td>Text Rendering</td><td class="num">1771</td><td class="num">1456</td><td class="num"><span class="chip ok">122%</span></td></tr>
+          <tr><td>Integer</td><td>Clang</td><td class="num">1891</td><td class="num">2161</td><td class="num"><span class="chip bad">88%</span></td></tr>
+          <tr><td>Integer</td><td>Camera</td><td class="num">2005</td><td class="num">1861</td><td class="num"><span class="chip ok">108%</span></td></tr>
+          <tr><td>Float</td><td>N-Body Physics</td><td class="num">2227</td><td class="num">1956</td><td class="num"><span class="chip ok">114%</span></td></tr>
+          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">1885</td><td class="num">1737</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">2136</td><td class="num">2149</td><td class="num">99%</td></tr>
+          <tr><td>Float</td><td>Face Detection</td><td class="num">2401</td><td class="num">2770</td><td class="num"><span class="chip bad">87%</span></td></tr>
+          <tr><td>Float</td><td>Horizon Detection</td><td class="num">1834</td><td class="num">1459</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float</td><td>Image Inpainting</td><td class="num">4100</td><td class="num">4092</td><td class="num">100%</td></tr>
+          <tr><td>Float</td><td>HDR</td><td class="num">4563</td><td class="num">3614</td><td class="num"><span class="chip ok">126%</span></td></tr>
+          <tr><td>Float</td><td>Ray Tracing</td><td class="num">2725</td><td class="num">2042</td><td class="num"><span class="chip ok">133%</span></td></tr>
+          <tr><td>Float</td><td>Structure from Motion</td><td class="num">1806</td><td class="num">1661</td><td class="num"><span class="chip ok">109%</span></td></tr>
+          <tr><td>Float</td><td>Speech Recognition</td><td class="num">1712</td><td class="num">1741</td><td class="num">98%</td></tr>
+          <tr><td>Float</td><td>Machine Learning</td><td class="num">2511</td><td class="num">2028</td><td class="num"><span class="chip ok">124%</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">AES-XTS single-core carries the post-fix re-run value (8047 / confirm run 8140): the earlier low score was a kernel serial-print-tax artifact (AES-NI was probe-proven healthy — guest aesenc throughput 1268 vs native 1244 M rounds/s); the high-load capture is discarded. Source: docs/test/geekbench-report.md, 2026-11-02 standing.</p>
+
+    <h3>Multi-core, per workload (all 21)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Workload</th><th class="num">Rux</th><th class="num">Linux</th><th class="num">Rux/Linux</th></tr></thead>
+        <tbody>
+          <tr><td>AES-XTS</td><td>AES-XTS</td><td class="num">9331</td><td class="num">8972</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer</td><td>Text Compression</td><td class="num">5787</td><td class="num">3851</td><td class="num"><span class="chip ok">150%</span></td></tr>
+          <tr><td>Integer</td><td>Image Compression</td><td class="num">7410</td><td class="num">7481</td><td class="num">99%</td></tr>
+          <tr><td>Integer</td><td>Navigation</td><td class="num">4187</td><td class="num">3546</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Integer</td><td>HTML5</td><td class="num">8087</td><td class="num">7151</td><td class="num"><span class="chip ok">113%</span></td></tr>
+          <tr><td>Integer</td><td>SQLite</td><td class="num">7069</td><td class="num">6829</td><td class="num"><span class="chip ok">104%</span></td></tr>
+          <tr><td>Integer</td><td>PDF Rendering</td><td class="num">6566</td><td class="num">7632</td><td class="num"><span class="chip bad">86%</span></td></tr>
+          <tr><td>Integer</td><td>Text Rendering</td><td class="num">5794</td><td class="num">5924</td><td class="num">98%</td></tr>
+          <tr><td>Integer</td><td>Clang</td><td class="num">7359</td><td class="num">7823</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Integer</td><td>Camera</td><td class="num">7191</td><td class="num">7477</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>N-Body Physics</td><td class="num">7174</td><td class="num">7501</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>Rigid Body Physics</td><td class="num">7463</td><td class="num">7589</td><td class="num">98%</td></tr>
+          <tr><td>Float</td><td>Gaussian Blur</td><td class="num">7682</td><td class="num">7694</td><td class="num">100%</td></tr>
+          <tr><td>Float</td><td>Face Detection</td><td class="num">9949</td><td class="num">10296</td><td class="num"><span class="chip bad">97%</span></td></tr>
+          <tr><td>Float</td><td>Horizon Detection</td><td class="num">7111</td><td class="num">7616</td><td class="num"><span class="chip bad">93%</span></td></tr>
+          <tr><td>Float</td><td>Image Inpainting</td><td class="num">14838</td><td class="num">12349</td><td class="num"><span class="chip ok">120%</span></td></tr>
+          <tr><td>Float</td><td>HDR</td><td class="num">17872</td><td class="num">18962</td><td class="num"><span class="chip bad">94%</span></td></tr>
+          <tr><td>Float</td><td>Ray Tracing</td><td class="num">13374</td><td class="num">11370</td><td class="num"><span class="chip ok">118%</span></td></tr>
+          <tr><td>Float</td><td>Structure from Motion</td><td class="num">7155</td><td class="num">7486</td><td class="num"><span class="chip bad">96%</span></td></tr>
+          <tr><td>Float</td><td>Speech Recognition</td><td class="num">5939</td><td class="num">4537</td><td class="num"><span class="chip ok">131%</span></td></tr>
+          <tr><td>Float</td><td>Machine Learning</td><td class="num">5641</td><td class="num">5635</td><td class="num">100%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">The multi-core split: the +4.3% total is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
+
+    <h2 id="method"><span class="anchor">§4</span>Method and rig</h2>
+    <ul>
+      <li><b>Same host, same accelerator</b>: both sides on the same host, the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same Ubuntu rootfs shape, the same static benchmark binaries; one case per boot (the serial console interleaves with long sweeps, so a single-case boot is the only clean collection), PID 1 runner, 35 s in-guest budget (exceptions noted per case).</li>
+      <li><b>Comparable-class rule</b>: debug vs release-strong never cross-compared (strong reads 10–30× lower on the floor families); TCG vs KVM never cross-compared.</li>
+      <li><b>Anchor provenance</b>: gate anchors read only Rux's own medians — the Linux column never enters a Rux gate anchor (leg 32 found four cells transcribed from the Linux column; corrected and filed).</li>
+    </ul>
+
+    <h2 id="gate"><span class="anchor">§5</span>The merge-gate performance dimension (three tiers + six domains)</h2>
+    <p>Every merge is reviewed for both function and performance; baselines move only through merges that passed their own tier; a regression blocks the merge until fixed or justified in writing. Workflow details: <a href="../../guides/development.html#gate">Contributing §3</a>.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Tier</th><th>Applies to</th><th>Requirement</th></tr></thead>
+        <tbody>
+          <tr><td><b>Tier 1</b></td><td>All kernel changes</td><td>One quiet syscost boot: census in band, ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, key per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 2</b></td><td>Hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>Plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
+          <tr><td><b>Tier 3</b></td><td>Allocator or IRQ paths</td><td>Plus an IF=0 measurement (EFLAGS-pair probe if0 v3, official — no proxy)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Six guarded domains</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Domain</th><th>Guarded metric (current band)</th></tr></thead>
+        <tbody>
+          <tr><td>Memory allocation / reclaim</td><td>small_alloc global class-lock sections ≤25M/boot (measured 19.7M, latest board 6.0M), REST share ≤10% (now 0.1–1.2%), no reclaim slow-path emergence on standard boots</td></tr>
+          <tr><td>Scheduler</td><td>GRQ average hold band 1200–7320 ns (measured 2786 ns @ n=6.3M, −48%), census TERM 8±2 / REFUSED 32±4, P2 ±20%, futex wake→run quiet 7.5 µs ±20%</td></tr>
+          <tr><td>Filesystem hot paths</td><td>P6 rows ±20% (stat 71 / openclose 156 / append 77 / mkdrmdir 2760 / unlink 808 / write_fsync 14200 µs), buffer-cache hit rate 99.1% ≥ baseline, no new sync-write classes</td></tr>
+          <tr><td>Interrupts / IRQ paths</td><td>IF=0 share 20.4%±3pp, longest closed cli segment ≤10 ms (now 6–9 ms), SOFTIRQ share 3.1±2pp, no new IRQ-OFF print classes</td></tr>
+          <tr><td>IPC</td><td>p5 family ±20% (p5a 18.3 / p5b 23–41 / stream 24–27 µs), unix writev/truesize 24 µs class not regressed</td></tr>
+          <tr><td>binder</td><td>SLOW-TXN classes stable (queue ≤10 ms; per-code bands), throughput not regressed, REST watch row (avg 9.2 µs / max 73 ms, not reproduced)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, add a debug observability tool (gated off by default). Measurement is part of the change, not an afterthought.</div>
+
+    <h2 id="t1"><span class="anchor">§6</span>Tier 1: quiet syscost boot census (KVM q35 smp2/4G, 780 s window)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th>Baseline / band</th></tr></thead>
+        <tbody>
+          <tr><td>TERM-DESCHED census</td><td class="num">8 ± 2 (4+ consecutive boots read exactly 8/32)</td></tr>
+          <tr><td>WAKE-REFUSED census</td><td class="num">32 ± 4</td></tr>
+          <tr><td>WAKE-STRANDED</td><td class="num">5–31 organic, no 1001 ms grid class</td></tr>
+          <tr><td>Per-CPU tick rate</td><td class="num">≥99.5/s sustained to window end (current arc reads 104–124/s)</td></tr>
+          <tr><td>panics / new OOM classes</td><td class="num">0</td></tr>
+          <tr><td>Syscall volume (780 s)</td><td class="num">126.0M ± 10% (same lineage class)</td></tr>
+          <tr><td>clock_gettime avg</td><td class="num">3–4 µs (±20% or better)</td></tr>
+          <tr><td>nanosleep avg</td><td class="num">158–203 ms family, ≤244 ms one-sided (p7_sleep1ms probe 15.8 µs on the same core)</td></tr>
+          <tr><td>IF=0 share</td><td class="num">20.4% ± 3pp (EFLAGS-pair probe if0 v3, official)</td></tr>
+          <tr><td>Longest closed cli segment</td><td class="num">≤10 ms (now 6–9 ms; the one-shot 594–599 ms class is gone)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="t2"><span class="anchor">§7</span>Tier 2: pbench P1–P7 anchors (KVM debug class, re-anchored 2026-11-03 across three boards)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (KVM debug, µs)</th></tr></thead>
+        <tbody>
+          <tr><td>P1</td><td>p1_null null syscall (N=1e6) / p1_clock_gettime (N=1e6)</td><td class="num">0.300 / 0.371</td></tr>
+          <tr><td>P2</td><td>p2_ctxsw: 1-byte pipe ping-pong context switch (pinned)</td><td class="num">1.242</td></tr>
+          <tr><td>P3</td><td>Page-fault family: p3a first-touch anon / p3b COW / p3c filemap / p3d concurrent</td><td class="num">p3b_cow 8.075</td></tr>
+          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td class="num">KVM sub-millisecond (578/772 µs class)</td></tr>
+          <tr><td>P5</td><td>IPC family: p5a pipe round trip / p5b unix dgram / p5c stream write / p5e-p5f flow discriminators</td><td class="num">p5a 18.3 / p5b 23–41 / stream 24–27</td></tr>
+          <tr><td>P6</td><td>Filesystem family: stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19</td></tr>
+          <tr><td>P7</td><td>p7_sleep1ms: nanosleep(1ms) overshoot (med/p99/max, N=1e4)</td><td class="num">15.8 (TCG family 54.4)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:13px;color:var(--text-3)">Re-anchor: the KVM debug anchor is the median of three full boards (each PBENCH DONE rc=0, boards within ±1%). Old TCG columns remain in the baseline file for provenance only.</p>
+
+    <h2 id="campaigns"><span class="anchor">§8</span>Landed performance work (same-rig A/B measured)</h2>
+    <p>Each item below was attributed with a same-rig A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Item</th><th>Mechanism</th><th>Measured result</th></tr></thead>
+        <tbody>
+          <tr><td>Context switch</td><td>FSGSBASE (393 ns/switch) + lazy FPU (xsaveopt moved into #NM) + CPUID-gated PCID</td><td>lat_ctx 4.97→<b>2.07 µs (−58%)</b></td></tr>
+          <tr><td>Measured-wait wakeup preemption gate (D-14)</td><td>Poke a busy CPU only when the wakee's measured wait ≥6 ms, replacing vruntime-credit comparison</td><td>74-byte unix-stream wake/preempt/switch round trip ~275→~2.5 µs; p5 family <b>10–18×</b></td></tr>
+          <tr><td>fs metadata re-anchor</td><td>D-8 direct-write jbd2 + D-12 read-window batch fill + D-13 batched publication / discard-on-free</td><td>stat −65% / openclose −70% / append −88% / mkdrmdir −88%; p6_mkdrmdir median 29,796→<b>2,107 µs</b></td></tr>
+          <tr><td>vm-op family</td><td>leaf-table direct unmap (allocation-free per-page walker)</td><td>mmap 72→27–32 µs, munmap 177→52 µs; OH workload <b>15→5 s/CPU-min</b></td></tr>
+          <tr><td>Anon reclaim (SP-7)</td><td>reclaim check-path rework</td><td>check rate <b>35%→82–89%</b>, swap writes +75%</td></tr>
+          <tr><td>Typed timer wheel (D-19)</td><td>clock-domain typing + scope guards</td><td>arm lock 924→697 ns; nanosleep 772.6→<b>662.7 ms</b>; p2_ctxsw 12.198 vs 15.400 µs</td></tr>
+          <tr><td>dcache lockless reads (WalkClaim)</td><td>reader-bank publication + deferred retirement</td><td>stat 0.643→<b>0.423 µs</b>, open 1.128→0.889 µs</td></tr>
+          <tr><td>small_alloc magazine</td><td>per-CPU magazine (depth 16) + bitmap routing</td><td>class-lock sections <b>25M→19.7M→6.0M</b>/boot; REST share 9.2%→0.1–1.2%</td></tr>
+          <tr><td>GRQ hold</td><td>0.7 ms granularity pins churn + slimmer pick path (segment-measured)</td><td>average hold <b>2786 ns</b> @126M syscalls (band 1200–7320)</td></tr>
+          <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
+          <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
+          <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates (per-inode open_count replaced the global BTreeMap lock; reader-side seqlock lock-free)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="queue"><span class="anchor">§9</span>Optimization queue (open gaps, priority order)</h2>
+    <ul>
+      <li><b>Syscall entry and fill/copy tail</b>: null 1.17× / open 1.82× / stat 1.32× / write 1.10× (same-rig) — entry-floor and fill/copy tail (SMAP AC brackets); fd lookup is no longer the bottleneck (fstat already ahead).</li>
+      <li><b>lat_proc fork 1.11×</b>: retire batch-park in flight.</li>
+      <li><b>AES-XTS single-core</b>: root-caused and fixed (print-tax artifact, re-run 105–106%); residual single-core rows (Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87%) await isolated re-runs.</li>
+      <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); connect and data paths themselves work, and TCP throughput can only be measured after the fix.</li>
+      <li><b>Backfill queue</b>: same-rig KVM Linux comparisons for the remaining lmbench cases (lat_mmap family is already paired) and for Geekbench; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
+    </ul>
+
+    <h2 id="tools"><span class="anchor">§10</span>debug measurement toolchain</h2>
+    <ul>
+      <li><b>syscost</b>: boot census (syscall volume, census counts, tick rate, per-op averages) — the Tier 1 collector.</li>
+      <li><b>pbench</b> (test/pbench.c): the P1–P7 microbenchmark probes — the Tier 2 collector.</li>
+      <li><b>census / wakewatch</b>: scheduling-strand census and wake→run latency forensics (1024-slot side tables + pick-skip reason table).</li>
+      <li><b>if0 v3</b>: EFLAGS-pair probe — the official IF=0 share and cli-segment measurement (on main; no more tick-mode proxy).</li>
+      <li><b>fsw / mmprof counters</b>: fs sync-write classes, memory accounting reconciliation (OOM forensics).</li>
+      <li><b>run/perf-gate.sh</b>: gate automation (anchor JSON + tier dispatch + band verdicts).</li>
+      <li><b>Unified tracepoint framework</b>: 51 events / 16 groups, byte-exact tracefs, +13–19 ns per record when enabled (see <a href="../../architecture/design.html#trace">Observability</a>).</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

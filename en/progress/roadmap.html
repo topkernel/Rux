@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Roadmap · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Roadmap and milestones</h1>
+    <div class="sub">The boot-achievement timeline + current goals — authoritative source: docs/progress/roadmap.md</div>
+
+    <h2 id="now"><span class="anchor">§1</span>Current goals (2026-11)</h2>
+    <ul>
+      <li><b>A complete GNOME desktop loop</b> (x86_64 + KVM primary): GDM login achieved; the gnome-session component chain (gsd → gnome-shell) closing out.</li>
+      <li><b>OpenHarmony launcher → desktop</b>: /data mounting and the SystemUI lock screen achieved; advancing toward the full launcher home screen.</li>
+      <li><b>Maximizing the LTP pass rate</b>: r27 = 1084/1869, attacking the FAIL/CRASH/TIMEOUT surface.</li>
+      <li><b>Aligning debugging with the reference kernel</b>: the tracepoint framework expanding (lock/tcp/input families + PSI + log control); deep water: lockdep/RCU-stall/blktrace/perf-probes/kdump.</li>
+    </ul>
+
+    <h2 id="timeline"><span class="anchor">§2</span>Milestone timeline</h2>
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="when">2026-09-29</div>
+        <h4>Ubuntu 22.04 (riscv64) full userspace boots</h4>
+        <p>A graphical desktop session (framebuffer + evdev), bash -i, both D-Bus buses, ptys, SysV IPC, 4-CPU SMP.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-07</div>
+        <h4>x86_64 lands in main</h4>
+        <p>Ubuntu 22.04 amd64 boots to a graphical desktop on q35; LTP x86 r3 = 850/1869 the same period.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-14</div>
+        <h4>GNOME Shell renders</h4>
+        <p>gnome-shell/mutter + Xorg-fbdev: the top bar, clock, workspace thumbnails, dash; 2,100 seconds zero panic.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-24</div>
+        <h4>The OpenHarmony boot animation renders</h4>
+        <p>bootanimation → render_service → composition → scanout — the whole OH graphics chain runs on Rux.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-27</div>
+        <h4>Full GNOME Shell frame + closed input loop</h4>
+        <p>Reproduced across three independent boots, zero panic; virtio-input IRQ-ified, typed characters echo in the focused terminal.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-28</div>
+        <h4>Typed shell conversation verified pixel-exact</h4>
+        <p>Two independent boots; convcheck adjudicates identical line geometry and cursor cells pixel for pixel.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-30</div>
+        <h4>aarch64 lands in main</h4>
+        <p>QEMU virt (cortex-a72) interactive root shell, signals, the suite 1119/1119 green; requires -M virt,gic-version=3.</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-10-31</div>
+        <h4>OpenHarmony /data mounted + SystemUI lock screen</h4>
+        <p>After the ext4 superblock 32-bit checksum fix the stock userdata mounts; StartUser(100) in 64 ms; the lock screen renders every element (clock/date/status bar/unlock hint).</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-11-01</div>
+        <h4>The GDM greeter (x86_64 + KVM)</h4>
+        <p>The stock chain end to end: udevd → logind (a real CreateSession fd) → gdm3 → PAM → gdm-x-session → gnome-session; 45 minutes zero panic; boot-to-login ~4.5 s. The same day x86_64+KVM becomes the standing test rig; the fs metadata family re-anchors (−65%~−88%).</p>
+      </div>
+      <div class="tl-item">
+        <div class="when">2026-11-05/06</div>
+        <h4>LTP r27 = 1084/1869; the munmap churn-race family closed</h4>
+        <p>PI futexes land fully in main; the munmap chunked TLB-flush race family (taxonomy row 34) closes and ports back to all three architectures.</p>
+      </div>
+    </div>
+
+    <h2 id="beyond"><span class="anchor">§3</span>Beyond</h2>
+    <ul>
+      <li>Continuing LTP climbs (TIMEOUT-class cases get top priority);</li>
+      <li>observability deep water: lockdep-class, RCU-stall, blktrace, perf-probes, kdump;</li>
+      <li>closing the security gap register item by item (KASLR, text/rodata W^X, stack protectors);</li>
+      <li>LTP on aarch64; a btrfs evaluation.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

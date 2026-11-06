@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Changelog · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Changelog (highlights)</h1>
+    <div class="sub">The full history: docs/progress/changelog.md and git log — this page records structural milestones only</div>
+
+    <h2 id="n1106"><span class="anchor">2026-11-06</span></h2>
+    <ul>
+      <li><b>The munmap churn-race family closed</b> (taxonomy row 34): the detach-all-then-zap rework landed, closing the chunked tail-TLB-flush races; the x86_64 fix (c4a548d7) ported back to riscv64/aarch64; the OH crash storm of ~66 SEGVs/boot verified 3/3 clean by the mmap-witness probe.</li>
+      <li><b>The GNOME desktop regression retrospective</b> published: both root causes fixed (the munmap races; ext4 async read-fill cross-file page-cache poisoning gated off pending its own lane); a desktop-boot gate and byte-exact mmap verification probes move into the standing surface.</li>
+      <li>The safety ledger round 4: taxonomy row 34 + boundary-row extensions.</li>
+    </ul>
+
+    <h2 id="n1105"><span class="anchor">2026-11-05</span></h2>
+    <ul>
+      <li><b>LTP r27 = 1084/1869</b> (x86_64+KVM): +17, the pidfd family all green; 51 WEDGE rows rescued via isolation boots.</li>
+      <li><b>PI futexes land fully in main</b>: LOCK/TRYLOCK/UNLOCK_PI + the requeue pair (21 probes × 2), the futex lock order extended with INV-LOCK-PI-1.</li>
+    </ul>
+
+    <h2 id="n1103"><span class="anchor">2026-11-03</span></h2>
+    <ul>
+      <li><b>The safety-and-performance ledger</b> (docs/architecture/safety-and-performance.md) and the <b>Rust-native register</b> (rust-native-register.md) established: every merge round files its safety properties, performance numbers and eliminated bug classes in the same change.</li>
+      <li><b>Bug taxonomy v1</b>: all 3,358 deduplicated commits adjudicated one by one; 34 memory-corruption defects attributed (23 audited unsafe/asm, 11 safe but non-pointer-expression classes).</li>
+      <li>The typed timer wheel (D-19) A/B: nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</li>
+    </ul>
+
+    <h2 id="n1101"><span class="anchor">2026-11-01</span></h2>
+    <ul>
+      <li><b>The GDM greeter achieved</b> (x86_64+KVM, ~4.5 s boot-to-login, 45 minutes zero panic); x86_64+KVM becomes the standing test rig; the fs metadata family re-anchors (−65%~−88%); kernel suite 1267/1267 (riscv64), 1263/1263 (x86_64).</li>
+      <li>IF=0 re-anchored at 20.4%±3pp (the mechanism: softirqs leave the IF=0 window to ksoftirqd).</li>
+    </ul>
+
+    <h2 id="n1030"><span class="anchor">2026-10-30/31</span></h2>
+    <ul>
+      <li><b>aarch64 lands in main</b>: three architectures complete — interactive shell + signals + the suite 1119/1119 green.</li>
+      <li><b>OpenHarmony /data mounted + SystemUI lock screen</b>: after the ext4 superblock 32-bit checksum fix; StartUser(100) in 64 ms.</li>
+      <li>Attribution corrected: the OH watchdog self-kill was a pure performance wall — the kernel's binder was not at fault.</li>
+    </ul>
+
+    <h2 id="n1014"><span class="anchor">2026-10-07 ~ 10-28</span></h2>
+    <ul>
+      <li>x86_64 lands in main (10-07); GNOME Shell renders (10-14) → a complete frame across three boots (10-27) → a typed conversation verified pixel-exact (10-28).</li>
+      <li>The OpenHarmony boot animation renders (10-24); the riscv64 LTP line climbs 801 → 945 → 1028 (closing 10-31).</li>
+      <li>Scheduling strands ended: spin-with-preemption-off convicted as the root cause, strands 233→31; census/heal ships.</li>
+      <li>RVV support mainlined: lazy V-extension enable + per-task vstate.</li>
+    </ul>
+
+    <h2 id="n0929"><span class="anchor">2026-09-29</span></h2>
+    <ul>
+      <li><b>Ubuntu 22.04 (riscv64) full userspace first boot</b>: a desktop session, bash, D-Bus, ptys, SysV IPC, SMP4.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

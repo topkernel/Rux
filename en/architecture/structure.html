@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code layout · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Code layout</h1>
+    <div class="sub">Repository layout and the kernel source map — kernel/src: 437 files, ~330,102 lines (the 2026-11-01 review-coverage ledger)</div>
+
+    <h2 id="kernel"><span class="anchor">§1</span>The kernel source map (kernel/src/)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Directory</th><th class="num">Lines</th><th class="num">Share</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">fs/</td><td class="num">61,091</td><td class="num">19.1%</td><td>ext4 (12 files), jbd2, VFS, dcache, page_cache, bio/buffer, procfs/sysfs/debugfs/tracefs/tmpfs, pipe, xattr, inotify, locks, io_uring, elf</td></tr>
+          <tr><td class="mono">arch/</td><td class="num">43,440</td><td class="num">13.6%</td><td>riscv64 / x86_64 / aarch64: boot, trap, mm (page_fault), cpu, uaccess, intc, SBI/MSR/registers</td></tr>
+          <tr><td class="mono">debug/</td><td class="num">37,946</td><td class="num">11.9%</td><td>syscost, kallsyms, debugfs, taskdump, watchdog, memwatch, ledger (the diagnostics layer, unsafe tracked separately)</td></tr>
+          <tr><td class="mono">syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>the dispatch tables and implementations (the capsule boundary: user-pointer validation/translation, uaccess_safe typed copy_in/out)</td></tr>
+          <tr><td class="mono">drivers/</td><td class="num">23,247</td><td class="num">7.3%</td><td>virtio (blk/net/gpu/input; queue + PCI transport), blkdev, intc, pci, gpu/drm, input, timer</td></tr>
+          <tr><td class="mono">net/</td><td class="num">18,649</td><td class="num">5.8%</td><td>SkBuff, eth, arp, ipv4/ipv6, icmp, udp, tcp (4,841 lines), unix (3,707 lines), netlink, raw</td></tr>
+          <tr><td class="mono">process/</td><td class="num">14,824</td><td class="num">4.7%</td><td>task structures, fork/exit, signals, wait, pid, cgroup</td></tr>
+          <tr><td class="mono">mm/</td><td class="num">16,712</td><td class="num">5.2%</td><td>memblock, buddy, slab, small_alloc, page fault, VMA, page-cache cooperation, kswapd, rmap</td></tr>
+          <tr><td class="mono">ipc/</td><td class="num">14,559</td><td class="num">4.6%</td><td>binder (10,425 lines, the largest single file), access_token, SysV sem/msg/shm, POSIX MQ</td></tr>
+          <tr><td class="mono">sched/</td><td class="num">12,532</td><td class="num">3.9%</td><td>the GRQ, fair/rt/deadline classes, wakewatch, census/heal</td></tr>
+          <tr><td class="mono">sync/</td><td class="num">7,281</td><td class="num">2.3%</td><td>spinlocks/sleep-locks/futex (incl. PI), CpuLocal (D-7), typed lock keys (D-11)</td></tr>
+          <tr><td class="mono">trace/</td><td class="num">—</td><td>—</td><td>the unified trace-event framework: mod.rs event side (2,538 lines) + files.rs tracefs side</td></tr>
+          <tr><td class="mono">tests/</td><td class="num">—</td><td>—</td><td>73 in-guest test files (the make test host)</td></tr>
+          <tr><td class="mono">verify/</td><td class="num">—</td><td>—</td><td>the formal-verification crate: 157 Kani harnesses, 1104 proptests, 4 SPIN models, Miri/loom mirrors</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="layers"><span class="anchor">§2</span>Layering and unsafe governance</h2>
+    <p><code>docs/architecture/kernel-layers.md</code> defines the longest-prefix-match layering: unmatched files default into the safest bucket.</p>
+    <ul>
+      <li><b>Framework layer</b> (arch/mm primitives/interrupt/virtio core/trace/perf): unsafe allowed, every block requiring a <code>// SAFETY:</code> comment (3,207/5,009 = 64% covered).</li>
+      <li><b>Service layer</b>: targets 100% <code>forbid(unsafe_code)</code> — 47 files already forbid it at compile time, 56 more contain none; the first named shrink target <code>syscall/io.rs</code> went 69 unsafe tokens → 0 (typed entries + uaccess_safe).</li>
+      <li><b>The syscall boundary is the capsule boundary</b>: entries validate and translate user pointers; uaccess_safe.rs provides typed copy_in/copy_out.</li>
+      <li><b>12.9% of lines are unsafe</b>; the trace module bans unsafe entirely.</li>
+    </ul>
+
+    <h2 id="repo"><span class="anchor">§3</span>Top-level repository layout</h2>
+    <pre><code>Rux/
+├── kernel/       <span class="c"># kernel sources (table above)</span>
+├── userspace/    <span class="c"># mrsh, toybox, linux-ltp, probes/ (tarball+extract.sh), fio, geekbench, lmbench, stress</span>
+├── test/         <span class="c"># guest-side C probe sources (pbench.c etc.) + suite dirs (ubuntu-gnome, ltpscan, stressng…)</span>
+├── scripts/      <span class="c"># host-side: extract-probes.sh, test/ (run.sh, run-x86-ub.sh, oh-boot.sh…)</span>
+├── toolchain/    <span class="c"># self-built musl cross toolchains (build-musl.sh, riscv64-rux-linux-musl/, x86_64 sysroot tarball)</span>
+├── build/        <span class="c"># build/config tooling (build/Makefile, menuconfig.sh, current-platform.sh)</span>
+├── work/         <span class="c"># runtime artifacts (gnome-x86.img, rootfs, pbench disks)</span>
+├── docs/         <span class="c"># documentation: guides/ architecture/ development/ test/ progress/</span>
+├── AGENTS.md     <span class="c"># the binding development workflow (the de-facto contribution guide)</span>
+├── Kernel.toml   <span class="c"># kernel configuration → kernel/src/config.rs</span>
+└── Makefile      <span class="c"># top-level entry (forwards to build/Makefile)</span></code></pre>
+    <div class="callout"><b>The probe-tarball policy:</b> guest test-case sources are archived only as <code>userspace/probes/probes.tar.gz</code> + <code>extract.sh</code>; make user / make test restore them idempotently via scripts/extract-probes.sh — loose guest C sources are never committed.</div>
+
+    <h2 id="langs"><span class="anchor">§4</span>Language composition</h2>
+    <p>The kernel itself is 100% Rust (no_std, plus the necessary platform assembly); userspace probes are C (musl cross-compiled); repository language statistics use the <code>git ls-files</code> basis (vendored toybox is marked linguist-vendored).</p>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

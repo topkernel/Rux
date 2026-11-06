@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Getting started · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Getting started</h1>
+    <div class="sub">From a bare environment to a booting kernel in ~15 minutes — mirrors docs/guides/getting-started.md</div>
+
+    <h2 id="env"><span class="anchor">§1</span>Requirements</h2>
+    <p>Rux develops and runs on an ordinary Linux host — no special hardware.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th>Dependency</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Required</td><td class="mono">rustup / rustc (stable or nightly)</td><td>the kernel itself is pure Rust (no_std)</td></tr>
+          <tr><td>Required</td><td class="mono">QEMU ≥ 5.0</td><td>system emulation (qemu-system-riscv64 / x86_64 / aarch64)</td></tr>
+          <tr><td>Required</td><td class="mono">riscv64-linux-gnu-gcc</td><td>cross-compiling userspace programs</td></tr>
+          <tr><td>Optional</td><td class="mono">whiptail</td><td>the <code>make menuconfig</code> TUI</td></tr>
+          <tr><td>Optional</td><td class="mono">gdb (riscv64-unknown-elf-gdb)</td><td><code>make debug</code> kernel debugging</td></tr>
+          <tr><td>Optional</td><td class="mono">e2fsprogs</td><td><code>mkfs.ext4 -d</code> for rootfs images</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre><code><span class="c"># Ubuntu / Debian</span>
+sudo apt-get install gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+     qemu-system-riscv e2fsprogs
+
+<span class="c"># Arch Linux</span>
+sudo pacman -S riscv64-linux-gnu-gcc</code></pre>
+
+    <h2 id="clone"><span class="anchor">§2</span>Code and toolchains</h2>
+    <pre><code>git clone https://github.com/topkernel/Rux
+cd Rux
+
+<span class="c"># add the Rust cross targets</span>
+rustup target add riscv64gc-unknown-none-elf
+rustup target add riscv64gc-unknown-linux-musl</code></pre>
+    <p>The <code>toolchain/</code> directory carries a self-built musl cross toolchain (Ubuntu ships no <code>gcc-riscv64-linux-musl</code> package): <code>make sdk</code> builds <code>toolchain/riscv64-rux-linux-musl/</code> (headers + libc.a + a musl-gcc wrapper), the prerequisite for userspace builds. The x86_64 musl sysroot ships as a tarball that <code>make user</code> restores on demand.</p>
+
+    <h2 id="build"><span class="anchor">§3</span>Building</h2>
+    <h3>The kernel</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Architecture</th><th>Command</th><th>Rust target</th><th>QEMU machine</th></tr></thead>
+        <tbody>
+          <tr><td>riscv64 (default)</td><td class="mono">make build</td><td class="mono">riscv64gc-unknown-none-elf</td><td class="mono">virt</td></tr>
+          <tr><td>x86_64</td><td class="mono">PLATFORM=x86_64 make build <span class="c">or</span> make build-x86</td><td class="mono">x86_64-unknown-none</td><td class="mono">q35</td></tr>
+          <tr><td>aarch64</td><td class="mono">PLATFORM=aarch64 make build</td><td class="mono">aarch64-unknown-none</td><td class="mono">virt (gic-version=3)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Other modes: <code>make -C build build-release</code> (optimized), <code>make bin</code>, <code>make clean</code>. Configuration lives in <code>Kernel.toml</code>, compiled by <code>build.rs</code> into <code>kernel/src/config.rs</code> — see <a href="configuration.html">Kernel configuration</a>.</p>
+    <h3>The full userspace stack</h3>
+    <pre><code>make build     <span class="c"># ① the kernel</span>
+make sdk       <span class="c"># ② the musl libc SDK (prerequisite for userspace)</span>
+make user      <span class="c"># ③ userspace programs (Rust std + musl; runs sdk + probes first)</span>
+make toybox    <span class="c"># ④ toybox, 200+ command-line tools</span>
+make mrsh      <span class="c"># ⑤ a POSIX shell</span>
+make rootfs    <span class="c"># ⑥ pack the minimal rootfs image</span></code></pre>
+    <div class="callout">Guest-side test-case sources are archived as <b>userspace/probes/probes.tar.gz</b>; make user / make test restore them into <code>test/</code> via scripts/extract-probes.sh — no manual steps.</div>
+
+    <h2 id="run"><span class="anchor">§4</span>Running</h2>
+    <h3>The minimal system (an mrsh shell)</h3>
+    <pre><code>make run</code></pre>
+    <p>Builds if needed, then enters the serial console at <code>/bin/sh</code>. Try <code>ls /</code>, <code>toybox cat /proc/cpuinfo</code>, <code>echo "Hello Rux!"</code>.</p>
+    <h3>Ubuntu 22.04 GNOME desktop (x86_64 + KVM)</h3>
+    <pre><code>make ubuntu-run</code></pre>
+    <p>Builds (or reuses) the Ubuntu GNOME disk image and boots it in an SDL window; log in as <code>root / rux</code>. Overridable variables:</p>
+    <pre><code>SMP=1 make ubuntu-run      <span class="c"># single core (default SMP=4)</span>
+ACCEL=tcg make ubuntu-run  <span class="c"># disable KVM (KVM by default)</span>
+THREAD=single make ubuntu-run <span class="c"># single-threaded TCG for deterministic debugging</span></code></pre>
+    <div class="callout warn"><b>Note:</b> the GUI entry point is <code>make ubuntu-run</code>. Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code> — the image itself is never written.</div>
+    <h3>OpenHarmony</h3>
+    <p>OH boots through the dedicated driver script <code>scripts/test/debug/oh-boot.sh</code> (q35 + virtio-gpu, 7 OH images, serial to file, the QEMU monitor on a unix socket for screenshots). The porting plan: docs/development/openharmony-port-plan.md.</p>
+
+    <h2 id="flags"><span class="anchor">§5</span>Markers of a successful boot</h2>
+    <p>Minimal system, in order on serial:</p>
+    <pre><code>OpenSBI v0.9 banner
+<span class="k">Rux</span> ASCII banner
+console  [ok]   trap    [ok]   mm      [ok]
+sched    [ok]   fs      [ok]   driver  [ok]   smp [ok]
+init: loading /bin/sh
+$ _</code></pre>
+    <p>Ubuntu GNOME: init complete, framebuffer resolution, login-screen-ready lines — then the SDL window shows the desktop.</p>
+
+    <h2 id="test"><span class="anchor">§6</span>Running the tests</h2>
+    <h3>The in-kernel suite</h3>
+    <pre><code>make test                          <span class="c"># riscv64 (default)</span>
+PLATFORM=x86_64 make test          <span class="c"># x86_64</span>
+PLATFORM=aarch64 make test         <span class="c"># aarch64</span></code></pre>
+    <p>All assertions run inside the QEMU guest. Current baseline: <b>riscv64 1267/1267</b>, <b>x86_64 1263/1263</b> (2026-11-01, 73 test files) across memory / process / fs / ipc / signal / network / driver / syscall.</p>
+    <h3>LTP</h3>
+    <pre><code>make ltp            <span class="c"># build LTP on the host (needs sdk; 1,838 official binaries)</span>
+<span class="c"># inside the Rux shell:</span>
+cd /test/linux-ltp
+./run_quick.sh</code></pre>
+    <h3>Formal verification (four layers)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Command</th><th>What it verifies</th><th>Scale</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">make verify</td><td>sync checks + property-based tests</td><td class="mono">1104 proptests</td></tr>
+          <tr><td class="mono">make kani</td><td>Kani symbolic execution (per harness)</td><td class="mono">157 proof harnesses</td></tr>
+          <tr><td class="mono">make spin</td><td>SPIN concurrency models</td><td class="mono">4 models</td></tr>
+          <tr><td class="mono">make miri</td><td>Miri UB detection</td><td class="mono">nightly</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The GUI has a CI-style verifier: <code>python3 test/ubuntu-gui/verify.py --runs 2 --smp 4</code> (23 checks per boot).</p>
+
+    <h2 id="config"><span class="anchor">§7</span>Kernel configuration</h2>
+    <pre><code>make config        <span class="c"># view (cat Kernel.toml)</span>
+make menuconfig    <span class="c"># TUI configuration (12 categories)</span></code></pre>
+    <p>Common <code>Kernel.toml</code> sections: <code>[memory]</code> (kernel_heap_size / physical_memory / page_size), <code>[smp]</code> (max_cpus), <code>[network]</code> (eth_mtu), <code>[printk]</code> (log_level), <code>[performance]</code> (opt_level / lto). Changes trigger a rebuild; the generated <code>kernel/src/config.rs</code> is <b>never hand-edited</b>. The repository's current <code>Kernel.toml</code> is authoritative (a few defaults move with lane needs, e.g. kernel heap size).</p>
+
+    <h2 id="trouble"><span class="anchor">§8</span>Troubleshooting</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Symptom</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">error: target not found</td><td>re-run the two <code>rustup target add</code> commands</td></tr>
+          <tr><td class="mono">riscv64-linux-gnu-gcc: command not found</td><td>install the cross toolchain (apt / pacman, §1)</td></tr>
+          <tr><td class="mono">qemu: unsupported machine / could not load bootloader</td><td>upgrade to QEMU ≥ 5.0 (ships OpenSBI) or point <code>-bios</code> manually</td></tr>
+          <tr><td class="mono">fs: ext4 mount failed</td><td>in order: <code>make sdk && make user && make toybox && make rootfs</code></td></tr>
+          <tr><td>test timeouts</td><td>kill leftover QEMU processes and retry; or use a release build</td></tr>
+          <tr><td class="mono">Load/Store access fault</td><td><code>make clean && make build</code>, confirm the kernel version matches</td></tr>
+          <tr><td>configuration not taking effect</td><td><code>cargo clean</code>, rebuild, check <code>cat kernel/src/config.rs</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="next"><span class="anchor">§9</span>Next steps</h2>
+    <ul>
+      <li><a href="development.html">Contributing</a> — the workflow, merge gates, the debugging toolbox, and the "first task" path for newcomers.</li>
+      <li><a href="../testing/index.html">Testing</a> — LTP, stability and stress; <a href="../performance/index.html">Performance</a> and <a href="../security/index.html">Security</a> are standalone sections.</li>
+      <li><a href="../architecture/design.html">Architecture &amp; design</a> — every subsystem with mechanisms and measured numbers.</li>
+      <li><a href="../progress/quickref.html">Command reference</a> — the common commands on one page.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

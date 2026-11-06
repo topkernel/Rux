@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture &amp; module design · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Architecture &amp; module design</h1>
+    <div class="sub">Mechanisms, data structures and measured numbers per subsystem — numbers come from the repository docs; unmeasured items are marked as such</div>
+
+    <h2 id="overview"><span class="anchor">§0</span>Overview</h2>
+    <p>Rux is one source tree serving three architectures (riscv64 / x86_64 / aarch64), ~90% arch-independent. Externally it matches the reference ABI across 345+ syscalls; internally it is a clean-room design — every internal decision that differs from the mainstream is registered in the <a href="#divergences">design-divergence register</a> with compatibility evidence.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Subsystem</th><th class="num">Lines</th><th class="num">Share</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td>fs/ (ext4 · VFS · page cache · jbd2)</td><td class="num">61,091</td><td class="num">19.1%</td><td>filesystem stack and caches</td></tr>
+          <tr><td>arch/ (three port layers)</td><td class="num">43,440</td><td class="num">13.6%</td><td>boot / traps / context switch / TLB</td></tr>
+          <tr><td>debug/ (syscost · kallsyms · watchdog)</td><td class="num">37,946</td><td class="num">11.9%</td><td>diagnostics and observability</td></tr>
+          <tr><td>syscall/</td><td class="num">33,840</td><td class="num">10.6%</td><td>syscall boundary (the capsule edge)</td></tr>
+          <tr><td>drivers/ (virtio · DRM · input)</td><td class="num">23,247</td><td class="num">7.3%</td><td>device drivers</td></tr>
+          <tr><td>net/ (TCP/IP · unix · netlink)</td><td class="num">18,649</td><td class="num">5.8%</td><td>network stack</td></tr>
+          <tr><td>process/ + sched/ + sync/</td><td class="num">34,637</td><td class="num">10.9%</td><td>tasks / scheduling / synchronization</td></tr>
+          <tr><td>mm/</td><td class="num">16,712</td><td class="num">5.2%</td><td>memory management</td></tr>
+          <tr><td>ipc/ (binder · SysV · MQ)</td><td class="num">14,559</td><td class="num">4.6%</td><td>inter-process communication</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The layering model (<code>docs/architecture/kernel-layers.md</code>): the Framework layer (arch/mm primitives/interrupt/virtio core/trace) allows <code>unsafe</code> with per-block <code>// SAFETY:</code> comments; the service layer targets 100% <code>forbid(unsafe_code)</code> (47 files already forbid it at compile time, 56 more contain none); the syscall entry is the capsule boundary, validating and translating user pointers in one place.</p>
+
+    <div class="mod-anchor" id="sched"></div>
+    <h2><span class="anchor">§1</span>Scheduler (kernel/src/sched/)</h2>
+    <p><b>A single global run queue — GRQ (divergence <a href="#d1">D-1</a>).</b> One <code>GlobalRunQueue</code> serves every CPU with three per-class subqueues: DL (BTreeMap, EDF), RT (bitmap + per-priority lists), CFS (BTreeMap by vruntime); atomic <code>nr_running</code>, an <code>idle_cpus</code> bitmap, and per-CPU current/idle/stop pointers only. <b>No per-CPU queues, no load balancer</b> — idle CPUs pull work on demand via IPI.</p>
+    <ul>
+      <li><b>CFS (fair.rs)</b>: vruntime = runtime ×(NICE_0_LOAD/weight); <code>cfs_min_granularity_ns = 0.7 ms</code> (also the wakeup granularity), a 6 ms latency window, 100 Hz ticks; pick lifts non-runnable entries out of the timeline and reinserts them; <code>min_vruntime</code> takes the whole tree's leftmost (never erasing a sleeper's credit).</li>
+      <li><b>The measured-wait wakeup preemption gate (D-14)</b>: a wakeup with no idle CPU pokes the busy CPU only when the wakee's measured wait ≥ 6 ms — replacing the reference's vruntime-credit comparison (which Rux's vruntime adjustments would fool every time).</li>
+      <li><b>wakewatch</b>: a wake→run latency forensics instrument (1024-slot side table + a pick-skip reason table).</li>
+      <li>The GRQ lock is protected by typed lock keys (<a href="#d11">D-11</a> — nesting is a compile-time fact).</li>
+    </ul>
+    <h3>Key numbers</h3>
+    <ul>
+      <li>GRQ average hold <b>2786 ns</b> (n=6.3M; gate band 1200–7320 ns); flat across a 126.0M-syscall boot → size-coupled, not contention-bound (at ≤4 vCPUs).</li>
+      <li>Boot census reads exactly, on every qualified quiet boot: TERM-DESCHED <b>8</b> (band 8±2), WAKE-REFUSED <b>32</b> (band 32±4).</li>
+      <li>Three context-switch levers (FSGSBASE 393 ns/switch + lazy FPU + CPUID-gated PCID): <code>lat_ctx -s64 2</code> <b>4.97→2.07 µs (−58%)</b>; same-rig lmbench <b>1.98 vs 6.71 µs (3.39×)</b>.</li>
+      <li>With D-14: the 74-byte unix-stream wake/preempt/switch round trip ~275 µs → ~2.5 µs; the p5 IPC family <b>10–18×</b>.</li>
+    </ul>
+    <p><b>Compatibility:</b> pure internal policy, no ABI surface. Guarded by the performance gate's scheduler domain (hold band, census, P2 ±20%).</p>
+
+    <div class="mod-anchor" id="mm"></div>
+    <h2><span class="anchor">§2</span>Memory management (kernel/src/mm/)</h2>
+    <p>Deep dive in the <a href="memory.html">memory page</a>; summary:</p>
+    <ul>
+      <li><b>Three-stage boot</b>: memblock (dual-region table) → fixmap → zone/buddy; Sv39 layout constants match the reference (PAGE_OFFSET/VMALLOC/vmemmap/TASK_SIZE).</li>
+      <li><b>vmemmap</b>: a 64-byte cache-line-aligned <code>Page</code> per physical page, pfn↔page O(1); buddy MAX_ORDER=10, order-0 through the per-CPU pageset (PCP) with zero zone locks.</li>
+      <li><b>small_alloc (magazine)</b>: 8 power-of-two classes (8..1024B) + a per-CPU magazine (depth 16); class locks are taken only for batched refill/flush; one free bit per slab page, cleared before the page returns — a stale pointer lands on the buddy-side sentinel instead of corrupting silently.</li>
+      <li><b>Packed kernel-stack slab (D-2, x86_64)</b>: 80KB slots in 256KB blocks + a side table; 85.3KB/stack vs 128KB, 99.9% slot packing, 3,445 live tasks (deepest recorded) with zero canary hits.</li>
+      <li><b>Page cache</b>: lockless global slot-table reads + per-inode spinlocks; floor 32MB, soft cap half of managed RAM (a fixed 32MB cap once made OH library loads cost ~1.5 s per fault).</li>
+      <li><b>Deferred-free ring (D-16)</b>: MmStruct/Task free into a 16,384-slot global ring drained on a 1500 ms wall clock — bounded reclamation latency independent of scheduling.</li>
+      <li><b>Per-mm PTE lock</b>: a global epoch (read side of an RwSpinlock) + per-mm spinlock split mode, replacing a global PTE lock that let fork-walks monopolize the machine; leaf-table direct unmap: mmap 72 µs→27–32 µs, munmap body 177→52 µs.</li>
+      <li><b>CpuLocal&lt;T,N&gt; (D-7)</b>: typed per-CPU storage — "the IRQ-off window a per-CPU access relies on = the guard's lifetime" is a type-level fact.</li>
+    </ul>
+    <h3>Key numbers</h3>
+    <ul>
+      <li>small_alloc global class-lock sections/boot <b>19.7M</b> (gate ≤25M; latest board 6.0M), REST machine share <b>0.1–1.2%</b> (gate ≤10%).</li>
+      <li>Anon reclaim check rate <b>35%→82–89%</b> (SP-7), swap writes +75%.</li>
+      <li>Negative-lookup memo oracle: 475k negative hits, 963k stale normalizations, <b>0</b> stale negative deliveries.</li>
+    </ul>
+    <p><b>Compatibility:</b> /proc/meminfo, pagemap, mmap/munmap/mprotect/mremap/mlock/brk semantics aligned item by item (msync wrap checks, mmap offset alignment EINVAL and the rest).</p>
+
+    <div class="mod-anchor" id="fs"></div>
+    <h2><span class="anchor">§3</span>File systems (kernel/src/fs/)</h2>
+    <ul>
+      <li><b>The capability-declarative FileOps builder (D-6)</b>: one method per slot, duplicate installs are compile errors; errno mapping collapses to a single point. Paid incident: read() on a valid epoll fd returned EBADF and the OH event loop spun 155,991 times.</li>
+      <li><b>Lockless dcache reads (WalkClaim reader banks)</b>: removed two spinlock pairs per path component — stat <b>0.643→0.423 µs</b>, open <b>1.128→0.889 µs</b>; the negative memo invalidates by parent-directory generation.</li>
+      <li><b>ext4 (12 files, ~13k lines)</b>: mount feature gates (unknown incompat → refuse; ENCRYPT is a capability bit and accepted — refusing it once took down OH's stock userdata); read-side window batch fill (<a href="#d12">D-12</a>, ≤64 blocks/128KiB merged requests), write-side batched metadata publication + discard-on-free (<a href="#d13">D-13</a>).</li>
+      <li><b>jbd2 direct-write commit (D-8)</b>: commit writes transaction buffers straight to their final locations and advances the log tail/head with the commit — a completed commit leaves nothing to replay, and the 8–12 synchronous round trips per unlink/rmdir disappear; on-disk format and recovery (e2fsck) unchanged.</li>
+      <li><b>bio/buffer cache</b>: buffer_head five states + LRU; write planning once re-scanned all pending quadratically (fixed with a 3-round cap + conservative linear fallback; 252 samples of one fsync wedging 1,092 s pinned it).</li>
+      <li><b>The procfile! macro (D-4)</b>: /proc formatters derived from one field-declaration table, killing the format-drift defect class (vmstat/meminfo/status byte-identical to a live host).</li>
+      <li><b>pipe</b>: 64 KiB capacity, PIPE_BUF=4096 atomic writes (reference defaults). <b>io_uring</b>: the 5.1+ ABI (SQ/CQ ring mmap), operations executed synchronously in the enter context.</li>
+    </ul>
+    <h3>Key numbers</h3>
+    <ul>
+      <li>Metadata re-bank (2026-11-01): stat 200.9→<b>71.1 µs</b>, openclose 512.9→<b>156.3 µs</b>, read_cached 546.8→<b>203.7 µs</b>, append 657.2→<b>77.4 µs</b>, mkdrmdir 22.8→<b>2.76 ms</b>, unlink 1,141→<b>808 µs</b>.</li>
+      <li>D-13 end to end: p6_mkdrmdir median 29,796→<b>2,107 µs</b>, p99 54→<b>16.4 ms</b> (vs 153 µs for the reference — the residue is shared syscall/lookup overhead, not fs).</li>
+      <li>buffer cache hit rate <b>99.1%</b> (gate ≥ baseline).</li>
+    </ul>
+    <p><b>Compatibility:</b> the jbd2 on-disk format is unchanged (image mounting/recovery identical); POSIX does not promise per-operation directory persistence (that is fsync(dirfd)); LTP change families green.</p>
+
+    <div class="mod-anchor" id="ipc"></div>
+    <h2><span class="anchor">§4</span>IPC (kernel/src/ipc/)</h2>
+    <ul>
+      <li><b>binder (10,425 lines, the largest single file)</b>: the load-bearing implementation of the OpenHarmony service mesh. A misc device <code>/dev/binder</code>; mmap buffer silently truncated at 4 MiB (same as the reference); protocol version 8; the full BC_*/BR_* set, flat_binder_object cross-process translation, deferred TRANSACTION_COMPLETE for sync transactions. Lock model: one global spinlock, no user-memory copies and no sleeping under it.</li>
+      <li><b>The access_token registry</b>: <code>/dev/access_token_id</code> + BINDER_GET_SENDER_INFO — samgr's permission checks depend on it; its absence once caused the OH display blackout (the b98–b112 root cause).</li>
+      <li><b>SysV trio + POSIX MQ</b>: structs compile-time asserted against the reference layouts (ShmidDsUapi 112B, MqAttr 64B); SysV objects scoped per ipc_namespace.</li>
+      <li>The binder poll wake/availability fix converged four semantic divergences in one diff (the reference's three OR conditions in binder_has_work_ilocked).</li>
+    </ul>
+    <h3>Key numbers</h3>
+    <ul>
+      <li>With /data mounted and the service mesh at ~<b>89k txns/s</b>, binder lock REST sections averaged 9.2 µs (single-transaction max 73 ms — a watch row; not reproduced on re-runs).</li>
+      <li>pipe round trip p5a <b>18.3 µs</b>, unix dgram p5b <b>23–41 µs</b> (was 318.6 µs before D-14, −93%).</li>
+    </ul>
+    <p><b>Compatibility:</b> the UAPI is byte-aligned with the reference binder header (_IOC encoding, packed layouts); LTP sem/msg/shm families + the full OH service set are the guards.</p>
+
+    <div class="mod-anchor" id="net"></div>
+    <h2><span class="anchor">§5</span>Network (kernel/src/net/, 18 files)</h2>
+    <ul>
+      <li>Bottom-up: SkBuff → ethernet → arp → ipv4 → icmp/udp/tcp (+ipv6); a socket layer with SOCK_STREAM/DGRAM/RAW + unix + netlink.</li>
+      <li><b>TCP (4,841 lines)</b>: ISN from a four-tuple hash + jiffies; MSS 1460, window 65535, RTO 200 ms–120 s, DELACK 40 ms, zero-window persist probes at 5 s (reference initial values).</li>
+      <li><b>AF_UNIX (3,707 lines)</b>: STREAM/SEQPACKET/DGRAM, the abstract namespace, SCM_RIGHTS fd passing, kernel-filled SCM_CREDENTIALS; peers are mutual Weaks (the fd is the only strong owner — "peer closed" = Weak::upgrade failure, no reference cycles); a single-lock send path with no AB-BA.</li>
+      <li>netlink set operations gate on NET_ADMIN, raw/packet on NET_RAW (errno precedence pinned from the reference source).</li>
+    </ul>
+    <h3>Key numbers</h3>
+    <ul>
+      <li>Same-rig lmbench: lat_pipe <b>3.74 vs 13.30 µs (3.56×)</b>.</li>
+      <li>unix stream p5c <b>24.9–26.8 µs</b> (was 276.5 µs, −90%).</li>
+      <li>TCP throughput/congestion benchmarks: not yet measured (stated plainly; covered by the LTP socket family + nettest).</li>
+    </ul>
+
+    <div class="mod-anchor" id="drivers"></div>
+    <h2><span class="anchor">§6</span>Drivers (kernel/src/drivers/)</h2>
+    <ul>
+      <li><b>virtio</b>: VirtIO 1.0 register layouts; VirtQueue (1,246 lines) + a PCI transport layer (2,146 lines, modern + transitional); the blk device-ID table was once mis-shifted (a reserved base address read as a device ID, zero matches with disable-legacy) — guarded by run.sh disable-legacy=on.</li>
+      <li><b>virtio-net lock order (INV-LOCK-6)</b>: {rx|tx}_queue → stats, one-way; an AB-BA where poll held stats across refill was convicted by the watchdog (two CPUs spinning against each other).</li>
+      <li><b>gpu/drm</b>: a framebuffer core + virtio-gpu + DRM/PRIME (the GEM_CLOSE shared-keep semantics fix); the display path carries GNOME and OH rendering.</li>
+      <li><b>intc</b>: PLIC/CLINT (riscv64), APIC (x86_64), GICv3 (aarch64); <b>pci</b>: ECAM enumeration.</li>
+      <li><b>Device MMIO discipline (D-17)</b>: everything through the kernel-side alias arena, the bootstrap identity mapping UNLINKed after the boot-stack switch — no low identity window at runtime, and uaccess has no identity hole.</li>
+    </ul>
+
+    <div class="mod-anchor" id="trace"></div>
+    <h2><span class="anchor">§7</span>Observability (kernel/src/trace/ + debug/)</h2>
+    <ul>
+      <li><b>The unified trace-event framework (D-15)</b>: one declaration-table row = group/name/id/print-fmt/fields/typed record function; the tracefs (<code>/sys/kernel/tracing</code>) tree and byte formats align exactly (tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…). Currently <b>51 events / 16 groups</b> (sched, kmem, raw_syscalls, block, binder, the ext4 family, jbd2, rux:epoll).</li>
+      <li><b>Measured gate cost</b>: disabled sites compile to one load+test+branch (verified point by point in release disassembly); enabling costs <b>+13–19 ns/record</b>; image cost +0.18%.</li>
+      <li><b>kallsyms (D-3)</b>: a compile-time symbol table in .rodata (2.4MB names + 0.7MB index @ ~22.6k symbols), zero boot cost, standard /proc/kallsyms lines.</li>
+      <li><b>census + heal</b>: per-task per-field tick observation + phantom-preempt adjudication + a 20 ms starvation bound; IF=0 share <b>25.7%→20.4%</b>, longest cli segment 594–599 ms one-shot → <b>6–9 ms</b>, WAKE-STRANDED 233→31.</li>
+      <li><b>The debug= switch table is frozen at 59 entries</b> (legacy): new observability is tracepoint-only.</li>
+    </ul>
+
+    <div class="mod-anchor" id="archs"></div>
+    <h2><span class="anchor">§8</span>The three port layers (kernel/src/arch/)</h2>
+    <p>Details in the <a href="riscv64.html">porting guide</a> and <a href="boot.html">boot flow</a>. Highlights:</p>
+    <ul>
+      <li><b>riscv64</b>: OpenSBI M→S mode, Sv39; a 288-byte PtRegs (orig_a0 rollback); SUM-bit uaccess + an exception table; Sstc direct stimecmp writes; a 9-bit ASID atomic bitmap allocator.</li>
+      <li><b>x86_64</b>: multiboot1 + the bzImage boot protocol; FSGSBASE/lazy-FPU/PCID levers (switch −58%); SMAP via pushfq EFLAGS.AC brackets (<a href="#d18">D-18</a>, ~55 ns — dodging the TCG STAC/CLAC #UD); userspace W^X.</li>
+      <li><b>aarch64</b>: QEMU virt GICv3 (requires <code>-M virt,gic-version=3</code>); an embedded DTB blob; TPIDR_EL0 as the task TLS state; EL0 FP traps capturing NEON state; TASK_SIZE 256GB, TCR IPS=44-bit.</li>
+    </ul>
+
+    <h2 id="divergences"><span class="anchor">§9</span>The design-divergence register (19 entries)</h2>
+    <p>Source: <code>docs/architecture/design-divergences.md</code>. Each entry must pass three gates — external compatibility intact, affected LTP families green, zero upstream breakage; entries are never deleted, superseded ones keep history.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th style="width:90px">ID</th><th>Design · benefit · key numbers · known cost</th></tr></thead>
+        <tbody>
+          <tr><td id="d1"><b>D-1</b></td><td><b>The global run queue</b>: no per-CPU queues, no balancer — one source of truth for scheduling order; all forensics reason about one structure. Hold measured 2786 ns (band 1200–7320). Cost: a contention ceiling at high core counts + locality loss (registered).</td></tr>
+          <tr><td><b>D-2</b></td><td><b>Packed kernel-stack slab</b> (x86_64): 85.3KB/stack vs 128KB, 99.9% slot packing, 3,445 live tasks zero canary; non-gated archs compile it out. Cost: side-table locks + 6.7% tail waste.</td></tr>
+          <tr><td><b>D-3</b></td><td><b>Compile-time symbol table in .rodata</b>: zero boot cost, 2.4MB names + 0.7MB index @22.6k symbols, shared by kallsyms/backtraces/%ps. Cost: image +3.1MB.</td></tr>
+          <tr><td><b>D-4</b></td><td><b>The procfile! /proc formatter macro</b>: one declaration table casts the renderer + shape tests, killing the format-drift class (vmstat/meminfo/status byte-identical). Cost: ~18 hand-written files remain.</td></tr>
+          <tr><td><b>D-5</b></td><td><s>The tracepoint! declaration macro</s> — superseded by D-15, kept for history.</td></tr>
+          <tr><td><b>D-6</b></td><td><b>Capability-checked file-ops declarations</b>: duplicate installs are compile errors, errno mapping in one point (paid incident: an epoll fd's EBADF spun the OH loop 155,991 times). Migration complete.</td></tr>
+          <tr><td><b>D-7</b></td><td><b>Typed per-CPU CpuLocal&lt;T,N&gt;</b>: accessible only via with(f); guard lifetime = the IRQ-off window; out-of-range ids take the survival arm. Guard: changes require a release-strong pbench boot.</td></tr>
+          <tr><td><b>D-8</b></td><td><b>Direct-write jbd2 commit</b> (no replay window, no revoke-cancel): the 8–12 synchronous round trips per unlink/rmdir are gone (p6_mkdrmdir 52–58 ms → single-digit ms); on-disk format unchanged, recovery = e2fsck.</td></tr>
+          <tr><td><b>D-9</b></td><td><b>LD_* environment scrubbing for secure-exec</b>: at AT_SECURE the kernel deletes all LD_* before installing envp (libc-independent defense in depth). Visible difference: /proc/&lt;pid&gt;/environ omits LD_*.</td></tr>
+          <tr><td><b>D-10</b></td><td><b>Result-typed internal error API</b> (an Errno enum, negative errno mapped exactly once per call chain): file-locks, xattr and the VFS inode-op tables converted.</td></tr>
+          <tr><td><b>D-11</b></td><td><b>Typed lock keys</b>: nesting = a trait-impl table; acquiring in reverse does not compile, zero runtime. Used by the GRQ, futex buckets and wait slots.</td></tr>
+          <tr><td><b>D-12</b></td><td><b>ext4 read-miss window batch fill</b>: one round trip fills the whole miss window, contiguous segments merged into ≤64-block/128KiB requests — the prerequisite for desktop-scale images (per-page synchronous commits cost ~1.8 ms under TCG). Cost: the miss path holds EXT4_BIG_LOCK (correctness first).</td></tr>
+          <tr><td><b>D-13</b></td><td><b>Batched metadata publication + discard-on-free</b>: PUB_BATCH=64 batching + forgetting dead blocks + full-block overwrite without reads. p6_mkdrmdir 29,796→2,107 µs, p99 54→16.4 ms.</td></tr>
+          <tr><td><b>D-14</b></td><td><b>The measured-wait wakeup preemption gate</b>: poke a busy CPU only when the wakee's measured wait ≥6 ms. 74-byte unix streams 275 µs→~2.5 µs, p5 family 10–18×. Cost: sub-6ms ping-pong wakeups wait for slice expiry.</td></tr>
+          <tr><td><b>D-15</b></td><td><b>The single-declaration tracepoint table</b>: one row = the whole event, armed() a single disabled-path branch, typed arguments are compile errors; tracefs byte-aligned. Cost: 10 u64 slots per record.</td></tr>
+          <tr><td><b>D-16</b></td><td><b>The deferred-free timer ring</b>: 16,384 slots + a 1500 ms wall-clock drain (covering QSBR-invisible unaccounted borrows). Revisit condition: once borrows become RcuHead, delete the ring.</td></tr>
+          <tr><td><b>D-17</b></td><td><b>The kernel-side device alias arena</b>: no identity MMIO window at runtime, no uaccess identity hole (a bad user pointer faults instead of reading physical memory). Guards: PF-NOCTX/SMAP-VIOL beacons stay silent.</td></tr>
+          <tr><td><b>D-18</b></td><td><b>SMAP via the pushfq EFLAGS.AC sequence</b>: STAC/CLAC unconditionally #UD under TCG (convicted by paired trials); ~55 ns per bracket, boots on hardware and TCG alike.</td></tr>
+          <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-rig A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="rust-native"><span class="anchor">§10</span>Rust-native engineering (register highlights)</h2>
+    <p>Thesis: externally reference-compatible, internally <b>not a C→Rust translation</b> — correctness and speed come from the type system, ownership, or internal architectures the reference does not have. Every entry carries numbers measured by this repository's instruments (entries without evidence are placeholders in the G bucket).</p>
+    <ul>
+      <li><b>The type system turns bug classes into compile errors</b>: D-19's six misuse classes caught by rustc; the S-1 concurrency-primitive model check (loom interleavings + Kani proofs of INV-M1..M5) caught a real pid-0 recursion bug within its first 90 seconds; D-11 lock keys, D-7 CpuLocal, the WalkClaim lockless dcache (stat 0.643→0.423 µs).</li>
+      <li><b>Safe-by-construction shapes are themselves optimizations</b>: D-1's single-structure forensics (how the OH campaign actually found the scheduling bug family); the leaf-table direct unmap (vm-op family 15→5 s/CPU-min); the negative-lookup memo (oracle 475k/963k/0).</li>
+      <li><b>Semantic divergences are found by diffing the reference tree and fixed by adopting its behavior</b> (root causes, not symptoms): execve ETXTBSY, SysV IPC per namespace, shared-futex keys resolved to the physical word, tmpfs MAP_SHARED coherence through the page cache, the binder poll triple-condition, O_DIRECT reads flushing the dirty page-cache range first, SYSRET TF|RF fallback, UTF-8 validation on every user-writable string.</li>
+      <li><b>Safety properties C kernels rent from tools</b>: constructive memory safety + SMAP/CR0.WP/no identity window/userspace W^X/seccomp/capabilities + a designed panic surface (every instance retired with a regression test).</li>
+      <li><b>Redesigns that landed as performance (same-rig A/B)</b>: lmbench four-row leads (lat_ctx 3.4×, lat_pipe 2.6×, exec 1.39×, fstat 1.19×), switch −58%, p5 family −90~93%, the fs metadata family −65~−88%; Geekbench multi-core 7332 (4-CPU pinned).</li>
+      <li><b>Honest placeholders (bucket G)</b>: the typed-binder transaction FSM, an ext4/jbd2 host-side test slice, an internal completion-ring writeback base — no A/B numbers yet; the only way out is a measured row.</li>
+    </ul>
+
+    <h2 id="safety"><span class="anchor">§11</span>Security and performance together (ledger highlights)</h2>
+    <p>Thesis: <b>security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> Source: <code>docs/architecture/safety-and-performance.md</code>.</p>
+    <ul>
+      <li><b>Bug taxonomy v1</b> (3,358 deduplicated commits adjudicated one by one): of 34 memory-corruption defects, <b>23 live in explicit unsafe blocks/arch assembly</b> and <b>11 in safe code</b> — all ownership/refcount/lock-protocol classes safe Rust does not type-check today; <b>zero</b> pointer-expression defects (OOB/iterator invalidation/wild-pointer arithmetic/format strings) in safe code. 6 of 34 were caught by review before any boot.</li>
+      <li><b>The unsafe surface is enumerated and contracted</b>: 12.9% of lines; 47 service files compile-time forbid(unsafe_code), 56 more already unsafe-free; SAFETY comments cover 64%; 157 Kani harnesses prove the core unsafe code for all inputs.</li>
+      <li><b>Every performance row is paired with its safety sentence</b>: e.g. the switch path carries typed per-CPU storage + keyed locks; lmbench/Geekbench numbers and the census-adjudicated structure share a table; the cost side (futex wake→run ~10 ms behind a running task, tick-quantized) is recorded as-is.</li>
+      <li><b>The honest gap register v1</b>: KASLR (no boot entropy source), kernel text/rodata W^X tightening, compiler stack protectors, KASAN-style poisoning breadth, KCSAN watchpoints, kallsyms masking — each with what closing it looks like.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

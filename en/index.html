@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rux — A Linux ABI-compatible OS kernel written from scratch in Rust</title>
+<meta name="description" content="Rux is a Linux ABI-compatible operating system kernel written entirely in Rust: unmodified Ubuntu 22.04 boots to a GNOME Shell desktop and unmodified OpenHarmony boots all 135+ services. ~330k lines of Rust, 345+ syscalls, three architectures.">
+<link rel="stylesheet" href="../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="../testing/index.html">Testing</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../index.html">中文</a><a class="on" href="index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+
+<section class="hero">
+  <div class="container hero-grid">
+    <div>
+      <span class="chip acc"><span class="dot o"></span>Built end-to-end by AI agents · humans review and merge</span>
+      <h1>A Linux ABI-compatible kernel<br><span class="grad">written from scratch in Rust</span></h1>
+      <p class="lede">Every subsystem of Rux — scheduler, memory management, ext4, binder, the network stack and the verification framework — was implemented by AI agents; humans set goals, review and merge. <b>Unmodified Ubuntu 22.04</b> boots to a GNOME Shell desktop and <b>unmodified OpenHarmony</b> boots all 135+ services — no patches, no rebuilds, no configuration changes.</p>
+      <div class="hero-badges">
+        <span class="chip">Rust no_std</span>
+        <span class="chip">POSIX compatible</span>
+        <span class="chip">345+ syscalls</span>
+        <span class="chip">x86_64 · riscv64 · aarch64</span>
+        <span class="chip">ext4 / binder / ELF</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="../guides/getting-started.html">Get started →</a>
+        <a class="btn btn-ghost" href="../architecture/design.html">Architecture &amp; design</a>
+        <a class="btn btn-ghost" href="https://github.com/topkernel/Rux">GitHub</a>
+      </div>
+      <a class="repo-addr" href="https://github.com/topkernel/Rux">git clone https://github.com/topkernel/Rux.git</a>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar"><i></i><i></i><i></i><span>rux — zsh</span></div>
+      <div class="terminal-body"><div class="ln"><span class="c"># ① Unmodified Ubuntu 22.04 → GNOME desktop (x86_64 + KVM)</span></div>
+<div class="ln"><span class="p">$</span> make ubuntu-run</div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] smp: 4 vCPU online (q35)</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] virtio-blk: root mounted (ext4)</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">ubuntu</span> <span class="dim">] systemd 249 — user session up</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">gdm</span> <span class="dim">] greeter ready … login ok</span></div>
+<div class="ln"><span class="ok">[ gnome-shell ] frame on screen ✓</span></div>
+<div class="ln"> </div>
+<div class="ln"><span class="c"># ② Unmodified OpenHarmony → all services</span></div>
+<div class="ln"><span class="p">$</span> ./oh-boot.sh --accel kvm</div>
+<div class="ln"><span class="dim">[</span> <span class="hi">rux</span> <span class="dim">] binder: global context ready</span></div>
+<div class="ln"><span class="dim">[</span> <span class="hi">oh</span> <span class="dim">] servicemgr: 135+ services up</span></div>
+<div class="ln"><span class="ok">[ launcher ] home screen rendered ✓</span></div>
+<div class="ln"> </div>
+<div class="ln"><span class="c"># ③ In-kernel test suite</span></div>
+<div class="ln"><span class="p">$</span> make test</div>
+<div class="ln"><span class="ok">1267 / 1267 passed ✓</span> <span class="dim">(riscv64)</span></div>
+<div class="ln"><span class="acc">▌</span> <span class="dim">ABI is the contract; internals are free.</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section-tight">
+  <div class="container">
+    <div class="stats">
+      <div class="stat"><div class="v">330<em>k+</em></div><div class="l">lines of Rust</div></div>
+      <div class="stat"><div class="v">345<em>+</em></div><div class="l">syscalls</div></div>
+      <div class="stat"><div class="v">4200<em>+</em></div><div class="l">test cases</div></div>
+      <div class="stat"><div class="v">3</div><div class="l">architectures</div></div>
+      <div class="stat"><div class="v">1084<em>/1869</em></div><div class="l">LTP passing</div></div>
+      <div class="stat"><div class="v">19</div><div class="l">design divergences (registered)</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="milestones">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Boots · verified on real images</span>
+      <h2>Verified with unmodified distributions</h2>
+      <p>Compatibility is verified directly against unmodified distribution images and upstream userspace — no porting-layer adapters. All screenshots are native framebuffer/serial captures from the Rux kernel.</p>
+    </div>
+    <div class="gallery grid-2">
+      <figure class="shot">
+        <img src="../images/ubuntu-gnome-shell-frame-2026-10-27.png" alt="GNOME Shell desktop" loading="lazy">
+        <figcaption class="cap"><div class="t">GNOME Shell desktop, fully composited frame</div><div class="d">top bar / terminal / workspace thumbnails · reproduced across three boots</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="../images/gdm-greeter-login-2026-11-01.png" alt="GDM greeter" loading="lazy">
+        <figcaption class="cap"><div class="t">GDM login greeter</div><div class="d">udevd → logind → gdm3 → PAM, end to end · 2026-11-01</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="../images/ubuntu-gnome-xterm-conversation-2026-10-28.png" alt="typed terminal conversation" loading="lazy">
+        <figcaption class="cap"><div class="t">Typed shell conversation in a GNOME session</div><div class="d">typing → echo → bash reply · pixel-identical across two boots</div></figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="../images/oh-launcher-2026-10-31.png" alt="OpenHarmony SystemUI" loading="lazy">
+        <figcaption class="cap"><div class="t">OpenHarmony SystemUI lock screen</div><div class="d">launcher-chain milestone · 2026-10-31</div></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="platforms">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Platforms · three architectures</span>
+      <h2>One kernel tree, three architectures</h2>
+      <p>x86_64 is the first-priority development and test platform (KVM near-native acceleration; all functional/performance/LTP testing runs there); riscv64 and aarch64 are kept as three-architecture build + regression gates.</p>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Architecture</th><th>QEMU machine</th><th>Accel</th><th>Userspace</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><b>x86_64</b></td><td class="mono">q35</td><td>KVM (primary)</td><td>Ubuntu 22.04 (glibc)</td><td><span class="chip ok"><span class="dot g"></span>GNOME desktop boots · main LTP/perf rig</span></td></tr>
+          <tr><td><b>riscv64</b></td><td class="mono">virt</td><td>TCG (MTTCG)</td><td>Ubuntu 22.04 / musl minimal rootfs</td><td><span class="chip ok"><span class="dot g"></span>Desktop + kernel suite 1267/1267</span></td></tr>
+          <tr><td><b>aarch64</b></td><td class="mono">virt (gic-version=3)</td><td>TCG</td><td>Interactive shell</td><td><span class="chip cyan"><span class="dot o"></span>shell / signals / kernel suite green</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="why">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Design · tenets</span>
+      <h2>The ABI is the contract; the internals are a clean-room design</h2>
+      <p>Externally: syscall numbers and semantics, ELF/auxv, futex, the procfs layout — down to the <code>uname</code> strings glibc's loader keys on — all match Linux. Internally: free of historical baggage, better designs in Rust — every internal divergence is registered with compatibility evidence.</p>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">📜</span>Compatibility as the constitution</h3>
+        <p>POSIX and the Linux kernel ABI are the supreme constraints: LTP families pass family by family; distribution userspace runs unmodified.</p>
+        <div class="nums">345+ syscalls · LTP <b>1084/1869</b></div>
+        <a class="more" href="../architecture/design.html#divergences">Divergence register →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛡️</span>Rust safety, with a ledger</h3>
+        <p>All-Rust kernel (no_std). All 34 memory-corruption defects in history are individually filed: 23 in audited <code>unsafe</code>/assembly, 11 in safe code (all ownership/lock-protocol classes safe Rust does not type-check today); pointer-expression classes (OOB, wild pointers, format strings) are zero in safe code.</p>
+        <div class="nums">unsafe lines 12.9% · Kani 157 proofs</div>
+        <a class="more" href="../security/index.html">Security section →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🤖</span>Parallel AI engineering</h3>
+        <p>Multiple agents develop in parallel: one worktree and branch per task, the main session reviews and merges. Several merges per day, full regression protection.</p>
+        <div class="nums">worktrees <b>130+</b> · 5 concurrent lanes</div>
+      </div>
+      <div class="card">
+        <h3><span class="ico">⚡</span>Performance is a gate</h3>
+        <p>Every merge is reviewed for both function and performance: three gate tiers + six guarded domains (memory/scheduler/fs/IRQ/IPC/binder) — no merge without measurement.</p>
+        <div class="nums">GRQ hold <b>~2.8 µs</b> measured</div>
+        <a class="more" href="../performance/index.html">Performance section →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="modules">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Modules · map</span>
+      <h2>What the kernel is made of</h2>
+      <p>Every subsystem has its own design page with mechanisms, data structures and measured numbers. Summary below.</p>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">🧮</span>Scheduler</h3>
+        <p>A single global run queue (GRQ): for the 2–4 vCPU target it eliminates load balancing and task stealing entirely; wakeup paths go direct.</p>
+        <div class="nums">hold <b>~2.8µs</b> · census 8/32 in band</div>
+        <a class="more" href="../architecture/design.html#sched">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🧠</span>Memory management</h3>
+        <p>Buddy allocator + magazine small-object allocation, global page cache, per-task VMAs; the munmap churn-race family fully closed.</p>
+        <div class="nums">class-lock sections <b>19.7M</b>/boot · gate ≤25M</div>
+        <a class="more" href="../architecture/design.html#mm">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">💾</span>File systems</h3>
+        <p>ext4 (rw) + async batched block reads + buffer-cache hit-rate protection; pbench filesystem medians all in band.</p>
+        <div class="nums">buffer cache hit rate <b>99.1%</b></div>
+        <a class="more" href="../architecture/design.html#fs">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📡</span>IPC &amp; binder</h3>
+        <p>A complete OpenHarmony-compatible binder, unix sockets, pipes, SysV IPC; the cross-process deadlock family fixed and regressed.</p>
+        <div class="nums">pipe round trip <b>µs class</b> · full OH service mesh</div>
+        <a class="more" href="../architecture/design.html#ipc">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🌐</span>Network stack</h3>
+        <p>Hand-written TCP/IP stack: socket API semantics aligned; loopback and local paths continuously verified by LTP socket families and benchmarks.</p>
+        <div class="nums">socket families growing in LTP</div>
+        <a class="more" href="../architecture/design.html#net">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔌</span>Drivers</h3>
+        <p>virtio-blk (PCI/MMIO, async completion rings), serial console, input; the display path carries GNOME and OH rendering.</p>
+        <div class="nums">completion path rebuilt through several concurrency rounds</div>
+        <a class="more" href="../architecture/design.html#drivers">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔍</span>Observability</h3>
+        <p>A unified trace-event framework + tracefs (semantics aligned with Linux), syscost census, kallsyms, task dumps, watchdog.</p>
+        <div class="nums">new observability is <b>tracepoint</b>-only</div>
+        <a class="more" href="../architecture/design.html#trace">Design →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🧭</span>Arch port layer</h3>
+        <p>Boot protocols (bzImage / image headers), trap entry, context switch, TLB management; ~90% of the kernel is arch-independent.</p>
+        <div class="nums">x86_64 / riscv64 / aarch64</div>
+        <a class="more" href="../architecture/design.html#archs">Design →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="quality">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Quality · sections</span>
+      <h2>The numbers</h2>
+      <p>Four standalone sections: Testing (LTP / stability / stress), Performance (gates + benchmark panel + optimization ledger), Security (taxonomy + formal verification + gap register) — every number carries its rig and date.</p>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">🧪</span>LTP compliance</h3>
+        <p>The full 1,869-case scan grew from 35 early passes to 1,084; every round is archived and new failures are isolated-rerun twice before being called regressions.</p>
+        <div class="nums">current <b>1084 / 1869</b> (r27)</div>
+        <a class="more" href="../testing/ltp.html">LTP scan →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛡️</span>Stability &amp; stress</h3>
+        <p>Kernel suite green on three architectures, 2,100 s desktop gates ×3, census/heal self-correction MISS=0; a standing 11-QEMU stress fleet (monkey/fuzz/memstorm).</p>
+        <div class="nums">make test <b>1267/1267</b> · 2100s zero panic</div>
+        <a class="more" href="../testing/stability.html">Stability →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📊</span>Performance</h3>
+        <p>Three gate tiers + six guarded domains. Same-rig KVM-vs-KVM vs Linux: 14 paired cases, 9 ahead (page fault 2.26–2.45×, mmap 4.2×, pipe 3.56×), 5 behind (worst 1.82×); Geekbench MC +4.3%, SC +5.1%.</p>
+        <div class="nums">14 paired cases · full ledger</div>
+        <a class="more" href="index.html">Performance →</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔐</span>Security</h3>
+        <p>All 34 memory-corruption defects in history individually adjudicated (23 audited unsafe/asm + 11 safe ownership-class), zero pointer-expression defects in safe code; 157 Kani harnesses prove the core unsafe code for all inputs.</p>
+        <div class="nums">unsafe lines 12.9% · gaps stated plainly</div>
+        <a class="more" href="../security/index.html">Security →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="quickstart">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Quickstart</span>
+      <h2>Three commands</h2>
+      <p>A Linux host + QEMU is all you need. Full requirements, toolchains and troubleshooting in <a href="../guides/getting-started.html">Getting started</a>.</p>
+    </div>
+    <div class="card-grid grid-3">
+      <div class="card">
+        <h3><span class="ico">①</span>Clone</h3>
+        <pre><code>git clone https://github.com/topkernel/Rux
+cd Rux</code></pre>
+        <p>A pure Rust workspace — no submodules, no vendored dependency images.</p>
+      </div>
+      <div class="card">
+        <h3><span class="ico">②</span>Build</h3>
+        <pre><code>make build                 <span class="c"># riscv64 (default)</span>
+make build PLATFORM=x86_64 <span class="c"># x86_64</span></code></pre>
+        <p><code>Kernel.toml</code> is compiled into <code>kernel/src/config.rs</code> at build time.</p>
+      </div>
+      <div class="card">
+        <h3><span class="ico">③</span>Run</h3>
+        <pre><code>make run        <span class="c"># musl minimal rootfs → shell</span>
+make ubuntu-run <span class="c"># Ubuntu 22.04 → GNOME desktop</span></code></pre>
+        <p>The serial port (<code>ttyS0</code>) is the primary log; GUI images boot with <code>-snapshot</code> so the shared image is never written.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="docs">
+  <div class="container">
+    <div class="sec-head">
+      <span class="kicker">Docs · map</span>
+      <h2>Documentation index</h2>
+    </div>
+    <div class="card-grid grid-4">
+      <div class="card">
+        <h3><span class="ico">🏛️</span>Architecture</h3>
+        <a href="../architecture/design.html">Architecture &amp; module design (sched/mm/fs/IPC/net/drivers/observability)</a>
+        <a href="../architecture/structure.html">Code layout</a>
+        <a href="../architecture/boot.html">Boot flow (bzImage / image headers / three archs)</a>
+        <a href="../architecture/memory.html">Memory management</a>
+        <a href="../architecture/riscv64.html">Porting guide</a>
+        <a href="../architecture/kernel-lock.html">Lock ordering invariants</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🔬</span>Quality sections</h3>
+        <a href="index.html">Performance (gates / lmbench / Geekbench / queue)</a>
+        <a href="../security/index.html">Security &amp; formal verification (taxonomy / Kani / gaps)</a>
+        <a href="../testing/index.html">Testing overview</a>
+        <a href="../testing/ltp.html">LTP scan</a>
+        <a href="../testing/ltp-full.html">LTP full case list (1,869)</a>
+        <a href="../testing/stability.html">Stability</a>
+        <a href="../testing/stress.html">Stress</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">🛠️</span>Guides</h3>
+        <a href="../guides/getting-started.html">Getting started: environment → build → run</a>
+        <a href="../guides/development.html">Contributing: workflow / gates / debugging</a>
+        <a href="../guides/configuration.html">Kernel configuration (Kernel.toml)</a>
+      </div>
+      <div class="card">
+        <h3><span class="ico">📈</span>Progress</h3>
+        <a href="../progress/roadmap.html">Milestones &amp; roadmap</a>
+        <a href="../progress/changelog.html">Changelog highlights</a>
+        <a href="../progress/quickref.html">Command reference</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License · <a href="https://github.com/topkernel/Rux">github.com/topkernel/Rux</a></span>
+      <span>~330,000 lines of Rust · built by AI agents under human direction · 2026</span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=16"></script>
+</body>
+</html>

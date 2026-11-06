@@ -620,3 +620,17 @@ details.family summary:hover { background: #e9edf3; }
     .terminal { font-size: 10.5px; }
     .rv { transform: translateY(10px); }
 }
+
+/* ---------- 语言切换 ---------- */
+.lang-sw {
+    display: inline-flex; align-items: center; flex: none;
+    border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden;
+    margin-left: 4px;
+}
+.lang-sw a {
+    padding: 5px 10px; font-size: 12px; font-family: var(--mono);
+    color: var(--text-2); border-radius: 0; line-height: 1.4;
+}
+.lang-sw a:hover { text-decoration: none; color: var(--text); background: rgba(27,35,48,0.05); }
+.lang-sw a.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
+.lang-sw a + a { border-left: 1px solid var(--border-strong); }

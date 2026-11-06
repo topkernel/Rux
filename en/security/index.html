@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security &amp; formal verification · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Security &amp; formal verification</h1>
+    <div class="sub">Bug taxonomy · unsafe-surface ledger · formal verification · runtime hardening · honest gap register — living document docs/architecture/safety-and-performance.md, evidence accrued every merge round</div>
+
+    <h2 id="thesis"><span class="anchor">§1</span>Thesis</h2>
+    <div class="callout"><b>Security checks happen at compile time and vanish from the fast paths — the fast design and the safe design are the same design.</b> C kernels trade safety for speed; Rux moves the important checks into the type system and build time so the fast paths no longer carry them. §8 pairs each performance number with the safety property it carries.</div>
+
+    <h2 id="taxonomy"><span class="anchor">§2</span>Bug taxonomy v1 (every commit adjudicated)</h2>
+    <p>Method: all <b>3,358 deduplicated non-merge commits</b> (2,702 kernel-code subjects) + hunting ledgers + fix diffs, each of 169 candidates individually adjudicated; three sweeps to v1 (2026-11-03).</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th class="num">Count</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Memory-corruption defects (all history)</td><td class="num"><b>34</b></td><td>each with fix commit and reproduction/regression evidence</td></tr>
+          <tr><td>— in explicit unsafe blocks / arch assembly</td><td class="num">23</td><td>raw <code>*mut Task</code> protocols, UnsafeCell allocator metadata, etc.</td></tr>
+          <tr><td>— in safe code</td><td class="num">11</td><td>all ownership/refcount/lock-protocol/stack-depth decisions that safe Rust does not type-check today, executed via trusted unsafe edges or unguarded stacks</td></tr>
+          <tr><td>Pointer-expression classes (OOB / iterator invalidation / wild-pointer arithmetic / format strings)</td><td class="num"><b>0</b></td><td>the classes dominating C kernel CVE history are <b>compile errors</b> here</td></tr>
+          <tr><td>Caught by review before any boot</td><td class="num">6 / 34</td><td>rows 7/13/18/21/32/33</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Representative rows (excerpt)</h3>
+    <ul>
+      <li>kthread pt_regs zeroing 168×168B overwrite (d047afad); x86 DF flag reversing rep movsb (e7070224).</li>
+      <li>aarch64 ldp wrong-slot + SPSR.M mis-sampling (92799345); copy_kernel_mappings, two cases (7a497838 / 963832a).</li>
+      <li>buddy split not marking allocated → double-allocation of the same block (016b3fa1); do_exit waking the parent first (3b39b732).</li>
+      <li>GRQ keyed-lock guard dropped as a bare statement → no mutual exclusion (2b092c49; keyed guards are now #[must_use]).</li>
+      <li>munmap chunked rework losing the tail TLB flush (row 34, fixed in c4a548d7; caught within hours by the OH battery — the synthetic probe was structurally blind because it read back the same stale state; race adjudicated from a 150-boot serial-log timeline).</li>
+    </ul>
+    <p>The only would-be OOB write in safe code (the pcp refill race) was stopped by a bounds check and ended as a loud panic ("the len is 32 but the index is 32", 165ee5fc) — loud and caught, not silent corruption.</p>
+
+    <h2 id="surface"><span class="anchor">§3</span>The unsafe surface and layered governance</h2>
+    <ul>
+      <li><b>Enumerated and contracted</b>: unsafe lines are <b>12.9%</b> of the kernel; the Framework layer carries 1,340 unsafe tokens (each block requiring a <code>// SAFETY:</code> comment; coverage 3,207/5,009 = 64%).</li>
+      <li><b>Service layer targets 100% forbid</b>: 47 files compile-time <code>forbid(unsafe_code)</code>, 56 more already unsafe-free; the first named shrink target <code>syscall/io.rs</code> went 69 tokens → 0 (typed entries + uaccess_safe typed copy_in/copy_out).</li>
+      <li><b>Layering</b> (kernel-layers.md, longest-prefix match, unmatched files default to the safest bucket): Framework (arch/mm primitives/interrupt/virtio core/trace/perf) allows audited unsafe; the service layer forbids it; dfx/ diagnostics are tracked separately; the trace module bans unsafe entirely.</li>
+      <li><b>Capsule boundary</b>: syscall entries validate and translate user pointers in one place; nothing else in the kernel touches user memory directly.</li>
+    </ul>
+
+    <h2 id="formal"><span class="anchor">§4</span>Formal verification (apparatus the reference kernel does not have)</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Layer</th><th>What it proves</th><th class="num">Scale</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">make verify</td><td>sync checks + property-based tests</td><td class="num">1104 proptests</td><td><span class="chip ok">every push, binding</span></td></tr>
+          <tr><td class="mono">make kani</td><td>Kani symbolic execution — proves the core unsafe code for all inputs</td><td class="num">157 harnesses</td><td><span class="chip cyan">nightly CI</span></td></tr>
+          <tr><td class="mono">make spin</td><td>SPIN concurrency models (futex / lock ordering / interrupt-preempt / sched enqueue-dequeue)</td><td class="num">4 models</td><td><span class="chip cyan">nightly CI</span></td></tr>
+          <tr><td class="mono">make miri</td><td>Miri UB detection (verify mirror crate, incl. loom interleavings)</td><td class="num">nightly</td><td><span class="chip cyan">nightly CI</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><b>Mirror-sync discipline</b>: the verify crate hand-mirrors the proved algorithms and <code>scripts/verify_sync_check.py</code> enforces byte-equivalence with the kernel originals — proofs stay pinned to the code they cover; a kernel change without its mirror update fails make verify and the CI gate.</li>
+      <li><b>Cadence</b>: per-push (mirror sync + full proptest) → nightly (Kani all harnesses / Miri / SPIN — they do not fit a per-commit budget) → manual (make verify &amp;&amp; make kani before declaring a proof-bearing change done).</li>
+      <li><b>Catch record</b>: the concurrency-primitive state-machine mirror (SleepMutex; loom 8 interleavings + Kani proofs of INV-M1..M5) caught a real pid-0 recursion bug within its first 90 seconds (011a71c5); exhaustion also yields a design-characterization proof — with pure fair contention two tasks cannot strand, and 3+ waiters need the R85 timer bound.</li>
+    </ul>
+
+    <h2 id="runtime"><span class="anchor">§5</span>Runtime hardening inventory (present)</h2>
+    <ul>
+      <li><b>User/kernel boundary</b>: SMAP (enabled via the EFLAGS.AC bracket, D-18, ~55 ns — avoiding the TCG STAC/CLAC #UD), CR0.WP from the earliest boot, no identity MMIO window (D-17 — uaccess has no identity hole), PF-NOCTX/SMAP-VIOL beacons silent across the whole suite.</li>
+      <li><b>Userspace</b>: W^X (NX mappings, PT_GNU_STACK, READ_IMPLIES_EXEC), seccomp (STRICT/FILTER + NO_NEW_PRIVS), capabilities (41 CAP_* UAPI numbers).</li>
+      <li><b>Kernel-stack guards</b>: stack canaries, depth probes (KSTACK-HW), a 0xC3 scribble ring on free.</li>
+      <li><b>Deferred-free isolation</b>: MmStruct/Task enter a 16,384-slot timer ring drained at 1500 ms — reclamation strictly separated from use.</li>
+      <li><b>Failure discipline</b>: Oops/panic in the reference report shape (CSRs + all GPRs + 32-frame backtrace), panic_on_oops sysctl, panic= reboot, pstore console.</li>
+      <li><b>Observable safety net</b>: unified tracepoints (51 events / 16 groups), census + heal self-correction, watchdog, kallsyms-symbolized backtraces.</li>
+    </ul>
+
+    <h2 id="panic"><span class="anchor">§6</span>The panic surface is a design surface, not a latent one</h2>
+    <ul>
+      <li>Every panic instance that ever fired was <b>eliminated with a regression test</b> (a dozen receipts on file): the UTF-8 printer family (non-UTF-8 comm once broke the panic printer at t=209 s), negative-memo null deref, mmprof slot namespace, the debug switch table, memwatch PFN bounds, binder dead-proc expect → bounded warning, timer same-CPU IRQ reentry, ext4 empty index root, aarch64 regs[31].</li>
+      <li>Principle: <b>loud and caught beats silent corruption</b> — bounds checks turn OOB writes into panics instead of letting corruption proceed.</li>
+    </ul>
+
+    <h2 id="gaps"><span class="anchor">§7</span>Honest gap register v1</h2>
+    <p>What is missing, stated plainly, with what closing it looks like (safety-and-performance.md §5):</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Status</th><th>Items</th></tr></thead>
+        <tbody>
+          <tr><td><span class="chip bad">Absent</span></td><td>KASLR (plumbing exists, no boot entropy source), kernel text/rodata W^X tightening (image RWX/RW without NX, no mark_rodata_ro), compiler stack protector / shadow-call-stack, hardened usercopy (only access_ok), module signing (module surface = registration only, no runtime code loading), KCSAN-class watchpoints, an eBPF-class runtime mitigation channel, kptr_restrict / kallsyms masking (/proc/kallsyms shows real addresses to all readers)</td></tr>
+          <tr><td><span class="chip warn">Partial</span></td><td>lockdep-class debugging (keys are compile-time facts + census MISS=0; a whole-tree runtime lock-order graph is missing), refcount hardening (page/frame refcounts are plain atomics — taxonomy rows 24/25 are exactly what a checked Refcount would catch), release overflow checks off (one line + measured cost closes it), KASAN-style poisoning breadth (debug-gated; small_alloc has no redzones), the LSM surface (hooks exist, selinuxfs permissive), namespaces (PID/IPC real; net/user/mount stubs), capability enforcement breadth (~18 gate points vs Linux ~120)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="pairs"><span class="anchor">§8</span>Security × performance paired evidence</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Performance result (same-rig A/B)</th><th>Safety property it carries</th></tr></thead>
+        <tbody>
+          <tr><td>Context switch −58% (three levers)</td><td>the switch path carries typed per-CPU storage (D-7: guard lifetime = the IRQ-off window) + keyed locks (D-11: nesting is a compile-time fact)</td></tr>
+          <tr><td>GRQ hold 2786 ns @ 126M syscalls</td><td>a single global structure = forensic reasoning (D-1; the OH-campaign scheduling bug family was actually found this way) + census adjudication every boot</td></tr>
+          <tr><td>nanosleep 772.6→662.7 ms (D-19)</td><td>six historical bug classes (clock-domain mixing / periodic re-arm / double-del / stale-id…) became compile errors</td></tr>
+          <tr><td>stat 0.643→0.423 µs (WalkClaim)</td><td>lockless reads via reader-bank publication + deferred retirement, no dangling-reference window; the first landing hit an existing defect and was reverted, then re-landed after the fix (history kept honest)</td></tr>
+          <tr><td>munmap 177→52 µs (leaf-table direct walk)</td><td>the chunked-TLB-flush race family (taxonomy row 34) closed with it; the OH crash storm of 66 SEGVs/boot → 3/3 clean</td></tr>
+          <tr><td>lmbench lat_ctx same-rig 3.39× / Geekbench MC 104%</td><td>all of it runs on the D-1/D-7/D-11 structures — the fast path is the safe path</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">All evidence in this section is recorded in the same change into <code>docs/architecture/safety-and-performance.md</code> (living ledger) and <code>docs/architecture/rust-native-register.md</code> (architecture register — no measured number means a placeholder).</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

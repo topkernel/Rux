@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contributing · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Contributing</h1>
+    <div class="sub">Workflow · merge gates · the debugging toolbox — the binding spec is AGENTS.md in the repository</div>
+
+    <h2 id="how"><span class="anchor">§1</span>How this project works</h2>
+    <p>Rux is developed by multiple AI agents in parallel — one worktree per task — while humans set goals, review and hold merge authority. Two constitutional principles:</p>
+    <ul>
+      <li><b>100% external compatibility</b>: full POSIX semantics + an ABI aligned with the reference (syscall numbers, ELF/auxv, futex, the ext4 on-disk format, the procfs layout). Any upstream software runs unmodified — the first constraint on every decision.</li>
+      <li><b>Internal freedom, registered divergences</b>: an internal divergence survives only behind the triple gate — external compatibility intact, affected LTP families green, zero upstream breakage — and is registered in <code>docs/architecture/design-divergences.md</code> (D-numbered, 19 entries). Example: a single global run queue instead of per-CPU queues + balancing.</li>
+    </ul>
+    <div class="callout">The repository is <b>English-only</b>: commit messages, comments, docs and code. Reports use plain engineering language with concrete numbers.</div>
+
+    <h2 id="flow"><span class="anchor">§2</span>The standard development flow</h2>
+    <ol>
+      <li>Create the task's worktree under <code>/home/william/rux-agents/&lt;name&gt;/</code> (<code>git worktree add</code>) — <b>never develop in the main repository</b>.</li>
+      <li>Build the kernel in place; commit fixes on a branch with English commit messages.</li>
+      <li>Pass the merge gates locally (§3) before review.</li>
+      <li>The main session cherry-picks into main → builds → smoke-boots (<b>push only if it reaches the login screen</b>) → pushes.</li>
+      <li>Merges touching the same files (e.g. the virtio completion path) need <b>semantic reconciliation</b>, not mechanical conflict resolution.</li>
+    </ol>
+    <p>Five background agents run concurrently by default; the quota-death recovery flow: inventory each worktree's uncommitted work/unmerged branches → land them (build + smoke first) → clean up orphaned QEMUs by PID → restore the full queue.</p>
+
+    <h2 id="gate"><span class="anchor">§3</span>The merge gate (binding for all kernel-code changes)</h2>
+    <p>Every merge is reviewed on two dimensions: <b>functional correctness and performance</b>. A functionally correct change that regresses performance does not merge until fixed or justified with numbers.</p>
+    <ol>
+      <li><b>Dual-arch build</b>: <code>PLATFORM=x86_64 make build</code>, then <code>rm build/.config && make build</code> — both rc=0.</li>
+      <li><b>riscv64 regression boot</b>: scripted serial on the minimal rootfs (cd/proc, rc=0, zero panics).</li>
+      <li><b>The full suite</b>: riscv64 <code>make test</code> all green.</li>
+      <li><b>The performance gate</b>: in-tree debug tooling (syscost / census probes / pbench) against <code>docs/development/perf-gate-baseline.md</code>.</li>
+    </ol>
+    <h3>Performance-gate tiers</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Tier</th><th>Applies to</th><th>Extra requirement</th></tr></thead>
+        <tbody>
+          <tr><td><b>Tier 1</b></td><td>all kernel changes</td><td>one quiet syscost boot: census in band (TERM-DESCHED 8±2, WAKE-REFUSED 32±4, no grid strands), ticks ≥99.5/s, zero new panic/OOM classes, syscall volume ±10%, key per-op averages ±20% or better</td></tr>
+          <tr><td><b>Tier 2</b></td><td>hot paths: mm/ sched/ fs/ ipc/ binder/ timer/ arch trap</td><td>plus one pbench boot: P1–P7 medians within ±20% or better</td></tr>
+          <tr><td><b>Tier 3</b></td><td>allocator or IRQ paths</td><td>plus an IF=0 measurement (the EFLAGS-pair probe)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>The six guarded domains (touching any requires an explicit report of that domain's check)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Domain</th><th>Guarded metrics</th></tr></thead>
+        <tbody>
+          <tr><td>Memory allocation / reclaim</td><td>small_alloc class-lock sections ≤ ~25M/boot, REST share ≤10%, no reclaim slow-path emergence, zone free floor unchanged</td></tr>
+          <tr><td>Scheduler</td><td>GRQ average hold band 1200–7320 ns (measured ~2.8 µs), census in band, wake→pick and context-switch cost in band</td></tr>
+          <tr><td>Filesystem hot paths</td><td>pbench fs rows (stat/mkdir+rmdir/unlink/write+fsync) in band, no new sync-write classes, buffer-cache hit rate ≥ baseline</td></tr>
+          <tr><td>Interrupts / IRQ paths</td><td>IF=0 share in band (currently 20.4%±3pp), closed cli segments 3–7 ms class, no new IRQ-OFF print classes</td></tr>
+          <tr><td>IPC</td><td>pipe / unix round-trip medians in band, truesize/writev path not regressed, connect-storm volumes in band</td></tr>
+          <tr><td>binder</td><td>SLOW-TXN classes stable, transaction throughput not regressed on standard loads</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>Principle:</b> every subsystem that can affect performance must be under gate measurement — if no existing tool measures it, <b>add a debug observability tool for it</b> (gated off by default). Measurement is part of the change, not an afterthought. Baselines move only through merges that passed their own tier.</div>
+
+    <h2 id="x86"><span class="anchor">§4</span>Platform priority: x86_64 + KVM first</h2>
+    <p>x86 + KVM is the fastest x86 virtualization on the host (near-native). Our own A/B: the reference probe <code>p1_null</code> 0.040 µs (KVM) vs 0.240 µs (TCG) — <b>6×</b>; IO/timer paths diverge more. Therefore:</p>
+    <ul>
+      <li>The primary dev/test/perf loop = x86_64 + KVM; all functional, performance, LTP and compatibility testing runs there first.</li>
+      <li>riscv64 / aarch64 remain <b>three-architecture build + suite regression gates</b> (TCG boots — KVM cannot emulate them on an x86 host) with no perf/compat duty for now.</li>
+      <li>~90% of the kernel (fs/mm/ipc/sched/syscall) is arch-independent — optimizations measured on x86/KVM carry to every arch; only entry/TLB/context-switch hot paths are x86-first.</li>
+      <li><b>The fair-comparison rule</b>: when comparing two kernels, both sides use the same accelerator.</li>
+    </ul>
+
+    <h2 id="rules"><span class="anchor">§5</span>Code and repository discipline</h2>
+    <ul>
+      <li><b>R-numbered comments</b>: ext4 read/write coherence, virtio completion ordering and wakeup-path lifetimes are historically bug-dense — read the R-numbered comments before changing them.</li>
+      <li><b>Lock ordering</b>: read <code>docs/architecture/lock-ordering.md</code> (INV-LOCK-*) before any lock nesting.</li>
+      <li><b>Observability policy</b>: new kernel observability goes through the unified trace-event framework as tracepoints (<code>kernel/src/trace/</code>, tracefs at <code>/sys/kernel/tracing</code>); the legacy <code>debug=</code> switch table is frozen and must not grow.</li>
+      <li><b>The probe-tarball policy</b>: guest test-case sources are archived only as <code>userspace/probes/probes.tar.gz</code> + an extract script — loose guest sources are never committed; host-side boot drivers (.py/.sh) stay in <code>test/</code> / <code>scripts/</code>.</li>
+      <li><b>Standing ledgers</b>: every merge round appends its safety properties, performance numbers and eliminated bug classes to <code>docs/architecture/safety-and-performance.md</code>; architectural advantages with measured evidence go into <code>docs/architecture/rust-native-register.md</code> (no number = placeholder).</li>
+      <li><b>The main repository root stays clean</b>: no scratch scripts, drivers, logs or images — not even gitignored ones; boot drivers and temp scripts live in your worktree's <code>run/</code>.</li>
+    </ul>
+
+    <h2 id="resources"><span class="anchor">§6</span>Image and resource discipline</h2>
+    <ul>
+      <li>All disk images live in <code>/home/william/rux-images/</code> (outside every repo/worktree); worktrees reference them <b>by symlink only</b> — real image bytes never enter a worktree.</li>
+      <li>Shared images boot only with <code>-snapshot</code> + <code>file.locking=off</code>.</li>
+      <li>Only kill QEMU processes you started (<code>pkill qemu</code> is forbidden); test runs default to <code>-smp 2 -m 1G</code>, SMP4/2G for final validation.</li>
+      <li>Long scans run detached (<code>setsid</code>); if QEMU fails to start under memory pressure, wait and retry instead of piling on.</li>
+    </ul>
+
+    <h2 id="debug"><span class="anchor">§7</span>The debugging toolbox</h2>
+    <h3>Logs and panics</h3>
+    <ul>
+      <li><b>The serial console is the primary log</b> (<code>console=ttyS0</code>). printk levels 0–7 match the reference; everything prints to UART during boot, dropping to emerg once the scheduler runs; userspace reopens with <code>dmesg -n 7</code>. All messages enter a 1 MB kmsg ring buffer, readable via <code>/proc/kmsg</code>, <code>syslog(2)</code>, <code>dmesg</code>.</li>
+      <li><b>Kernel panic</b> output includes file:line, CSRs (sstatus/scause/stval/sepc), all 31 GPRs, and a Call trace of up to 32 frames along the fp chain. Symbolize with <code>riscv64-linux-gnu-addr2line -e &lt;kernel&gt; &lt;addr&gt;</code>.</li>
+      <li><b>Offline forensics</b>: extract guest logs from a copied image with <code>debugfs</code> — no boot required.</li>
+    </ul>
+    <h3>Runtime switches</h3>
+    <ul>
+      <li><b>debug= boot flags</b> (legacy but functional): <code>debug=taskdump,watchdog</code> periodic task dumps + the spinlock-deadlock watchdog; <code>debug=memwatch</code> heap/page accounting for leak hunts. The authoritative table is <code>kernel/src/debug/switches.rs</code>.</li>
+      <li><b>The unified tracepoint framework (the new standard)</b>: a tracefs tree aligned exactly with the reference — <code>tracing_on</code>, <code>trace</code>, <code>trace_pipe</code>, <code>available_events</code>, <code>set_event</code>, <code>snapshot</code>, <code>events/&lt;group&gt;/&lt;event&gt;/enable</code>; two-level gating, an unarmed site pays one relaxed load.</li>
+      <li><b>hunt-wedge</b>: <code>./test/hunt-wedge.sh</code> captures deadlocks/hangs (a holder-annotated build + stress injection + on-site capture, paired with addr2line).</li>
+      <li><b>GDB</b>: <code>make debug</code>.</li>
+    </ul>
+
+    <h2 id="first"><span class="anchor">§8</span>A newcomer's first task</h2>
+    <ol>
+      <li><b>Environment verification</b>: finish <a href="getting-started.html">Getting started</a>, then explore <code>/proc</code> and <code>/dev</code> in the mrsh shell.</li>
+      <li><b>Run the tests</b>: watch make test's 1267 assertions go green; run one LTP quick set (<code>./run_quick.sh</code>).</li>
+      <li><b>Read one module</b>: <code>kernel/src/sched/</code> is recommended (11 files: the stop/deadline/rt/fair/idle class framework, the main loop <code>schedule()</code> → <code>__schedule()</code> → <code>context_switch()</code>) against the <a href="../architecture/design.html#sched">scheduler design page</a>.</li>
+      <li><b>Implement a small probe</b>: model it on an existing C probe in <code>test/</code>, cross-compile, drop it into the rootfs <code>/test/</code>, verify in the shell.</li>
+      <li><b>Claim a small fix</b>: pick a failing LTP case or a small bug and walk the full §2/§3 flow from branch to merge gate.</li>
+    </ol>
+
+    <h2 id="refs"><span class="anchor">§9</span>Required-reading index</h2>
+    <ul>
+      <li><code>AGENTS.md</code> — the binding development workflow (the source of this page's rules)</li>
+      <li><code>docs/architecture/lock-ordering.md</code> — required before virtio or any lock nesting</li>
+      <li><code>docs/architecture/design-divergences.md</code> — the divergence register (D-numbers)</li>
+      <li><code>docs/architecture/safety-and-performance.md</code> — the safety/performance evidence ledger</li>
+      <li><code>docs/development/perf-gate-baseline.md</code> — the performance gate baseline</li>
+      <li><code>docs/test/README.md</code> — the test-report index (every report carries its rig and date)</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

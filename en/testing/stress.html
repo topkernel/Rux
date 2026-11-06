@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stress · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Stress (the standing stress-fleet)</h1>
+    <div class="sub">High load + randomized monkey testing across a concurrent QEMU fleet, catching every anomaly class — design doc docs/test/stress-fleet.md</div>
+
+    <p>The standing stress fleet targets: wild writes (armed capture on the hunt chains), panics/hangs, leaks, fake-OOM recurrences, scheduler pathologies, perf-under-load drift (vs <code>docs/development/perf-gate-baseline.md</code>), and data corruption. Probes live in <code>test/stressng</code> and <code>test/cowrace</code>.</p>
+
+    <h2 id="roster"><span class="anchor">§1</span>Fleet roster</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Member</th><th>Kind</th><th>Load</th></tr></thead>
+        <tbody>
+          <tr><td>chains ×2</td><td>wild-write hunt chains</td><td>self-advancing hunt kernel + load chains (frozen, never restarted)</td></tr>
+          <tr><td>ltp-a/b/c/d</td><td>LTP sweep members</td><td>riscv64 TCG smp2/2G, random-start full LTP sweeps</td></tr>
+          <tr><td>monkey-a/b</td><td>monkey members</td><td>x86_64 KVM 4G, usbless OH image + randomized churn (storage hotplug, hilog flood/rotate, appspawn kill-restart, bm/hidumper/param walks, sync)</td></tr>
+          <tr><td>memstorm</td><td>memory storm</td><td>mmap/munmap/MAP_FIXED/mprotect/fork storms, dfx=periodic,memwatch,watchdog</td></tr>
+          <tr><td>fsfuzz</td><td>filesystem fuzzing</td><td>random-syscall fuzzer + file/pipe/socket/madvise/fork sequences</td></tr>
+          <tr><td>ltpm</td><td>control member</td><td>LTP sweeps on the current main kernel (worktree-vs-main drift control)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li><b>Round mechanics</b>: 1,800 s per round, serial to file, a classification line (decisive CRITICAL &gt; WARN &gt; WEDGE &gt; clean); <b>wedge rule</b>: no serial growth for ≥300 s → kill, mark WEDGE, keep the tail.</li>
+      <li><b>Host budget discipline</b>: adaptive fleet size, a hard floor of ≥10 GB free host memory (checked via <code>free</code> before every launch/ramp); QEMU launches niced +10; shared images only <code>-snapshot</code>/<code>snapshot=on</code> + <code>file.locking=off</code>; writable images are private reflink copies.</li>
+      <li><b>Standing shape: 2 chains + 9 members = 11 QEMUs</b>, guarded by a 30-minute central sweeper.</li>
+    </ul>
+
+    <h2 id="closed"><span class="anchor">§2</span>Root-caused classes (fleet wins)</h2>
+    <ul>
+      <li><b>The SIGILL family (kernel bug, fixed)</b>: read_counter() read the time CSR with the write-flavored form <code>csrrw a0, time, zero</code> — the whole instruction is illegal-instruction-prone; the mount hammer loop hit it within ~100 s on every build (toolchain zcb exonerated by paired trials). Fixed with the canonical read form <code>csrr</code>.</li>
+      <li><b>Seven user-length round-up overflows (fixed)</b>: fsfuzz r172 drove madvise length=−1 into <code>attempt to add with overflow</code> (syscall/memory.rs); all seven user-length round-ups (madvise/mprotect/msync/mremap/mincore/mlock/munlock) gained wrap checks (EINVAL, reference end-wrap semantics); post-fix the deterministic seed stream ran 150 s+ with zero panics (v4 died within 60 s).</li>
+      <li><b>The zero-serve family (excluded)</b>: fleet LTP sweeps were round-for-round identical across the virtio/bio completion rewrite (1253/1254 TPASS both rounds) — the rewrite cost nothing on that surface.</li>
+    </ul>
+
+    <h2 id="watch"><span class="anchor">§3</span>Known classes under watch</h2>
+    <ul>
+      <li><b>The fsfuzz WATCHDOG family</b> (a perf-registry static+heap lock pair): r282 recorded zero DEADLOCK prints (a first for this home, 45,858 lines), r283 returned 118 — same family, same ra, the static lock moved with the new binary; adjudicated as a known transient class until the fix lands on main (closure waits for the c5640ccc class).</li>
+      <li><b>oom01 fake-OOM</b> (root cause identified): the direct-reclaim leg landed (the page_alloc slowpath's deep final round, 39a515a5), but the kills fire from the <b>kswapd escalation path</b> (16 consecutive zero-reclaim balance_pgdat passes → out_of_memory), which has no deep drain. Evidence: OOM-FORENSIC shows in_direct_reclaim=1 with 172 MB of clean page cache one list away and zero OOM-DEEP-PASS lines all round; the control arm improved nothing. The s17 design (one deep drain at the escalation point, reset the failure counter on success) awaits the mm/perf owner.</li>
+      <li><b>The W3 stall family</b>: oom01 SIGKILL delivered, then serial silence — the s17 shape, owned by the W3/OH lane.</li>
+      <li><b>monkey-b / memstorm status</b>: monkey-b x86 rounds all WARN with zero critical flags, margin growth 141–178 MB within criterion; memstorm r34 PREEMPT-UNDERFLOW=8 (the trio family band 6–10), beats 86 vs the 91–97 band — under continued observation before adjudication.</li>
+    </ul>
+
+    <h2 id="queue"><span class="anchor">§4</span>Fleet queue</h2>
+    <ul>
+      <li>fsfuzz accumulation; a closure round once the fix class reaches main;</li>
+      <li>the kswapd deep-drain leg handed to mm/perf;</li>
+      <li>census r20+ round-over-round stability + the monkey-b big-heap watch;</li>
+      <li>the memstorm beat-band verdict at r35/r36.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

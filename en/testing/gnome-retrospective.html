@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Retrospective: the GNOME desktop regression · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../../index.html">Home</a>
+      <a href="../../architecture/design.html">Architecture</a>
+      <a href="../../performance/index.html">Performance</a>
+      <a href="../../security/index.html">Security</a>
+      <a href="../../testing/index.html">Testing</a>
+      <a href="../../guides/getting-started.html">Getting started</a>
+      <a href="../../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a href="../../index.html">中文</a><a class="on" href="../index.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../../architecture/design.html">Design deep-dive</a>
+    <a href="../../architecture/structure.html">Code layout</a>
+    <a href="../../architecture/boot.html">Boot flow</a>
+    <a href="../../architecture/memory.html">Memory management</a>
+    <a href="../../architecture/riscv64.html">Porting guide</a>
+    <a href="../../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="../../testing/index.html">Overview</a>
+    <a href="../../testing/ltp.html">LTP scan</a>
+    <a href="../../testing/ltp-full.html">LTP full cases</a>
+    <a href="../../testing/stability.html">Stability</a>
+    <a href="../../testing/stress.html">Stress</a>
+    <a href="../../testing/gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../../guides/getting-started.html">Getting started</a>
+    <a href="../../guides/development.html">Contributing</a>
+    <a href="../../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../../progress/roadmap.html">Roadmap</a>
+    <a href="../../progress/changelog.html">Changelog</a>
+    <a href="../../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>Retrospective: the GNOME desktop regression</h1>
+    <div class="sub">2026-11-06 · scope: x86_64 GNOME desktop boot, main@4ed009ac (10-31 acceptance) → main@264b6961 (11-06) · source doc: docs/test/gnome-regression-retrospective.md</div>
+
+    <div class="callout"><b>Status:</b> two of three root causes fixed and verified; one deep-water item open; one fresh regression of the same class caught during the hunt (§6).</div>
+
+    <h2 id="accept"><span class="anchor">§1</span>What "works" meant concretely</h2>
+    <p>The x86 GNOME milestone (99% non-black frame, 17-minute stable session) was accepted at main@4ed009ac by the gnome-x86 lane: per-boot manual verification with the lane's fire.py driver. It was a <b>campaign acceptance, not a standing gate</b> — after the lane demobilized, nothing in the recurring test surface booted the GNOME desktop again.</p>
+
+    <h2 id="window"><span class="anchor">§2</span>The regression window</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th class="num">Value</th></tr></thead>
+        <tbody>
+          <tr><td>Commits in window</td><td class="num">2,825</td></tr>
+          <tr><td>Commits touching perf/optimization paths (title match)</td><td class="num">~664</td></tr>
+          <tr><td>Standing desktop-boot runs in window</td><td class="num">0</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The desktop workload left the test surface the day its lane demobilized. Every landing since was gated against LTP, make test, pbench, syscost and the OH image — none of which boot gnome-shell.</p>
+
+    <h2 id="roots"><span class="anchor">§3</span>Confirmed root causes (both performance reworks)</h2>
+    <h3>3.1 munmap chunked surgery — two-sided races</h3>
+    <ul>
+      <li><b>Origin</b>: the OH campaign's 132 µs munmap-convoy fix replaced the single VMA-write-lock hold with per-256KB chunks, re-deriving the VMA tree after each chunk guard drop.</li>
+      <li><b>Hole</b>: between guards, a same-mm racing mmap legally landed in the transient tree hole inside the still-processed range; the next chunk treated the fresh VMA as an unprocessed piece of the current munmap and deleted it (vma=NONE faults), and the deferred zap cleared fresh PTEs (face B).</li>
+      <li><b>Fix</b> (main@5b4a4bc7): <b>detach-all-then-zap</b> — one guard detaches every piece; ≤4 MB ranges (the whole malloc/arena class) zap inside the guard. Reproducer: 2/3 boots crashed → 3/3 clean (12,000 checks per boot).</li>
+    </ul>
+    <h3>3.2 ext4 async batch read fill — cross-file page-cache poison</h3>
+    <ul>
+      <li><b>Origin</b>: the lmbench read-throughput hunt (the bw_file_rd 50× attribution) moved the read path to async batch DMA with ReadDst::Discard cache warming.</li>
+      <li><b>Hole</b>: completion/buffer-reuse attribution served the previous read's buffer bytes under the new file's cache keys. Measured: /bin/bzip2's mmap pages carried /bin/bzexe's script bytes while pread of the same fd returned correct data. Downstream: ld.so read garbage .dynsym → "undefined symbol" with an empty name → lazy-bind NULL+8 → gnome-shell died at fontconfig init every boot.</li>
+      <li><b>Fix</b> (in main): an interim gate disables async submission — the synchronous per-block path's attribution is exact. Cold-file probe: 3/3 boots, zero mismatches. The async attribution bug itself is queued as its own lane (the cache-poison branch, full evidence package).</li>
+    </ul>
+
+    <h2 id="gate"><span class="anchor">§4</span>Why the merge gate missed both</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Gate item</th><th>Why it could not see these</th></tr></thead>
+        <tbody>
+          <tr><td>LTP 1,869 scan</td><td>read(2) tests never touch mmap fault-around; mmap tests are small single-threaded files; the munmap races need same-mm multi-threaded churn</td></tr>
+          <tr><td>make test</td><td>in-kernel unit suite, no userspace FS load</td></tr>
+          <tr><td>pbench / syscost</td><td>microbenchmarks measure speed, not content correctness</td></tr>
+          <tr><td>OH image boot</td><td>OHOS uses musl (different allocator behavior); the OH lane's own image-side failures masked mm-class crashes</td></tr>
+          <tr><td>GNOME boot</td><td>campaign-only; demobilized with the lane</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout"><b>Root pattern:</b> every lock removed and every I/O batched was verified against microbenchmarks and LTP. The one workload that exercises glibc's dynamic linker, heap trim and GObject lifecycles — a real desktop — had disappeared from the standing test surface. The regression was not an event; it was silent accumulation across 2,825 commits, exposed the first time someone ran <code>make ubuntu-run</code> again.</div>
+
+    <h2 id="factors"><span class="anchor">§5</span>Compounding factors (honest list)</h2>
+    <ol>
+      <li><b>Image artifacts lost</b>: the worktree cleanup took the gnome-x86 build outputs; the central store only kept riscv64 GNOME disks. No old-image + new-kernel A/B was possible; the hunt started from zero.</li>
+      <li><b>Two variables changed at once</b>: the freshly rebuilt image pulls today's jammy (733 packages; gjs/mutter newer than the validated set), so kernel-regression vs version-drift had to be separated before the kernel hunt could start.</li>
+      <li><b>Probe false positives</b> (both corrected in-session): one forensic print dereferenced the Arc handle instead of the File (a constant "same pointer" artifact); one probe's CRC covered a different byte range than its checker (guaranteed false corruption). Lesson recorded: validate the probe against a known-good case before treating its output as evidence.</li>
+      <li><b>Organizational regressions in the same window</b>: the scripts/test relocation broke 37 drivers' repo-root anchors at once; an unanchored <code>debug/</code> gitignore rule left 36 module files untracked and origin unbuildable (caught by the post-push clone gate, main@484f2144). Same disease: moves and renames applied halfway.</li>
+    </ol>
+
+    <h2 id="repeat"><span class="anchor">§6</span>The pattern repeated during the hunt</h2>
+    <p>While the two fixes above were being verified, <b>perf-gap-hunt round 7</b> (lease fast gates + memo v2 lockless) landed and the GNOME boot began wedging before the shell (the dbus library-load phase, 55–129 "fdreap close completion stalled" lines per boot, zero shell starts). A discriminator boot on the same tree without the hunt's diagnostic parameter wedged identically — <b>a third regression of the same class, caught the same week by the same sensor</b>. It needs its own bisect lane.</p>
+
+    <h2 id="open"><span class="anchor">§7</span>Open items</h2>
+    <ol>
+      <li><b>The trim face</b> (deep water): glibc systrim reclaims heap the kernel agrees is free, then live pointers walk inside it — the metadata was destroyed before the trim. Every kernel-side hypothesis is eliminated by probe evidence (allocator placement, brk/VMA consistency, COW, mremap, swap roundtrip under real pressure, fault-around discipline, madvise bounds, rmap/LRU). The trim-quarantine instrument (main@f8ffce15, boot param <code>trimq=1</code>) captured the first touch with full context: two READs by gobject code 0–2 jiffies after the trim, inside a 1.15 MB reclaimed range. Next: a frame-content dump at the hit (distinguishing zero-fill from aliasing) plus a userspace malloc interposer.</li>
+      <li><b>The round-7 early-boot wedge</b>: bisect the perf-gap-hunt round 7 merge on the GNOME boot.</li>
+      <li><b>fdreap close-stall floods</b>: present in every recent boot's late phase (55–129 per boot); its own lane.</li>
+    </ol>
+
+    <h2 id="recs"><span class="anchor">§8</span>Recommendations (prevent recurrence)</h2>
+    <ol>
+      <li>Add a <b>desktop-boot gate</b> to the standing merge tiers: the serial log shows "Running GNOME Shell" and the session survives 60 s — the same standing as the LTP scan.</li>
+      <li>Add the <b>byte-exact file-mmap verification probe</b> (fmv/coldfile) to the standing probes — the sensor class that would have caught the poison the day it landed.</li>
+      <li>Require perf landings that remove locks or batch I/O to state, in the merge message, how fault-around, brk-trim and multi-threaded munmap were re-verified.</li>
+    </ol>
+
+    <div class="callout">Evidence: probe sources under run/ (mmap_witness, arena_churn, coldfile, fmv, swaprt, mremap), boot serials per session, kernel commits 5b4a4bc7, 10705570, f8ffce15, 484f2144.</div>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>
