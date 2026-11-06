@@ -138,15 +138,19 @@ pub fn test_fileops_caps() {
     );
 
     // D-6 follow-on conversions (leg-39): the two hot-path regular-file
-    // tables. ext4 and tmpfs carry the full positional file set minus
-    // poll — poll on a regular file goes through the always-ready
+    // tables. ext4 and tmpfs carried the full positional file set
+    // minus poll — poll on a regular file goes through the always-ready
     // fallback (a regular file is always readable/writable per the
     // reference behavior), pinned here so adding a poll slot to either
     // table is a deliberate act that fails this shape first.
+    // (perf-gap-hunt) The deliberate act happened: ext4 gained the
+    // EOF-aware poll slot (bd112281) but this pinned shape was never
+    // flipped, so main has failed make test 1317/1318 since. tmpfs
+    // still has no poll slot.
     check(
         "ext4 file caps",
         &crate::fs::ext4::file::EXT4_FILE_OPS,
-        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+        Expect { read: true, write: true, lseek: true, close: true, poll: true, read_at: true },
     );
     check(
         "tmpfs file caps",
