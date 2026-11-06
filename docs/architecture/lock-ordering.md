@@ -16,16 +16,21 @@ Level 0 (outermost): IRQ disable (irq_save / save_and_disable_irq)
         +-- Level 2a: GRQ lock (kernel/src/sched/sched.rs: GlobalRunQueue.lock)
         |     |
         |     +-- Level 3a: per-zone lock (kernel/src/mm/zone.rs)
-        |     |
-        |     +-- Level 3b: futex hash bucket lock (kernel/src/sync/futex.rs: HASH_HEADS[i])
-        |           |
-        |           +-- Level 4: waiter slot lock (kernel/src/sync/futex.rs: WAITER_POOL[i])
         |
         +-- Level 2b: process tree lock (kernel/src/process/task.rs)
         |
         +-- Level 2c: inode lock (kernel/src/fs/)
         |
         +-- Level 2d: dentry cache lock (kernel/src/fs/)
+        |
+        +-- Level 2e: futex hash bucket lock (kernel/src/sync/futex.rs: HASH_HEADS[i])
+              |     (INV-LOCK-5: the GRQ lock may nest INSIDE the
+              |      bucket — the bucket is OUTER to GRQ. Corrected
+              |      2026-11-07: the earlier diagram placed the bucket
+              |      under GRQ, contradicting the invariant row, the
+              |      futex-wake path, and the lockkey impls.)
+              |
+              +-- Level 3e: waiter slot lock (kernel/src/sync/futex.rs: WAITER_POOL[i])
 ```
 
 ## Sleeping mutexes (outside the spinlock hierarchy)
@@ -151,6 +156,7 @@ block-scoped to the two counter updates.
 | INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
 | INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/mm_struct.rs PteLock, arch mm_ops PTE_MODIFY_LOCK |
 | INV-LOCK-8 | SleepMutex (sleeping mutex): never taken with a spinlock held or from IRQ context; nests only VFS_MUTATION_LOCK -> EXT4_BIG_LOCK; spin-family locks never sleep | kernel/src/sync/mutex.rs; see "Sleeping mutexes" above |
+| INV-LOCK-9 | a wait-queue lock (WaitQueueHead's internal spinlock) is never acquired while holding a virtio driver lock — wake_up runs the GRQ lock per waiter under it, so nesting it under a virtio lock builds the BLK convoy that froze GNOME final6 | kernel/src/sync/spinlock.rs (renumbered 2026-11-07: this rule was previously mis-numbered INV-LOCK-6, colliding with the virtio-net pair above) |
 
 ## Typed lock keys (the hierarchy as types, 2026-10)
 

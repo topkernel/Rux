@@ -32,11 +32,10 @@
 //! Level note: the `level` field is the class's nesting depth in the
 //! declared-order DAG (outermost = 0), NOT the level numbers of
 //! lock-ordering.md's hierarchy diagram verbatim — the diagram's
-//! futex-bucket placement (3b under GRQ's 2a) contradicts INV-LOCK-5
-//! and the compile-enforced lockkey impls (bucket is OUTER to GRQ on
-//! the futex-wake path); the invariant table wins. Recorded as a P0
-//! finding; the diagram correction belongs to the lock-ordering.md
-//! owner.
+//! futex-bucket placement contradicted INV-LOCK-5 and the
+//! compile-enforced lockkey impls (bucket is OUTER to GRQ on the
+//! futex-wake path); the invariant table won and the diagram was
+//! corrected 2026-11-07 (futex bucket is its own Level-2e branch).
 
 // Kernel layer policy (docs/architecture/kernel-layers.md):
 // this module must stay Safe Rust.
@@ -160,10 +159,10 @@ lock_class_ids! {
     GRQ              / "grq"               / Spin,   3, "INV-LOCK-5",               Some("GrqKey"),
     PI_BUCKET        / "futex-pi-bucket"   / Spin,   3, "INV-LOCK-PI-1",            None,
     PI_POOL          / "futex-pi-pool"     / Spin,   4, "INV-LOCK-PI-1",            None,
-    // Net / waitqueue (INV-LOCK-6 family)
+    // Net (INV-LOCK-6) / waitqueue (INV-LOCK-9)
     NET_QUEUE        / "net-queue"         / Spin,   2, "INV-LOCK-6",               Some("NetQueueKey"),
     NET_STATS        / "net-stats"         / Spin,   3, "INV-LOCK-6",               Some("NetStatsKey"),
-    WAIT_QUEUE       / "wait-queue"        / Spin,   2, "spinlock.rs waitqueue rule", None,
+    WAIT_QUEUE       / "wait-queue"        / Spin,   2, "INV-LOCK-9",               None,
     // mm (INV-LOCK-7 + hierarchy diagram)
     VMA_MANAGER      / "vma-manager"       / RwSpin, 1, "INV-LOCK-7",               None,
     PTE_GLOBAL_EPOCH / "pte-global-epoch"  / RwSpin, 2, "INV-LOCK-7",               None,
@@ -188,7 +187,7 @@ lock_class_table! {
     PI_POOL          / "futex-pi-pool"     / Spin,   4, "INV-LOCK-PI-1",            None,
     NET_QUEUE        / "net-queue"         / Spin,   2, "INV-LOCK-6",               Some("NetQueueKey"),
     NET_STATS        / "net-stats"         / Spin,   3, "INV-LOCK-6",               Some("NetStatsKey"),
-    WAIT_QUEUE       / "wait-queue"        / Spin,   2, "spinlock.rs waitqueue rule", None,
+    WAIT_QUEUE       / "wait-queue"        / Spin,   2, "INV-LOCK-9",               None,
     VMA_MANAGER      / "vma-manager"       / RwSpin, 1, "INV-LOCK-7",               None,
     PTE_GLOBAL_EPOCH / "pte-global-epoch"  / RwSpin, 2, "INV-LOCK-7",               None,
     PTE_PER_MM       / "pte-per-mm"        / Spin,   2, "INV-LOCK-7",               None,
@@ -212,10 +211,10 @@ pub static DECLARED_EDGES: &[DeclaredEdge] = &[
     // INV-LOCK-6: stats nest inside the virtio-net queue locks.
     DeclaredEdge { outer: NET_QUEUE, inner: NET_STATS, inv: "INV-LOCK-6" },
     // The waitqueue wake rule (sync/spinlock.rs): wake_up runs under
-    // the wait-queue lock and takes the GRQ lock per waiter. The
-    // document names this family INV-LOCK-6; see the P0 finding about
-    // the id collision with the virtio-net pair.
-    DeclaredEdge { outer: WAIT_QUEUE, inner: GRQ, inv: "spinlock.rs waitqueue rule" },
+    // the wait-queue lock and takes the GRQ lock per waiter. Numbered
+    // INV-LOCK-9 since 2026-11-07 (was a duplicated INV-LOCK-6 that
+    // collided with the virtio-net pair).
+    DeclaredEdge { outer: WAIT_QUEUE, inner: GRQ, inv: "INV-LOCK-9" },
     // INV-LOCK-7: vma_manager -> PTE section -> page_desc. The two
     // PTE-section classes have NO edge between them (rule 3: an
     // overlap of the same mm is forbidden; the undeclared check

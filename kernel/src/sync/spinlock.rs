@@ -46,7 +46,8 @@
 //! - **INV-LOCK-5**: GRQ lock and futex hash bucket lock nesting direction is
 //!   consistent: GRQ may nest inside futex bucket, but never the reverse.
 //!
-//! - **INV-LOCK-6** (virtio-blk ABBA fix): a wait-queue lock
+//! - **INV-LOCK-9** (virtio-blk ABBA fix; renumbered 2026-11-07 from a
+//!   duplicated INV-LOCK-6 that collided with the virtio-net pair): a wait-queue lock
 //!   (`WaitQueueHead`'s internal `Spinlock<Vec<WaitQueueEntry>>`) must NEVER
 //!   be acquired while holding a virtio driver lock (`VIRTIO_PCI_BLK_LOCK`,
 //!   the MMIO device's `virtqueue` lock, `VIRTIO_*_PENDING`). Wait-queue
