@@ -5918,3 +5918,126 @@ UsbPnpManagerInit succeed would CREATE a divergence.
   rd2/ (ramdisk), hdf_default.hcb, bzImage-usbhunt1 — gitignored,
   kept to reproduce §1-§2 with readelf/objdump/debugfs.
 - No stray QEMU from this lane.
+
+---
+
+## 56TH SESSION — eventfd+pipe EPOLLET lost-edge families fixed and probe-proven; wedge re-rooted to samgr's SUBSCRIBE_SYSTEM_ABILITY freeze (2026-11-06, branch oh-crash)
+
+Setup: merged origin/oh-int (d3a94b4d timerfd-ET fix + four-lane
+instruments + vlock) after committing the 55th's WIP dfx (3fd0a2be).
+
+### 1. THE EXTENDED PROBE (test/et_fd_probe.c, archived in probes.tar.gz)
+
+Same shape as tfd_et_probe.c (EPOLLIN|EPOLLET, never drained, producer
+writes between waits) across fd types; unix socketpair row is the
+control (unix.rs already notifies). Host Linux reference: ALL rows 0
+miss. Probe quirk worth remembering: the unix row is capped at 60
+rounds and SOCK_NONBLOCK — never-drained socketpair writes accumulate
+~768B skb overhead each and BLOCK the write forever near round ~277
+(measured on the reference; killed two probe boots before capping).
+
+BEFORE (prebuilt oh-int bzImage, i.e. timerfd fix only):
+```
+timerfd  300/300 miss=0     (d3a94b4d holds)
+eventfd    1/300 miss=299   <- same lost-edge hole, one file over
+pipe       1/300 miss=299   <- same, plus the peer-id problem
+unixsock  60/60  miss=0     (control; 11 unix.rs notify sites work)
+```
+AFTER (my build): all rows 0 miss, whole probe 3s (was 302s of 500ms
+miss timeouts). Probe rig: run/et-boot2.py + etroot/init initrd
+(rdinit=/init, no disks), copied from oh-int's tfd-boot2.py.
+
+### 2. THE FIXES (kernel)
+
+- misc.rs eventfd_write: epoll_notify_file(file.file_id) after the
+  counter CAS (the reference: eventfd_write -> wake_up_locked_poll
+  EPOLLIN rides ep_poll_callback unconditionally). eventfd_read: same
+  on drain (EPOLLOUT edge for counter-full watchers).
+- pipe: THE PEER-ID PROBLEM — the write syscall holds the WRITE end's
+  File but raises the READ end's readiness, and the wake registry binds
+  by the WATCHED description's file_id. Pipe now carries
+  epoll_read_fid/epoll_write_fid (AtomicU64, 0=no-op), bound in
+  create_pipe (both ends) and fifo open (per accmode; limitation: one id
+  per direction — most-recent fifo reader open wins; anonymous pipes,
+  the overwhelming case, are exact). Notified at every readiness-rise
+  site: write/vmsplice/tee data arrival (read end), read-drain space
+  free (write end), close EOF/EPIPE, fifo reopen_write.
+- fifo.rs open path binds its file_id per direction.
+- Reference parity rationale: ep_poll_callback rides the file wait
+  queue for ALL fd types; our registry equivalent is epoll_notify_file
+  at every wake site. Remaining known-unwired fd types: TCP/UDP sockets
+  (Socket has no file_id field yet) and signalfd (notify_task wakes its
+  own queue only) — no probe yet, no hung chain pinned on them (ohc53:
+  softbus TXN hangs are samgr-side, not socket-side).
+
+### 3. OH VERDICT BOOTS (system-lb5 + userdata-fresh2, SMP2 KVM)
+
+- ohc52 (oh-int prebuilt): softbus ServiceStart 21.6s, SA:4802 device_
+  manager init finished 230ms @15.9s, SA:4700 softbus OpenSo @21.96s —
+  then KERNEL PANIC at 46.1s: binder.rs sleep_snapshot chunker sliced
+  rest[..240] on a multi-byte char BEFORE the ohc47 boundary backoff.
+  The 55th's fix (boundary backoff BEFORE the rfind) was uncommitted in
+  oh-crash and never reached oh-int; it is in my tree (WIP commit) and
+  boots clean. ACTION FOR MAIN: cherry-pick the chunker fix into
+  oh-int/main — the prebuilt oh-int kernel is unsafe under
+  dfx=sleepsnap.
+- ohc53 (my kernel: timerfd+eventfd+pipe fixes + chunker fix, full
+  instruments): NO panic. Wedge persists; yardstick unchanged (SA:1301
+  never prints init finished; appfwk.ready not set at 56.8s warning;
+  no pixels).
+
+### 4. THE WEDGE, RE-ROOTED WITH THE NEW DATA (ohc53)
+
+ALL TXN-HANG faces (device_manager, netmanager, time_service, softbus_
+server, wifi_manager_se, distributeddata, wallpaper_servi, useriam)
+are CLIENTS of samgr (pid 329): every stuck txn is code6 =
+SUBSCRIBE_SYSTEM_ABILITY (samgr_ipc_interface_code.h), accepted by a
+samgr OS_IPC handler (BC_ACQUIRE, lastbwr ~300s) whose thread then
+parks forever (FUTEX_WAIT_PRIVATE, untimed) on a per-instance word,
+ALL at offset 0x194 in separate mmaps — the samgr::mutex/FFRT wait
+class the 54th named from libffrt.
+SEEDS: txn4847 (device_manager) and txn4831 (netmanager) both at
+t≈34.4s; everything else piled after (softbus 35.8, distributeddata
+~49s). softbus_server itself has TWO frozen code6 txns to samgr
+(txn5088 from OS_FFRT_2_0, txn5837 main) — so softbus OnStart cannot
+finish even though it now LOADS; DM's DM-retry loop (the 54th's
+question) is downstream: DM is UP (init finished 3601ms @23.3s — note
+3.6s vs 887ms on the 54th's boots), distributeddata's LOAD txn to
+samgr (txn8193) queues behind frozen handler tid 943. The 500ms
+DeviceManagerAdapter retry is the SDK InitDeviceManager error path
+(20x100ms usleeps -> ERR_DM_NOT_INIT -> adapter 500ms reschedule).
+RWFRZ PANDEMIC: 8 processes (samgr, bluetooth, softbus, wifi, 380,
+460, 797, 318, wallpaper word=0x80000010 readers=16) each hold a
+frozen rwlock word=0x2 readers=2 waiters=1 — FFRT SharedMutexPrivate
+state=2: TWO read holders never unlocked. FFRT read holders are
+SUSPENDED TASKS (no thread parked — invisible to sleepsnap/ufw); FXRS
+word-watch: anywoken=0 on all 0x..194 words — no FUTEX_WAKE was ever
+issued (userspace never completed the dependency; NOT a kernel wake
+loss).
+FFRT ENGINE CHECK (source, oh-robot ffrt): BasePoller registers its
+wake eventfd LEVEL-triggered (EPOLLIN, no EPOLLET anywhere in ffrt) —
+the FFRT loop engine was NOT starved by the eventfd-ET hole; timerfd-
+ET (54th) and eventfd/pipe-ET (56th) are both now excluded as causes
+of THIS freeze. The leaf is FFRT-task-graph-internal: suspended tasks
+holding shared-lock read counts whose wake dependencies never fire.
+
+### 5. Boots this session
+ohc52 (oh-int prebuilt verdict; panic @46s), et2/et3 (probe before),
+et4 (probe after), ohc53 (full verdict, ran to 914s+, wedge persists).
+
+### 6. Queued (57th)
+1. THE FFRT LEAF — needs task-level observability: (a) dump latched
+   maps from censusd TASK context (blocking vma read — the softirq
+   try_read NEVER succeeded for samgr in 250+s, mapless walks again);
+   (b) FFRT arena scan: find suspended task structs (signature/scan of
+   the 0x..194 objects' owner arenas) to name the parked dependencies;
+   (c) reference-timing comparison at the seed second (34.4s): what
+   completes GetSystemAbility/Subscribe on the reference in ms.
+2. samgr handler words all at +0x194 — symbolize once (a) lands; the
+   54th's e8-call-site brute-force pattern is ready for it.
+3. TCP/UDP + signalfd epoll_notify_file wiring (extend et_fd_probe
+   with a loopback socketpair row FIRST — probe before patch).
+4. oh-int chunker panic (§3) — cherry-pick to main before anyone else
+   boots dfx=sleepsnap on oh-int builds.
+Gates this session: x86_64/riscv64/aarch64 builds rc=0; riscv64 make
+test ALL TESTS PASSED (patched tree).
