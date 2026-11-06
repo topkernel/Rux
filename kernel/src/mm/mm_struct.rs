@@ -993,6 +993,17 @@ impl MmStruct {
         self.vma_files.read().get(&vma_start).cloned()
     }
 
+    /// Non-blocking `get_vma_file` for diagnostic callers that run under
+    /// locks they must not spin against (pid-hash buckets, softirq): a
+    /// busy map defers the decode instead of blocking the caller.
+    pub fn try_get_vma_file(
+        &self,
+        vma_start: usize,
+    ) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+        let m = self.vma_files.try_read()?;
+        m.get(&vma_start).cloned()
+    }
+
     pub fn vma_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, VmaManager> {
         self.vma_manager.write()
     }

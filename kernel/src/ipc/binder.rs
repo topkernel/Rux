@@ -3388,6 +3388,15 @@ pub fn sleep_snapshot() {
     // pid_hash::lock_bucket from stallwatch_tick). Collect lines here,
     // print ONCE after the walk with every bucket released.
     let mut out = alloc::string::String::new();
+    // 54th: high-value focus lines (ufw/uss/uvma) collect separately and
+    // emit through the deferred task-context lane — the bulk census can
+    // be lossy under the flood, the park-chain data cannot.
+    let mut outf = alloc::string::String::new();
+    // 54th ufw hunt: snapshot generation for the focus-latch persistence
+    // rule (a main-stack futex wait observed in TWO DISTINCT snapshots
+    // is a persistent wedge, not a startup transient).
+    static UFW_GEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let ufw_gen = UFW_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) & 0xff;
     use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
@@ -3446,6 +3455,210 @@ pub fn sleep_snapshot() {
                 a1,
                 a2
             );
+            // 54th (coordinator redirect — SA:1301 stuck-init hunt): the
+            // futex-census blind spot. A retry-loop futex wait (5ms
+            // timeout, ETIMEDOUT, immediate re-issue) never ages into
+            // FUX-STUCK's 10s threshold, and sys=202 parks skip parkstk
+            // below — so a wedged handshake on a STACK mutex (the
+            // distributeddata main-thread shape: futex on 0x7fffffffd004,
+            // val=2, forever) prints nothing beyond uaddr. Latch up to 4
+            // "focus" thread groups — any S-state task futex-parked in
+            // the MAIN-STACK window — and for focus threads print the
+            // USER side of the park: rbp-chain return addresses plus a
+            // stack scan for code words (which image region the waiter
+            // lives in), and once per latch the process's VMA map with
+            // file paths, so the raw addresses symbolize offline.
+            // Read contract: same as the pollfd decode below (bounded
+            // page-table walks of the parker's own memory under the
+            // bucket lock; hunting boots only, dfx=sleepsnap-gated).
+            #[cfg(feature = "x86_64")]
+            if top != 0 {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's own entry frame
+                // (owns_kernel_stack checked above).
+                // r10, not rcx: at syscall entry the kernel ABI moves the
+                // 4th argument to r10 (syscall clobbers rcx with the
+                // return address) — for futex this is the timeout ptr.
+                let (urbp, ursp, ua3) =
+                    unsafe { ((*regs).rbp, (*regs).rsp, (*regs).r10) };
+                let main_stack_futex =
+                    sys == 202 && a0 >= 0x7fff_ff00_0000 && a0 < 0x8000_0000_0000;
+                let my_tgid = tk.tgid();
+                // Direct rule (ohc35-39 lessons: first-come latch burned
+                // on transients; promotion lottery lost the real gate to
+                // the stuck SA pile's candidate churn). A main-stack
+                // futex waiter IS the interesting event — walk its user
+                // frames immediately (deduped per (tid,rip)), and dump
+                // its process's EXEC-ONLY vma map ONCE per tgid (the
+                // symbolization table; exec-only keeps the dump ~40-60
+                // lines instead of ~160).
+                static VMA_DUMPED_TGID: [core::sync::atomic::AtomicU32; 16] =
+                    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+                if main_stack_futex && my_tgid != 0 {
+                    let mut dumped = false;
+                    for v in VMA_DUMPED_TGID.iter() {
+                        if v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid {
+                            dumped = true;
+                            break;
+                        }
+                    }
+                    if !dumped {
+                        let mut slot = usize::MAX;
+                        for (i, v) in VMA_DUMPED_TGID.iter().enumerate() {
+                            if v.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                slot = i;
+                                break;
+                            }
+                        }
+                        if slot == usize::MAX {
+                            static VMA_VICTIM: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            slot = VMA_VICTIM
+                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                % VMA_DUMPED_TGID.len();
+                        }
+                        VMA_DUMPED_TGID[slot].store(my_tgid, core::sync::atomic::Ordering::Relaxed);
+                        if let Some(aspace) = tk.address_space() {
+                            if let Some(vm) = aspace.vma_try_read() {
+                                for v in vm.iter() {
+                                    if !v.flags().is_executable() {
+                                        continue;
+                                    }
+                                    let path = aspace
+                                        .try_get_vma_file(v.start().as_usize())
+                                        .map(|f| f.path())
+                                        .unwrap_or_default();
+                                    let _ = writeln!(
+                                        outf,
+                                        "uvma: tgid {} {:x}-{:x} off={:#x} {}",
+                                        my_tgid,
+                                        v.start().as_usize(),
+                                        v.end().as_usize(),
+                                        v.offset(),
+                                        if path.is_empty() {
+                                            alloc::string::String::from("-")
+                                        } else {
+                                            path.chars().take(60).collect::<alloc::string::String>()
+                                        }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // The user frame chain, deduped per (tid, rip): a
+                // parked thread re-prints only when its innermost site
+                // moves (retry loops otherwise repeat the same chain
+                // every 5s snapshot). Walks run for main-stack futex
+                // waiters AND every thread of an already-latched tgid
+                // (the ring above doubles as the latch — the full park
+                // chain of the wedged process, not just its leader).
+                let tgid_latched = VMA_DUMPED_TGID.iter().any(|v| {
+                    v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
+                });
+                if main_stack_futex || tgid_latched {
+                    static UFW_SEEN: [core::sync::atomic::AtomicU64; 64] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+                    let key = ((tk.pid() as u64) << 44) | (rip & 0xfff_ffff_fff);
+                    let mut seen = false;
+                    for k in UFW_SEEN.iter() {
+                        if k.load(core::sync::atomic::Ordering::Relaxed) == key {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        let idx = (key as usize) % UFW_SEEN.len();
+                        UFW_SEEN[idx].store(key, core::sync::atomic::Ordering::Relaxed);
+                        if let Some(aspace) = tk.address_space() {
+                            let root = aspace.root_ppn();
+                            // SAFETY: read-only diagnostic walk of the
+                            // task's own page tables (pollfd contract).
+                            let read_u64_at = |va: u64| -> Option<u64> {
+                                if va & 0xfff > 0xff8 {
+                                    return None;
+                                }
+                                let (ppn, _) = unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                        root,
+                                        va & !0xfff,
+                                    )
+                                }?;
+                                let pa = (ppn as usize) << 12;
+                                let kv = crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new(pa as u64),
+                                )
+                                .bits() as usize
+                                    + (va & 0xfff) as usize;
+                                Some(unsafe { core::ptr::read_volatile(kv as *const u64) })
+                            };
+                            let mut chain = alloc::string::String::new();
+                            use core::fmt::Write as _;
+                            let _ = write!(chain, "{:#x}", rip);
+                            let mut rbp = urbp;
+                            for _ in 0..10 {
+                                if rbp < 0x1000 || rbp > 0x8000_0000_0000 || rbp & 7 != 0 {
+                                    break;
+                                }
+                                let Some(ret) = read_u64_at(rbp + 8) else { break };
+                                let Some(next) = read_u64_at(rbp) else { break };
+                                if ret >= 0x1000 {
+                                    let _ = write!(chain, " {:#x}", ret);
+                                }
+                                if next <= rbp || next - rbp > 0x20_0000 {
+                                    break;
+                                }
+                                rbp = next;
+                            }
+                            let _ = writeln!(
+                                outf,
+                                "ufw: tgid {} tid {} sys={} a3={:#x} rbp={:#x} rsp={:#x}: {}",
+                                my_tgid, tk.pid(), sys, ua3, urbp, ursp, chain
+                            );
+                            // Stack scan fallback (frame-pointer-less
+                            // builds): the first code-looking words above
+                            // rsp, classified against exec vmas so anon
+                            // arena words do not flood the line. The vma
+                            // read guard is taken ONCE (no locking per
+                            // word under the bucket lock).
+                            let mut scan = alloc::string::String::new();
+                            let mut sp = ursp & !7;
+                            let mut shown = 0;
+                            let vm = aspace.vma_try_read();
+                            for _ in 0..640 {
+                                if shown >= 12 || sp > 0x8000_0000_0000 {
+                                    break;
+                                }
+                                if let Some(w) = read_u64_at(sp) {
+                                    let looks_code = (0x5555_0000_0000..=0x5556_0000_0000)
+                                        .contains(&w)
+                                        || (0x7ff0_0000_0000..=0x7ffa_0000_0000).contains(&w)
+                                        || (0x3f00_0000_0000..=0x4000_0000_0000).contains(&w);
+                                    if looks_code {
+                                        if let Some(vm) = vm.as_ref() {
+                                            if let Some(v) =
+                                                vm.find(crate::mm::page::VirtAddr::new(w as usize))
+                                            {
+                                                if v.flags().is_executable() {
+                                                    let _ = write!(scan, " {:#x}", w);
+                                                    shown += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                sp += 8;
+                            }
+                            if !scan.is_empty() {
+                                let _ =
+                                    writeln!(outf, "uss: tgid {} tid {} :{}", my_tgid, tk.pid(), scan);
+                            }
+                        }
+                    }
+                }
+            }
             // 53rd (52nd §6a): the inner wait-object naming — walk this
             // S-state task's kernel stack from its saved switch sp and
             // symbolize the frames; this names the innermost wait (wait
@@ -3540,6 +3753,30 @@ pub fn sleep_snapshot() {
             }
             let (chunk, tail) = rest.split_at(cut);
             crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
+    // Focus lines go through the deferred task-context lane (censusd):
+    // a softirq printk emitter carries a 100us console-emit budget and
+    // the OH flood loses these lines (ohc36: ~30% of the uvma map never
+    // reached the serial; ohc37: the queue flooded before focus lines
+    // were separated from the bulk).
+    {
+        let mut rest = outf.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(240);
+            if cut < rest.len() {
+                match rest[..cut].rfind('\n') {
+                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
+                    _ => {
+                        while cut > 0 && !rest.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                    }
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::dfx::taskdump::defer_emit_line(alloc::string::String::from(chunk));
             rest = tail;
         }
     }

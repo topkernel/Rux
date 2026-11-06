@@ -1115,6 +1115,133 @@ pub fn parked_kstack_syms(t: &crate::process::task::Task) -> alloc::string::Stri
     s
 }
 
+// ---------------------------------------------------------------------------
+// Deferred census emission (54th): the S-state census collects under the
+// timer softirq, where a printk emitter carries a 100us console-emit
+// budget while the OH hilog flood holds the console ~0.4-17ms per line —
+// ohc36 lost ~30% of the uvma map lines (and other CPUs' /dev/console
+// writes spliced mid-census-record). Producers push pre-chunked LINES
+// (each already under the printk record cap) here; a task-context
+// kthread drains and printk()s them — task context waits up to 2s for
+// the console and always gets through (the mmprofd discipline, lb332).
+// Drop-oldest when full: census lines are diagnostic, a stuck boot
+// regenerates them every snapshot.
+// ---------------------------------------------------------------------------
+
+const DEFER_LINE_MAX: usize = 256;
+
+struct DeferredEmit {
+    ring: [Option<alloc::string::String>; DEFER_LINE_MAX],
+    head: usize,
+    tail: usize,
+    dropped: u64,
+}
+
+static DEFER_Q: crate::sync::spinlock::Spinlock<DeferredEmit> =
+    crate::sync::spinlock::Spinlock::new(DeferredEmit {
+        ring: [const { None }; DEFER_LINE_MAX],
+        head: 0,
+        tail: 0,
+        dropped: 0,
+    });
+
+/// Queue one census line for task-context emission. Producers may be
+/// softirq (timer heartbeat census). The line must already be under the
+/// printk record text cap (240 bytes) — the sleep_snapshot chunker
+/// guarantees that for everything it feeds here.
+pub fn defer_emit_line(line: alloc::string::String) {
+    if line.is_empty() {
+        return;
+    }
+    {
+        let mut q = DEFER_Q.lock_irqsave();
+        let next = (q.tail + 1) % DEFER_LINE_MAX;
+        if next == q.head {
+            // Full: drop the OLDEST line.
+            let h = q.head;
+            q.ring[h] = None;
+            q.head = (h + 1) % DEFER_LINE_MAX;
+            q.dropped += 1;
+        }
+        let t = q.tail;
+        q.ring[t] = Some(line);
+        q.tail = next;
+    }
+    ensure_defer_thread();
+}
+
+/// Spawn (once) the task-context consumer kthread for `defer_emit_line`.
+pub fn ensure_defer_thread() {
+    static THREAD_ON: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if THREAD_ON.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    crate::process::kthread::kthread_run(
+        defer_emit_fn,
+        core::ptr::null_mut(),
+        "censusd",
+    );
+}
+
+extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
+    use crate::process::task::{Task, TaskState};
+    loop {
+        if crate::process::kthread::kthread_should_stop() {
+            break;
+        }
+        // Drain everything queued first.
+        loop {
+            let line = {
+                let mut q = DEFER_Q.lock_irqsave();
+                if q.head == q.tail {
+                    if q.dropped > 0 {
+                        let d = q.dropped;
+                        q.dropped = 0;
+                        Some(alloc::format!(
+                            "censusd: {} deferred lines dropped (queue full)",
+                            d
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    let h = q.head;
+                    let l = q.ring[h].take();
+                    q.head = (h + 1) % DEFER_LINE_MAX;
+                    l
+                }
+            };
+            match line {
+                Some(l) => crate::printk::printk_ln(
+                    crate::printk::loglevel::KERN_INFO,
+                    format_args!("{}", l),
+                ),
+                None => break,
+            }
+        }
+        // Sleep 250 ms (jiffies discipline as mmprofd).
+        let current = match crate::sched::current() {
+            Some(t) => t as *mut Task,
+            None => return 0,
+        };
+        // SAFETY: current is the running task's pointer (we are it).
+        let pid = unsafe { (*current).pid() };
+        let wake_at = crate::drivers::timer::get_jiffies() + 25;
+        let timer_id = crate::timer::add_timer_wakeup(wake_at, pid);
+        // SAFETY: setting our own task's state.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+        if timer_id != 0 {
+            crate::timer::del_timer(timer_id);
+        }
+    }
+    0
+}
+
 /// Early-cadence wrapper for the S-state sleep snapshot (53rd): the
 /// khungtaskd cadence (60 s) sees a 7.4 s park only at 61 s; this runs
 /// the same snapshot every ~5 s for the first ~60 s of boot so the
