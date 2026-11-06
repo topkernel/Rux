@@ -291,7 +291,7 @@
     <ul>
       <li><b>syscost</b>: boot census (syscall volume, census counts, tick rate, per-op averages) — the Tier 1 collector.</li>
       <li><b>pbench</b> (test/pbench.c): the P1–P7 microbenchmark probes — the Tier 2 collector.</li>
-      <li><b>census / wakewatch</b>: scheduling-strand census and wake→run latency forensics (1024-slot side tables + pick-skip reason table).</li>
+      <li><b>census / wakewatch</b>: scheduler-stall census (WAKE-STRANDED) and wake→run latency forensics (1024-slot side tables + pick-skip reason table).</li>
       <li><b>if0 v3</b>: EFLAGS-pair probe — the official IF=0 share and cli-segment measurement (on main; no more tick-mode proxy).</li>
       <li><b>fsw / mmprof counters</b>: fs sync-write classes, memory accounting reconciliation (OOM forensics).</li>
       <li><b>run/perf-gate.sh</b>: gate automation (anchor JSON + tier dispatch + band verdicts).</li>

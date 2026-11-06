@@ -74,8 +74,8 @@
     <ul>
       <li>73 个测试文件,覆盖 memory / process+scheduler / fs / ipc / signal / network / driver / syscall 八大类。</li>
       <li>所有断言在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>,这是 no_std + 自有 panic 路径的约束)。</li>
-      <li><b>CI 冒烟门</b>(smoke.yml):每次 push 跑 riscv64 套件腿 + proptest;GUI 另有 23 项像素/串口检查门。</li>
-      <li><b>集成舰队</b>:多腿无人值守 + 探针矩阵(integration-test-report.md,2026-11-01)。</li>
+      <li><b>CI 冒烟门</b>(smoke.yml):每次 push 跑 riscv64 套件 + proptest;GUI 另有 23 项像素/串口检查门。</li>
+      <li><b>集成测试集群</b>:多进程无人值守 + 探针矩阵(integration-test-report.md,2026-11-01)。</li>
       <li>形式验证常备(157 Kani harness / 1104 proptest / 4 SPIN / Miri)—— 详见<a href="../security/index.html#formal">安全栏目 §4</a>。</li>
     </ul>
 
@@ -84,7 +84,7 @@
       <li>GNOME 全会话 <b>2100 秒门</b>(M1–M5 里程碑全过,零 panic)<b>三次独立启动</b>复现(2026-10-27)。</li>
       <li>桌面会话保持 <b>45 分钟零 panic</b>(GDM 端到端链路,2026-11-01);boot-to-login ~4.5 s(4 vCPU MTTCG)。</li>
       <li>GUI 验证器(<code>test/ubuntu-gui/verify.py</code>):每次启动 <b>23 项像素/串口检查</b>;键入式终端对话两次独立启动逐像素一致(convcheck)。</li>
-      <li>OH 侧:bootanimation → SystemUI 锁屏 → 135+ 服务集,舰队猴测持续走查(见压力子页)。</li>
+      <li>OH 侧:bootanimation → SystemUI 锁屏 → 135+ 服务集,集群随机化测试持续走查(见压力子页)。</li>
     </ul>
 
     <h2 id="heal"><span class="anchor">§3</span>自愈观测(census + heal)</h2>

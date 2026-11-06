@@ -79,7 +79,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔥</span>压力</h3>
-        <p>stress-fleet 常驻舰队(11 台 QEMU):LTP 成员 ×4 + 随机测试 ×2 + 内存风暴 + fs 模糊 + 对照成员;已根因类、在观察类与舰队队列。</p>
+        <p>stress-fleet 常驻并发测试集群(11 台 QEMU):LTP 扫描 ×4 + 随机化测试 ×2 + 内存压力 + fs 模糊 + 对照实例;已根因类、在观察类与测试队列。</p>
         <a class="more" href="stress.html">进入子项 →</a>
       </div>
       <div class="card">
@@ -97,11 +97,11 @@
         <thead><tr><th>报告</th><th>测什么</th><th>最新</th></tr></thead>
         <tbody>
           <tr><td>unit-test-report.md</td><td>内核内 guest 套件(make test),逐架构</td><td class="mono">1267/1267 riscv64 · 1263/1263 x86_64 · 2026-11-01</td></tr>
-          <tr><td>integration-test-report.md</td><td>多腿无人值守舰队、探针、CI 冒烟门</td><td class="mono">2026-11-01</td></tr>
+          <tr><td>integration-test-report.md</td><td>多进程无人值守测试、探针、CI 冒烟门</td><td class="mono">2026-11-01</td></tr>
           <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP 兼容性,双机位(riscv64 TCG / x86_64 KVM)</td><td class="mono">r27 1084/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
           <tr><td>lmbench-report.md</td><td>lmbench 逐用例:Rux vs Linux(同机同加速)</td><td class="mono">2026-11-04 基线 → 见性能栏目</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5:全部 21 项工作负载对照</td><td class="mono">MC 7332/7027 · SC 2115/2165 → 见性能栏目</td></tr>
-          <tr><td>stress-fleet.md</td><td>压测/稳定性/猴测/模糊舰队设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
+          <tr><td>stress-fleet.md</td><td>压测/稳定性/随机化/模糊测试集群设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri 常备状态</td><td class="mono">157 harness · 1104 proptests → 见安全栏目</td></tr>
           <tr><td>test-coverage.md</td><td>覆盖台账(每次变更再生成)</td><td class="mono">滚动</td></tr>
           <tr><td>gnome-regression-retrospective.md</td><td>GNOME 桌面回归回溯:根因、门禁盲区与防复发改造</td><td class="mono">2026-11-06 → 见回溯报告子页</td></tr>
@@ -112,7 +112,7 @@
     <h2 id="forms"><span class="anchor">§3</span>测试形态总览</h2>
     <ul>
       <li><b>内核内套件(make test)</b>:73 个测试文件、八大门类(memory / process / fs / ipc / signal / network / driver / syscall);断言全部在 QEMU guest 内运行(内核 crate 无法承载宿主侧 <code>#[cfg(test)]</code>)。CI 冒烟门(smoke.yml)每次 push 跑 riscv64 腿。</li>
-      <li><b>集成舰队</b>:多腿无人值守 + 探针矩阵(integration-test-report.md);GUI 有 23 项像素/串口检查门(<code>test/ubuntu-gui/verify.py</code>),两次独立启动逐像素一致性判定。</li>
+      <li><b>集成测试集群</b>:多进程无人值守 + 探针矩阵(integration-test-report.md);GUI 有 23 项像素/串口检查门(<code>test/ubuntu-gui/verify.py</code>),两次独立启动逐像素一致性判定。</li>
       <li><b>形式验证</b>:1104 proptest 每次 push 绑定跑;Kani(157 harness)/ SPIN / Miri nightly(详见<a href="../security/index.html#formal">安全栏目</a>)。</li>
       <li><b>仓库测试总量 4,200+ 用例</b>(套件 + 探针 + 基准 + 验证)。</li>
     </ul>

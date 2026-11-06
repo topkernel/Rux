@@ -110,7 +110,7 @@
     <ul>
       <li><b>镜像同步纪律</b>:verify crate 手工镜像被证算法,<code>scripts/verify_sync_check.py</code> 强制镜像函数体与内核原文逐字节等价 —— 证明钉在被证代码上;不同步镜像副本的内核改动直接 fail make verify 与 CI 门。</li>
       <li><b>节奏</b>:per-push(镜像同步 + proptest 全量)→ nightly(Kani 全 harness / Miri / SPIN,装不进单提交预算)→ 手动(证明性改动落地前 <code>make verify && make kani</code>)。</li>
-      <li><b>已捕获缺陷</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无搁浅,3+ 等待者需要 R85 定时器保障。</li>
+      <li><b>已捕获缺陷</b>:并发原语状态机镜像(SleepMutex,loom 交错 8 场景 + Kani 证 INV-M1..M5)启用头 90 秒抓到一个<b>真实的 pid-0 递归 bug</b>(011a71c5);穷举还给出设计特征证明 —— 纯公平争用下两任务无停滞,3+ 等待者需要 R85 定时器保障。</li>
     </ul>
 
     <h2 id="runtime"><span class="anchor">§5</span>运行时强化清单(已具备)</h2>

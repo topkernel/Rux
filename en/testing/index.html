@@ -79,7 +79,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔥</span>Stress</h3>
-        <p>The standing stress-fleet (11 QEMUs): LTP members ×4 + monkey ×2 + memstorm + fsfuzz + a control member; root-caused classes, the watch list and the fleet queue.</p>
+        <p>The standing stress-fleet cluster (11 QEMUs): LTP sweeps ×4 + randomized testing ×2 + memstorm + fsfuzz + a control instance; root-caused classes, the watch list and the test queue.</p>
         <a class="more" href="stress.html">Open →</a>
       </div>
       <div class="card">
@@ -97,11 +97,11 @@
         <thead><tr><th>Report</th><th>What it measures</th><th>Latest</th></tr></thead>
         <tbody>
           <tr><td>unit-test-report.md</td><td>In-kernel guest suite (make test), per architecture</td><td class="mono">1267/1267 riscv64 · 1263/1263 x86_64 · 2026-11-01</td></tr>
-          <tr><td>integration-test-report.md</td><td>Multi-leg unattended fleet, probes, CI smoke gate</td><td class="mono">2026-11-01</td></tr>
+          <tr><td>integration-test-report.md</td><td>Multi-process unattended testing, probes, CI smoke gate</td><td class="mono">2026-11-01</td></tr>
           <tr><td>ltp-report.md / ltp-tracking.md</td><td>LTP compatibility, both rigs (riscv64 TCG / x86_64 KVM)</td><td class="mono">r27 1084/1869 (x86+KVM) · 1028/1869 (riscv64)</td></tr>
           <tr><td>lmbench-report.md</td><td>lmbench per-case: Rux vs Linux (same rig)</td><td class="mono">2026-11-06 campaign table → Performance section</td></tr>
           <tr><td>geekbench-report.md</td><td>Geekbench 5: all 21 workloads vs Linux</td><td class="mono">MC 7332/7027 · SC 2274/2165</td></tr>
-          <tr><td>stress-fleet.md</td><td>Stress/stability/monkey/fuzz fleet design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
+          <tr><td>stress-fleet.md</td><td>Stress/stability/randomized/fuzz cluster design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri standing</td><td class="mono">157 harnesses · 1104 proptests</td></tr>
           <tr><td>test-coverage.md</td><td>Coverage ledger (regenerated per change)</td><td class="mono">rolling</td></tr>
           <tr><td>gnome-regression-retrospective.md</td><td>GNOME desktop regression retrospective: root causes, gate blind spots, anti-recurrence</td><td class="mono">2026-11-06 → retrospective sub-page</td></tr>
@@ -112,7 +112,7 @@
     <h2 id="forms"><span class="anchor">§3</span>Test forms</h2>
     <ul>
       <li><b>In-kernel suite (make test)</b>: 73 test files across eight domains (memory / process / fs / ipc / signal / network / driver / syscall); all assertions run inside the QEMU guest (a kernel crate cannot host host-side <code>#[cfg(test)]</code>). The CI smoke gate (smoke.yml) runs the riscv64 leg on every push.</li>
-      <li><b>Integration fleet</b>: multi-leg unattended runs + probe matrix (integration-test-report.md); the GUI has a 23-check pixel/serial gate (<code>test/ubuntu-gui/verify.py</code>) with pixel-identical cross-boot comparison (convcheck).</li>
+      <li><b>Integration cluster</b>: multi-process unattended runs + probe matrix (integration-test-report.md); the GUI has a 23-check pixel/serial gate (<code>test/ubuntu-gui/verify.py</code>) with pixel-identical cross-boot comparison (convcheck).</li>
       <li><b>Formal verification</b>: 1104 proptests binding on every push; Kani (157 harnesses) / SPIN / Miri nightly (see the <a href="../security/index.html#formal">Security section</a>).</li>
       <li><b>4,200+ test cases</b> in the repository (suite + probes + benchmarks + proofs).</li>
     </ul>

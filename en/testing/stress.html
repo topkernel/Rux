@@ -57,19 +57,19 @@
   </aside>
 
   <article class="doc-main">
-    <h1>Stress (the standing stress-fleet)</h1>
-    <div class="sub">High load + randomized monkey testing across a concurrent QEMU fleet, catching every anomaly class — design doc docs/test/stress-fleet.md</div>
+    <h1>Stress testing (the standing stress-fleet cluster)</h1>
+    <div class="sub">High load + randomized testing across a concurrent QEMU cluster, catching every anomaly class — design doc docs/test/stress-fleet.md</div>
 
-    <p>The standing stress fleet targets: wild writes (armed capture on the hunt chains), panics/hangs, leaks, fake-OOM recurrences, scheduler pathologies, perf-under-load drift (vs <code>docs/development/perf-gate-baseline.md</code>), and data corruption. Probes live in <code>test/stressng</code> and <code>test/cowrace</code>.</p>
+    <p>The standing stress cluster targets: wild writes (armed capture on the hunt chains), panics/hangs, leaks, fake-OOM recurrences, scheduler pathologies, perf-under-load drift (vs <code>docs/development/perf-gate-baseline.md</code>), and data corruption. Probes live in <code>test/stressng</code> and <code>test/cowrace</code>.</p>
 
-    <h2 id="roster"><span class="anchor">§1</span>Fleet roster</h2>
+    <h2 id="roster"><span class="anchor">§1</span>Cluster composition</h2>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Member</th><th>Kind</th><th>Load</th></tr></thead>
         <tbody>
           <tr><td>chains ×2</td><td>wild-write hunt chains</td><td>self-advancing hunt kernel + load chains (frozen, never restarted)</td></tr>
-          <tr><td>ltp-a/b/c/d</td><td>LTP sweep members</td><td>riscv64 TCG smp2/2G, random-start full LTP sweeps</td></tr>
-          <tr><td>monkey-a/b</td><td>monkey members</td><td>x86_64 KVM 4G, usbless OH image + randomized churn (storage hotplug, hilog flood/rotate, appspawn kill-restart, bm/hidumper/param walks, sync)</td></tr>
+          <tr><td>ltp-a/b/c/d</td><td>LTP sweep instances</td><td>riscv64 TCG smp2/2G, random-start full LTP sweeps</td></tr>
+          <tr><td>monkey-a/b</td><td>randomized-testing instances</td><td>x86_64 KVM 4G, usbless OH image + randomized churn (storage hotplug, hilog flood/rotate, appspawn kill-restart, bm/hidumper/param walks, sync)</td></tr>
           <tr><td>memstorm</td><td>memory storm</td><td>mmap/munmap/MAP_FIXED/mprotect/fork storms, dfx=periodic,memwatch,watchdog</td></tr>
           <tr><td>fsfuzz</td><td>filesystem fuzzing</td><td>random-syscall fuzzer + file/pipe/socket/madvise/fork sequences</td></tr>
           <tr><td>ltpm</td><td>control member</td><td>LTP sweeps on the current main kernel (worktree-vs-main drift control)</td></tr>
@@ -86,15 +86,15 @@
     <ul>
       <li><b>The SIGILL family (kernel bug, fixed)</b>: read_counter() read the time CSR with the write-flavored form <code>csrrw a0, time, zero</code> — the whole instruction is illegal-instruction-prone; the mount hammer loop hit it within ~100 s on every build (toolchain zcb exonerated by paired trials). Fixed with the canonical read form <code>csrr</code>.</li>
       <li><b>Seven user-length round-up overflows (fixed)</b>: fsfuzz r172 drove madvise length=−1 into <code>attempt to add with overflow</code> (syscall/memory.rs); all seven user-length round-ups (madvise/mprotect/msync/mremap/mincore/mlock/munlock) gained wrap checks (EINVAL, reference end-wrap semantics); post-fix the deterministic seed stream ran 150 s+ with zero panics (v4 died within 60 s).</li>
-      <li><b>The zero-serve family (excluded)</b>: fleet LTP sweeps were round-for-round identical across the virtio/bio completion rewrite (1253/1254 TPASS both rounds) — the rewrite cost nothing on that surface.</li>
+      <li><b>The zero-serve family (excluded)</b>: cluster LTP sweeps were round-for-round identical across the virtio/bio completion rewrite (1253/1254 TPASS both rounds) — the rewrite cost nothing on that surface.</li>
     </ul>
 
     <h2 id="watch"><span class="anchor">§3</span>Known classes under watch</h2>
     <ul>
       <li><b>The fsfuzz WATCHDOG family</b> (a perf-registry static+heap lock pair): r282 recorded zero DEADLOCK prints (a first for this home, 45,858 lines), r283 returned 118 — same family, same ra, the static lock moved with the new binary; adjudicated as a known transient class until the fix lands on main (closure waits for the c5640ccc class).</li>
       <li><b>oom01 fake-OOM</b> (root cause identified): the direct-reclaim leg landed (the page_alloc slowpath's deep final round, 39a515a5), but the kills fire from the <b>kswapd escalation path</b> (16 consecutive zero-reclaim balance_pgdat passes → out_of_memory), which has no deep drain. Evidence: OOM-FORENSIC shows in_direct_reclaim=1 with 172 MB of clean page cache one list away and zero OOM-DEEP-PASS lines all round; the control arm improved nothing. The s17 design (one deep drain at the escalation point, reset the failure counter on success) awaits the mm/perf owner.</li>
-      <li><b>The W3 stall family</b>: oom01 SIGKILL delivered, then serial silence — the s17 shape, owned by the W3/OH lane.</li>
-      <li><b>monkey-b / memstorm status</b>: monkey-b x86 rounds all WARN with zero critical flags, margin growth 141–178 MB within criterion; memstorm r34 PREEMPT-UNDERFLOW=8 (the trio family band 6–10), beats 86 vs the 91–97 band — under continued observation before adjudication.</li>
+      <li><b>The W3 stall class</b>: oom01 SIGKILL delivered, then serial silence — the s17 shape, owned by the W3/OH lane.</li>
+      <li><b>monkey-b / memstorm instance status</b>: monkey-b x86 rounds all WARN with zero critical flags, margin growth 141–178 MB within criterion; memstorm r34 PREEMPT-UNDERFLOW=8 (the trio family band 6–10), beats 86 vs the 91–97 band — under continued observation before adjudication.</li>
     </ul>
 
     <h2 id="queue"><span class="anchor">§4</span>Fleet queue</h2>

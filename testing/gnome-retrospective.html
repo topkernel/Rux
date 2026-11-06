@@ -116,12 +116,12 @@
     </ol>
 
     <h2 id="repeat"><span class="anchor">§6</span>排查期间模式当场重演</h2>
-    <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前搁浅(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭排查诊断参数的判别启动同样搁浅 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
+    <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前停滞(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭排查诊断参数的判别启动同样停滞 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
 
     <h2 id="open"><span class="anchor">§7</span>开放项</h2>
     <ol>
       <li><b>trim 面(深水区)</b>:glibc systrim 收回一块内核也认为空闲的堆,随后活指针走进其中 —— 元数据在 trim 之前已被销毁。所有内核侧假说都被探针证据排除(分配器布局、brk/VMA 一致性、COW、mremap、真实压力下的 swap 往返、fault-around 纪律、madvise 边界、rmap/LRU)。trim 隔离区观测器(main@f8ffce15,启动参数 <code>trimq=1</code>)已捕获首次触碰及完整上下文:trim 后 0–2 jiffy 内 gobject 代码在 1.15 MB 收回区间内的两次 READ。下一步:命中点的帧内容转储(区分零填与别名)+ 用户态 malloc interposer。</li>
-      <li><b>第 7 轮早期启动搁浅</b>:对 GNOME 启动二分 perf-gap-hunt 第 7 轮合并。</li>
+      <li><b>第 7 轮早期启动停滞</b>:对 GNOME 启动二分 perf-gap-hunt 第 7 轮合并。</li>
       <li><b>fdreap close 停滞洪泛</b>:近期每次启动的晚段都有(55–129 行/启动);独立成线。</li>
     </ol>
 

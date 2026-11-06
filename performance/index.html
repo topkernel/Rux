@@ -300,7 +300,7 @@
     <ul>
       <li><b>syscost</b>:启动普查(系统调用量、census 计数、tick 率、每操作均值)—— Tier 1 的采集器。</li>
       <li><b>pbench</b>(test/pbench.c):P1–P7 七组微基准探针 —— Tier 2 的采集器。</li>
-      <li><b>census / wakewatch</b>:调度搁浅普查与唤醒→运行延迟取证(1024 槽旁表 + pick-skip 原因旁表)。</li>
+      <li><b>census / wakewatch</b>:调度停滞普查(WAKE-STRANDED)与唤醒→运行延迟取证(1024 槽旁表 + pick-skip 原因旁表)。</li>
       <li><b>if0 v3</b>:EFLAGS 对探针,官方 IF=0 份额与关中断段测量(已上 main,不再用 tick-mode 代理)。</li>
       <li><b>fsw / mmprof 计数器</b>:fs 同步写类、内存记账核对(OOM forensics)。</li>
       <li><b>run/perf-gate.sh</b>:门禁自动化(anchor JSON + Tier 调度 + 带判定)。</li>

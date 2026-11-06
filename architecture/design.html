@@ -87,7 +87,7 @@
     <ul>
       <li><b>CFS(fair.rs)</b>:vruntime = 实际运行时间 ×(NICE_0_LOAD/权重);<code>cfs_min_granularity_ns = 0.7 ms</code>(亦是唤醒粒度)、延迟窗 6 ms、tick 100 Hz;pick 时把本 CPU 不能跑的条目抬出 timeline 再插回,<code>min_vruntime</code> 取完整树最左(防止抹掉睡眠者信用)。</li>
       <li><b>实测等待唤醒抢占门(D-14)</b>:唤醒无空闲 CPU 时,仅当被唤醒者的实测等待 ≥ 6 ms 窗口才抢占在跑任务 —— 替代Linux 内核的 vruntime 信用比较(后者会被 Rux 的 vruntime 调整骗过)。</li>
-      <li><b>wakewatch</b>:唤醒→运行延迟取证仪(1024 槽旁表 + pick-skip 原因旁表),是搁浅问题归因的常备工具。</li>
+      <li><b>wakewatch</b>:唤醒→运行延迟取证仪(1024 槽旁表 + pick-skip 原因旁表),是唤醒停滞(WAKE-STRANDED)问题归因的常备工具。</li>
       <li>GRQ 锁为类型化锁键保护(<a href="#d11">D-11</a>,嵌套关系是编译事实)。</li>
     </ul>
     <h3>关键数字</h3>
