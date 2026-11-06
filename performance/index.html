@@ -190,7 +190,7 @@
     <p style="font-size:13px;color:var(--text-3)">多核逐项的分化说明:总分 +4.3% 由文本压缩(150%)、图像修补(120%)、语音识别(131%)、光线追踪(118%)等调度敏感项拉动;单核 AES-XTS 修复后 105–106%(串口打印税已根因清除);Clang/PDF 渲染等单核余差待隔离复跑。</p>
 
     <!-- ================= fio ================= -->
-    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 存储 I/O 压测(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
+    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 存储 I/O 测试:兼容性与正确性面(qa-suites 第 5/5b 轮,2026-11-04/05)</h2>
     <p style="font-size:13.5px">来源:qa-suites 线台账 run/qa-suites-findings.md(内核 9f2c1cc6)。机位:x86_64 + KVM q35 2G/2cpu,fio 3.36 静态 musl 构建(libaio 引擎内建),每类负载一次独立启动,共 20 次启动。全部启动零 KERNPANIC / 零 DEADLOCK / 零 ALLOCTHROW。</p>
     <h3>引擎枚举(单启动顺序小作业)</h3>
     <div class="tbl-wrap">
@@ -205,7 +205,7 @@
         </tbody>
       </table>
     </div>
-    <h3>压力类(每类独立启动)</h3>
+    <h3>负载类(每类独立启动,验证数据完整性)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>类</th><th>负载</th><th>结论</th></tr></thead>
@@ -222,7 +222,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">吞吐口径:multi 组级 ~700 MiB/s(KVM,页缓存吸收类);引擎枚举作业极小(256k),只枚举系统调用路径支持,不代表吞吐。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
+    <p style="font-size:13px;color:var(--text-3)">口径说明:fio 在此轮用于验证 I/O 引擎路径与数据完整性,非吞吐基准(无同机 Linux 对照;multi 组级 ~700 MiB/s 为页缓存吸收类的顺带读数)。I/O 吞吐性能由 §8 pbench P6(Rux 锚:write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs)与 §2 lmbench 带宽行(bw_pipe 2.68×、bw_unix 1.88× 对 Linux)承担;fio 吞吐基准列入补测队列。附记:作业收尾后 numjobs 进程组回收阶段观测到 F-8(F-5 家族:停靠 forker + KOT-KILL 级联,调度交接问题,移交调度线);fio 自身结果不受影响(rc=0、数据正确)。netperf / iperf3 / sockperf 网络基准在 qa-suites 章程序列中,尚未开测。</p>
 
     <!-- ================= 方法 ================= -->
     <h2 id="method"><span class="anchor">§5</span>方法与 rig</h2>
@@ -322,13 +322,13 @@
 
     <h2 id="queue"><span class="anchor">§10</span>优化队列(开放差距,按优先序)</h2>
     <ul>
-      <li><b>lat_syscall open 1.82× / stat 1.32×</b>:路径解析尾部分解(campaign 已落 open 累计 −15.2%、stat −4.6%,继续攻)。</li>
+      <li><b>lat_syscall open 1.82× / stat 1.32×</b>:路径解析尾部分解(campaign 已落 open 累计 −15.2%、stat −4.6%,继续优化)。</li>
       <li><b>lat_proc fork 1.11×</b>:retire batch-park 在途。</li>
       <li><b>lat_syscall null 1.17× / write 1.10×</b>:入口地板与 fill/copy 尾;write 距持平 6 ns。</li>
       <li><b>Geekbench 单核余差复核</b>:文本压缩 94% / 导航 81% / PDF 85% / Clang 88% / 人脸 87% 等待隔离复跑(AES-XTS 已根因修复,105–106%)。</li>
       <li><b>网络族</b>:bw_tcp TIMEOUT / lat_connect 14–16 ms —— 调度 stale-claim 拒绝 accept server/worker 唤醒(WAKE-HEAL-SKIP ×39);修复后才能取得 TCP 吞吐读数。</li>
-      <li><b>pbench 主线堆问题</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 腿暂停直到定位修复;lmbench 各行不受影响。</li>
-      <li><b>补测队列</b>:Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
+      <li><b>pbench 主线堆问题</b>:0d7993b6 之后 pbench 探针在 musl malloc get_meta 确定性死亡(疑似 scribble 家族),pbench Tier-2 项暂停直到定位修复;lmbench 各行不受影响。</li>
+      <li><b>补测队列</b>:fio 吞吐基准(同机 Linux 对照,direct=1 绕页缓存);Geekbench 的同机 KVM Linux 对照;页缓存命中率绝对值、PCP 水位、binder 吞吐专项。</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§11</span>debug 测量工具链</h2>

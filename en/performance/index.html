@@ -185,7 +185,7 @@
     </div>
     <p style="font-size:13px;color:var(--text-3)">The multi-core split: the +4.3% total is pulled by scheduler-sensitive workloads — text compression (150%), inpainting (120%), speech recognition (131%), ray tracing (118%) — while AES-XTS SC 64% in the 11-04 capture was the pre-fix reading (now re-run at 105–106%); Clang/PDF-rendering single-core residuals await isolated re-runs.</p>
 
-    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 storage-IO stress (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
+    <h2 id="fio"><span class="anchor">§4</span>fio 3.36 storage-IO testing: compatibility and correctness (qa-suites rounds 5/5b, 2026-11-04/05)</h2>
     <p style="font-size:13.5px">Source: the qa-suites lane ledger run/qa-suites-findings.md (kernel 9f2c1cc6). Rig: x86_64 + KVM q35 2G/2cpu, fio 3.36 static musl (libaio engine builtin), one family per boot, 20 boots total. Zero KERNPANIC / DEADLOCK / ALLOCTHROW across all boots.</p>
     <h3>Engine survey (tiny sequential jobs, one boot)</h3>
     <div class="tbl-wrap">
@@ -200,7 +200,7 @@
         </tbody>
       </table>
     </div>
-    <h3>Stress classes (one family per boot)</h3>
+    <h3>Load classes (one family per boot, verifying data integrity)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Class</th><th>Load</th><th>Verdict</th></tr></thead>
@@ -217,7 +217,7 @@
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Throughput basis: the multi group ran ~700 MiB/s (KVM, page-cache-absorbed class); the engine-survey jobs are tiny (256k) and enumerate syscall-path support, not throughput. Post-completion note: the numjobs process-group reaping phase showed F-8 (the F-5 family: parked forker + KOT-KILL cascade, a scheduler-handoff issue handed to the sched lane); fio's own results are unaffected (rc=0, data correct). netperf / iperf3 / sockperf network benchmarks are on the qa-suites charter but have not run yet.</p>
+    <p style="font-size:13px;color:var(--text-3)">Scope note: this round used fio to verify IO engine paths and data integrity, not throughput (no same-rig Linux baseline exists; the multi-group ~700 MiB/s reading is an incidental page-cache-absorbed number). IO throughput performance is carried by §8 pbench P6 (Rux anchors: write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19 µs) and §2 lmbench bandwidth rows (bw_pipe 2.68×, bw_unix 1.88× vs Linux); a fio throughput benchmark is on the backfill queue. Post-completion note: the numjobs process-group reaping phase showed F-8 (the F-5 family: parked forker + KOT-KILL cascade, a scheduler-handoff issue handed to the sched lane); fio's own results are unaffected (rc=0, data correct). netperf / iperf3 / sockperf network benchmarks are on the qa-suites charter but have not run yet.</p>
 
         <h2 id="method"><span class="anchor">§5</span>Method and rig</h2>
     <ul>
@@ -318,7 +318,7 @@
       <li><b>lat_proc fork 1.11×</b>: retire batch-park in flight.</li>
       <li><b>AES-XTS single-core</b>: root-caused and fixed (print-tax artifact, re-run 105–106%); residual single-core rows (Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87%) await isolated re-runs.</li>
       <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); connect and data paths themselves work, and TCP throughput can only be measured after the fix.</li>
-      <li><b>Backfill queue</b>: same-rig KVM Linux comparisons for the remaining lmbench cases (lat_mmap family is already paired) and for Geekbench; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
+      <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1 to bypass the page cache); same-rig KVM Linux comparisons for the remaining lmbench cases (lat_mmap family is already paired) and for Geekbench; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§11</span>debug measurement toolchain</h2>
