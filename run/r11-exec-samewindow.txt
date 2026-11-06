@@ -1,0 +1,6 @@
+r11cut2-1:  load=4.10
+r11ptrace-1: Process fork+execve: 80.6916 load=3.87
+r11cut2-2: Process fork+execve: 82.3741 load=3.31
+r11ptrace-2: Process fork+execve: 81.9250 load=3.02
+r11cut2-3: Process fork+execve: 78.5260 load=3.26
+r11ptrace-3: Process fork+execve: 77.9507 load=3.28

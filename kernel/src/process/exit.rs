@@ -884,27 +884,45 @@ pub fn do_exit(exit_code: i32) -> ! {
         // on a dead owner forever.
         crate::fs::vfs::VFS_MUTATION_LOCK.release_if_owner(current_pid);
 
-        // ===== Ptrace tracer death: auto-detach tracees =====
-        // Linux forgets the tracing relationship when the tracer exits
-        // (ptrace_exit → every tracee is detached and resumed). Without
-        // this, a tracer that dies between PTRACE_ATTACH and DETACH (the
-        // LTP runner 30s-kills a wedged test) leaves its tracee STOPPED
-        // forever — when the tracee is init (ptrace11 attaches PID 1) the
-        // whole guest wedges.
+        // ===== Ptrace: end own relationship + tracer death auto-detach =====
+        // (perf-gap-hunt r11) Two halves:
+        //  (a) a dying TRACEE's own relationship ends here (the count
+        //      decrements with it — keeps the any_tracees gate exact
+        //      across traced-task death);
+        //  (b) Linux forgets the tracing relationship when the TRACER
+        //      exits (ptrace_exit → every tracee is detached and
+        //      resumed). Without this, a tracer that dies between
+        //      PTRACE_ATTACH and DETACH (the LTP runner 30s-kills a
+        //      wedged test) leaves its tracee STOPPED forever — when the
+        //      tracee is init (ptrace11 attaches PID 1) the whole guest
+        //      wedges. The scan is GATED on the global tracee count:
+        //      zero (no tracing relationship anywhere — every
+        //      non-strace shape) skips the 256-bucket walk entirely,
+        //      which was ~4.6us of per-exit bucket-lock traffic
+        //      (forkprof ex_premm).
         {
-            crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
-                if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
-                    return;
-                }
-                // SAFETY: task is alive for the duration of the hash walk
-                // (same discipline as send_signal_to_pgid's in-walk use).
-                (*t).set_tracer_pid(0);
-                (*t).set_ptrace_options(0);
-                (*t).clear_single_step();
-                if (*t).state().contains(TaskState::STOPPED) {
-                    crate::signal::signal_wake_up(t);
-                }
-            });
+            // (a) own tracee relationship ends at death.
+            if (*current).tracer_pid() != 0 {
+                (*current).set_tracer_pid(0);
+                crate::process::ptrace::tracee_count_add(-1);
+            }
+            // (b) tracer death: detach (and resume) any tracee of ours.
+            if crate::process::ptrace::any_tracees() {
+                crate::process::pid_hash::pid_hash_for_each_task(|t| unsafe {
+                    if (*t).tracer_pid() != current_pid || (*t).pid() == current_pid {
+                        return;
+                    }
+                    // SAFETY: task is alive for the duration of the hash walk
+                    // (same discipline as send_signal_to_pgid's in-walk use).
+                    crate::process::ptrace::tracee_count_add(-1);
+                    (*t).set_tracer_pid(0);
+                    (*t).set_ptrace_options(0);
+                    (*t).clear_single_step();
+                    if (*t).state().contains(TaskState::STOPPED) {
+                        crate::signal::signal_wake_up(t);
+                    }
+                });
+            }
         }
 
         // ===== Core dump (P1) =====
@@ -1039,6 +1057,13 @@ pub fn do_exit(exit_code: i32) -> ! {
         // is the uncharge unit.
         crate::sched::cgroup::cgroup_exit(current);
 
+        // (r11 round-2) PREMM: entry prologue -> exit_mm start (the
+        // journal/lock force-releases, ptrace detach, coredump gate,
+        // binder reap, rusage fold).
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_PREMM, fp_t0);
+        }
+
         // ===== exit_mm: drop THIS task's mm reference =====
         // Linux exit_mm discipline:
         // - shm detach (nattch) runs inside MmStruct::drop now — exactly
@@ -1084,7 +1109,19 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::process::task::vfork_wake_parent(current);
 
         // ===== exit_files: Release file descriptor table reference =====
+        // (perf-gap-hunt r11) P_EX_FDDROP: the reference drop runs
+        // FdTable::drop (slot sweep + close decisions) when this was the
+        // last reference — phase-timed to attribute the exit body's
+        // unattributed share.
+        let fp_t_fd = if fp { crate::debug::forkprof::now() } else { 0 };
         (*current).set_fdtable(None);
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_FDDROP, fp_t_fd);
+        }
+        // (r11 round-2) POSTF: exit_files end -> exit_notify start
+        // (futex/PI cleanup, itimers, POSIX timers, SEM_UNDO,
+        // reparenting, thread-group split).
+        let fp_t_postf = if fp { crate::debug::forkprof::now() } else { 0 };
 
         // ===== Clean up futex waiters =====
         crate::sync::futex::futex_cleanup(current);
@@ -1290,6 +1327,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         // notify — a timer IRQ landing here would schedule() us out with
         // state != RUNNING, and lines below (the notify arm) would never
         // run: the parent's only wake source lost.
+        if fp {
+            crate::debug::forkprof::add(crate::debug::forkprof::P_EX_POSTF, fp_t_postf);
+        }
         let fp_t_notify = if fp { crate::debug::forkprof::now() } else { 0 };
         crate::interrupt::preempt::preempt_count_add(1);
         // Set process state to Zombie

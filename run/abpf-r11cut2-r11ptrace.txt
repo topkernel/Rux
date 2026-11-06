@@ -1,0 +1,6 @@
+CASE[fork+exit] r11cut2 rep1 load=1.87 VAL=57.3598
+CASE[fork+exit] r11ptrace rep1 load=1.71 VAL=55.6837
+CASE[fork+exit] r11cut2 rep2 load=1.56 VAL=57.0438
+CASE[fork+exit] r11ptrace rep2 load=1.29 VAL=54.6506
+CASE[fork+exit] r11cut2 rep3 load=1.48 VAL=57.9484
+CASE[fork+exit] r11ptrace rep3 load=1.74 VAL=57.2045
