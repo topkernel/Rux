@@ -600,16 +600,86 @@ impl MmStruct {
             vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
             self.map_vma(vma, perm)?;
         }
+        // mmoverlap tripwire (trim-verdict lane 2026-11-06): heapstress
+        // proved two live glibc chunks can overlap in VA (one mmap'd
+        // chunk landing one page inside another's range), which needs
+        // the placement to have seen a HOLE where live PTEs remained —
+        // a VMA-tree/PTE divergence. Gated by boot param mmoverlap=1:
+        // count live leaves under the freshly placed range; any nonzero
+        // count is the fingerprint (report-only — the demand path will
+        // rebuild those leaves; the report names the producer).
+        if Self::mmov_enabled() && !is_fixed {
+            let (live, first) =
+                count_live_user_ptes(self.pgd, start.as_usize(), aligned_size);
+            if live > 0 {
+                static NS: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::pr_err!(
+                        "MM-STALE-PTES va={:#x} len={:#x} live={} first={:#x} pid={} comm='{}'",
+                        start.as_usize(),
+                        aligned_size,
+                        live,
+                        first,
+                        crate::process::current_pid(),
+                        comm
+                    );
+                }
+            }
+        }
         Ok(start)
     }
 
-    /// Find free virtual address area
-    /// MAP_32BIT placement (Linux x86_64): bottom-up gap search inside
-    /// the first 2GB, low limit 1GB — static ELF segments (0x400000+),
-    /// the brk region below BRK_DEFAULT, and vDSO-less early mappings all
-    /// live below; the gap walk skips whatever exists. ENOMEM when the
-    /// 2GB window has no room.
-    pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+// ---- mmoverlap tripwire helpers (trim-verdict lane) ---------------------
+
+/// Gate for the VMA/PTE divergence tripwires (boot param mmoverlap=1).
+fn mmov_enabled() -> bool {
+    static ON: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if ON.load(core::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let on = crate::cmdline::get_param("mmoverlap")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if on {
+        ON.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    on
+}
+
+/// Count live user leaves under [start, start+len) of the given root.
+/// Returns (live_count, first_live_va). Debug-only (mmoverlap=1).
+pub fn count_live_user_ptes(pgd: u64, start: usize, len: usize) -> (usize, usize) {
+    let mut live = 0usize;
+    let mut first = 0usize;
+    let end = start.saturating_add(len);
+    let mut va = start;
+    while va < end {
+        // SAFETY: read-only page-table walk of the current mm's root.
+        if unsafe { PageTableWalker::walk(pgd, va as u64) }.is_some() {
+            if live == 0 {
+                first = va;
+            }
+            live += 1;
+        }
+        va += PAGE_SIZE_USIZE;
+    }
+    (live, first)
+}
+
+/// Find free virtual address area
+/// MAP_32BIT placement (Linux x86_64): bottom-up gap search inside the
+/// first 2GB, low limit 1GB — static ELF segments (0x400000+),
+/// the brk region below BRK_DEFAULT, and vDSO-less early mappings all
+/// live below; the gap walk skips whatever exists. ENOMEM when the
+/// 2GB window has no room.
+pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError> {
         let vma_mgr = self.vma_read();
         self.find_free_area_32bit_locked(&vma_mgr, size)
     }

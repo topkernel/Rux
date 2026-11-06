@@ -53,19 +53,24 @@ fn round_up_pages_checked(len: usize) -> Option<usize> {
 
 #[derive(Clone, Copy)]
 struct TrimQEntry {
+    /// Lifecycle: 0 = free, 1 = reserved (being filled by the trimming
+    /// CPU, invisible to readers), 2 = active. Transitions happen only
+    /// under the TRIMQ lock; the heavy FILL runs outside it.
+    state: u32,
     mm: usize,
     start: usize,
     end: usize,
     tick: u64,
-    /// PFN + first-16-bytes snapshots of the first TRIMQ_SNAP pages of
-    /// the trimmed range, taken BEFORE the munmap (pfn 0 = page had no
-    /// PTE / beyond cap). The trim-time content is the discriminator:
-    /// valid glibc chunk headers at trim time = the trim was legitimate
-    /// and the later walk is stale-pointer; already-zeroed/garbage
-    /// headers = the corruption predates the trim.
-    pfns: [u64; TRIMQ_SNAP],
-    w0: [u64; TRIMQ_SNAP],
-    w1: [u64; TRIMQ_SNAP],
+    /// PFN snapshots for the WHOLE bitmap range (pfn 0 = page had no
+    /// PTE at trim) + first-16-bytes content snapshots for the first
+    /// TRIMQ_SNAPW pages, taken BEFORE the munmap. The trim-time
+    /// content is the discriminator: valid glibc chunk headers at trim
+    /// time = the trim was legitimate and the later walk is
+    /// stale-pointer; already-zeroed/garbage headers = the corruption
+    /// predates the trim.
+    pfns: [u64; TRIMQ_BM_BITS],
+    w0: [u64; TRIMQ_SNAPW],
+    w1: [u64; TRIMQ_SNAPW],
     /// Present-at-trim bitmap for the WHOLE range (TRIMQ_BM_BITS
     /// pages = 18 MB per slot): bit i = page i had a live PTE when the
     /// trim began. A hit on a present page means glibc reclaimed a
@@ -75,13 +80,50 @@ struct TrimQEntry {
     present_bits: [u64; TRIMQ_BM_WORDS],
 }
 
-const TRIMQ_SNAP: usize = 256;
+// Window policy (tv1/tv5 lesson): full-range CONTENT snapshots (first
+// 16 bytes per page) change boot timing enough to flip which crash
+// form appears (the wedge form preempts the shell-crash form), so the
+// content window stays at 256 pages like the boots that reproduce the
+// shell-crash face. PFN coverage is extended to the FULL bitmap range
+// (one 8-byte store per present page — microseconds) so TRIMQ-FRAME's
+// pfn/descriptor-state/now-content verdict still works for the hits
+// that land 353-1591 pages in; only the trim-time content words are
+// absent there (report prints trimw0=na for idx >= TRIMQ_SNAPW).
+//
+// STORAGE DISCIPLINE (tv1/tv2 lesson): entries are big, so the table
+// must never MOVE one under a lock. The first widening (static
+// [Option<TrimQEntry>; 16] with FIFO-shift eviction) copied ~1.8MB per
+// full-table trim under lock_irqsave — multi-millisecond IF=0 sections
+// that deterministically derailed Xorg startup (user-mode #PF arriving
+// with the arch current slot still naming the idle task → PF-NOCTX →
+// panic; the slot/idle divergence itself is a separate pre-existing
+// kernel weakness this instrument exposed, not caused). The pool below
+// keeps every locked section O(1): reserve (mark 1) → fill outside the
+// lock → publish (mark 2). Eviction deactivates in place; the evicting
+// trimmer then owns the entry exclusively and refills it.
+const TRIMQ_SNAPW: usize = 256; // content snapshot window (timing-critical)
 const TRIMQ_BM_BITS: usize = 72 * 64;
 const TRIMQ_BM_WORDS: usize = 72;
+const TRIMQ_SLOTS: usize = 16;
 
-static TRIMQ: crate::sync::spinlock::Spinlock<[Option<TrimQEntry>; 16]> = {
+impl TrimQEntry {
+    const EMPTY: TrimQEntry = TrimQEntry {
+        state: 0,
+        mm: 0,
+        start: 0,
+        end: 0,
+        tick: 0,
+        pfns: [0; TRIMQ_BM_BITS],
+        w0: [0; TRIMQ_SNAPW],
+        w1: [0; TRIMQ_SNAPW],
+        present_bits: [0; TRIMQ_BM_WORDS],
+    };
+}
+
+static TRIMQ_POOL: crate::sync::spinlock::Spinlock<[TrimQEntry; TRIMQ_SLOTS]> = {
     use crate::sync::spinlock::Spinlock;
-    const INIT: Spinlock<[Option<TrimQEntry>; 16]> = Spinlock::new([None; 16]);
+    const INIT: Spinlock<[TrimQEntry; TRIMQ_SLOTS]> =
+        Spinlock::new([TrimQEntry::EMPTY; TRIMQ_SLOTS]);
     INIT
 };
 static TRIMQ_ON: core::sync::atomic::AtomicBool =
@@ -106,14 +148,59 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
         return;
     }
     let tick = crate::drivers::timer::get_jiffies();
-    // Snapshot the present pages' PFNs before they are torn down: the
-    // TRIMQ-HIT report reads the frames' CURRENT content + descriptor
-    // state, which discriminates "frame recycled by another mapping"
-    // (aliasing) from "frame untouched, only the pointers were stale".
-    let mut pfns = [0u64; TRIMQ_SNAP];
-    let mut w0 = [0u64; TRIMQ_SNAP];
-    let mut w1 = [0u64; TRIMQ_SNAP];
-    let mut present_bits = [0u64; TRIMQ_BM_WORDS];
+    // Phase 1 — reserve a pool slot under the lock (O(1): flip state or
+    // deactivate the oldest entry in place). The fill happens OUTSIDE
+    // the lock; concurrent readers skip reserved/deactivated entries.
+    // The raw pointer is derived under the guard and used after it
+    // drops: safe because state==1 makes the entry invisible to every
+    // other CPU until we publish it.
+    let slot: *mut TrimQEntry = {
+        let mut pool = TRIMQ_POOL.lock_irqsave();
+        // Free slot first; else evict the active entry with the
+        // smallest tick (reserved entries are untouchable).
+        let mut pick = usize::MAX;
+        let mut oldest = u64::MAX;
+        for i in 0..TRIMQ_SLOTS {
+            let e = &mut pool[i];
+            if e.state == 0 {
+                pick = i;
+                break;
+            }
+            if e.state == 2 && e.tick < oldest {
+                oldest = e.tick;
+                pick = i;
+            }
+        }
+        if pick == usize::MAX {
+            return; // only reserved entries — let this trim go unrecorded
+        }
+        let e: &mut TrimQEntry = &mut pool[pick];
+        e.state = 1; // reserved: invisible to readers, owned by us
+        e as *mut TrimQEntry
+    };
+    // SAFETY: this entry is reserved by us; no other CPU touches it
+    // until we publish (state 2) under the lock. Reservation mutably
+    // borrowed the pool under the guard; we continue writing through a
+    // raw pointer after dropping the guard.
+    let slot = slot as *mut TrimQEntry;
+    // SAFETY: writing our reserved entry. present_bits is cleared and
+    // fully rebuilt by the fill loop below; pfns/w0/w1 are written for
+    // every page whose present bit gets set, and readers consult them
+    // ONLY through a set present bit — so the arrays need no clearing
+    // between entries (the bitmap is the validity authority, which
+    // keeps the per-trim memset to the 576-byte bitmap).
+    unsafe {
+        (*slot).mm = mm;
+        (*slot).start = start;
+        (*slot).end = end;
+        (*slot).tick = tick;
+        (*slot).present_bits = [0; TRIMQ_BM_WORDS];
+    }
+    // Phase 2 — snapshot the present pages' PFNs + first 16 bytes
+    // BEFORE the munmap: the TRIMQ-HIT report reads the frames' CURRENT
+    // content + descriptor state, which discriminates "frame recycled
+    // by another mapping" (aliasing) from "frame untouched, only the
+    // pointers were stale".
     {
         let task = crate::sched::current();
         if let Some(t) = task {
@@ -126,17 +213,17 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
                     if let Some((ppn, _)) = unsafe {
                         crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)
                     } {
-                        present_bits[i / 64] |= 1u64 << (i % 64);
-                        if i < TRIMQ_SNAP {
-                            pfns[i] = ppn as u64;
-                            // SAFETY: linear-map view of a live frame.
-                            let kv = crate::arch::mm::phys_to_virt(
-                                crate::arch::mm::PhysAddr::new((ppn as u64) << 12),
-                            )
-                            .bits() as *const u64;
-                            unsafe {
-                                w0[i] = *kv;
-                                w1[i] = *kv.add(1);
+                        unsafe {
+                            (*slot).present_bits[i / 64] |= 1u64 << (i % 64);
+                            (*slot).pfns[i] = ppn as u64;
+                            if i < TRIMQ_SNAPW {
+                                // SAFETY: linear-map view of a live frame.
+                                let kv = crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new((ppn as u64) << 12),
+                                )
+                                .bits() as *const u64;
+                                (*slot).w0[i] = *kv;
+                                (*slot).w1[i] = *kv.add(1);
                             }
                         }
                     }
@@ -144,19 +231,41 @@ fn trimq_record(mm: usize, start: usize, end: usize) {
             }
         }
     }
-    let mut q = TRIMQ.lock_irqsave();
-    let slot = q.iter_mut().enumerate().find(|(_, e)| e.is_none());
-    let entry = TrimQEntry { mm, start, end, tick, pfns, w0, w1, present_bits };
-    match slot {
-        Some((_, e)) => {
-            *e = Some(entry);
-        }
-        None => {
-            // Full: drop the oldest (index 0) by shifting.
-            for i in 0..15 {
-                q[i] = q[i + 1].take();
+    // Phase 3 — publish (O(1) state flip under the lock) + a bounded
+    // record line so a hunting boot can SEE the trim population (who
+    // trims, how big, how many pages still resident) without needing a
+    // hit. Budgeted at 48 lines/boot.
+    {
+        static NR: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let npages_total = (end - start) / crate::mm::page::PAGE_SIZE;
+        let n = NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // First 16 trims unconditionally, then only the big ones (the
+        // trim face lives in MB-class shrinks), 48 lines total.
+        if (n < 16 || npages_total >= 256) && n < 200 {
+            static PL: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 48 {
+            let mut present_n = 0usize;
+            for w in 0..TRIMQ_BM_WORDS {
+                present_n += unsafe { (*slot).present_bits[w] }.count_ones() as usize;
             }
-            q[15] = Some(entry);
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "TRIMQ-REC n={} comm='{}' range=[{:#x},{:#x}) pages={} present={} tick={}",
+                n, comm, start, end, npages_total, present_n, tick
+            );
+            }
+        }
+    }
+    {
+        let _pool = TRIMQ_POOL.lock_irqsave();
+        unsafe {
+            (*slot).state = 2;
         }
     }
 }
@@ -169,8 +278,11 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
         return false;
     }
     let tick = crate::drivers::timer::get_jiffies();
-    let q = TRIMQ.lock_irqsave();
-    for e in q.iter().flatten() {
+    let q = TRIMQ_POOL.lock_irqsave();
+    for e in q.iter() {
+        if e.state != 2 {
+            continue; // free or being filled — invisible
+        }
         if e.mm == mm && addr >= e.start && addr < e.end {
             static NH: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
@@ -196,7 +308,13 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
                     "TRIMQ-PRESENT idx={} present={}",
                     idx, present as u8
                 );
-                if idx < TRIMQ_SNAP as usize {
+                // FRAME verdict at FULL range via PFN + descriptor state
+                // + current content; the trim-time content words exist
+                // only inside the 256-page window (timing budget — see
+                // the window-policy comment above). pfns[] is valid
+                // only where the present bit is set (the bitmap is the
+                // validity authority — see trimq_record).
+                if idx < TRIMQ_BM_BITS && present {
                     let pfn = e.pfns[idx];
                     if pfn != 0 {
                         let pd = crate::mm::page_desc::pfn_to_page(pfn as usize);
@@ -211,12 +329,19 @@ pub fn trimq_report(mm: usize, addr: usize, is_write: bool, rip: usize) -> bool 
                             crate::arch::mm::PhysAddr::new(pfn << 12),
                         )
                         .bits() as *const u64;
-                        let (now0, now1) = unsafe { (*kv, *kv.add(1)) };
-                        let changed = now0 != e.w0[idx] || now1 != e.w1[idx];
-                        crate::pr_warn!(
-                            "TRIMQ-FRAME pfn={:#x} state={} changed={} trimw0={:#016x} noww0={:#016x}",
-                            pfn, flags_desc, changed as u8, e.w0[idx], now0
-                        );
+                        let (now0, _now1) = unsafe { (*kv, *kv.add(1)) };
+                        if idx < TRIMQ_SNAPW {
+                            let changed = now0 != e.w0[idx] || _now1 != e.w1[idx];
+                            crate::pr_warn!(
+                                "TRIMQ-FRAME pfn={:#x} state={} changed={} trimw0={:#016x} noww0={:#016x}",
+                                pfn, flags_desc, changed as u8, e.w0[idx], now0
+                            );
+                        } else {
+                            crate::pr_warn!(
+                                "TRIMQ-FRAME pfn={:#x} state={} trimw0=na noww0={:#016x}",
+                                pfn, flags_desc, now0
+                            );
+                        }
                     } else {
                         crate::pr_warn!("TRIMQ-FRAME pfn=0 (page was not present at trim)");
                     }
