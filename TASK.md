@@ -6465,3 +6465,138 @@ word (the B-class censusd arm), plus manual fuxwatch on
 is parked INSIDE the queue runtime between Publish and Subscribe, the
 fix target is the same kernel leaf the 58th exonerated the futex layer
 for: name the kernel-visible event the queue's next notify waits on.
+
+### 60. 60TH SESSION (2026-11-07) — the launcher gate DECODED to an FFRT
+task-graph freeze in samgr; the mission's (b)/(c) both answered NO
+
+Boots this session: ohw5-ohw10 (6 KVM boots, system-lb5 +
+userdata-fresh2, LOGLEVEL7; dfx=fuxstuck,txnhunt[,schedtrace,sleepsnap],
+fuxwatch=0x7ff0004862c0,0 on ohw6/8/9). Tally contribution: 5/6 reached
+accountmgr spawn, 0/6 passed appfwk.ready (ohw7 stalled pre-services —
+the known early-stall class). Session wedge-rate with the mission's:
+3/14.
+
+#### 1. The mission's two hypotheses are both dead — the subscriptions
+ARE issued and delivered
+
+- (b) "the subscribe RPC never leaves" — FALSE. TXN-HANG (which logs
+  code6) caught accountmgr's code=6 IN FLIGHT in ohw3 (txn4117,
+  929.934 -> 329.329, exec 1930ms+) and whole families of code=6
+  SYNC-OUT txns from device_manager/multimodalinput/accesstoken/
+  telephony/resource_scheduler in ohw5/6/8. SAREG never logged code=6
+  because its filter lacked the code — FIXED this session (SAREG now
+  traces SUBSCRIBE=6; ohw9 shows the full subscription stream:
+  storage_daemon, el5_filekey_man et al, with SLRD "read txn code=0x6"
+  lines proving samgr DELIVERED them to OS_IPC threads).
+- (c) "the OnStart context starves" — FALSE. RUNQ-STRAND census ran in
+  FIVE boots (ohw5/6/8/9/10, with the new wall-probe/give-up counters):
+  ZERO strand lines. No pickable-but-unpicked task exists in these
+  wedges; the ohw2-4 censusd/khungtaskd strands are a separate
+  transient class. Every wedge victim is LEGITIMATELY parked.
+
+#### 2. What the wedge actually is (boot-grade evidence)
+
+- samgr goes to ZERO runnable threads with 17-25 futex waiters
+  (FUX-RUN, every burst from ~17-33s to boot end). All 17+ threads'
+  pthread+0xc0 point at ONE object (0x7ff0004862b8-class).
+- The parked threads are in TWO userspace shapes (ufw chains,
+  symbolized against the unstripped OH build):
+  - binder loopers (OS_IPC_N, the main thread): musl
+    pthread_cond_timedwait <- libc++ __sub_wait <-
+    ffrt::mutexPrivate::wait() (mutex.cpp:237) — waiting for
+    ffrt::mutex owners (samgr's map locks: listenerMapLock_ /
+    abilityMapLock_ et al; samgr builds with SAMGR_USE_FFRT so
+    samgr::mutex IS ffrt::mutex).
+  - FFRT workers (OS_FFRT_N_M): musl cond wait <-
+    ffrt::SExecuteUnit::WorkerIdleAction(CPUWorker*) — the workers'
+    IDLE park, unbounded, predicate-gated. The workers believe no task
+    is ready.
+- fuxwatch on 0x7ff0004862c0 (ohw6/8/9; the same VA as the chain-walk's
+  lock-head l word — FUXWATCH-LOCKHEAD confirms the object) traced the
+  word's full lifecycle. The writers' rips decode (base = the libffrt
+  exec mapping, ohw9: 7ff0015a6000/off 0x65000) to VersionCtx::
+  onProduced / NotifyNextProducer / onConsumed (version_ctx.cpp:88,
+  version_ctx.h:87) — the word is the FFRT VERSION-CHAIN status
+  (DataStatus IDLE=0/READY=1/CONSUMED=2), the serial-queue dependency
+  edge between tasks.
+- THE FREEZE SEQUENCE (ohw6 n=606-608 tid 360; ohw8 n=142-144 tid 342;
+  ohw9 n=721-723 tids 342/349): normal 0<->1<->2 churn, then the last
+  onConsumed (old=1 -> CONSUMED) — and then status never leaves
+  CONSUMED again: only onProduced CONSUMED->CONSUMED writes from fresh
+  threads piling in, NO further consumers, NO NotifyNextProducer
+  progress. The version chain is frozen; every task waiting behind it
+  stays suspended; the workers idle-park; the binders park on the map
+  mutexes the suspended tasks hold.
+- Wake-side audit (FUXW rings, ever_word / anywoken): the parked
+  waiters' words NEVER receive a futex_wake — the waker-side userspace
+  never RUNS. This is not a kernel lost-wake (the 58th's exoneration
+  holds); it is a userspace task-dependency GRAPH deadlock — but one
+  the reference NEVER enters (refu1-9 all resolve in ms), so the
+  divergence that steers our boots into the cycle is still ours.
+
+#### 3. What the freeze is NOT
+
+- Not the scheduler (zero strands, 5 boots, wall-probe armed).
+- Not the futex layer (wakes never sent; no anywoken=1-with-parked).
+- Not the subscriptions (delivered; SLRD proves samgr read them).
+- Not accountmgr-specific: the same freeze kills powermgr/telephony/
+  privacy_service code=6 txns and every Publish reply in the same
+  window; accountmgr is just the gate the launcher needs.
+
+#### 4. Instruments landed this session (all dfx-gated, zero cost off)
+
+- RUNQ-STRAND census v2: victim claim/pk/policy/timeslice/skip-history
+  (peek_skip_history — non-destructive), the WALL below each victim
+  (strand_wall_probe: entries a pick consults first, with their
+  on_cpu/claim/affinity), incumbent policy+prio, and the two pick-walk
+  give-up counters (PICK_STASH_OVERFLOW / PICK_SKIP_ALL — a >32-entry
+  refusal wall makes every pick bail before the victim is visited).
+- FUXWATCH-LOCKHEAD: the chain-walk's lock-shape hit now arms the
+  mutex's l word PREFERRING SLOT 1 (the manual fuxwatch param is
+  usually absent and the same-VA word is a different object each
+  boot), falling back to slot 2, and prints the arm line. The census's
+  old stack-word auto-arm is DISABLED (a musl cv waiter node on the
+  waiter's own stack — cannot identify an owner; it was stealing the
+  slot from the lock-head arm every boot).
+- SAREG code=6 (coordinator ask): the subscription stream is visible.
+- FUX-MAPS cap 24 -> 40 -> 72: samgr's libffrt mapping (off=0x65000)
+  is now in the dump; the frame chains symbolize.
+- ohsrc55/ has sym.py + libffrt.so + the unstripped-build path; the
+  recipe: runtime -> ELF vaddr = runtime - map_base + 0x66000 (exec
+  segment file 0x65754 -> vaddr 0x66754), addr2line -e
+  out/x86_64_virt/lib.unstripped/resourceschedule/ffrt/libffrt.so.
+
+#### 5. For the 61st — the two remaining questions, with a recipe
+
+The wedge is an FFRT task-graph cycle: task T holds map-mutex M1,
+CoWait-blocks on M2 inside the critical section; M2's owner waits on a
+version whose producer waits on M1-class mutexes; the workers idle.
+What is still missing is the BOTTOM of the cycle — the kernel-visible
+event the bottom task waits for. Recipe:
+1. Boot with fuxwatch=0x7ff0004862c0,0 (slot 1 from t=0 — caught the
+   freeze triangle in 3/3 boots) + dfx=fuxstuck,txnhunt,sleepsnap. The
+   l-word stream's last ACQUIRE-class write (old=0 at df8a) with no
+   matching unlock (e9c0) names the OWNER-OF-RECORD tid X.
+2. Pull X's ufw chain from sleepsnap (Class A = WorkerIdleAction =
+   a worker whose TASK holds M1 suspended mid-critical-section;
+   Class B = a waiter). For a Class A owner, extend ffrt_chain_walk to
+   start from the OWNER's frame spills (it currently walks WAITERS) —
+   the walk from X's stack finds M2's head and M2's own l word.
+3. Walk the chain M2 -> M3 -> ... until a holder is parked on a KERNEL
+   event (ioctl/ioctl-BWR/futex with a live waker) — that event is the
+   fix target. If the walk closes a pure userspace cycle, the kernel
+   divergence is the EVENT ORDER that built it: compare the txn
+   delivery/reply interleaving (TXN-HANG + SAREG code6/3 timeline)
+   against refu9's in the same window — our binder is 2-3x slower per
+   round-trip, which is the leading suspect for WHY the cycle forms.
+4. The wedge-rate lever, if the cycle is order-driven: the PICK_STASH_
+   OVERFLOW / PICK_SKIP_ALL counters and RUNQ-STRAND wall-probe are in
+   place to re-audit the scheduler on any boot that passes appfwk —
+   the ohw2-4 kthread strands (censusd linked, vr ~ min_vr, 50s) are
+   still unexplained and are the same class that would freeze a
+   producer thread permanently.
+
+### 6. Gates this session
+aarch64 build rc=0; riscv64 build + make test in the gate logs
+(run/gate-riscv-*.log). All instrument changes are dfx/param-gated;
+zero cost on plain boots.

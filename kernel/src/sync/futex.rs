@@ -797,26 +797,51 @@ pub fn ffrt_chain_walk(
                     }
                 }
                 if is_lock {
-                    // sc57b: auto-arm the second watch on a NEW lock
-                    // head (the B-class mutex) once per boot — ONLY
-                    // for the registered samgr pid's walks: ohc71
-                    // armed a random hot mutex from a foreign
+                    // sc57b: auto-arm a watch on the DETECTED lock's `l`
+                    // word (hop-0x8: the mutexPrivate state) once per
+                    // boot — ONLY for the registered samgr pid's walks:
+                    // ohc71 armed a random hot mutex from a foreign
                     // process's ring and trapped the boot into a
-                    // fault+step crawl.
+                    // fault+step crawl. 60th: prefer SLOT 1 (the manual
+                    // fuxwatch= param is absent on these boots and the
+                    // same-VA word across processes is a different
+                    // object every boot); fall back to slot 2. The old
+                    // census auto-arm (first stuck OS_FFRT park word =
+                    // a musl cv waiter node on the waiter's own stack)
+                    // cannot identify the owner and was stealing the
+                    // slot before this walk could arm the lock word —
+                    // it no longer fires.
                     let samgr_pid =
                         crate::ipc::binder::binder_sareg_samgr_pid();
                     if samgr_pid != 0 && tk.tgid() as u32 == samgr_pid {
-                        let w2 = nxt.wrapping_sub(0x8);
+                        let wl = nxt.wrapping_sub(0x8);
                         let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-                        if (w1 & !0x3) != (w2 & !0x3) {
-                            FUXWATCH2_ADDR
+                        if (w1 & !0x3) != (wl & !0x3) {
+                            if FUXWATCH_ADDR
                                 .compare_exchange(
                                     0,
-                                    w2,
+                                    wl,
                                     core::sync::atomic::Ordering::Relaxed,
                                     core::sync::atomic::Ordering::Relaxed,
                                 )
-                                .ok();
+                                .is_err()
+                            {
+                                FUXWATCH2_ADDR
+                                    .compare_exchange(
+                                        0,
+                                        wl,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .ok();
+                            }
+                            crate::pr_warn!(
+                                "FUXWATCH-LOCKHEAD l={:#x} head={:#x} tid={} pid={}",
+                                wl,
+                                nxt,
+                                tk.pid(),
+                                samgr_pid
+                            );
                         }
                     }
                     return Some((out, Some(nxt)));
@@ -2453,14 +2478,22 @@ pub fn futex_stuck_census() {
     //       held|waiters): its write trace decides "unlock happens but
     //       waiter never wakes" (kernel drop) from "no unlock ever"
     //       (holder never runs — reference-diff branch).
+    //       60th DISABLED: the park word is a musl cv waiter node on
+    //       the waiter's OWN stack — its write trace cannot identify
+    //       the mutex owner, and arming it stole the slot (and the
+    //      censusd arm rounds) from the chain-walk's LOCK-HEAD arm
+    //      (fuxwatch-LOCKHEAD), which is the owner-naming instrument.
     {
         use core::fmt::Write as _;
         // (a) pool stats — O(1) counter (see FUX_POOL_USED).
         let pool_used = FUX_POOL_USED.load(Relaxed);
         let last_full = FUX_POOL_FULL_J.load(Relaxed);
-        // (c) slot-2 auto-arm on the first stuck samgr FFRT-worker word.
+        // (c) DISABLED (60th): see the comment above — the stack-word
+        // auto-arm lost the slot race against the chain-walk's
+        // LOCK-HEAD arm; kept as a const-gated block for reference.
+        const CENSUS_STACK_WORD_ARM: bool = false;
         let samgr_pid = crate::ipc::binder::binder_sareg_samgr_pid();
-        if samgr_pid != 0 && FUXWATCH2_ADDR.load(Relaxed) == 0 {
+        if CENSUS_STACK_WORD_ARM && samgr_pid != 0 && FUXWATCH2_ADDR.load(Relaxed) == 0 {
             for g in groups.iter() {
                 if g.tgid == samgr_pid && g.rep_comm[..7] == *b"OS_FFRT" {
                     let w2 = g.uaddr as u64;
@@ -2641,14 +2674,19 @@ pub fn futex_stuck_census() {
                 // SAFETY: diagnostic reads under the for_each_task
                 // contract.
                 let tk = unsafe { &*task };
-                if tk.pid() != samgr_pid || maps_n >= 24 {
+                // 60th: cap 24 -> 40 — samgr's libffrt/libipc mappings
+                // sort AFTER the first 24 file VMAs, and the wedge frame
+                // chain (TXN-HANG-BWR ffrt-chain uret addrs) lands in
+                // exactly those; without them the frames symbolize as
+                // "unmapped".
+                if tk.pid() != samgr_pid || maps_n >= 72 {
                     return;
                 }
                 if let Some(aspace) = tk.address_space() {
                     if let Some(mgr) = aspace.vma_try_read() {
                         use crate::mm::vma::VmaType;
                         for vma in mgr.iter() {
-                            if maps_n >= 24 {
+                            if maps_n >= 72 {
                                 break;
                             }
                             if !vma.flags().is_executable() {

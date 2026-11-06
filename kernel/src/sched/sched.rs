@@ -5276,13 +5276,87 @@ pub fn runq_strand_census(now_j: u64) {
         };
         let throttled = crate::sched::cgroup::task_cgroup_throttled(task as *const Task);
         let vr = tk.sched_entity().get_vruntime();
-        let min_vr = match try_grq_lock() {
-            Some(g) => g.cfs_rq.get_min_vruntime(),
-            None => 0,
-        };
+        // 60th: the pick-path's own refusal history for this task
+        // (non-destructive; None = never refused or slot stolen). Only
+        // armed under dfx=schedtrace.
+        let skips = crate::sched::fair::peek_skip_history(task as *mut Task);
+        // 60th: the two pick-walk give-up shapes (stash overflow /
+        // skip-all), plus the WALL below this victim: entries every
+        // pick consults first. Held under the same GRQ window.
+        let (ovf, skipall) = crate::sched::fair::pick_giveups();
+        let mut wall_s = alloc::string::String::new();
         let mut inc_s = alloc::string::String::new();
+        let mut min_vr: u64 = 0;
         {
-            use core::fmt::Write as _;
+            let mut g = match try_grq_lock() {
+                Some(g) => g,
+                None => {
+                    use core::fmt::Write as _;
+                    // BUSY: report the give-up counters (lock-free) and
+                    // name the window busy; skip the tree walk.
+                    use core::fmt::Write as _;
+                    let _ = write!(
+                        wall_s,
+                        " grq=busy ovf={} skipall={}",
+                        ovf, skipall
+                    );
+                    // HOTPATH-PRINT: fuxstuck graph-burst gate.
+                    crate::pr_warn!(
+                        "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr=?{}{}",
+                        tk.pid(),
+                        tk.tgid(),
+                        core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
+                        age / 100,
+                        exec / 1_000_000,
+                        linked,
+                        tk.cpus_allowed(),
+                        throttled as u8,
+                        tk.policy(),
+                        tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
+                        tk.pick_state(),
+                        tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
+                        match skips { Some((n, _)) => n as u64, None => u64::MAX },
+                        vr,
+                        wall_s,
+                        inc_s
+                    );
+                    continue;
+                }
+            };
+            min_vr = g.cfs_rq.get_min_vruntime();
+            // The wall: up to 8 entries sorting before the victim.
+            {
+                use core::fmt::Write as _;
+                let mut rows: [crate::sched::fair::StrandWallRow; 8] = [
+                    crate::sched::fair::StrandWallRow {
+                        vruntime: 0,
+                        pid: 0,
+                        policy: 0,
+                        on_cpu: false,
+                        claim: 0,
+                        aff: 0,
+                    };
+                    8
+                ];
+                let (below, total, filled) = g.cfs_rq.strand_wall_probe(task as *mut Task, &mut rows);
+                let _ = write!(
+                    wall_s,
+                    " ovf={} skipall={} below={} total={}",
+                    ovf, skipall, below, total
+                );
+                for r in rows.iter().take(filled) {
+                    let _ = write!(
+                        wall_s,
+                        " |{}p{}vr{:#x}oc{}cl{}af{:#x}",
+                        r.pid, r.policy, r.vruntime, r.on_cpu as u8, r.claim, r.aff
+                    );
+                }
+                if below > filled {
+                    let _ = write!(wall_s, " |+{}", below - filled);
+                }
+            }
+            {
+                use core::fmt::Write as _;
             for c in 0..MAX_CPUS {
                 let cur = cpu_state(c).current;
                 if cur.is_null() {
@@ -5297,20 +5371,25 @@ pub fn runq_strand_census(now_j: u64) {
                     .load(core::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(se.prev_sum_exec_runtime.load(core::sync::atomic::Ordering::Relaxed))
                     / 1_000_000;
+                // 60th: incumbent policy/prio — an RT-class incumbent
+                // (FIFO/RR) explains CFS strands without any pick bug.
                 let _ = write!(
                     inc_s,
-                    " c{}={}({}/act{}ms/pc{})",
+                    " c{}={}({}/act{}ms/pc{}/pol{}pr{})",
                     c,
                     cur.pid(),
                     core::str::from_utf8(cur.comm()).unwrap_or("").trim_end_matches('\0'),
                     act_ms,
-                    cur.preempt_count()
+                    cur.preempt_count(),
+                    cur.policy() as u8 as u64,
+                    cur.prio()
                 );
+            }
             }
         }
         // HOTPATH-PRINT: fuxstuck graph-burst gate.
         crate::pr_warn!(
-            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} vr={:#x} min_vr={:#x} why?{}",
+            "RUNQ-STRAND tid={} tgid={} ({}) age={}s exec_frozen={}ms linked={} aff={:#x} throttled={} pol={:?} claim={} pk={:#x} ts={}ms skips={} vr={:#x} min_vr={:#x}{}{}",
             tk.pid(),
             tk.tgid(),
             core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0'),
@@ -5319,8 +5398,14 @@ pub fn runq_strand_census(now_j: u64) {
             linked,
             tk.cpus_allowed(),
             throttled as u8,
+            tk.policy(),
+            tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
+            tk.pick_state(),
+            tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
+            match skips { Some((n, _)) => n as u64, None => u64::MAX },
             vr,
             min_vr,
+            wall_s,
             inc_s
         );
     }

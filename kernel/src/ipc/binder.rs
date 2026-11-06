@@ -8967,6 +8967,12 @@ fn binder_transaction(
         // that init never spawns. The parcel head (header + token + said)
         // names the target of every load offline.
         const SAMGR_LOAD: u32 = 7;
+        // 60th (coordinator ask): trace SUBSCRIBE (code 6) — the
+        // AddSystemAbilityListener subscriptions (SA 180/3101/5003 from
+        // accountmgr et al) were INVISIBLE to SAREG before: the
+        // subscription stream (sent? delivered? which samgr thread?)
+        // is the launcher-gate evidence.
+        const SAMGR_SUBSCRIBE: u32 = 6;
         // The samgr interface token starts UTF-16 "oh" at parcel offset
         // 12 (after the 8-byte OH parcel header + u32 string length).
         static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
@@ -8977,7 +8983,12 @@ fn binder_transaction(
         if !reply
             && matches!(
                 tr.code,
-                SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD | SAMGR_LOAD
+                SAMGR_ADD
+                    | SAMGR_REMOVE
+                    | SAMGR_ADD_ONDEMAND
+                    | SAMGR_UNLOAD
+                    | SAMGR_LOAD
+                    | SAMGR_SUBSCRIBE
             )
         {
             let mut hdr = [0u8; 16];
@@ -9013,6 +9024,7 @@ fn binder_transaction(
                             | SAMGR_ADD_ONDEMAND
                             | SAMGR_UNLOAD
                             | SAMGR_LOAD
+                            | SAMGR_SUBSCRIBE
                     )
                 })
                 .unwrap_or(false)

@@ -84,6 +84,25 @@ static WW_PICK_WALKS: AtomicU64 = AtomicU64::new(0);
 static WW_ONCPU_HEALS: AtomicU64 = AtomicU64::new(0);
 static WW_CLAIM_HEALS: AtomicU64 = AtomicU64::new(0);
 
+// 60th (RUNQ-STRAND follow-up): the two pick-walk GIVE-UP shapes, counted
+// unconditionally (one relaxed inc each, zero cost when not read).
+// STASH-OVERFLOW: the 32-slot refusal stash filled — the walk abandoned
+// the rest of the tree, so every entry sorting above the stash window is
+// never visited by this pick (a >32-entry refusal wall strands the whole
+// right side of the timeline). SKIP-ALL: the walk refused everything and
+// the pick returned None with entries still linked (callers go idle).
+pub(crate) static PICK_STASH_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PICK_SKIP_ALL: AtomicU64 = AtomicU64::new(0);
+
+/// (stash overflows, skip-all picks) since boot — the RUNQ-STRAND census
+/// prints them on every burst.
+pub fn pick_giveups() -> (u64, u64) {
+    (
+        PICK_STASH_OVERFLOW.load(Ordering::Relaxed),
+        PICK_SKIP_ALL.load(Ordering::Relaxed),
+    )
+}
+
 /// Total pick-walk entries since boot (WW5 heartbeat; wake-side
 /// snapshot for the strand line's visits= field).
 pub fn ww_pick_walks() -> u64 {
@@ -198,6 +217,29 @@ pub fn print_skip_history(task: *mut Task) {
         pu(now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64);
     }
     putchar(b'\n');
+}
+
+/// 60th (RUNQ-STRAND census): NON-destructive peek of `task`'s recorded
+/// pick-refusal history. Unlike print_skip_history (wakewatch consumes it
+/// once), the census reports the same victim burst after burst and must
+/// not wipe the evidence. Returns None when the slot no longer names this
+/// task (never refused since boot, or the address-keyed slot was stolen —
+/// the census prints the ambiguity explicitly).
+pub fn peek_skip_history(task: *mut Task) -> Option<(u64, [u64; 5])> {
+    let s = skip_hist_of(task);
+    if s.task.load(Ordering::Acquire) != task as usize as u64 {
+        return None;
+    }
+    Some((
+        s.n.load(Ordering::Relaxed),
+        [
+            s.why[0].load(Ordering::Relaxed),
+            s.why[1].load(Ordering::Relaxed),
+            s.why[2].load(Ordering::Relaxed),
+            s.why[3].load(Ordering::Relaxed),
+            s.why[4].load(Ordering::Relaxed),
+        ],
+    ))
 }
 
 /// Clock frequency (HZ) - from config
@@ -560,6 +602,21 @@ impl VruntimeKey {
     fn new(vruntime: u64, task_id: u64) -> Self {
         Self { vruntime, task_id }
     }
+}
+
+/// One row of the strand-wall probe (CfsRunQueue::strand_wall_probe):
+/// a timeline entry that sorts before a stranded victim — a pick-order
+/// predecessor whose refusal every pick must digest before the victim
+/// can be reached.
+#[derive(Clone, Copy)]
+pub struct StrandWallRow {
+    pub vruntime: u64,
+    pub pid: u32,
+    /// SchedPolicy as u8 (0 Normal, 1 Fifo, 2 Rr, 3 Batch, 5 Idle, 6 Deadline)
+    pub policy: u64,
+    pub on_cpu: bool,
+    pub claim: i32,
+    pub aff: u32,
 }
 
 // R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
@@ -1010,6 +1067,63 @@ impl CfsRunQueue {
             Some(key) => self.tasks_timeline.get(&key) == Some(&task),
             None => false,
         }
+    }
+
+    /// 60th (RUNQ-STRAND census): bounded in-order walk of the timeline
+    /// naming the WALL below a stranded victim — every entry whose key
+    /// sorts before the victim's stored key is consulted by EVERY pick
+    /// before the victim is reached, so a wall of entries that refuse
+    /// their picks (affinity pinning, ownership marks, throttling)
+    /// delays the victim; past 32 stash slots the pick gives up entirely
+    /// and the victim (and everything above it) is never visited.
+    ///
+    /// Returns (entries_below_victim, total_entries, rows_filled).
+    /// `rows` is filled with the EARLIEST wall entries in pick order
+    /// (their vruntime, pid, policy, on_cpu, claim, affinity mask) —
+    /// the census prints them so the refusal shape is named in the
+    /// same line as the victim. GRQ-HELD. Read-only: the tree is not
+    /// modified; only a stable snapshot of POD fields is copied.
+    pub fn strand_wall_probe(
+        &mut self,
+        victim: *mut crate::process::Task,
+        rows: &mut [StrandWallRow],
+    ) -> (usize, usize, usize) {
+        let victim_key = if victim.is_null() {
+            None
+        } else {
+            // SAFETY: GRQ-held timeline discipline covers the SE access.
+            unsafe { (*victim).sched_entity().timeline_key() }
+        };
+        let mut below = 0usize;
+        let mut total = 0usize;
+        let mut filled = 0usize;
+        for (&k, &t) in self.tasks_timeline.iter() {
+            total += 1;
+            let is_below = match victim_key {
+                Some(vk) => k < vk,
+                None => true, // victim not in tree: everything is "before" it
+            };
+            if is_below {
+                below += 1;
+                if filled < rows.len() {
+                    // SAFETY: the map holds valid Task pointers; the GRQ
+                    // we hold pins them against dequeue for the read.
+                    let (policy, on_cpu, claim, aff) = unsafe {
+                        ((*t).policy() as u8 as u64, (*t).on_cpu(), (*t).running_on_cpu.load(Ordering::Acquire), (*t).cpus_allowed())
+                    };
+                    rows[filled] = StrandWallRow {
+                        vruntime: k.vruntime,
+                        pid: unsafe { (*t).pid() },
+                        policy,
+                        on_cpu,
+                        claim,
+                        aff,
+                    };
+                    filled += 1;
+                }
+            }
+        }
+        (below, total, filled)
     }
 
     /// Shared heal-report rate gate: at most one heal line per 2 jiffies
@@ -1644,7 +1758,14 @@ impl CfsRunQueue {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;
             } else {
-                // Overflow — re-insert and give up (very unlikely)
+                // Overflow — re-insert and give up. 60th (RUNQ-STRAND): NOT
+                // "very unlikely" — >32 simultaneously refused entries make
+                // EVERY later pick bail out here, and every entry sorting
+                // above the stash window (e.g. a linked, pickable, frozen
+                // censusd/samgr victim) is never even VISITED while the
+                // callers walk away empty-handed. Count it unconditionally;
+                // the strand census reports the total.
+                PICK_STASH_OVERFLOW.fetch_add(1, Ordering::Relaxed);
                 self.timeline_insert(key, task);
                 break;
             }
@@ -1683,6 +1804,7 @@ impl CfsRunQueue {
         // the hot idle-loop callers cannot flood the console. SBI direct
         // write discipline (R34): we hold the GRQ lock here.
         if result.is_none() && skip_count > 0 {
+            PICK_SKIP_ALL.fetch_add(1, Ordering::Relaxed);
             use crate::console::putchar_no_lock as putchar;
             fn pd(mut v: u64) {
                 use crate::console::putchar_no_lock as putchar;
