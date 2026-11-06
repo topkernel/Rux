@@ -122,4 +122,88 @@ pub fn test_sync_locks() {
         }
         test_pass("rwlock write protocol");
     }
+
+    // ---- Rwsem (sleepable, the mmap_lock shape) fast-path protocol ----
+    // Single-CPU rows: the preempt bracket of the fast paths, count/owner
+    // word shapes, reader sharing, and the trylock refusal rules. The
+    // cross-CPU grant/handoff protocol is exercised by every mmap/fault
+    // in the suite (vma_manager IS an Rwsem) and by the OH boots.
+    {
+        use crate::sync::rwsem::Rwsem;
+
+        let sem: Rwsem<u64> = Rwsem::new("test-rwsem", 7);
+
+        // Uncontended read: preempt balanced, and a second reader may
+        // join (readers share).
+        {
+            let r1 = sem.read();
+            let in_section = crate::interrupt::preempt::preempt_count();
+            let r2 = sem.read();
+            if in_section != base {
+                // The sleepable lock must NOT pin preemption while held
+                // (only the fast-path RMW section is bracketed).
+                test_fail(
+                    "rwsem read protocol",
+                    "held read guard pins preempt_count (must be preemptible)",
+                );
+                return;
+            }
+            if *r1 != 7 || *r2 != 7 {
+                test_fail("rwsem read protocol", "data not visible to readers");
+                return;
+            }
+            drop(r2);
+            drop(r1);
+            if crate::interrupt::preempt::preempt_count() != base {
+                test_fail("rwsem read protocol", "preempt_count not restored after up_read");
+                return;
+            }
+            if sem.is_locked() {
+                test_fail("rwsem read protocol", "count word nonzero after last up_read");
+                return;
+            }
+        }
+
+        // Writer: try_write must refuse under a live reader; a real write
+        // excludes try_read and restores the count word on drop.
+        {
+            let _r = sem.read();
+            if sem.try_write().is_some() {
+                test_fail("rwsem write protocol", "try_write barged past a live reader");
+                return;
+            }
+            drop(_r);
+            let mut w = sem.write();
+            if sem.try_read().is_some() {
+                test_fail("rwsem write protocol", "try_read entered under the writer");
+                return;
+            }
+            *w = 8;
+            drop(w);
+            if sem.is_locked() {
+                test_fail("rwsem write protocol", "count word nonzero after up_write");
+                return;
+            }
+            if *sem.read() != 8 {
+                test_fail("rwsem write protocol", "write data lost across unlock");
+                return;
+            }
+        }
+
+        // try_read under a live reader: legal (readers share). Queued-
+        // waiter refusal (READ_FAILED_MASK) needs real contention —
+        // exercised by the SMP suite and the OH boots.
+        {
+            let _r = sem.read();
+            if sem.try_read().is_none() {
+                test_fail("rwsem try_read protocol", "try_read refused under a bare reader");
+                return;
+            }
+        }
+        if sem.is_locked() {
+            test_fail("rwsem try_read protocol", "count word nonzero after drops");
+            return;
+        }
+        test_pass("rwsem fast-path protocol");
+    }
 }

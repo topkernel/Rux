@@ -474,33 +474,18 @@ pub fn register() {
     }
 }
 
-/// The set_event write handler — the reference grammar exactly.
+/// Apply ONE set_event token (the reference's ftrace_set_clr_event):
+/// arm (or, with a leading '!', disarm) every event the token matches.
+/// Returns how many event switches were set — 0 means the token
+/// matched no event.
 ///
-/// The reference applies ONE whitespace-delimited token per write
-/// (trace_get_user consumes a single token and the rest of the buffer
-/// with it; a whitespace-only write is a no-op). A leading '!' disarms
-/// instead of arming. The token forms, per ftrace_set_clr_event:
+/// The token forms, per ftrace_set_clr_event:
 ///
 /// - `system:event` — that one event;
 /// - `*:event` / `:event` — every event of that name, any system;
 /// - `system:*` / `system:` — every event of that system;
 /// - `name` (no colon) — every event whose SYSTEM or NAME is `name`.
-///
-/// A token that matches no event is EINVAL (the reference's
-/// __ftrace_set_clr_event_nolock leaves the error set). There are no
-/// "all"/"none" words in the reference's set_event — the events/enable
-/// file is the all-events switch.
-fn set_event_write(buf: &[u8]) -> i32 {
-    let text = match core::str::from_utf8(buf) {
-        Ok(t) => t,
-        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
-    };
-    let token = match text.split_whitespace().next() {
-        Some(t) => t,
-        // Only whitespace (the shell's split trailing-newline write):
-        // consumed, nothing applied.
-        None => return 0,
-    };
+pub(crate) fn apply_event_token(token: &str) -> usize {
     let (disarm, spec) = match token.strip_prefix('!') {
         Some(rest) => (true, rest),
         None => (false, token),
@@ -517,12 +502,70 @@ fn set_event_write(buf: &[u8]) -> i32 {
         })
         .copied()
         .collect();
-    if matches.is_empty() {
-        return crate::errno::Errno::InvalidArgument.as_neg_i32();
-    }
-    for e in matches {
+    for e in matches.iter() {
         e.enabled
             .store(!disarm, core::sync::atomic::Ordering::Relaxed);
+    }
+    matches.len()
+}
+
+/// The `trace_event=` boot parameter — the reference's
+/// `__setup("trace_event=", ...)` in kernel/trace/trace_events.c:
+/// comma-separated set_event tokens applied at boot, before the first
+/// userspace instruction. A token that matches no event is warned
+/// about and skipped (the reference's "Failed to enable trace event").
+///
+/// One Rux-side addition over just arming the switches: the boot
+/// parameter also turns `tracing_on` on. The reference's tracing_on
+/// is on by default, so boot-armed events record from the first tick;
+/// Rux's tracing_on starts off (its events-off default), so the boot
+/// parameter flips it to reach the same net effect.
+pub fn init_from_cmdline() {
+    let Some(spec) = crate::cmdline::get_param("trace_event") else {
+        return;
+    };
+    let mut armed = 0usize;
+    for token in spec.split(',') {
+        if token.is_empty() {
+            continue;
+        }
+        let n = apply_event_token(token);
+        if n == 0 {
+            crate::println!(
+                "[trace] trace_event=: no such event '{}' (skipped)",
+                token
+            );
+        }
+        armed += n;
+    }
+    if armed > 0 {
+        trace::set_tracing_on(true);
+    }
+}
+
+/// The set_event write handler — the reference grammar exactly.
+///
+/// The reference applies ONE whitespace-delimited token per write
+/// (trace_get_user consumes a single token and the rest of the buffer
+/// with it; a whitespace-only write is a no-op). A leading '!' disarms
+/// instead of arming. There are no "all"/"none" words in the
+/// reference's set_event — the events/enable file is the all-events
+/// switch.
+fn set_event_write(buf: &[u8]) -> i32 {
+    let text = match core::str::from_utf8(buf) {
+        Ok(t) => t,
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    let token = match text.split_whitespace().next() {
+        Some(t) => t,
+        // Only whitespace (the shell's split trailing-newline write):
+        // consumed, nothing applied.
+        None => return 0,
+    };
+    if apply_event_token(token) == 0 {
+        // A token that matches no event is EINVAL (the reference's
+        // __ftrace_set_clr_event_nolock leaves the error set).
+        return crate::errno::Errno::InvalidArgument.as_neg_i32();
     }
     0
 }

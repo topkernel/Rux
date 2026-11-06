@@ -235,6 +235,25 @@ dead-proc `expect()` replaced by a bounded warning (619bf4b6); the
   WAKE-REFUSED 32±4, exact across the board since 2026-10-25); the
   design that makes the workload fast is the design the safety
   instruments reason over.
+- Trace records sequence per CPU, merge by timestamp (oh-tracepc
+  round, 2026-11-06): the ONE global fetch_add every armed trace
+  record paid (both CPUs, sys_enter+sys_exit+kmem class) became a
+  per-ring counter + read-time timestamp merge — the reference's
+  local_t/__find_next_entry shape, so cross-CPU recording no longer
+  shares a cache line. Same-rig A/B (q35 KVM SMP2, debug kernels,
+  events armed via the reference-parity trace_event= boot param):
+  pbench p1_null median unchanged (0.701 µs both) while the tail
+  recovered toward the events-off floor — p99 1.403→0.741 µs (−47%),
+  avg −2.6%; p2_ctxsw median −3.4%; armed OH boot kernel ticks in the
+  early window −1.4% at the same SA ladder (51/51 inserts, ceiling
+  8301 both). Events-off census A/B identical (TERM 0/0, WAKE-REF
+  0/0, zero panics) — the disabled path is byte-identical
+  (p1_null 0.290/0.290 µs medians). Pairing: per-CPU sequencing
+  removes the shared mutable state rather than narrowing a race
+  window around it; the merge order is now a timestamp property the
+  renderer asserts, not a global counter's arrival order. Artifacts:
+  oh-tracepc TASK.md §5-7, run/ab-analyze.sh outputs
+  (run/oh-abp1[ab]-*, run/oh-abe1[ab]-*, work/pbench-pb[oa]-[ab]-*).
 
 ## 4. Nothing traded away
 The compatibility checklist stands while both ledgers hold: 345+
@@ -375,3 +394,11 @@ absents stated plainly. Each absent names what closing looks like.
   is a silent observability outage, not a clean merge.
   Source: dfx-trace3 TASK.md round-3 record (run/tr3-base-check.log,
   census A/B logs in the lane worktree).
+- Trace per-CPU sequencing round (2026-11-06, oh-tracepc): GLOBAL_SEQ
+  (one atomic for every record on every CPU) replaced by per-ring
+  counters + read-time timestamp merge — the reference's
+  ring_buffer.c/__find_next_entry contract, verified on 4-CPU real
+  data (500-record merged window globally ts-sorted). The reference's
+  trace_event= boot parameter landed with it (deterministic boot-time
+  arming for any lane). Evidence: §3 bullet above; oh-tracepc TASK.md
+  (functional + gate record).

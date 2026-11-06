@@ -17,6 +17,7 @@ pub mod futex_pi;
 pub mod mutex;
 pub mod spinlock;
 pub mod rwlock;
+pub mod rwsem;
 pub mod seqlock;
 pub mod rcu;
 pub mod percpu;
@@ -31,6 +32,7 @@ pub use rwlock::{
     RwSpinlockIrqReadGuard, RwSpinlockIrqWriteGuard,
     RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,
 };
+pub use rwsem::{RwSemaphore, Rwsem, RwsemReadGuard, RwsemWriteGuard};
 pub use rcu::{RcuHead, RcuCallback, rcu_read_lock, rcu_read_unlock, call_rcu, synchronize_rcu, synchronize_rcu_bounded};
 pub use percpu::{CpuLocal, CpuLocalRef};
 pub use seqlock::{SeqLock, SeqLockWriteGuard, RawSeqLock};

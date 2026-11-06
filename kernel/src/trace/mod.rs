@@ -1545,8 +1545,15 @@ pub const RING_CAPACITY: usize = 1024;
 /// One recorded event.
 #[derive(Clone, Copy)]
 pub struct TraceRecord {
-    /// The global sequence number (a single counter, so records from
-    /// every CPU share one total order).
+    /// The per-CPU sequence number: the recording CPU's own ring
+    /// counter, so records from one CPU share one order (ring order)
+    /// while records from different CPUs do NOT. Cross-CPU order is
+    /// reconstructed at read time by timestamp — the reference's shape
+    /// (per-CPU ring buffers sequenced by local_t; `__find_next_entry`
+    /// merges by picking the smallest timestamp). A single global
+    /// sequence counter would put one shared atomic in every record
+    /// path — a cross-CPU serialization point the reference does not
+    /// have.
     pub seq: u64,
     /// The timestamp in nanoseconds since boot.
     pub ts_ns: u64,
@@ -1576,6 +1583,15 @@ pub struct TraceRing {
     pub head: AtomicUsize,
     /// How many records are stored.
     pub count: AtomicUsize,
+    /// This CPU's sequence counter (one counter per ring, so recording
+    /// on one CPU never writes a cache line another CPU's records
+    /// read-modify-write — the reference's local_t sequencing).
+    pub seq: AtomicU64,
+    /// How many records this CPU has ever attempted (including drops),
+    /// never reset — the per-CPU counterpart of the entries-written
+    /// total, summed at read time like the reference's
+    /// entries+overrun per-CPU stats.
+    pub written: AtomicU64,
     /// How many records a trace_pipe reader has consumed (the stats
     /// file's "read events" column).
     pub read_events: AtomicU64,
@@ -1609,6 +1625,8 @@ impl TraceRing {
             }; RING_CAPACITY],
             head: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
+            seq: AtomicU64::new(0),
+            written: AtomicU64::new(0),
             read_events: AtomicU64::new(0),
             dropped_events: AtomicU64::new(0),
         }
@@ -1619,6 +1637,10 @@ impl TraceRing {
     /// off, a full ring DROPS the new record and counts it in
     /// `dropped_events` — the reference's two ring policies.
     fn push(&self, record: TraceRecord) {
+        // Counted per CPU before the drop check: one attempted record,
+        // stored or dropped, one increment (the reference's per-CPU
+        // entries counter; summed at read time for the trace header).
+        self.written.fetch_add(1, Ordering::Relaxed);
         if !OPT_OVERWRITE.set.load(Ordering::Relaxed)
             && self.count.load(Ordering::Relaxed) >= RING_CAPACITY
         {
@@ -1660,13 +1682,14 @@ static RINGS: [TraceRing; crate::config::MAX_CPUS] =
 static SNAPSHOT_RINGS: [TraceRing; crate::config::MAX_CPUS] =
     [const { TraceRing::new() }; crate::config::MAX_CPUS];
 
-/// The global sequence counter (one counter for every CPU, so the
-/// reader can merge the rings into the true recording order).
-static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// The total number of records ever written.
+/// The total number of records ever written (every CPU's attempted
+/// count summed at read time — the reference has no global counter
+/// either; its entries-written total is the sum of per-CPU stats).
 pub fn records_written() -> u64 {
-    GLOBAL_SEQ.load(Ordering::Relaxed)
+    RINGS
+        .iter()
+        .map(|r| r.written.load(Ordering::Relaxed))
+        .sum()
 }
 
 /// The number of records currently buffered.
@@ -1733,7 +1756,11 @@ pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
         }
     }
     let ring = &RINGS[cpu];
-    let seq = GLOBAL_SEQ.fetch_add(1, Ordering::Relaxed);
+    // Per-CPU sequencing: this CPU's ring counter, not a global one —
+    // the fetch only moves this ring's line (the reference's local_t
+    // per-buffer sequencing). The ts_ns below is the cross-CPU merge
+    // key at read time.
+    let seq = ring.seq.fetch_add(1, Ordering::Relaxed);
     ring.push(TraceRecord {
         seq,
         ts_ns: crate::drivers::timer::monotonic_ns_since_boot(),
@@ -1791,14 +1818,28 @@ pub fn record_marker(text: &[u8]) -> bool {
     record(&EVENT_TRACE_MARKER, args)
 }
 
-/// The records of every CPU, in sequence order, without consuming
+/// Merge the per-CPU record streams into read order, by timestamp —
+/// the reference's `__find_next_entry`: the reader walks every CPU's
+/// buffer and picks the pending entry with the smallest timestamp;
+/// per-CPU order is the buffer's own ring order. `collect_ring` feeds
+/// this Vec grouped by CPU (cpu 0's records first, each CPU's in ring
+/// order), and `sort_by_key` is stable, so timestamp ties keep the
+/// same tie-break the reference's pick loop produces (lowest CPU
+/// first, and within a CPU the ring order). There is no global
+/// sequence number to sort by: records from different CPUs are only
+/// ordered by their timestamps at merge time.
+fn merge_by_timestamp(out: &mut [TraceRecord]) {
+    out.sort_by_key(|r| r.ts_ns);
+}
+
+/// The records of every CPU, merged by timestamp, without consuming
 /// them (the `trace` file).
 pub fn snapshot() -> Vec<TraceRecord> {
     let mut out: Vec<TraceRecord> = Vec::new();
     for ring in RINGS.iter() {
         collect_ring(ring, &mut out);
     }
-    out.sort_by_key(|r| r.seq);
+    merge_by_timestamp(&mut out);
     out
 }
 
@@ -1815,7 +1856,7 @@ pub fn drain() -> Vec<TraceRecord> {
         ring.count.store(0, Ordering::Release);
         ring.read_events.fetch_add(taken, Ordering::Relaxed);
     }
-    out.sort_by_key(|r| r.seq);
+    merge_by_timestamp(&mut out);
     out
 }
 
@@ -1908,14 +1949,14 @@ pub fn clear_snapshot() {
     }
 }
 
-/// The snapshot set's records, every CPU in sequence order (the
+/// The snapshot set's records, every CPU merged by timestamp (the
 /// `snapshot` file's read side).
 pub fn snapshot_records() -> Vec<TraceRecord> {
     let mut out: Vec<TraceRecord> = Vec::new();
     for spare in SNAPSHOT_RINGS.iter() {
         collect_ring(spare, &mut out);
     }
-    out.sort_by_key(|r| r.seq);
+    merge_by_timestamp(&mut out);
     out
 }
 
