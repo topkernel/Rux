@@ -3465,7 +3465,18 @@ pub fn dump_latched_maps_taskctx() {
         let mut dumped_ok = false;
         let mut outf = alloc::string::String::new();
         for v in vm.iter() {
-            if !v.flags().is_executable() {
+            // sc57 (57th): the exec-only filter named code segments but
+            // left the wedge's lock objects anonymous — an FFRT
+            // mutexPrivate/SharedMutexPrivate found by the FUX-CHAIN
+            // walk lives in a WRITABLE file-backed VMA (samgr .data/
+            // .bss of the binary or a lib) or the brk heap. Emit
+            // writable file-backed VMAs too (marked "W"); the heap
+            // range prints as one line.
+            let exec = v.flags().is_executable();
+            let writable_file = !exec
+                && matches!(v.vma_type(), crate::mm::vma::VmaType::FileBacked)
+                && v.flags().is_writable();
+            if !exec && !writable_file {
                 continue;
             }
             let path = aspace
@@ -3474,11 +3485,12 @@ pub fn dump_latched_maps_taskctx() {
                 .unwrap_or_default();
             let _ = writeln!(
                 outf,
-                "uvma: tgid {} {:x}-{:x} off={:#x} {}",
+                "uvma: tgid {} {:x}-{:x} off={:#x}{} {}",
                 tgid,
                 v.start().as_usize(),
                 v.end().as_usize(),
                 v.offset(),
+                if writable_file { " W" } else { "" },
                 if path.is_empty() {
                     alloc::string::String::from("-")
                 } else {
@@ -5212,9 +5224,44 @@ pub fn bwr_park_audit() {
         } else {
             alloc::format!(" head=[{}]", s.todo_head)
         };
+        // sc57 (57th): FFRT waiter-chain walk for futex-parked binder
+        // threads — names the contested ffrt::mutex/shared_mutex whose
+        // unlock never comes (the waiter-pool census misses waiters
+        // parked after the pool fills). dfx=fuxstuck gates the walker.
+        let chain_txt = if park == "FUTEX"
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+            && !task.is_null()
+        {
+            match crate::sync::futex::ffrt_chain_walk(task, a0 as usize) {
+                Some((t, head)) => {
+                    if let Some(h) = head {
+                        // sc57: ring closed — the lock object is named;
+                        // scan every same-tgid thread's stack window AND
+                        // (once per boot) the stack-pool regions for the
+                        // lock pointer — the hit names the holder, or a
+                        // suspended coroutine's stack.
+                        let holders = crate::sync::futex::ffrt_lock_holder_scan(s.pid, h);
+                        let regions = crate::sync::futex::ffrt_lock_region_scan(s.pid, h);
+                        if !holders.is_empty() || !regions.is_empty() {
+                            alloc::format!(
+                                " ffrt-chain[{}] ffrt-holders[{}] ffrt-regions[{}]",
+                                t, holders, regions
+                            )
+                        } else {
+                            alloc::format!(" ffrt-chain[{}]", t)
+                        }
+                    } else {
+                        alloc::format!(" ffrt-chain[{}]", t)
+                    }
+                }
+                None => alloc::string::String::new(),
+            }
+        } else {
+            alloc::string::String::new()
+        };
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}",
             s.pid,
             s.tid,
             comm_of(task),
@@ -5231,7 +5278,8 @@ pub fn bwr_park_audit() {
             head_txt,
             rwait,
             s.stack.len(),
-            stx
+            stx,
+            chain_txt
         );
     }
     if printed > 0 {

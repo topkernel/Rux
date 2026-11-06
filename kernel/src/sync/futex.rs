@@ -548,6 +548,383 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
     out
 }
 
+/// sc57 (57th session): FFRT waiter-chain walk for an arbitrary parked
+/// task — the export the binder TXN-HANG-BWR report calls (the futex
+/// census has its own inline copy; the waiter-pool census cannot see
+/// waiters parked after the pool filled). Layout rationale in the
+/// census (d) block comment: scan the parked task's entry-sp window
+/// for heap-class pointers, test each as a WaitUntilEntry.cv /
+/// wn.wl spill with node offsets {0x60,0x70,0x88,0x98}, verify the
+/// intrusive LinkedList ring by back-links, walk it to the head (a
+/// member of the contested mutexPrivate / SharedMutexPrivate), and
+/// window the head. Returns a printable summary, or None when the
+/// park does not decode. dfx-gated by the caller; walker-only reads
+/// of the pinned waiter's frozen mm.
+pub fn ffrt_chain_walk(
+    task: *mut crate::process::Task,
+    uaddr: usize,
+) -> Option<(alloc::string::String, Option<u64>)> {
+    use core::fmt::Write as _;
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: diagnostic reads of the parked task under the
+    // for_each/try contract; the task is pinned by the caller's pid
+    // lookup and parked in the futex this walk decodes.
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top_checked()?;
+    #[cfg(feature = "x86_64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::x86_64::pt_regs::PtRegs))
+        .rsp as u64
+    };
+    #[cfg(feature = "riscv64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::riscv64::pt_regs::PtRegs))
+        .sp as u64
+    };
+    #[cfg(feature = "aarch64")]
+    let usp = unsafe {
+        (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
+            as *const crate::arch::aarch64::pt_regs::PtRegs))
+        .sp as u64
+    };
+    if usp == 0 {
+        return None;
+    }
+    let aspace = tk.address_space()?;
+    let root = aspace.root_ppn();
+    let mgr = aspace.vma_try_read()?;
+    let rd = |va: u64| -> Option<u64> {
+        // SAFETY: read-only page-table walk of the parked task's mm.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+                );
+                // SAFETY: linear-mapped RAM word.
+                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            }
+            _ => None,
+        }
+    };
+    let heapish = |va: u64| -> bool {
+        if va <= 0x10000 || (va >> 47) != 0 {
+            return false;
+        }
+        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+            Some(vma) => {
+                !vma.flags().is_executable()
+                    && !vma.flags().contains(crate::mm::vma::VmaFlags::GROWSDOWN)
+            }
+            None => false,
+        }
+    };
+    let _ = uaddr; // the park word itself is a stack word (musl node);
+                   // the scan starts from the frame spills instead
+    for wi in 0..96u64 {
+        let Some(w) = rd(usp + 8 * wi) else {
+            continue;
+        };
+        if !heapish(w) {
+            continue;
+        }
+        for &xoff in &[0x60u64, 0x70, 0x88, 0x98] {
+            let node = w.wrapping_sub(xoff);
+            if !heapish(node) {
+                continue;
+            }
+            let (Some(prev), Some(next)) = (rd(node), rd(node + 8)) else {
+                continue;
+            };
+            if prev == 0
+                || next == 0
+                || prev == node
+                || next == node
+                || !heapish(next)
+                || !heapish(prev)
+            {
+                continue;
+            }
+            let ok_next = rd(next) == Some(node);
+            let ok_prev = rd(prev + 8) == Some(node);
+            if !ok_next && !ok_prev {
+                continue;
+            }
+            let mut out = alloc::string::String::new();
+            let _ = write!(out, "node={:#x} nwin:", node);
+            for hw in 0..6u64 {
+                if let Some(x) = rd(node.wrapping_sub(0x18) + 8 * hw) {
+                    let _ = write!(out, " {:#x}", x);
+                }
+            }
+            // mutex-shape test: the ring member that IS the lock's
+            // list head has (head-0x8) low32 == 2 (sync_detail::WAIT)
+            // and (head-0x10) a file-backed non-exec pointer (the
+            // mutexPrivate vtable in some .so's data).
+            let filebacked = |va: u64| -> bool {
+                match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+                    Some(vma) => {
+                        !vma.flags().is_executable()
+                            && matches!(
+                                vma.vma_type(),
+                                crate::mm::vma::VmaType::FileBacked
+                            )
+                    }
+                    None => false,
+                }
+            };
+            let lock_shape = |hop: u64| -> bool {
+                match (rd(hop.wrapping_sub(0x10)), rd(hop.wrapping_sub(0x8))) {
+                    (Some(v), Some(l)) => {
+                        filebacked(v) && (l & 0xffff_ffff) == 2
+                    }
+                    _ => false,
+                }
+            };
+            let _ = write!(out, " hops:");
+            let mut cur = node;
+            for h in 0..16 {
+                let Some(nxt) = rd(cur + 8) else { break };
+                if nxt == node {
+                    break;
+                }
+                if nxt == 0 || (nxt >> 47) != 0 || !heapish(nxt) {
+                    break;
+                }
+                let _ = write!(out, " {:#x}{}", nxt, if rd(nxt) == Some(cur) { "*" } else { "?" });
+                let is_lock = lock_shape(nxt);
+                // window every hop (8 words at hop-0x28)
+                if rd(nxt.wrapping_sub(0x28))
+                    .map_or(false, |x| x == 0 || (x >> 47) == 0)
+                {
+                    let mut win = alloc::string::String::new();
+                    let mut nz = 0;
+                    for hw in 0..8u64 {
+                        if let Some(x) = rd(nxt.wrapping_sub(0x28) + 8 * hw) {
+                            if x != 0 {
+                                nz += 1;
+                            }
+                            let _ = write!(win, " {:#x}", x);
+                        }
+                    }
+                    if nz > 0 {
+                        let _ = write!(out, " w[{}:{}]", nxt, win);
+                    }
+                }
+                if is_lock {
+                    return Some((out, Some(nxt)));
+                }
+                cur = nxt;
+            }
+            // no closure within budget: report the hops anyway plus
+            // the prev direction
+            let _ = write!(out, " prev:");
+            let mut cur = node;
+            for _ in 0..3 {
+                let Some(prv) = rd(cur) else { break };
+                if prv == 0 || prv == node || (prv >> 47) != 0 || !heapish(prv) {
+                    break;
+                }
+                let _ = write!(out, " {:#x}", prv);
+                cur = prv;
+            }
+            return Some((out, None));
+        }
+    }
+    None
+}
+
+/// sc57 (57th): one-shot region scan — a SUSPENDED FFRT coroutine's
+/// stack lives in an 8MB stack-pool region (same class as the worker
+/// pthread stacks the chain walk already sees); its frames hold the
+/// contested lock pointer mid-stack while no thread does. Sweep the
+/// top of every large anonymous region of the tgid's mm for the lock
+/// range once per boot per lock; print region+offset hits.
+pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    static DONE: [core::sync::atomic::AtomicU64; 4] =
+        [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+    let mut slot = DONE[0].load(Relaxed);
+    let mut free = false;
+    for d in DONE.iter() {
+        let v = d.load(Relaxed);
+        if v == lock {
+            return alloc::string::String::new();
+        }
+        if v == 0 {
+            free = true;
+        }
+    }
+    if !free && slot != 0 {
+        return alloc::string::String::new();
+    }
+    for d in DONE.iter() {
+        if d
+            .compare_exchange(0, lock, Relaxed, Relaxed)
+            .is_ok()
+        {
+            slot = lock;
+            break;
+        }
+    }
+    if slot != lock {
+        return alloc::string::String::new();
+    }
+    let lo = lock.saturating_sub(0x180);
+    let hi = lock + 0x28;
+    let mut out = alloc::string::String::new();
+    let mut scanned_regions = 0usize;
+    crate::sched::for_each_task_try(|task| {
+        if scanned_regions > 0 {
+            return;
+        }
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        let Some(mgr) = aspace.vma_try_read() else {
+            return;
+        };
+        let root = aspace.root_ppn();
+        for vma in mgr.iter() {
+            if scanned_regions >= 48 {
+                break;
+            }
+            let start = vma.start().as_usize() as u64;
+            let end = vma.end().as_usize() as u64;
+            let size = end - start;
+            // stack-pool class: large anonymous regions
+            if !matches!(vma.vma_type(), crate::mm::vma::VmaType::Anonymous)
+                || size < 0x40_0000
+                || size > 0x20_0_0000
+            {
+                continue;
+            }
+            scanned_regions += 1;
+            // sweep the top 0x10000 (the active end of a pool stack)
+            let mut hits = 0;
+            let mut va = end - 0x10000;
+            while va < end && hits < 6 {
+                // SAFETY: walker read of the frozen user region.
+                let Some(w) = (|| {
+                    match unsafe {
+                        crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                    } {
+                        Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                            let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                crate::arch::mm::memory_layout::PhysAddr::new(
+                                    (ppn << 12) | (va & 0xfff),
+                                ),
+                            );
+                            // SAFETY: linear-mapped RAM word.
+                            Some(unsafe {
+                                core::ptr::read_volatile(kv.as_usize() as *const u64)
+                            })
+                        }
+                        _ => None,
+                    }
+                })() else {
+                    va += 8;
+                    continue;
+                };
+                if w >= lo && w < hi {
+                    let _ = write!(out, " r[{:#x}]+{:#x}(={:#x})", start, va - start, w);
+                    hits += 1;
+                }
+                va += 8;
+            }
+        }
+    });
+    out
+}
+
+/// sc57 (57th): holder scan — for a named lock-object address (the
+/// waiter ring's closing head), scan every same-tgid thread's
+/// entry-sp window for the lock pointer (the holder's active
+/// lock_guard keeps `&lock` spilled in its frame). Walker-only reads
+/// of each parked task's frozen mm; dfx-gated by the caller. Returns
+/// "tid+off, ..." candidate list (empty string when none).
+pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
+    use core::fmt::Write as _;
+    let mut out = alloc::string::String::new();
+    // The list head sits INSIDE the lock object; the lock itself
+    // inside its container (SystemAbilityManager &c). Threads running
+    // the container's methods hold `this` or &lock spilled — accept
+    // any word in [lock-0x180, lock+0x28) and print the exact value
+    // (common values across threads name the container base).
+    let lo = lock.saturating_sub(0x180);
+    let hi = lock + 0x28;
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
+        #[cfg(feature = "x86_64")]
+        let usp = unsafe {
+            (*(top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE)
+                as *const crate::arch::x86_64::pt_regs::PtRegs))
+            .rsp as u64
+        };
+        #[cfg(feature = "riscv64")]
+        let usp = unsafe {
+            (*(top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE)
+                as *const crate::arch::riscv64::pt_regs::PtRegs))
+            .sp as u64
+        };
+        #[cfg(feature = "aarch64")]
+        let usp = unsafe {
+            (*(top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE)
+                as *const crate::arch::aarch64::pt_regs::PtRegs))
+            .sp as u64
+        };
+        if usp == 0 {
+            return;
+        }
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        let root = aspace.root_ppn();
+        for wi in 0..512u64 {
+            // SAFETY: walker read of the parked task's frozen user
+            // stack page.
+            let Some(w) = (|| {
+                match unsafe {
+                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, usp + 8 * wi)
+                } {
+                    Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                (ppn << 12) | ((usp + 8 * wi) & 0xfff),
+                            ),
+                        );
+                        // SAFETY: linear-mapped RAM word.
+                        Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                    }
+                    _ => None,
+                }
+            })() else {
+                continue;
+            };
+            if w >= lo && w < hi {
+                let _ = write!(out, " tid{}+{:#x}(={:#x})", tk.pid(), 8 * wi, w);
+            }
+        }
+    });
+    out
+}
+
 /// dfx=fuxstuck (17th successor): futex-stuck census, called at the ~1 Hz
 /// timer heartbeat (same slot as the TXN-HANG audit). The post-creation OH
 /// stall web parks threads in userspace-internal condvars (useriam's FFRT
@@ -664,6 +1041,28 @@ pub fn futex_stuck_census() {
         u2v_end: usize,
         u2v_off: usize,
         u2v_cls: u8,
+        // sc57 (57th session): FFRT waiter-chain walk. The park word is
+        // the musl condvar seq word at ExecuteCtx->wn.cv (WaitUntilEntry
+        // +0x88); the intrusive node (LinkedList prev@0/next@8) at wn+0
+        // links every waiter of one ffrt::mutexPrivate /
+        // SharedMutexPrivate into the OWNER object's list head (mutex:
+        // `list` inside the mutex object; smx: wList1/wList2). Walking
+        // node.next hops waiter->waiter->head; the hop that leaves the
+        // waiter's own stack VMA is the head — the lock object itself.
+        // Offsets verified against oh-robot ffrt include/sched/
+        // execute_ctx.h (WaitUntilEntry: node 0x00, prev 0x10, next
+        // 0x18, task 0x20, wtType 0x28, status 0x2c, hasWaitTime 0x30,
+        // tp 0x38, cb 0x40, wl 0x60 (musl pthread_mutex 0x28), cv
+        // 0x88); the prev-link mutuality check prunes wrong-guess
+        // offsets (a hop only counts when *(hop) == cur).
+        chn_task: u64,          // wn+0x20: CPUEUTask* (0 = plain thread)
+        chn_wt: u32,            // wn+0x28: 0=NORMAL(mutex) 1=READ 2=WRITE
+        chn_node: u64,          // the accepted WaitUntilEntry.node address
+        chn_hops: [u64; 8],     // next-direction hops (0 = end)
+        chn_hops_ok: u32,       // bit i set = hop i's back-link verified
+        chn_prev3: [u64; 3],    // prev-direction hops
+        chn_head: u64,          // ring-closing hop = the lock object's list head
+        chn_head_win: [u64; 8], // words at chn_head-0x28 .. +0x28
     }
     let mut stuck: Vec<Stuck> = Vec::new();
     let mut total = 0usize;
@@ -734,6 +1133,14 @@ pub fn futex_stuck_census() {
                         u2v_end: 0,
                         u2v_off: 0,
                         u2v_cls: b'-',
+                        chn_task: 0,
+                        chn_wt: 0,
+                        chn_node: 0,
+                        chn_hops: [0; 8],
+                        chn_hops_ok: 0,
+                        chn_prev3: [0; 3],
+                        chn_head: 0,
+                        chn_head_win: [0; 8],
                     });
                 } else if total > 192 {
                     // Sample cap reached with clear headroom — stop the
@@ -1004,6 +1411,181 @@ pub fn futex_stuck_census() {
                                 };
                             }
                         }
+                        // (d) sc57: FFRT waiter-chain walk —
+                        // IMAGE-CALIBRATED (the 56th's +0x1000 symbol
+                        // fix re-rooted the park: ffrt::
+                        // mutexPrivate::wait+0x157 after std::
+                        // condition_variable::wait, disassembly of the
+                        // image libffrt: ctx in rbx with wn.task@ctx+0x40,
+                        // wn.wl@ctx+0x90, wn.cv@ctx+0xb8, mutex in r14
+                        // with wlock@mutex+0xc). The musl cond wait
+                        // parks on the waiter's OWN stack node.state
+                        // (node = sp-frame word; solo waiters have NULL
+                        // node links), so the word itself does not chain
+                        // — but pthread_cond_timedwait SPILLS r14 =
+                        // &wn.cv (a heap pointer: ExecuteCtx is new'd)
+                        // into its frame. Scan the entry-sp window for
+                        // heap-class pointers; for each, test whether
+                        // cv-{0x88,0x98} is a linked FFRT LinkedList
+                        // node (WaitUntilEntry.node, first member);
+                        // then walk the verified ring — the hops are the
+                        // OTHER waiters' ctx->wn nodes and the ring's
+                        // head lives inside the contested
+                        // mutexPrivate/SharedMutexPrivate object. All
+                        // reads are page-table walks of the pinned
+                        // waiter's frozen mm; wrong candidates fail the
+                        // back-link verification and leave zeros.
+                        if usp != 0 {
+                            let root = aspace.root_ppn();
+                            // SAFETY: read-only AddressSpace accessor on
+                            // the pinned waiter.
+                            let rd = |va: u64| -> Option<u64> {
+                                match unsafe {
+                                    crate::arch::mm::mm_ops::PageTableWalker::walk(root, va)
+                                } {
+                                    Some((ppn, bits))
+                                        if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 =>
+                                    {
+                                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                                (ppn << 12) | (va & 0xfff),
+                                            ),
+                                        );
+                                        // SAFETY: linear-mapped RAM word.
+                                        Some(unsafe {
+                                            core::ptr::read_volatile(kv.as_usize() as *const u64)
+                                        })
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            // is a virtual address inside a writable
+                            // non-stack VMA (heap/data — where an
+                            // ExecuteCtx or lock object lives)?
+                            let heapish = |va: u64| -> bool {
+                                if va <= 0x10000 || (va >> 47) != 0 {
+                                    return false;
+                                }
+                                match mgr.find(VirtAddr::new(va as usize)) {
+                                    Some(vma) => {
+                                        !vma.flags().is_executable()
+                                            && !vma
+                                                .flags()
+                                                .contains(
+                                                    crate::mm::vma::VmaFlags::GROWSDOWN,
+                                                )
+                                    }
+                                    None => false,
+                                }
+                            };
+                            'cand: for wi in 0..96u64 {
+                                let Some(w) = rd(usp + 8 * wi) else {
+                                    continue;
+                                };
+                                if !heapish(w) {
+                                    continue;
+                                }
+                                // W on the stack may be &wn.cv (r14
+                                // spill; cv@wn+0x88 or +0x98 depending
+                                // on the WaitEntry packing) or &wn.wl
+                                // (mutexPrivate::wait's own spill;
+                                // wl@wn+0x60 or +0x70) — try each; the
+                                // ring verification prunes the wrong
+                                // ones.
+                                for &xoff in &[0x60u64, 0x70, 0x88, 0x98] {
+                                    let node = w.wrapping_sub(xoff);
+                                    if !heapish(node) {
+                                        continue;
+                                    }
+                                    let (Some(prev), Some(next)) = (rd(node), rd(node + 8))
+                                    else {
+                                        continue;
+                                    };
+                                    // unlinked LinkedList nodes point at
+                                    // themselves; linked ones never do
+                                    if prev == 0
+                                        || next == 0
+                                        || prev == node
+                                        || next == node
+                                        || !heapish(next)
+                                        || !heapish(prev)
+                                    {
+                                        continue;
+                                    }
+                                    // verify BOTH directions' back-links
+                                    // before trusting the ring
+                                    let ok_next = rd(next) == Some(node);
+                                    let ok_prev = rd(prev + 8) == Some(node);
+                                    if !ok_next && !ok_prev {
+                                        continue;
+                                    }
+                                    // candidate accepted: walk next up to
+                                    // 8 hops, window the hop that closes
+                                    // the ring (the head — a member of
+                                    // the lock object)
+                                    s.chn_task = rd(node + 0x20).unwrap_or(0);
+                                    s.chn_wt = rd(node + 0x28).unwrap_or(0) as u32;
+                                    s.chn_node = node;
+                                    let mut cur = node;
+                                    let mut prev_hop = node;
+                                    for h in 0..8 {
+                                        let Some(nxt) = rd(cur + 8) else {
+                                            break;
+                                        };
+                                        if nxt == node {
+                                            // ring closed: prev_hop is the
+                                            // head (its container is the
+                                            // lock object)
+                                            if s.chn_head == 0 && prev_hop != node {
+                                                s.chn_head = prev_hop;
+                                                for (hw, wv) in
+                                                    s.chn_head_win.iter_mut().enumerate()
+                                                {
+                                                    if let Some(x) = rd(
+                                                        prev_hop
+                                                            .wrapping_sub(0x28)
+                                                            + 8 * hw as u64,
+                                                    ) {
+                                                        *wv = x;
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        if nxt == 0 || (nxt >> 47) != 0 || !heapish(nxt) {
+                                            break;
+                                        }
+                                        if rd(nxt) == Some(cur) {
+                                            s.chn_hops_ok |= 1 << h;
+                                        }
+                                        s.chn_hops[h] = nxt;
+                                        prev_hop = cur;
+                                        cur = nxt;
+                                    }
+                                    if s.chn_hops[0] == 0 {
+                                        // next-walk dead-ended: the head
+                                        // sits the other way; record the
+                                        // prev direction
+                                        let mut cur = node;
+                                        for h in 0..3 {
+                                            let Some(prv) = rd(cur) else {
+                                                break;
+                                            };
+                                            if prv == 0
+                                                || prv == node
+                                                || (prv >> 47) != 0
+                                                || !heapish(prv)
+                                            {
+                                                break;
+                                            }
+                                            s.chn_prev3[h] = prv;
+                                            cur = prv;
+                                        }
+                                    }
+                                    break 'cand;
+                                }
+                            }
+                        }
                     }
                 }
                 break;
@@ -1103,6 +1685,14 @@ pub fn futex_stuck_census() {
         rep_u2v_end: usize,
         rep_u2v_off: usize,
         rep_u2v_cls: u8,
+        rep_chn_task: u64,
+        rep_chn_wt: u32,
+        rep_chn_node: u64,
+        rep_chn_hops: [u64; 8],
+        rep_chn_hops_ok: u32,
+        rep_chn_prev3: [u64; 3],
+        rep_chn_head: u64,
+        rep_chn_head_win: [u64; 8],
     }
     let mut groups: Vec<Group> = Vec::new();
     for s in stuck.iter() {
@@ -1158,6 +1748,14 @@ pub fn futex_stuck_census() {
                         rep_u2v_end: s.u2v_end,
                         rep_u2v_off: s.u2v_off,
                         rep_u2v_cls: s.u2v_cls,
+                        rep_chn_task: s.chn_task,
+                        rep_chn_wt: s.chn_wt,
+                        rep_chn_node: s.chn_node,
+                        rep_chn_hops: s.chn_hops,
+                        rep_chn_hops_ok: s.chn_hops_ok,
+                        rep_chn_prev3: s.chn_prev3,
+                        rep_chn_head: s.chn_head,
+                        rep_chn_head_win: s.chn_head_win,
                     });
                 }
             }
@@ -1263,6 +1861,53 @@ pub fn futex_stuck_census() {
         // 51st session: follow this word's futex lifecycle from here on
         // (FXRS word watch — the WAIT/WAKE trace decides holder-never-
         // releases from kernel-lost-wake).
+        // sc57: the FFRT waiter-chain walk lines (only when the layout
+        // check admitted the wn — plain futex parks print nothing).
+        if g.rep_chn_hops.iter().any(|&h| h != 0) || g.rep_chn_prev3.iter().any(|&h| h != 0) {
+            let mut hops_s = alloc::string::String::new();
+            for (h, &a) in g.rep_chn_hops.iter().enumerate() {
+                if a == 0 {
+                    break;
+                }
+                let _ = write!(
+                    hops_s,
+                    " {:#x}{}",
+                    a,
+                    if g.rep_chn_hops_ok & (1 << h) != 0 { "*" } else { "?" }
+                );
+            }
+            let mut prev_s = alloc::string::String::new();
+            for &a in g.rep_chn_prev3.iter() {
+                if a == 0 {
+                    break;
+                }
+                let _ = write!(prev_s, " {:#x}", a);
+            }
+            // HOTPATH-PRINT: FUX-CHAIN — same dfx=fuxstuck gate and
+            // burst budget as the FUX-STUCK row it follows; one to
+            // three lines per reported group.
+            crate::pr_warn!(
+                "FUX-CHAIN tid={} node={:#x} task={:#x} wt={} hops:{} prev:{}",
+                g.rep_tid,
+                g.rep_chn_node,
+                g.rep_chn_task,
+                g.rep_chn_wt,
+                hops_s,
+                prev_s
+            );
+            if g.rep_chn_head != 0 {
+                let mut win_s = alloc::string::String::new();
+                for &wv in g.rep_chn_head_win.iter() {
+                    let _ = write!(win_s, "{:#x} ", wv);
+                }
+                crate::pr_warn!(
+                    "FUX-CHAIN-HEAD tid={} head={:#x} win:{}",
+                    g.rep_tid,
+                    g.rep_chn_head,
+                    win_s
+                );
+            }
+        }
         fxrs_word_add(g.uaddr);
         printed += 1;
         if LINES.fetch_add(1, Relaxed) > 1200 {
@@ -1403,6 +2048,53 @@ pub fn futex_stuck_census() {
                     }
                 );
                 graph_lines += 1;
+                // sc57: chain lines for graph rows too (the graph set
+                // is the reliable samgr coverage — the 8-row sample is
+                // contested by peripheral parks).
+                if g.rep_chn_hops.iter().any(|&h| h != 0)
+                    || g.rep_chn_prev3.iter().any(|&h| h != 0)
+                {
+                    let mut hops_s = alloc::string::String::new();
+                    for (h, &a) in g.rep_chn_hops.iter().enumerate() {
+                        if a == 0 {
+                            break;
+                        }
+                        let _ = write!(
+                            hops_s,
+                            " {:#x}{}",
+                            a,
+                            if g.rep_chn_hops_ok & (1 << h) != 0 { "*" } else { "?" }
+                        );
+                    }
+                    let mut prev_s = alloc::string::String::new();
+                    for &a in g.rep_chn_prev3.iter() {
+                        if a == 0 {
+                            break;
+                        }
+                        let _ = write!(prev_s, " {:#x}", a);
+                    }
+                    crate::pr_warn!(
+                        "FUX-CHAIN tid={} node={:#x} task={:#x} wt={} hops:{} prev:{}",
+                        g.rep_tid,
+                        g.rep_chn_node,
+                        g.rep_chn_task,
+                        g.rep_chn_wt,
+                        hops_s,
+                        prev_s
+                    );
+                    if g.rep_chn_head != 0 {
+                        let mut win_s = alloc::string::String::new();
+                        for &wv in g.rep_chn_head_win.iter() {
+                            let _ = write!(win_s, "{:#x} ", wv);
+                        }
+                        crate::pr_warn!(
+                            "FUX-CHAIN-HEAD tid={} head={:#x} win:{}",
+                            g.rep_tid,
+                            g.rep_chn_head,
+                            win_s
+                        );
+                    }
+                }
             }
             if graph_lines > 0 {
                 crate::pr_warn!(
