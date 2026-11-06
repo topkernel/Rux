@@ -92,8 +92,13 @@ These are cheap to fix and actively mislead:
   (`b"GFfUvPDdCAcNIOsl"`). **Fixed in Tranche 1** — the reference kernel's set is
   `P F S R M B U D A W C I O E L K`, rendered as a 16-column line with
   `G` in the first column when the proprietary-module bit is clear.
-- `/proc/kmsg` uses the dmesg header format while `/dev/kmsg` uses
-  the reference kernel's `level,seq,timestamp_us,-;` — the two disagree.
+- `/proc/kmsg` used the dmesg header format while `/dev/kmsg` used
+  the reference kernel's `level,seq,timestamp_us,-;` — the two disagreed.
+  **Fixed in the logctl lane (2026-11)** — `/proc/kmsg` is now the
+  reference's syslog stream: `<N>[SSSSS.MMMMMM] text` records
+  (`record_print_text(&r, true, true)` shape), fill reads, destructive
+  shared cursor with syslog(2), CAP_SYSLOG-gated open, `O_NONBLOCK`
+  → `-EAGAIN`; `/dev/kmsg` untouched.
 - `/proc/[pid]/stat` reports `vsize` in bytes where the reference reports pages,
   and leaves fields 7–13, 18–22, 24–30, 32–53 as literal `0`.
 - `/proc/interrupts` hardcodes the IRQ list to `1..=15` + `32..=47`
@@ -114,9 +119,9 @@ incomplete or non-reference shape · **--** = absent.
 
 | Family | Reference facility | Rux | Gap |
 |---|---|---|---|
-| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log RESTORED (klogd thread, Tranche 5) |
-| Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
-| Crash | panic handler, `Call Trace:` | PART | banner is the reference kernel's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
+| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | OK | `/proc/kmsg` reference syslog shape since the logctl lane (2026-11): fill reads, destructive shared cursor, CAP_SYSLOG open gate, `O_NONBLOCK` → `-EAGAIN`; ring stores ≤ KERN_INFO at any console level (console gating on the emit path only); persistent log since Tranche 5 |
+| Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | OK | logctl lane (2026-11): `/proc/sys/kernel/printk` four-number block (TAB-separated, proc_dointvec partial writes), `loglevel=`/`quiet` boot params, syslog(2) 6/7/8 saved-level dance — all move the same live first number |
+| Crash | panic handler, `Call Trace:` | OK | logctl lane (2026-11): banner is `Kernel panic - not syncing: <message>` with the message INLINE (the standalone `PANIC:` line is gone); end marker after the dumps; frames symbolized since Tranche 3 |
 | Crash | `Oops` (non-fatal) | OK | T5b: reference-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
 | Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
