@@ -883,6 +883,51 @@ pub fn sys_setitimer(args: SyscallArgs) -> i64 {
     0
 }
 
+/// sys_alarm - alarm(2): x86_64 native syscall 37 (asm-generic has no
+/// slot; libcs there build alarm() on setitimer).
+///
+/// Reference kernel/time/itimer.c alarm_setitimer: re-arm ITIMER_REAL as
+/// a one-shot of `seconds` (0 cancels) and return the replaced timer's
+/// remaining time in whole seconds — rounded to nearest, and never 0
+/// while a timer was still pending ("better return too much than too
+/// little").
+///
+/// # Arguments
+/// - args[0]: seconds (unsigned int)
+#[cfg(feature = "x86_64")]
+pub fn sys_alarm(args: SyscallArgs) -> i64 {
+    let seconds = args[0] as u32;
+    // Remaining time of the timer being replaced — the same read
+    // sys_setitimer's old_value path does for ITIMER_REAL. Read and re-arm
+    // are two steps (the reference swaps them under siglock in
+    // do_setitimer): a timer expiring in between reports 1, not 0.
+    let remaining_ns = match crate::process::current_task() {
+        Some(t) => {
+            let deadline_ns = t.itimer_real[0].load(core::sync::atomic::Ordering::Acquire);
+            if deadline_ns == 0 {
+                0
+            } else {
+                let (mono_sec, mono_nsec) = monotonic_time();
+                let now_ns = (mono_sec as u64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(mono_nsec as u64);
+                deadline_ns.saturating_sub(now_ns)
+            }
+        }
+        None => 0,
+    };
+    // One-shot: no interval; seconds == 0 disarms (set_itimer_real's
+    // zero-value arm).
+    set_itimer_real(0, 0, seconds as i64, 0);
+
+    let mut old_sec = remaining_ns / 1_000_000_000;
+    let old_nsec = remaining_ns % 1_000_000_000;
+    if (old_sec == 0 && old_nsec != 0) || old_nsec >= 500_000_000 {
+        old_sec += 1;
+    }
+    old_sec as i64
+}
+
 /// Disarm ITIMER_REAL timer for the current process.
 fn disarm_itimer_real() {
     let task = match crate::process::current_task() {

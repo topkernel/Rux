@@ -33,6 +33,61 @@ pub fn test_syscall_time() {
 
     // Test 6: Syscall number verification
     test_syscall_numbers();
+
+    // Test 7: x86_64 native alarm(2) + unmapped native numbers
+    #[cfg(feature = "x86_64")]
+    test_x86_alarm_and_unmapped_numbers();
+}
+
+/// alarm(2) re-arms ITIMER_REAL and returns the replaced timer's
+/// remaining seconds (rounded); x86_64 numbers with no translation must
+/// not alias the same-numbered generic syscall, while the shared 462..470
+/// range stays identity-mapped.
+#[cfg(feature = "x86_64")]
+fn test_x86_alarm_and_unmapped_numbers() {
+    use crate::syscall::time::sys_alarm;
+    use crate::syscall::x86_compat::{dispatch_target, UNMAPPED_NR};
+
+    if crate::process::current_task().is_none() {
+        test_skip("alarm(2)", "no current task");
+    } else {
+        let first = sys_alarm([100, 0, 0, 0, 0, 0]);
+        let cancel = sys_alarm([0, 0, 0, 0, 0, 0]);
+        let again = sys_alarm([0, 0, 0, 0, 0, 0]);
+        if first == 0 && cancel == 100 && again == 0 {
+            test_pass("alarm(2) arms, reports remaining, cancels");
+        } else {
+            test_fail(
+                "alarm(2)",
+                &alloc::format!("alarm(100)={} alarm(0)={} alarm(0)={}", first, cancel, again),
+            );
+        }
+    }
+
+    let args = [1u64, 2, 3, 4, 5, 6];
+    // x86_64 numbers Rux has no handler for (getdents, utime, uselib,
+    // ustat, modify_ldt, iopl, ioperm, the not-implemented
+    // 174/177/178/181-185/205/211/214/215/236 slots, utimes, futimesat,
+    // uretprobe 335, and numbers inside the 336..423 gap): each must reach
+    // the ENOSYS arm, not the same-numbered generic syscall.
+    let unmapped = [
+        78u64, 132, 134, 136, 154, 172, 173, 174, 177, 178, 181, 182, 183, 184, 185, 205, 211,
+        214, 215, 235, 236, 261, 335, 400, 423,
+    ];
+    let leaked: alloc::vec::Vec<u64> = unmapped
+        .iter()
+        .copied()
+        .filter(|&n| dispatch_target(n, &args).0 != UNMAPPED_NR)
+        .collect();
+    let identity_ok = (424u64..=470).all(|n| dispatch_target(n, &args) == (n as i64, args));
+    if leaked.is_empty() && identity_ok {
+        test_pass("x86_64 dispatch: unmapped numbers -> ENOSYS, 424..470 identity");
+    } else {
+        test_fail(
+            "x86_64 translate",
+            &alloc::format!("unexpected mapping for {:?}, identity_ok={}", leaked, identity_ok),
+        );
+    }
 }
 
 /// TimeVal structure (for gettimeofday)

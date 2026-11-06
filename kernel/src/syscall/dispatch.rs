@@ -276,6 +276,14 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
             syscall_set_return_value(regs, signal::sys_pause(args));
             return;
         }
+        37 => {
+            // alarm(seconds). glibc on x86_64 issues the native NR 37
+            // (asm-generic libcs emulate it over setitimer). Untranslated,
+            // 37 is the generic table's linkat: alarm() armed nothing and
+            // returned -1.
+            syscall_set_return_value(regs, time::sys_alarm(args));
+            return;
+        }
         139 => {
             // sysfs(2): query the registered filesystem list. No
             // asm-generic number (riscv64/aarch64 never issue it);
@@ -304,20 +312,16 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         _ => {}
     }
 
+    // The caller's own number, for the unknown-syscall report (on x86_64
+    // the dispatch number below is the translated one).
+    let native_nr = syscall_no;
+
     #[cfg(feature = "x86_64")]
-    let syscall_no = match crate::syscall::x86_compat::translate(syscall_no as u64, &args) {
-        Some((generic_nr, generic_args)) => {
-            args = generic_args;
-            generic_nr as i64
-        }
-        // A hole in the reference's own x86_64 table: ENOSYS, never the
-        // same-numbered generic syscall (x86 156 _sysctl vs generic
-        // getsid — LTP sysctl01/03/04 read ESRCH instead of ENOSYS).
-        // Routed to the unmapped-number arm below, which answers ENOSYS.
-        None if crate::syscall::x86_compat::native_enosys_hole(syscall_no as u64) => {
-            u64::MAX as i64
-        }
-        None => syscall_no as i64,
+    let syscall_no = {
+        let (generic_nr, generic_args) =
+            crate::syscall::x86_compat::dispatch_target(syscall_no as u64, &args);
+        args = generic_args;
+        generic_nr
     };
 
     // FORENSIC ring ENTRY record (ret sentinel = in-flight): a task
@@ -741,7 +745,7 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         // ==================== Unimplemented System Calls ====================
         _ => {
             crate::println!("syscall: unknown syscall {} (args: {:#x}, {:#x}, {:#x})",
-                syscall_no, args[0], args[1], args[2]);
+                native_nr, args[0], args[1], args[2]);
             -(errno::ENOSYS as i64)
         }
     };
