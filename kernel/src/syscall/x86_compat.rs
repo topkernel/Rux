@@ -229,7 +229,10 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         175 => Some((105, *args)), // init_module
         176 => Some((106, *args)), // delete_module
         179 => Some((60, *args)), // quotactl
-        180 => Some((42, *args)), // nfsservctl
+        // 180 nfsservctl: sys_ni on the reference x86_64 (the tbl entry
+        // carries no impl column) — ENOSYS here, never the generic 42
+        // (which only asm-generic archs reach by number; the
+        // syscall-table audit test pins this hole).
         186 => Some((178, *args)), // gettid
         187 => Some((213, *args)), // readahead
         188 => Some((5, *args)), // setxattr
