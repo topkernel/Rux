@@ -1229,6 +1229,13 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         if crate::process::kthread::kthread_should_stop() {
             break;
         }
+        // 56th: BEFORE draining, dump any latched-but-mapless tgid's
+        // vma map (kthread context can take the sleepable vma read for
+        // block; the softirq snapshot's try_read lost every attempt
+        // for samgr in ohc53). The dump's lines land IN the focus ring
+        // this pass drains. Cheap when nothing is pending: two ring
+        // scans of atomics.
+        crate::ipc::binder::dump_latched_maps_taskctx();
         // Drain everything queued first: focus lines (park-chain
         // evidence) take priority over bulk census.
         loop {

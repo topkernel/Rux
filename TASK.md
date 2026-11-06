@@ -6041,3 +6041,43 @@ et4 (probe after), ohc53 (full verdict, ran to 914s+, wedge persists).
    boots dfx=sleepsnap on oh-int builds.
 Gates this session: x86_64/riscv64/aarch64 builds rc=0; riscv64 make
 test ALL TESTS PASSED (patched tree).
+
+### 7. SAME-SESSION ADDENDUM — censusd task-context map dump LANDED and samgr is now SYMBOLIZED
+
+The §6.1(a) instrument is IN this branch (not just queued): VMA_DUMPED_DONE
+hoisted to module scope; `binder::dump_latched_maps_taskctx()` walks both
+latch rings, takes the SLEEPABLE vma read (kthread context — no bucket or
+spinlock held), emits exec-only uvma lines through the focus lane, marks
+done. Called from the censusd kthread before each drain. Verified in ohc54
+(same rig): tgid 329's map = 105 uvma lines at t=171s (ohc53: zero).
+
+With the map, ohc54's own samgr walks symbolize (sorted-nearest on
+dynsym; libc++/musl are stripped of internals so their frames stay
+coarse):
+```
+handlers (leader + OS_IPC class, sys=202 untimed):
+  musl futex <- libc++ cv-wait region(0xc7e02) <- libffrt
+    0xa0807/0xa0946 = SetRtgStatus region
+    0xcd0c7         = ffrt::TimerManager::GetTimerStatus+0x167
+tid 342 (sys=281 epoll_pwait, a3=0x2bf20 = 180000ms):
+  libffrt 0xcac6d = ffrt::DelayedWorker region — the DelayedWorker
+  poller parked in its 180s epoll_pwait, the exact engine the 54th's
+  timerfd-ET fix armed. No pending delayed timers => long sleep. NOT
+  the frozen party.
+tid 348: musl mutex-futex <- libc++ 0xca139 <- libbeget_pro 0x151df
+  (a param/beget-side mutex park).
+```
+Structural read (57th entry point): the parked-handler neighborhood is
+FFRT's thread-pool mutation machinery (SetRtgStatus rides worker-thread
+creation; TimerManager::GetTimerStatus takes timerMutex_; worker-group
+tgMutex is the std::shared_mutex whose frozen word RWFRZ shows with 2
+readers — reader-side holders per source are worker_monitor.cpp:170 /
+sexecute_unit.cpp:100 teardown, BOTH inside the read section across
+callouts that can park). Next concrete steps:
+1. ufw-walk the two READER threads (find them by walking tgid 329's
+   threads that are NOT parked on 0x..194-class words; the map+walk rig
+   now does this) and symbolize their innermost libc++/libffrt frames —
+   that names the parking callout inside the read section.
+2. tid 348's libbeget_pro park: param_watcher/param service interplay.
+ohc54 gates: x86_64/riscv64/aarch64 builds rc=0, riscv64 make test
+ALL TESTS PASSED (same tree as this addendum).

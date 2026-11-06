@@ -3392,6 +3392,118 @@ static VMA_DUMPED_TGID: [core::sync::atomic::AtomicU32; 16] =
 static VMA_STICKY_TGID: [core::sync::atomic::AtomicU32; 8] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 8];
 
+/// Dump-once ring shared by the softirq snapshot dumper and the
+/// censusd task-context dumper (see dump_latched_maps_taskctx).
+static VMA_DUMPED_DONE: [core::sync::atomic::AtomicU32; 16] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+
+/// 56th: task-context map dump for latched tgids. The softirq
+/// sleep_snapshot's vma_try_read NEVER succeeded for samgr in ohc53
+/// (24 latched walks at t=254s, zero uvma lines, 250+ s of retries —
+/// the non-blocking read loses whenever the target's vma lock is
+/// held, and the wedged boot holds it often). censusd runs in kthread
+/// context where the sleepable rwsem can be taken for read WITHOUT
+/// spinning; this walks both latch rings, and for every latched tgid
+/// lacking a done-mark emits its exec-only vma map through the focus
+/// lane (the same uvma lines the softirq path produces) and marks it
+/// done. No locks are held across the vma_read (the pid lookup is a
+/// brief bucket-lock visit); safe to call from any task context.
+pub fn dump_latched_maps_taskctx() {
+    use core::fmt::Write as _;
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+        return;
+    }
+    // Collect candidates first (cheap atomic scans); the blocking vma
+    // read happens with no latch/bucket locks held.
+    let mut want = [0u32; 24];
+    let mut nwant = 0usize;
+    let mut push_want = |tgid: u32, want: &mut [u32; 24], nwant: &mut usize| {
+        if tgid == 0 || *nwant == want.len() {
+            return;
+        }
+        if VMA_DUMPED_DONE
+            .iter()
+            .any(|d| d.load(core::sync::atomic::Ordering::Relaxed) == tgid)
+        {
+            return;
+        }
+        if want.iter().take(*nwant).any(|&w| w == tgid) {
+            return;
+        }
+        want[*nwant] = tgid;
+        *nwant += 1;
+    };
+    for v in VMA_DUMPED_TGID.iter() {
+        push_want(
+            v.load(core::sync::atomic::Ordering::Relaxed),
+            &mut want,
+            &mut nwant,
+        );
+    }
+    for v in VMA_STICKY_TGID.iter() {
+        push_want(
+            v.load(core::sync::atomic::Ordering::Relaxed),
+            &mut want,
+            &mut nwant,
+        );
+    }
+    for &tgid in want.iter().take(nwant) {
+        // The latch stores thread-group ids; the leader's pid == tgid.
+        // SAFETY: sched::find_task_by_pid returns a valid Task pointer
+        // from the pid hash (null when gone); we only read its aspace.
+        let tkp = unsafe { crate::sched::find_task_by_pid(tgid) };
+        if tkp.is_null() {
+            continue;
+        }
+        let tk = unsafe { &*tkp };
+        let aspace = match tk.address_space() {
+            Some(a) => a,
+            None => continue,
+        };
+        // Blocking read: kthread context, no spinlocks held.
+        let vm = aspace.vma_read();
+        let mut dumped_ok = false;
+        let mut outf = alloc::string::String::new();
+        for v in vm.iter() {
+            if !v.flags().is_executable() {
+                continue;
+            }
+            let path = aspace
+                .try_get_vma_file(v.start().as_usize())
+                .map(|f| f.path())
+                .unwrap_or_default();
+            let _ = writeln!(
+                outf,
+                "uvma: tgid {} {:x}-{:x} off={:#x} {}",
+                tgid,
+                v.start().as_usize(),
+                v.end().as_usize(),
+                v.offset(),
+                if path.is_empty() {
+                    alloc::string::String::from("-")
+                } else {
+                    path.chars().take(60).collect::<alloc::string::String>()
+                }
+            );
+            dumped_ok = true;
+        }
+        drop(vm);
+        if dumped_ok {
+            crate::dfx::taskdump::defer_emit_line(outf);
+            // Same insert-by-value discipline as the softirq path.
+            let mut dslot = (tgid as usize) % VMA_DUMPED_DONE.len();
+            for (i, d) in VMA_DUMPED_DONE.iter().enumerate() {
+                let cur = d.load(core::sync::atomic::Ordering::Relaxed);
+                if cur == 0 || cur == tgid {
+                    dslot = i;
+                    break;
+                }
+            }
+            VMA_DUMPED_DONE[dslot].store(tgid, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Latch a tgid for the park-chain walk (idempotent). `sticky` writes
 /// the dedicated never-evicted ring (the walk gate ORs both rings).
 pub fn latch_park_walk_tgid_sticky(tgid: u32) {
@@ -3580,8 +3692,8 @@ pub fn sleep_snapshot() {
                 // the txn-hang server latch inserts tgids whose threads
                 // wait on THREAD stacks (samgr) — those must still get
                 // their one-time map dump (ohc42 walked them mapless).
-                static VMA_DUMPED_DONE: [core::sync::atomic::AtomicU32; 16] =
-                    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+                // (56th: hoisted to module scope — the censusd task-
+                // context dumper below shares the done ring.)
                 {
                     let latched = VMA_DUMPED_TGID.iter().any(|v| {
                         v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
