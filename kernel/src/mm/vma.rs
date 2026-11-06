@@ -804,6 +804,68 @@ impl VmaManager {
         self.vmas.range(addr..).next().map(|(_, vma)| vma)
     }
 
+    /// mremap in-place grow, atomic (reference kernel holds its mmap
+    /// lock across vma_to_resize + the grow; this method is that
+    /// critical section for the tree half).
+    ///
+    /// Extends the VMA that starts at `addr` and currently ends at
+    /// `old_end` to `new_end`, refusing when the shape no longer holds
+    /// or when any VMA starts inside [old_end, new_end).
+    ///
+    /// The caller must run this under ONE vma_write hold together with
+    /// its decision to grow — the old sys_mremap shape checked
+    /// can_expand under a read guard, dropped it, and installed the
+    /// extension with a MAP_FIXED mmap: a same-mm racer's fresh chunk
+    /// placed in [old_end, new_end) in that window was silently
+    /// absorbed by the extension surgery (two live chunks overlapping
+    /// in VA — the heapstress VA-OVERLAP catches, the gnome-shell
+    /// malloc.c:4302 assert family).
+    ///
+    /// Returns Err(NotFound) when the [addr, old_end) shape does not
+    /// hold anymore, Err(Overlap) when the extension range is taken.
+    pub fn mremap_expand(
+        &mut self,
+        addr: VirtAddr,
+        old_end: VirtAddr,
+        new_end: VirtAddr,
+    ) -> Result<(), VmaError> {
+        if new_end.as_usize() <= old_end.as_usize() {
+            return Err(VmaError::Invalid);
+        }
+        // Shape: the VMA must start at addr and end exactly at old_end
+        // (whole-VMA growth — the reference's vma_to_resize contract).
+        {
+            let v = match self.find_mut(addr) {
+                Some(v) => v,
+                None => return Err(VmaError::NotFound),
+            };
+            if v.start().as_usize() != addr.as_usize()
+                || v.end().as_usize() != old_end.as_usize()
+            {
+                return Err(VmaError::NotFound);
+            }
+        }
+        // Nothing may live in [old_end, new_end). A VMA overlapping the
+        // range from the left would overlap the incumbent itself —
+        // impossible in a valid tree, so first-start >= old_end is the
+        // complete check.
+        if let Some(next) = self.find_vma_after(old_end) {
+            if next.start().as_usize() < new_end.as_usize() {
+                return Err(VmaError::Overlap);
+            }
+        }
+        // Same shape re-verified above under this same lock hold; the
+        // tree cannot have changed between the two lookups (no lock
+        // drop, no sleeping call in between).
+        if let Some(v) = self.find_mut(addr) {
+            v.merge_at_end(new_end);
+        }
+        if new_end.as_usize() > self.max_end.as_usize() {
+            self.max_end = new_end;
+        }
+        Ok(())
+    }
+
     /// Clear all VMAs
     pub fn clear(&mut self) {
         self.vmas.clear();
