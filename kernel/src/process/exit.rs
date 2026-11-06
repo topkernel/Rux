@@ -502,9 +502,22 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
             guard.push(m);
         }
         drop(guard);
-        // Yield so the stragglers can progress (IRQs are on throughout).
+        // IRQs on, no locks held: REAL yield, not a pause hint. The
+        // spin_loop() that stood here claimed to let the stragglers run
+        // but never gave up the CPU — on a single-CPU boot (and any
+        // boot where the straggler's only runnable CPU is this one) the
+        // preempted mid-exit member could never reach its terminal DEAD
+        // store, so this loop never exited: it became the 870k/s sz32
+        // allocation storm (two 32-byte Vec pushes per iteration),
+        // monopolized the CPU in kernel mode and starved RCU grace
+        // periods (the fdreap close-stall floods, frozen one generation
+        // behind). Waiting for another task to progress requires
+        // scheduling away — the same shape as wait_for_thread_group_death
+        // above and the fdreap completion loop; the context switch also
+        // reports this CPU's RCU quiescent state, which the straggler's
+        // own bounded grace wait may need.
         crate::arch::cpu::restore_irq(true);
-        core::hint::spin_loop();
+        crate::sched::schedule();
     }
 
     // ===== RUSAGE_CHILDREN fold at reap (reference wait_task_zombie) =====
