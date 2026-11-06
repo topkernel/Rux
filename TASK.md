@@ -6808,3 +6808,66 @@ iterations); aarch64 build rc=0 (run/gate-a64-61.rc); riscv64 build +
 make test ALL TESTS PASSED on the final tree (run/test-rv-61c.log).
 All changes dfx/param gated or print-path only; zero cost on plain
 boots.
+
+### 61.1 SECOND ADDENDUM (2026-11-07 late) — ohw18-ohw26: the coroutine-pool
+### sweep, the heap-map instrument, and the ZERO-FIND verdict that narrows
+### the cycle bottom
+
+ohw18-ohw26 (9 more boots, same recipe; wedges at 15-55 s every time).
+Three more instrument rounds landed (all dfx/param-gated):
+
+1. **The coroutine-pool sweep**: the region scan's VMA floor dropped
+   4 MB → 0xF0000 — the FFRT coroutine stacks are 1 MB chunks the old
+   floor NEVER SWEPT (ohw13-17's single hit was an 8 MB OS_IPC thread
+   stack — the A1 waiter class); chunk-top windows (32 KB per 1 MB)
+   cover every coroutine's active end. ohw19 found a SECOND stack
+   class: region 0x7ff0822a6000+0x800200 with frames
+   LoadSystemAbilityInner → AddSystemAbility(thunk) → RefreshListener-
+   State(inlined, takes listenerMapLock_) → lock → wait — a code=12
+   PUBLISH waiter on M2 (RefreshListenerState:1029 is a THIRD
+   listenerMapLock_ acquisition site; AddSystemAbility's very first
+   call takes it).
+2. **The heap map (ffrt_mutex_heap_map)**: one-shot census of every
+   ffrt::mutex in samgr's address space by the mutexPrivate VTABLE
+   signature (read from the known lock itself — a single runtime VA
+   per boot; structurally excludes the ExecuteCtx class). Plumbing
+   lessons, all fixed in-tree: (a) the first cut ran the full-heap
+   scan in the TXN-HANG timer context — ohw20's console died at 35 s
+   (TIMER-SOFTIRQ-STALL cpu=0 age=5000ms pid=301); now armed by the
+   chain closure and executed in the censusd kthread. (b) The burn
+   gate fired on a transient signature failure (ohw21/22: map never
+   printed) — retryable now. (c) The unsliced scan monopolized the
+   kthread (ohw23 stall) — sliced to 300 k words/round with a
+   persistent cursor. (d) The scan volume: ±64 MB arena window around
+   the known lock (the mutexes share the deterministic
+   0x7ff0000xxxxx-class arena; the 1-8 MB stack/pool chunks at
+   0x7ff08xxxxxxxx only burn budget). ohw24-26: the deferred lane
+   stays ALIVE through the wedge (ufw lines past 400 s — the
+   ohw12-style lane death is gone).
+3. **STRAND-WALL (split line) first data (ohw19/21)**: the wall rows
+   show a handful of tasks with GROWING why=1 refusal counts (sk4,
+   sk20 — the on_cpu-mark transient class) amid never-refused rows,
+   ALL at the SAME vruntime advancing in LOCKSTEP (~5.7 ms/s) — the
+   churn re-inserts at min_vr each wake; a frozen-vr victim behind
+   the churn closes the gap at 5.7 ms/s against a 0.4-26 s-of-vr
+   deficit → the 100-4600 s strand arithmetic. The censusd strand is
+   a DIAGNOSTIC problem; the OS_FFRT_Delay_S exec=0 class (300 s,
+   never picked once) is the producer-freezer candidate.
+
+**THE ZERO-FIND VERDICT (ohw26, retries exhausted)**: across five full
+arena-window passes there is NO stuck ffrt::mutex-with-waiters other
+than M2 itself. L3 — the lock A2 (the M2 holder) suspended on — is
+NOT a mutexPrivate in samgr's arena. A2's CoWait host is one of the
+NON-mutex classes: the SerialQueue cond_ (the dispatch worker's
+wait_for), the delayed-worker timer wheel, WaitFdEvent's
+waitTaskMap_, or — the TXN-HANG favorite — a NESTED SYNC BINDER CALL
+whose BWR wait never resolves (the lastbwr=BC_TRANSACTION rows). The
+62nd's opening move: dump the holder's OWN park (the FW owner tid's
+TXN-HANG row + its BWR target — the nested OUT txn's to-pid/code is
+in the audit's stack-entry fields when the outgoing txn is SYNC-OUT)
+and audit the FUXW birth window of ITS park word for a wake-vs-no-wake
+verdict.
+
+Gates this addendum: x86_64 builds rc=0 (61l-61s); riscv64 build +
+make test ALL TESTS PASSED (run/test-rv-61d.log, tree = 61s); aarch64
+build rc=0 (run/build-a64-61b.log).

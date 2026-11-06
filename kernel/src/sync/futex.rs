@@ -1413,20 +1413,35 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
             let start = vma.start().as_usize() as u64;
             let end = vma.end().as_usize() as u64;
             let size = end - start;
-            // stack-pool class: large anonymous regions
+            // stack-pool class: large anonymous regions.
+            // 61st: the floor drops to 0xF0000 — the FFRT coroutine
+            // stacks are 1 MB (FFRT_STACK_SIZE 1<<20) mmap'd chunks;
+            // the old 4 MB floor swept ONLY the 8 MB OS_IPC thread
+            // stacks (whose waiters are the A1 BLOCK_THREAD class) and
+            // NEVER the coroutine pool where the M2 HOLDER (A2)
+            // suspends.
             if !matches!(vma.vma_type(), crate::mm::vma::VmaType::Anonymous)
-                || size < 0x40_0000
+                || size < 0xF_0000
                 || size > 0x20_0_0000
             {
                 continue;
             }
             scanned_regions += 1;
-            // sweep the top 0x40000 (the active end of a pool stack;
-            // a deep task chain — listener loops over IPC sends — runs
-            // far below the top)
+            // 61st: sweep EVERY 1MB chunk top (32 KB each) — the FFRT
+            // coroutine stack pool packs 1 MB stacks back to back, and
+            // a suspended coroutine's active window sits within a few
+            // KB BELOW ITS OWN chunk top. The old region-top-only
+            // window (last 0x40000) saw only the HIGHEST chunk's
+            // coroutine (ohw13-17: always the A1 waiter class) and
+            // never the holder's (A2) stack deeper in the pool.
             let mut hits = 0;
-            let mut va = end - 0x40000;
-            while va < end && hits < 12 {
+            let chunk: u64 = 0x10_0000;
+            let win: u64 = 0x8000;
+            let mut chunk_top = end;
+            while chunk_top > start && hits < 12 {
+                let wlo = chunk_top.saturating_sub(win).max(start);
+                let mut va = wlo;
+                while va < chunk_top && hits < 12 {
                 // SAFETY: walker read of the frozen user region.
                 let Some(w) = (|| {
                     match unsafe {
@@ -1559,6 +1574,8 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
                     hits += 1;
                 }
                 va += 8;
+                }
+                chunk_top = chunk_top.saturating_sub(chunk);
             }
         }
     });
@@ -1571,6 +1588,199 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
 /// lock_guard keeps `&lock` spilled in its frame). Walker-only reads
 /// of each parked task's frozen mm; dfx-gated by the caller. Returns
 /// "tid+off, ..." candidate list (empty string when none).
+/// 61st (ohw19 handoff): ONE-SHOT heap census of every ffrt::mutex
+/// object in the tgid's address space. Signature: the mutexPrivate
+/// vtable pointer at +0 — a SINGLE runtime VA per boot (read from the
+/// KNOWN wedge lock), so every hit is a real ffrt::mutex (ExecuteCtx's
+/// vtable differs; the QoS false-positive class is structurally
+/// excluded). For each object: l value + waiter ring (up to 6 hops) +
+/// the ring members' containing-ctx hint. The lock that is stuck
+/// held-with-waiters and is NOT the watched one = L3 (the FFRT-internal
+/// lock the M2 holder suspended on) — the cycle bottom the region scan
+/// could not reach (the holder's guard lives in a coroutine chunk the
+/// chunk-top sweep missed). Once per boot per tgid; the walk over the
+/// anon VMAs is the cost (bounded by the same 160-region cap).
+/// 61st: the heap-map arm flag — the chain closure stores the known
+/// lock's OBJECT base here; the censusd KTHREAD consumes it ONCE and
+/// runs the scan in sleepable context. The first cut called the map
+/// straight from the TXN-HANG print path (timer/softirq): a full-heap
+/// walk with IRQs off — ohw20's console died at 35 s mid-scan.
+pub static HEAPMAP_ARM: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// True once the heap map COMPLETED (successfully or having burned its
+/// one successful-signature pass) — the consumer stops re-arming.
+pub fn ffrt_mutex_heap_map_done() -> bool {
+    HEAPMAP_DONE.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// 61st: retry path — clear the burn gates so the next kthread rounds
+/// re-run the (sliced) scan against the deeper-wedged heap.
+pub fn ffrt_mutex_heap_map_rearm() {
+    HEAPMAP_DONE.store(0, core::sync::atomic::Ordering::Relaxed);
+    HM_BURNED.store(0, core::sync::atomic::Ordering::Relaxed);
+    HM_CUR.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
+static HEAPMAP_DONE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static HM_BURNED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+pub(crate) static HM_CUR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static HM_FOUND: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+pub fn ffrt_mutex_heap_map(tgid: u32, known_lock: u64) -> alloc::string::String {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    if HM_BURNED.load(Relaxed) > 0 {
+        return alloc::string::String::new();
+    }
+    if known_lock < 0x10000 {
+        return alloc::string::String::new();
+    }
+    // Signature: the vtable VA of the known lock (same per boot for
+    // every mutexPrivate of that .so).
+    let mut sig: u64 = 0;
+    let mut root: u64 = 0;
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid || sig != 0 {
+            return;
+        }
+        if let Some(aspace) = tk.address_space() {
+            root = aspace.root_ppn();
+            sig = rd_word(root, known_lock).unwrap_or(0);
+        }
+    });
+    if sig == 0 || root == 0 {
+        return alloc::string::String::new();
+    }
+    // Signature + root are good: burn the one shot only now (a failed
+    // signature pass must be retryable on the next kthread round —
+    // ohw21 burned it on a transient address_space failure and the map
+    // never printed).
+    if HM_BURNED.fetch_add(1, Relaxed) > 0 {
+        return alloc::string::String::new();
+    }
+    HEAPMAP_DONE.store(1, Relaxed);
+
+    // 61st: the scan is SLICED — a persistent cursor resumes across
+    // kthread rounds (300k words = ~0.3 s of page-table walks per
+    // round). The unsliced first cut monopolized a CPU for the whole
+    // scan and stalled the timer softirq (ohw23: TIMER-SOFTIRQ-STALL
+    // cpu=0 age=5000ms pid=301). VMAs above 32 MB are skipped: the
+    // mutexes live in the malloc arenas, not the 1-8 MB stack/pool
+    // chunks that dominate samgr's large-anon volume.
+    let budget: u64 = 300_000;
+    let mut out = alloc::string::String::new();
+    let mut found = HM_FOUND.load(Relaxed) as usize;
+    let mut scanned: u64 = 0;
+    let mut finished = true;
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: walker-only reads of the tgid's frozen mm.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        if aspace.root_ppn() != root {
+            return;
+        }
+        let Some(m) = aspace.vma_try_read() else {
+            return;
+        };
+        let mut cursor = HM_CUR.load(Relaxed);
+        'vmas: for vma in m.iter() {
+            let vt = vma.vma_type();
+            // The heap class: anonymous arenas AND ashmem-backed
+            // (FileBacked writable) — OH's malloc arenas may be
+            // ashmem-typed; the vtable-signature match itself rejects
+            // everything but mutexPrivate objects, so accept both.
+            if !matches!(vt, crate::mm::vma::VmaType::Anonymous)
+                && !matches!(vt, crate::mm::vma::VmaType::FileBacked)
+            {
+                continue;
+            }
+            if vma.flags().is_executable() {
+                continue;
+            }
+            let start = vma.start().as_usize() as u64;
+            let end = vma.end().as_usize() as u64;
+            if end - start < 0x1_0000 || end - start > 0x200_0000 {
+                continue;
+            }
+            // The FFRT mutexes all live in the SAME malloc arena as the
+            // known lock (the deterministic 0x7ff0000xxxxx-class heap);
+            // the 8 MB thread/coroutine stacks and the big pools sit
+            // FAR above (0x7ff08xxxxxxxx) and only burn scan budget.
+            // Window: ±64 MB around the known lock.
+            let wlo = known_lock.saturating_sub(0x400_0000);
+            let whi = known_lock.saturating_add(0x400_0000);
+            if end <= wlo || start >= whi {
+                continue;
+            }
+            if end <= cursor {
+                continue;
+            }
+            let mut va = start.max(cursor & !0x7);
+            while va < end {
+                if scanned >= budget {
+                    HM_CUR.store(va, Relaxed);
+                    finished = false;
+                    break 'vmas;
+                }
+                if let Some(w) = rd_word(root, va) {
+                    if w == sig && va != known_lock {
+                        let l = rd_word(root, va + 0x8).unwrap_or(0) & 0xffff_ffff;
+                        let n = rd_word(root, va + 0x18).unwrap_or(0);
+                        let mut hops = 0usize;
+                        let mut ring = alloc::string::String::new();
+                        let mut cur = va + 0x18;
+                        for _ in 0..8 {
+                            let Some(nx) = rd_word(root, cur) else {
+                                break;
+                            };
+                            if nx == va + 0x10 {
+                                break;
+                            }
+                            if nx == 0 || (nx >> 47) != 0 || hops >= 6 {
+                                break;
+                            }
+                            let _ = write!(ring, "{:#x},", nx);
+                            cur = nx;
+                            hops += 1;
+                        }
+                        if (l == 1 || l == 2) && hops > 0 {
+                            let _ = write!(
+                                out,
+                                " m{found}={:#x}l{l}ring[{hops}:{}]",
+                                va,
+                                ring
+                            );
+                            found += 1;
+                            HM_FOUND.store(found as u32, Relaxed);
+                        }
+                    }
+                }
+                va += 8;
+                scanned += 1;
+            }
+        }
+        if finished {
+            HM_CUR.store(0, Relaxed);
+        }
+    });
+    if found == 0 {
+        return alloc::string::String::new();
+    }
+    out
+}
+
 pub fn ffrt_lock_holder_scan(tgid: u32, lock: u64) -> alloc::string::String {
     use core::fmt::Write as _;
     let mut out = alloc::string::String::new();

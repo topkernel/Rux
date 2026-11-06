@@ -1246,6 +1246,44 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // word's page in every mapping mm (kthread context; TLB
         // shootdown via flush_tlb_all is safe here).
         crate::sync::futex::fuxwatch_arm_round();
+        // 61st: the ONE-SHOT ffrt::mutex heap map — armed by the first
+        // closed chain walk, consumed ONCE here (kthread/sleepable
+        // context; the full-heap walk is seconds of page-table walks
+        // and must never run in the timer path — ohw20). On an empty
+        // result (transient sig failure) the arm is RESTORED so the
+        // next round retries; ohw21/22 burned the arm on the first
+        // failure and the map never printed.
+        {
+            static HM_TRIES: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let arm = crate::sync::futex::HEAPMAP_ARM.load(core::sync::atomic::Ordering::Relaxed);
+            if arm != 0 {
+                let samgr = crate::ipc::binder::binder_sareg_samgr_pid();
+                if samgr != 0 {
+                    let out = crate::sync::futex::ffrt_mutex_heap_map(samgr, arm);
+                    if !out.is_empty() {
+                        crate::sync::futex::HEAPMAP_ARM.store(
+                            0,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
+                        crate::pr_warn!("FFRT-HEAPMAP tgid={} base={:#x}{}", samgr, arm, out);
+                    } else if crate::sync::futex::ffrt_mutex_heap_map_done() {
+                        // Completed with ZERO qualifying locks — the arm
+                        // fired pre-wedge (no waiters yet). Retry up to
+                        // 4 times: reset the burn gates and let the next
+                        // rounds re-scan as the wedge deepens.
+                        if HM_TRIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                            crate::sync::futex::ffrt_mutex_heap_map_rearm();
+                        } else {
+                            crate::sync::futex::HEAPMAP_ARM.store(
+                                0,
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // Drain everything queued first: focus lines (park-chain
         // evidence) take priority over bulk census.
         loop {

@@ -5292,6 +5292,22 @@ pub fn bwr_park_audit() {
                         // suspended coroutine's stack.
                         let holders = crate::sync::futex::ffrt_lock_holder_scan(s.pid, h);
                         let regions = crate::sync::futex::ffrt_lock_region_scan(s.pid, h);
+                        // 61st (ohw19 handoff): the ONE-SHOT heap map —
+                        // enumerate every ffrt::mutex in the process by
+                        // the vtable signature; the non-watched stuck
+                        // lock with waiters = L3 (the FFRT-internal lock
+                        // the M2 holder suspended on). h is the ring
+                        // head member (obj+0x10); the map wants the
+                        // object base. ARMED here, RUN in the censusd
+                        // kthread (a full-heap walk must not run in the
+                        // timer context — ohw20's console died at 35 s
+                        // mid-scan with IRQs off).
+                        crate::sync::futex::HEAPMAP_ARM.compare_exchange(
+                            0,
+                            h.wrapping_sub(0x10),
+                            core::sync::atomic::Ordering::Relaxed,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
                         if !holders.is_empty() || !regions.is_empty() {
                             alloc::format!(
                                 " ffrt-chain[{}] ffrt-holders[{}] ffrt-regions[{}]",
