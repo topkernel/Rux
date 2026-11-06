@@ -173,8 +173,10 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
                 page += 0x1000;
                 continue;
             }
-            // Valid but read-only: COW? (COW software bit 8)
-            if bits & (1 << 8) != 0 {
+            // Valid but read-only: COW? (COW software bit 8) — only
+            // breakable when the VMA allows writes (a COW leaf under a
+            // PROT_READ VMA stays a protection fault -> EFAULT).
+            if bits & (1 << 8) != 0 && addr_space.vma_allows_write(page) {
                 match crate::arch::mm::mm_ops::handle_cow_fault(
                     addr_space,
                     root_ppn,
