@@ -133,6 +133,32 @@ pub fn sys_getpriority(args: SyscallArgs) -> i64 {
     }
 }
 
+/// Permission to change another task's scheduling: the caller's euid
+/// matches the target's real or effective uid (reference
+/// check_same_owner in kernel/sched/syscalls.c, set_one_prio_perm in
+/// kernel/sys.c), or the caller holds CAP_SYS_NICE. Always true for the
+/// caller itself and for its own threads.
+///
+/// # Safety
+/// `task` must point to a live task.
+unsafe fn may_change_sched_of(task: *const crate::process::task::Task) -> bool {
+    if let Some(cur) = crate::sched::current() {
+        // SAFETY: cur is the running task; task is live per the contract.
+        unsafe {
+            // The caller itself (pid compare, as the checks this replaces
+            // did — pid 0 lookups need not return `cur` itself).
+            if (*cur).pid() == (*task).pid() {
+                return true;
+            }
+            let (c, t) = ((*cur).cred(), (*task).cred());
+            if c.euid == t.euid || c.euid == t.uid {
+                return true;
+            }
+        }
+    }
+    crate::security::capable(crate::security::CAP_SYS_NICE)
+}
+
 /// sys_setpriority - Set process priority
 ///
 /// # Arguments
@@ -197,7 +223,6 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
         _ => return -(errno::EINVAL as i64),
     }
 
-    let current_pid = crate::process::current_pid();
     let mut last_err: i64 = 0;
     let mut applied = 0usize;
 
@@ -211,20 +236,21 @@ pub fn sys_setpriority(args: SyscallArgs) -> i64 {
             continue;
         }
 
-        // Permission checks (Linux setpriority):
-        // - another process's priority requires CAP_SYS_NICE (EPERM);
-        // - RAISING priority (lowering nice) requires CAP_SYS_NICE even for
-        //   self (EACCES) — previously any self-renice passed (review批次1).
+        // Permission checks (reference kernel/sys.c set_one_prio):
+        // - a task owned by another user requires CAP_SYS_NICE (EPERM) —
+        //   the caller's own processes and threads do not;
+        // - RAISING priority (lowering nice) requires CAP_SYS_NICE for any
+        //   target (EACCES) — previously any self-renice passed (review批次1).
         // SAFETY: task validated non-null; nice() only reads.
         let cur_nice = unsafe { (*task).nice() };
-        if target_pid != current_pid {
-            if !crate::security::capable(crate::security::CAP_SYS_NICE) {
-                // SAFETY: release the pin taken above.
-                unsafe { crate::process::task::Task::task_put(task); }
-                last_err = -(errno::EPERM as i64);
-                continue;
-            }
-        } else if niceval < cur_nice
+        // SAFETY: task is pinned above.
+        if !unsafe { may_change_sched_of(task) } {
+            // SAFETY: release the pin taken above.
+            unsafe { crate::process::task::Task::task_put(task); }
+            last_err = -(errno::EPERM as i64);
+            continue;
+        }
+        if niceval < cur_nice
             && !crate::security::capable(crate::security::CAP_SYS_NICE)
         {
             // SAFETY: release the pin taken above.
@@ -374,6 +400,15 @@ pub fn sys_sched_setscheduler(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Another user's task: CAP_SYS_NICE (reference
+    // user_check_sched_setscheduler -> check_same_owner, which runs after
+    // the parameter checks: bad parameters are EINVAL first). Without it
+    // any user could move init or another user's tasks to SCHED_IDLE.
+    // SAFETY: task validated non-null above.
+    if !unsafe { may_change_sched_of(task) } {
+        return -(errno::EPERM as i64);
+    }
+
     // Store the RESET_ON_FORK request where fork() can see it.
     unsafe {
         (*task).set_sched_reset_on_fork(reset_on_fork);
@@ -505,7 +540,8 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
     // the setscheduler validation.
     // SAFETY: task is validated non-null above; policy() reads the task's field.
     let policy = unsafe { (*task).policy() };
-    if matches!(policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr) {
+    let is_rt = matches!(policy, crate::process::task::SchedPolicy::Fifo | crate::process::task::SchedPolicy::Rr);
+    if is_rt {
         // RT parameter changes require CAP_SYS_NICE, mirroring the RT
         // policy-switch check in sys_sched_setscheduler.
         if !crate::security::capable(crate::security::CAP_SYS_NICE) {
@@ -515,12 +551,23 @@ pub fn sys_sched_setparam(args: SyscallArgs) -> i64 {
         if !(1..=99).contains(&param.sched_priority) {
             return -(errno::EINVAL as i64);
         }
-        // change_task_policy takes the GRQ lock internally and
-        // re-positions the task in the RT priority lists.
-        crate::sched::change_task_policy(task, policy, param.sched_priority as u32);
     } else if param.sched_priority != 0 {
         // Non-RT policies must carry priority 0 (review PROC-P06).
         return -(errno::EINVAL as i64);
+    }
+
+    // Another user's task: CAP_SYS_NICE (reference sched_setparam ->
+    // __sched_setscheduler -> user_check_sched_setscheduler ->
+    // check_same_owner, after the parameter checks).
+    // SAFETY: task validated non-null above.
+    if !unsafe { may_change_sched_of(task) } {
+        return -(errno::EPERM as i64);
+    }
+
+    if is_rt {
+        // change_task_policy takes the GRQ lock internally and
+        // re-positions the task in the RT priority lists.
+        crate::sched::change_task_policy(task, policy, param.sched_priority as u32);
     }
 
     0
@@ -820,6 +867,26 @@ pub fn sys_sched_setattr(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Another user's task: CAP_SYS_NICE (reference
+    // user_check_sched_setscheduler -> check_same_owner, which runs after
+    // the parameter checks: bad parameters are EINVAL first). Without it
+    // any user could move init or another user's tasks to SCHED_IDLE.
+    // SAFETY: task validated non-null above.
+    if !unsafe { may_change_sched_of(task) } {
+        return -(errno::EPERM as i64);
+    }
+
+    // Fair policies: lowering nice is a priority raise and needs
+    // CAP_SYS_NICE, the same rule setpriority applies (reference
+    // user_check_sched_setscheduler: is_nice_reduction or req_priv).
+    if matches!(policy, SCHED_NORMAL | SCHED_BATCH)
+        // SAFETY: task validated non-null above; nice() only reads.
+        && attr.sched_nice.clamp(MIN_NICE, MAX_NICE) < unsafe { (*task).nice() }
+        && !crate::security::capable(crate::security::CAP_SYS_NICE)
+    {
+        return -(errno::EPERM as i64);
+    }
+
     let new_policy = match policy {
         SCHED_NORMAL => crate::process::task::SchedPolicy::Normal,
         SCHED_FIFO => crate::process::task::SchedPolicy::Fifo,
@@ -970,7 +1037,11 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
         if target.is_null() {
             return -(errno::ESRCH as i64);
         }
-        if target != current && !crate::security::capable(crate::security::CAP_SYS_NICE) {
+        // Another user's task needs CAP_SYS_NICE (reference
+        // sched_setaffinity: check_same_owner) — the caller's own threads
+        // do not (pthread_setaffinity_np on a worker thread).
+        // SAFETY: target validated non-null above.
+        if !unsafe { may_change_sched_of(target) } {
             return -(errno::EPERM as i64);
         }
         target
