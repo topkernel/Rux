@@ -42,6 +42,12 @@ pub struct ConsoleWriter {
 
 impl ConsoleWriter {
     pub fn new() -> Self {
+        // Console lane (oh-console): bytes queued in the TX ring must
+        // reach the wire BEFORE this crash report's direct writes, or
+        // the report interleaves into (or overtakes) pending console
+        // output. Bounded synchronous drain (~200 ms cap) — panic/oops
+        // context only, where the IRQ drain may already be dead.
+        crate::console::tx_drain_poll();
         ConsoleWriter {
             emit_locked: crate::printk::try_console_emit_lock(),
             buf: [0u8; 128],

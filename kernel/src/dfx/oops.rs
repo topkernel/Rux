@@ -75,6 +75,13 @@ static OOPS_COUNT: AtomicU32 = AtomicU32::new(0);
 /// discipline as the trap printers' `KP_DUMP_ENTERED`.
 static OOPS_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Whether an oops report has been entered this boot — the console
+/// lane's crash-context discriminator (console TX must take the
+/// synchronous direct path while a report is in flight).
+pub fn oops_entered() -> bool {
+    OOPS_ENTERED.load(Ordering::Acquire)
+}
+
 /// `panic_on_oops` — seeded from the `oops=panic` kernel parameter
 /// (Linux panic.c's `oops_setup`) and writable at runtime through
 /// `/proc/sys/kernel/panic_on_oops`. Default off, like the reference.

@@ -321,9 +321,9 @@ pub fn console_emit_skipped() -> u64 {
 }
 
 /// Acquire budget in interrupt context (hardirq/NMI/softirq): 100µs of
-/// read_time() units. Interrupt context must not spin long — the holder
-/// may itself be an interrupt-context emitter on another CPU or a
-/// preempted task whose progress this CPU cannot help.
+/// read_time() units. Used by `try_console_emit_lock` for crash/
+/// diagnostic writers (IF=0 printk emitters defer before ever waiting
+/// on the lock — see the deferral queue below).
 const EMIT_WAIT_IRQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 10_000;
 
 /// Acquire budget in task context: 2s. Generous on purpose: a healthy
@@ -332,78 +332,6 @@ const EMIT_WAIT_IRQ: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 10_000;
 /// scheduling latency under host contention so healthy consoles never
 /// drop lines.
 const EMIT_WAIT_TASK: u64 = crate::config::TIMER_CLOCK_FREQ_HZ * 2;
-
-/// Bounded TTAS acquire of CONSOLE_EMIT_LOCK. Returns false when the
-/// budget expires (caller skips console output — the record is already
-/// in the ring buffer).
-fn acquire_emit_lock() -> bool {
-    let irq_ctx = crate::interrupt::preempt::in_interrupt();
-    let budget = if irq_ctx { EMIT_WAIT_IRQ } else { EMIT_WAIT_TASK };
-    let start = crate::arch::cpu::read_time();
-    loop {
-        if CONSOLE_EMIT_LOCK
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            return true;
-        }
-        // Check the deadline on EVERY outer iteration: under pure CAS
-        // contention (lock bouncing free/held between rivals) the inner
-        // TTAS load below sees "free" immediately and never re-checks the
-        // clock — without this check the spin would not be bounded.
-        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
-            return false;
-        }
-        // TTAS: park on a relaxed load until the holder releases instead
-        // of re-issuing an atomic RMW every iteration (same rationale as
-        // RawSpinlock::lock).
-        let mut parked: u32 = 0;
-        while CONSOLE_EMIT_LOCK.load(Ordering::Relaxed) {
-            parked += 1;
-            if parked >= 512 {
-                parked = 0;
-                if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
-                    return false;
-                }
-            }
-            core::hint::spin_loop();
-        }
-    }
-}
-
-/// Console (UART) emission path for printk records.
-///
-/// Uses the LOCK-FREE MMIO writer (putchar_no_lock), never the UART
-/// spinlock: printk can run with arbitrary locks held or in IRQ context.
-/// Re-entrancy is already excluded by the IN_PRINTK guard in the callers.
-fn emit_to_console(text: &[u8]) {
-    if !acquire_emit_lock() {
-        CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
-        return; // record is in the ring buffer; console line skipped
-    }
-    // Leg-54 item C: one batched TX pass per record (CR expansion into a
-    // stack buffer, then Uart::puts_batch — one THRE poll + one string-IO
-    // per 16 bytes instead of two exits per byte).
-    let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
-    let mut n = 0usize;
-    for &b in text {
-        if b == b'\n' {
-            if n < buf.len() {
-                buf[n] = b'\r';
-                n += 1;
-            }
-        }
-        if n < buf.len() {
-            buf[n] = b;
-            n += 1;
-        }
-    }
-    let uart = crate::console::Uart::new();
-    uart.puts_batch(&buf[..n]);
-    let emitted = n; // syscost probe
-    crate::dfx::syscost::note_printk_con(emitted); // syscost probe
-    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
-}
 
 /// Bounded best-effort acquire of the console emit lock for diagnostic
 /// writers that bypass printk (dfx `ConsoleWriter`: softlockup reports,
@@ -438,6 +366,423 @@ pub fn try_console_emit_lock() -> bool {
 /// Release CONSOLE_EMIT_LOCK acquired via `try_console_emit_lock`.
 pub fn console_emit_unlock() {
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+}
+
+// ==================== Console TX deferral + unified sink ====================
+//
+// (console lane, oh-console; reference parity linux-6.6)
+//
+// The reference NEVER paces the UART from an interrupts-off writer:
+// tty/console writes copy into a driver buffer (IRQ-off for the copy
+// only) and the TX-complete interrupt does the byte pacing; printk
+// contexts that must not print (`in_sched`, NMI) DEFER via
+// defer_console_output(). Two consequences mirrored here:
+//
+// 1. printk records emitted from an IF=0 context (hardirq, softirq on
+//    the inline irq-exit path, or a caller holding an irqsave lock)
+//    are NOT emitted synchronously — that was 5-17 ms of interrupts
+//    off per 256-byte line under the OH log flood (53rd session §3),
+//    far outside the interrupts guarded domain band (3-7 ms class).
+//    They land in a small drop-oldest queue (the record is already in
+//    the printk ring, so dmesg never loses it) and flush from the next
+//    IF=1 console writer or the timer tick — defer_console_output's
+//    shape.
+// 2. /dev/console (fs::tty `console_output`) and /dev/ttyS0/exec-stdio
+//    (char_dev `uart_write_kernel`) writes serialize against printk
+//    records under CONSOLE_EMIT_LOCK — the role the reference's uart
+//    port lock plays for BOTH serial8250_console_write and uart_write.
+//    Before this, the tty sink went straight to puts_bytes under
+//    UART.lock_irqsave: it spliced mid-printk-record (the 54th's
+//    atomicity gap) AND held IF=0 across every THRE poll.
+
+/// Deferred console bytes produced by IF=0 printk contexts. Drop-oldest
+/// byte ring: sustained overload sheds oldest bytes first; the dropped
+/// counter keeps the loss visible (dmesg still has every record).
+const CONSOLE_DEFER_SIZE: usize = 8192;
+
+struct ConsoleDefer {
+    buf: [u8; CONSOLE_DEFER_SIZE],
+    /// Consumer index (flusher).
+    head: usize,
+    /// Producer index (IF=0 printk emitters).
+    tail: usize,
+}
+
+static CONSOLE_DEFER: Spinlock<ConsoleDefer> = Spinlock::new(ConsoleDefer {
+    buf: [0; CONSOLE_DEFER_SIZE],
+    head: 0,
+    tail: 0,
+});
+
+/// Deferred bytes shed by drop-oldest (diagnostic).
+static CONSOLE_DEFER_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Console lines deferred because the TX ring had no whole-record
+/// space (they ride the defer queue instead of being dropped).
+static CONSOLE_DEFER_NOSPACE: AtomicU64 = AtomicU64::new(0);
+/// Deferred bytes flushed to the console.
+static CONSOLE_DEFER_FLUSHED: AtomicU64 = AtomicU64::new(0);
+
+/// Read-only view for probes/syscost: (dropped, nospace, flushed).
+pub fn console_defer_stats() -> (u64, u64, u64) {
+    (
+        CONSOLE_DEFER_DROPPED.load(Ordering::Relaxed),
+        CONSOLE_DEFER_NOSPACE.load(Ordering::Relaxed),
+        CONSOLE_DEFER_FLUSHED.load(Ordering::Relaxed),
+    )
+}
+
+/// Expand `\n` to `\r\n` into `dst` (the console OPOST rule), returning
+/// the expanded length. Callers pre-size dst at 2x the input.
+fn expand_crlf(text: &[u8], dst: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    for &b in text {
+        if b == b'\n' {
+            if n < dst.len() {
+                dst[n] = b'\r';
+                n += 1;
+            }
+        }
+        if n < dst.len() {
+            dst[n] = b;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Queue already-expanded console bytes for an IF=1 flusher. Drop-oldest
+/// on overflow (bounded memory; the printk ring keeps the record).
+fn defer_push(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let mut q = CONSOLE_DEFER.lock_irqsave();
+    for &b in bytes {
+        let tail = q.tail;
+        let next = (tail + 1) % CONSOLE_DEFER_SIZE;
+        if next == q.head {
+            // Full: shed the OLDEST byte (drop-oldest keeps the newest
+            // evidence lines — the census/txn-hunt prints this queue
+            // exists for).
+            q.head = (q.head + 1) % CONSOLE_DEFER_SIZE;
+            CONSOLE_DEFER_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        q.buf[tail] = b;
+        q.tail = next;
+    }
+}
+
+/// Single-byte defer entry for hardirq putchar writers whose byte could
+/// not enter a full TX ring (console.rs putchar fallback; the byte must
+/// not race the IRQ drain with a direct THR write).
+pub(crate) fn defer_byte(b: u8) {
+    defer_push(&[b]);
+}
+
+/// Flush deferred console bytes to the console. Never sleeps: staged
+/// chunks submit only when they fit WHOLE (a partial submit would let
+/// another writer split the chunk mid-line); leftover bytes stay
+/// queued for the next flusher. Caller must NOT hold CONSOLE_EMIT_LOCK.
+fn flush_deferred() {
+    {
+        let q = CONSOLE_DEFER.lock_irqsave();
+        if q.head == q.tail {
+            return;
+        }
+    }
+    if !acquire_emit_lock_task() {
+        return; // another flusher/writer holds it; retried next entry
+    }
+    let mut staged: [u8; 1024] = [0; 1024];
+    let mut flushed_total: u64 = 0;
+    loop {
+        // Stage up to 1 KiB (the staging copy may split a wrap point;
+        // the console-side run stays contiguous because emit_locked
+        // submits it whole).
+        let mut n = 0usize;
+        {
+            let mut q = CONSOLE_DEFER.lock_irqsave();
+            while n < staged.len() && q.head != q.tail {
+                let head = q.head;
+                staged[n] = q.buf[head];
+                q.head = (head + 1) % CONSOLE_DEFER_SIZE;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        if !emit_locked(&staged[..n]) {
+            // No whole-chunk console space: push the chunk back to the
+            // queue head (order preserved) and stop this round.
+            let mut q = CONSOLE_DEFER.lock_irqsave();
+            for i in (0..n).rev() {
+                let head = (q.head + CONSOLE_DEFER_SIZE - 1) % CONSOLE_DEFER_SIZE;
+                q.buf[head] = staged[i];
+                q.head = head;
+            }
+            break;
+        }
+        flushed_total += n as u64;
+    }
+    if flushed_total > 0 {
+        CONSOLE_DEFER_FLUSHED.fetch_add(flushed_total, Ordering::Relaxed);
+        crate::dfx::syscost::note_printk_con(flushed_total as usize);
+    }
+    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+}
+
+/// Task-budget acquire of CONSOLE_EMIT_LOCK (printk/user console
+// writers; IF=0 printk contexts defer before ever reaching this).
+// Softirq-context flushers (the tick hook from ksoftirqd) use a short
+// budget: a user writer may sleep on ring space for up to ~250 ms
+// while holding the lock, and a softirq must not spin behind it — the
+// flush just retries next tick.
+fn acquire_emit_lock_task() -> bool {
+    let budget = if crate::interrupt::preempt::in_interrupt() {
+        // 10 ms: covers any memcpy-speed holder, gives up on sleepers.
+        crate::config::TIMER_CLOCK_FREQ_HZ / 100
+    } else {
+        EMIT_WAIT_TASK
+    };
+    let start = crate::arch::cpu::read_time();
+    loop {
+        if CONSOLE_EMIT_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Push bytes to the console with CONSOLE_EMIT_LOCK HELD by the caller.
+/// Whole-run submit only: returns false when the TX ring has no space
+/// for the whole slice (a partial submit would let another writer's
+/// bytes split it mid-line — see tx_submit_whole). On x86_64 with the
+/// TX engine armed this never touches LSR (the IRQ drain paces the
+/// UART); otherwise it is the legacy synchronous batch
+/// (riscv64/aarch64/pre-engine early boot).
+fn emit_locked(bytes: &[u8]) -> bool {
+    if crate::console::tx_armed() {
+        return crate::console::tx_submit_whole(bytes);
+    }
+    let uart = crate::console::Uart::new();
+    uart.puts_batch(bytes);
+    true
+}
+
+/// Crash-context synchronous emit (panic/oops): the direct polling path
+/// must stay — deferral queues and IRQ drains may be dead, and the
+/// report must reach the wire. Bounded THRE polls per the putc stall
+/// discipline; the best-effort emit lock keeps it off an in-flight
+/// line (the ConsoleWriter contract).
+fn emit_direct_crash(text: &[u8]) {
+    crate::console::tx_drain_poll();
+    let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
+    let n = expand_crlf(text, &mut buf);
+    let locked = try_console_emit_lock();
+    let uart = crate::console::Uart::new();
+    uart.puts_batch(&buf[..n]);
+    crate::dfx::syscost::note_printk_con(n);
+    if locked {
+        CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+    }
+}
+
+/// Timer-tick flush hook (timer.rs softirq): drains deferred console
+/// bytes and re-arms the TX drain if an edge was lost. Runs only with
+/// interrupts enabled — the inline irq-exit softirq path (IF=0) skips:
+/// flushing there would be the very IF=0 emission being eliminated.
+/// Cost when idle: one EFLAGS read + two atomic loads.
+pub fn console_tick_flush() {
+    if !crate::arch::cpu::get_interrupts_state() {
+        return;
+    }
+    crate::console::tx_kick();
+    let pending = {
+        let q = CONSOLE_DEFER.lock_irqsave();
+        q.head != q.tail
+    };
+    if pending {
+        flush_deferred();
+    }
+}
+
+/// Console (UART) emission path for printk records.
+///
+/// Reference-shaped dispatch:
+/// - crash context -> synchronous direct polling emit (panic reports
+///   must reach the wire even with IRQs dead);
+/// - IF=0 context -> defer (the record is already in the ring);
+/// - otherwise -> flush older deferred lines first, then whole-record
+///   emit under CONSOLE_EMIT_LOCK. A full TX ring defers the line
+///   instead of blocking — printk never sleeps.
+fn emit_to_console(text: &[u8]) {
+    if crate::dfx::pstore::sink_armed() || crate::dfx::oops::oops_entered() {
+        emit_direct_crash(text);
+        return;
+    }
+    // Early boot (no scheduler yet, single hart): the tick/flusher and
+    // the IRQ drain that would empty the defer queue / TX ring may not
+    // run yet — print synchronously exactly as before, bypassing the
+    // ring (brief IRQ-off windows on a quiet machine are not the flood
+    // the deferral exists for).
+    let early_boot = crate::sched::current().is_none()
+        && !crate::interrupt::preempt::in_interrupt();
+    if early_boot {
+        let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
+        let n = expand_crlf(text, &mut buf);
+        let uart = crate::console::Uart::new();
+        uart.puts_batch(&buf[..n]);
+        crate::dfx::syscost::note_printk_con(n);
+        return;
+    }
+    // IF=0 printk (hardirq, inline-irq-exit softirq, or a caller
+    // holding an irqsave lock): defer when the polling TX engine is
+    // armed — that combination was the 5-17 ms IRQ-off-per-line tax.
+    // Without the engine (riscv64/aarch64 MMIO sinks, pre-engine early
+    // boot) emission is a bounded store sequence: no reason to defer.
+    if crate::console::tx_armed() && !crate::arch::cpu::get_interrupts_state() {
+        let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
+        let n = expand_crlf(text, &mut buf);
+        defer_push(&buf[..n]);
+        return;
+    }
+    flush_deferred();
+    if !acquire_emit_lock_task() {
+        CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        return; // record is in the ring buffer; console line skipped
+    }
+    let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
+    let n = expand_crlf(text, &mut buf);
+    if !emit_locked(&buf[..n]) {
+        // TX ring full: whole-record space returns when the drain
+        // catches up; ride the defer queue (drop-oldest) rather than
+        // drop the line outright.
+        CONSOLE_DEFER_NOSPACE.fetch_add(1, Ordering::Relaxed);
+        defer_push(&buf[..n]);
+    } else {
+        crate::dfx::syscost::note_printk_con(n);
+    }
+    CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+}
+
+/// The unified USERSPACE console TX sink (/dev/console via fs::tty
+/// `console_output`, /dev/ttyS0 + exec-stdio via char_dev
+/// `uart_write_kernel`). Serializes against printk records under
+/// CONSOLE_EMIT_LOCK (the reference's shared uart port lock role) and
+/// paces through the TX ring: the write SLEEPS while the ring is full
+/// (tty_write blocking semantics) — it never spins and never holds
+/// IF=0 across device polls.
+///
+/// `bytes` must already carry the OPOST/ONLCR translation: every user
+/// console path (io.rs' stdio fast path, condev_write, the tty echo/
+/// pty output paths) translates before reaching the sink, exactly as
+/// they did for the old puts_bytes sink — expanding here would double
+/// every newline.
+///
+/// Returns the number of bytes accepted: the full slice on success, a
+/// partial count when bailing (ring-space timeout / chardev stall /
+/// pending signal). Bailed bytes are stashed into the printk ring (the
+/// `quietcon` discipline) so dmesg keeps them.
+pub fn console_emit_user(bytes: &[u8]) -> isize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    const USER_CHUNK: usize = 256;
+    let mut done = 0usize;
+    while done < bytes.len() {
+        let end = (done + USER_CHUNK).min(bytes.len());
+        let chunk = &bytes[done..end];
+        flush_deferred();
+        if !acquire_emit_lock_task() {
+            CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            crate::printk::ring_stash_console(&bytes[done..]);
+            return done as isize;
+        }
+        let mut at = 0usize;
+        let mut bailed = false;
+        while at < chunk.len() {
+            if !crate::console::tx_armed() {
+                // Synchronous path (riscv64/aarch64/pre-engine x86):
+                // one batched pass, no waiting.
+                let uart = crate::console::Uart::new();
+                uart.puts_batch(&chunk[at..]);
+                crate::dfx::syscost::note_printk_con(chunk.len() - at);
+                at = chunk.len();
+                break;
+            }
+            let took = crate::console::tx_submit(&chunk[at..]);
+            if took > 0 {
+                crate::dfx::syscost::note_printk_con(took);
+                at += took;
+            }
+            if at < chunk.len() {
+                // Ring full: bounded SLEEPING wait for drain space (IF=1,
+                // preemptible) — the reference tty write's behavior
+                // against a full xmit buffer.
+                if crate::console::tx_stalled()
+                    || crate::signal::signal_pending()
+                    || !user_tx_wait_space()
+                {
+                    // One-shot diagnosis of the FIRST bail (stall latch
+                    // vs timer-pool exhaustion vs timeout vs signal —
+                    // the drop shape differs per cause).
+                    static BAIL_REPORTED: AtomicBool = AtomicBool::new(false);
+                    if !BAIL_REPORTED.swap(true, Ordering::Relaxed) {
+                        let why = if crate::console::tx_stalled() {
+                            "tx_stalled"
+                        } else if crate::signal::signal_pending() {
+                            "signal"
+                        } else {
+                            "wait_timeout_or_no_timer"
+                        };
+                        crate::pr_warn!(
+                            "console: user TX bail ({}); line continues from printk ring",
+                            why
+                        );
+                    }
+                    bailed = true;
+                    break;
+                }
+            }
+        }
+        CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+        if bailed {
+            crate::printk::ring_stash_console(&bytes[done + at..]);
+            return (done + at) as isize;
+        }
+        done = end;
+        crate::sched::cond_resched();
+    }
+    bytes.len() as isize
+}
+
+/// Bounded sleeping wait for TX ring space (task context only). Caps
+/// the emit-lock hold so printk emitters never starve behind one
+/// blocked user write: ~250 ms of 20 ms polls covers a full 256-byte
+/// chunk's drain time (~22 ms at emulation pace) with an order of
+/// margin, and bounds the worst hold on a stalled chardev.
+fn user_tx_wait_space() -> bool {
+    const USER_TX_WAIT_MS: u64 = 250;
+    let mut waited: u64 = 0;
+    loop {
+        if crate::console::tx_free() >= 64 || !crate::console::tx_armed() {
+            return true;
+        }
+        if waited >= USER_TX_WAIT_MS {
+            return false;
+        }
+        if !kmsg_poll_sleep(20) {
+            return false; // no timer/task available: let the caller bail
+        }
+        waited += 20;
+    }
 }
 
 /// Write a formatted message with trailing newline to the kernel log.

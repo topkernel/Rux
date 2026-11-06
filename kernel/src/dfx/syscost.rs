@@ -1855,6 +1855,26 @@ pub fn dump() {
         }
     }
 
+    // Console lane (oh-console): TX-ring engine + IF=0 deferral
+    // accounting. The uart if0/if1 tables above now carry only the IRQ
+    // drain's register traffic (per-burst LSR reads — the writer-side
+    // multi-poll class is gone); these rows carry the queue dynamics.
+    {
+        let (sub, irqb, irqd) = crate::console::tx_stats();
+        let (dropped, nospace, flushed) = crate::printk::console_defer_stats();
+        crate::pr_warn!(
+            "SYSCOST t={}s contx : submitted={}B irq_drained={}B irq_passes={} deferred_flushed={}B nospace={} defer_dropped={}B es={}",
+            secs,
+            sub,
+            irqb,
+            irqd,
+            flushed,
+            nospace,
+            dropped,
+            crate::printk::console_emit_skipped()
+        );
+    }
+
     // pa15 per-comm printk volume (console producers; "<irq>" collects
     // interrupt-context prints so they do not smear interrupted tasks).
     {
