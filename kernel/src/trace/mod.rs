@@ -1419,6 +1419,253 @@ tracepoints! {
             args[0] as i32, args[1] as i32, args[2] as u32, ps_render(args[3])
         )
     };
+
+    /// lock:lock_acquire — every acquire attempt at Rux's sleeping-mutex
+    /// funnel. The reference host's events/lock/lock_acquire is a
+    /// LOCKDEP event (it fires from lock_acquire() with the lockdep_map
+    /// of ANY lock class); Rux has no lockdep, so the honest analog is
+    /// the real funnel Rux HAS: the SleepMutex (the wait-queue mutex of
+    /// kernel/src/sync/mutex.rs — VFS_MUTATION_LOCK, EXT4_BIG_LOCK).
+    /// Sites: SleepMutex::lock() entry. Divergences (documented, none
+    /// silent): flags is always 0 (Rux's funnel is a plain blocking
+    /// write-acquire — no trylock/read variants exist there, so the
+    /// reference's try/read bits have nothing honest to report);
+    /// lockdep_addr carries the SleepMutex address itself (the honest
+    /// analog of the embedded lockdep_map — a stable per-lock
+    /// identity); the name is the lock's diagnostic name (15 bytes +
+    /// NUL inline, the irq-name precedent).
+    EVENT_LOCK_ACQUIRE / lock_acquire_fmt / trace_lock_acquire : "lock", "lock_acquire", 52,
+    print: "\"%p %s%s%s\", REC->lockdep_addr, (REC->flags & 1) ? \"try \" : \"\", (REC->flags & 2) ? \"read \" : \"\", __get_str(name)",
+    fields: "\tfield:unsigned int flags;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:__data_loc char[] name;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:void *lockdep_addr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (flags: u32, name: &[u8; COMM_LEN], lockdep_addr: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let name = comm_from_words(args[1], args[2]);
+        let end = name.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "{:#x} {}{}{}",
+            args[3],
+            if args[0] & 1 != 0 { "try " } else { "" },
+            if args[0] & 2 != 0 { "read " } else { "" },
+            String::from_utf8_lossy(&name[..end])
+        )
+    };
+
+    /// lock:lock_acquired — a contended acquire at the sleeping-mutex
+    /// funnel completed (the LOCK_STAT bracket's closing record; the
+    /// wait duration pairs this record's timestamp with the matching
+    /// lock_contended of the same pid+lockdep_addr — exactly how the
+    /// reference's lockstat derives contended_wait_time). The reference
+    /// event is LOCKDEP+LOCK_STAT-only; Rux fires it when a lock()
+    /// that fell to the slow path returns. Divergence: lockdep_addr =
+    /// the SleepMutex address (see lock_acquire).
+    EVENT_LOCK_ACQUIRED / lock_acquired_fmt / trace_lock_acquired : "lock", "lock_acquired", 53,
+    print: "\"%p %s\", REC->lockdep_addr, __get_str(name)",
+    fields: "\tfield:__data_loc char[] name;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:void *lockdep_addr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (name: &[u8; COMM_LEN], lockdep_addr: u64),
+    render |args: &[u64; TRACE_ARGS]| fmt_lock_name_addr(args);
+
+    /// lock:lock_contended — an acquire at the sleeping-mutex funnel
+    /// hit contention and fell to the slow path (the optimistic-spin
+    /// probe gave up: holder off-CPU, handoff window, or need_resched).
+    /// The LOCK_STAT bracket's opening record; the timestamp at
+    /// contention start is this record's own trace timestamp.
+    /// Divergence: lockdep_addr = the SleepMutex address (see
+    /// lock_acquire).
+    EVENT_LOCK_CONTENDED / lock_contended_fmt / trace_lock_contended : "lock", "lock_contended", 54,
+    print: "\"%p %s\", REC->lockdep_addr, __get_str(name)",
+    fields: "\tfield:__data_loc char[] name;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:void *lockdep_addr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (name: &[u8; COMM_LEN], lockdep_addr: u64),
+    render |args: &[u64; TRACE_ARGS]| fmt_lock_name_addr(args);
+
+    /// lock:lock_release — the sleeping-mutex release funnel. The
+    /// reference's is a LOCKDEP event fired from lock_release() for
+    /// every lock class; Rux's honest analog is SleepMutex::release()
+    /// (the single normal-release funnel — guard drop). Divergence:
+    /// release_if_owner (the exit-path force-drop) is NOT instrumented
+    /// (no reference analog; a dying task's forced release is Rux
+    /// forensics, not the release funnel).
+    EVENT_LOCK_RELEASE / lock_release_fmt / trace_lock_release : "lock", "lock_release", 55,
+    print: "\"%p %s\", REC->lockdep_addr, __get_str(name)",
+    fields: "\tfield:__data_loc char[] name;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:void *lockdep_addr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (name: &[u8; COMM_LEN], lockdep_addr: u64),
+    render |args: &[u64; TRACE_ARGS]| fmt_lock_name_addr(args);
+
+    /// lock:contention_begin — the slow path of a CONTENDED spinlock
+    /// acquire began (the lockdep-free contention pair; this is what a
+    /// reference kernel without LOCKDEP emits for spinlock contention).
+    /// Site: RawSpinlock::lock()'s contended branch — AFTER the first
+    /// CAS fails, so the uncontended fast path executes none of it (the
+    /// lane charter's spinlock-fast-path rule). flags carries LCB_F_SPIN
+    /// (0x1) — Rux's RawSpinlock is a plain exclusive spin lock (no
+    /// read/write/rt/percpu variants). Divergence: the reference also
+    /// fires this pair in the mutex slow path (LCB_F_MUTEX); Rux's
+    /// sleeping mutex carries its own lock_contended/lock_acquired
+    /// bracket instead — one bracket per contended acquire, no
+    /// duplicated records.
+    EVENT_CONTENTION_BEGIN / contention_begin_fmt / trace_contention_begin : "lock", "contention_begin", 56,
+    print: "\"%p (flags=%s)\", REC->lock_addr, __print_flags(REC->flags, \"|\", { 0x1, \"SPIN\" }, { 0x2, \"READ\" }, { 0x4, \"WRITE\" }, { 0x8, \"RT\" }, { 0x10, \"PERCPU\" }, { 0x20, \"MUTEX\" })",
+    fields: "\tfield:void *lock_addr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int flags;\toffset:16;\tsize:4;\tsigned:0;\n",
+    call (lock_addr: u64, flags: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!("{:#x} (flags={})", args[0], lcb_flags_text(args[1] as u64))
+    };
+
+    /// lock:contention_end — a contended spinlock acquire completed.
+    /// Site: RawSpinlock::lock()'s exit, only when the contended branch
+    /// ran. Divergence: ret is always 0 — Rux's TTAS spin acquire
+    /// cannot fail (the reference's ret carries the acquire return,
+    /// e.g. -EINTR for interruptible sleepers; a spinner never sleeps).
+    EVENT_CONTENTION_END / contention_end_fmt / trace_contention_end : "lock", "contention_end", 57,
+    print: "\"%p (ret=%d)\", REC->lock_addr, REC->ret",
+    fields: "\tfield:void *lock_addr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:int ret;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (lock_addr: u64, ret: i32),
+    render |args: &[u64; TRACE_ARGS]| format!("{:#x} (ret={})", args[0], args[1] as i32);
+
+    /// tcp:tcp_retransmit_skb — a segment was retransmitted (timeout or
+    /// fast-retransmit). The reference host's events/tcp/tcp_retransmit_skb,
+    /// field rows and print fmt verbatim with the show_* expansions.
+    /// Sites: Rux's two retransmit funnels — retransmit_timer_expired
+    /// (RTO timer) and fast_retransmit (3 dup-ACKs). Slot packing (the
+    /// record's fixed 10 slots): skbaddr, skaddr, state, then ONE word
+    /// carrying family<<32|sport<<16|dport (three u16s), ONE word
+    /// carrying saddr<<32|daddr (two u32s, host order), saddrv6 lo/hi,
+    /// daddrv6 lo/hi (little-endian words of the 16 bytes), err.
+    /// Divergences: skbaddr carries the retransmit QUEUE ENTRY's
+    /// address (Rux's TcpSendSeg — the analog of the SKB); err is
+    /// always 0 (Rux's deferred-TX staging returns no errno; a
+    /// can't-happen overflow skips only the wire emission — retry
+    /// accounting still runs); saddrv6/daddrv6 carry the v4-mapped
+    /// form for AF_INET sockets exactly as the reference's
+    /// ipv6_addr_set_v4mapped does.
+    EVENT_TCP_RETRANSMIT_SKB / tcp_retransmit_skb_fmt / trace_tcp_retransmit_skb :
+        "tcp", "tcp_retransmit_skb", 58,
+    print: "\"skbaddr=%p skaddr=%p family=%s sport=%hu dport=%hu saddr=%pI4 daddr=%pI4 saddrv6=%pI6c daddrv6=%pI6c state=%s err=%d\", REC->skbaddr, REC->skaddr, show_family_name(REC->family), REC->sport, REC->dport, REC->saddr, REC->daddr, REC->saddr_v6, REC->daddr_v6, show_tcp_state_name(REC->state), REC->err",
+    fields: "\tfield:void *skbaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:void *skaddr;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:int state;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:__u16 sport;\toffset:28;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 dport;\toffset:30;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 family;\toffset:32;\tsize:2;\tsigned:0;\n\
+             \tfield:__u8 saddr[4];\toffset:34;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 daddr[4];\toffset:38;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 saddr_v6[16];\toffset:42;\tsize:16;\tsigned:0;\n\
+             \tfield:__u8 daddr_v6[16];\toffset:58;\tsize:16;\tsigned:0;\n\
+             \tfield:int err;\toffset:74;\tsize:4;\tsigned:1;\n",
+    call (skbaddr: u64, skaddr: u64, state: i32, fsd: u64, addrs4: u64,
+          saddr6_lo: u64, saddr6_hi: u64, daddr6_lo: u64, daddr6_hi: u64, err: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let (family, sport, dport) = unpack_family_ports(args[3]);
+        format!(
+            "skbaddr={:#x} skaddr={:#x} family={} sport={} dport={} saddr={} daddr={} saddrv6={} daddrv6={} state={} err={}",
+            args[0], args[1], family_name(family), sport, dport,
+            fmt_pi4((args[4] >> 32) as u32), fmt_pi4(args[4] as u32),
+            fmt_pi6c(args[5], args[6]), fmt_pi6c(args[7], args[8]),
+            tcp_state_name(args[2] as i32), args[9] as i32
+        )
+    };
+
+    /// tcp:tcp_receive_reset — an acceptable RST was processed by the
+    /// connection (the reference's tcp_event_sk class shape, fired from
+    /// tcp_reset()). Site: Rux's handle_rst_recv entry — the funnel the
+    /// window-checked RST path reaches. Slot packing: skaddr, then ONE
+    /// word family<<32|sport<<16|dport, ONE word saddr<<32|daddr,
+    /// saddrv6 lo/hi, daddrv6 lo/hi, sock_cookie. Divergence:
+    /// sock_cookie carries the socket address (Rux has no sock cookie
+    /// allocator; the address is the same stable while-alive identity).
+    EVENT_TCP_RECEIVE_RESET / tcp_receive_reset_fmt / trace_tcp_receive_reset :
+        "tcp", "tcp_receive_reset", 59,
+    print: "\"family=%s sport=%hu dport=%hu saddr=%pI4 daddr=%pI4 saddrv6=%pI6c daddrv6=%pI6c sock_cookie=%llx\", show_family_name(REC->family), REC->sport, REC->dport, REC->saddr, REC->daddr, REC->saddr_v6, REC->daddr_v6, REC->sock_cookie",
+    fields: "\tfield:void *skaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:__u16 sport;\toffset:16;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 dport;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 family;\toffset:20;\tsize:2;\tsigned:0;\n\
+             \tfield:__u8 saddr[4];\toffset:22;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 daddr[4];\toffset:26;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 saddr_v6[16];\toffset:32;\tsize:16;\tsigned:0;\n\
+             \tfield:__u8 daddr_v6[16];\toffset:48;\tsize:16;\tsigned:0;\n\
+             \tfield:__u64 sock_cookie;\toffset:64;\tsize:8;\tsigned:0;\n",
+    call (skaddr: u64, fsd: u64, addrs4: u64,
+          saddr6_lo: u64, saddr6_hi: u64, daddr6_lo: u64, daddr6_hi: u64, cookie: u64),
+    render |args: &[u64; TRACE_ARGS]| fmt_tcp_event_sk(args);
+
+    /// tcp:tcp_destroy_sock — a socket was destroyed (the reference's
+    /// tcp_event_sk class shape, fired from tcp_v4_destroy_sock()).
+    /// Site: Rux's TcpSocketTable::free — the single destroy funnel
+    /// (the fd close path and the timer's orphan sweep both pass
+    /// through it). Same slot packing and sock_cookie divergence as
+    /// tcp_receive_reset.
+    EVENT_TCP_DESTROY_SOCK / tcp_destroy_sock_fmt / trace_tcp_destroy_sock :
+        "tcp", "tcp_destroy_sock", 60,
+    print: "\"family=%s sport=%hu dport=%hu saddr=%pI4 daddr=%pI4 saddrv6=%pI6c daddrv6=%pI6c sock_cookie=%llx\", show_family_name(REC->family), REC->sport, REC->dport, REC->saddr, REC->daddr, REC->saddr_v6, REC->daddr_v6, REC->sock_cookie",
+    fields: "\tfield:void *skaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:__u16 sport;\toffset:16;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 dport;\toffset:18;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 family;\toffset:20;\tsize:2;\tsigned:0;\n\
+             \tfield:__u8 saddr[4];\toffset:22;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 daddr[4];\toffset:26;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 saddr_v6[16];\toffset:32;\tsize:16;\tsigned:0;\n\
+             \tfield:__u8 daddr_v6[16];\toffset:48;\tsize:16;\tsigned:0;\n\
+             \tfield:__u64 sock_cookie;\toffset:64;\tsize:8;\tsigned:0;\n",
+    call (skaddr: u64, fsd: u64, addrs4: u64,
+          saddr6_lo: u64, saddr6_hi: u64, daddr6_lo: u64, daddr6_hi: u64, cookie: u64),
+    render |args: &[u64; TRACE_ARGS]| fmt_tcp_event_sk(args);
+
+    /// sock:inet_sock_set_state — an inet socket's state changed. This
+    /// is the reference's REAL state-change event (there is no
+    /// tcp:tcp_state_change upstream — the event lives in sock.h and
+    /// fires from inet_sk_state_store/tcp_set_state for inet sockets).
+    /// Site: Rux's TcpSocket::set_state funnel (every post-creation
+    /// state write passes through it; the constructor's initial
+    /// TCP_CLOSE is the untraced sk_alloc analog; same-state writes do
+    /// not record). Slot packing: skaddr, oldstate, newstate, then ONE
+    /// word family<<48|protocol<<32|sport<<16|dport (four u16s), ONE
+    /// word saddr<<32|daddr, saddrv6 lo/hi, daddrv6 lo/hi.
+    /// Divergences: protocol is IPPROTO_TCP only (Rux's funnel is the
+    /// TCP state machine; Rux's UDP carries no state store); state
+    /// numbers are the REFERENCE enum (include/net/tcp_states.h),
+    /// translated from Rux's private TcpState at the site.
+    EVENT_INET_SOCK_SET_STATE / inet_sock_set_state_fmt / trace_inet_sock_set_state :
+        "sock", "inet_sock_set_state", 61,
+    print: "\"family=%s protocol=%s sport=%hu dport=%hu saddr=%pI4 daddr=%pI4 saddrv6=%pI6c daddrv6=%pI6c oldstate=%s newstate=%s\", show_family_name(REC->family), show_inet_protocol_name(REC->protocol), REC->sport, REC->dport, REC->saddr, REC->daddr, REC->saddr_v6, REC->daddr_v6, show_tcp_state_name(REC->oldstate), show_tcp_state_name(REC->newstate)",
+    fields: "\tfield:void *skaddr;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:int oldstate;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:int newstate;\toffset:20;\tsize:4;\tsigned:1;\n\
+             \tfield:__u16 sport;\toffset:24;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 dport;\toffset:26;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 family;\toffset:28;\tsize:2;\tsigned:0;\n\
+             \tfield:__u16 protocol;\toffset:30;\tsize:2;\tsigned:0;\n\
+             \tfield:__u8 saddr[4];\toffset:32;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 daddr[4];\toffset:36;\tsize:4;\tsigned:0;\n\
+             \tfield:__u8 saddr_v6[16];\toffset:40;\tsize:16;\tsigned:0;\n\
+             \tfield:__u8 daddr_v6[16];\toffset:56;\tsize:16;\tsigned:0;\n",
+    call (skaddr: u64, oldstate: i32, newstate: i32, fpsp: u64, addrs4: u64,
+          saddr6_lo: u64, saddr6_hi: u64, daddr6_lo: u64, daddr6_hi: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        let family = ((args[3] >> 48) & 0xffff) as u16;
+        let protocol = ((args[3] >> 32) & 0xffff) as u16;
+        let sport = ((args[3] >> 16) & 0xffff) as u16;
+        let dport = (args[3] & 0xffff) as u16;
+        format!(
+            "family={} protocol={} sport={} dport={} saddr={} daddr={} saddrv6={} daddrv6={} oldstate={} newstate={}",
+            family_name(family),
+            if protocol == 6 {
+                "IPPROTO_TCP".to_string()
+            } else {
+                format!("{protocol:#x}")
+            },
+            sport, dport,
+            fmt_pi4((args[4] >> 32) as u32), fmt_pi4(args[4] as u32),
+            fmt_pi6c(args[5], args[6]), fmt_pi6c(args[7], args[8]),
+            tcp_state_name(args[1] as i32), tcp_state_name(args[2] as i32)
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
@@ -2535,4 +2782,156 @@ pub fn str_to_comm16(name: &str) -> [u8; COMM_LEN] {
     let n = name.len().min(COMM_LEN - 1);
     out[..n].copy_from_slice(&name.as_bytes()[..n]);
     out
+}
+
+// ============================================================================
+// Shared renderers of the round-4 lock:/tcp:/sock: wave
+// ============================================================================
+
+/// The lock: class render "%p %s" (lockdep_addr, name) — the shape of
+/// lock_release / lock_contended / lock_acquired.
+fn fmt_lock_name_addr(args: &[u64; TRACE_ARGS]) -> String {
+    let name = comm_from_words(args[0], args[1]);
+    let end = name.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+    format!("{:#x} {}", args[2], String::from_utf8_lossy(&name[..end]))
+}
+
+/// show_flags of the LCB_F_* table (include/trace/events/lock.h —
+/// contention_begin's __print_flags, values as they resolve).
+fn lcb_flags_text(flags: u64) -> String {
+    const FLAGS: &[(u64, &str)] = &[
+        (0x1, "SPIN"),
+        (0x2, "READ"),
+        (0x4, "WRITE"),
+        (0x8, "RT"),
+        (0x10, "PERCPU"),
+        (0x20, "MUTEX"),
+    ];
+    print_flags_walk(flags, "|", FLAGS)
+}
+
+/// show_family_name — AF_INET / AF_INET6 (sock.h's family_names,
+/// values as TRACE_DEFINE_ENUM resolves them: 2 / 10).
+fn family_name(family: u16) -> String {
+    match family {
+        2 => "AF_INET".into(),
+        10 => "AF_INET6".into(),
+        other => format!("{:#x}", other),
+    }
+}
+
+/// show_tcp_state_name — the reference's TCP state enum
+/// (include/net/tcp_states.h numbering), which the live format file
+/// resolves TRACE_DEFINE_ENUM to: ESTABLISHED=1 ... CLOSING=11.
+/// Unmatched values print the number (the reference's
+/// __print_symbolic fallback).
+fn tcp_state_name(state: i32) -> String {
+    match state {
+        1 => "TCP_ESTABLISHED".into(),
+        2 => "TCP_SYN_SENT".into(),
+        3 => "TCP_SYN_RECV".into(),
+        4 => "TCP_FIN_WAIT1".into(),
+        5 => "TCP_FIN_WAIT2".into(),
+        6 => "TCP_TIME_WAIT".into(),
+        7 => "TCP_CLOSE".into(),
+        8 => "TCP_CLOSE_WAIT".into(),
+        9 => "TCP_LAST_ACK".into(),
+        10 => "TCP_LISTEN".into(),
+        11 => "TCP_CLOSING".into(),
+        other => format!("{}", other),
+    }
+}
+
+/// Unpack the family<<32|sport<<16|dport word the tcp:/sock: sites
+/// build (three u16s in one slot).
+fn unpack_family_ports(word: u64) -> (u16, u16, u16) {
+    (
+        ((word >> 32) & 0xffff) as u16,
+        ((word >> 16) & 0xffff) as u16,
+        (word & 0xffff) as u16,
+    )
+}
+
+/// %pI4 — a dotted quad. The slot carries the address as a HOST-order
+/// u32 (Rux's IpAddr::V4 convention), so the conventional display is
+/// v>>24 . v>>16 . v>>8 . v.
+fn fmt_pi4(v: u32) -> String {
+    format!("{}.{}.{}.{}", (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff)
+}
+
+/// %pI6c — an IPv6 address in compressed form (RFC 5952): the longest
+/// zero run of two or more groups becomes `::`, and a v4-mapped
+/// address renders as `::ffff:a.b.c.d` (the reference's %pI6c
+/// behavior for mapped addresses — what every AF_INET socket's
+/// saddrv6/daddrv6 shows). The two words are the 16 bytes as
+/// little-endian u64 halves.
+fn fmt_pi6c(lo: u64, hi: u64) -> String {
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&lo.to_le_bytes());
+    b[8..].copy_from_slice(&hi.to_le_bytes());
+    // v4-mapped: ::ffff:a.b.c.d
+    if b[..10].iter().all(|&x| x == 0) && b[10] == 0xff && b[11] == 0xff {
+        let v = u32::from_be_bytes([b[12], b[13], b[14], b[15]]);
+        return format!("::ffff:{}", fmt_pi4(v));
+    }
+    // Group the bytes, find the longest all-zero run (>= 2 groups).
+    let mut groups = [0u16; 8];
+    for (i, g) in groups.iter_mut().enumerate() {
+        *g = u16::from_be_bytes([b[i * 2], b[i * 2 + 1]]);
+    }
+    let (mut best_start, mut best_len) = (usize::MAX, 0usize);
+    let (mut cur_start, mut cur_len) = (0usize, 0usize);
+    for (i, &g) in groups.iter().enumerate() {
+        if g == 0 {
+            if cur_len == 0 {
+                cur_start = i;
+            }
+            cur_len += 1;
+            if cur_len > best_len {
+                best_len = cur_len;
+                best_start = cur_start;
+            }
+        } else {
+            cur_len = 0;
+        }
+    }
+    if best_len < 2 {
+        best_start = usize::MAX;
+    }
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < 8 {
+        if i == best_start {
+            out.push_str("::");
+            i += best_len;
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with(':') {
+            out.push(':');
+        }
+        out.push_str(&format!("{:x}", groups[i]));
+        i += 1;
+    }
+    if out.is_empty() {
+        out.push_str("::");
+    }
+    out
+}
+
+/// The tcp_event_sk class render — the shape of tcp_receive_reset and
+/// tcp_destroy_sock. Slots: skaddr, family<<32|sport<<16|dport,
+/// saddr<<32|daddr, saddrv6 lo/hi, daddrv6 lo/hi, sock_cookie.
+fn fmt_tcp_event_sk(args: &[u64; TRACE_ARGS]) -> String {
+    let (family, sport, dport) = unpack_family_ports(args[1]);
+    format!(
+        "family={} sport={} dport={} saddr={} daddr={} saddrv6={} daddrv6={} sock_cookie={:#x}",
+        family_name(family),
+        sport,
+        dport,
+        fmt_pi4((args[2] >> 32) as u32),
+        fmt_pi4(args[2] as u32),
+        fmt_pi6c(args[3], args[4]),
+        fmt_pi6c(args[5], args[6]),
+        args[7]
+    )
 }

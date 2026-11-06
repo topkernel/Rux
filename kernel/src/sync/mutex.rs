@@ -332,7 +332,65 @@ impl SleepMutex {
     ///
     /// NOT for interrupt context (see module doc); syscall/task context
     /// only. Returns a guard that releases on drop (outermost only).
+    ///
+    /// Tracepoint bracket (round 4, the lock: family): lock_acquire at
+    /// the funnel entry, lock_acquired when a contended acquire
+    /// completes (`contended` is set where lock_contended fires — the
+    /// wait duration pairs the two records' timestamps, the lockstat
+    /// derivation). The gated helpers keep the disabled path at one
+    /// relaxed load per site (the name marshalling runs only when
+    /// armed).
     pub fn lock(&'static self) -> SleepMutexGuard {
+        self.trace_acquire();
+        let mut contended = false;
+        let guard = self.lock_inner(&mut contended);
+        if contended {
+            self.trace_lock_acquired();
+        }
+        guard
+    }
+
+    /// lock_acquire — every acquire attempt at the funnel (the
+    /// reference's LOCKDEP event; flags 0 = the plain blocking
+    /// write-acquire, see the event's doc).
+    #[inline]
+    fn trace_acquire(&'static self) {
+        if crate::trace::EVENT_LOCK_ACQUIRE.armed() {
+            crate::trace::trace_lock_acquire(
+                0,
+                &crate::trace::str_to_comm16(self.name),
+                self as *const SleepMutex as u64,
+            );
+        }
+    }
+
+    /// lock_acquired — the contended acquire completed (LOCK_STAT's
+    /// closing record of the contended bracket).
+    #[inline]
+    fn trace_lock_acquired(&'static self) {
+        if crate::trace::EVENT_LOCK_ACQUIRED.armed() {
+            crate::trace::trace_lock_acquired(
+                &crate::trace::str_to_comm16(self.name),
+                self as *const SleepMutex as u64,
+            );
+        }
+    }
+
+    /// lock_release — the normal release funnel (guard drop).
+    #[inline]
+    fn trace_release(&'static self) {
+        if crate::trace::EVENT_LOCK_RELEASE.armed() {
+            crate::trace::trace_lock_release(
+                &crate::trace::str_to_comm16(self.name),
+                self as *const SleepMutex as u64,
+            );
+        }
+    }
+
+    /// The lock() body (the adaptive spin, the degrade paths and the
+    /// wait-queue slow path). Sets `contended` when the acquire fell to
+    /// the slow path (where lock_contended fires).
+    fn lock_inner(&'static self, contended: &mut bool) -> SleepMutexGuard {
         let pid = crate::process::current_pid();
         if self.fsw_notes {
             crate::debug::fsw::note_biglock();
@@ -385,6 +443,18 @@ impl SleepMutex {
         // stall-quiet wedge). Spin instead: interrupts stay enabled,
         // the scheduler is never touched, and whichever CPU runs the
         // holder can still take its ticks and release us.
+        //
+        // Tracepoint (round 4): this is contention onset — the
+        // LOCK_STAT bracket's opening record (lock_contended); the
+        // closing lock_acquired fires from lock() when this acquire
+        // returns. The flag doubles as the marker for that fire.
+        *contended = true;
+        if crate::trace::EVENT_LOCK_CONTENDED.armed() {
+            crate::trace::trace_lock_contended(
+                &crate::trace::str_to_comm16(self.name),
+                self as *const SleepMutex as u64,
+            );
+        }
         let can_sleep = crate::sched::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
         if self.fsw_notes {
@@ -658,6 +728,11 @@ impl SleepMutex {
     }
 
     fn release(&'static self) {
+        // Tracepoint (round 4): the single normal-release funnel
+        // (every guard drop passes here; release_if_owner — the
+        // exit-path force-drop — is deliberately uninstrumented, no
+        // reference analog).
+        self.trace_release();
         {
             let mut st = self.state.lock();
             if st.depth > 0 {

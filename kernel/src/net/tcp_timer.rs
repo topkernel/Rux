@@ -145,7 +145,7 @@ impl TcpTimerManager {
                     } else if now - socket.timers.close_wait_since
                         > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
                     {
-                        socket.state = TcpState::TCP_CLOSE;
+                        socket.set_state(TcpState::TCP_CLOSE);
                         socket.send_buffer.clear();
                         socket.recv_buffer.clear();
                         socket.retrans_queue.clear();
@@ -218,7 +218,7 @@ impl TcpTimerManager {
                                 // Peer dead: ETIMEDOUT + abort (Linux
                                 // tcp_keepalive_timer keepcnt exhaustion).
                                 socket.pending_error = 110; // ETIMEDOUT
-                                socket.state = TcpState::TCP_CLOSE;
+                                socket.set_state(TcpState::TCP_CLOSE);
                                 socket.send_buffer.clear();
                                 socket.retrans_queue.clear();
                                 socket.ooo_queue.clear();
@@ -250,12 +250,20 @@ impl TcpTimerManager {
                         // W3: record ETIMEDOUT for blocked connect()/send()
                         // waiters and SO_ERROR readers.
                         socket.pending_error = 110; // ETIMEDOUT
-                        socket.state = TcpState::TCP_CLOSE;
+                        socket.set_state(TcpState::TCP_CLOSE);
                         socket.timers.stop_retransmit();
                         socket.timers.syn_retries = 0;
                         self.timeout_closes += 1;
                     } else {
                         socket.timers.syn_retries += 1;
+                        // Tracepoint (round 4): the SYN-retransmit
+                        // funnel — a third retransmit site besides the
+                        // RTO and fast-retransmit ones (the reference's
+                        // tcp_retransmit_skb fires for SYN retransmits
+                        // too; Rux's SYN path re-derives the segment
+                        // instead of pulling a queue entry, so skbaddr
+                        // reports 0 — no queued buffer exists).
+                        socket.trace_retransmit_syn();
                         let _ = socket.resend_syn(tx);
                         // Exponential backoff, capped at TCP_RTO_MAX_US.
                         let shift = core::cmp::min(socket.timers.syn_retries, 6) as u32;
@@ -274,7 +282,7 @@ impl TcpTimerManager {
                 } else if now - socket.timers.fin_wait_since
                     > (crate::config::TCP_TIMEWAIT_TIMEOUT_US / 10_000)
                 {
-                    socket.state = TcpState::TCP_CLOSE;
+                    socket.set_state(TcpState::TCP_CLOSE);
                 }
                 // Retransmit (the FIN itself — R21-N3) + delack still run.
                 if socket.timers.retransmit_deadline > 0
@@ -300,7 +308,7 @@ impl TcpTimerManager {
                     && now >= socket.timers.retransmit_deadline
                 {
                     // TIME_WAIT timeout, close connection
-                    socket.state = TcpState::TCP_CLOSE;
+                    socket.set_state(TcpState::TCP_CLOSE);
                     socket.timers.stop_retransmit();
                 }
             }
