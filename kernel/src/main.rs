@@ -1802,22 +1802,42 @@ fn panic(info: &PanicInfo) -> ! {
     // other boot).
     crate::debug::pstore::arm_sink();
 
-    let mut w = debug::backtrace::ConsoleWriter::new();
-
-    // Header
-    let _ = w.write_str("\n\nKernel panic - not syncing:\n\n");
-    let _ = write!(w, "PANIC: {}\n", info.message());
-    if let Some(loc) = info.location() {
-        let _ = write!(w, "  Location: {}: {}\n", loc.file(), loc.line());
+    // Reference shape (kernel/panic.c: pr_emerg("Kernel panic - not
+    // syncing: %s\n")): the panic message sits INLINE in the banner
+    // line — the old printer put it on its own "PANIC:" line under a
+    // bare banner (logctl lane fix; the staged pstore record picks up
+    // the new shape through the same ConsoleWriter).
+    //
+    // ConsoleWriter stages into a 128-byte buffer flushed by Drop. Two
+    // consequences, both handled by giving every writer a scope that
+    // ends while the machine still prints:
+    // - the banner must FLUSH before the register/stack dumps (each
+    //   dumps with its own writer), or the dumps hit the serial first
+    //   and the report order inverts;
+    // - the panic tail (pstore capture, `panic=` policy) never
+    //   returns, so an unscoped writer would carry its last partial
+    //   buffer to the grave (the end marker truncated mid-line) and
+    //   hold CONSOLE_EMIT_LOCK until the reset.
+    {
+        let mut w = debug::backtrace::ConsoleWriter::new();
+        let _ = write!(w, "\nKernel panic - not syncing: {}\n", info.message());
+        if let Some(loc) = info.location() {
+            let _ = write!(w, "  Location: {}: {}\n", loc.file(), loc.line());
+        }
     }
 
-    // Separator
-    let _ = w.write_str("\n---[ end Kernel panic - not syncing ]---\n\n");
-
-    // Dump CSRs, registers, and stack trace via debug
+    // Dump CSRs, registers, and stack trace via debug (the reference's
+    // panic_print_sys_info — context between the banner and the end
+    // marker).
     debug::backtrace::dump_csrs();
     debug::backtrace::dump_regs_inline();
     debug::backtrace::dump_stack();
+
+    // End marker AFTER the register/stack dump, like the reference.
+    {
+        let mut w = debug::backtrace::ConsoleWriter::new();
+        let _ = w.write_str("---[ end Kernel panic - not syncing ]---\n");
+    }
 
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
