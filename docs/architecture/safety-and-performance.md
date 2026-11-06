@@ -402,3 +402,26 @@ absents stated plainly. Each absent names what closing looks like.
   trace_event= boot parameter landed with it (deterministic boot-time
   arming for any lane). Evidence: §3 bullet above; oh-tracepc TASK.md
   (functional + gate record).
+- Round-5 (2026-11-06, OH wedge campaign, staged on oh-int pending the
+  convergence relay): the fd lost-edge family — one kernel shape, five
+  members, all probe-convicted before patching (et_fd_probe.c, archived
+  in userspace/probes): timerfd (expiry never notified the epoll
+  registry; 59/60 after-gap edges lost), eventfd (1/300), pipe (1/300,
+  plus the peer-id problem — the writer raises the READ end's
+  readiness), TCP and UDP sockets (1/60 each; the generic Socket's
+  rise hooks woke sleepers but never re-armed ET interests). All fixed
+  by routing every readiness rise through epoll_notify_file — the
+  registry entry that resets the ET edge and wakes epoll sleepers; the
+  reference's ep_poll_callback rides every file wake unconditionally.
+  Post-fix: 300/300 and 60/60 across the whole family (3s probe, was
+  302s of lost-edge timeouts). System consequence on the OH image:
+  softbus loads for the first time (19.8s; previously never), the
+  frozen-mutex pandemic 115-193 -> 59-80 threads, distributeddata's
+  binder call returns (was parked 22s->231s+). Also landed this round:
+  the sleepable VMA rwsem (oh-vlock; reference rwsem.c semantics; the
+  old pure-spinner caused a whole early-wedge boot class — 0-OpenSo
+  boots existed only pre-fix), the per-CPU trace sequence (oh-tracepc;
+  events-off census A/B identical, p99 tail -47% armed), and the
+  trace-kmem record-time symbolization fix (52nd; preempt-leak prints
+  379 -> 0, RCU-GP-BOUND 200 -> 37). Sources: oh-int TASK.md lineage,
+  ohc20-ohc54 + ohv1-ohv3 boots, et_fd_probe host/guest verdicts.
