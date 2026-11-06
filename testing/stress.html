@@ -67,7 +67,7 @@
       <table>
         <thead><tr><th>成员</th><th>类型</th><th>负载内容</th></tr></thead>
         <tbody>
-          <tr><td>chain ×2</td><td>野指针写捕获链</td><td>自推进狩猎内核 + 负载链(冻结、不重启,见 wildwrite-hunt.md)</td></tr>
+          <tr><td>chain ×2</td><td>野指针写捕获链</td><td>自推进捕获内核 + 负载链(冻结、不重启,见 wildwrite-hunt.md)</td></tr>
           <tr><td>ltp-a/b/c/d</td><td>LTP 扫描成员</td><td>riscv64 TCG smp2/2G,随机起点 LTP 全量扫</td></tr>
           <tr><td>monkey-a/b</td><td>随机测试成员</td><td>x86_64 KVM 4G,usbless OH 镜像 + 随机扰动(存储热插拔、hilog 洪泛/轮转、appspawn 杀重启、bm/hidumper/param 走查、sync)</td></tr>
           <tr><td>memstorm</td><td>内存风暴</td><td>mmap/munmap/MAP_FIXED/mprotect/fork 风暴,debug=periodic,memwatch,watchdog</td></tr>

@@ -60,7 +60,7 @@
     <h1>Retrospective: the GNOME desktop regression</h1>
     <div class="sub">2026-11-06 · scope: x86_64 GNOME desktop boot, main@4ed009ac (10-31 acceptance) → main@264b6961 (11-06) · source doc: docs/test/gnome-regression-retrospective.md</div>
 
-    <div class="callout"><b>Status:</b> two of three root causes fixed and verified; one deep-water item open; one fresh regression of the same class caught during the hunt (§6).</div>
+    <div class="callout"><b>Status:</b> two of three root causes fixed and verified; one deep-water item open; one fresh regression of the same class caught during the investigation (§6).</div>
 
     <h2 id="accept"><span class="anchor">§1</span>What "works" meant concretely</h2>
     <p>The x86 GNOME milestone (99% non-black frame, 17-minute stable session) was accepted at main@4ed009ac by the gnome-x86 lane: per-boot manual verification with the lane's fire.py driver. It was a <b>campaign acceptance, not a standing gate</b> — after the lane demobilized, nothing in the recurring test surface booted the GNOME desktop again.</p>
@@ -87,7 +87,7 @@
     </ul>
     <h3>3.2 ext4 async batch read fill — cross-file page-cache poison</h3>
     <ul>
-      <li><b>Origin</b>: the lmbench read-throughput hunt (the bw_file_rd 50× attribution) moved the read path to async batch DMA with ReadDst::Discard cache warming.</li>
+      <li><b>Origin</b>: the lmbench read-throughput optimization (the bw_file_rd 50× attribution) moved the read path to async batch DMA with ReadDst::Discard cache warming.</li>
       <li><b>Hole</b>: completion/buffer-reuse attribution served the previous read's buffer bytes under the new file's cache keys. Measured: /bin/bzip2's mmap pages carried /bin/bzexe's script bytes while pread of the same fd returned correct data. Downstream: ld.so read garbage .dynsym → "undefined symbol" with an empty name → lazy-bind NULL+8 → gnome-shell died at fontconfig init every boot.</li>
       <li><b>Fix</b> (in main): an interim gate disables async submission — the synchronous per-block path's attribution is exact. Cold-file probe: 3/3 boots, zero mismatches. The async attribution bug itself is queued as its own lane (the cache-poison branch, full evidence package).</li>
     </ul>

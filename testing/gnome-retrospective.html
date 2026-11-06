@@ -116,7 +116,7 @@
     </ol>
 
     <h2 id="repeat"><span class="anchor">§6</span>排查期间模式当场重演</h2>
-    <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前搁浅(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭猎捕诊断参数的判别启动同样搁浅 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
+    <p>在上面两项修复验证的同时,<b>perf-gap-hunt 第 7 轮</b>(lease 快门 + memo v2 无锁化)落地,GNOME 启动开始在 shell 之前搁浅(dbus 库加载阶段,每次 55–129 行"fdreap close 完成停滞",零 shell 启动)。在同一棵树上关闭排查诊断参数的判别启动同样搁浅 —— <b>同类第三个回归,同一周被同一传感器抓住</b>。它需要自己的二分线。</p>
 
     <h2 id="open"><span class="anchor">§7</span>开放项</h2>
     <ol>
