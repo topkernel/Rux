@@ -7,11 +7,14 @@
 //! The quiet-quiet boot (quietcon + loglevel=3) has a second failure shape
 //! the classic-race probes cannot see: the pid flow stalls in the
 //! 900-1400 zone from ~min 10-12 with NO rwlock freeze word and NO kernel
-//! evidence (sc196/sc197; sc195 passes it 1-in-3). The evidence gap is
-//! structural: `printk_bytes` drops every record above CONSOLE_LOGLEVEL
-//! BEFORE the ring, so at loglevel=3 all pr_warn! census output
-//! (SACMP, binder-stall, stkfutex, RWFRZ) never existed — muted is the
-//! wrong model; it was never recorded.
+//! evidence (sc196/sc197; sc195 passes it 1-in-3). The evidence gap was
+//! structural when this module was born: `printk_bytes` used to drop
+//! every record above CONSOLE_LOGLEVEL BEFORE the ring, so at loglevel=3
+//! all pr_warn! census output (SACMP, binder-stall, stkfutex, RWFRZ)
+//! never existed. The logctl lane (2026-11) made the ring store
+//! unconditional for levels <= KERN_INFO — census records now reach the
+//! ring at any console level — but the UART stays muted at loglevel=3,
+//! so the heartbeat lines remain the only real-time signal.
 //!
 //! This module buys visibility back with a budget far below the
 //! loglevel-4 watermark (the sc198 lesson: probe traffic modulates the
@@ -605,9 +608,10 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     }
 
     // (3) Kernel stall machinery at warn level: lift the console loglevel
-    // to 4 so binder-stall / freeze_scan / WAKE-RUN-LEAK print (at
-    // loglevel=3 their records are dropped before the ring — see the
-    // module doc), run one stall_report pass, restore verbatim. The pass
+    // to 4 so binder-stall / freeze_scan / WAKE-RUN-LEAK print to the
+    // UART (at loglevel=3 the records still reach the ring since the
+    // logctl lane — but the console stays muted; see the module doc),
+    // run one stall_report pass, restore verbatim. The pass
     // also re-kicks parked readers (idempotent heal khungtaskd already
     // runs every 60s); if that unwedges the system the next heartbeats
     // show the flow resuming — itself a diagnostic.
@@ -625,8 +629,9 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
     // (samgr in sc201: not runnable, not binder-waiting, clients owed
     // 200s+). sleep_snapshot is self-gated on its own debug switch; boots
     // that arm debug=schb,sleepsnap get its census inside this lifted
-    // window (its khungtaskd-driven prints at loglevel 3 are dropped
-    // pre-ring, so the 60s cadence costs no UART burn).
+    // window (its khungtaskd-driven prints stay off the UART at
+    // loglevel 3 — console-gated since the logctl lane, ring-stored —
+    // so the 60s cadence costs no UART burn).
     crate::ipc::binder::sleep_snapshot();
     if saved < 4 {
         crate::printk::set_console_loglevel(saved);

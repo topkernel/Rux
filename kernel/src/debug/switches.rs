@@ -313,9 +313,9 @@ pub enum DebugSwitch {
     /// runnable/D-state scheduler views, stall_report with the loglevel
     /// briefly lifted, and the printk-ring tail that carries quietcon's
     /// diverted userspace console stream). At loglevel=3 every pr_warn!
-    /// census record is dropped BEFORE the ring (printk_bytes pre-filter),
-    /// so the quiet-quiet soft-wedge leaves no kernel evidence by design;
-    /// this switch is the budgeted replacement. See debug/schb.rs.
+    /// census record stays OFF the UART (console-gated; the ring stores
+    /// it since the logctl lane, but serial evidence still needs this
+    /// heartbeat's budgeted lines). See debug/schb.rs.
     Schb,
     /// Leg-16 kstack high-water probe: zero-every-fresh-kernel-stack at
     /// alloc + scan-at-free + the SC-KREC record stash. Adds a ~size-of-
