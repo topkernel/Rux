@@ -2669,7 +2669,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             super::mm::asid::flush_tlb_page(fault_addr);
             let exact = (fault_addr & !0x3) == (crate::sync::futex::fuxwatch_addr() & !0x3);
             let old_word = crate::sync::futex::fuxwatch_read_word(root);
-            if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word) {
+            if crate::sync::futex::fuxwatch_log_write(tid, rip, exact, old_word, fault_addr) {
                 // Step the writer: TF traps right after the store;
                 // RF masks fault-class re-entry for this insn.
                 regs.rflags |= (1 << 8) | (1 << 16);

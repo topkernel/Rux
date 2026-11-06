@@ -718,6 +718,28 @@ pub fn ffrt_chain_walk(
                     }
                 }
                 if is_lock {
+                    // sc57b: auto-arm the second watch on a NEW lock
+                    // head (the B-class mutex) once per boot — ONLY
+                    // for the registered samgr pid's walks: ohc71
+                    // armed a random hot mutex from a foreign
+                    // process's ring and trapped the boot into a
+                    // fault+step crawl.
+                    let samgr_pid =
+                        crate::ipc::binder::binder_sareg_samgr_pid();
+                    if samgr_pid != 0 && tk.tgid() as u32 == samgr_pid {
+                        let w2 = nxt.wrapping_sub(0x8);
+                        let w1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+                        if (w1 & !0x3) != (w2 & !0x3) {
+                            FUXWATCH2_ADDR
+                                .compare_exchange(
+                                    0,
+                                    w2,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .ok();
+                        }
+                    }
                     return Some((out, Some(nxt)));
                 }
                 cur = nxt;
@@ -752,6 +774,13 @@ pub fn ffrt_chain_walk(
 // that never unlocked. All zero-cost without the boot param.
 pub static FUXWATCH_ADDR: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+// sc57b: second watch slot — the chain walk auto-arms it on the first
+// NEW shape-detected lock head that differs from FUXWATCH_ADDR's lock
+// (the wedge's nested "B" mutex: the FFRT queue-internal lock).
+pub static FUXWATCH2_ADDR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static FUXWATCH2_HITS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 static FUXWATCH_DELAY_S: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 static FUXWATCH_HITS: core::sync::atomic::AtomicUsize =
@@ -793,9 +822,14 @@ pub fn fuxwatch_parse() {
 pub fn fuxwatch_arm_round() {
     use core::sync::atomic::Ordering::Relaxed;
     let addr = FUXWATCH_ADDR.load(Relaxed);
-    if addr == 0
-        || FUXWATCH_HITS.load(Relaxed) >= FUXWATCH_BUDGET
-        || crate::drivers::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
+    let addr2 = FUXWATCH2_ADDR.load(Relaxed);
+    if (addr == 0 || FUXWATCH_HITS.load(Relaxed) >= FUXWATCH_BUDGET)
+        && (addr2 == 0 || FUXWATCH2_HITS.load(Relaxed) >= FUXWATCH_BUDGET)
+    {
+        return;
+    }
+    if addr != 0
+        && crate::drivers::timer::get_jiffies() < FUXWATCH_DELAY_S.load(Relaxed) * 100
     {
         return;
     }
@@ -815,27 +849,41 @@ pub fn fuxwatch_arm_round() {
         {
             return;
         }
-        // page present and writable?
+        // page present and writable? (arm both watch words; a page
+        // already armed via done-set is skipped whole)
         // SAFETY: read-only walk of the task's page tables.
-        let leaf_w = unsafe {
-            crate::arch::mm::mm_ops::PageTableWalker::walk(root, addr)
+        let mut to_arm: [u64; 2] = [0; 2];
+        let mut narm = 0usize;
+        for &wa in [&addr, &addr2] {
+            if wa == 0 || to_arm.contains(&wa) {
+                continue;
+            }
+            let ok = unsafe {
+                crate::arch::mm::mm_ops::PageTableWalker::walk(root, wa)
+            }
+            .map(|(_, bits)| bits & 0x2 != 0)
+            .unwrap_or(false);
+            if ok {
+                to_arm[narm] = wa;
+                narm += 1;
+            }
         }
-        .map(|(_, bits)| bits & 0x2 != 0)
-        .unwrap_or(false);
-        if !leaf_w {
+        if narm == 0 {
             return;
         }
         let g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
-        // SAFETY: root is a live user page-table root; one page,
-        // R-only (heap data page — no exec).
-        unsafe {
-            crate::arch::mm::mm_ops::mprotect_pte_range(
-                root,
-                addr & !0xfff,
-                1,
-                0x1,
-            )
-        };
+        // SAFETY: root is a live user page-table root; R-only heap
+        // data pages.
+        for &wa in to_arm.iter().take(narm) {
+            unsafe {
+                crate::arch::mm::mm_ops::mprotect_pte_range(
+                    root,
+                    wa & !0xfff,
+                    1,
+                    0x1,
+                )
+            };
+        }
         drop(g);
         crate::arch::x86_64::mm::asid::flush_tlb_all();
         for d in FUXWATCH_MM_DONE.iter() {
@@ -863,7 +911,9 @@ pub fn fuxwatch_arm_round() {}
 #[inline]
 pub fn fuxwatch_page_matches(fault_addr: u64) -> bool {
     let a = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed);
-    a != 0 && (fault_addr & !0xfff) == (a & !0xfff)
+    let b = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+    (a != 0 && (fault_addr & !0xfff) == (a & !0xfff))
+        || (b != 0 && (fault_addr & !0xfff) == (b & !0xfff))
 }
 
 /// True only for mms WE armed (the done-set) — a fork-COW write fault
@@ -887,7 +937,8 @@ pub fn fuxwatch_over_budget() -> bool {
 /// WORD itself (cr2 gives byte precision): only those log; same-page
 /// neighbours of other heap objects step silently (they must not reach
 /// do_page_fault, which would install W and kill the watch).
-pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32) -> bool {
+pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_addr: u64) -> bool {
+    let w2 = FUXWATCH2_ADDR.load(core::sync::atomic::Ordering::Relaxed);
     let claim = |tid: u32| {
         for s in FUXWATCH_STEP_TIDS.iter() {
             if s.load(core::sync::atomic::Ordering::Relaxed) == tid {
@@ -907,13 +958,15 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32) -> boo
         claim(tid);
         return true;
     }
+    let which2 = w2 != 0 && (fault_addr & !0x3) == (w2 & !0x3);
     let n = FUXWATCH_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if n >= FUXWATCH_BUDGET {
         return false;
     }
     // HOTPATH-PRINT: compact per-write line; the wedge window carries
-    // at most a few hundred.
-    crate::pr_warn!("FW tid={} rip={:#x} old={} n={}", tid, rip, old_word, n);
+    // at most a few hundred. (w2 marker identifies second-watch words
+    // when both pages share rips.)
+    crate::pr_warn!("FW tid={} rip={:#x} old={} n={}{}", tid, rip, old_word, n, if which2 { " w2" } else { "" });
     claim(tid);
     true
 }
