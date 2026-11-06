@@ -9,7 +9,9 @@
 //! for userspace `dmesg` to read/manage kernel logs.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI8, AtomicU8, AtomicU64, AtomicUsize, Ordering,
+};
 
 extern crate alloc;
 
@@ -111,6 +113,36 @@ static RING_BUFFER: Spinlock<RingBuffer> = Spinlock::new(RingBuffer::new());
 /// Starts at 7 (KERN_DEBUG) so all boot messages are visible.
 static CONSOLE_LOGLEVEL: AtomicU8 = AtomicU8::new(loglevel::DEFAULT_CONSOLE_LOGLEVEL);
 
+// ==================== The printk(4) value block ====================
+//
+// /proc/sys/kernel/printk exposes the reference's four loglevel numbers
+// (the reference's console_printk[]), tab-separated like proc_dointvec.
+// Only the first is consulted on any hot path — the ring always stores
+// levels <= KERN_INFO (see printk), so a lowered console_loglevel mutes
+// the UART without erasing history.
+
+/// default_message_loglevel — level given to messages without an
+/// explicit one (MESSAGE_LOGLEVEL_DEFAULT = 4 in the reference). Rux
+/// printk callers always pass a level, so this is stored/read back only.
+static DEFAULT_MESSAGE_LOGLEVEL: AtomicU8 = AtomicU8::new(4);
+
+/// minimum_console_loglevel — floor syslog(2) console actions clamp to
+/// (CONSOLE_LOGLEVEL_MIN = 1 in the reference).
+static MINIMUM_CONSOLE_LOGLEVEL: AtomicU8 = AtomicU8::new(1);
+
+/// default_console_loglevel — what a fresh boot starts at
+/// (CONSOLE_LOGLEVEL_DEFAULT in the reference; Rux's is KERN_INFO).
+static DEFAULT_CONSOLE_LOGLEVEL_VALUE: AtomicU8 =
+    AtomicU8::new(loglevel::DEFAULT_CONSOLE_LOGLEVEL);
+
+/// Sentinel for "no console_loglevel saved by syslog(2) console-off"
+/// (the reference's LOGLEVEL_DEFAULT = -1).
+const NO_SAVED_LOGLEVEL: i8 = -1;
+
+/// console_loglevel stashed by syslog(2) SYSLOG_ACTION_CONSOLE_OFF and
+/// restored by CONSOLE_ON. The reference's saved_console_loglevel.
+static SAVED_CONSOLE_LOGLEVEL: AtomicI8 = AtomicI8::new(NO_SAVED_LOGLEVEL);
+
 /// Set during boot after printk is ready.
 static PRINTK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -152,8 +184,9 @@ impl Drop for PrintkGuard {
 
 // ==================== Public API ====================
 
-/// Set the console log level.
-/// Only messages with level <= this value will be printed to UART.
+/// Set the console log level (the live first number of the
+/// /proc/sys/kernel/printk block). Console gating ONLY: the ring still
+/// records everything at KERN_INFO or higher priority regardless.
 pub fn set_console_loglevel(level: u8) {
     CONSOLE_LOGLEVEL.store(level, Ordering::Relaxed);
 }
@@ -161,6 +194,39 @@ pub fn set_console_loglevel(level: u8) {
 /// Get the current console log level.
 pub fn get_console_loglevel() -> u8 {
     CONSOLE_LOGLEVEL.load(Ordering::Relaxed)
+}
+
+/// Read the stored default_message_loglevel (no runtime effect; the
+/// sysctl file's second number).
+pub fn default_message_loglevel() -> u8 {
+    DEFAULT_MESSAGE_LOGLEVEL.load(Ordering::Relaxed)
+}
+
+/// Read the minimum_console_loglevel (the syslog(2) clamp floor; the
+/// sysctl file's third number).
+pub fn minimum_console_loglevel() -> u8 {
+    MINIMUM_CONSOLE_LOGLEVEL.load(Ordering::Relaxed)
+}
+
+/// Read the default_console_loglevel (fresh-boot level; the sysctl
+/// file's fourth number).
+pub fn default_console_loglevel() -> u8 {
+    DEFAULT_CONSOLE_LOGLEVEL_VALUE.load(Ordering::Relaxed)
+}
+
+/// Store a new default_message_loglevel (sysctl write path).
+pub fn set_default_message_loglevel(level: u8) {
+    DEFAULT_MESSAGE_LOGLEVEL.store(level, Ordering::Relaxed);
+}
+
+/// Store a new minimum_console_loglevel (sysctl write path).
+pub fn set_minimum_console_loglevel(level: u8) {
+    MINIMUM_CONSOLE_LOGLEVEL.store(level, Ordering::Relaxed);
+}
+
+/// Store a new default_console_loglevel (sysctl write path).
+pub fn set_default_console_loglevel(level: u8) {
+    DEFAULT_CONSOLE_LOGLEVEL_VALUE.store(level, Ordering::Relaxed);
 }
 
 /// Initialize the printk subsystem.
@@ -187,23 +253,40 @@ impl<'a> fmt::Write for BufferWriter<'a> {
     }
 }
 
+/// Pre-format drop for KERN_DEBUG records only (the debug pre-filter).
+///
+/// Store semantics (logctl lane, 2026-11): the ring ALWAYS records
+/// messages at KERN_INFO or higher priority, whatever console_loglevel
+/// says — the reference stores every printk and gates only the console
+/// emission, and the runtime-knob contract ("arm a low console level,
+/// dmesg still has it") needs exactly that. The one exception is
+/// KERN_DEBUG: the reference compiles pr_debug out unless DEBUG/dynamic
+/// debug is on, and Rux's per-trap pr_debug (trap.rs prints on EVERY
+/// syscall, fault and interrupt) made the unfiltered fmt pass ~70% of
+/// the getpid syscall cost under TCG debug builds (printk_ln history).
+/// Dropping debug records before formatting when console_loglevel < 7
+/// keeps that measured guard while staying reference-shaped: a
+/// debug-by-default kernel that never logs debug is what the reference
+/// ships too.
+#[inline]
+fn debug_prefiltered(level: u8) -> bool {
+    level >= loglevel::KERN_DEBUG
+        && CONSOLE_LOGLEVEL.load(Ordering::Relaxed) < loglevel::KERN_DEBUG
+}
+
 /// Write a formatted message to the kernel log (no trailing newline).
 ///
 /// This is the core function called by all printk macros.
 /// It:
 /// 1. Formats the message into a stack buffer
-/// 2. If level <= console_loglevel, writes to the ring buffer AND emits
-///    synchronously to the console UART (review批次8: the console path was
-///    missing entirely — kernel messages were invisible outside panics)
-///
-/// The console_loglevel filter here drops the message BEFORE the ring:
-/// that is a quiet-boot cost guard for internal kernel traffic, but it
-/// is NOT Linux /dev/kmsg semantics — userspace kmsg writes must always
-/// reach the ring (see printk_ring_always, pa9).
+/// 2. Writes it to the ring buffer ALWAYS (levels <= KERN_INFO)
+/// 3. Emits synchronously to the console UART iff level <=
+///    console_loglevel — one compare on the emit path (see
+///    printk_ring_always), the reference's console gating
 pub fn printk(level: u8, args: fmt::Arguments) {
-    // Perf: filter BEFORE formatting (same rationale as printk_ln below —
-    // discarded messages must not pay the fmt pass).
-    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+    // Perf: the debug pre-filter runs BEFORE formatting (same rationale
+    // as printk_ln below — discarded messages must not pay the fmt pass).
+    if debug_prefiltered(level) {
         crate::debug::syscost::note_printk_filtered(); // syscost probe
         return;
     }
@@ -251,8 +334,9 @@ fn printk_ring_always(level: u8, args: fmt::Arguments) {
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
     }
 
-    // Console emit (level gated here: printk() pre-filtered already,
-    // printk_ring_always callers pass user-chosen levels).
+    // Console emit: the single console_loglevel compare on the emit
+    // path (the ring write above is unconditional — reference
+    // semantics; printk_ring_always callers pass user-chosen levels).
     if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
         emit_to_console(&buf[..text_len]);
     }
@@ -443,16 +527,17 @@ pub fn console_emit_unlock() {
 /// Write a formatted message with trailing newline to the kernel log.
 /// Used by the `println!` macro.
 pub fn printk_ln(level: u8, args: fmt::Arguments) {
-    // Perf: filter BEFORE formatting. core::fmt argument construction and
-    // the format pass itself dominate the cost of a printk — with the
-    // check only in printk_bytes, every discarded pr_debug! on a hot path
-    // (the per-trap trace in trap.rs runs on EVERY syscall, page fault and
-    // interrupt) still paid full formatting into a stack buffer that was
-    // then thrown away. Semantics are unchanged: printk_bytes drops
-    // filtered messages after its re-entrancy guard anyway; skipping the
-    // guard+format first only removes work (measured ~70% of the getpid
-    // syscall cost under TCG debug builds).
-    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+    // Perf: the debug pre-filter runs BEFORE formatting. core::fmt
+    // argument construction and the format pass itself dominate the cost
+    // of a printk — with the check only in printk_bytes, every discarded
+    // pr_debug! on a hot path (the per-trap trace in trap.rs runs on
+    // EVERY syscall, page fault and interrupt) still paid full formatting
+    // into a stack buffer that was then thrown away. Semantics are
+    // unchanged: only KERN_DEBUG records are dropped (see
+    // debug_prefiltered); everything else always reaches the ring
+    // (measured ~70% of the getpid syscall cost under TCG debug builds
+    // for the unfiltered pass).
+    if debug_prefiltered(level) {
         return;
     }
     // Format with newline into a local buffer to avoid borrow conflict
@@ -475,19 +560,19 @@ fn printk_bytes(level: u8, text: &[u8]) {
         None => return,
     };
 
-    // Check console log level — controls ring buffer writes.
-    if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
-        return;
-    }
-
-    // Write to ring buffer (if initialized)
+    // Write to ring buffer ALWAYS (if initialized): console_loglevel
+    // gates only the UART emission below, never the store — the
+    // reference semantics (logctl lane; the old level check here dropped
+    // below-console records from dmesg entirely).
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
         let timestamp = crate::arch::cpu::read_time();
         write_to_ring_buffer(level, text, timestamp);
     }
 
-    // Console emit (level filter already passed above)
-    emit_to_console(text);
+    // Console emit: the single console_loglevel compare on the emit path.
+    if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        emit_to_console(text);
+    }
 }
 
 // ==================== Ring Buffer Write ====================
@@ -596,25 +681,46 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
             0
         }
 
-        // Console off: suppress all console output except emergencies
+        // Console off: drop to minimum_console_loglevel, remembering the
+        // current level for CONSOLE_ON (the reference's
+        // saved_console_loglevel dance; the old code hard-set KERN_EMERG
+        // and CONSOLE_ON reset to a constant, so off/on was lossy).
         6 => {
-            CONSOLE_LOGLEVEL.store(loglevel::KERN_EMERG, Ordering::Relaxed);
+            let saved = SAVED_CONSOLE_LOGLEVEL.load(Ordering::Relaxed);
+            if saved == NO_SAVED_LOGLEVEL {
+                let cur = CONSOLE_LOGLEVEL.load(Ordering::Relaxed).min(i8::MAX as u8) as i8;
+                SAVED_CONSOLE_LOGLEVEL.store(cur, Ordering::Relaxed);
+            }
+            let minimum = MINIMUM_CONSOLE_LOGLEVEL.load(Ordering::Relaxed);
+            CONSOLE_LOGLEVEL.store(minimum, Ordering::Relaxed);
             0
         }
 
-        // Console on: restore console output to default
+        // Console on: restore the level saved by CONSOLE_OFF (no-op when
+        // nothing was saved — the reference keeps the current level then).
         7 => {
-            CONSOLE_LOGLEVEL.store(loglevel::DEFAULT_CONSOLE_LOGLEVEL, Ordering::Relaxed);
+            let saved = SAVED_CONSOLE_LOGLEVEL.swap(NO_SAVED_LOGLEVEL, Ordering::Relaxed);
+            if saved != NO_SAVED_LOGLEVEL {
+                CONSOLE_LOGLEVEL.store(saved as u8, Ordering::Relaxed);
+            }
             0
         }
 
-        // Set console log level (`int level`: <0 and >8 are EINVAL)
+        // Set console log level (`int len`: 1..=8 per the reference,
+        // clamped up to minimum_console_loglevel; also implicitly
+        // re-enables the console by clearing any saved level).
         8 => {
             let new_level = args[2] as u32 as i32;
-            if !(0..=loglevel::KERN_DEBUG as i32).contains(&new_level) {
+            if !(1..=8).contains(&new_level) {
                 return -(crate::syscall::errno::EINVAL as i64);
             }
-            CONSOLE_LOGLEVEL.store(new_level as u8, Ordering::Relaxed);
+            let mut new_level = new_level as u8;
+            let minimum = MINIMUM_CONSOLE_LOGLEVEL.load(Ordering::Relaxed);
+            if new_level < minimum {
+                new_level = minimum;
+            }
+            SAVED_CONSOLE_LOGLEVEL.store(NO_SAVED_LOGLEVEL, Ordering::Relaxed);
+            CONSOLE_LOGLEVEL.store(new_level, Ordering::Relaxed);
             0
         }
 
@@ -635,47 +741,50 @@ pub fn sys_syslog(args: [u64; 6]) -> i64 {
 
 // ==================== syslog Read Helpers ====================
 
-/// Maximum length of a formatted record header (human-readable, for /proc/kmsg).
-/// Format: `[    0.000000] info: pid(1) cpu(0): `
-const MAX_HEADER_LEN: usize = 52;
+/// Exact length of the reference syslog-format header.
+/// Format: `<6>[    0.000000] ` = 3 + 1 + 5 + 1 + 6 + 1 + 1 = 18 bytes
+/// (the reference's info_print_prefix: `<%u>` + print_time's
+/// `[%5lu.%06lu]` + one trailing space; seconds wider than 5 digits
+/// would grow in the reference — capped at 6 here to keep the fixed
+/// layout).
+const SYSLOG_HEADER_LEN: usize = 18;
 
-/// Maximum length of syslog-format header.
-/// Format: `<6>[    0.000000] pid(12345) cpu(3): ` — ~40 bytes max.
-const SYSLOG_HEADER_LEN: usize = 48;
-
-/// Format a syslog-format record header for syslog(2) reads.
-///
-/// Format: `<level>[SSSSSS.MMMMMM] pid(N) cpu(M): `
-fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp: u64, pid: u32, cpu_id: u16) -> usize {
+/// Format a syslog-format record header for syslog(2) and /proc/kmsg
+/// reads — the reference's record_print_text(&r, true, true) shape:
+/// `<level>[SSSSS.MMMMMM] ` (logctl lane: the old header carried a
+/// `pid(N) cpu(M): ` decoration the reference never prints, and padded
+/// seconds to 6 instead of 5).
+fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp: u64) -> usize {
     let secs = timestamp / crate::config::TIMER_CLOCK_FREQ_HZ;
-    let frac_us = ((timestamp % crate::config::TIMER_CLOCK_FREQ_HZ) * 1_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ;
+    let frac_us = ((timestamp % crate::config::TIMER_CLOCK_FREQ_HZ) * 1_000_000)
+        / crate::config::TIMER_CLOCK_FREQ_HZ;
     let mut pos = 0;
 
     // "<level>"
     buf[pos] = b'<';
     pos += 1;
-    buf[pos] = b'0' + level;
+    buf[pos] = b'0' + (level & 7);
     pos += 1;
     buf[pos] = b'>';
     pos += 1;
 
-    // "[SSSSSS.MMMMMM]"
+    // "[%5lu.%06lu]" — seconds right-aligned to at least 5 columns.
     buf[pos] = b'[';
     pos += 1;
-    let mut sec_buf = [b' '; 6];
+    let mut sec_buf = [b' '; 5];
     let mut s = secs;
     let mut digits = 0usize;
     if s == 0 {
-        sec_buf[5] = b'0';
+        sec_buf[4] = b'0';
     } else {
-        while s > 0 && digits < 6 {
-            sec_buf[5 - digits] = b'0' + (s % 10) as u8;
+        while s > 0 && digits < 5 {
+            sec_buf[4 - digits] = b'0' + (s % 10) as u8;
             s /= 10;
             digits += 1;
         }
     }
-    buf[pos..pos + 6].copy_from_slice(&sec_buf);
-    pos += 6;
+    buf[pos..pos + 5].copy_from_slice(&sec_buf);
+    pos += 5;
     buf[pos] = b'.';
     pos += 1;
     let mut us_buf = [b'0'; 6];
@@ -694,164 +803,6 @@ fn format_syslog_header(buf: &mut [u8; SYSLOG_HEADER_LEN], level: u8, timestamp:
     pos += 1;
     buf[pos] = b' ';
     pos += 1;
-
-    // "pid(N) "
-    buf[pos..pos + 4].copy_from_slice(b"pid(");
-    pos += 4;
-    let mut pid_buf = [0u8; 10];
-    let mut pdigits = 0usize;
-    let mut p = pid as usize;
-    if p == 0 {
-        pid_buf[0] = b'0';
-        pdigits = 1;
-    } else {
-        while p > 0 && pdigits < 10 {
-            pid_buf[9 - pdigits] = b'0' + (p % 10) as u8;
-            p /= 10;
-            pdigits += 1;
-        }
-    }
-    buf[pos..pos + pdigits].copy_from_slice(&pid_buf[10 - pdigits..]);
-    pos += pdigits;
-    buf[pos..pos + 2].copy_from_slice(b") ");
-    pos += 2;
-
-    // "cpu(M): "
-    buf[pos..pos + 4].copy_from_slice(b"cpu(");
-    pos += 4;
-    let mut cpu_buf = [0u8; 4];
-    let mut cdigits = 0usize;
-    let mut c = cpu_id as usize;
-    if c == 0 {
-        cpu_buf[0] = b'0';
-        cdigits = 1;
-    } else {
-        while c > 0 && cdigits < 4 {
-            cpu_buf[3 - cdigits] = b'0' + (c % 10) as u8;
-            c /= 10;
-            cdigits += 1;
-        }
-    }
-    buf[pos..pos + cdigits].copy_from_slice(&cpu_buf[4 - cdigits..]);
-    pos += cdigits;
-    buf[pos..pos + 3].copy_from_slice(b"): ");
-    pos += 3;
-
-    pos
-}
-
-/// Format a record header into a buffer, return bytes written.
-///
-/// Format: `[SSSSSS.MMMMMMM] level_name: pid(N) cpu(M): `
-/// Timestamp is seconds from boot (cycles / TIMER_CLOCK_FREQ_HZ).
-fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, cpu_id: u16, timestamp: u64) -> usize {
-    // Convert cycles to seconds (TIMER_FREQ = 10MHz)
-    let secs = timestamp / crate::config::TIMER_CLOCK_FREQ_HZ;
-    let frac_us = ((timestamp % crate::config::TIMER_CLOCK_FREQ_HZ) * 1_000_000) / crate::config::TIMER_CLOCK_FREQ_HZ;
-
-    // Level name
-    let name: &[u8] = match level {
-        0 => b"emerg",
-        1 => b"alert",
-        2 => b"crit",
-        3 => b"err",
-        4 => b"warn",
-        5 => b"notice",
-        6 => b"info",
-        7 => b"debug",
-        _ => b"unknown",
-    };
-
-    let mut pos = 0;
-
-    // Write "[SSSSSS.MMMMMM] " (dmesg-style timestamp)
-    buf[pos] = b'[';
-    pos += 1;
-    // Format seconds as right-aligned in 6 chars (e.g. "     0" or "  1234")
-    let mut sec_buf = [b' '; 6];
-    let mut s = secs;
-    let mut digits = 0usize;
-    if s == 0 {
-        sec_buf[5] = b'0';
-        digits = 1;
-    } else {
-        while s > 0 && digits < 6 {
-            sec_buf[5 - digits] = b'0' + (s % 10) as u8;
-            s /= 10;
-            digits += 1;
-        }
-    }
-    buf[pos..pos + 6].copy_from_slice(&sec_buf);
-    pos += 6;
-    buf[pos] = b'.';
-    pos += 1;
-    // Format fractional microseconds as 6 digits
-    let mut us_buf = [b'0'; 6];
-    let mut u = frac_us.min(999999);
-    let mut udigits = 0usize;
-    if u == 0 {
-        // already all zeros
-    } else {
-        while u > 0 && udigits < 6 {
-            us_buf[5 - udigits] = b'0' + (u % 10) as u8;
-            u /= 10;
-            udigits += 1;
-        }
-    }
-    buf[pos..pos + 6].copy_from_slice(&us_buf);
-    pos += 6;
-    buf[pos] = b']';
-    pos += 1;
-    buf[pos] = b' ';
-    pos += 1;
-
-    // Write "level: "
-    buf[pos..pos + name.len()].copy_from_slice(name);
-    pos += name.len();
-    buf[pos..pos + 2].copy_from_slice(b": ");
-    pos += 2;
-
-    // Write "pid(N): " — manual integer formatting
-    buf[pos..pos + 4].copy_from_slice(b"pid(");
-    pos += 4;
-    let mut pid_buf = [0u8; 10];
-    let mut pdigits = 0usize;
-    let mut p = pid as usize;
-    if p == 0 {
-        pid_buf[0] = b'0';
-        pdigits = 1;
-    } else {
-        while p > 0 && pdigits < 10 {
-            pid_buf[9 - pdigits] = b'0' + (p % 10) as u8;
-            p /= 10;
-            pdigits += 1;
-        }
-    }
-    buf[pos..pos + pdigits].copy_from_slice(&pid_buf[10 - pdigits..]);
-    pos += pdigits;
-    buf[pos..pos + 2].copy_from_slice(b") ");
-    pos += 2;
-
-    // Write "cpu(M): "
-    buf[pos..pos + 4].copy_from_slice(b"cpu(");
-    pos += 4;
-    let mut cpu_buf = [0u8; 4];
-    let mut cdigits = 0usize;
-    let mut c = cpu_id as usize;
-    if c == 0 {
-        cpu_buf[0] = b'0';
-        cdigits = 1;
-    } else {
-        while c > 0 && cdigits < 4 {
-            cpu_buf[3 - cdigits] = b'0' + (c % 10) as u8;
-            c /= 10;
-            cdigits += 1;
-        }
-    }
-    buf[pos..pos + cdigits].copy_from_slice(&cpu_buf[4 - cdigits..]);
-    pos += cdigits;
-    buf[pos..pos + 3].copy_from_slice(b"): ");
-    pos += 3;
 
     pos
 }
@@ -898,8 +849,8 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
                     continue;
                 }
 
-                // Format: <level>[timestamp] pid(N) cpu(M): text\n
-                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
+                // Format: <level>[SSSSS.MMMMMM] text\n (reference syslog shape)
+                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
                 let text_bytes = &record.text[..record.text_len as usize];
                 let trailing_nl = text_bytes.last() == Some(&b'\n');
                 let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
@@ -978,8 +929,8 @@ fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
                     continue;
                 }
 
-                // Format: <level>[timestamp] pid(N) cpu(M): text\n
-                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp, record.pid, record.cpu_id);
+                // Format: <level>[SSSSS.MMMMMM] text\n (reference syslog shape)
+                let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
                 let text_bytes = &record.text[..record.text_len as usize];
                 let trailing_nl = text_bytes.last() == Some(&b'\n');
                 let needed = header_len + text_bytes.len() + if trailing_nl { 0 } else { 1 };
@@ -1047,8 +998,6 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
     struct TailRec {
         level: u8,
         timestamp: u64,
-        pid: u32,
-        cpu_id: u16,
         text: [u8; RECORD_TEXT_SIZE],
         text_len: u16,
     }
@@ -1072,8 +1021,6 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
                 recs.push(TailRec {
                     level: record.level,
                     timestamp: record.timestamp,
-                    pid: record.pid,
-                    cpu_id: record.cpu_id,
                     text,
                     text_len: record.text_len,
                 });
@@ -1083,13 +1030,7 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
     }
     let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
     for r in &recs {
-        let hlen = format_syslog_header(
-            &mut header_buf,
-            r.level,
-            r.timestamp,
-            r.pid,
-            r.cpu_id,
-        );
+        let hlen = format_syslog_header(&mut header_buf, r.level, r.timestamp);
         out.push_str(unsafe { core::str::from_utf8_unchecked(&header_buf[..hlen]) });
         // Lossy-UTF8 substitute that stays in core: kernel and console
         // records are overwhelmingly valid UTF-8; anything else prints
@@ -1181,13 +1122,7 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
         if record.text_len == 0 || record.seq != seq {
             continue;
         }
-        let hlen = format_syslog_header(
-            &mut header_buf,
-            record.level,
-            record.timestamp,
-            record.pid,
-            record.cpu_id,
-        );
+        let hlen = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         push(dst, &mut at, &header_buf[..hlen]);
         push(dst, &mut at, &record.text[..record.text_len as usize]);
         // One record per line, the ring_tail convention.
@@ -1203,8 +1138,13 @@ pub fn ring_tail_into(dst: &mut [u8]) -> usize {
 
 // ==================== ProcFS /dev/kmsg Support ====================
 
-/// Generate kmsg content for /proc/kmsg.
-/// Format: "<level>text\n" per record, matching dmesg expected format.
+/// Generate kmsg content for the /proc/kmsg node.
+///
+/// The real /proc/kmsg is the PROC_KMSG_OPS stream (procfs_get_file_ops
+/// keys off THIS function's pointer); this generator is the node's
+/// dynamic-file identity and a whole-ring snapshot in the reference
+/// syslog shape (`<level>[SSSSS.MMMMMM] text\n` per record) if any
+/// generic path ever reads it that way.
 pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
     let rb = RING_BUFFER.lock_irqsave();
     let next_seq = rb.next_seq;
@@ -1214,7 +1154,7 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
     }
 
     let mut result = alloc::vec::Vec::new();
-    let mut header_buf = [0u8; MAX_HEADER_LEN];
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
     let write_idx = rb.write_idx;
 
     // Read records from oldest to newest
@@ -1232,8 +1172,8 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
             continue;
         }
 
-        // Format: [timestamp] level: pid(N) cpu(M): text\n
-        let header_len = format_record_header(&mut header_buf, record.level, record.pid, record.cpu_id, record.timestamp);
+        // Format: <level>[SSSSS.MMMMMM] text\n (reference syslog shape)
+        let header_len = format_syslog_header(&mut header_buf, record.level, record.timestamp);
         result.extend_from_slice(&header_buf[..header_len]);
         result.extend_from_slice(text_bytes);
         // Only append newline if text doesn't already end with one
@@ -1491,7 +1431,15 @@ pub fn init_kmsg_device() {
 static PROC_KMSG_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// /proc/kmsg open hook (called from procfs_open instead of snapshotting).
+/// CAP_SYSLOG-gated like the reference's kmsg_open →
+/// check_syslog_permissions(SYSLOG_ACTION_OPEN, SYSLOG_FROM_PROC) under
+/// dmesg_restrict — the legacy interface hands out kernel log text, so
+/// only privileged readers get a fd (reads after open are not
+/// re-checked; the reference checks at open time only).
 pub fn proc_kmsg_open() -> i32 {
+    if !crate::security::capable(crate::security::CAP_SYSLOG) {
+        return -crate::syscall::errno::EPERM;
+    }
     if PROC_KMSG_OPEN.swap(true, Ordering::AcqRel) {
         return -crate::syscall::errno::EBUSY;
     }
@@ -1504,13 +1452,20 @@ fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
     0
 }
 
-/// /proc/kmsg read: one record per call, syslog human format
-/// `<level>[SSSSSS.MMMMMM] pid(N) cpu(M): text\n`, destructive via the
-/// SHARED `read_seq` cursor (the same cursor syslog(2) READ uses —
-/// Linux shares the syslog buffer consumption between klogctl(2) and
-/// /proc/kmsg). Blocks while caught up (no O_NONBLOCK mode exists for
-/// /proc/kmsg on Linux); a too-small buffer truncates but still
-/// consumes the record.
+/// /proc/kmsg read: reference syslog_print semantics — fill the caller's
+/// buffer with as many pending records as fit, blocking until at least
+/// one is available; records render as `<level>[SSSSS.MMMMMM] text\n`
+/// (the reference's record_print_text(&r, true, true)) and are consumed
+/// destructively via the SHARED `read_seq` cursor (the same cursor
+/// syslog(2) READ uses — the reference shares the syslog buffer
+/// consumption between klogctl(2) and /proc/kmsg). O_NONBLOCK is
+/// honored like the reference's kmsg_read: a caught-up nonblocking
+/// reader takes -EAGAIN instead of parking. A record that does not fit
+/// the remaining buffer ends the fill; if even the first record
+/// overflows a too-small buffer it is truncated and consumed (the
+/// reference would resume mid-record on the next read via
+/// syslog_partial — divergence: readers use >= KiB buffers, records are
+/// <= ~304 bytes, so the edge never triggers in practice).
 ///
 /// The "block" is a ~10 ms timed poll (kmsg_poll_sleep), NOT a
 /// KMSG_READ_WQ wait. pa11: parking the reader on KMSG_READ_WQ made
@@ -1525,12 +1480,18 @@ fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
 /// waiter. Cost: up to ~1 jiffy of record-delivery latency, vs the
 /// 60-92K EOF reads/s the snapshot produced.
 fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    // O_NONBLOCK (the reference's kmsg_read fast path): a caught-up
+    // nonblocking reader fails instead of parking on the poll sleep.
+    let nonblock =
+        _file.flags_bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
     loop {
-        // Produce one record if the cursor has not caught up.
+        // Produce records until the buffer is full or the cursor catches
+        // up (0 = caught up: go sleep one poll interval).
         let produced = {
             let mut rb = RING_BUFFER.lock_irqsave();
-            let next_seq = rb.next_seq;
-            if rb.read_seq < next_seq {
+            let mut offset = 0usize;
+            while rb.read_seq < rb.next_seq && offset < buf.len() {
+                let next_seq = rb.next_seq;
                 // Skip records the ring has already overwritten.
                 let oldest = next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
                 let seq = rb.read_seq.max(oldest);
@@ -1539,21 +1500,16 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 if record.text_len == 0 || record.seq != seq {
                     // Overwritten: jump the cursor to live records.
                     rb.read_seq = next_seq;
-                    drop(rb);
                     continue;
                 }
                 let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
-                let header_len = format_syslog_header(
-                    &mut header_buf,
-                    record.level,
-                    record.timestamp,
-                    record.pid,
-                    record.cpu_id,
-                );
+                let header_len =
+                    format_syslog_header(&mut header_buf, record.level, record.timestamp);
                 let text_bytes = &record.text[..record.text_len as usize];
 
                 // Stage header+text in one line buffer, then truncate to
-                // the caller's request (record consumed regardless).
+                // the caller's remaining request (record consumed
+                // regardless).
                 let mut line = [0u8; SYSLOG_HEADER_LEN + RECORD_TEXT_SIZE + 1];
                 let mut len = 0usize;
                 let hcopy = header_len.min(line.len());
@@ -1567,16 +1523,31 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                     len += 1;
                 }
 
-                let copy = len.min(buf.len());
-                buf[..copy].copy_from_slice(&line[..copy]);
+                // Whole-record boundary: stop before a record that would
+                // not fit — the next read starts at it.
+                let room = buf.len() - offset;
+                if len > room {
+                    if offset > 0 {
+                        break;
+                    }
+                    // First record overflows a too-small buffer: truncate
+                    // and consume (see the divergence note above).
+                    buf[..room].copy_from_slice(&line[..room]);
+                    rb.read_seq = seq + 1;
+                    offset = room;
+                    break;
+                }
+                buf[offset..offset + len].copy_from_slice(&line[..len]);
+                offset += len;
                 rb.read_seq = seq + 1;
-                copy as isize
-            } else {
-                -1 // caught up: go sleep one poll interval
             }
+            offset
         };
-        if produced >= 0 {
-            return produced;
+        if produced > 0 {
+            return produced as isize;
+        }
+        if nonblock {
+            return -(crate::syscall::errno::EAGAIN as isize);
         }
 
         if !kmsg_poll_sleep(10) {
