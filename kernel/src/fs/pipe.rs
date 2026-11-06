@@ -20,7 +20,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::sync::spinlock::Spinlock;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use alloc::sync::Arc;
 use crate::process::wait::WaitQueueHead;
 
@@ -327,6 +327,20 @@ pub struct Pipe {
     read_queue: WaitQueueHead,
     /// Write wait queue (for write blocking)
     write_queue: WaitQueueHead,
+    /// EPOLLET wake-registry ids of the two END FILES (the peer-id
+    /// problem): data landing in the buffer raises the READ end's
+    /// readiness, but the producing syscall holds the WRITE end's File
+    /// — a different file_id, and the epoll wake registry binds by the
+    /// id of the WATCHED description. The Pipe therefore carries both
+    /// end ids so a write can notify the read end's ET interests (and a
+    /// drain can notify the write end's). 0 = end not created yet
+    /// (fresh Pipe, or a fifo end never opened): notify is a no-op.
+    /// Same lost-edge class as timerfd/eventfd (d3a94b4d): without the
+    /// notify, an ET registration that reported once and was never
+    /// drained stays suppressed on every later same-mask arrival
+    /// (probed: et_fd_probe pipe row — 1/300 vs Linux 300/300).
+    epoll_read_fid: AtomicU64,
+    epoll_write_fid: AtomicU64,
 }
 
 impl Pipe {
@@ -358,6 +372,38 @@ impl Pipe {
             fifo_writers: AtomicUsize::new(0),
             read_queue: WaitQueueHead::new(),
             write_queue: WaitQueueHead::new(),
+            epoll_read_fid: AtomicU64::new(0),
+            epoll_write_fid: AtomicU64::new(0),
+        }
+    }
+
+    /// Bind the READ end File's registry id (create_pipe / fifo open).
+    pub fn set_epoll_read_fid(&self, fid: u64) {
+        self.epoll_read_fid.store(fid, Ordering::Release);
+    }
+
+    /// Bind the WRITE end File's registry id (create_pipe / fifo open).
+    pub fn set_epoll_write_fid(&self, fid: u64) {
+        self.epoll_write_fid.store(fid, Ordering::Release);
+    }
+
+    /// Readiness rose on the read end (data landed / EOF / fifo new
+    /// writer): re-arm its ET interests and wake epoll sleepers. The
+    /// reference rides ep_poll_callback off the pipe's wait queue for
+    /// every wake_up; this is the registry equivalent.
+    pub fn epoll_notify_read_end(&self) {
+        let fid = self.epoll_read_fid.load(Ordering::Acquire);
+        if fid != 0 {
+            crate::syscall::misc::epoll_notify_file(fid);
+        }
+    }
+
+    /// Readiness rose on the write end (space freed / read end closed):
+    /// see epoll_notify_read_end.
+    pub fn epoll_notify_write_end(&self) {
+        let fid = self.epoll_write_fid.load(Ordering::Acquire);
+        if fid != 0 {
+            crate::syscall::misc::epoll_notify_file(fid);
         }
     }
 
@@ -366,6 +412,10 @@ impl Pipe {
         self.read_closed.store(1, Ordering::Release);
         // Wake up all write waiters (read end closed causes write to return SIGPIPE)
         self.write_queue.wake_up_all();
+        // EPIPE edge for write-end watchers (mask gains EPOLLERR — the
+        // scan would catch it, but a sleeping epoll needs the wake now,
+        // not at the next re-check tick).
+        self.epoll_notify_write_end();
     }
 
     /// Close write end
@@ -373,6 +423,8 @@ impl Pipe {
         self.write_closed.store(1, Ordering::Release);
         // Wake up all read waiters (EOF)
         self.read_queue.wake_up_all();
+        // EOF edge for read-end watchers (EPOLLHUP joins the mask).
+        self.epoll_notify_read_end();
     }
 
     /// FIFO lifecycle (fs/fifo.rs): re-arm the read end after the last
@@ -390,6 +442,7 @@ impl Pipe {
         self.write_closed.store(0, Ordering::Release);
         // Data may already be buffered by this new writer — wake readers.
         self.read_queue.wake_up_all();
+        self.epoll_notify_read_end();
     }
 
     /// Check if read end is closed
@@ -464,6 +517,7 @@ impl Pipe {
             // New data readable in dst: wake its readers (tee01's second
             // splice drains it immediately).
             dst.read_queue.wake_up_all();
+            dst.epoll_notify_read_end();
         }
         written
     }
@@ -601,6 +655,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
                             drop(guard);
                             pipe.read_queue().wake_up_all();
                             oasync_notify(pipe as *const _ as usize, true);
+                            pipe.epoll_notify_read_end();
                             return n as isize;
                         }
                         return -14; // EFAULT
@@ -611,6 +666,7 @@ pub fn pipe_vmsplice_to(file: &File, iovs: &[(usize, usize)], nonblock: bool) ->
                 drop(guard);
                 pipe.read_queue().wake_up_all();
                 oasync_notify(pipe as *const _ as usize, true);
+                pipe.epoll_notify_read_end();
                 return n as isize;
             }
         }
@@ -687,6 +743,7 @@ pub fn pipe_vmsplice_from(file: &File, iovs: &[(usize, usize)], nonblock: bool) 
                 if n > 0 {
                     pipe.write_queue().wake_up_all();
                     oasync_notify(pipe as *const _ as usize, false);
+                    pipe.epoll_notify_write_end();
                     // Copy out segment by segment.
                     let mut off = 0usize;
                     for &(base, len) in iovs {
@@ -802,6 +859,7 @@ fn pipe_read_common(file: &File, dst: *mut u8, count: usize, user: bool) -> isiz
                 pipe.write_queue().wake_up_all();
                 // O_ASYNC: space freed — signal write-end owners (fcntl31).
                 oasync_notify(pipe as *const _ as usize, false);
+                pipe.epoll_notify_write_end();
                 return count as isize;
             }
             // avail > 0 but 0 bytes copied: a USER fault on the destination
@@ -973,6 +1031,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
                 pipe.read_queue().wake_up_all();
                 // O_ASYNC: data arrived — signal read-end owners (fcntl31).
                 oasync_notify(pipe as *const _ as usize, true);
+                pipe.epoll_notify_read_end();
                 continue;
             }
 
@@ -1479,6 +1538,15 @@ pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     let write_file = Arc::new(File::new(FileFlags::new(FileFlags::O_WRONLY)));
     write_file.set_ops(&PIPE_OPS);
     write_file.set_private_data(write_ptr);
+
+    // Bind the registry ids so the PEER's syscalls can notify this end's
+    // ET interests (a write holds the write File but raises the READ
+    // end's readiness — see Pipe::epoll_read_fid).
+    unsafe {
+        let rd = &*(read_ptr as *const Pipe);
+        rd.set_epoll_read_fid(read_file.file_id);
+        rd.set_epoll_write_fid(write_file.file_id);
+    }
 
     (read_file, write_file)
 }

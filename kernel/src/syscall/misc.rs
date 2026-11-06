@@ -2871,6 +2871,16 @@ fn eventfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             buf[..8].copy_from_slice(&return_val.to_le_bytes());
             // A reader consumed — writers waiting for space can proceed.
             efd.wait_queue.wake_up_all();
+            // EPOLLET lost-edge fix (same class as the timerfd d3a94b4d
+            // fix): the counter DROP is a readiness edge for EPOLLOUT
+            // watchers (the eventfd gained write space) and, for
+            // EFD_SEMAPHORE drains, an EPOLLIN mask change. The
+            // reference wakes the file's wait queue (eventfd_read_ctx →
+            // wake_up_locked_poll EPOLLOUT) which rides ep_poll_callback;
+            // our registry equivalent is the notify below. Without it an
+            // ET EPOLLOUT registration on a counter-full fd stays
+            // suppressed forever.
+            crate::syscall::misc::epoll_notify_file(file.file_id);
             return 8;
         }
         // CAS failed, retry
@@ -2906,6 +2916,18 @@ fn eventfd_write(file: &crate::fs::File, buf: &[u8]) -> isize {
                 ).is_ok() {
                     // Counter no longer zero — wake blocked readers.
                     efd.wait_queue.wake_up_all();
+                    // EPOLLET lost-edge fix (same class as the timerfd
+                    // d3a94b4d fix): a write that lands while NOBODY
+                    // waits must still re-arm edge-triggered interests —
+                    // the ET entry's last_reported mask stayed set and
+                    // every later epoll_wait suppressed the readable fd.
+                    // The reference's ep_poll_callback runs from
+                    // wake_up_poll on the file's wait queue
+                    // unconditionally (eventfd_write →
+                    // wake_up_locked_poll EPOLLIN). Probed before
+                    // patching (et_fd_probe eventfd row): 1/300 edges
+                    // reported vs Linux 300/300; with this notify 300/300.
+                    crate::syscall::misc::epoll_notify_file(file.file_id);
                     return 8;
                 }
                 // CAS failed, retry
@@ -4620,12 +4642,14 @@ pub fn timerfd_wheel_audit() {
         while !rest.is_empty() {
             let mut cut = rest.len().min(240);
             if cut < rest.len() {
-                match rest[..cut].rfind('\n') {
-                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
-                    _ => {
-                        while cut > 0 && !rest.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
+                // ohc47: boundary backoff BEFORE the rfind slice (a
+                // multi-byte char straddling cut panics rest[..cut]).
+                while cut > 0 && !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if let Some(nl) = rest[..cut].rfind('\n') {
+                    if nl + 1 > 0 {
+                        cut = nl + 1;
                     }
                 }
             }

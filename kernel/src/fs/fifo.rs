@@ -169,6 +169,20 @@ pub fn fifo_open_file(peer: &Arc<FifoPeer>, flags: u32) -> Result<Arc<File>, i32
     file.set_ops(&FIFO_OPS);
     // One Arc reference per open File — fifo_file_close consumes it.
     file.set_private_data(Arc::into_raw(Arc::clone(&peer.pipe)) as *mut u8);
+    // EPOLLET peer-notify binding (see Pipe::epoll_read_fid): a write
+    // through ANY fifo description must be able to re-arm the READ
+    // end's ET interests. Limitation: a fifo may have several reader
+    // descriptions open, but the Pipe carries one id per direction —
+    // the most recent reader open is the notified one (anonymous
+    // pipes, the overwhelming case, have exactly one File per end).
+    // The reference registers per-description wait-queue callbacks;
+    // exact parity would need a per-direction id list.
+    if accmode == FileFlags::O_RDONLY || accmode == FileFlags::O_RDWR {
+        peer.pipe.set_epoll_read_fid(file.file_id);
+    }
+    if accmode == FileFlags::O_WRONLY || accmode == FileFlags::O_RDWR {
+        peer.pipe.set_epoll_write_fid(file.file_id);
+    }
     Ok(file)
 }
 
