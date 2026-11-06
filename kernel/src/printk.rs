@@ -1436,7 +1436,10 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
         }
         1 => {
             // SEEK_CUR
-            let new_pos = file.get_pos() as i64 + offset as i64;
+            let new_pos = match (file.get_pos() as i64).checked_add(offset as i64) {
+                Some(v) => v,
+                None => return -22, // EINVAL
+            };
             file.set_pos(new_pos as u64);
             new_pos as isize
         }

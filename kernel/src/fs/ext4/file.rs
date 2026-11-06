@@ -1377,7 +1377,10 @@ pub fn ext4_file_lseek(
             // TODO: Need to track current file position
             return Err(errno::Errno::FunctionNotImplemented.as_neg_i32());
         }
-        2 => file_size + offset,   // SEEK_END
+        2 => match file_size.checked_add(offset) { // SEEK_END
+            Some(v) => v,
+            None => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+        },
         _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
     };
 
@@ -2787,8 +2790,14 @@ fn reg_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     let current_pos = file.get_pos() as i64;
     let new_pos = match whence {
         0 => offset as i64,              // SEEK_SET
-        1 => current_pos + offset as i64, // SEEK_CUR
-        2 => file_size + offset as i64,   // SEEK_END
+        1 => match current_pos.checked_add(offset as i64) { // SEEK_CUR
+            Some(v) => v,
+            None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+        },
+        2 => match file_size.checked_add(offset as i64) { // SEEK_END
+            Some(v) => v,
+            None => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
+        },
         _ => return errno::Errno::InvalidArgument.as_neg_i32() as isize,
     };
 

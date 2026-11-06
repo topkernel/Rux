@@ -27,6 +27,7 @@ pub fn test_syscall_file() {
 
     // Test 4: lseek syscall
     test_sys_lseek();
+    test_lseek_offset_overflow();
 
     // Test 5: mkdir/rmdir syscalls
     test_sys_mkdir_rmdir();
@@ -325,6 +326,61 @@ fn test_sys_lseek() {
         }
         Err(_) => {
             test_skip("sys_lseek", "no test file");
+        }
+    }
+}
+
+/// lseek with an offset that overflows `base + offset` (SEEK_CUR from a
+/// non-zero position, SEEK_END on a non-empty file) must fail with EINVAL
+/// and leave the position alone — the reference's vfs_setpos rejects the
+/// wrapped result. The seek ops computed the sum with a plain `+`, which
+/// panics the kernel under overflow checks (any user, any readable file).
+fn test_lseek_offset_overflow() {
+    const EINVAL: isize = -22;
+    // root (ext4, or ramfs when no disk), tmpfs, procfs
+    for &(path, create) in &[
+        ("/test_lseek_overflow", true),
+        ("/dev/shm/test_lseek_overflow", true),
+        ("/proc/meminfo", false),
+    ] {
+        let flags = if create {
+            FileFlags::O_CREAT | FileFlags::O_RDWR | FileFlags::O_TRUNC
+        } else {
+            FileFlags::O_RDONLY
+        };
+        let fd = match vfs::file_open(path, flags, 0o644) {
+            Ok(fd) => fd,
+            Err(_) => {
+                test_skip("lseek overflow", &alloc::format!("cannot open {}", path));
+                continue;
+            }
+        };
+        unsafe {
+            match get_file_fd(fd) {
+                Some(file) => {
+                    if create {
+                        let data = b"0123456789";
+                        let _ = file.write(data.as_ptr(), data.len());
+                    }
+                    let _ = file.lseek(1, 0);
+                    let end = file.lseek(isize::MAX, 2);
+                    let cur = file.lseek(isize::MAX, 1);
+                    let pos = file.lseek(0, 1);
+                    if end == EINVAL && cur == EINVAL && pos == 1 {
+                        test_pass(&alloc::format!("lseek overflow -> EINVAL ({})", path));
+                    } else {
+                        test_fail(
+                            "lseek overflow",
+                            &alloc::format!("{}: SEEK_END={} SEEK_CUR={} pos={}", path, end, cur, pos),
+                        );
+                    }
+                }
+                None => test_fail("lseek overflow", "fd lookup failed"),
+            }
+        }
+        let _ = file_close(fd);
+        if create {
+            let _ = vfs::file_unlink(path);
         }
     }
 }

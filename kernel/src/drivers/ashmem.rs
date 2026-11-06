@@ -355,8 +355,14 @@ fn ashmem_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -
     let size = inner.size as i64;
     let new_pos = match whence {
         0 => offset as i64,
-        1 => cur + offset as i64,
-        2 => size + offset as i64,
+        1 => match cur.checked_add(offset as i64) {
+            Some(v) => v,
+            None => return -22,
+        },
+        2 => match size.checked_add(offset as i64) {
+            Some(v) => v,
+            None => return -22,
+        },
         _ => return -22,
     };
     if new_pos < 0 {
