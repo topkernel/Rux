@@ -32,6 +32,13 @@ pub struct ConsoleWriter {
     /// e.g. a wedged holder, or this CPU's own interrupted task holds
     /// the lock — output proceeds locklessly exactly as before.
     emit_locked: bool,
+    /// Drain-quiesce section held for the writer's LIFETIME (console
+    /// lane, oh-console): the report's direct THR writes must also be
+    /// exclusive against the TX engine's IRQ drain — the emit lock
+    /// serializes printk emitters but does not stop a live drain pass
+    /// on another CPU from writing THR concurrently (smoke #7's 3-way
+    /// char-level splice). No-op without the engine / on other arches.
+    _quiesce: crate::console::TxQuiesce,
     /// Staged-byte buffer (perf-console): write_str fragments coalesce
     /// here and flush through ONE batched TX pass per 128 bytes instead
     /// of one register-IO pair per byte — a softlockup stack dump is
@@ -42,14 +49,21 @@ pub struct ConsoleWriter {
 
 impl ConsoleWriter {
     pub fn new() -> Self {
-        // Console lane (oh-console): bytes queued in the TX ring must
-        // reach the wire BEFORE this crash report's direct writes, or
-        // the report interleaves into (or overtakes) pending console
-        // output. Bounded synchronous drain (~200 ms cap) — panic/oops
-        // context only, where the IRQ drain may already be dead.
+        // Console lane (oh-console): take the quiesce section FIRST so
+        // the ordering drain below (and the report's direct writes) run
+        // with THR exclusively ours — a drain pass that starts later
+        // would interleave (and the drain_poll alone could not stop
+        // one).
+        let quiesce = crate::console::TxQuiesce::new();
+        // Bytes queued in the TX ring must reach the wire BEFORE this
+        // report's direct writes, or the report overtakes pending
+        // console output. Bounded synchronous drain (~200 ms cap) —
+        // panic/oops context only, where the IRQ drain may already be
+        // dead.
         crate::console::tx_drain_poll();
         ConsoleWriter {
             emit_locked: crate::printk::try_console_emit_lock(),
+            _quiesce: quiesce,
             buf: [0u8; 128],
             len: 0,
         }

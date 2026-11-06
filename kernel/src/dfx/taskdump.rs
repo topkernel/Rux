@@ -53,6 +53,19 @@ fn put_dec(mut v: u64) {
     }
 }
 
+/// Whole-report THR exclusivity for the multi-KB dumps below (console
+/// lane, oh-console): hold a drain-quiesce section for the dump's
+/// duration and push pending TX-ring bytes first, so the report is
+/// neither char-spliced with a live IRQ drain (smoke #7: KMSGFLUSH
+/// 000179 vs FROZEN-CPU truth, 3-way interleave) nor reordered behind
+/// queued console traffic. No-op without the TX engine / other arches.
+/// While held, `putc` takes putchar_no_lock's direct arm (see there).
+fn dump_console_begin() -> crate::console::TxQuiesce {
+    let q = crate::console::TxQuiesce::new();
+    crate::console::tx_drain_poll();
+    q
+}
+
 /// DFX raw diagnostic line (SBI console, no locks) for other subsystems'
 /// one-shot probes — same discipline as the dump itself.
 pub fn taskdump_raw_line(s: &[u8]) {
@@ -296,6 +309,9 @@ const fn bt_user_window() -> (u64, u64) {
 }
 
 pub fn dump_all_tasks(reason: &str) {
+    // Whole-report THR exclusivity (see dump_console_begin): the dump's
+    // per-byte direct writes must not race the TX engine's IRQ drain.
+    let _dump_exclusive = dump_console_begin();
     puts("\n=== DFX TASK DUMP (");
     puts(reason);
     puts(") ===\n");
@@ -867,6 +883,11 @@ fn frozen_ipi_probe(_arg: *mut core::ffi::c_void) {
 pub fn dump_frozen_cpu_truth(stuck: usize) {
     #[cfg(feature = "x86_64")]
     {
+        // Whole-report THR exclusivity (see dump_console_begin): smoke
+        // #7 caught this dump char-splicing a live drain mid-KMSGFLUSH
+        // line under the console flood (a false-positive rcu grace
+        // freeze during the flood — a LIVE box, drain running).
+        let _dump_exclusive = dump_console_begin();
         puts("\n=== FROZEN-CPU TRUTH (stuck=");
         put_dec(stuck as u64);
         puts(") ===\n");

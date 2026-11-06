@@ -472,11 +472,20 @@ static TX_DRAIN_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "x86_64")]
 pub fn tx_irq_drain() {
     use core::sync::atomic::Ordering::Relaxed;
+    if tx_quiesced() {
+        return; // a bypass reporter owns THR (see TxQuiesce)
+    }
     if TX_DRAIN_ACTIVE
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         return; // another CPU is mid-drain; its loop takes our bytes
+    }
+    if tx_quiesced() {
+        // A quiesce section began while we were entering: release the
+        // guard and leave THR to the reporter (the tick net re-arms).
+        TX_DRAIN_ACTIVE.store(false, Ordering::Release);
+        return;
     }
     let probe = crate::dfx::syscost::on();
     let t0 = if probe { crate::arch::cpu::read_counter() } else { 0 };
@@ -569,6 +578,169 @@ pub fn tx_irq_drain() {
     if budget_out {
         r_ring_nonempty_and_retrigger();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Drain quiesce: exclusive THR access for direct (bypass) writers
+// (console lane, oh-console; smoke boot #7 finding)
+//
+// The IRQ drain is the ONLY context that may write THR while the engine
+// is armed — EXCEPT the bypass writers: crash/diagnostic reporters
+// (panic/oops via ConsoleWriter and emit_direct_crash, the taskdump
+// wedge dumps, per-byte anomaly tripwires) that must reach the wire
+// without depending on the ring, the emit lock, or a live drain. A
+// bypass writer racing a live drain pass interleaves at CHARACTER
+// granularity — smoke #7 caught a 3-way splice (KMSGFLUSH 000179 +
+// FROZEN-CPU truth + syscost FROZEN lines) exactly there. While a
+// quiesce section is held, the drain refuses to enter, so the bypass
+// writer owns THR alone.
+//
+// Lock-free by construction: the section is one atomic counter plus a
+// BOUNDED wait for an in-flight pass to end (passes are hard-capped at
+// 200 µs of read_time plus one `rep outsb` — a wedged pass still ends;
+// the wait gives up after TX_QUIESCE_WAIT and proceeds, accepting the
+// race rather than hanging the reporter). Drop does NOT re-kick the
+// drain: bytes submitted during the section wait for the 100 Hz tick
+// safety net (tx_kick) — bounded, and these sections are one-shot
+// reports, not throughput paths.
+// ---------------------------------------------------------------------------
+
+/// Depth of nested drain-quiesce sections (0 = drain may run).
+#[cfg(feature = "x86_64")]
+static TX_QUIESCE_DEPTH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Bound for waiting out an in-flight drain pass at section entry.
+/// A pass is capped at ~200 µs of wall time plus one string-IO burst;
+/// 50 ms covers any host-scheduling outlier without hanging a reporter
+/// that runs with IRQs off (the spinlock watchdog context).
+#[cfg(feature = "x86_64")]
+const TX_QUIESCE_WAIT: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 20;
+
+/// Whether a drain-quiesce section is currently held (bypass writers
+/// own THR; the IRQ drain must not enter). Acquire pairs with the
+/// drain's Release store of TX_DRAIN_ACTIVE: a section that waited out
+/// an in-flight pass sees its THR writes complete.
+#[cfg(feature = "x86_64")]
+fn tx_quiesced() -> bool {
+    TX_QUIESCE_DEPTH.load(Ordering::Acquire) != 0
+}
+
+/// Exclusive THR section for a bypass (direct-write) console reporter.
+/// See the block comment above. Nesting is supported: only the 0→1
+/// transition waits out an in-flight drain pass.
+#[cfg(feature = "x86_64")]
+pub struct TxQuiesce {
+    /// Set when THIS instance performed the 0→1 transition (its Drop is
+    /// the one that may return depth to 0 — purely informational; the
+    /// counter itself is the truth).
+    _entered: bool,
+}
+
+#[cfg(feature = "x86_64")]
+impl TxQuiesce {
+    pub fn new() -> Self {
+        let prev = TX_QUIESCE_DEPTH.fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            // Wait out any in-flight pass: it will not re-enter (the
+            // entry check below sees depth != 0), and its budget-exit
+            // retrigger edge lands in a handler that also refuses to
+            // enter. Bounded so a reporter in IRQ context never hangs.
+            let start = crate::arch::cpu::read_time();
+            while TX_DRAIN_ACTIVE.load(Ordering::Acquire) {
+                if crate::arch::cpu::read_time().saturating_sub(start) >= TX_QUIESCE_WAIT {
+                    break; // pathological pass; proceed (accept the race)
+                }
+                core::hint::spin_loop();
+            }
+        }
+        TxQuiesce { _entered: prev == 0 }
+    }
+}
+
+#[cfg(feature = "x86_64")]
+impl Default for TxQuiesce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "x86_64")]
+impl Drop for TxQuiesce {
+    fn drop(&mut self) {
+        TX_QUIESCE_DEPTH.fetch_sub(1, Ordering::Release);
+        // No tx_kick here: the 100 Hz tick net re-arms a lost edge
+        // within 10 ms, and taking the ring lock from Drop would give
+        // the "lock-free for crash contexts" contract a lock back.
+    }
+}
+
+/// Other arches: the drain engine does not exist; sections are no-ops.
+#[cfg(not(feature = "x86_64"))]
+pub struct TxQuiesce;
+
+#[cfg(not(feature = "x86_64"))]
+impl TxQuiesce {
+    pub fn new() -> Self {
+        TxQuiesce
+    }
+}
+
+#[cfg(not(feature = "x86_64"))]
+impl Default for TxQuiesce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wedge-safe ordered submit for lock-free diagnostic writers (per-byte
+/// anomaly tripwires: preempt-underflow, KSO-CENSUS, WW latefire).
+/// The byte joins the TX ring — ordered and atomic against every other
+/// console writer — IF the ring lock is immediately free and the whole
+/// slice fits. Returns false otherwise; the caller falls back to a
+/// direct write inside a TxQuiesce section (evidence beats ordering in
+/// the doubly-pathological case: a ring lock wedged by a dying CPU).
+#[cfg(feature = "x86_64")]
+pub fn tx_submit_try(bytes: &[u8]) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if bytes.is_empty() {
+        return true;
+    }
+    if crate::dfx::pstore::sink_armed() {
+        for &b in bytes {
+            crate::dfx::pstore::sink(b);
+        }
+    }
+    let Some(mut r) = TX_RING.try_lock_irqsave() else {
+        return false;
+    };
+    let free = (r.head + UART_TX_RING_SIZE - 1 - r.tail) & UART_TX_RING_MASK;
+    if free < bytes.len() {
+        return false;
+    }
+    for &b in bytes {
+        // SAFETY: tail is masked in-range; the lock serializes access.
+        unsafe {
+            (*r.data.get())[r.tail] = b;
+        }
+        r.tail = (r.tail + 1) & UART_TX_RING_MASK;
+    }
+    // SAFETY: COM1 IER, lock-held RMW (see tx_submit).
+    unsafe {
+        let ier = read_reg(COM1_BASE, UART_IER);
+        if ier & IER_TX_ENABLE == 0 {
+            write_reg(COM1_BASE, UART_IER, ier | IER_TX_ENABLE);
+        }
+    }
+    drop(r);
+    TX_SUBMITTED.fetch_add(bytes.len() as u64, Relaxed);
+    true
+}
+
+/// Non-x86_64 stub (tx_armed() is false, so callers never reach it).
+#[cfg(not(feature = "x86_64"))]
+pub fn tx_submit_try(_bytes: &[u8]) -> bool {
+    false
 }
 
 /// Budget-exhaustion helper (under the ring lock): if the ring still
@@ -1425,6 +1597,17 @@ pub fn putchar(c: u8) {
         crate::printk::defer_byte(c);
         return;
     }
+    // Crash context with the engine armed: direct polling write, but
+    // inside a quiesce section — a live drain on another CPU must not
+    // interleave with the panic/oops report (smoke #7's 3-way splice
+    // class; the emit lock alone does not stop the drain).
+    #[cfg(feature = "x86_64")]
+    if tx_armed() {
+        let _q = TxQuiesce::new();
+        let uart = UART.lock_irqsave();
+        uart.putc(c);
+        return;
+    }
     // Use lock_irqsave: putchar may be called from interrupt context
     // (panic from IRQ, oops, etc.). A plain lock() would self-deadlock
     // if an interrupt fires while UART lock is held on the same CPU.
@@ -1458,19 +1641,61 @@ pub fn lock() -> SpinlockIrqGuard<'static, Uart> {
 
 /// Interrupt-safe character output (no lock)
 pub fn putchar_no_lock(c: u8) {
+    // TX engine armed (x86_64): the byte must not race the IRQ drain's
+    // THR writes. Preferred: join the ring (ordered, atomic against
+    // every console writer) when the ring lock is immediately free —
+    // these callers are per-byte anomaly tripwires (preempt-underflow,
+    // KSO-CENSUS, WW latefire, the taskdump dumps) whose lock-free
+    // contract forbids spinning on any lock, and try-lock never spins.
+    // Inside a quiesce section (a whole-report bypass writer owns THR)
+    // or when the try fails: direct write under a per-byte quiesce —
+    // wedge-safe (no unbounded lock), exclusive vs. the drain.
+    #[cfg(feature = "x86_64")]
+    if tx_armed()
+        && !crate::dfx::pstore::sink_armed()
+        && !crate::dfx::oops::oops_entered()
+        && !tx_quiesced()
+    {
+        if tx_submit_try(&[c]) {
+            return;
+        }
+        let _q = TxQuiesce::new();
+        Uart::new().putc(c);
+        return;
+    }
+    // Crash contexts, non-x86_64, and pre-engine: direct write.
     let uart = Uart::new();
     uart.putc(c);
 }
 
 /// Interrupt-safe string output (no lock) — batched TX (leg-54 item C).
 pub fn puts_no_lock(s: &str) {
-    let uart = Uart::new();
-    uart.puts_batch(s.as_bytes());
+    puts_bytes_no_lock(s.as_bytes());
 }
 
 /// Interrupt-safe byte output (no lock) — batched TX, `puts_no_lock`
 /// for byte slices (crash-context writers stage expanded bytes).
+/// TX-engine armed: whole-run ring submit when the ring lock is free
+/// (ordered, atomic); otherwise a direct batched write inside a quiesce
+/// section (exclusive vs. the IRQ drain — see putchar_no_lock).
 pub fn puts_bytes_no_lock(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    #[cfg(feature = "x86_64")]
+    if tx_armed()
+        && !crate::dfx::pstore::sink_armed()
+        && !crate::dfx::oops::oops_entered()
+        && !tx_quiesced()
+    {
+        if tx_submit_try(bytes) {
+            return;
+        }
+        let _q = TxQuiesce::new();
+        let uart = Uart::new();
+        uart.puts_batch(bytes);
+        return;
+    }
     let uart = Uart::new();
     uart.puts_batch(bytes);
 }

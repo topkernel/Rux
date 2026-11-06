@@ -580,8 +580,12 @@ fn emit_locked(bytes: &[u8]) -> bool {
 /// must stay — deferral queues and IRQ drains may be dead, and the
 /// report must reach the wire. Bounded THRE polls per the putc stall
 /// discipline; the best-effort emit lock keeps it off an in-flight
-/// line (the ConsoleWriter contract).
+/// line (the ConsoleWriter contract). The quiesce section makes the
+/// direct write exclusive against a still-live IRQ drain on another
+/// CPU (smoke #7's char-level splice class — the emit lock alone does
+/// not stop the drain).
 fn emit_direct_crash(text: &[u8]) {
+    let _q = crate::console::TxQuiesce::new();
     crate::console::tx_drain_poll();
     let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
     let n = expand_crlf(text, &mut buf);
