@@ -3372,6 +3372,41 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 /// thread lives: this names the exact syscall the server main thread is
 /// sleeping in, at khungtaskd cadence. Purely diagnostic; OFF unless
 /// dfx=sleepsnap is on the cmdline.
+/// Park-walk latch ring (54th hunt): tgids whose threads get the
+/// ufw/uss user-frame walk in sleep_snapshot. Latched directly on
+/// main-stack futex waits, and from the txn-hang audit for hung-txn
+/// SERVER processes (their handler parks userspace-side before
+/// replying — e.g. the device_manager InitDeviceManager reply the
+/// distributeddata store's OnStart waits on).
+static VMA_DUMPED_TGID: [core::sync::atomic::AtomicU32; 16] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+
+/// Latch a tgid for the park-chain walk (idempotent).
+pub fn latch_park_walk_tgid(tgid: u32) {
+    if tgid == 0 {
+        return;
+    }
+    for v in VMA_DUMPED_TGID.iter() {
+        if v.load(core::sync::atomic::Ordering::Relaxed) == tgid {
+            return;
+        }
+    }
+    let mut slot = usize::MAX;
+    for (i, v) in VMA_DUMPED_TGID.iter().enumerate() {
+        if v.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            slot = i;
+            break;
+        }
+    }
+    if slot == usize::MAX {
+        static VMA_VICTIM: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        slot = VMA_VICTIM.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            % VMA_DUMPED_TGID.len();
+    }
+    VMA_DUMPED_TGID[slot].store(tgid, core::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn sleep_snapshot() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
         return;
@@ -3494,32 +3529,25 @@ pub fn sleep_snapshot() {
                 // its process's EXEC-ONLY vma map ONCE per tgid (the
                 // symbolization table; exec-only keeps the dump ~40-60
                 // lines instead of ~160).
-                static VMA_DUMPED_TGID: [core::sync::atomic::AtomicU32; 16] =
+                // (VMA_DUMPED_TGID hoisted to module scope — see
+                // latch_park_walk_tgid below.)
+                // Dump-once flag ring, SEPARATE from the latch ring:
+                // the txn-hang server latch inserts tgids whose threads
+                // wait on THREAD stacks (samgr) — those must still get
+                // their one-time map dump (ohc42 walked them mapless).
+                static VMA_DUMPED_DONE: [core::sync::atomic::AtomicU32; 16] =
                     [const { core::sync::atomic::AtomicU32::new(0) }; 16];
-                if main_stack_futex && my_tgid != 0 {
-                    let mut dumped = false;
-                    for v in VMA_DUMPED_TGID.iter() {
-                        if v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid {
-                            dumped = true;
-                            break;
-                        }
-                    }
-                    if !dumped {
-                        let mut slot = usize::MAX;
-                        for (i, v) in VMA_DUMPED_TGID.iter().enumerate() {
-                            if v.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-                                slot = i;
-                                break;
-                            }
-                        }
-                        if slot == usize::MAX {
-                            static VMA_VICTIM: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            slot = VMA_VICTIM
-                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                % VMA_DUMPED_TGID.len();
-                        }
-                        VMA_DUMPED_TGID[slot].store(my_tgid, core::sync::atomic::Ordering::Relaxed);
+                {
+                    let latched = VMA_DUMPED_TGID.iter().any(|v| {
+                        v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
+                    });
+                    let done = VMA_DUMPED_DONE.iter().any(|v| {
+                        v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
+                    });
+                    if my_tgid != 0 && (main_stack_futex || latched) && !done {
+                        latch_park_walk_tgid(my_tgid);
+                        let dslot = (my_tgid as usize) % VMA_DUMPED_DONE.len();
+                        VMA_DUMPED_DONE[dslot].store(my_tgid, core::sync::atomic::Ordering::Relaxed);
                         if let Some(aspace) = tk.address_space() {
                             if let Some(vm) = aspace.vma_try_read() {
                                 for v in vm.iter() {
@@ -4143,6 +4171,12 @@ pub fn txn_hang_audit() {
                     swout = c as i32;
                 }
             }
+            // 54th: latch the hung-txn SERVER's process for the
+            // sleep_snapshot park-chain walk — "reply deferred
+            // userspace-side" (TXN-HANG-OWE) means the handler thread
+            // parks in ITS userspace before replying; naming that park
+            // (ufw/uss/uvma) is the next level of the chain.
+            latch_park_walk_tgid(h.spid);
             let _ = writeln!(
                 w,
                 "TXN-HANG-SRV txn{} tid{} st={:#x} linked={} on_rq={} on_cpu={} claim={} cpu={} slot={} swout={} pc={:#x} exec_ms={}",
