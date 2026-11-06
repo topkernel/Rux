@@ -81,7 +81,14 @@ pub const P_CHILD_RUN: usize = 29;
 /// unattributed vs its sub-phases, and the Drop's full-table slot sweep
 /// was the prime suspect.
 pub const P_EX_FDDROP: usize = 30;
-pub const P_COUNT: usize = 31;
+/// r11 round-2 decomposition: entry prologue (journal/lock force
+/// releases, ptrace detach, coredump gate, binder reap, rusage fold)
+/// up to exit_mm — the remaining unattributed exit-middle share.
+pub const P_EX_PREMM: usize = 31;
+/// exit_files end -> exit_notify start (futex/PI cleanup, itimers,
+/// POSIX timers, SEM_UNDO, reparenting, thread-group split).
+pub const P_EX_POSTF: usize = 32;
+pub const P_COUNT: usize = 33;
 
 /// Per-pid wake stamps (cycle domain) for the wake->run delta. Keyed by
 /// pid & mask; a stamp is consumed (zeroed) by the first switch-in.
@@ -363,6 +370,8 @@ pub fn report() {
         "wake_run",
         "child_run",
         "ex_fddrop",
+        "ex_premm",
+        "ex_postf",
     ];
     crate::println!("FORKPROF BEGIN hz={}", hz);
     for (i, name) in names.iter().enumerate() {

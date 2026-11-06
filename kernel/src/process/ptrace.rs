@@ -43,6 +43,29 @@ use crate::process::task::Task;
 use crate::signal::{SigInfo, Signal};
 use crate::syscall::SyscallArgs;
 
+// (perf-gap-hunt r11) Global count of tasks with a nonzero tracer_pid.
+// do_exit's tracer-death auto-detach scanned ALL 256 pid-hash buckets
+// on EVERY exit — ~4.6us of lock traffic (forkprof ex_premm phase) for
+// a relationship that exists on none of the benchmark/workstation
+// shapes. The count gates that scan: zero proves no tracing
+// relationship exists anywhere, so the scan would find nothing. The
+// failure direction is safe: a missed decrement only OVER-counts,
+// which re-enables the scan (exactly today's behavior); an under-count
+// is impossible while every 0->nonzero transition increments — and the
+// only such transitions are TRACEME and ATTACH below (tracer_pid is
+// born zero at Task creation and never inherited).
+static TRACEE_COUNT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+#[inline]
+pub fn tracee_count_add(d: i64) {
+    TRACEE_COUNT.fetch_add(d, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn any_tracees() -> bool {
+    TRACEE_COUNT.load(core::sync::atomic::Ordering::Relaxed) > 0
+}
+
 // ==================== ptrace request numbers (asm-generic) ====================
 
 pub const PTRACE_TRACEME: u32 = 0;
@@ -493,6 +516,7 @@ pub fn sys_ptrace(args: SyscallArgs) -> i64 {
         }
         // SAFETY: tracer_pid is an atomic field.
         unsafe { (*current).set_tracer_pid(ppid) };
+        tracee_count_add(1);
         return 0;
     }
 
@@ -536,6 +560,11 @@ fn dispatch_request(
         }
         // SAFETY: atomics.
         unsafe { (*target).set_tracer_pid(my_pid) };
+        if cur_tracer == 0 {
+            // New relationship (a re-ATTACH by the same tracer is not a
+            // 0->nonzero transition).
+            tracee_count_add(1);
+        }
         // Stop the tracee: queue SIGSTOP — do_signal() sees tracer_pid set
         // and routes it to ptrace_stop instead of the default stop.
         // SAFETY: pending set is lock-protected.
@@ -563,6 +592,7 @@ fn dispatch_request(
                 (*target).set_ptrace_options(0);
                 (*target).clear_single_step();
             }
+            tracee_count_add(-1);
             if is_stopped {
                 crate::signal::signal_wake_up(target);
             }
