@@ -30,7 +30,7 @@ pub use lsm::{security_capable, security_hook_call, security_signal_send, HookAr
 ///     return -errno::EPERM as u64;
 /// }
 /// ```
-#[inline]
+#[inline(never)]
 pub fn capable(cap: u32) -> bool {
     match crate::sched::current() {
         Some(task) => {
@@ -45,7 +45,16 @@ pub fn capable(cap: u32) -> bool {
 ///
 /// Used when checking permissions on behalf of another context
 /// (e.g., checking file opener's credentials).
-#[inline]
+///
+/// (perf-gap-hunt) Deliberately NOT inlined and WITHOUT the
+/// capability-only fast path: this has ~100 call sites, and inlining
+/// the fast path grew every one of them — the .text shift moved the
+/// syscall dispatch neighborhood and cost the null row 3ns (bisected:
+/// the security change alone reproduced it; the hash/fsw/dead-block
+/// changes were neutral). The hot DAC path funnels through
+/// generic_permission (fs/permission.rs), which carries the fast
+/// path in ONE body instead.
+#[inline(never)]
 pub fn has_capability(cred: &crate::process::task::Cred, cap: u32) -> bool {
     security_capable(cred, cap) == 0
 }

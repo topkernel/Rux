@@ -26,12 +26,32 @@ pub fn generic_permission(
     mask: u32,
     cred: &crate::process::task::Cred,
 ) -> bool {
+    // (perf-gap-hunt) Capability-only fast path: the capability LSM is
+    // always registered (order 0) and is the ONLY module on the
+    // boot-default chain; its Capable verdict is exactly the
+    // effective-set bit test. When it is the sole registered LSM, both
+    // capability checks below resolve to inline bit tests — no HookArgs
+    // build + dyn dispatch per check, which the DAC hot path (the
+    // full-path memo's per-ancestor validation) paid 2-4x per lookup.
+    // Multi-LSM and pre-init (empty chain) configurations take the
+    // original has_capability calls, byte-for-byte the old semantics.
+    // The fast path lives HERE (one body) rather than in
+    // has_capability (~100 call sites): the .text growth of inlining
+    // it there shifted the syscall dispatch neighborhood and cost the
+    // null row 3ns (measured, bisected).
+    let mode = inode_mode as u32;
+    let cap_only = crate::security::lsm::chain_is_capability_only();
+
     // CAP_DAC_OVERRIDE: root bypasses DAC. Linux grants read/write/search
     // on DIRECTORIES unconditionally; on files, execute still needs at
     // least one x bit (LTP access01 creates files inside 0222 dirs as
     // root — search must be overridden).
-    if crate::security::has_capability(cred, crate::security::CAP_DAC_OVERRIDE) {
-        let mode = inode_mode as u32;
+    let dac_override = if cap_only {
+        cred.cap_effective.has(crate::security::CAP_DAC_OVERRIDE)
+    } else {
+        crate::security::has_capability(cred, crate::security::CAP_DAC_OVERRIDE)
+    };
+    if dac_override {
         let is_dir = mode & 0o170000 == 0o040000; // S_IFMT == S_IFDIR
         if mask & MAY_EXEC != 0 && !is_dir {
             // DAC_OVERRIDE: can exec only if at least one x bit is set
@@ -48,16 +68,20 @@ pub fn generic_permission(
     // `!(mask & MAY_WRITE)` and only for S_ISDIR; plain files never pass
     // through this cap here (a file read needs CAP_DAC_OVERRIDE; the
     // cap's other file use, linkat AT_EMPTY_PATH, is not implemented).
-    if mask & MAY_WRITE == 0 {
-        let mode = inode_mode as u32;
-        if mode & 0o170000 == 0o040000 // S_IFDIR
-            && crate::security::has_capability(cred, crate::security::CAP_DAC_READ_SEARCH)
-        {
+    if mask & MAY_WRITE == 0 && mode & 0o170000 == 0o040000 {
+        // S_IFDIR
+        let read_search = if cap_only {
+            cred.cap_effective.has(crate::security::CAP_DAC_READ_SEARCH)
+        } else {
+            crate::security::has_capability(
+                cred,
+                crate::security::CAP_DAC_READ_SEARCH,
+            )
+        };
+        if read_search {
             return true;
         }
     }
-
-    let mode = inode_mode as u32;
 
     // Linux's generic_permission compares against the FILESYSTEM ids
     // (current_fsuid/current_fsgid), not euid/egid — setfsuid/setfsgid

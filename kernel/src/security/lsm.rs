@@ -135,6 +135,17 @@ pub fn register_lsm(lsm: &'static dyn LsmHooks) {
     }
 }
 
+/// True when the capability LSM is the only registered module (the boot
+/// default). Backs the has_capability fast path: its Capable verdict
+/// (the effective-set bit test) IS the chain verdict in that case.
+///
+/// (perf-gap-hunt) Read on the DAC hot path — one usize load.
+pub fn chain_is_capability_only() -> bool {
+    // SAFETY: LSM_COUNT is written only during kernel init
+    // (single-threaded, before the first syscall) and frozen after.
+    unsafe { LSM_COUNT == 1 }
+}
+
 /// Dispatch a security hook through the registered LSM chain.
 ///
 /// Returns 0 if all LSMs allow (or have no opinion).
