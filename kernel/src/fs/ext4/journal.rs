@@ -151,9 +151,50 @@ impl Ext4FileSystem {
             }
         }
 
+        // Journal geometry (reference fs/jbd2/journal.c,
+        // journal_check_superblock + journal_load_superblock): s_maxlen is
+        // the TOTAL journal length in blocks, journal superblock included,
+        // so the log ring is [s_first, s_maxlen) and j_last = s_maxlen is
+        // already "one past the last usable block". mke2fs writes
+        // s_first = 1 and s_maxlen = the journal inode's block count, so
+        // j_first + j_maxlen pointed one block PAST the journal inode: the
+        // ring wrap in commit.rs / revoke.rs then wrote log blocks onto the
+        // filesystem block that follows the journal. Reject geometry the
+        // reference rejects (it fails the mount; here the journal is
+        // disabled, like the other superblock checks above).
+        let j_inode_blocks = ((journal_inode.i_size as u64)
+            | ((journal_inode.i_size_high as u64) << 32))
+            / (self.block_size as u64);
+        let geometry_ok = j_first != 0
+            && j_first < j_maxlen
+            && (j_maxlen as u64) <= j_inode_blocks
+            && (j_start == 0 || (j_start >= j_first && j_start < j_maxlen));
+        if !geometry_ok {
+            crate::print_status("ext4", "journal geometry invalid, disabled", false);
+            bio::brelse(j_sb_bh);
+            return Ok(());
+        }
+        let mut j_last = j_maxlen as u64;
+        // Fast-commit area: the reference carves the last s_num_fc_blks
+        // (default JBD2_DEFAULT_FAST_COMMIT_BLOCKS) out of the regular log
+        // when the feature is set, provided the remaining log keeps
+        // JBD2_MIN_JOURNAL_BLOCKS.
+        if j_features & jbd2::types::JBD2_FEATURE_INCOMPAT_FAST_COMMIT != 0 {
+            let fc = match u32::from_be(j_sb.s_num_fc_blks) {
+                0 => jbd2::types::JBD2_DEFAULT_FAST_COMMIT_BLOCKS,
+                n => n,
+            } as u64;
+            if j_last.saturating_sub(fc) >= jbd2::types::JBD2_MIN_JOURNAL_BLOCKS as u64 {
+                j_last -= fc;
+            }
+        }
+        if (j_first as u64) >= j_last || (j_start != 0 && (j_start as u64) >= j_last) {
+            crate::print_status("ext4", "journal geometry invalid, disabled", false);
+            bio::brelse(j_sb_bh);
+            return Ok(());
+        }
+
         // Create Journal instance
-        // j_last = j_first + j_maxlen (one past the last usable journal block)
-        let j_last = (j_first as u64) + (j_maxlen as u64);
         let mut journal = jbd2::Journal::new(j_blocksize, j_maxlen);
         journal.j_feature_incompat
             .store(j_features, core::sync::atomic::Ordering::SeqCst);
