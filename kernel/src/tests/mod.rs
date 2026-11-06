@@ -293,6 +293,8 @@ pub mod ipc_epoll;
 #[cfg(feature = "unit-test")]
 pub mod ipc_eventfd;
 pub mod io_uring_abi;
+#[cfg(feature = "x86_64")]
+pub mod syscall_table_audit;
 
 // ===== IPC System V =====
 #[cfg(feature = "unit-test")]
@@ -599,6 +601,8 @@ pub fn run_all_tests() {
     pipe2::test_pipe2();
     test_group_start("pty_hangup");
     pty_hangup::test_pty_hangup();
+    #[cfg(feature = "x86_64")]
+    syscall_table_audit::test_syscall_table_audit();
 
     test_group_start("ext4_allocator");
     ext4_allocator::test_ext4_allocator();
