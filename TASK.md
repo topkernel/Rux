@@ -6423,3 +6423,45 @@ gates.
   is the current frontier either way.
 - All session QEMUs stopped (drivers + the orphaned ohc77 guest,
   verified by /proc cwd); no other lanes touched.
+
+### 59.5 COORDINATOR ADDENDUM (2026-11-07) — the launcher-gate narrowed to accountmgr's three subscriptions
+
+Source-read of the whole chain (ability_manager_service.cpp:7870/10380,
+account_mgr_service.cpp:543-562/613-652, local_ability_manager.cpp:305-350,
+samgr_ipc_interface_code.h:30):
+- Launcher start = AMS StartHighestPriorityAbility(isBoot=true, infinite
+  BMS re-poll) ← SwitchToUser ← AMS StartUser(binder) ← os_account
+  ActivateDefaultOsAccount ← accountmgr OnAddSystemAbility, which needs
+  isAmsReady_ && isStorageReady_ (SA:180 + SA:5003 callbacks).
+- Those callbacks require accountmgr to SUBSCRIBE (samgr code=6,
+  SUBSCRIBE_SYSTEM_ABILITY_TRANSACTION) for SA 180/3101/5003 via
+  AddSystemAbilityListener (OnStart, AFTER Init()/Publish — accountmgr.cpp:554-556).
+- DATA across ohw1-4: accountmgr Publishes (code=3, Init completed) but
+  NEVER issues a single code=6 (ohw1: 0/expected 3; ohw3: 0; ohw2: 0).
+  ohw4: even Publish missing (Init did not complete).
+- Reference check: the same code resolves in ms on refu9 (accountmgr 4.3s,
+  BMS 8.5s, launcher.ready 11.7s — subscriptions invisible there only
+  because the reference log has no SAREG instrument; the reference does
+  not wedge here).
+- Hypothesis space for "Publish OK but three subscriptions never issued":
+  (a) GetSystemAbilityManager() returns null on those calls (proxy-side
+  samgr handle not cached YET at that point — but it was cached for
+  Publish one line earlier in the same process: SUSPECT this is NOT it);
+  (b) the three AddSystemAbilityListener calls execute but their
+  SubscribeSystemAbility RPC never leaves (blocked INSIDE the first
+  binder transaction to samgr — would show as an in-flight txn in
+  TXN-HANG-BWR or a park in libipc: NOT seen; accountmgr main thread
+  parks on FFRT-internal words (0x7ff083b52b44-class) instead, ohw3);
+  (c) Init() DID complete Publish but the FFRT-worker starvation the
+  58th documented (the same cascade class) parked the accountmgr
+  OnStart thread between Publish and the listeners — accountmgr's own
+  OnStart runs INSIDE an FFRT serial queue context? samgr profile
+  accountmgr.json queue semantics: CHECK (next step, ohw5 driver with
+  fuxwatch2 auto-armed on the accountmgr park word).
+
+Action for 60th: one boot, census auto-arm on the accountmgr FFRT park
+word (the B-class censusd arm), plus manual fuxwatch on
+0x7ff083b52b44-class from ohw3; decide (b)/(c) — if the OnStart thread
+is parked INSIDE the queue runtime between Publish and Subscribe, the
+fix target is the same kernel leaf the 58th exonerated the futex layer
+for: name the kernel-visible event the queue's next notify waits on.
