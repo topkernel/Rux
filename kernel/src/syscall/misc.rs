@@ -4588,12 +4588,14 @@ pub fn timerfd_wheel_audit() {
         while !rest.is_empty() {
             let mut cut = rest.len().min(240);
             if cut < rest.len() {
-                match rest[..cut].rfind('\n') {
-                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
-                    _ => {
-                        while cut > 0 && !rest.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
+                // ohc47: boundary backoff BEFORE the rfind slice (a
+                // multi-byte char straddling cut panics rest[..cut]).
+                while cut > 0 && !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if let Some(nl) = rest[..cut].rfind('\n') {
+                    if nl + 1 > 0 {
+                        cut = nl + 1;
                     }
                 }
             }

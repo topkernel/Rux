@@ -1145,6 +1145,27 @@ static DEFER_Q: crate::sync::spinlock::Spinlock<DeferredEmit> =
         dropped: 0,
     });
 
+// 55th: focus lane for the park-chain evidence lines (ufw/uss/uvma). The
+// bulk census flood evicted them on ohc43 (2k+ lines dropped per window —
+// the samgr FFRT-worker walks never reached the serial). A separate ring,
+// drained FIRST by censusd; drop-oldest only within its own class.
+const DEFER_FOCUS_MAX: usize = 512;
+
+struct DeferredFocus {
+    ring: [Option<alloc::string::String>; DEFER_FOCUS_MAX],
+    head: usize,
+    tail: usize,
+    dropped: u64,
+}
+
+static DEFER_FOCUS_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
+    crate::sync::spinlock::Spinlock::new(DeferredFocus {
+        ring: [const { None }; DEFER_FOCUS_MAX],
+        head: 0,
+        tail: 0,
+        dropped: 0,
+    });
+
 /// Queue one census line for task-context emission. Producers may be
 /// softirq (timer heartbeat census). The line must already be under the
 /// printk record text cap (240 bytes) — the sleep_snapshot chunker
@@ -1153,7 +1174,25 @@ pub fn defer_emit_line(line: alloc::string::String) {
     if line.is_empty() {
         return;
     }
-    {
+    // 55th: park-chain evidence lines go to the focus ring (see its
+    // declaration) so the bulk census flood cannot evict them.
+    let focus = line.starts_with("ufw:")
+        || line.starts_with("uss:")
+        || line.starts_with("uvma:")
+        || line.starts_with("uhp:");
+    if focus {
+        let mut q = DEFER_FOCUS_Q.lock_irqsave();
+        let next = (q.tail + 1) % DEFER_FOCUS_MAX;
+        if next == q.head {
+            let h = q.head;
+            q.ring[h] = None;
+            q.head = (h + 1) % DEFER_FOCUS_MAX;
+            q.dropped += 1;
+        }
+        let t = q.tail;
+        q.ring[t] = Some(line);
+        q.tail = next;
+    } else {
         let mut q = DEFER_Q.lock_irqsave();
         let next = (q.tail + 1) % DEFER_LINE_MAX;
         if next == q.head {
@@ -1190,7 +1229,37 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
         if crate::process::kthread::kthread_should_stop() {
             break;
         }
-        // Drain everything queued first.
+        // Drain everything queued first: focus lines (park-chain
+        // evidence) take priority over bulk census.
+        loop {
+            let line = {
+                let mut q = DEFER_FOCUS_Q.lock_irqsave();
+                if q.head == q.tail {
+                    if q.dropped > 0 {
+                        let d = q.dropped;
+                        q.dropped = 0;
+                        Some(alloc::format!(
+                            "censusd: {} focus lines dropped (queue full)",
+                            d
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    let h = q.head;
+                    let l = q.ring[h].take();
+                    q.head = (h + 1) % DEFER_FOCUS_MAX;
+                    l
+                }
+            };
+            match line {
+                Some(l) => crate::printk::printk_ln(
+                    crate::printk::loglevel::KERN_INFO,
+                    format_args!("{}", l),
+                ),
+                None => break,
+            }
+        }
         loop {
             let line = {
                 let mut q = DEFER_Q.lock_irqsave();

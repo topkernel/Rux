@@ -3381,9 +3381,54 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
 static VMA_DUMPED_TGID: [core::sync::atomic::AtomicU32; 16] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 16];
 
+/// 55th: STICKY latch ring — written ONLY by the sleep_snapshot
+/// main-stack-untimed rule (the forever class: a thread parked on its
+/// own main stack with NO timeout is the wedge signature). The churned
+/// 16-slot ring above is shared with the 1 Hz txn-hang audit (~60
+/// wedged tgids at the cascade's peak); a fresh latch could be evicted
+/// between insert and the walk-gate scan (ohc45/49: samgr's main-stack
+/// park observed at three consecutive snapshots, zero walks). Sticky
+/// slots never evict — at most 8 distinct wedged-leader tgids.
+static VMA_STICKY_TGID: [core::sync::atomic::AtomicU32; 8] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+
+/// Latch a tgid for the park-chain walk (idempotent). `sticky` writes
+/// the dedicated never-evicted ring (the walk gate ORs both rings).
+pub fn latch_park_walk_tgid_sticky(tgid: u32) {
+    if tgid == 0 {
+        return;
+    }
+    for v in VMA_STICKY_TGID.iter() {
+        if v.load(core::sync::atomic::Ordering::Relaxed) == tgid {
+            return;
+        }
+    }
+    for v in VMA_STICKY_TGID.iter() {
+        if v
+            .compare_exchange(
+                0,
+                tgid,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+    // Full: leave it — 8 wedged leaders already walked; the churned ring
+    // still covers the rest.
+}
+
 /// Latch a tgid for the park-chain walk (idempotent).
 pub fn latch_park_walk_tgid(tgid: u32) {
     if tgid == 0 {
+        return;
+    }
+    if VMA_STICKY_TGID
+        .iter()
+        .any(|v| v.load(core::sync::atomic::Ordering::Relaxed) == tgid)
+    {
         return;
     }
     for v in VMA_DUMPED_TGID.iter() {
@@ -3540,14 +3585,26 @@ pub fn sleep_snapshot() {
                 {
                     let latched = VMA_DUMPED_TGID.iter().any(|v| {
                         v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
+                    }) || VMA_STICKY_TGID.iter().any(|v| {
+                        v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
                     });
                     let done = VMA_DUMPED_DONE.iter().any(|v| {
                         v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
                     });
                     if my_tgid != 0 && (main_stack_futex || latched) && !done {
+                        // 55th: a main-stack UNTIMED park is the wedge
+                        // signature — sticky-latch it so the audit churn
+                        // cannot evict it before the walk-gate scan.
+                        if main_stack_futex && ua3 == 0 {
+                            latch_park_walk_tgid_sticky(my_tgid);
+                        }
                         latch_park_walk_tgid(my_tgid);
-                        let dslot = (my_tgid as usize) % VMA_DUMPED_DONE.len();
-                        VMA_DUMPED_DONE[dslot].store(my_tgid, core::sync::atomic::Ordering::Relaxed);
+                        // 55th: mark done ONLY after a successful dump —
+                        // ohc44 latched samgr but the first visiting thread
+                        // lost the vma read (non-blocking under contention),
+                        // the done mark suppressed every retry, and the
+                        // whole boot walked mapless.
+                        let mut dumped_ok = false;
                         if let Some(aspace) = tk.address_space() {
                             if let Some(vm) = aspace.vma_try_read() {
                                 for v in vm.iter() {
@@ -3572,7 +3629,25 @@ pub fn sleep_snapshot() {
                                         }
                                     );
                                 }
+                                dumped_ok = true;
                             }
+                        }
+                        if dumped_ok {
+                            // 55th: insert by value (first free slot, else
+                            // probe). The old tgid%16 direct store let any
+                            // other tgid congruent mod 16 clobber the mark
+                            // (ohc45: tgid 500's map dumped 187 times in
+                            // one pass, flooding the focus lane and evicting
+                            // the very walk lines the lane exists for).
+                            let mut dslot = (my_tgid as usize) % VMA_DUMPED_DONE.len();
+                            for (i, v) in VMA_DUMPED_DONE.iter().enumerate() {
+                                let cur = v.load(core::sync::atomic::Ordering::Relaxed);
+                                if cur == 0 || cur == my_tgid {
+                                    dslot = i;
+                                    break;
+                                }
+                            }
+                            VMA_DUMPED_DONE[dslot].store(my_tgid, core::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -3585,21 +3660,57 @@ pub fn sleep_snapshot() {
                 // chain of the wedged process, not just its leader).
                 let tgid_latched = VMA_DUMPED_TGID.iter().any(|v| {
                     v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
+                }) || VMA_STICKY_TGID.iter().any(|v| {
+                    v.load(core::sync::atomic::Ordering::Relaxed) == my_tgid
                 });
+                // 55th: auto-latch FOREVER-class futex words (untimed
+                // parks, a3==0) of latch-ring tgids into the FXRS
+                // word-watch. The walks name the waiter side
+                // (mutexPrivate::wait on its own condvar barrier); the
+                // wake side decides the verdict: a WAKE on this word
+                // that the waiter never consumes = kernel wake loss;
+                // NO WAKE ever = userspace never signaled (dead holder
+                // / broken notify chain). Timed parks (a3 != 0) are the
+                // idle/retry classes — excluded so the 16-word ring
+                // stays on the forever set.
+                if tgid_latched && sys == 202 && ua3 == 0 && a0 != 0 {
+                    crate::sync::futex::fxrs_word_add(a0 as usize);
+                }
                 if main_stack_futex || tgid_latched {
                     static UFW_SEEN: [core::sync::atomic::AtomicU64; 64] =
                         [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+                    // 55th: time-aware dedup. ohc43/44's forever-parked
+                    // threads (samgr's FFRT workers and early handlers)
+                    // parked/unparked at the same rip during the healthy
+                    // 0-15s window and consumed their (tid,rip) keys, so
+                    // the FOREVER park at 20s+ never re-walked — the
+                    // holder chain stayed invisible. Re-walk a seen key if
+                    // its last walk is older than UFW_REWALK_100MS (in
+                    // 100ms jiffies units, HZ=100 → ~90 s): transients do
+                    // not spam, forever parks re-print every ~90 s.
+                    static UFW_SEEN_T: [core::sync::atomic::AtomicU32; 64] =
+                        [const { core::sync::atomic::AtomicU32::new(0) }; 64];
+                    const UFW_REWALK_100MS: u32 = 300;
                     let key = ((tk.pid() as u64) << 44) | (rip & 0xfff_ffff_fff);
-                    let mut seen = false;
-                    for k in UFW_SEEN.iter() {
+                    let now100 = (crate::drivers::timer::get_jiffies() / 10) as u32;
+                    let mut seen_idx = usize::MAX;
+                    for (i, k) in UFW_SEEN.iter().enumerate() {
                         if k.load(core::sync::atomic::Ordering::Relaxed) == key {
-                            seen = true;
+                            seen_idx = i;
                             break;
                         }
                     }
-                    if !seen {
-                        let idx = (key as usize) % UFW_SEEN.len();
+                    let seen_recent = seen_idx != usize::MAX && now100
+                        .wrapping_sub(UFW_SEEN_T[seen_idx].load(core::sync::atomic::Ordering::Relaxed))
+                        < UFW_REWALK_100MS;
+                    if !seen_recent {
+                        let idx = if seen_idx != usize::MAX {
+                            seen_idx
+                        } else {
+                            (key as usize) % UFW_SEEN.len()
+                        };
                         UFW_SEEN[idx].store(key, core::sync::atomic::Ordering::Relaxed);
+                        UFW_SEEN_T[idx].store(now100, core::sync::atomic::Ordering::Relaxed);
                         if let Some(aspace) = tk.address_space() {
                             let root = aspace.root_ppn();
                             // SAFETY: read-only diagnostic walk of the
@@ -3680,8 +3791,50 @@ pub fn sleep_snapshot() {
                                 sp += 8;
                             }
                             if !scan.is_empty() {
-                                let _ =
-                                    writeln!(outf, "uss: tgid {} tid {} :{}", my_tgid, tk.pid(), scan);
+                                let _ = writeln!(
+                                    outf,
+                                    "uss: tgid {} tid {} :{}",
+                                    my_tgid,
+                                    tk.pid(),
+                                    scan
+                                );
+                            }
+                            // 55th: HEAP-word locals dump for futex-parked
+                            // threads. mutexPrivate::lock spills the lock
+                            // object pointer (`this`, a heap/arena address)
+                            // near rsp; grouping waiters by these words
+                            // reconstructs the userspace lock graph — the
+                            // word stuck at 2 (WAIT) with no live holder
+                            // names the orphaned lock. Only for the
+                            // forever class (untimed futex park).
+                            if sys == 202 && ua3 == 0 {
+                                let mut heap = alloc::string::String::new();
+                                let mut hshown = 0;
+                                let mut hsp = ursp & !7;
+                                for _ in 0..48 {
+                                    if hshown >= 6 || hsp > 0x8000_0000_0000 {
+                                        break;
+                                    }
+                                    if let Some(w) = read_u64_at(hsp) {
+                                        let looks_heap = (0x7ff0_0000_0000..=0x7ffb_0000_0000)
+                                            .contains(&w)
+                                            && w & 7 == 4; // futex words are 4-aligned
+                                        if looks_heap {
+                                            let _ = write!(heap, " {:#x}", w);
+                                            hshown += 1;
+                                        }
+                                    }
+                                    hsp += 8;
+                                }
+                                if !heap.is_empty() {
+                                    let _ = writeln!(
+                                        outf,
+                                        "uhp: tgid {} tid {} :{}",
+                                        my_tgid,
+                                        tk.pid(),
+                                        heap
+                                    );
+                                }
                             }
                         }
                     }
@@ -3766,16 +3919,16 @@ pub fn sleep_snapshot() {
         while !rest.is_empty() {
             let mut cut = rest.len().min(240);
             if cut < rest.len() {
-                match rest[..cut].rfind('\n') {
-                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
-                    _ => {
-                        // No newline in range: back off to the nearest
-                        // UTF-8 char boundary (ohc28: a task comm carried
-                        // a multi-byte char and split_at(240) panicked the
-                        // kernel mid-census).
-                        while cut > 0 && !rest.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
+                // Back off to a char boundary BEFORE slicing for rfind —
+                // `rest[..cut]` with a multi-byte char straddling cut
+                // panics before the ohc28 backoff below ever ran (ohc47:
+                // census line + unicode comm, panic in the softirq).
+                while cut > 0 && !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if let Some(nl) = rest[..cut].rfind('\n') {
+                    if nl + 1 > 0 {
+                        cut = nl + 1;
                     }
                 }
             }
@@ -3794,12 +3947,14 @@ pub fn sleep_snapshot() {
         while !rest.is_empty() {
             let mut cut = rest.len().min(240);
             if cut < rest.len() {
-                match rest[..cut].rfind('\n') {
-                    Some(nl) if nl + 1 > 0 => cut = nl + 1,
-                    _ => {
-                        while cut > 0 && !rest.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
+                // ohc47: boundary backoff BEFORE the rfind slice (same
+                // panic class as the bulk chunker above).
+                while cut > 0 && !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if let Some(nl) = rest[..cut].rfind('\n') {
+                    if nl + 1 > 0 {
+                        cut = nl + 1;
                     }
                 }
             }
@@ -4176,7 +4331,15 @@ pub fn txn_hang_audit() {
             // userspace-side" (TXN-HANG-OWE) means the handler thread
             // parks in ITS userspace before replying; naming that park
             // (ufw/uss/uvma) is the next level of the chain.
-            latch_park_walk_tgid(h.spid);
+            // 55th: FOREVER-class only (exec >= 15 s). At the wedge the
+            // audit sees ~60 hung-txn servers at 1 Hz and the 16-slot
+            // latch ring churned through them all — samgr (the pile's
+            // root) was evicted seconds after latching and its threads
+            // never walked (ohc44-46). The forever class is ~8 stable
+            // tgids; they stay resident in the ring.
+            if h.exec_ms >= 15000 {
+                latch_park_walk_tgid(h.spid);
+            }
             let _ = writeln!(
                 w,
                 "TXN-HANG-SRV txn{} tid{} st={:#x} linked={} on_rq={} on_cpu={} claim={} cpu={} slot={} swout={} pc={:#x} exec_ms={}",
