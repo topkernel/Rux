@@ -65,6 +65,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(feature = "debug-lock-owner")]
 use core::sync::atomic::AtomicUsize;
 
+/// LCB_F_SPIN — the contention_begin flag of a plain exclusive spin
+/// lock (include/trace/events/lock.h).
+const LCB_F_SPIN: u32 = 1;
+
 // ==================== RawSpinlock (TTAS) ====================
 
 /// Capture this function's return address (the spinlock call site) for
@@ -143,6 +147,16 @@ impl RawSpinlock {
         // Capture caller's return address before spinning
         let caller_ra = caller_return_address();
         let mut spins: u32 = 0;
+        // Tracepoint bracket (round 4, lock:contention_begin/end): the
+        // SITES LIVE IN THE CONTENDED BRANCH ONLY — an uncontended
+        // acquire (first CAS succeeds) executes neither the flag nor
+        // the event check, so the spinlock FAST PATH gained NOTHING
+        // (the lane charter's rule). One begin/end pair per acquire
+        // that saw contention, regardless of how many TTAS rounds it
+        // took. Record path is IRQ-safe (per-CPU SPSC ring, no locks)
+        // — the slow path may run with interrupts disabled
+        // (lock_irq/lock_irqsave).
+        let mut contended = false;
         // TTAS (test-and-test-and-set, C7): one CAS to acquire; while
         // contended, spin on a plain Relaxed load until the word reads
         // free, then retry the CAS. Relaxed is sufficient for the spin
@@ -155,6 +169,13 @@ impl RawSpinlock {
             if self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok() {
                 break;
             }
+            if !contended {
+                contended = true;
+                crate::trace::trace_contention_begin(
+                    self as *const RawSpinlock as u64,
+                    LCB_F_SPIN,
+                );
+            }
             while self.locked.load(Ordering::Relaxed) != 0 {
                 spins = spins.wrapping_add(1);
                 if spins == Self::DEADLOCK_WARN_ITERS {
@@ -163,6 +184,10 @@ impl RawSpinlock {
                 }
                 core::hint::spin_loop();
             }
+        }
+        if contended {
+            // ret is always 0 — the TTAS acquire cannot fail.
+            crate::trace::trace_contention_end(self as *const RawSpinlock as u64, 0);
         }
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).

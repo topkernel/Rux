@@ -63,7 +63,7 @@ fn tx_batch() -> TcpTxBatch {
 fn established() -> TcpSocket {
     let mut s = TcpSocket::new();
     s.bind(40000).unwrap();
-    s.state = TcpState::TCP_ESTABLISHED;
+    s.set_state(TcpState::TCP_ESTABLISHED);
     s.snd_una = 1000;
     s.snd_nxt = 1000;
     s.rcv_nxt = 2000;
@@ -149,7 +149,7 @@ fn test_rst_sequence_validation() {
 fn test_rst_syn_sent_validation() {
     // RST without ACK — not acceptable.
     let mut s = established();
-    s.state = TcpState::TCP_SYN_SENT;
+    s.set_state(TcpState::TCP_SYN_SENT);
     s.snd_nxt = 500;
     s.snd_una = 500;
     let mut tx = tx_batch();
@@ -161,7 +161,7 @@ fn test_rst_syn_sent_validation() {
 
     // RST+ACK with the wrong ack_seq — not acceptable.
     let mut s = established();
-    s.state = TcpState::TCP_SYN_SENT;
+    s.set_state(TcpState::TCP_SYN_SENT);
     s.snd_nxt = 500;
     s.snd_una = 500;
     let mut tx = tx_batch();
@@ -174,7 +174,7 @@ fn test_rst_syn_sent_validation() {
     // RST+ACK acknowledging our SYN → ECONNREFUSED (the slirp refuse
     // path; R34 pinned that this aborts instead of ping-ponging).
     let mut s = established();
-    s.state = TcpState::TCP_SYN_SENT;
+    s.set_state(TcpState::TCP_SYN_SENT);
     s.snd_nxt = 500;
     s.snd_una = 500;
     let mut tx = tx_batch();
@@ -234,7 +234,7 @@ fn test_fin_sequence_gating() {
     // Retransmitted FIN in CLOSE_WAIT (fin_seq == rcv_nxt-1): re-ACK,
     // no state churn — the peer can finish its close.
     let mut s = established();
-    s.state = TcpState::TCP_CLOSE_WAIT;
+    s.set_state(TcpState::TCP_CLOSE_WAIT);
     s.rcv_nxt = 2001;
     let mut tx = tx_batch();
     let _ = s.handle_packet(&hdr(2000, 1000, FIN | ACK, 8192), &[], &[], &mut tx);
@@ -245,7 +245,7 @@ fn test_fin_sequence_gating() {
 
     // FIN_WAIT2 + exact FIN → TIME_WAIT.
     let mut s = established();
-    s.state = TcpState::TCP_FIN_WAIT2;
+    s.set_state(TcpState::TCP_FIN_WAIT2);
     s.rcv_nxt = 2000;
     let mut tx = tx_batch();
     let _ = s.handle_packet(&hdr(2000, 1000, FIN | ACK, 8192), &[], &[], &mut tx);
@@ -256,7 +256,7 @@ fn test_fin_sequence_gating() {
 
     // FIN_WAIT2 + out-of-order FIN → dropped, still FIN_WAIT2.
     let mut s = established();
-    s.state = TcpState::TCP_FIN_WAIT2;
+    s.set_state(TcpState::TCP_FIN_WAIT2);
     s.rcv_nxt = 2000;
     let mut tx = tx_batch();
     let _ = s.handle_packet(&hdr(2400, 1000, FIN | ACK, 8192), &[], &[], &mut tx);
@@ -668,7 +668,7 @@ fn test_syn_option_gate() {
 
     // SYN_SENT: the SYN-ACK's options are adopted (also handshake).
     let mut s = established();
-    s.state = TcpState::TCP_SYN_SENT;
+    s.set_state(TcpState::TCP_SYN_SENT);
     s.snd_nxt = 500;
     s.snd_una = 500;
     s.rcv_nxt = 9001;

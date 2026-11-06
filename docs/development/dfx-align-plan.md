@@ -123,8 +123,8 @@ incomplete or non-reference shape · **--** = absent.
 | Crash | taint flags | OK | Tranche 1: exported, the reference's letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
-| Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
-| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; perf software-clock sampling (`PERF_TYPE_SOFTWARE` cpu/task-clock, `sample_period`, `PERF_SAMPLE_IP` via `read(2)`) landed 2026-10-27; probes/hw events/rings still `ENOSYS`/`EINVAL` |
+| Control | tracefs `/sys/kernel/tracing` | OK | 61 events (tracepoint! table, ids 1-61): sched/irq/syscalls/signal/binder/mm/kmem/block/ext4/jbd2/rux:epoll (rounds 1-3) + lock:/tcp:/sock: (round 4) |
+| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | rounds 1-4 tracepoints + nop tracer; perf software-clock sampling (`PERF_TYPE_SOFTWARE` cpu/task-clock, `sample_period`, `PERF_SAMPLE_IP` via `read(2)`) landed 2026-10-27; probes/hw events/rings still `ENOSYS`/`EINVAL` |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
 | Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
 | Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
@@ -139,7 +139,8 @@ incomplete or non-reference shape · **--** = absent.
 | Perf | `/proc/diskstats`, `/proc/timer_list`, `/proc/lockstat` | -- | absent |
 | Memory | KASAN / UBSAN / Kfence / slub debug | -- | absent (Rux substitutes are bespoke) |
 | Memory | page poisoning on free | -- | absent |
-| Locking | lockdep (lock-class graph, cycle detect) | -- | absent |
+| Locking | lockdep (lock-class graph, cycle detect) | -- | absent (no lock classes exist; the lock: trace events below are the honest funnel analog) |
+| Locking | lock: trace events (lock_acquire/_acquired/_contended/_release, contention_begin/end) | OK | round 4: the lockdep/lockstat quartet at the SleepMutex funnel + the lockdep-free contention pair at the Spinlock contended slow path (fast path carries nothing); `debug=syncguard`/`syncwatch` alias-arm the family |
 | Locking | lock owner tracking | PART | compile-time feature `debug-lock-owner` only |
 | Locking | soft lockup / hung task | OK | present and working |
 | Locking | RCU stall detector | -- | absent |
@@ -147,6 +148,7 @@ incomplete or non-reference shape · **--** = absent.
 | Storage | `blktrace`, `scsi_debug` | -- | absent |
 | Network | `/proc/net/*` | OK | present, the reference's column layouts |
 | Network | `netstat -s` counters, `sockstat` | PART | `sockstat` present, error counters absent |
+| Network | tcp:/sock: trace events (tcp_retransmit_skb, tcp_receive_reset, tcp_destroy_sock, inet_sock_set_state) | OK | round 4 at the real funnels (three retransmit sites incl. the SYN resend, the RST funnel, the destroy funnel, the set_state state-store funnel); `debug=tcptrace`/`socksnap` alias-arm the family; the rest of the reference tcp.h catalog is blocked-on-stack (no cong-state enum, no md5/ao, no probe/rcvbuf machinery) |
 | Time | clocksource exposure, monotonic sanity | PART | `monowatch` exists but console-only |
 | Power | `/sys/power/state` | OK | present |
 | Container | cgroup v2 | PART | cpu/memory/pids only; no cgroup v1 `memory` mount |

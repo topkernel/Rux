@@ -781,6 +781,27 @@ pub fn trace_alias(switch: DebugSwitch) -> Option<&'static [&'static crate::trac
         &trace::EVENT_EPOLL_WAIT_EXIT,
         &trace::EVENT_EPOLL_DELIVERY,
     ];
+    // The round-4 lock: family (the ledger's syncguard/syncwatch row —
+    // round 2 left them waiting on lock:lock_acquire/lock_release).
+    // The lockdep/lockstat quartet at the sleeping-mutex funnel plus
+    // the lockdep-free contention pair at the spinlock slow path.
+    static LOCK: &[&trace::TraceEvent] = &[
+        &trace::EVENT_LOCK_ACQUIRE,
+        &trace::EVENT_LOCK_ACQUIRED,
+        &trace::EVENT_LOCK_CONTENDED,
+        &trace::EVENT_LOCK_RELEASE,
+        &trace::EVENT_CONTENTION_BEGIN,
+        &trace::EVENT_CONTENTION_END,
+    ];
+    // The round-4 tcp:/sock: wave (the ledger's tcptrace/socksnap
+    // row): the reference's inet state store, the retransmit funnel,
+    // the reset-receive funnel and the destroy funnel.
+    static TCP_SOCK: &[&trace::TraceEvent] = &[
+        &trace::EVENT_TCP_RETRANSMIT_SKB,
+        &trace::EVENT_TCP_RECEIVE_RESET,
+        &trace::EVENT_TCP_DESTROY_SOCK,
+        &trace::EVENT_INET_SOCK_SET_STATE,
+    ];
     match switch {
         // The ledger's ready-to-port wave. (WwCensus is deliberately
         // ABSENT: the ledger keeps the wild-write tripwires frozen —
@@ -824,6 +845,16 @@ pub fn trace_alias(switch: DebugSwitch) -> Option<&'static [&'static crate::trac
         // The round-3 epoll wave: epollscan/epolltrace arm the rux:
         // epoll family.
         DebugSwitch::EpollScan | DebugSwitch::EpollTrace => Some(EPOLL),
+        // The round-4 lock: family: syncguard/syncwatch (round 2's
+        // partial row) now arm the real lock: events — the mutex
+        // funnel quartet and the spinlock contention pair. Their own
+        // binder-sync-send checks keep working alongside, per the
+        // ledger's do-not-delete rule.
+        DebugSwitch::SyncGuard | DebugSwitch::SyncWatch => Some(LOCK),
+        // The round-4 tcp:/sock: wave: tcptrace/socksnap arm the
+        // inet state store plus the tcp retransmit/reset/destroy
+        // funnels.
+        DebugSwitch::TcpTrace | DebugSwitch::SockSnap => Some(TCP_SOCK),
         _ => None,
     }
 }

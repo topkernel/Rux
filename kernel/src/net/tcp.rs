@@ -1263,6 +1263,186 @@ impl TcpSocket {
         Ok(())
     }
 
+    // ==================== Round 4: sock:/tcp: tracepoint funnel ====================
+    //
+    // Every post-creation state write goes through set_state(), which
+    // records sock:inet_sock_set_state (the reference's inet state
+    // store — there is no tcp:tcp_state_change upstream; the event
+    // lives in sock.h and fires from inet_sk_state_store). The
+    // constructor's initial TCP_CLOSE stays a plain field init (the
+    // reference's sk_alloc analog, untraced), and a same-state write
+    // records nothing (the reference's store path warns on those).
+
+    /// Translate Rux's private TcpState onto the reference's TCP state
+    /// enum numbers (include/net/tcp_states.h — what the event's
+    /// show_tcp_state_name resolves).
+    #[inline]
+    fn ref_state(s: TcpState) -> i32 {
+        match s {
+            TcpState::TCP_CLOSE => 7,
+            TcpState::TCP_LISTEN => 10,
+            TcpState::TCP_SYN_SENT => 2,
+            TcpState::TCP_SYN_RECV => 3,
+            TcpState::TCP_ESTABLISHED => 1,
+            TcpState::TCP_FIN_WAIT1 => 4,
+            TcpState::TCP_FIN_WAIT2 => 5,
+            TcpState::TCP_CLOSE_WAIT => 8,
+            TcpState::TCP_LAST_ACK => 9,
+            TcpState::TCP_TIME_WAIT => 6,
+            TcpState::TCP_CLOSING => 11,
+        }
+    }
+
+    /// The endpoint words every sock:/tcp: event carries:
+    /// (family, addrs4, saddrv6 lo/hi, daddrv6 lo/hi). Ports are added
+    /// by the per-event quartet (they differ in shape). For AF_INET6
+    /// the v4 pair is 0 (the reference's inet_saddr/inet_daddr fields
+    /// of a v6 socket) and the v6 pair carries the real bytes; for
+    /// AF_INET the v6 pair carries the v4-mapped form (the reference's
+    /// ipv6_addr_set_v4mapped). All words little-endian halves.
+    #[inline]
+    fn trace_endpoint_words(&self) -> (u64, u64, u64, u64, u64, u64) {
+        if self.is_v6 {
+            (
+                10, // AF_INET6
+                0,
+                u64::from_le_bytes(self.local_ip6[..8].try_into().unwrap()),
+                u64::from_le_bytes(self.local_ip6[8..].try_into().unwrap()),
+                u64::from_le_bytes(self.remote_ip6[..8].try_into().unwrap()),
+                u64::from_le_bytes(self.remote_ip6[8..].try_into().unwrap()),
+            )
+        } else {
+            let s6 = crate::net::ipv6::v4_to_mapped(self.local_ip);
+            let d6 = crate::net::ipv6::v4_to_mapped(self.remote_ip);
+            (
+                2, // AF_INET
+                ((self.local_ip as u64) << 32) | self.remote_ip as u64,
+                u64::from_le_bytes(s6[..8].try_into().unwrap()),
+                u64::from_le_bytes(s6[8..].try_into().unwrap()),
+                u64::from_le_bytes(d6[..8].try_into().unwrap()),
+                u64::from_le_bytes(d6[8..].try_into().unwrap()),
+            )
+        }
+    }
+
+    /// sock:inet_sock_set_state at the state-store funnel. The armed
+    /// gate keeps the endpoint marshalling off the disabled path (one
+    /// relaxed load when off).
+    #[inline]
+    fn trace_state_change(&self, new_state: TcpState) {
+        if !crate::trace::EVENT_INET_SOCK_SET_STATE.armed() {
+            return;
+        }
+        let (family, addrs4, s6lo, s6hi, d6lo, d6hi) = self.trace_endpoint_words();
+        let fpsp = (family << 48)
+            | (6u64 << 32) // IPPROTO_TCP
+            | ((self.local_port as u64) << 16)
+            | self.remote_port as u64;
+        crate::trace::trace_inet_sock_set_state(
+            self as *const TcpSocket as u64,
+            Self::ref_state(self.state),
+            Self::ref_state(new_state),
+            fpsp,
+            addrs4,
+            s6lo,
+            s6hi,
+            d6lo,
+            d6hi,
+        );
+    }
+
+    /// The state-store funnel: record the transition, then store.
+    pub fn set_state(&mut self, new_state: TcpState) {
+        if new_state != self.state {
+            self.trace_state_change(new_state);
+        }
+        self.state = new_state;
+    }
+
+    /// tcp:tcp_receive_reset — an acceptable RST reached the socket
+    /// (the reference's tcp_event_sk class): skaddr, the
+    /// family<<32|sport<<16|dport word, the v4 pair, the v6 pair, and
+    /// the sock-cookie analog (the socket address — Rux has no cookie
+    /// allocator; the address is the same stable while-alive
+    /// identity).
+    #[inline]
+    fn trace_receive_reset(&self) {
+        if !crate::trace::EVENT_TCP_RECEIVE_RESET.armed() {
+            return;
+        }
+        let (family, addrs4, s6lo, s6hi, d6lo, d6hi) = self.trace_endpoint_words();
+        let fsd =
+            (family << 32) | ((self.local_port as u64) << 16) | self.remote_port as u64;
+        let skaddr = self as *const TcpSocket as u64;
+        crate::trace::trace_tcp_receive_reset(skaddr, fsd, addrs4, s6lo, s6hi, d6lo, d6hi, skaddr);
+    }
+
+    /// tcp:tcp_destroy_sock — the socket destroy funnel (the same
+    /// tcp_event_sk class shape; sock_cookie = the socket address).
+    #[inline]
+    fn trace_destroy_sock(&self) {
+        if !crate::trace::EVENT_TCP_DESTROY_SOCK.armed() {
+            return;
+        }
+        let (family, addrs4, s6lo, s6hi, d6lo, d6hi) = self.trace_endpoint_words();
+        let fsd =
+            (family << 32) | ((self.local_port as u64) << 16) | self.remote_port as u64;
+        let skaddr = self as *const TcpSocket as u64;
+        crate::trace::trace_tcp_destroy_sock(skaddr, fsd, addrs4, s6lo, s6hi, d6lo, d6hi, skaddr);
+    }
+
+    /// tcp:tcp_retransmit_skb — a segment retransmitted at either
+    /// funnel (RTO timer or 3-dup-ACK fast retransmit). skbaddr
+    /// carries the retransmit queue entry's address (the TcpSendSeg —
+    /// the SKB analog); err is always 0 (the deferred-TX staging
+    /// returns no errno).
+    #[inline]
+    fn trace_retransmit(&self, skbaddr: u64) {
+        if !crate::trace::EVENT_TCP_RETRANSMIT_SKB.armed() {
+            return;
+        }
+        let (family, addrs4, s6lo, s6hi, d6lo, d6hi) = self.trace_endpoint_words();
+        let fsd =
+            (family << 32) | ((self.local_port as u64) << 16) | self.remote_port as u64;
+        crate::trace::trace_tcp_retransmit_skb(
+            skbaddr,
+            self as *const TcpSocket as u64,
+            Self::ref_state(self.state),
+            fsd,
+            addrs4,
+            s6lo,
+            s6hi,
+            d6lo,
+            d6hi,
+            0,
+        );
+    }
+
+    /// tcp:tcp_retransmit_skb at the SYN-retransmit funnel (the timer
+    /// tick's SYN_SENT arm — resend_syn re-derives the segment, so
+    /// skbaddr reports 0: this path has no queued buffer).
+    #[inline]
+    pub fn trace_retransmit_syn(&self) {
+        if !crate::trace::EVENT_TCP_RETRANSMIT_SKB.armed() {
+            return;
+        }
+        let (family, addrs4, s6lo, s6hi, d6lo, d6hi) = self.trace_endpoint_words();
+        let fsd =
+            (family << 32) | ((self.local_port as u64) << 16) | self.remote_port as u64;
+        crate::trace::trace_tcp_retransmit_skb(
+            0,
+            self as *const TcpSocket as u64,
+            Self::ref_state(self.state),
+            fsd,
+            addrs4,
+            s6lo,
+            s6hi,
+            d6lo,
+            d6hi,
+            0,
+        );
+    }
+
     // ==================== P1 IPv6: family-aware TX recording ====================
 
     /// Record a data/ctl segment honoring the socket's address family.
@@ -1323,7 +1503,7 @@ impl TcpSocket {
         if !self.bound {
             return Err(());
         }
-        self.state = TcpState::TCP_LISTEN;
+        self.set_state(TcpState::TCP_LISTEN);
         Ok(())
     }
 
@@ -1345,7 +1525,7 @@ impl TcpSocket {
 
         // Send SYN packet (first step of three-way handshake)
         self.send_syn(tx)?;
-        self.state = TcpState::TCP_SYN_SENT;
+        self.set_state(TcpState::TCP_SYN_SENT);
         // R32-N16: arm the retransmit timer so the timer tick can
         // retransmit a lost SYN (bounded by syn_retries). Without this a
         // single lost SYN parked the socket in SYN_SENT forever.
@@ -1371,7 +1551,7 @@ impl TcpSocket {
         self.rcv_nxt = 0;
 
         self.send_syn(tx)?;
-        self.state = TcpState::TCP_SYN_SENT;
+        self.set_state(TcpState::TCP_SYN_SENT);
         self.timers.start_retransmit(crate::config::TCP_RTO_DEFAULT_US);
 
         Ok(())
@@ -1709,11 +1889,11 @@ impl TcpSocket {
                     // Simultaneous close: FIN+ACK -> TIME_WAIT
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     let _ = self.send_ack(tx);
-                    self.state = TcpState::TCP_TIME_WAIT;
+                    self.set_state(TcpState::TCP_TIME_WAIT);
                     self.start_timewait_timer();
                 } else if valid_ack {
                     // ACK of our FIN -> FIN_WAIT2
-                    self.state = TcpState::TCP_FIN_WAIT2;
+                    self.set_state(TcpState::TCP_FIN_WAIT2);
                     // Data and/or FIN may follow
                     if !data.is_empty() {
                         self.handle_data_recv(tcp_hdr, data, tx)?;
@@ -1727,7 +1907,7 @@ impl TcpSocket {
                     // FIN without ACK -> CLOSING
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
                     let _ = self.send_ack(tx);
-                    self.state = TcpState::TCP_CLOSING;
+                    self.set_state(TcpState::TCP_CLOSING);
                 } else if !data.is_empty() {
                     self.handle_data_recv(tcp_hdr, data, tx)?;
                 }
@@ -1777,7 +1957,7 @@ impl TcpSocket {
                         tcp_hdr.window(),
                         tx,
                     ) {
-                        self.state = TcpState::TCP_TIME_WAIT;
+                        self.set_state(TcpState::TCP_TIME_WAIT);
                         self.start_timewait_timer();
                     }
                 }
@@ -1793,7 +1973,7 @@ impl TcpSocket {
                         tcp_hdr.window(),
                         tx,
                     ) {
-                        self.state = TcpState::TCP_CLOSE;
+                        self.set_state(TcpState::TCP_CLOSE);
                     }
                 }
             }
@@ -1846,7 +2026,7 @@ impl TcpSocket {
 
         // Send SYN-ACK (second step of three-way handshake)
         self.send_synack(self.rcv_nxt, tx)?;
-        self.state = TcpState::TCP_SYN_RECV;
+        self.set_state(TcpState::TCP_SYN_RECV);
 
         Ok(())
     }
@@ -1869,7 +2049,7 @@ impl TcpSocket {
 
         // Send ACK (third step of three-way handshake)
         self.send_ack(tx)?;
-        self.state = TcpState::TCP_ESTABLISHED;
+        self.set_state(TcpState::TCP_ESTABLISHED);
         // R32-N16: handshake complete — stop the SYN retransmit machinery
         // armed in connect().
         self.timers.stop_retransmit();
@@ -1894,7 +2074,7 @@ impl TcpSocket {
         // R14-7: the ACK acknowledges the SYN's sequence number — advance
         // snd_una in lockstep with send_synack's snd_nxt advance.
         self.snd_una = self.snd_una.wrapping_add(1);
-        self.state = TcpState::TCP_ESTABLISHED;
+        self.set_state(TcpState::TCP_ESTABLISHED);
         Ok(())
     }
 
@@ -2082,17 +2262,17 @@ impl TcpSocket {
         // State transition based on current state
         match self.state {
             TcpState::TCP_ESTABLISHED => {
-                self.state = TcpState::TCP_CLOSE_WAIT;
+                self.set_state(TcpState::TCP_CLOSE_WAIT);
                 // R32-B8: timestamp the CLOSE_WAIT entry so the timer tick
                 // can bound orphaned half-closed connections.
                 self.timers.close_wait_since = crate::drivers::timer::get_jiffies();
             }
             TcpState::TCP_FIN_WAIT2 => {
-                self.state = TcpState::TCP_TIME_WAIT;
+                self.set_state(TcpState::TCP_TIME_WAIT);
                 self.start_timewait_timer();
             }
             TcpState::TCP_CLOSING => {
-                self.state = TcpState::TCP_TIME_WAIT;
+                self.set_state(TcpState::TCP_TIME_WAIT);
                 self.start_timewait_timer();
             }
             _ => {}
@@ -2103,6 +2283,11 @@ impl TcpSocket {
 
     /// Handle received RST packet (RFC 793 §3.9)
     fn handle_rst_recv(&mut self) {
+        // Tracepoint (round 4): the window-checked RST funnel — the
+        // reference fires tcp_receive_reset from tcp_reset(). Fired at
+        // entry; the ignore arm below (CLOSE/LISTEN) still records,
+        // matching the reference's acceptance-funnel placement.
+        self.trace_receive_reset();
         match self.state {
             TcpState::TCP_SYN_SENT => {
                 // R34: RFC 793 — in SYN_SENT an RST (with an acceptable
@@ -2113,7 +2298,7 @@ impl TcpSocket {
                 // W3: record ECONNREFUSED — a blocking connect()/send()
                 // and getsockopt(SO_ERROR) must see WHY.
                 self.pending_error = 111; // ECONNREFUSED
-                self.state = TcpState::TCP_CLOSE;
+                self.set_state(TcpState::TCP_CLOSE);
                 self.send_buffer.clear();
                 self.recv_buffer.clear();
                 self.retrans_queue.clear();
@@ -2121,7 +2306,7 @@ impl TcpSocket {
             TcpState::TCP_SYN_RECV => {
                 // If ACK is acceptable, abort connection
                 self.pending_error = 104; // ECONNRESET
-                self.state = TcpState::TCP_CLOSE;
+                self.set_state(TcpState::TCP_CLOSE);
             }
             TcpState::TCP_ESTABLISHED
             | TcpState::TCP_FIN_WAIT1
@@ -2129,7 +2314,7 @@ impl TcpSocket {
             | TcpState::TCP_CLOSE_WAIT => {
                 // Abort connection
                 self.pending_error = 104; // ECONNRESET
-                self.state = TcpState::TCP_CLOSE;
+                self.set_state(TcpState::TCP_CLOSE);
                 // Clear buffers
                 self.send_buffer.clear();
                 self.recv_buffer.clear();
@@ -2140,7 +2325,7 @@ impl TcpSocket {
             | TcpState::TCP_TIME_WAIT => {
                 // In these states, just close — no error (the close was
                 // locally initiated)
-                self.state = TcpState::TCP_CLOSE;
+                self.set_state(TcpState::TCP_CLOSE);
             }
             _ => {
                 // TCP_CLOSE, TCP_LISTEN, TCP_SYN_SENT — ignore RST
@@ -2255,7 +2440,7 @@ impl TcpSocket {
     pub fn close(&mut self, tx: &mut TcpTxBatch) {
         match self.state {
             TcpState::TCP_ESTABLISHED => {
-                self.state = TcpState::TCP_FIN_WAIT1;
+                self.set_state(TcpState::TCP_FIN_WAIT1);
                 let _ = self.tx_packets(tx);
                 if self.send_buffer.is_empty() {
                     let _ = self.send_fin(tx);
@@ -2264,7 +2449,7 @@ impl TcpSocket {
                 }
             }
             TcpState::TCP_CLOSE_WAIT => {
-                self.state = TcpState::TCP_LAST_ACK;
+                self.set_state(TcpState::TCP_LAST_ACK);
                 // R32-B8: leaving CLOSE_WAIT — disarm the orphan timeout.
                 self.timers.close_wait_since = 0;
                 let _ = self.tx_packets(tx);
@@ -2275,7 +2460,7 @@ impl TcpSocket {
                 }
             }
             _ => {
-                self.state = TcpState::TCP_CLOSE;
+                self.set_state(TcpState::TCP_CLOSE);
             }
         }
     }
@@ -2681,13 +2866,18 @@ impl TcpSocket {
         // sampled (remove_acked_segments filters on retries == 0). The
         // stale tx_time used to stay, underestimating RTO into
         // spurious-retransmit loops.
-        let (seg_seq, seg_data) = {
+        let (seg_seq, seg_skb, seg_data) = {
             let Some(seg) = self.retrans_queue.front_mut() else {
                 return;
             };
             seg.retries += 1;
-            (seg.seq, seg.data.clone())
+            // Round 4 tracepoint: the queue entry's address (the SKB
+            // analog); the record fires below, after the queue borrow
+            // ends.
+            (seg.seq, seg as *const TcpSendSeg as u64, seg.data.clone())
         };
+        // Tracepoint (round 4): the 3-dup-ACK fast-retransmit funnel.
+        self.trace_retransmit(seg_skb);
         let _ = self.tx_segment(tx, seg_seq, &seg_data);
     }
 
@@ -2783,6 +2973,11 @@ impl TcpSocket {
         // First get needed info to avoid borrow conflicts
         let should_close;
 
+        // Round 4 tracepoint: the retransmitted queue entry's address
+        // (set while the queue borrow is live; the record fires after
+        // the borrow ends).
+        let mut retr_skb = 0u64;
+
         // Copy the endpoint scalars out of self before the &mut borrow of
         // the retrans queue (P1: family-aware recording needs them).
         let (ep_v6, ep_lip, ep_rip, ep_lip6, ep_rip6, ep_lport, ep_rport, ep_rcv_nxt, ep_rcv_wnd) =
@@ -2826,6 +3021,13 @@ impl TcpSocket {
                         ep_rcv_wnd,
                         &seg.data,
                     );
+                    // Tracepoint (round 4): the RTO retransmit funnel —
+                    // capture the queue entry's address (the SKB
+                    // analog); the record fires below, after the queue
+                    // borrow ends. Fired under the table lock, which the
+                    // per-CPU SPSC ring tolerates (record takes no
+                    // locks).
+                    retr_skb = seg as *const TcpSendSeg as u64;
                     // Increment retransmit count
                     seg.retries += 1;
                 }
@@ -2838,9 +3040,15 @@ impl TcpSocket {
             // W3: record ETIMEDOUT — a blocked writer / SO_ERROR reader
             // must see why the connection died.
             self.pending_error = 110; // ETIMEDOUT
-            self.state = TcpState::TCP_CLOSE;
+            self.set_state(TcpState::TCP_CLOSE);
             self.timers.stop_retransmit();
             return;
+        }
+
+        // A retransmission was staged (the should_close arm returned) —
+        // record it.
+        if retr_skb != 0 {
+            self.trace_retransmit(retr_skb);
         }
 
         // Congestion control: timeout handling
@@ -3055,7 +3263,7 @@ impl TcpConnectionManager {
                                 | TcpState::TCP_CLOSE_WAIT
                         )
                     {
-                        socket.state = TcpState::TCP_CLOSE;
+                        socket.set_state(TcpState::TCP_CLOSE);
                         socket.send_buffer.clear();
                         socket.recv_buffer.clear();
                         socket.retrans_queue.clear();
@@ -3100,7 +3308,7 @@ impl TcpConnectionManager {
                     new_socket.local_ip = dest_ip;
                     new_socket.remote_port = src_port;
                     new_socket.remote_ip = src_ip;
-                    new_socket.state = TcpState::TCP_LISTEN;
+                    new_socket.set_state(TcpState::TCP_LISTEN);
                     new_socket.parent_fd = Some(parent);
                     // State machine drives itself from LISTEN: SYN →
                     // handle_syn_recv → sends SYN-ACK → SYN_RECV.
@@ -3181,7 +3389,7 @@ impl TcpConnectionManager {
                                 | TcpState::TCP_CLOSE_WAIT
                         )
                     {
-                        socket.state = TcpState::TCP_CLOSE;
+                        socket.set_state(TcpState::TCP_CLOSE);
                         socket.send_buffer.clear();
                         socket.recv_buffer.clear();
                         socket.retrans_queue.clear();
@@ -3224,7 +3432,7 @@ impl TcpConnectionManager {
                     new_socket.local_ip6 = *dest6;
                     new_socket.remote_port = src_port;
                     new_socket.remote_ip6 = *src6;
-                    new_socket.state = TcpState::TCP_LISTEN;
+                    new_socket.set_state(TcpState::TCP_LISTEN);
                     new_socket.parent_fd = Some(parent);
                     let opts = tcp_option_slice(skb, tcp_hdr.header_len());
                     let _ = new_socket.handle_packet(&tcp_hdr, opts, &[], tx);
@@ -3401,6 +3609,14 @@ impl TcpSocketTable {
     /// Free socket (public for timer cleanup)
     pub fn free(&mut self, fd: usize) {
         if fd < self.count {
+            // Tracepoint (round 4): the single destroy funnel (the fd
+            // close path and the timer's orphan sweep both pass here) —
+            // the reference's tcp_destroy_sock fires from
+            // tcp_v4_destroy_sock. Fired under the table lock; the
+            // per-CPU SPSC ring takes no locks.
+            if let Some(sock) = self.sockets[fd].as_ref() {
+                sock.trace_destroy_sock();
+            }
             self.sockets[fd] = None;
         }
     }
@@ -4748,16 +4964,16 @@ pub fn tcp_v4_err(
                             match icmp_code {
                                 crate::net::icmp::icmp_code::HOST_UNREACH => {
                                     socket.pending_error = 113; // EHOSTUNREACH
-                                    socket.state = TcpState::TCP_CLOSE;
+                                    socket.set_state(TcpState::TCP_CLOSE);
                                 }
                                 crate::net::icmp::icmp_code::PORT_UNREACH => {
                                     // Peer refused: the classic RST-equivalent
                                     socket.pending_error = 111; // ECONNREFUSED
-                                    socket.state = TcpState::TCP_CLOSE;
+                                    socket.set_state(TcpState::TCP_CLOSE);
                                 }
                                 crate::net::icmp::icmp_code::NET_UNREACH => {
                                     socket.pending_error = 101; // ENETUNREACH
-                                    socket.state = TcpState::TCP_CLOSE;
+                                    socket.set_state(TcpState::TCP_CLOSE);
                                 }
                                 _ => {
                                     // FRAG_NEEDED etc. — just record, don't abort
@@ -4767,7 +4983,7 @@ pub fn tcp_v4_err(
                         crate::net::icmp::icmp_type::TIME_EXCEEDED => {
                             // TTL expired — abort
                             socket.pending_error = 110; // ETIMEDOUT
-                            socket.state = TcpState::TCP_CLOSE;
+                            socket.set_state(TcpState::TCP_CLOSE);
                         }
                         _ => {}
                     }

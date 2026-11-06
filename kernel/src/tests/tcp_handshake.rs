@@ -95,14 +95,14 @@ fn test_tcp_state_machine() {
     }
 
     // State transition: LISTEN -> SYN_RECV (server)
-    socket.state = TcpState::TCP_SYN_RECV;
+    socket.set_state(TcpState::TCP_SYN_RECV);
     if socket.state != TcpState::TCP_SYN_RECV {
         test_fail("TCP state machine", "not SYN_RECV");
         return;
     }
 
     // State transition: SYN_RECV -> ESTABLISHED (server)
-    socket.state = TcpState::TCP_ESTABLISHED;
+    socket.set_state(TcpState::TCP_ESTABLISHED);
     if socket.state == TcpState::TCP_ESTABLISHED {
         test_pass("TCP state machine");
     } else {
@@ -126,7 +126,7 @@ fn test_tcp_client_handshake() {
     socket.remote_port = 80;
     socket.snd_nxt = 12345;
     socket.snd_una = socket.snd_nxt;
-    socket.state = TcpState::TCP_SYN_SENT;
+    socket.set_state(TcpState::TCP_SYN_SENT);
 
     // Verify sequence number
     if socket.snd_nxt == 0 {
@@ -142,7 +142,7 @@ fn test_tcp_client_handshake() {
     socket.rcv_nxt = 54321;
     socket.snd_una = socket.snd_nxt.wrapping_add(1);
     socket.snd_nxt = socket.snd_una;
-    socket.state = TcpState::TCP_ESTABLISHED;
+    socket.set_state(TcpState::TCP_ESTABLISHED);
 
     if socket.state == TcpState::TCP_ESTABLISHED {
         test_pass("TCP client handshake");
@@ -164,7 +164,7 @@ fn test_tcp_server_handshake() {
     }
 
     // Simulate receiving SYN packet
-    socket.state = TcpState::TCP_SYN_RECV;
+    socket.set_state(TcpState::TCP_SYN_RECV);
     socket.snd_nxt = 54321;
     socket.snd_una = socket.snd_nxt;
 
@@ -174,7 +174,7 @@ fn test_tcp_server_handshake() {
     }
 
     // Simulate receiving ACK packet
-    socket.state = TcpState::TCP_ESTABLISHED;
+    socket.set_state(TcpState::TCP_ESTABLISHED);
 
     if socket.state == TcpState::TCP_ESTABLISHED {
         test_pass("TCP server handshake");
