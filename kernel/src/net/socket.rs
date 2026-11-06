@@ -288,6 +288,16 @@ pub struct Socket {
     /// for POLLRDHUP/EPOLLRDHUP must see it (LTP epoll_wait05 shuts the
     /// read side and expects the RDHUP event).
     pub shut_rd: core::sync::atomic::AtomicBool,
+    /// Identity of this socket's open file description (File.file_id;
+    /// 0 until the fd pairing). The RX-path rise hooks
+    /// (wake_tcp_matches / wake_udp_matches) notify the epoll registry
+    /// with it: without that notify, a readiness rise landing while NO
+    /// task sleeps on the wait queue never re-arms edge-triggered
+    /// interests — the ET entry's last_reported mask stayed set and
+    /// every later epoll_wait suppressed the ready fd (the EPOLLET
+    /// lost-edge family; probe: TCP/UDP after-gap 1/60 reported, Linux
+    /// 60/60).
+    pub file_id: core::sync::atomic::AtomicU64,
 }
 
 // SAFETY: Socket uses Spinlocks for all mutable shared state.
@@ -320,6 +330,7 @@ impl Socket {
             options: Spinlock::new(SocketOptions::new()),
             more_stage: Spinlock::new(alloc::vec::Vec::new()),
             shut_rd: core::sync::atomic::AtomicBool::new(false),
+            file_id: core::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1802,6 +1813,14 @@ impl SocketTable {
             if let Some(s) = slot {
                 if s.tcp_fd.load(core::sync::atomic::Ordering::Acquire) == tcp_fd {
                     s.wait_queue.wake_up_all();
+                    // EPOLLET lost-edge fix: the rise must also re-arm
+                    // edge-triggered epoll interests and wake epoll
+                    // sleepers (reference: ep_poll_callback rides every
+                    // sk wake). See the file_id field note.
+                    let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
                 }
             }
         }
@@ -1824,6 +1843,10 @@ impl SocketTable {
                     let sleepers =
                         s.wait_queue.has_sleepers() as u32;
                     let woken = s.wait_queue.wake_up_all();
+                    let fid = s.file_id.load(core::sync::atomic::Ordering::Acquire);
+                    if fid != 0 {
+                        crate::syscall::misc::epoll_notify_file(fid);
+                    }
                     crate::trace::trace_net_udp_wake(
                         udp_fd,
                         matched,
@@ -1950,6 +1973,11 @@ pub fn sys_socket_create(domain: i32, type_: i32, protocol: i32) -> Result<usize
     // Clone Arc and convert to raw pointer to keep the Socket alive
     // independently of the socket table entry.
     file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
+    // Bind the File's generation id for the RX-rise epoll notify (the
+    // EPOLLET lost-edge family — see the file_id field note).
+    socket
+        .file_id
+        .store(file.file_id, core::sync::atomic::Ordering::Release);
 
     // R14-14 (MED-10): unwind the proto slot and the raw Arc reference on
     // fdtable failures — each error exit used to leak BOTH permanently.
@@ -2068,6 +2096,11 @@ pub fn socket_create_accepted(tcp_fd: i32, flags: i32) -> Result<usize, i32> {
     let file = Arc::new(File::new(FileFlags::new(flags_bits)));
     file.set_ops(&SOCKET_OPS);
     file.set_private_data(Arc::into_raw(Arc::clone(&socket)) as *mut u8);
+    // Bind the File's generation id for the RX-rise epoll notify (the
+    // EPOLLET lost-edge family — see the file_id field note).
+    socket
+        .file_id
+        .store(file.file_id, core::sync::atomic::Ordering::Release);
 
     // R22-5: unwind on fdtable failures — the raw Arc + the protocol-
     // slot pin (R21-N4) leak on every error exit otherwise.
