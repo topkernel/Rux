@@ -922,6 +922,23 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
 
         // Loop write until all data written or error encountered
         while total_written < count {
+            // Reference fs/pipe.c pipe_write: a reader-less pipe ends the
+            // write on EVERY iteration (SIGPIPE, then the partial count or
+            // EPIPE). Checking only around the sleep below was not enough:
+            // when the last reader closed while this writer was copying,
+            // the buffer stayed full, the pre-sleep recheck saw
+            // read_closed and `continue`d back here, and the loop spun
+            // forever without reaching a signal check (unkillable writer,
+            // CPU lost with kernel preemption off).
+            if pipe.is_read_closed() {
+                if let Some(current) = crate::sched::current() {
+                    let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                }
+                if total_written > 0 {
+                    return total_written as isize;
+                }
+                return -(crate::errno::constants::EPIPE) as isize;
+            }
             let remaining = count - total_written;
 
             // POSIX PIPE_BUF atomicity: a write of <= PIPE_BUF bytes must be
@@ -1051,18 +1068,8 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
                     return -(crate::errno::constants::EINTR) as isize;
                 }
 
-                // Check if read end closed while we were sleeping
-                if pipe.is_read_closed() {
-                    if total_written > 0 {
-                        return total_written as isize;
-                    }
-                    if let Some(current) = crate::sched::current() {
-                        let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
-                    }
-                    return -(crate::errno::constants::EPIPE) as isize;
-                }
-
-                // Retry write
+                // Retry write (a reader that closed while we slept is
+                // handled at the top of the loop)
                 continue;
             }
         }
@@ -1224,7 +1231,12 @@ pub fn pipe_file_poll(file: &File, events: u16) -> u16 {
             }
         }
         if can_write && events & POLLOUT != 0 {
-            if pipe.buffer.lock().available_write() > 0 {
+            // Writable means a PIPE_BUF write would not block (reference
+            // pipe_poll: EPOLLOUT only while a whole buffer slot is free).
+            // With "any byte free" a non-blocking 4 KiB writer saw POLLOUT,
+            // got EAGAIN from the atomic-write rule, and polled again — a
+            // busy loop in level-triggered event loops.
+            if pipe.buffer.lock().available_write() >= PIPE_BUF {
                 ready |= POLLOUT | POLLWRNORM;
             }
         }

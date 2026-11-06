@@ -3,7 +3,7 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
-use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_read, pipe_file_write};
+use crate::fs::pipe::{Pipe, PipeBuffer, create_pipe, pipe_file_poll, pipe_file_read, pipe_file_write};
 use crate::fs::file::File;
 use super::test_group_start;
 
@@ -106,5 +106,21 @@ pub fn test_pipe2() {
         test_assert_eq!(r, 20, "both small writes are readable (FIFO order)");
         test_assert_eq!(buf[..10], [0x01u8; 10], "first chunk order preserved");
         test_assert_eq!(buf[10..], [0x02u8; 10], "second chunk order preserved");
+    }
+
+    // Test 11: POLLOUT means a PIPE_BUF (4096-byte) write fits — reference
+    // pipe_poll reports EPOLLOUT only while a whole buffer slot is free.
+    {
+        const POLLOUT: u16 = 0x004;
+        let (read_file, write_file) = create_pipe();
+        let cap = pipe_of(&write_file).capacity();
+        let fill = alloc::vec![0x5au8; cap - 100];
+        let w = pipe_file_write(&write_file, &fill);
+        test_assert_eq!(w, (cap - 100) as isize, "pipe filled to capacity - 100");
+        test_assert_eq!(pipe_file_poll(&write_file, POLLOUT) & POLLOUT, 0, "no POLLOUT with < PIPE_BUF free");
+        let mut drain = alloc::vec![0u8; 4000];
+        let r = pipe_file_read(&read_file, &mut drain);
+        test_assert_eq!(r, 4000, "drained 4000 bytes");
+        test_assert!(pipe_file_poll(&write_file, POLLOUT) & POLLOUT != 0, "POLLOUT once PIPE_BUF is free");
     }
 }
