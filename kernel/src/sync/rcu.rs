@@ -374,6 +374,36 @@ fn wait_qs_sleepy(gen: u32, max_ms: u64, site: &'static str) -> bool {
                     RCU_QS_GEN[2].load(Ordering::Acquire),
                     RCU_QS_GEN[3].load(Ordering::Acquire),
                 );
+                // Name the monopolist: each NON-quiescent online CPU's
+                // current task (comm/pid/preempt_count). A stuck qs with a
+                // non-idle current means that task has not returned to
+                // user or scheduled since its last report — the phantom
+                // preempt-count / kernel busy-loop family.
+                for c in 0..4 {
+                    if !crate::sched::sched::cpu_online(c)
+                        || crate::sched::sched::cpu_running_idle(c)
+                        || cpu_quiescent(c, gen)
+                    {
+                        continue;
+                    }
+                    let cur = crate::sched::sched::cpu_state(c).current;
+                    if !cur.is_null() {
+                        let comm: &[u8; 16] = unsafe { (*cur).comm() };
+                        let comm_s = core::str::from_utf8(comm)
+                            .unwrap_or("?");
+                        let nr = unsafe { (*cur).last_syscall_nr.load(Ordering::Relaxed) };
+                        let a0 = unsafe { (*cur).last_syscall_a0.load(Ordering::Relaxed) };
+                        crate::pr_warn!(
+                            "RCU-STUCK-CPU{} task={} pid={} preempt={} lastsys={} a0={:#x}",
+                            c,
+                            comm_s.split(char::from(0)).next().unwrap_or("?"),
+                            unsafe { (*cur).pid() },
+                            unsafe { (*cur).preempt_count() },
+                            nr,
+                            a0
+                        );
+                    }
+                }
                 crate::pr_warn!(
                     "RCU-GP-BOUND site={} waited>{}ms (sleepy): no full quiescent round gen={} qs={},{},{},{} on={},{},{},{}",
                     site,
