@@ -6260,3 +6260,146 @@ ohc70 gates unchanged (same tree as ohc69 verdict commits).
   pid-gated auto-arm) + FUX-CHAIN shape detection; arm from t=1 to
   catch samgr's own A-trace before the wedge (ohc72's wedge beat the
   18s delay).
+
+## 58TH SESSION — the verdict measurement landed: the wedge is notify-never-fires (branch 2), the futex layer is clean; TWO boots passed appfwk.ready for the first time; the frontier moved to the launcher-spawn gate (2026-11-06 21:26-23:0x, branch oh-crash @ a5e33790+)
+
+### 0. What the 58th inherited and corrected
+
+- The 57th's "B ring = 0x7ff0004dac08-class" was a MISREAD: ohc58's walk
+  windows show 0x7ff0004dac18 is a WAITER NODE in A's ring whose (node-
+  0x10) slot holds a heap pointer (0x7ff0006153a0), not a vtable. B's
+  address was never actually shape-detected in any samgr walk.
+- The FFRT-worker park words decode as MUSL MUTEX WORDS
+  (fval=0x80000010 = fast-held|waiters, OH's patched musl), on 1-page
+  heap regions — the worker parks trying to TAKE the queue-internal
+  mutex. The park word IS the B-class lock word (per boot, per worker;
+  NOT stable across boots: 0x7ff000b0488c in ohc70 vs 0x7ff0009b3f8c in
+  ohc72), so a fixed-address watch can never cover it — the census
+  auto-arm (below) replaced that plan.
+- musl NEVER uses FUTEX_WAIT_BITSET: __timedwait_cp converts absolute
+  deadlines to RELATIVE timespecs and issues plain FUTEX_WAIT. Every
+  wedge park is fop=0x80 (WAIT|PRIVATE), timeouts are relative values
+  (59.99s = the 60s watchdogs). The WAIT_BITSET|CLOCK_MONOTONIC check
+  the mission asked for is structurally N/A for this image (one latent
+  divergence noted in §5).
+
+### 1. INSTRUMENTS LANDED (dfx-gated, two commits)
+
+- **FUXW per-CPU rings**: every WAKE-class futex syscall system-wide
+  from t=0 (cmd, uaddr, tid/tgid, ret) in 4 x 16k-entry rings keyed by
+  cpu_id (a global ring serialized wake syscalls across CPUs — the
+  wedge is timing-sensitive and must not be measured through a
+  cross-CPU choke point). The census dumps the birth window
+  (park_j-2s..+5s) of the top stuck groups: "WAKE on the word with
+  ret>=1 while the waiter never returned" vs "ret==0 with the waiter
+  linked" vs "no WAKE near the birth at all". Closes the FXRS arming
+  gap (FXRS starts 3+s AFTER a word parks; the lost wake, if any,
+  happens at birth).
+- **FUXW-SUM**: waiter-pool occupancy O(1) counter (alloc/free/woken-
+  exit paths) + last-exhaustion jiffies — verdict input for the
+  pool-full blindness hypothesis.
+- **fuxwatch2=0xADDR** cmdline override + census auto-arm of slot 2 on
+  the first stuck FFRT-worker park word in the registered samgr pid
+  (the B-class word), + FUXWATCH2_HITS budget accounting.
+- **censusd spawn fix**: the arm rounds live in the censusd kthread,
+  which only spawned lazily on the first DEFERRED print — ohc73/74
+  never queued one, so watches NEVER armed (0 FW lines despite
+  FUXWATCH2-AUTO). fuxwatch/fuxwatch2 parse now spawns censusd
+  eagerly. ohc75 confirmed: 982 FW lines.
+
+### 2. THE VERDICT MATRIX, ANSWERED (ohc73 + ohc75, and ohc70/72 re-reads)
+
+- **Branch 2: NO unlock writes, NO WAKE syscall ever fires on the stuck
+  words.** Evidence: (a) FUXW ring: ever_word=0 for every samgr/FFRT
+  stuck word (the 19 word-ops on bluetooth's 0x7ff084355854 were OTHER
+  processes' same-VA copies — per-process same-offset allocations; the
+  mm must filter, tgid 388 itself issued ZERO ops after the park);
+  (b) FXRS in ohc70/75: post-park total syscall silence on stuck
+  words; (c) anywoken=0 on every stuck park — no waiter was ever
+  woken-flagged and failed to return; (d) the wake machinery works
+  THROUGHOUT the wedge: 72-260 wakes/s delivered system-wide (ring
+  newest keeps advancing), 10k/s pre-wedge.
+- **Timers fine**: no timed park ever outlives its deadline (watchdog
+  60s parks cap at 57s visible age, then re-issue). **Pool fine**:
+  70-227/8192 typical, last_full never set (ohc75's counter overshot
+  from a missed decrement in the woken-exit path — fixed; ohc73/74
+  pre-fix sweeps agree). **WAIT_BITSET: unused by this image.**
+- ohc75's FW trace on A (0x7ff0004862c0, samgr listenerMapLock_):
+  clean acquire(cmpxchg old=0)/release(old=1) pairs from samgr main
+  ALL BOOT — the first boot in the campaign where A's lifecycle is
+  observed healthy end-to-end. The classic wedge did not form.
+- **Conclusion: the kernel futex layer is exonerated for this wedge
+  (47th's REQUEUE parity + audited wait/wake ordering hold). The wedge
+  is a userspace deadlock cascade whose root notify never EXECUTES
+  because every thread that would run it is itself parked. The kernel-
+  visible divergence that starts the cascade lives upstream — next
+  hunt is the syscall/behavior diff vs the reference in the pre-wedge
+  window, or (what actually happened this session, §3) the frontier
+  simply moves when timing shifts.**
+
+### 3. THE HEADLINE: ohc74 AND ohc75 PASSED bootevent.appfwk.ready
+
+First boots in the campaign's history to do so (all 57 predecessors'
+yardstick stopped before it). Both then stall BEFORE the launcher:
+- ohc74: appfwk.ready + SA:1301 init finished + bootanimation.ready +
+  FINISHED; pixels frozen at shot-181==shot-300; NO stuck futex parks
+  at ANY census burst (system-wide, the whole boot — pool ~212, all
+  churn); "launcher" never appears in the serial; init never prints
+  ServiceStart starting:launcher. NOT a futex wedge — an event-driven
+  stall.
+- ohc75: same ladder (appfwk + SA:1301 + bootanimation.finished), FW
+  trace healthy on A, ends with appspawn's kickdog loop ("App enable
+  -1") and foundation MAIN (tid 1016) parked 601s in IOCTL-BWR with
+  68/68 pending writes, last BWR a BC_TRANSACTION at t≈97 —
+  foundation's launcher-spawn request cannot be delivered into a
+  backlogged target todo. The 59th's entry point: WHO owes foundation
+  that reply/drain — TXN-HANG-BWR end-state censuses are on disk.
+- Boot-outcome sample this session (same rig, system-lb5 +
+  userdata-fresh2, SMP2 KVM, dfx=fuxstuck,txnhunt): ohc73 classic
+  wedge (OS_IPC_0/1 parked 654s); ohc74 pass-appfwk; ohc75 pass-appfwk;
+  ohc76 slow-stall pre-appfwk (only 21 stuck threads, samgr clean).
+  The classic wedge receded to 1/4 on the new builds. Attributable
+  cause unknown — the only kernel diffs are dfx-gated instruments (no
+  behavior change off the dfx flags); timing sensitivity is real, and
+  the sample is small. Do NOT claim it fixed; DO re-run the wedge-rate
+  on these builds before hunting the old shape again.
+- Census artifact documented: a stuck waiter can be INVISIBLE for ~1
+  min (ohc73: OS_IPC linked at j=4505, first printed t=99 despite age
+  >=3s at every burst) — phase B's for_each_task_try skips its pid
+  bucket under contention, tgid stays 0, the samgr graph filter drops
+  it. Ages and park_j remain trustworthy; group visibility does not.
+
+### 4. Gates
+
+x86_64 / riscv64 / aarch64 builds rc=0; riscv64 `make test` ALL TESTS
+PASSED. All instrument code is behind dfx=fuxstuck / fuxwatch params —
+zero cost on plain boots (one switch load per wake op, one per alloc/
+free/woken-exit).
+
+### 5. For the 59th
+
+1. The launcher-spawn gate: foundation main's 601s IOCTL-BWR with
+   68/68 pending (ohc75) is the sharpest anchor — decide whether OUR
+   binder write path stalls a delivery the reference completes (async
+   space accounting? todo backpressure?) or the target proc is
+   userspace-dead (same notify-never-fires class one level up). The
+   FUXW ring + TXN-HANG-BWR end-state censuses are on disk for ohc74/
+   75/76.
+2. Re-run 2-3 plain wedge-rate boots on THIS tree (dfx off) vs the
+   57th's tree before trusting the wedge recession.
+3. Latent (not-this-wedge) futex divergence worth a small fix someday:
+   futex_parse_timeout treats absolute WAIT_BITSET deadlines as
+   jiffies-since-boot; correct for CLOCK_MONOTONIC, WRONG for
+   FUTEX_CLOCK_REALTIME once wall_epoch_offset is set (CLOCK_REALTIME
+   = monotonic + wall offset since FIX8). musl never issues that
+   shape; glibc binaries would.
+4. The 56th's queued TCP/UDP+signalfd epoll_notify_file wiring and
+   the oh-int chunker cherry-pick remain open (carried from §6/57).
+
+### 6. Boots this session
+
+ohc73-ohc76 (4 KVM boots, system-lb5 + userdata-fresh2, LOGLEVEL7,
+dfx=fuxstuck,txnhunt; fuxwatch=0x7ff0004862c0,1). Serial logs, shots,
+and marker files under run/oh-ohc7[3-6]-*.log. No QEMU left running
+beyond the drivers' own lifetimes; no behavior changes outside dfx
+gates.
