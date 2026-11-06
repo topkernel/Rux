@@ -108,6 +108,7 @@ macro_rules! debug_switch_table {
             SyncGuard => "syncguard",
             SyncWatch => "syncwatch",
             FuxStuck => "fuxstuck",
+            LockDep => "lockdep",
         }
     };
 }
@@ -547,9 +548,16 @@ pub enum DebugSwitch {
     /// adjudication for the OH post-creation stall web (useriam FFRT /
     /// DB_TaskExecutor families). Zero cost when off.
     FuxStuck,
+    /// lockdep-lite P0 (debug/lockdep.rs): validate the declared
+    /// lock-order registry (the machine-readable mirror of
+    /// docs/architecture/lock-ordering.md) at boot and report the
+    /// result. P0 has no hot-path code; runtime acquire tracking is
+    /// the P1 cargo feature per
+    /// docs/development/lockdep-lite-design.md. Zero cost when off.
+    LockDep,
 }
 
-const SWITCH_COUNT: usize = 60;
+const SWITCH_COUNT: usize = 61;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -654,6 +662,7 @@ impl DebugSwitch {
             DebugSwitch::SyncGuard => 57,
             DebugSwitch::SyncWatch => 58,
             DebugSwitch::FuxStuck => 59,
+            DebugSwitch::LockDep => 60,
         }
     }
 

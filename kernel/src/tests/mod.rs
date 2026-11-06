@@ -224,6 +224,9 @@ pub mod mount_flags;
 #[cfg(feature = "unit-test")]
 pub mod percpu;
 pub mod lockkey;
+/// lockdep-lite P0 registry tests (declared-order validator negative
+/// halves + the lockkey impl mirror pin).
+pub mod lockdep;
 #[cfg(feature = "unit-test")]
 pub mod sync_locks;
 
@@ -508,6 +511,12 @@ pub fn run_all_tests() {
     // mechanics + the GRQ claim pattern.
     test_group_start("lockkey");
     lockkey::test_lockkey();
+
+    // lockdep-lite P0: the declared lock-order registry validates
+    // clean, and the validator's negative halves fire on synthetic
+    // tables (design doc §10).
+    test_group_start("lockdep");
+    lockdep::test_lockdep();
 
     // Sync primitives (review-s2-c): SeqLock writer-guard accounting
     // (the try_write fix) + RwSpinlock two-phase write mechanics.
