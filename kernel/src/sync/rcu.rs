@@ -111,8 +111,22 @@ pub fn rcu_read_unlock() {
 // Public API: callback registration
 // ============================================================================
 
-/// Register an RCU callback. After all CPUs pass through a quiescent state,
-/// `head.func` will be called with `head` as the argument from softirq context.
+/// Register an RCU callback. **CONTRACT WARNING (perf-gap-hunt r11
+/// finding): the current softirq handler fires callbacks at the next
+/// RCU softirq WITHOUT waiting for any grace period** — despite what
+/// the original comment below promised. Callbacks whose correctness
+/// hinges on a full grace period (freeing objects a lock-free reader
+/// may still be walking) MUST NOT use this; that shape needs the
+/// explicit grace waits (`synchronize_rcu*`) plus a deferral mechanism
+/// of its own (see mm/deferred_free.rs, which replaced a call_rcu idea
+/// with wall-clock deferral for exactly this reason, and fs/fdreap.rs,
+/// which built its own grace-then-drain queue). The r11 path-memo v3
+/// experiment UAF-panicked the SMP test rig by trusting the promise
+/// below; the doc is kept as the intended long-term contract.
+///
+/// Original (intended, NOT yet implemented) contract: after all CPUs
+/// pass through a quiescent state, `head.func` will be called with
+/// `head` as the argument from softirq context.
 ///
 /// # Safety
 /// - `head` must remain valid until the callback executes.
