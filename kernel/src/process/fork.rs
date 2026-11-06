@@ -153,15 +153,27 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                     // FP since its switch-in). With TS set the saved
                     // image in thread.fpu is already the parent's
                     // current state (never dirtied) — and xsave under TS
-                    // would trap anyway. The child still receives the
-                    // clean initial image (mark_fpu_clean), unchanged.
+                    // would trap anyway.
                     if !crate::arch::cpu::ts_set() {
                         (*parent_task).thread_mut().fpu_save_for_switch();
                     }
+                    // The child inherits that image (reference fpu_clone;
+                    // POSIX: fork and pthread_create inherit the FP
+                    // environment — MXCSR rounding/FTZ/DAZ, the x87
+                    // control word). mark_fpu_clean() here replaced the
+                    // copy with the ABI-initial image: on riscv64/aarch64
+                    // it only sets the FS status, on x86_64 it rewrites
+                    // the image. A parent that never touched FP has no
+                    // valid image; the child gets the initial one.
+                    let pvalid = (*parent_task).thread().fpu_valid;
                     let pfpu = (*parent_task).thread().fpu;
                     let ct = task.thread_mut();
-                    ct.fpu.bytes.copy_from_slice(&pfpu.bytes);
-                    ct.mark_fpu_clean();
+                    if pvalid {
+                        ct.fpu.bytes.copy_from_slice(&pfpu.bytes);
+                        ct.fpu_valid = true;
+                    } else {
+                        ct.mark_fpu_clean();
+                    }
                 }
             }
         }
