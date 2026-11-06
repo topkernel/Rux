@@ -1647,9 +1647,12 @@ pub fn putchar_no_lock(c: u8) {
     // these callers are per-byte anomaly tripwires (preempt-underflow,
     // KSO-CENSUS, WW latefire, the taskdump dumps) whose lock-free
     // contract forbids spinning on any lock, and try-lock never spins.
-    // Inside a quiesce section (a whole-report bypass writer owns THR)
-    // or when the try fails: direct write under a per-byte quiesce —
-    // wedge-safe (no unbounded lock), exclusive vs. the drain.
+    // Ring busy/full (healthy state): the printk defer queue (also a
+    // try-lock) — a direct THR write here would land between the
+    // drain's bursts and splice a ring-resident line mid-text (boot-9's
+    // "…pad" + "AL" + "ding END"). Only when BOTH try-locks fail (the
+    // doubly-pathological wedged-machinery case) does the byte go
+    // direct under a per-byte quiesce — evidence beats ordering there.
     #[cfg(feature = "x86_64")]
     if tx_armed()
         && !crate::dfx::pstore::sink_armed()
@@ -1657,6 +1660,9 @@ pub fn putchar_no_lock(c: u8) {
         && !tx_quiesced()
     {
         if tx_submit_try(&[c]) {
+            return;
+        }
+        if crate::printk::defer_byte_try(c) {
             return;
         }
         let _q = TxQuiesce::new();
@@ -1676,8 +1682,11 @@ pub fn puts_no_lock(s: &str) {
 /// Interrupt-safe byte output (no lock) — batched TX, `puts_no_lock`
 /// for byte slices (crash-context writers stage expanded bytes).
 /// TX-engine armed: whole-run ring submit when the ring lock is free
-/// (ordered, atomic); otherwise a direct batched write inside a quiesce
-/// section (exclusive vs. the IRQ drain — see putchar_no_lock).
+/// (ordered, atomic); ring busy/full: whole-slice defer-queue push
+/// (try-lock, ordered — spares ring-resident lines the mid-text splice
+/// a direct THR write would cause at drain burst boundaries); only when
+/// both try-locks fail: direct batched write inside a quiesce section
+/// (exclusive vs. the IRQ drain — see putchar_no_lock).
 pub fn puts_bytes_no_lock(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -1689,6 +1698,9 @@ pub fn puts_bytes_no_lock(bytes: &[u8]) {
         && !tx_quiesced()
     {
         if tx_submit_try(bytes) {
+            return;
+        }
+        if crate::printk::defer_bytes_try(bytes) {
             return;
         }
         let _q = TxQuiesce::new();
