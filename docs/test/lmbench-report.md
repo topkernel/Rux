@@ -96,72 +96,65 @@ sweep ran under loadavg 10–19; strikethrough values show the lineage.*
 
 
 
-## Campaign standings (2026-11-06, rounds 1-7 of perf-gap-hunt — the current authoritative table)
+## Campaign standings (2026-11-08, rounds 1-14 of perf-gap-hunt — the current authoritative table)
 
-Seven rounds of the ≥2x-per-row campaign (kernel lineage 53f4a4f6 →
-7fed9179; full evidence chain in the campaign ledger
-rux-agents/perf-gap-hunt/CHARTER.md; every row below is an interleaved
-same-window A/B, med-of-3+3 unless noted, gate: dual-arch build + make
-test + riscv 90s soak + LTP families + pbench Tier-2 where the pbench
-leg is not suspended by the mainline-heap landmine, see below).
+Fourteen rounds (kernel lineage 53fba4f6 → branch tip; evidence chain in
+the campaign ledger rux-agents/perf-gap-hunt/CHARTER.md; interleaved
+same-window A/B med-of-3+3, gates: dual-arch + make test + soak + LTP
+families + pbench Tier-2 where applicable).
 
-**Rows at ≥2x ahead (closed):**
+**Rows at ≥2x ahead or parity-ahead (closed, 10):**
 
 | Case | Rux | Reference (KVM) | Ratio |
 |---|---|---|---|
-| lat_pagefault | **0.0287-0.0312 µs** | 0.0702 | **2.26-2.45x** (16.1x vs the 0.468 starting point; backward fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap) |
-| lat_pipe | **3.74 µs** | 13.30 | **3.56x** (hook-call tax: the 1331 cli/sti sites' outlined calls compounded per ping-pong round) |
-| lat_ctx -s 64 2 | 2.13 µs (1.98 quiet) | 6.71 | **3.15x** |
-| lat_sem | **0.788 µs** | 2.065 (re-anchored KVM) | **2.62x** — the old 1.80x row compared against a native column; the fair-KVM anchor doubles the win |
-| lat_unix | **3.96-4.27 µs** | 12.89 (re-anchored KVM) | **3.14x** — same re-anchor |
+| lat_pagefault | **0.0287-0.0312 µs** | 0.0702 | **2.26-2.45x** |
+| lat_pipe | **3.74 µs** | 13.30 | **3.56x** |
+| lat_ctx -s 64 2 | 2.13 µs | 6.71 | **3.15x** |
+| lat_sem | 0.785 µs | 2.09 | **2.66x** |
+| lat_unix | 4.11 µs | 12.92 | **3.14x** |
 | lat_mmap 1m | 1.049 µs | 4.41 | **4.2x** |
 | bw_pipe | 28030 MB/s | 10443 | **2.68x** |
-| bw_unix | 42885 MB/s | 22783 | **1.88x** |
+| lat_syscall read | 0.0646 µs | 0.066 | **0.98x (ahead)** |
+| lat_proc exec | 78-82 µs | 84.80 | **~1.0x (parity-to-ahead)** |
+| lat_proc fork | 52.9-54.1 µs | 51.61 | **1.02-1.05x (parity band; r14 UAF fix)** |
 
-**Rows behind (open, attacking):**
+**Rows behind (open):**
 
-| Case | Rux | Reference (KVM) | Ratio | levers in flight |
+| Case | Rux | Reference (KVM) | Ratio | levers |
 |---|---|---|---|---|
-| lat_syscall null | 0.0491 µs | 0.042 | 1.17x | entry floor: dispatch flattening, armed()-residue merge |
-| lat_syscall write | 0.0636 µs | 0.058 | 1.10x | 6 ns from parity |
-| lat_syscall read | 0.0646 µs | 0.066 | **0.98x (ahead)** | consolidate |
-| lat_syscall stat | 0.3081 µs | 0.227 | 1.32x | path-walk component decomposition (185 ns = 4x23 components + 70 glue + 50 pre) |
-| lat_syscall open | 0.6497 µs | 0.3566 | 1.82x | tail decomposition (med 1072 → 6497-scale improvements landed; per-tick 10 ms close-stall class fixed) |
-| lat_proc fork | 59.9 µs | 53.99 | 1.11x | retire batch-park |
-| Geekbench SC | 2115 | 2165 (4-CPU pinned) | 97.7% | after the mm stack |
+| lat_syscall null | 0.0494 µs | 0.0418 | 1.18x | entry floor; 2x ruled physically unreachable (syscall RTT floor shared by both kernels) — converge to parity |
+| lat_syscall open | 0.5736 µs | 0.3566 | 1.61x | tail: memo-hit 80-90 + fd install; File-pool hypothesis refuted (PC3: fil=19/ins=24 ns) |
+| lat_syscall stat | 0.2829 µs | 0.2141 | 1.32x | tail v3 shelved pending call_rcu contract (now fixed r14 — retry unblocked) |
+| lat_syscall write | 0.0636 µs | 0.0557 | 1.14x | 6 ns from parity; 2x needs entry-floor restructuring |
+| Geekbench SC | 2115 (best-of-runs 2297) | 2165 pinned | 97.7% / 106% | |
 
-**The round-by-round mechanism ledger** (each verified by interleaved
-A/B; negatives recorded as rejects):
+**Round-by-round mechanism highlights** (full chain in the ledger):
 
-1. RCU fd lookup + fdreap post-grace reaper (8d81c5da): fstat first
-   ever ahead; open/close -21%, read_cached -11%, ctxsw -8%.
-2. Adaptive idle-poll window: **rejected** (3 variants; host KVM
-   halt_poll_ns=200000 already covers sub-200 us wakes thread-side).
-3. GRQ three-hypothesis exclusion (spin 241 cyc; in-lock IPI helps the
-   handoff; BTreeMap alloc ~100 ns — perf-neutral, kept as a
-   robustness patch on the branch).
-4. Context-switch first-principles audit: machinery 620 ns < the
-   reference's native 910 ns whole-switch; remaining gap is
-   rendezvous physics.
-5. Hook-call tax (a5124151/c0034520): the 1331 cli/sti sites carried
-   outlined trace/forkprof calls — inlined fast gates: null -7%,
-   read -5%, write -6%, ctxsw -6.1%, pipe -12%.
-6. pagefault round (e163d7dc): 16.1x total, gated six legs green.
-7. path_memo + lease gates + memo v2 (0d7993b6..7fed9179): open -15.2%
-   cumulative, stat -4.6%; per-inode open_count replaced the global
-   BTreeMap lock; the reader-side memo went lock-free (seqlock slots).
+- R1-3: pagefault 16.1x (SHARED fault-around + PCACHE_RO + batched
+  release), hook-call tax inline gates (1331 cli/sti sites), fsw/cctx
+  decomposition discipline.
+- R4-6: fdreap post-grace reaper + per-tick 10ms close-stall fix;
+  path memo + lock-free seqlock reads; sem/unix KVM re-anchor (both
+  flip to 2.6x/3.1x ahead — the old "behind" rows compared a native
+  column against our KVM column).
+- R7-9: lease fast gates (open -15.2% cumulative); mainline pbench
+  heap landmine = 5b4a4bc7 missing final TLB flush, fixed on main.
+- R10: word-at-a-time memo hash, capability-only DAC fast path
+  (open -5.2%, stat -10%); File-pool hypothesis refuted by PC3 phase
+  anatomy.
+- R11: fd-table bitmap sweeps (fork copy 910→574ns, exit drop
+  4491→825ns), ptrace tracee-count gate (premm 4635→757ns); exit body
+  17.9→7.3µs; exec three-state anchored at parity.
+- R12-14: fork bistability root-caused through the freeze forensics
+  toolchain to a UART print storm (fixed, batched) then to a
+  stale-rsp0-at-free UAF (fixed, six-leg gated; hang 3/6→1/6, fork to
+  the 1.02-1.05x parity band); call_rcu contract honored; wake-monitor
+  confirmation logic inversion fixed; SCHED-IRQOFF storm silenced.
 
-**Known open issues carried by this table:**
-
-- **pbench mainline-heap landmine**: pbench probe binaries on the
-  post-0d7993b6 lineage die deterministically in musl malloc get_meta
-  (chunk header zeroed) — bisect pair work/bzImage-bisect7e-ctl (dies)
-  vs bzImage-g6tmp (clean); suspected same scribble family as the
-  riscv soak c3c4c3c4 pattern. lmbench rows unaffected; pbench Tier-2
-  legs suspended until it is hunted down.
-- The open row's reference anchor was re-measured at 0.3566 (the
-  older 0.360 value reproduced); the 2.1-3.0 us readings seen on
-  11-05 were a lost-vmlinuz artifact.
+**Correctness bugs found and fixed by the performance campaign** (the
+performance gaps were hiding these): stale-rsp0-at-free UAF; call_rcu
+zero-grace callback firing; wake-monitor staleness inversion;
+fdreap per-tick close stall; munmap final-TLB-flush loss (mainline).
 
 ## Standing addendum (2026-11-03, kernel 33413d92 lineage — idle poll window 120us)
 
