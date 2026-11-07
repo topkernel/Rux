@@ -5091,6 +5091,83 @@ impl Task {
                 }
             }
 
+            // (perf-gap-hunt r14) Close the stale-rsp0 ordering hole
+            // BEFORE the diagnostic below can fire. The exit terminal
+            // deschedule (schedule_dead_never_returns) releases the dying
+            // task's pick-ownership pair — publishing on_cpu=false —
+            // BEFORE the real context switch installs the next task's
+            // rsp0, so the reaper's on_cpu wait (exit.rs) can legally
+            // pass and reach THIS free while the exiting CPU's TSS.rsp0
+            // still names this stack (and that CPU may still be running
+            // its final schedule rounds on it). Freeing then hands the
+            // pages to the stack cache while another CPU's trap entries
+            // push frames through rsp0 into freed/recycled memory — the
+            // stale-rsp0 engine behind the chunk@700 "Kernel stack
+            // overflow" panics, and the amplifier of the fork ping-pong
+            // slow mode (r13: the PI-exit gate widened the race to
+            // 1184-2463 witness hits/boot; base boots hit it at the ~2%
+            // rate = ~100-300/boot — every one a live UAF window).
+            //
+            // Fix: before freeing, wait (bounded, interrupts enabled so
+            // this CPU keeps taking ticks) for every OTHER cpu's
+            // tss_rsp0 to leave stack_top. The stale CPU is on its way
+            // to a switch — normally it clears within the first spin
+            // window; if it does not, kick it with resched_cpu (covers a
+            // CPU parked/halted or stuck in schedule refusal rounds,
+            // which only a reschedule unblocks). Give-up bound keeps
+            // today's behavior exactly: free anyway and let the witness
+            // print below name it. Own cpu is skipped: our own rsp0
+            // naming this stack means we are the one executing on it
+            // (self-exit free paths) and only our own next switch can
+            // move it — waiting would deadlock.
+            #[cfg(feature = "x86_64")]
+            {
+                let self_cpu = crate::arch::cpu_id() as usize;
+                let mut stale: Option<usize> = None;
+                for c in 0..crate::config::MAX_CPUS {
+                    if c == self_cpu {
+                        continue;
+                    }
+                    if crate::arch::x86_64::smp::PER_CPU[c]
+                        .tss_rsp0
+                        .load(core::sync::atomic::Ordering::Acquire)
+                        == stack_top as u64
+                    {
+                        stale = Some(c);
+                        break;
+                    }
+                }
+                if let Some(c) = stale {
+                    let irq_was = crate::arch::cpu::get_interrupts_state();
+                    crate::arch::cpu::restore_irq(true);
+                    let j0 = crate::drivers::timer::get_jiffies();
+                    let mut kicked = false;
+                    loop {
+                        for _ in 0..20000 {
+                            core::hint::spin_loop();
+                        }
+                        if crate::arch::x86_64::smp::PER_CPU[c]
+                            .tss_rsp0
+                            .load(core::sync::atomic::Ordering::Acquire)
+                            != stack_top as u64
+                        {
+                            break; // peer reached its switch: safe to free
+                        }
+                        let now = crate::drivers::timer::get_jiffies();
+                        if !kicked && now.wrapping_sub(j0) >= 1 {
+                            kicked = true;
+                            crate::sched::sched::resched_cpu(c);
+                        }
+                        if now.wrapping_sub(j0) >= 3 {
+                            // give up: free anyway (today's behavior);
+                            // the witness print below names the hole.
+                            break;
+                        }
+                    }
+                    crate::arch::cpu::restore_irq(irq_was);
+                }
+            }
+
             // debug (LTP chunk@700 panic hunt, 2026-11-02): if any CPU's
             // live TSS.rsp0 still points at THIS stack's top, every later
             // user-origin trap entry on that CPU pushes its frame into
