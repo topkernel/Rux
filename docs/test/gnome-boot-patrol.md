@@ -85,3 +85,40 @@ face. Run it with the btest.sh retry discipline.
 7791d772..1d9c8b75. The freeze-before-shell face (1-in-5) also still
 needs its own capture — the taskdump from the patrol boot shows the
 check-accelerated chain wedged (the §8.3 family).
+
+## Round 3 — 2026-11-08 ~04:30 (kernel 59f8d535, SMP 8)
+
+**Experiments this round**:
+
+1. 5-minute paint-latency boot (dumps at 60/120/180/240/300 s): the
+   screen NEVER paints — the break is hard, not timer latency.
+2. The xfill X-level paint probe could not complete (the probe binary
+   itself dies between its first print and connect() in the guest; runs
+   fine against the host X — probe bug, not adjudicated).
+3. A D-state task appeared (pid 312, >120 s, stack in
+   context_switch/is_fork_child) alongside the idle session.
+4. Bisect: midpoints 11f7cae2 and a8fae0b7 freeze before the shell on
+   repeated boots — the paint bisect cannot pass through the
+   phantom-bits era; honest anchors remain 7791d772 (good, 99%) ..
+   1d9c8b75 (bad, 0% with the shell running).
+
+**Unified theory** (fits every probe): the black screen is the known
+LOST-WAKE / wake-refused family hitting glib's worker pool. Evidence:
+- gnome-shell's 8 GJS workers sit in pthread_cond_wait forever (never
+  signaled) while the main thread idles in clock_nanosleep — the UI
+  never builds, no first frame, no damage, Xorg's shadow never
+  refreshes, the framebuffer stays zero. Every kernel path we probed
+  (fb mmap/write/flush, mprotect, shm, unix sockets, X protocol) is
+  clean.
+- The user's own console shows the family firing:
+  `W2-WAKE-REFUSED-SLEEPING pid=317 state=0x0 on_cpu=true ...` and a
+  run of `R46-RUNNING-PHANTOM healed ... exiting=1` lines — phantom
+  RUNNING marks and refused wakes in the session's early processes.
+- The bisect window (7791d772..1d9c8b75) contains exactly the
+  phantom-bits / preempt-heal / pick-machinery era.
+
+**Next round**: attack the wake-refusal itself — capture who wakes the
+GJS worker pool (the cond signal path), why the wake is refused
+(lying curr_on slot / stuck claim), and fix that producer; the
+STRAGGLER-RESCUE machinery covers exit-path stragglers but not
+cond-wake refusals.
