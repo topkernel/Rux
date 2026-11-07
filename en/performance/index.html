@@ -65,10 +65,10 @@
     <p>Every comparison against Linux on this page is <b>same-host, same-accelerator</b>: the same host (9950X), the same QEMU q35 + KVM (<code>-accel kvm -cpu host</code>), the same image shape, the same static benchmark binaries. No native columns.</p>
     <div class="card-grid grid-2">
       <div class="card">
-        <h3><span class="ico">📏</span>lmbench same-rig: 9 of 14 paired cases ahead, 5 behind</h3>
-        <p><b>Ahead</b>: page fault <b>2.26–2.45×</b>, lat_mmap <b>4.2×</b>, pipe <b>3.56×</b>, context switch <b>3.39×</b>, lat_unix <b>3.14×</b>, lat_sem <b>2.62×</b>, bw_pipe <b>2.68×</b>, bw_unix <b>1.88×</b>, read <b>1.02×</b>.</p>
-        <p><b>Behind</b> (Rux/Linux): open <b>1.82×</b>, stat <b>1.32×</b>, null <b>1.17×</b>, fork <b>1.11×</b>, write <b>1.10×</b>.</p>
-        <div class="nums">best lead 4.2× · worst lag 1.82× · data in §2</div>
+        <h3><span class="ico">📏</span>lmbench same-rig: 10 of 14 paired cases ahead or at parity, 4 behind</h3>
+        <p><b>Ahead</b>: lat_mmap <b>4.2×</b>, pipe <b>3.56×</b>, context switch <b>3.15×</b>, lat_unix <b>3.14×</b>, bw_pipe <b>2.68×</b>, lat_sem <b>2.66×</b>, page fault <b>2.26–2.45×</b>; read 0.98× flipped ahead, exec and fork in the parity band (exec ~1.0×, fork 1.02–1.05× after the r14 UAF fix).</p>
+        <p><b>Behind</b> (Rux/Linux): open <b>1.61×</b>, stat <b>1.32×</b>, null <b>1.18×</b>, write <b>1.14×</b> (6 ns from parity).</p>
+        <div class="nums">best lead 4.2× · worst lag 1.61× · data in §2</div>
       </div>
       <div class="card">
         <h3><span class="ico">🏁</span>Geekbench 5: multi-core +4.3%, single-core +5.1%</h3>
@@ -76,41 +76,42 @@
         <div class="nums">per-workload data in §3 · rig note: Linux side is the host 4-CPU pin (taskset, topology-matched)</div>
       </div>
     </div>
-    <div class="callout"><b>Gap structure:</b> the wins concentrate in the scheduler/wakeup paths (context switch, pipe) — Linux's cross-vCPU wakeup IPIs are expensive under virtualization while Rux's single global run queue produces no cross-core reschedule storms — and now also in page fault / mapping (seven campaign rounds turned the page fault from the worst deficit into a 2.26–2.45× lead). The remaining deficits are syscall entry and path resolution (open 1.82×, stat 1.32×) and fork (1.11×) — write is 6 ns from parity and read is already ahead. Data: the perf-gap-hunt seven-round campaign (interleaved same-window A/B per row, med-of-3+3).</div>
+    <div class="callout"><b>Gap structure:</b> after fourteen campaign rounds the wins cover page fault/mapping (mmap 4.2×), scheduler/wakeup (context switch, pipe), IPC (sem, unix) and bandwidth; exec/fork have reached parity. The deficits narrowed to syscall entry and path resolution (open 1.61×, stat 1.32×, null 1.18×, write 1.14×) — for null, 2× is proven physically unreachable (a syscall RTT floor shared by both kernels), so the target is converging to parity. The campaign also unearthed and fixed five correctness bugs (list after §2). Data: perf-gap-hunt rounds 1–14 (interleaved same-window A/B per row, med-of-3+3).</div>
 
     <h2 id="lmb"><span class="anchor">§2</span>lmbench data (same-rig KVM, all 14 paired cases)</h2>
-    <p style="font-size:13.5px">Source: lmbench-report.md "Campaign standings" (2026-11-06, perf-gap-hunt rounds 1–7, kernel 53f4a4f6 → 7fed9179) — the current authoritative table; every row is an interleaved same-window A/B, med-of-3+3. Method: one case per boot, 35 s in-guest timeout, PID 1 runner; the Linux column runs the same static binary on the <b>same KVM rig</b>.</p>
-    <h3>Ahead (9 cases)</h3>
+    <p style="font-size:13.5px">Source: lmbench-report.md "Campaign standings" (2026-11-08, perf-gap-hunt rounds 1–14, kernel 53fba4f6 → branch tip) — the current authoritative table; every row is an interleaved same-window A/B, med-of-3+3. Method: one case per boot, 35 s in-guest timeout, PID 1 runner; the Linux column runs the same static binary on the <b>same KVM rig</b>.</p>
+    <h3>Ahead / parity (10 cases, closed)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th></tr></thead>
         <tbody>
           <tr><td class="mono">lat_mmap 1m</td><td class="num">1.049 µs</td><td class="num">4.41 µs</td><td><span class="chip ok">ahead 4.2×</span></td></tr>
           <tr><td class="mono">lat_pipe</td><td class="num">3.74 µs</td><td class="num">13.30 µs</td><td><span class="chip ok">ahead 3.56×</span> (hook-call tax inlined away)</td></tr>
-          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">1.98 µs (quiet)</td><td class="num">6.71 µs</td><td><span class="chip ok">ahead 3.39×</span></td></tr>
-          <tr><td class="mono">lat_unix</td><td class="num">3.96–4.27 µs</td><td class="num">12.89 µs</td><td><span class="chip ok">ahead 3.14×</span> (Linux anchor re-measured same-rig)</td></tr>
+          <tr><td class="mono">lat_ctx -s64 2</td><td class="num">2.13 µs</td><td class="num">6.71 µs</td><td><span class="chip ok">ahead 3.15×</span></td></tr>
+          <tr><td class="mono">lat_unix</td><td class="num">4.11 µs</td><td class="num">12.92 µs</td><td><span class="chip ok">ahead 3.14×</span> (anchor re-measured same-rig)</td></tr>
           <tr><td class="mono">lat_pagefault</td><td class="num">0.0287–0.0312 µs</td><td class="num">0.0702 µs</td><td><span class="chip ok">ahead 2.26–2.45×</span> (16.1× vs the 0.468 starting point)</td></tr>
           <tr><td class="mono">bw_pipe</td><td class="num">28,030 MB/s</td><td class="num">10,443 MB/s</td><td><span class="chip ok">ahead 2.68×</span></td></tr>
-          <tr><td class="mono">lat_sem</td><td class="num">0.788 µs</td><td class="num">2.065 µs</td><td><span class="chip ok">ahead 2.62×</span> (anchor re-measured same-rig)</td></tr>
-          <tr><td class="mono">bw_unix</td><td class="num">42,885 MB/s</td><td class="num">22,783 MB/s</td><td><span class="chip ok">ahead 1.88×</span> (unix staging eliminated)</td></tr>
+          <tr><td class="mono">lat_sem</td><td class="num">0.785 µs</td><td class="num">2.09 µs</td><td><span class="chip ok">ahead 2.66×</span> (anchor re-measured same-rig)</td></tr>
           <tr><td class="mono">lat_syscall read</td><td class="num">0.0646 µs</td><td class="num">0.066 µs</td><td><span class="chip ok">ahead 1.02×</span> (flipped)</td></tr>
+          <tr><td class="mono">lat_proc exec</td><td class="num">78–82 µs</td><td class="num">84.80 µs</td><td><span class="chip ok">parity-to-ahead</span> (~1.0×)</td></tr>
+          <tr><td class="mono">lat_proc fork</td><td class="num">52.9–54.1 µs</td><td class="num">51.61 µs</td><td><span class="chip ok">parity band</span> (1.02–1.05×; after the r14 UAF fix)</td></tr>
         </tbody>
       </table>
     </div>
-    <h3>Behind (5 cases, to optimize)</h3>
+    <h3>Behind (4 cases, to optimize)</h3>
     <div class="tbl-wrap">
       <table>
         <thead><tr><th>Case</th><th class="num">Rux</th><th class="num">Linux (same-rig KVM)</th><th>Verdict</th><th>Optimization direction</th></tr></thead>
         <tbody>
-          <tr><td class="mono">lat_syscall open</td><td class="num">0.6497 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">behind 1.82×</span></td><td>tail decomposition (−15.2% cumulative; the 10 ms per-tick close-stall class fixed)</td></tr>
-          <tr><td class="mono">lat_syscall stat</td><td class="num">0.3081 µs</td><td class="num">0.227 µs</td><td><span class="chip bad">behind 1.32×</span></td><td>path-walk component decomposition (185 ns = 4×23 components + 70 glue + 50 pre)</td></tr>
-          <tr><td class="mono">lat_syscall null</td><td class="num">0.0491 µs</td><td class="num">0.042 µs</td><td><span class="chip bad">behind 1.17×</span></td><td>entry floor: dispatch flattening, armed()-residue merge</td></tr>
-          <tr><td class="mono">lat_proc fork</td><td class="num">59.9 µs</td><td class="num">53.99 µs</td><td><span class="chip bad">behind 1.11×</span></td><td>retire batch-park</td></tr>
-          <tr><td class="mono">lat_syscall write</td><td class="num">0.0636 µs</td><td class="num">0.058 µs</td><td><span class="chip bad">behind 1.10×</span></td><td>6 ns from parity</td></tr>
+          <tr><td class="mono">lat_syscall open</td><td class="num">0.5736 µs</td><td class="num">0.3566 µs</td><td><span class="chip bad">behind 1.61×</span></td><td>tail: memo-hit 80–90 ns + fd install; the File-pool hypothesis refuted by PC3 phase anatomy (fil=19/ins=24 ns)</td></tr>
+          <tr><td class="mono">lat_syscall stat</td><td class="num">0.2829 µs</td><td class="num">0.2141 µs</td><td><span class="chip bad">behind 1.32×</span></td><td>tail v3 was shelved on the call_rcu contract (fixed in r14 — retry unblocked)</td></tr>
+          <tr><td class="mono">lat_syscall null</td><td class="num">0.0494 µs</td><td class="num">0.0418 µs</td><td><span class="chip bad">behind 1.18×</span></td><td>entry floor; 2× ruled physically unreachable (a syscall RTT floor shared by both kernels) — converge to parity</td></tr>
+          <tr><td class="mono">lat_syscall write</td><td class="num">0.0636 µs</td><td class="num">0.0557 µs</td><td><span class="chip bad">behind 1.14×</span></td><td>6 ns from parity; 2× needs entry-floor restructuring</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup paths — Linux's cross-vCPU wakeup IPIs are expensive under virtualization while Rux's single global run queue creates no cross-core reschedule storms. Syscall-latency rows run the guest's own entry (no vmexit), so both sides carry almost no virtualization overhead — the gaps are real kernel differences. fstat (ahead 1.37×, RCU fd lookup) and exec (ahead 1.32×) also lead in the same-rig table — see the standing table in lmbench-report.md.</p>
+    <p style="font-size:13px;color:var(--text-3)">Mechanism note: the wins concentrate in scheduler/wakeup paths and the page-fault/mapping path; syscall-latency rows run the guest's own entry (no vmexit), so both sides carry almost no virtualization overhead — the gaps are real kernel differences. bw_unix (42,885 vs 22,783 MB/s, 1.88×) and fstat (ahead 1.37×, RCU fd lookup) also lead in the same-rig table — see the standing table in lmbench-report.md.</p>
+    <div class="callout"><b>Correctness bugs the campaign found and fixed</b> (the performance gaps were hiding them): a stale-rsp0-at-free UAF (the fork bistability root cause); a call_rcu zero-grace callback firing; a wake-monitor staleness inversion; the fdreap per-tick 10 ms close stall; the mainline munmap final-TLB-flush loss (5b4a4bc7).</div>
 
     <h2 id="gb"><span class="anchor">§3</span>Geekbench 5 data (5.5.1, 9950X, KVM q35 smp4/4G, strong kernel, 2026-11-04)</h2>
     <div class="tbl-wrap">
@@ -274,22 +275,23 @@
       </table>
     </div>
 
-    <h2 id="t2"><span class="anchor">§8</span>Tier 2: pbench P1–P7 anchors (KVM debug class, re-anchored 2026-11-03 across three boards)</h2>
+    <h2 id="t2"><span class="anchor">§8</span>Tier 2: pbench P1–P7 anchors (SMP-8 standard, re-banked 2026-11-08)</h2>
+    <div class="callout"><b>The SMP-8 standard</b> (user directive 2026-11-07): every launch boots with at least 8 CPUs (Kernel.toml <code>smp.max_cpus = 8</code>; the three-arch drivers default to <code>-smp 8</code>). The old anchors were measured at 2–4 real CPUs and cannot judge an 8-CPU run — cross-configuration comparison is as meaningless as debug-vs-strong. The anchors below = the SMP-8 same-rig A/B baseline (base 166e4516 vs per-mm-break c127e4bc, KVM q35 4G).</div>
     <div class="tbl-wrap">
       <table>
-        <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (KVM debug, µs)</th></tr></thead>
+        <thead><tr><th>Group</th><th>Content (test/pbench.c)</th><th class="num">Anchor (SMP-8 KVM, µs)</th></tr></thead>
         <tbody>
-          <tr><td>P1</td><td>p1_null null syscall (N=1e6) / p1_clock_gettime (N=1e6)</td><td class="num">0.300 / 0.371</td></tr>
-          <tr><td>P2</td><td>p2_ctxsw: 1-byte pipe ping-pong context switch (pinned)</td><td class="num">1.242</td></tr>
-          <tr><td>P3</td><td>Page-fault family: p3a first-touch anon / p3b COW / p3c filemap / p3d concurrent</td><td class="num">p3b_cow 8.075</td></tr>
-          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td class="num">KVM sub-millisecond (578/772 µs class)</td></tr>
-          <tr><td>P5</td><td>IPC family: p5a pipe round trip / p5b unix dgram / p5c stream write / p5e-p5f flow discriminators</td><td class="num">p5a 18.3 / p5b 23–41 / stream 24–27</td></tr>
-          <tr><td>P6</td><td>Filesystem family: stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8442.6 / mkdrmdir 216.7 / unlink 54.6 / append 5.19</td></tr>
-          <tr><td>P7</td><td>p7_sleep1ms: nanosleep(1ms) overshoot (med/p99/max, N=1e4)</td><td class="num">15.8 (TCG family 54.4)</td></tr>
+          <tr><td>P1</td><td>p1_null null syscall (N=1e6) / p1_clock_gettime (N=1e6)</td><td class="num">0.280 / —</td></tr>
+          <tr><td>P2</td><td>p2_ctxsw: 1-byte pipe ping-pong context switch (pinned)</td><td class="num"><b>0.756</b> (post per-mm-break; baseline 1.222 → 8 CPUs switch 38% faster)</td></tr>
+          <tr><td>P3</td><td>Page-fault family: p3a first-touch anon / p3b COW / p3c filemap / p3d concurrent</td><td class="num">p3b_cow 18.424 (+58% at SMP-8 — an honest gap, below)</td></tr>
+          <tr><td>P4</td><td>p4_fork_exit / p4_fork_exec (N=1e3)</td><td class="num">sub-ms class (r11: fork copy 910→574 ns, exit drop 4491→825 ns; exit body 17.9→7.3 µs)</td></tr>
+          <tr><td>P5</td><td>IPC family: p5a pipe round trip / p5b unix dgram / p5c stream write / p5e-p5f flow discriminators</td><td class="num">p5 family judged by gate bands</td></tr>
+          <tr><td>P6</td><td>Filesystem family: stat / openclose / getdents / read_cached / write_fsync / append / mkdir+rmdir / unlink</td><td class="num">write_fsync 8613.1 / mkdrmdir 269.8 / unlink 67.7 / append 6.402 (stat ±25% row noise)</td></tr>
+          <tr><td>P7</td><td>p7_sleep1ms: nanosleep(1ms) overshoot (med/p99/max, N=1e4)</td><td class="num">15.8 (probe basis)</td></tr>
         </tbody>
       </table>
     </div>
-    <p style="font-size:13px;color:var(--text-3)">Re-anchor: the KVM debug anchor is the median of three full boards (each PBENCH DONE rc=0, boards within ±1%). Old TCG columns remain in the baseline file for provenance only.</p>
+    <p style="font-size:13px;color:var(--text-3)">Open cost (stated plainly): the COW fault's +58% at SMP-8 (12.07→18.42 µs) is the price of the SMP-8 standard, recorded as an honest gap in the safety-performance ledger; it matters for fork-heavy service graphs (OH/GNOME). The next optimization target is the COW fault path's cross-CPU shootdown, not the break handling itself. The four-configuration comparison (8/4 CPUs × base/fix) is in the baseline file's "Re-bank: SMP-8 standard" section.</p>
 
     <h2 id="campaigns"><span class="anchor">§9</span>Landed performance work (same-rig A/B measured)</h2>
     <p>Each item below was attributed with a same-rig A/B; gains and costs are recorded in the same table (see docs/architecture/rust-native-register.md):</p>
@@ -309,17 +311,21 @@
           <tr><td>unix bandwidth</td><td>unix staging eliminated</td><td>bw_unix 2.6→<b>42.9 GB/s</b></td></tr>
           <tr><td>Page-fault path (campaign r6)</td><td>backward-fault window + contiguous put_range + PCACHE_RO alias protocol + batched pin release + single TLB flush per munmap</td><td>lat_pagefault 0.468→<b>0.029–0.031 µs (16.1× total)</b>, now 2.26–2.45× ahead of Linux</td></tr>
           <tr><td>Hook-call tax &amp; path_memo (campaign r5/r7)</td><td>1,331 cli/sti outlined calls inlined + path_memo/lease gates (per-inode open_count replaced the global BTreeMap lock; reader-side seqlock lock-free)</td><td>null −7% / read −5% / write −6% / ctxsw −6.1% / pipe −12%; open −15.2% cumulative, stat −4.6%, read flipped ahead</td></tr>
+          <tr><td>Word-at-a-time memo hash + capability-only DAC fast path (r10)</td><td>word-at-a-time hashing; DAC checks take the capability bit only</td><td>open −5.2%, stat −10%; the File-pool hypothesis refuted by PC3 phase anatomy (fil=19/ins=24 ns)</td></tr>
+          <tr><td>fd-table bitmap sweeps (r11)</td><td>fork copy and exit drop as bitmap scans; a ptrace tracee-count gate</td><td>fork copy 910→574 ns, exit drop 4491→825 ns, premm 4635→757 ns; exit body 17.9→7.3 µs; exec three-state anchored at parity</td></tr>
+          <tr><td>Fork bistability root cause (r12–14)</td><td>freeze-forensics chain: a UART print storm (batched) → a stale-rsp0-at-free UAF (fixed, six-leg gated)</td><td>hangs 3/6→1/6; fork into the 1.02–1.05× parity band; the call_rcu contract and a wake-monitor inversion fixed alongside</td></tr>
         </tbody>
       </table>
     </div>
 
-    <h2 id="queue"><span class="anchor">§10</span>Optimization queue (open gaps, priority order)</h2>
+    <h2 id="queue"><span class="anchor">§9</span>Optimization queue (open gaps, priority order)</h2>
     <ul>
-      <li><b>Syscall entry and fill/copy tail</b>: null 1.17× / open 1.82× / stat 1.32× / write 1.10× (same-rig) — entry-floor and fill/copy tail (SMAP AC brackets); fd lookup is no longer the bottleneck (fstat already ahead).</li>
-      <li><b>lat_proc fork 1.11×</b>: retire batch-park in flight.</li>
-      <li><b>AES-XTS single-core</b>: root-caused and fixed (print-tax artifact, re-run 105–106%); residual single-core rows (Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87%) await isolated re-runs.</li>
-      <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); connect and data paths themselves work, and TCP throughput can only be measured after the fix.</li>
-      <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1 to bypass the page cache); same-rig KVM Linux comparisons for the remaining lmbench cases (lat_mmap family is already paired) and for Geekbench; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
+      <li><b>COW-fault cross-CPU shootdown</b>: the +58% (18.42 µs) honest gap at SMP-8, affecting fork-heavy service graphs — the next main target.</li>
+      <li><b>lat_syscall open 1.61× / stat 1.32×</b>: open's tail (memo-hit 80–90 ns + fd install); stat's tail v3 unblocked now that the call_rcu contract is fixed — retry.</li>
+      <li><b>lat_syscall null 1.18× / write 1.14×</b>: entry floor; null's 2× is proven physically unreachable (the shared syscall RTT floor) — converge to parity; write is 6 ns from parity.</li>
+      <li><b>Geekbench single-core residuals</b>: Text Compression 94% / Navigation 81% / PDF 85% / Clang 88% / Face 87% await isolated re-runs (AES-XTS root-caused and fixed, 105–106%; best-of-runs 2297 = 106%).</li>
+      <li><b>Network family</b>: bw_tcp TIMEOUT / lat_connect 14–16 ms — a scheduler stale-claim refuses the accept server/worker wakes (WAKE-HEAL-SKIP ×39); TCP throughput needs that fix first.</li>
+      <li><b>Backfill queue</b>: a fio throughput benchmark (same-rig Linux baseline, direct=1); the Geekbench same-rig KVM comparison; page-cache hit-rate absolutes, PCP watermarks, binder throughput.</li>
     </ul>
 
     <h2 id="tools"><span class="anchor">§11</span>debug measurement toolchain</h2>

@@ -61,6 +61,12 @@
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
 
+    <h2 id="n1108"><span class="anchor">2026-11-08</span></h2>
+    <ul>
+      <li><b>lmbench campaign 至第 14 轮</b>:10 项关闭 —— exec(78–82 vs 84.80 µs,~1.0×)与 fork(52.9–54.1 vs 51.61 µs,1.02–1.05×)进入持平带(fork 双稳态根因 = UART 打印风暴 + free 时 stale-rsp0 UAF,均已修);open 收窄至 1.61×、null 1.18×(2× 论证为物理不可达)。campaign 顺带修复 5 个正确性 bug。</li>
+      <li><b>Tier-2 pbench 锚按 SMP-8 标准重锚</b>(用户指令:所有启动 ≥8 CPU):p2_ctxsw 0.756 µs(8 CPU 切换快 38%);COW 缺页 +58% 记为诚实缺口,下一主攻 = 跨 CPU shootdown。</li>
+    </ul>
+
     <h2 id="n1107"><span class="anchor">2026-11-07</span></h2>
     <ul>
       <li><b>LTP TIMEOUT 类审计</b>:13 个 TIMEOUT + 1 个 WEDGE 行逐行归因 —— 内核缺陷 1(ptrace06 的 exec-trap stop 丢失与坏参数 errno 映射,已修)、测试/清单缺陷 11(9 个按设计常驻辅助进程 + shmat1 + mmap1)、丢唤醒家族 1、进展慢 1。</li>

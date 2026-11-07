@@ -152,7 +152,7 @@
           <tr><td>nanosleep 772.6→662.7 ms (D-19)</td><td>six historical bug classes (clock-domain mixing / periodic re-arm / double-del / stale-id…) became compile errors</td></tr>
           <tr><td>stat 0.643→0.423 µs (WalkClaim)</td><td>lockless reads via reader-bank publication + deferred retirement, no dangling-reference window; the first landing hit an existing defect and was reverted, then re-landed after the fix (history kept honest)</td></tr>
           <tr><td>munmap 177→52 µs (leaf-table direct walk)</td><td>the chunked-TLB-flush race family (taxonomy row 34) closed with it; the OH crash storm of 66 SEGVs/boot → 3/3 clean</td></tr>
-          <tr><td>lmbench lat_ctx same-rig 3.39× / Geekbench MC 104%</td><td>all of it runs on the D-1/D-7/D-11 structures — the fast path is the safe path</td></tr>
+          <tr><td>lmbench same-rig 10 rows ahead-or-parity (exec/fork at parity) / Geekbench MC 104%</td><td>all of it runs on the D-1/D-7/D-11 structures — the fast path is the safe path</td></tr>
         </tbody>
       </table>
     </div>
