@@ -309,6 +309,17 @@ pub fn on() -> bool {
     }
 }
 
+/// Cheap "possibly armed" check for hot paths (the tick): one relaxed
+/// load once the word is resolved; the undetermined state falls back
+/// to on() which resolves it once.
+#[inline]
+pub fn maybe_armed() -> bool {
+    match ARMED.load(Ordering::Relaxed) {
+        0 => on(),
+        v => v == 2,
+    }
+}
+
 /// Cycle-counter read (raw TSC / cycle domain; the report converts).
 #[inline]
 pub fn now() -> u64 {
@@ -485,6 +496,24 @@ static LAST_TICK_TSC: [AtomicU64; 4] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
+
+/// The interrupted-context RIP at each CPU's last tick (r12): the tick
+/// preempts whatever the CPU was executing; a CPU stuck for many ticks
+/// shows the SAME rip here every time — the spin site. Written from the
+/// x86_64 timer tick when armed.
+pub static TICK_RIP: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[inline]
+pub fn note_tick_rip(cpu: usize, rip: u64) {
+    if cpu < 4 {
+        TICK_RIP[cpu].store(rip, Ordering::Relaxed);
+    }
+}
 
 /// Called from scheduler_tick while forkprof is armed. Records one
 /// sample; also detects streaks (same leftmost pid across >=2
@@ -716,7 +745,7 @@ pub fn report() {
                 continue;
             }
             crate::println!(
-                "FGSQ cfs={} grq={} lpid={} oncpu={} claim={} pk={:#x} tcpu={} idle={:#b} ph={}/{}",
+                "FGSQ cfs={} grq={} lpid={} oncpu={} claim={} pk={:#x} tcpu={} idle={:#b} ph={}/{} rip0={:#x} rip1={:#x}",
                 cfs,
                 s.grq_nr.load(Ordering::Relaxed),
                 lpid,
@@ -727,6 +756,8 @@ pub fn report() {
                 s.idle.load(Ordering::Relaxed),
                 s.ph0.load(Ordering::Relaxed),
                 s.ph1.load(Ordering::Relaxed),
+                TICK_RIP[0].load(Ordering::Relaxed),
+                TICK_RIP[1].load(Ordering::Relaxed),
             );
         }
     }

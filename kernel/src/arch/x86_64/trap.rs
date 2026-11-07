@@ -1350,6 +1350,12 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
+    // r12 wake/halt hunt: record the interrupted RIP when a forkprof
+    // boot is armed — a CPU stuck across many ticks shows the same rip
+    // (the spin site) in every FGSQ sample.
+    if crate::debug::forkprof::maybe_armed() {
+        crate::debug::forkprof::note_tick_rip(cpu, regs.rip);
+    }
     // Tick quiescent report (2026-11-06, the CPU0-qs stall family):
     // a task interrupted IN USER MODE is outside every RCU read
     // critical section by construction — report its CPU quiescent for
