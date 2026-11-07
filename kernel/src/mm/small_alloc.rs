@@ -738,6 +738,27 @@ pub fn live_stats_kib() -> (u64, u64) {
     (obj_bytes / 1024, pages * 4)
 }
 
+/// /proc/slabinfo accessor: per-class (obj_allocs, obj_frees, live slab
+/// pages) for the eight classes this layer serves, lock-free reads of the
+/// same Relaxed atomic counters the census prints. Live objects are
+/// allocs-frees (magazine residency skews the estimate by at most
+/// MAX_CPUS*8*MAG_DEPTH entries); pages are created-reclaimed (exact —
+/// the bitmap bit is cleared only when the page leaves this layer).
+pub fn slabinfo_counts() -> [(u64, u64, u64); 8] {
+    let mut out = [(0u64, 0u64, 0u64); 8];
+    for (i, c) in CACHES.iter().enumerate() {
+        out[i] = (
+            c.obj_allocs.load(Ordering::Relaxed) as u64,
+            c.obj_frees.load(Ordering::Relaxed) as u64,
+            c.pages_created
+                .load(Ordering::Relaxed)
+                .saturating_sub(c.pages_reclaimed.load(Ordering::Relaxed))
+                as u64,
+        );
+    }
+    out
+}
+
 /// Leg-16 census peek: dump the first two qwords of up to `per_page`
 /// objects from each active page of class `ci` (raw UART, allocation-
 /// free). Object headers carry vtables/magic/locks that identify the

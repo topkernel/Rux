@@ -454,6 +454,10 @@ pub fn run_all_tests() {
     // the zero columns declared by name, plus the exact-bytes snapshot.
     crate::fs::procfs::diskstats::diskstats_row_shape::shape_check();
     crate::fs::procfs::diskstats::diskstats_file_tests::snapshot_check();
+    // dfx-align storage row 1 (debug-blktrace lane): /proc/slabinfo — the
+    // row's exact bytes against the reference 5.15 geometry (name %-17s,
+    // 6/6/6/4/4 counts, tunables 0 0 0, slabdata 6/6/6).
+    crate::fs::procfs::slabinfo::slabinfo_file_tests::snapshot_check();
     // D-4 kvtab slice (refactor lane): /proc/[pid]/status — key order,
     // tab shape and value formats pinned against a live render.
     crate::fs::procfs::pid::status_file_tests::shape_check();
