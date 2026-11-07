@@ -368,6 +368,10 @@ struct StallSnap {
     /// Per-CPU WW_IDLE_PHASE at rescue (0..5; 4 = inside WFI).
     phase0: AtomicU8,
     phase1: AtomicU8,
+    /// Per-CPU last-tick interrupted RIP at rescue: the spin site of
+    /// whichever CPU was stuck (mid-benchmark reads only).
+    rip0: AtomicU64,
+    rip1: AtomicU64,
 }
 const SS0: StallSnap = StallSnap {
     delta_us: AtomicU64::new(0),
@@ -377,6 +381,8 @@ const SS0: StallSnap = StallSnap {
     nr_running: AtomicU64::new(0),
     phase0: AtomicU8::new(255),
     phase1: AtomicU8::new(255),
+    rip0: AtomicU64::new(0),
+    rip1: AtomicU64::new(0),
 };
 static STALLS: [StallSnap; 12] = [SS0; 12];
 static STALL_CUR: AtomicU64 = AtomicU64::new(0);
@@ -415,6 +421,8 @@ fn hist_account(kind: usize, delta_cyc: u64, pid: u32) {
         s.nr_running.store(nr_running, Ordering::Relaxed);
         s.phase0.store(phase0, Ordering::Relaxed);
         s.phase1.store(phase1, Ordering::Relaxed);
+        s.rip0.store(TICK_RIP[0].load(Ordering::Relaxed), Ordering::Relaxed);
+        s.rip1.store(TICK_RIP[1].load(Ordering::Relaxed), Ordering::Relaxed);
         STALL_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -720,7 +728,7 @@ pub fn report() {
                 continue;
             }
             crate::println!(
-                "FSTALL kind={} pid={} dt={}us idle={:#b} nrun={} ph0={} ph1={}",
+                "FSTALL kind={} pid={} dt={}us idle={:#b} nrun={} ph0={} ph1={} rip0={:#x} rip1={:#x}",
                 if s.kind.load(Ordering::Relaxed) == 0 { "child" } else { "wake" },
                 s.pid.load(Ordering::Relaxed),
                 d,
@@ -728,6 +736,8 @@ pub fn report() {
                 s.nr_running.load(Ordering::Relaxed),
                 s.phase0.load(Ordering::Relaxed),
                 s.phase1.load(Ordering::Relaxed),
+                s.rip0.load(Ordering::Relaxed),
+                s.rip1.load(Ordering::Relaxed),
             );
         }
     }
