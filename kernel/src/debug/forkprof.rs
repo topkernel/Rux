@@ -163,11 +163,16 @@ struct TEv {
     tsc: AtomicU64,
     site: AtomicU8,
     pid: AtomicU32,
+    /// Recording CPU (arch::cpu_id() in the recorder's context). For
+    /// T_CTXSW_IN this is the CPU the task actually switched in on —
+    /// the placement fact the wake/halt-alignment hunt needs (r12).
+    cpu: AtomicU8,
 }
 const EV0: TEv = TEv {
     tsc: AtomicU64::new(0),
     site: AtomicU8::new(255),
     pid: AtomicU32::new(0),
+    cpu: AtomicU8::new(255),
 };
 static RING: [TEv; 4096] = [EV0; 4096];
 static RING_CUR: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +212,7 @@ pub fn trace(site: u8, pid: u32) {
     RING[i].tsc.store(now(), Ordering::Relaxed);
     RING[i].site.store(site, Ordering::Relaxed);
     RING[i].pid.store(pid, Ordering::Relaxed);
+    RING[i].cpu.store(crate::arch::cpu_id() as u8, Ordering::Relaxed);
 }
 
 /// Dump the ring (forkprof=2 only): one line per event, delta from the
@@ -250,10 +256,15 @@ pub fn report_trace() {
         }
         let site = RING[i].site.load(Ordering::Relaxed);
         let pid = RING[i].pid.load(Ordering::Relaxed);
+        let cpu = RING[i].cpu.load(Ordering::Relaxed);
         let d = if prev == 0 { 0 } else { t.saturating_sub(prev) / per_us };
         prev = t;
         let nm = if (site as usize) < names.len() { names[site as usize] } else { "?" };
-        crate::println!("FTRACE {} pid={} dt={}us", nm, pid, d);
+        if cpu != 255 {
+            crate::println!("FTRACE {} pid={} cpu={} dt={}us", nm, pid, cpu, d);
+        } else {
+            crate::println!("FTRACE {} pid={} dt={}us", nm, pid, d);
+        }
     }
     crate::println!("FTRACE END");
 }
