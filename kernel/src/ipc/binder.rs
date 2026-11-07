@@ -5532,6 +5532,24 @@ pub fn bwr_park_audit() {
                         if !m2txt.is_empty() {
                             let _ = writeln!(w, "OH67-M2{}", m2txt);
                         }
+                        // oh68: the holder's block primitive — worker
+                        // TLS sweep (ctx->task), latched acquire-time
+                        // holder decode, and the ring CoTasks' labels +
+                        // saved coroutine RIP. Same burst throttle.
+                        let h68txt = {
+                            static H68_LAST_J: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            let lj = H68_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                            if now.wrapping_sub(lj) >= 500 {
+                                H68_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                                crate::sync::futex::oh68_holder_decode()
+                            } else {
+                                alloc::string::String::new()
+                            }
+                        };
+                        if !h68txt.is_empty() {
+                            let _ = writeln!(w, "OH68-HLD{}", h68txt);
+                        }
                         if !holders.is_empty() || !regions.is_empty() {
                             alloc::format!(
                                 " ffrt-chain[{}] ffrt-holders[{}] ffrt-regions[{}]",
@@ -10766,15 +10784,31 @@ unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<Bi
         return true;
     }
     // Reference parity (binder_available_for_proc_work_ilocked, 6.6):
-    // availability is ONLY "no stacked txn + empty own todo" — no looper
-    // flag requirement. The old LOOPER_ENTERED/REGISTERED gate here was a
-    // b85-era local patch that the reference never had: it parked
-    // unflagged BWR readers with waiting_for_proc_work=false, hid proc
-    // todo from them in has_work, and excluded them from wake_proc_one's
-    // pick — a single unflagged reader of a proc could then sleep forever
-    // with work queued (the never-woken class the 26th session removed;
-    // the reference drains such readers unconditionally).
-    let avail_for_proc = th.txn_stack.is_empty() && th.todo.is_empty();
+    //   !thread->transaction_stack &&
+    //   binder_worklist_empty_ilocked(&thread->todo) &&
+    //   (thread->looper & (BINDER_LOOPER_STATE_ENTERED |
+    //                      BINDER_LOOPER_STATE_REGISTERED))
+    // The looper-flag term IS in the reference — the 26th session removed
+    // it misreading 6.6 ("no looper flag requirement"), and the removal
+    // let any mid-BWR reader pull PROC todo: an FFRT worker inside
+    // BinderInvoker::WaitForCompletion of its own oneway SendRequest
+    // (never a pool thread, looper==0) was handed an incoming
+    // BR_TRANSACTION, which libipc dispatches SYNCHRONOUSLY on that
+    // thread's stack (HandleCommands -> Transaction ->
+    // SamgrServiceSendRequest -> stub->SendRequest). When the stolen txn
+    // is a samgr SUBSCRIBE_SYSTEM_ABILITY and the caller thread is the
+    // FindSystemAbilityNotify coroutine holding listenerMapLock_, the
+    // stub's SubscribeSystemAbility re-locks the same non-recursive
+    // mutexPrivate — the boot wedge of ohw63-ohw72 (holder decoded via
+    // the oh68 coroutine-stack instrument: task
+    // sq_workHandler_3_PostTask_NNN suspended in mutexPrivate::lock
+    // under FindSystemAbilityNotify:592, the re-entrant lock from
+    // SubsSystemAbilityInner on its own stack). Own-thread work
+    // (process_todo / own todo) stays flag-unconditional, exactly like
+    // the reference — the gate only stops the PROC-todo steal.
+    let avail_for_proc = th.txn_stack.is_empty()
+        && th.todo.is_empty()
+        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
     // sc161: only items this thread OWNS count as work for it (child-tgid
     // routing) — otherwise a daemon reader sees "work available", pops,
     // and would steal a child's transaction (or spin on requeue).
@@ -10878,12 +10912,15 @@ fn binder_thread_read(
                 unsafe {
                     // waiting_threads membership (reference parity,
                     // binder_wait_for_work: `if (do_proc_work)
-                    // list_add(waiting_thread_node)`: availability is
-                    // empty stack + empty own todo, NO looper-flag
-                    // requirement — the b85 flag gate is gone; the
-                    // reference registers every such reader for wakeups).
+                    // list_add(waiting_thread_node)` with do_proc_work =
+                    // binder_available_for_proc_work_ilocked — INCLUDING
+                    // the ENTERED/REGISTERED looper term; see
+                    // thread_has_work's comment for the oh68 wedge this
+                    // term prevents on the read side).
                     let th = thread.st();
-                    th.waiting_for_proc_work = th.todo.is_empty() && th.txn_stack.is_empty();
+                    th.waiting_for_proc_work = th.todo.is_empty()
+                        && th.txn_stack.is_empty()
+                        && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
                     // Reference parity: a joining reader goes to the HEAD
                     // of proc->waiting_threads (binder_wait_for_work's
                     // list_add). The stamp makes the pick order below
@@ -10983,12 +11020,24 @@ fn binder_thread_read(
                     }
                     let from_thread = !thread.st().todo.is_empty();
                     // Reference parity: list choice is own-todo first,
-                    // else proc todo when the read entered available
-                    // (binder_thread_read drain arm, 6.6) — no looper
-                    // flag requirement.
+                    // else proc todo — but ONLY for pool threads:
+                    // binder_thread_read's 6.6 drain arm calls
+                    // binder_available_for_proc_work_ilocked, whose
+                    // availability INCLUDES the ENTERED/REGISTERED
+                    // looper term. The flagless version here was the
+                    // oh68 wedge's actual steal: an FFRT worker (never a
+                    // pool thread) inside BinderInvoker::WaitForCompletion
+                    // of its own oneway send, own todo momentarily empty,
+                    // pulled an incoming samgr SUBSCRIBE off the proc
+                    // todo and dispatched it on its own stack — under
+                    // the listenerMapLock_ the worker's notify coroutine
+                    // held (self-deadlock; ohw63-74). Own-todo work
+                    // stays unconditional, like the reference.
                     let avail_for_proc = {
                         let th = thread.st();
-                        th.txn_stack.is_empty() && th.todo.is_empty()
+                        th.txn_stack.is_empty()
+                            && th.todo.is_empty()
+                            && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
                     };
                     let work = if from_thread {
                         thread.st().todo.pop_front()

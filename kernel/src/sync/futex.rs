@@ -1321,6 +1321,12 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
         FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
         FUXWATCH_OWNER_J
             .store(crate::drivers::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);
+        // oh68: latch the writer's ctx->task at the acquire instant (the
+        // only moment a coroutine holder is provably executing); exact =
+        // this IS the watched lock word's acquire, not a page-mate write.
+        if exact {
+            oh68_latch_owner_task(tid);
+        }
     }
     claim(tid);
     true
@@ -2156,6 +2162,487 @@ pub fn oh67_m2_decode() -> alloc::string::String {
         // First task of the tgid answers the decode once.
         done = true;
     });
+    out
+}
+
+// === oh68 (68th session): the holder's block primitive ===
+//
+// The 67th closed the M2 cycle shape but could not name the primitive the
+// holder waits on INSIDE the listenerMapLock_ critical section. This
+// instrument walks the FFRT TLS chain and the suspended coroutine's saved
+// stack. Every offset below is BuildID-verified (libffrt.so bb6920ed,
+// gdb DWARF; musl ld-musl-x86_64.so.1 99627cfd, disasm):
+//
+//   writer thread fs_base (kernel-tracked) -> musl struct pthread
+//   tsd pointer @ fs+0x88 (pthread_getspecific: mov 0x88(%fsbase),%rax)
+//   -> tsd[g_executeCtxTlsKey] — the key slot is FOUND BY VALIDATION
+//   (scan 1..64; the ExecuteCtx's own tid@248 must equal the reading
+//   thread's tid), so no libffrt load-bias discovery is needed (the
+//   first cut matched libffrt's RX VMA shape and failed — segment skews
+//   differ per build).
+//   -> ExecuteCtx {vptr@0 qos@8 task@16 wn@32 lastGid_@240 tid@248
+//      threadType_@252}; wn (WaitUntilEntry) cv @ ctx+216, so a
+//      WaitQueue::ThreadWait park futexes on ctx+224 (musl cond seq
+//      word = cv+8 — cond_timedwait lea 0x8(%cond)).
+//
+//   ctx->task STAYS set while a thread-mode task parks inside Execute()
+//   (ThreadWait under wn.cv); a COROUTINE task's ctx->task is cleared the
+//   moment it yields (ExecuteTask epilogue), so the holder coroutine is
+//   captured at the acquire WRITE itself (fuxwatch_log_write old==0 path)
+//   — the only instant the writer provably executes the holder.
+//
+//   CoTask (432B): TaskBase{type@24 gid@32 status@48 createTime@96
+//   executeTime@104 fromTid@112}, func_storage@116, label@216 (libc++
+//   string: short = size in byte0>>1, chars at +1; long = size@+8,
+//   ptr@+16), we@256{task@280}, wue@296, coRoutine@304, threadMode_@425.
+//   CoRoutine (128B): status@0 thEnv@8 task@16 fiber ctx@24 {RBX@+0 RBP@+8
+//   R12..R15@+0x10..0x28 RSP@+0x30 RIP@+0x38 -> co+72/co+80}, stkMem@104
+//   {size@104 magic@112 stk@120}; the coroutine stack is [co+120,
+//   co+120+size) with the saved RSP inside it, growing down.
+//
+// All reads are page-table walks of frozen wedged memory; dfx=fuxstuck
+// gates the print sites (the audit burst and the FW write path).
+// x86_64-only (the OH image and the fs/TLS offsets are x86_64).
+
+/// g_executeCtxTlsKey VALUE (cached per boot; 0 = unknown).
+static OH68_KEY: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// ExecuteCtx of the latched acquire writer (0 = none).
+pub static OH68_OWNER_CTX: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// ctx->task at the acquire write (the holder coroutine/thread task).
+pub static FUXWATCH_OWNER_TASK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static OH68_ROOT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_arch = "x86_64")]
+fn oh68_fs_base(tk: &crate::process::Task) -> u64 {
+    tk.thread().fs_base
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn oh68_fs_base(_tk: &crate::process::Task) -> u64 {
+    0
+}
+
+/// Resolve a thread's ExecuteCtx from its tsd array: the cached key, or a
+/// validated scan of slots 1..64 (ctx->tid == the reading thread's tid).
+/// Returns the ctx pointer (0 = not found); caches the key on first hit.
+#[cfg(target_arch = "x86_64")]
+fn oh68_ctx_of(root: u64, fs: u64, tid: u32) -> u64 {
+    use core::sync::atomic::Ordering::Relaxed;
+    if fs == 0 {
+        return 0;
+    }
+    let Some(tsd) = rd_word(root, fs + 0x88) else {
+        return 0;
+    };
+    if (tsd >> 47) != 0 || tsd < 0x1000 {
+        return 0;
+    }
+    let try_ctx = |c: u64| -> bool {
+        c != 0 && (c >> 47) == 0 && c > 0x1000 && matches!(rd_word(root, c + 248), Some(v) if (v & 0xffff_ffff) as u32 == tid)
+    };
+    let cached = OH68_KEY.load(Relaxed) as u64;
+    if cached != 0 {
+        if let Some(c) = rd_word(root, tsd + cached * 8) {
+            if try_ctx(c) {
+                return c;
+            }
+        }
+    }
+    for k in 1u64..64 {
+        let Some(c) = rd_word(root, tsd + k * 8) else {
+            continue;
+        };
+        if try_ctx(c) {
+            OH68_KEY.compare_exchange(
+                0,
+                k as u32,
+                Relaxed,
+                Relaxed,
+            )
+            .ok();
+            return c;
+        }
+    }
+    0
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn oh68_ctx_of(_root: u64, _fs: u64, _tid: u32) -> u64 {
+    0
+}
+
+/// Called from the FW write path on an exact acquire-class write
+/// (old==0): the faulting thread is executing the lock acquirer at this
+/// instant. Reads its TLS chain and latches ctx->task (the holder) plus
+/// the ExecuteCtx (for the audit-side ThreadWait park-word check
+/// ctx+224). Bounded: cached key = 3 reads, cold = up to 64.
+pub fn oh68_latch_owner_task(tid: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let _ = tid;
+    if cfg!(not(target_arch = "x86_64")) {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let Some(tsk) = crate::sched::current() else {
+            return;
+        };
+        // SAFETY: current-task accessor in the FW fault path (the same
+        // use the trap path itself makes right above this latch's
+        // caller).
+        let tk = unsafe { &*tsk };
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        let root = aspace.root_ppn();
+        let fs = oh68_fs_base(tk);
+        let ctx = oh68_ctx_of(root, fs, tid);
+        if ctx == 0 {
+            return;
+        }
+        OH68_OWNER_CTX.store(ctx, Relaxed);
+        if let Some(t) = rd_word(root, ctx + 16) {
+            FUXWATCH_OWNER_TASK.store(t, Relaxed);
+        }
+    }
+}
+
+/// oh68: audit-time decode. Walks EVERY samgr thread's TLS chain (worker
+/// sweep — a thread-mode holder keeps ctx->task set while parked inside
+/// Execute()), decodes the latched acquire-time holder task (coroutine
+/// case), and for each CoTask in the M2 waiter ring prints label +
+/// coRoutine saved RSP/RIP (the notify tasks' identities). The owner's
+/// saved coroutine stack is walked and every word landing in an exec VMA
+/// is printed as a FILE OFFSET — offline addr2line against the identical
+/// image .so names the exact cv/future frames.
+pub fn oh68_holder_decode() -> alloc::string::String {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    let tgid = OH67_M2_TGID.load(Relaxed);
+    if tgid == 0 {
+        return alloc::string::String::new();
+    }
+    let mut out = alloc::string::String::new();
+    // Pass 1: any thread's aspace root (shared across the tgid).
+    crate::sched::for_each_task_try(|task| {
+        if OH68_ROOT.load(Relaxed) != 0 {
+            return;
+        }
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        if let Some(aspace) = tk.address_space() {
+            OH68_ROOT.store(aspace.root_ppn(), Relaxed);
+        }
+    });
+    let root = OH68_ROOT.load(Relaxed);
+    if root == 0 {
+        return alloc::string::String::new();
+    }
+    let key = OH68_KEY.load(Relaxed);
+    let rd = |va: u64| -> Option<u64> { rd_word(root, va) };
+    let rd32 = |va: u64| -> Option<u32> { rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32) };
+    let _ = write!(out, " OH68[tgid={} key={}", tgid, key);
+
+    // Exec-VMA table for module-classification of stack words:
+    // (start, end, file_off_at_start, name). ONE task's aspace (all
+    // threads of the tgid share it — walking every thread duplicated the
+    // table and burned the cap on dupes before reaching libffrt). Cap 48
+    // (libipc_single/libdbinder sit past the old 24 cap and their frames
+    // are the divergence evidence); prints once per decode.
+    let mut exec_vmas: alloc::vec::Vec<(u64, u64, u64, alloc::string::String)> =
+        alloc::vec::Vec::new();
+    if root != 0 {
+        crate::sched::for_each_task_try(|task| {
+            if !exec_vmas.is_empty() || exec_vmas.len() >= 48 {
+                return;
+            }
+            // SAFETY: diagnostic read under the for_each_task contract.
+            let tk = unsafe { &*task };
+            if tk.tgid() as u32 != tgid {
+                return;
+            }
+            if let Some(aspace) = tk.address_space() {
+                if let Some(mgr) = aspace.vma_try_read() {
+                    for vma in mgr.iter() {
+                        if vma.flags().is_executable() && exec_vmas.len() < 48 {
+                            let name = aspace
+                                .try_get_vma_file(vma.start().as_usize())
+                                .map(|f| f.path())
+                                .unwrap_or_default();
+                            // Keep only the basename (bounded).
+                            let base: alloc::string::String = name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("-")
+                                .chars()
+                                .take(24)
+                                .collect();
+                            exec_vmas.push((
+                                vma.start().as_usize() as u64,
+                                vma.end().as_usize() as u64,
+                                vma.offset() as u64,
+                                base,
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for (i, &(s, e, f, ref n)) in exec_vmas.iter().enumerate() {
+        let _ = write!(out, " v{}={:#x}-{:#x}/{:#x}/{}", i, s, e, f, n);
+    }
+    let word_off = |w: u64| -> Option<(usize, u64)> {
+        for (i, &(s, e, f, _)) in exec_vmas.iter().enumerate() {
+            if w >= s && w < e {
+                return Some((i, w - s + f));
+            }
+        }
+        None
+    };
+
+    // Worker sweep: every thread's ctx->task. Thread-mode holders show
+    // task != 0; the park word for a ThreadWait is ctx+224 (wn.cv+8).
+    let mut swept = 0u32;
+    crate::sched::for_each_task_try(|task| {
+        if swept >= 24 {
+            return;
+        }
+        // SAFETY: diagnostic read under the for_each_task contract.
+        let tk = unsafe { &*task };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        swept += 1;
+        let tid = tk.pid() as u32;
+        let fs = oh68_fs_base(tk);
+        let ctx = oh68_ctx_of(root, fs, tid);
+        if ctx == 0 {
+            return;
+        }
+        let taskp = rd(ctx + 16).unwrap_or(0);
+        let _ = write!(
+            out,
+            " w{}[ctx={:#x} task={:#x} gid={:#x} ty={} st={} ft={}]",
+            tid,
+            ctx,
+            taskp,
+            if taskp > 0x1000 {
+                rd(taskp + 0x20).unwrap_or(0)
+            } else {
+                0
+            },
+            if taskp > 0x1000 {
+                rd32(taskp + 0x18).unwrap_or(0xffff)
+            } else {
+                0xffff
+            },
+            if taskp > 0x1000 {
+                rd(taskp + 0x30).unwrap_or(0) & 0xff
+            } else {
+                0xff
+            },
+            if taskp > 0x1000 {
+                rd32(taskp + 0x70).unwrap_or(0xffff)
+            } else {
+                0xffff
+            }
+        );
+    });
+    let _ = write!(out, " swept={}", swept);
+
+    // Deep decode of one CoTask: base fields + label + wue/coRoutine/
+    // threadMode + saved fiber RIP/RSP with their module file offsets.
+    let cotask = |tp: u64,
+                  tag: &str,
+                  deep: bool,
+                  out: &mut alloc::string::String| {
+        if tp == 0 || (tp >> 47) != 0 || tp < 0x1000 {
+            return;
+        }
+        let _ = write!(
+            out,
+            " {}[tp={:#x} gid={:#x} ty={} st={} ct={} ex={} ft={} wue={:#x} thrM={}",
+            tag,
+            tp,
+            rd(tp + 0x20).unwrap_or(0),
+            rd32(tp + 0x18).unwrap_or(0xffff),
+            rd(tp + 0x30).unwrap_or(0) & 0xff,
+            rd(tp + 0x60).unwrap_or(0),
+            rd(tp + 0x68).unwrap_or(0),
+            rd32(tp + 0x70).unwrap_or(0xffff),
+            rd(tp + 0x128).unwrap_or(0),
+            rd(tp + 0x1a9).map(|v| v & 0xff).unwrap_or(0xff)
+        );
+        // label (libc++ string @+216 = 0xd8; 24-byte SSO buffer spans
+        // three words; long form: size@+8, ptr@+16).
+        let w0 = rd(tp + 0xd8).unwrap_or(0);
+        let mut lbl: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        if w0 & 1 == 0 {
+            let n = ((w0 & 0xff) >> 1) as usize;
+            if n > 0 && n <= 22 {
+                let w1 = rd(tp + 0xd8 + 8).unwrap_or(0);
+                let w2 = rd(tp + 0xd8 + 16).unwrap_or(0);
+                let buf = [w0, w1, w2];
+                for i in 1..=n {
+                    let b = ((buf[i / 8] >> (8 * (i % 8))) & 0xff) as u8;
+                    lbl.push(b);
+                }
+            }
+        } else {
+            let size = rd(tp + 0xd8 + 8).unwrap_or(0);
+            let ptr = rd(tp + 0xd8 + 16).unwrap_or(0);
+            if size <= 64 && (ptr >> 47) == 0 && ptr > 0x1000 {
+                for i in 0..size as u64 {
+                    let b = rd(ptr + i).map(|w| (w & 0xff) as u8).unwrap_or(0);
+                    lbl.push(b);
+                }
+            }
+        }
+        let _ = write!(out, " lbl=\"{}\"", core::str::from_utf8(&lbl).unwrap_or("?"));
+        // saved coroutine context (coRoutine@304 = 0x130)
+        let co = rd(tp + 0x130).unwrap_or(0);
+        if co != 0 && (co >> 47) == 0 && co > 0x1000 {
+            let rsp = rd(co + 24 + 48).unwrap_or(0);
+            let rip = rd(co + 24 + 56).unwrap_or(0);
+            let stk_sz = rd(co + 0x68).unwrap_or(0);
+            let ripoff = match word_off(rip) {
+                Some((m, o)) => alloc::format!("v{}+{:#x}", m, o),
+                None => alloc::string::String::from("?"),
+            };
+            let _ = write!(
+                out,
+                " co={:#x}(st={} rsp={:#x} rip={:#x}@{} sz={:#x})",
+                co,
+                rd32(co).unwrap_or(0xffff),
+                rsp,
+                rip,
+                ripoff,
+                stk_sz
+            );
+            let lo = co + 120;
+            let hi = co + 120 + stk_sz.min(0x100000);
+            if rsp >= lo && rsp < hi && (rsp & 7) == 0 {
+                // Walk the suspended coroutine stack upward (older
+                // frames); every word inside an exec VMA is a candidate
+                // return address — print MODULE INDEX + FILE OFFSET for
+                // offline addr2line. Deep: 6 KB / 40 prints; ring rows:
+                // 12 / 2 KB.
+                let (cap, win) = if deep { (40, 6144) } else { (12, 2048) };
+                let mut found = 0u32;
+                let mut va = rsp;
+                let top = (rsp + win).min(hi);
+                let _ = write!(out, " stk[");
+                while va < top && found < cap {
+                    if let Some(w) = rd(va) {
+                        if let Some((m, off)) = word_off(w) {
+                            let _ = write!(out, " v{}:{:#x}", m, off);
+                            found += 1;
+                        }
+                    }
+                    va += 8;
+                }
+                let _ = write!(out, "]");
+            }
+        }
+    };
+
+    // The latched acquire-time holder (coroutine case) — deep walk.
+    let otask = FUXWATCH_OWNER_TASK.load(Relaxed);
+    let octx = OH68_OWNER_CTX.load(Relaxed);
+    let parkw = if octx != 0 { octx + 224 } else { 0 };
+    let _ = write!(out, " owner[task={:#x} ctx={:#x} parkw={:#x}]", otask, octx, parkw);
+    // oh68b probe: if the latched holder's saved RIP is not covered by
+    // any EXEC vma, name the containing vma's recorded flags (an
+    // exec-bit bookkeeping loss shows here; the 24-entry tables of
+    // ohw71/72 lacked the rip's module entirely).
+    if otask != 0 {
+        if let Some(co) = rd(otask + 0x130) {
+            if co > 0x1000 && (co >> 47) == 0 {
+                if let Some(rip) = rd(co + 24 + 56) {
+                    if word_off(rip).is_none() {
+                        let mut named = false;
+                        crate::sched::for_each_task_try(|task| {
+                            if named {
+                                return;
+                            }
+                            // SAFETY: diagnostic read under for_each.
+                            let tk = unsafe { &*task };
+                            if tk.tgid() as u32 != tgid {
+                                return;
+                            }
+                            if let Some(aspace) = tk.address_space() {
+                                if let Some(mgr) = aspace.vma_try_read() {
+                                    if let Some(v) = mgr.find(crate::mm::vma::VirtAddr::new(
+                                        rip as usize,
+                                    )) {
+                                        let name = aspace
+                                            .try_get_vma_file(v.start().as_usize())
+                                            .map(|f| f.path())
+                                            .unwrap_or_default();
+                                        let _ = write!(
+                                            out,
+                                            " RIPVMA[{}-{} off={:#x} flags={:#x} {}]",
+                                            v.start().as_usize(),
+                                            v.end().as_usize(),
+                                            v.offset(),
+                                            v.flags().bits(),
+                                            name
+                                        );
+                                        named = true;
+                                    }
+                                }
+                            }
+                        });
+                        if !named {
+                            let _ = write!(out, " RIPVMA[none]");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if otask != 0 {
+        cotask(otask, "own", true, &mut out);
+    }
+
+    // The M2 ring's CoTask waiters (the notify tasks queued behind M2):
+    // label + saved RIP names them without a full walk. Entry == the
+    // task's own wue (heap WaitUntilEntry) marks the coroutine waiters;
+    // thread parks (entry == some ctx+32) are covered by the sweep.
+    let m2 = OH67_M2.load(Relaxed);
+    if m2 != 0 {
+        let head = m2 + 0x10;
+        let mut cur = rd(m2 + 0x18).unwrap_or(0);
+        let mut n = 0u32;
+        let mut ct_n = 0u32;
+        while cur != 0 && cur != head && n < 40 && ct_n < 4 {
+            if (cur >> 47) != 0 || cur < 0x1000 {
+                break;
+            }
+            let taskp = rd(cur + 0x20).unwrap_or(0);
+            if taskp != 0 && (taskp >> 47) == 0 && taskp > 0x1000 {
+                // Coroutine waiter on this mutex: the ring entry IS the
+                // task's own we (CoTask+256 = +0x100). CV waiters sit at
+                // task->wue (+0x128). Thread-mode parks (entry == some
+                // ctx+32) are covered by the sweep.
+                if rd(taskp + 0x100) == Some(cur) || rd(taskp + 0x128) == Some(cur) {
+                    cotask(taskp, "rw", false, &mut out);
+                    ct_n += 1;
+                }
+            }
+            match rd(cur + 0x8) {
+                Some(v) if v != 0 && (v == head || ((v >> 47) == 0 && v > 0x1000)) => cur = v,
+                _ => break,
+            }
+            n += 1;
+        }
+    }
     out
 }
 

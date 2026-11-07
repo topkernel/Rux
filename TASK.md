@@ -7821,3 +7821,124 @@ Gate note (final tree): the follow-up commit (6da52cf4) re-ran the full
 gate set — x86_64 build rc=0, riscv64 build rc=0 (run/build-rv-67b.log)
 + make test 1319/1319 (run/test-rv-67b.log), aarch64 build rc=0
 (run/build-a64-67b.log). Branch pushed at 2 commits past the 66th.
+
+### 68. 68TH SESSION (2026-11-07) — the holder's block primitive read
+### end-to-end (oh68 TLS→ctx->task→coroutine-stack instrument); the M2
+### web root-caused to OUR binder: proc-todo work handed to non-pool
+### threads (the 26th's looper-gate removal was NOT reference parity);
+### fix landed (3-site gate restore); M2 web DRAINED, appfwk.ready
+### passed reproducibly; the 105-family is now the sole blocker
+
+Boots this session: ohw68-ohw76 (9 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=fuxstuck,txnhunt,sleepsnap,
+pctlmon fuxwatch=0x7ff0004862c0). Boots ohw68-74 = instrument
+bring-up + wedge re-decode on every boot (the M2 web re-formed at
+63-119 s in ALL of them). ohw75/76 = the fixed kernel.
+
+#### 1. THE OH68 INSTRUMENT (the 67th's item 1 — completed)
+
+Chain (every offset BuildID-verified: libffrt.so bb6920ed gdb DWARF;
+ld-musl 99627cfd disasm; samgr 48be5d8d exe.unstripped): writer thread
+fs_base (kernel-tracked) → musl pthread->tsd @ fs+0x88
+(pthread_getspecific disasm) → tsd[g_executeCtxTlsKey] — the key FOUND
+BY VALIDATION (scan 1..64, ctx->tid@248 must equal the reading thread's
+tid; per-boot cached — a first cut that matched libffrt's RX VMA shape
+for the bias failed, ohw68 "identity-FAILED") → ExecuteCtx
+{vptr@0 qos@8 task@16 wn@32(cv@+184→ctx+216) tid@248}. ctx->task stays
+set while a THREAD-mode task parks inside Execute() (ThreadWait parks
+on ctx+224); a COROUTINE task's ctx->task is cleared on yield — so the
+holder coroutine is latched AT THE ACQUIRE WRITE (fuxwatch_log_write
+old==0&&exact → oh68_latch_owner_task: 3 reads, cold 64). CoTask
+(432B): label@216 (libc++ SSO: size in byte0>>1), we@256, wue@296,
+coRoutine@304, threadMode_@425. CoRoutine (128B): fiber ctx@24
+{RSP@+0x30 RIP@+0x38 → co+72/co+80, x86_64 co2_context.c}, stack
+[co+120, +stkMem.size). The decode walks the suspended coroutine's
+stack and prints every exec-VMA word as module-index+FILE OFFSET with a
+per-decode VMA table (start-end/off/basename — 48 entries, ONE task's
+aspace; walking every thread duplicated the table and burned the cap).
+Ring-waiter matching extended: mutex-coroutine waiters sit at
+task->we (task+0x100), cv waiters at task->wue. OH68-HLD prints once
+per audit burst beside OH67-M2.
+
+#### 2. THE HOLDER NAMED (every wedge boot, identical shape)
+
+ohw70: own[lbl="sq_workHandler_3_PostTask_382" gid ty=3(queue) st=6
+ft=363 thrM=0 co(st=1) rip=libffrt+0x87ec4]. Full saved stack
+(innermost→outermost), symbolized: CoYield → CoWait →
+mutexPrivate::lock → ffrt_mutex_lock → **SystemAbilityManager::
+SubscribeSystemAbility:917** (the `listenerMap_[said]` under
+lock_guard(listenerMapLock_)) → SystemAbilityManagerStub::
+SubsSystemAbilityInner → OnRemoteRequest → [libipc_single:
+IPCObjectStub::SendRequestInner ← SendRequest ←
+BinderInvoker::SamgrServiceSendRequest ← Transaction ←
+HandleCommandsInner ← HandleCommands ← **WaitForCompletion** ←
+BinderInvoker::SendRequest ← IPCObjectProxy::SendRequestInner ←
+SendRequest] → stringbuf (parcel build) → **FindSystemAbilityNotify:592
+(HOLDING M2, the NotifySystemAbilityChanged call)** → task wrapper →
+CoStartEntry. THE HOLDER IS THE NOTIFY TASK ITSELF: under M2 it sent a
+listener-notify, and INSIDE THAT SEND'S WaitForCompletion the kernel
+handed it an incoming SUBSCRIBE_SYSTEM_ABILITY (code 6 — the TXN row's
+"txnNNNN code6 SYNC-IN from <pid>.<tid>" is the stolen txn; e.g. ohw74
+txn9448 from el5_filekey_man 314.314, both sides kernel-stuck 365 s),
+libipc dispatched it synchronously on the same stack
+(SamgrServiceSendRequest), SubscribeSystemAbility re-locked the
+non-recursive ffrt mutexPrivate the notify coroutine already held →
+self-deadlock. The 16 thread waiters are every samgr looper piled onto
+M2; the ring's type=3 CoTasks are the next serial-queue notify tasks.
+This also retires the 67th's "holder waits on a cv/future" reading:
+the primitive is mutexPrivate::lock — the SAME lock, re-entered.
+
+#### 3. ROOT CAUSE — OUR BINDER, NOT USERSPACE
+
+The stolen txn's route is on the boot log (txn hist):
+TXN_SENT → TXN_PQUEUED — proc todo, NOT the WF_SYNC origin-thread path.
+An FFRT worker (never a pool thread; TXN rows show looper=0x0) inside
+WaitForCompletion pulled an incoming transaction off its OWN process's
+proc todo and ran it on its own stack. Linux NEVER does this:
+binder_available_for_proc_work_ilocked() (binder.c, 5.10-6.6) is
+  !thread->transaction_stack && todo_empty &&
+  (thread->looper & (ENTERED | REGISTERED))
+— the looper term IS in the reference, at ALL THREE sites we had it
+wrong (binder_wait_for_work's do_proc_work/waiting_threads membership,
+binder_thread_read's has-work, and the read's drain-arm list choice).
+The 26th session removed the term citing "no looper flag requirement"
+— a misreading of 6.6 — and the removal has been loading every M2-web
+boot since (the 62nd's OWNER-LATCH rows were these steals; the 67th's
+"holder" was the victim of one). ohw74 (has_work+park sites fixed
+only) STILL wedged via the drain-arm site — the third and decisive
+one: the worker's read (own todo momentarily empty after consuming its
+oneway txn-complete) took txn9448 from proc todo in the drain loop.
+
+#### 4. THE FIX (binder.rs, 3 sites, reference parity)
+
+thread_has_work / park-membership / drain-arm avail_for_proc all gain
+`&& (looper & (ENTERED|REGISTERED))`. Own-thread work (process_todo /
+own todo) stays unconditional — a mid-WaitForCompletion thread still
+gets its BR_TRANSACTION_COMPLETE and replies; only the PROC-TODO STEAL
+is gone. Incoming txns now wait for real pool threads (samgr's
+OS_IPC_x loopers, looper=0x1/0x2), which block on M2 harmlessly until
+the notify completes — exactly the reference shape.
+
+#### 5. VALIDATION (ohw75/76, fixed kernel)
+
+ohw75: the M2 web never re-formed (25 OH67-M2 rows total 143-308 s,
+ending l=0 waiters=0 — vs continuous re-prints every 5 s for 200+ s on
+ohw63-74); bootevent.appfwk.ready SET at t=164.7 (pid 845) — the
+phase every wedged boot died before. The owner row at 323 s is a
+benign looper read (wfpw=true, rwait=1 s). ohw76 = reproducibility
+run (same result expected; see session close). NEW BLOCKER (the next
+lane's target): the 105-family — StartDynamicSystemProcess's
+ServiceControlWithExtra returns 105 after 15-95 s
+("Start dynamic proc:deviceprofile,6001,105_95980ms" class), pctlmon
+shows the ctl.start sends DO go out (q depth 13-15/11100 — not
+frozen, unlike ohw64's reading) — the param/init side of the dynamic
+start is the sole remaining blocker before ServiceStart
+starting:launcher. NOT the M2 web (drained); NOT a binder steal.
+
+#### 6. GATES
+
+x86_64 build rc=0; riscv64 build rc=0 (run/build-rv-68.log) + make
+test 1319/1319 (run/test-rv-68.log); aarch64 build rc=0
+(run/build-a64-68.log). Tier-2 (binder read path = IPC guarded
+domain): interleaved pbench A/B vs HEAD 6da52cf4 (ab-pbench.sh,
+3 reps, run/abpb-b68-f68.txt) — see session close for the numbers.
