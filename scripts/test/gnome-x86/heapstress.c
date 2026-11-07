@@ -37,6 +37,56 @@
 static volatile int stop_flag;
 static volatile int corrupt_detected;
 
+// Top-chunk watch (the 17MB-trim discriminator follow-up): a thread
+// samples the main arena's top chunk header (size field at the word
+// just below the current brk) every 200us. The top size is large but
+// bounded (arena grew to at most ~64MB in the crashing boots); the
+// corruption signature is a size field that covers a range reaching
+// PAST the brk (impossible value = the writer that makes glibc trim
+// 17MB of live heap). On detection: print old/new, the 32 bytes
+// before the header (whose canary pattern landed there = the writer
+// identity), and freeze.
+static void *topwatch_thread(void *arg)
+{
+    (void)arg;
+    uint64_t last_size = 0;
+    int prints = 0;
+    while (!stop_flag && prints < 8) {
+        // sbrk(0) reads the current break; the top chunk header sits
+        // at [brk - 32, brk - 16) for prev_size and [brk - 16, brk)
+        // for size in glibc's layout (top chunk ends at brk).
+        void *brk = sbrk(0);
+        if (brk != (void *)-1) {
+            uint64_t *size_word = (uint64_t *)((char *)brk - 16);
+            // Only meaningful if the top chunk really ends at brk;
+            // glibc keeps top->size such that chunk+size == brk.
+            uint64_t sz = *size_word;
+            uint64_t mask = ~(uint64_t)7;
+            uint64_t top_end = ((uint64_t)((char *)brk - 32)) + (sz & mask);
+            if (last_size != 0 && (sz & mask) != (last_size & mask)) {
+                // Top size changed: normal on malloc/free, but if the
+                // new size claims to reach past brk, that is the
+                // corruption signature.
+                if (top_end > (uint64_t)brk + 0x1000) {
+                    printf("TOPWATCH-CORRUPT brk=%p old=%#lx new=%#lx top_end=%#lx PAST BRK\n",
+                           brk, (unsigned long)(last_size & mask),
+                           (unsigned long)(sz & mask), (unsigned long)top_end);
+                    // dump 32 bytes before the header for the writer pattern
+                    unsigned char *pre = (unsigned char *)brk - 48;
+                    printf("TOPWATCH-PRE ");
+                    for (int i = 0; i < 32; i++) printf("%02x", pre[i]);
+                    printf("\n");
+                    corrupt_detected = 1;
+                    prints++;
+                }
+            }
+            last_size = sz;
+        }
+        usleep(200);
+    }
+    return NULL;
+}
+
 // mode bits read from /etc/stress-mode (default full)
 static int do_malloc = 1, do_files = 1, do_mprotect = 1, do_munmap = 1;
 static int nthreads = NTHREADS;
@@ -360,6 +410,8 @@ int main(void) {
         tas[i].id = i;
         pthread_create(&th[i], 0, worker, &tas[i]);
     }
+    pthread_t tw;
+    pthread_create(&tw, 0, topwatch_thread, NULL);
 
     int phase = 0;
     while (!corrupt_detected) {
