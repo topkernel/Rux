@@ -288,17 +288,21 @@ static ARMED: AtomicU8 = AtomicU8::new(0);
 static REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Cached arm check (syscost::on pattern; never cache before cmdline).
+///
+/// ARMED values: 1 = off, 2 = fully on, 3 = tick-path only (see
+/// tick_on). `on()` gates every fork/exit/wake/mm-path hook.
 #[inline]
 pub fn on() -> bool {
     match ARMED.load(Ordering::Relaxed) {
         2 => true,
-        1 => false,
+        1 | 3 => false,
         _ => {
             let v = match crate::cmdline::get_cmdline() {
                 None => return false,
                 Some(_) => {
                     match crate::cmdline::get_param("forkprof").as_deref() {
                         Some("1") | Some("2") => 2,
+                        Some("3") => 3,
                         _ => 1,
                     }
                 }
@@ -309,14 +313,35 @@ pub fn on() -> bool {
     }
 }
 
+/// Tick-path-only arming (`forkprof=3`): the freeze probes that live on
+/// the timer tick (FTICKGAP, the GRQ sampler, tick RIP) run, but every
+/// fork/exit/wake/mm-path hook stays off, so the measured path keeps
+/// its unarmed timing. Purpose: full arming measurably suppresses the
+/// fork slow mode (r13: armed gates 4/4 fast vs unarmed 3/5 slow), so
+/// all prior slow-mode topology came from armed boots whose mode
+/// distribution the arming itself shifted. Level 3 captures the freeze
+/// anatomy of a genuinely-unarmed-slow boot.
+#[inline]
+pub fn tick_on() -> bool {
+    match ARMED.load(Ordering::Relaxed) {
+        2 | 3 => true,
+        1 => false,
+        _ => {
+            on();
+            matches!(ARMED.load(Ordering::Relaxed), 2 | 3)
+        }
+    }
+}
+
 /// Cheap "possibly armed" check for hot paths (the tick): one relaxed
 /// load once the word is resolved; the undetermined state falls back
-/// to on() which resolves it once.
+/// to tick_on() which resolves it once (tick RIP belongs to the
+/// tick-path probe set, so level 3 counts as armed here).
 #[inline]
 pub fn maybe_armed() -> bool {
     match ARMED.load(Ordering::Relaxed) {
-        0 => on(),
-        v => v == 2,
+        0 => tick_on(),
+        v => v >= 2,
     }
 }
 
@@ -525,10 +550,11 @@ pub fn note_tick_rip(cpu: usize, rip: u64) {
 
 /// Called from scheduler_tick while forkprof is armed. Records one
 /// sample; also detects streaks (same leftmost pid across >=2
-/// consecutive samples) into a small streak table.
+/// consecutive samples) into a small streak table. Tick-path probe:
+/// runs under full arming (2) and tick-only arming (3).
 #[inline]
 pub fn tick_grq_sample() {
-    if !on() {
+    if !tick_on() {
         return;
     }
     tick_grq_sample_armed();
@@ -626,7 +652,10 @@ pub fn peek(p: usize) -> (u64, u64, u64) {
 
 /// Print the phase table. Called once from the shutdown cascade.
 pub fn report() {
-    if !on() || REPORTED.swap(true, Ordering::Relaxed) {
+    if !(on() || tick_on()) {
+        return;
+    }
+    if REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
     #[cfg(feature = "x86_64")]

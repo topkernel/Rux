@@ -67,6 +67,29 @@ static RCU_CBS_LOCK: [AtomicBool; MAX_CPUS] =
     [const { AtomicBool::new(false) }; MAX_CPUS];
 
 // ============================================================================
+// Grace-period-correct callback batches (r14 contract fix)
+// ============================================================================
+
+/// Global pending callback list. The softirq handler splices the local
+/// per-CPU list into this list instead of firing immediately; the batch
+/// fires only once every online CPU is quiescent with respect to
+/// `CBS_BATCH_GEN` (a generation opened when the pending period's first
+/// callback was queued). Guarded by `CBS_BATCH_LOCK`.
+static mut CBS_PENDING_LIST: ListHead = ListHead::new();
+/// TAS lock for `CBS_PENDING_LIST` (RCU_CBS_LOCK pattern).
+static CBS_BATCH_LOCK: AtomicBool = AtomicBool::new(false);
+/// Grace generation the pending batch waits on.
+static CBS_BATCH_GEN: AtomicU32 = AtomicU32::new(0);
+/// Callbacks awaiting their grace period (tick retry gate; one relaxed
+/// load per tick while zero).
+static CBS_PENDING_N: AtomicU32 = AtomicU32::new(0);
+/// Whether the pending batch holds the `RCU_WAITERS` announcement. QS
+/// reporting (`rcu_note_context_switch`) only stores reports while
+/// `RCU_WAITERS > 0`, so the pending batch must keep it non-zero or a
+/// quiet system would never satisfy its own grace period.
+static CBS_WAITER_HELD: AtomicBool = AtomicBool::new(false);
+
+// ============================================================================
 // Grace-period generation counter
 // ============================================================================
 
@@ -102,22 +125,19 @@ pub fn rcu_read_unlock() {
 // Public API: callback registration
 // ============================================================================
 
-/// Register an RCU callback. **CONTRACT WARNING (perf-gap-hunt r11
-/// finding): the current softirq handler fires callbacks at the next
-/// RCU softirq WITHOUT waiting for any grace period** — despite what
-/// the original comment below promised. Callbacks whose correctness
-/// hinges on a full grace period (freeing objects a lock-free reader
-/// may still be walking) MUST NOT use this; that shape needs the
-/// explicit grace waits (`synchronize_rcu*`) plus a deferral mechanism
-/// of its own (see mm/deferred_free.rs, which replaced a call_rcu idea
-/// with wall-clock deferral for exactly this reason, and fs/fdreap.rs,
-/// which built its own grace-then-drain queue). The r11 path-memo v3
-/// experiment UAF-panicked the SMP test rig by trusting the promise
-/// below; the doc is kept as the intended long-term contract.
+/// Register an RCU callback. After every online CPU has passed through a
+/// quiescent state at least one full grace generation AFTER this
+/// registration, `head.func` is invoked with `head` as the argument from
+/// RCU softirq context. (r14 contract fix: the old handler fired at the
+/// very next softirq with no grace period at all — the r11 path-memo v3
+/// experiment UAF-panicked the SMP rig by trusting the old promise. The
+/// batch now pends in `CBS_PENDING_LIST` until `CBS_BATCH_GEN` completes;
+/// the timer tick re-raises the drain while a batch is outstanding.)
 ///
-/// Original (intended, NOT yet implemented) contract: after all CPUs
-/// pass through a quiescent state, `head.func` will be called with
-/// `head` as the argument from softirq context.
+/// A monopolist CPU (no QS reports for a long window) delays firing for
+/// that whole window — callers needing bounded reclamation use the
+/// explicit `synchronize_rcu_bounded*` waits plus their own deferral
+/// (mm/deferred_free.rs shape), not this.
 ///
 /// # Safety
 /// - `head` must remain valid until the callback executes.
@@ -608,7 +628,9 @@ fn announce_and_wait(gen: u32, max_ms: u64, site: &'static str) -> bool {
 // Softirq handler
 // ============================================================================
 
-/// RCU softirq handler — drains the local CPU callback list.
+/// RCU softirq handler — moves the local CPU callback list into the
+/// grace-period-pending batch, then fires whatever batches' grace
+/// generations have completed.
 ///
 /// Registered at `SoftirqIndex::Rcu` (vector 9).
 pub fn rcu_softirq_handler(_nr: usize) {
@@ -622,7 +644,7 @@ pub fn rcu_softirq_handler(_nr: usize) {
     {
         lock_cb_list(cpu);
         // SAFETY: We hold cb_list lock for this CPU, so RCU_CBS[cpu] is only
-        // accessed by us.  The list pointers were initialised in init().
+        // accessed by us. The list pointers were initialised in init().
         unsafe {
             if !RCU_CBS[cpu].is_empty() {
                 // Splice the list into `batch`.
@@ -636,24 +658,132 @@ pub fn rcu_softirq_handler(_nr: usize) {
         unlock_cb_list(cpu);
     }
 
-    // Invoke all callbacks.
-    // SAFETY: We detached the entire callback list above and now own it
-    // exclusively.  Each RcuHead was registered via call_rcu with a valid
-    // func pointer and remains valid until the callback executes.
-    unsafe {
-        let sentinel = &mut batch as *mut ListHead;
-        let mut node = batch.next;
-        while node != sentinel {
-            let next = (*node).next;
-            let head = node as *mut RcuHead;
-            let func = (*head).func;
-            func(head as *mut core::ffi::c_void);
-            node = next;
+    // (r14 contract fix) A callback registered now must not fire until
+    // every online CPU has passed a quiescent state AFTER this point —
+    // firing at the next softirq (the old behavior) freed objects a
+    // lock-free reader could still be walking. The detached batch joins
+    // the global pending list; the first batch of a pending period opens
+    // a grace generation (RCU_GEN + 1) that every CPU must report before
+    // the batch fires. Later arrivals append and fire with it
+    // (conservative: firing later than needed is safe, earlier never).
+    if !batch.is_empty() {
+        // Keep QS reporting enabled while a grace period is outstanding
+        // (rcu_note_context_switch reports only when RCU_WAITERS > 0 —
+        // a quiet system would otherwise never satisfy its own batch).
+        if !CBS_WAITER_HELD.swap(true, Ordering::AcqRel) {
+            RCU_WAITERS.fetch_add(1, Ordering::AcqRel);
         }
+        // Count this batch for the tick retry gate before splicing.
+        let mut n = 0u32;
+        // SAFETY: we own `batch` exclusively (detached above).
+        unsafe {
+            let sentinel = &batch as *const ListHead as *mut ListHead;
+            let mut node = batch.next;
+            while node != sentinel {
+                n += 1;
+                node = (*node).next;
+            }
+        }
+        CBS_PENDING_N.fetch_add(n, Ordering::Relaxed);
+        lock_cbs_batch();
+        // SAFETY: CBS_BATCH_LOCK held; CBS_PENDING_LIST was initialised
+        // in init(); `batch` is owned exclusively (SAFETY above).
+        unsafe {
+            if CBS_PENDING_LIST.is_empty() {
+                // Open the grace generation NOW: after this advance,
+                // every subsequent QS report stores RCU_GEN >= g, so
+                // "all CPUs reported >= g" proves every CPU passed a
+                // quiescent point after this batch was queued.
+                let g = RCU_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+                CBS_BATCH_GEN.store(g, Ordering::Release);
+                CBS_PENDING_LIST.next = batch.next;
+                CBS_PENDING_LIST.prev = batch.prev;
+            } else {
+                // Append at the tail: pending batches fire FIFO, all
+                // under the same (earliest, therefore safest) generation.
+                let last = CBS_PENDING_LIST.prev;
+                (*last).next = batch.next;
+                (*batch.next).prev = last;
+                CBS_PENDING_LIST.prev = batch.prev;
+            }
+            batch.init();
+        }
+        unlock_cbs_batch();
     }
 
-    // Advance global generation so `synchronize_rcu()` callers can make progress.
-    RCU_GEN.fetch_add(1, Ordering::AcqRel);
+    fire_graced_batch();
+}
+
+/// Fire pending batches whose grace generation has completed. Called
+/// from the RCU softirq (every invocation) and re-raised by the timer
+/// tick while callbacks remain pending, so a completed grace period is
+/// noticed within a tick even on an otherwise quiet system.
+fn fire_graced_batch() {
+    loop {
+        let mut to_fire = ListHead::new();
+        lock_cbs_batch();
+        // SAFETY: CBS_BATCH_LOCK held; list pointers initialised in init().
+        unsafe {
+            if CBS_PENDING_LIST.is_empty() {
+                unlock_cbs_batch();
+                // Nothing pending: release the QS-reporting announcement
+                // we hold (exactly one holder via the swap).
+                if CBS_WAITER_HELD.swap(false, Ordering::AcqRel) {
+                    RCU_WAITERS.fetch_sub(1, Ordering::AcqRel);
+                }
+                return;
+            }
+            let gen = CBS_BATCH_GEN.load(Ordering::Acquire);
+            let mut all_qs = true;
+            for i in 0..MAX_CPUS {
+                if !crate::sched::sched::cpu_online(i) {
+                    continue;
+                }
+                if !cpu_quiescent(i, gen) {
+                    all_qs = false;
+                    break;
+                }
+            }
+            if !all_qs {
+                // Grace still outstanding: the tick re-raises us.
+                unlock_cbs_batch();
+                return;
+            }
+            to_fire.next = CBS_PENDING_LIST.next;
+            to_fire.prev = CBS_PENDING_LIST.prev;
+            CBS_PENDING_LIST.init();
+        }
+        unlock_cbs_batch();
+
+        // Invoke the callbacks OUTSIDE the batch lock (a callback may
+        // itself call_rcu, which would otherwise self-deadlock).
+        // SAFETY: we detached the entire batch above and own it
+        // exclusively. Each RcuHead was registered via call_rcu with a
+        // valid func pointer and remains valid until the callback
+        // executes.
+        let mut fired = 0u32;
+        unsafe {
+            let sentinel = &mut to_fire as *mut ListHead;
+            let mut node = to_fire.next;
+            while node != sentinel {
+                let next = (*node).next;
+                let head = node as *mut RcuHead;
+                let func = (*head).func;
+                func(head as *mut core::ffi::c_void);
+                node = next;
+                fired += 1;
+            }
+        }
+        CBS_PENDING_N.fetch_sub(fired, Ordering::Relaxed);
+        // Loop: new batches may have joined while the lock was dropped.
+    }
+}
+
+/// Whether any callbacks await their grace period (timer-tick retry
+/// gate; one relaxed load when zero).
+#[inline]
+pub fn cbs_pending() -> bool {
+    CBS_PENDING_N.load(Ordering::Relaxed) != 0
 }
 
 // ============================================================================
@@ -668,6 +798,8 @@ pub fn init() {
         unsafe { RCU_CBS[i].init(); }
         RCU_QS_GEN[i].store(0, Ordering::Relaxed);
     }
+    // SAFETY: same one-time boot context for the pending batch list.
+    unsafe { CBS_PENDING_LIST.init(); }
 
     crate::interrupt::softirq::open_softirq(
         crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
@@ -693,4 +825,19 @@ fn lock_cb_list(cpu: usize) {
 #[inline]
 fn unlock_cb_list(cpu: usize) {
     RCU_CBS_LOCK[cpu].store(false, Ordering::Release);
+}
+
+#[inline]
+fn lock_cbs_batch() {
+    while CBS_BATCH_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn unlock_cbs_batch() {
+    CBS_BATCH_LOCK.store(false, Ordering::Release);
 }

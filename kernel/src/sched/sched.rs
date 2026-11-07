@@ -1060,6 +1060,11 @@ pub const SLOT_W_ABORT_REPUB: u32 = 5;
 /// parks wake victims forever on x86_64, where the pid-hash harvester is
 /// gated off).
 pub const SLOT_W_IDLE_HEAL: u32 = 6;
+/// r15 (race-2 why=c closeout): wake-side lying-slot heal — the waker,
+/// holding the GRQ, convicted a busy slot naming a SLEEPING task
+/// (idle-marked slot / losing pick generation / 50-jiffy continuous
+/// shape) and rewrote it to the idle task.
+pub const SLOT_W_WAKE_LIE_HEAL: u32 = 7;
 pub static SLOT_WRITER: [core::sync::atomic::AtomicU32; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU32::new(0) }; MAX_CPUS];
 pub static SLOT_WRITER_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
@@ -2284,9 +2289,16 @@ pub fn schedule() {
     // preemption path (preempt_schedule_irq shape); anything else is a
     // sleeping-with-IRQs-off bug. Rate-limited one-liner naming the caller.
     if !crate::arch::cpu::get_interrupts_state() {
+        // (r14) Entries via asm_schedule (the trap-exit preemption path)
+        // set and surrender a per-CPU token — the legitimate shape; see
+        // SCHED_ASM_ENTRY above. Consume it here, report only direct
+        // Rust callers.
+        let sched_cpu = crate::arch::cpu_id() as usize;
+        let via_asm = sched_cpu < MAX_CPUS
+            && SCHED_ASM_ENTRY[sched_cpu].swap(false, core::sync::atomic::Ordering::AcqRel);
         static IRQOFF_N: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        if IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+        if !via_asm && IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
             let loc = core::panic::Location::caller();
             crate::pr_warn!(
                 "SCHED-IRQOFF caller={}:{} pid={} pc={:#x}",
@@ -2338,8 +2350,30 @@ pub fn schedule() {
     }
 }
 
+// (r14) Consumed-token marker for the trap-exit preemption path.
+// asm_schedule is called only from trap.S preempt loops (x86_64
+// trap_exit_syscall, riscv64 user-return resched + the
+// preempt_schedule_irq shape) — the ONE legitimate IRQs-off schedule()
+// entry. It sets this per-CPU token immediately before calling
+// schedule(); schedule()'s entry check consumes it (swap to false) and
+// skips the SCHED-IRQOFF report for that entry. Direct Rust callers
+// always see a consumed token and report as before, so the probe keeps
+// its real signal (sleeping-with-IRQs-off bugs) while the storm of
+// identity-free caller=sched.rs:2380 lines (every preempt with IF=0)
+// stops drowning it. Consumption — not a clear-on-return epilogue — is
+// the correctness trick: schedule() may switch away and RETURN on a
+// different CPU, so an epilogue clear could clobber another CPU's
+// token; the entry-time swap is strictly same-CPU synchronous with the
+// setter.
+static SCHED_ASM_ENTRY: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+
 #[no_mangle]
 pub extern "C" fn asm_schedule() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < MAX_CPUS {
+        SCHED_ASM_ENTRY[cpu].store(true, core::sync::atomic::Ordering::Release);
+    }
     schedule();
 }
 
@@ -4847,13 +4881,28 @@ pub fn wake_up_enqueue_opt(
                 // would poison every future wake-heal of this task (the
                 // same per-task forever-skip the parkwalk's mid-switch
                 // skip produces). Time-confirm, then ignore.
+                //
+                // (r14 race-2 fix) The original confirm refreshed the
+                // timestamp on EVERY observation, so a task woken more
+                // often than once per 50 jiffies NEVER aged out — the
+                // r14 wedge census showed exactly that (pid 308: an
+                // endless why=s skip stream, the stuck marker poisoning
+                // every wake until both CPUs halted — the lost-park
+                // permanent wedge). Age must measure how long the
+                // marker has been CONTINUOUSLY present: record the
+                // first-observed jiffy and only clear the entry when the
+                // task is seen WITHOUT the marker (a genuine switch
+                // clears it in microseconds, so the entry resets on the
+                // next wake; a marker that survives 50 jiffies of
+                // continuous presence is stale by the original
+                // discipline's own argument).
+                const WMS: usize = 8;
+                static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
+                    [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
+                static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
+                let key = task as usize;
                 if mid_switch {
-                    const WMS: usize = 8;
-                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
-                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
-                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
-                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
-                    let key = task as usize;
                     let jif = crate::drivers::timer::get_jiffies();
                     let mut stale = false;
                     for s in 0..WMS {
@@ -4864,7 +4913,6 @@ pub fn wake_up_enqueue_opt(
                             if jif.wrapping_sub(prev_jif) >= 50 {
                                 stale = true;
                             }
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                         if prev == 0
@@ -4884,6 +4932,23 @@ pub fn wake_up_enqueue_opt(
                     if stale {
                         mid_switch = false;
                     }
+                } else {
+                    // Marker absent: retire this task's WM entry so the
+                    // next stuck marker starts a FRESH age window (a
+                    // real switch clears the marker in microseconds; the
+                    // entry only survives while the marker does). The
+                    // entry is the SAME array the arm above reads
+                    // (hoisted statics).
+                    for s in 0..WMS {
+                        WM_TASK[s]
+                            .compare_exchange(
+                                key,
+                                0,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .ok();
+                    }
                 }
                 let mut curr_on = false;
                 if !mid_switch {
@@ -4892,6 +4957,271 @@ pub fn wake_up_enqueue_opt(
                             curr_on = true;
                             break;
                         }
+                    }
+                }
+                // r15 (race-2 closeout — the lying-slot wake-side heal):
+                // a SLEEPING/STOPPED task named by a busy (non-idle-marked)
+                // slot is not executing anywhere — a running task is
+                // RUNNING-state, its park rewrote the slot under this same
+                // lock, and the only legit window (sleep state stored,
+                // __schedule not yet entered) is covered by the mid_switch
+                // marker checked above. This is the why=c refusal that made
+                // the r14 both-CPU permanent halt permanent: the lying slot
+                // refuses every wake (curr_on) AND every pick
+                // (pick_owner_live), so a satisfiable sleeper is
+                // unreachable forever. Convict the lie under this GRQ hold
+                // and heal in place:
+                //   arm e (idle-marked slot): the R56c shape,
+                //     unconstructible in-tree (a pick clears the idle bit
+                //     and publishes the slot in one hold; mark_idle runs
+                //     with the slot naming idle) — instant conviction,
+                //     same rewrite R56c performs.
+                //   arm g (losing switch): pick_gen_is_lost — the pick
+                //     generation naming this task is unretired past the
+                //     2-jiffy in-flight floor (a healthy pick→switch-in
+                //     retires in the same jiffy). Instant conviction; a
+                //     starved-but-live picker may still sit between the
+                //     GRQ release and __switch_to's affirm, so the
+                //     revoke_pending_pick CAS(PICKED→REVOKED) gates the
+                //     mark release (the late switch-in aborts and
+                //     republishes its own slot — the R56-STEAL
+                //     discipline).
+                //   arm l (ledger desync — the r15 live capture: naming
+                //     slot busy, pickgen NOT naming the task): every
+                //     slot writer pairs the slot write with a pick-gen
+                //     publish of the SAME task inside one GRQ hold (the
+                //     pick: slot then gen; every heal/abort/resync:
+                //     supersede). A slot naming T whose CPU's ledger
+                //     names someone else is a torn pairing impossible
+                //     in-tree — the slot write that would have named the
+                //     ledger's task was lost, and an in-flight or
+                //     completed pick of T would have T as the ledger's
+                //     CURRENT entry. Instant conviction.
+                //   arm p (parked victim — the r15 FGSQ conviction: oncpu=0
+                //     claim=-1 pk=LIVE while the slot still names the
+                //     task): the ownership qword's full release is the
+                //     switch-out's LAST act (R63: after the release store
+                //     the context is fully saved and the task is parked —
+                //     only its own next pick can resume it, and a pick
+                //     needs the wake this refusal is eating). A SLEEPING
+                //     task with {on_cpu=false, claim=-1} named by a slot
+                //     is executing nowhere by the qword's own testimony;
+                //     pick_state is advisory (the R80 lesson — LIVE
+                //     legitimately persists after switch-outs). Requires
+                //     the gen NOT in flight (retired, or the ledger
+                //     already moved on) so a genuinely pending resume is
+                //     never raced. Instant conviction — this is the arm
+                //     the permanent wedge actually presents (a single
+                //     observation, no wake ever comes again to age it).
+                //   arm a (aged): the shape persisted CONTINUOUSLY for
+                //     ≥50 jiffies (the WM-fix discipline: first-seen jiffy
+                //     recorded, entry retired the moment any observation
+                //     stops seeing this exact shape — a genuine park window
+                //     is microseconds and a genuinely running task is
+                //     RUNNING-state, so a 500 ms continuous lying shape is
+                //     stale bookkeeping nobody will ever clear). PICK_LIVE
+                //     marks additionally require this arm (R74: LIVE is
+                //     executing-somewhere; only a matured age window
+                //     acquits it of that).
+                // On conviction: rewrite every naming slot to its idle
+                // task (+ generation supersede), release a leftover pick
+                // qword (R74 full-qword discipline), drop curr_on so the
+                // phantom-count heal below fires, and let the wake
+                // proceed to the normal enqueue — the linked task is
+                // pickable again (pick_owner_live now false) and any CPU's
+                // tick (halted CPUs keep ticking) resumes it within a
+                // jiffy.
+                const LSS: usize = 8;
+                static LS_TASK: [core::sync::atomic::AtomicUsize; LSS] =
+                    [const { core::sync::atomic::AtomicUsize::new(0) }; LSS];
+                static LS_JIF: [core::sync::atomic::AtomicU64; LSS] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; LSS];
+                let ls_key = task as usize;
+                if curr_on && !exiting && !mid_switch {
+                    let ls_now = crate::drivers::timer::get_jiffies();
+                    let mut ls_idle_arm = false;
+                    let mut ls_lost_arm = false;
+                    let mut ls_ledger_arm = false;
+                    let mut ls_parked_arm = false;
+                    // Arm p's precondition: the ownership qword is fully
+                    // released (the switch-out completed; nothing can be
+                    // resuming this context).
+                    let ls_qword_released = !(*task).on_cpu()
+                        && (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+                            == -1;
+                    for c in 0..MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            if grq()
+                                .idle_cpus
+                                .load(core::sync::atomic::Ordering::Acquire)
+                                & (1u32 << c)
+                                != 0
+                            {
+                                ls_idle_arm = true;
+                            } else if pick_gen_is_lost(c, task, ls_now) {
+                                ls_lost_arm = true;
+                            } else {
+                                let ledger_names =
+                                    PICK_GEN_TASK[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed)
+                                        == task as u64;
+                                if !ledger_names {
+                                    ls_ledger_arm = true;
+                                } else if ls_qword_released {
+                                    // The ledger still names the task —
+                                    // require the generation NOT in flight
+                                    // (a pending resume would be unretired
+                                    // and within the floor above).
+                                    let g = PICK_GEN[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    let done = PICK_GEN_DONE[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    if done >= g {
+                                        ls_parked_arm = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut ls_aged_arm = false;
+                    if !ls_idle_arm && !ls_lost_arm {
+                        for s in 0..LSS {
+                            let prev =
+                                LS_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                            if prev == ls_key {
+                                let prev_jif =
+                                    LS_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
+                                if ls_now.wrapping_sub(prev_jif) >= 50 {
+                                    ls_aged_arm = true;
+                                }
+                                break;
+                            }
+                            if prev == 0
+                                && LS_TASK[s]
+                                    .compare_exchange(
+                                        0,
+                                        ls_key,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                LS_JIF[s].store(ls_now, core::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
+                    let mut ls_convict =
+                        ls_idle_arm || ls_lost_arm || ls_ledger_arm || ls_parked_arm || ls_aged_arm;
+                    // Pick-ownership adjudication (R74, keyed on the
+                    // ownership QWORD — on_cpu/claim are published together
+                    // at pick and released together by the switch-out; a
+                    // released qword leaves pick_state as an advisory
+                    // remnant that cannot veto the rewrite): a leftover
+                    // {on_cpu=1} mark is only clearable when no live
+                    // execution can be behind it. LIVE needs the matured
+                    // age window; PICKED must be revoked so a starved
+                    // picker aborts at its affirm CAS.
+                    if ls_convict && (*task).on_cpu() {
+                        let ps = (*task).pick_state();
+                        if ps == PICK_LIVE {
+                            if !ls_aged_arm {
+                                ls_convict = false;
+                            }
+                        } else if ps == PICK_PICKED && !(*task).revoke_pending_pick() {
+                            // The picker affirmed LIVE under us — it is
+                            // resuming this task right now; not healable.
+                            ls_convict = false;
+                        }
+                    }
+                    if ls_convict {
+                        let mut ls_rewrote_all = true;
+                        for c in 0..MAX_CPUS {
+                            if cpu_state(c).current == task {
+                                let idle_task = cpu_state(c).idle;
+                                if !idle_task.is_null() && idle_task != task {
+                                    cpu_state_mut(c).current = idle_task;
+                                    slot_tag_write(c, SLOT_W_WAKE_LIE_HEAL, idle_task);
+                                    pick_gen_supersede(c, idle_task);
+                                } else {
+                                    ls_rewrote_all = false;
+                                }
+                            }
+                        }
+                        if ls_rewrote_all {
+                            if (*task).on_cpu() {
+                                (*task).release_pick_ownership();
+                            }
+                            // Budgeted census (direct console: GRQ held).
+                            static LSH_N: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            if LSH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                < 32
+                            {
+                                use crate::console::putchar_no_lock as putchar;
+                                const M: &[u8] = b"\nSLOT-LIE-WAKE-HEALED pid=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                let v = (*task).pid() as u64;
+                                let mut sh = 64;
+                                while sh > 0 {
+                                    sh -= 4;
+                                    let nb = ((v >> sh) & 0xF) as u8;
+                                    putchar(if nb < 10 {
+                                        b'0' + nb
+                                    } else {
+                                        b'a' + nb - 10
+                                    });
+                                }
+                                const A: &[u8] = b" arm=";
+                                for &b in A {
+                                    putchar(b);
+                                }
+                                putchar(if ls_idle_arm {
+                                    b'e'
+                                } else if ls_lost_arm {
+                                    b'g'
+                                } else if ls_ledger_arm {
+                                    b'l'
+                                } else if ls_parked_arm {
+                                    b'p'
+                                } else {
+                                    b'a'
+                                });
+                                putchar(b'\n');
+                            }
+                            // The aged entry's job is done (the shape is
+                            // gone); fall into the phantom-count heal and
+                            // the normal enqueue below.
+                            for s in 0..LSS {
+                                LS_TASK[s]
+                                    .compare_exchange(
+                                        ls_key,
+                                        0,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .ok();
+                            }
+                            curr_on = false;
+                        }
+                    }
+                } else {
+                    // The lying shape is not observed at this wake (no
+                    // naming slot, the mid-switch marker is live, or the
+                    // task is exiting): retire any aged entry so the next
+                    // stuck shape ages from scratch (WM-fix discipline —
+                    // entries only survive while the shape does).
+                    for s in 0..LSS {
+                        LS_TASK[s]
+                            .compare_exchange(
+                                ls_key,
+                                0,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .ok();
                     }
                 }
                 if !exiting && !mid_switch && !curr_on {
@@ -5588,6 +5918,15 @@ pub fn scheduler_tick() {
     // r12 wake/halt hunt: tick-path GRQ sampler (forkprof-armed boots
     // only; one relaxed armed-check when off).
     crate::debug::forkprof::tick_grq_sample();
+    // (r14) Grace-period-correct call_rcu: retry the callback drain
+    // once per tick while a batch awaits its grace period, so a
+    // completed grace is noticed within a tick even on an otherwise
+    // quiet system (one relaxed load while zero).
+    if crate::sync::rcu::cbs_pending() {
+        crate::interrupt::softirq::raise_softirq(
+            crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
+        );
+    }
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // PSI (/proc/pressure): sample the stall conditions once per

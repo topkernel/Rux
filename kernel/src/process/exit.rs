@@ -533,7 +533,18 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         {
             static TRIAGE_N: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
-            const RESCUE_ROUNDS: u64 = 50_000;
+            // r15: 50_000 rounds measured far past userspace watchdog
+            // tolerances — the Geekbench cpu workload's worker (pid 313,
+            // lost wake mid-exit) was rescued only after the runner's own
+            // heartbeat had expired (GEEKBENCH EXIT status=255 with the
+            // rescue print right before it, run/r15-gb-syscost.log). The
+            // rescue action is a spurious wake — benign by construction
+            // (wait loops re-check their conditions), re-armed per
+            // episode so a member that re-sleeps gets another full
+            // window — so err short: 2_000 rounds keeps a margin over
+            // legitimate mid-exit parking (observed dead in the first
+            // handful of rounds) while rescuing inside tens of ms.
+            const RESCUE_ROUNDS: u64 = 2_000;
             let rounds = TRIAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if rounds > RESCUE_ROUNDS {
                 let mut kept = alloc::vec::Vec::new();
