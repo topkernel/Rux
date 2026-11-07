@@ -4984,7 +4984,35 @@ pub fn wake_up_enqueue_opt(
                 //     GRQ release and __switch_to's affirm, so the
                 //     revoke_pending_pick CAS(PICKED→REVOKED) gates the
                 //     mark release (the late switch-in aborts and
-                //     republishes its own slot — the R56-STEAL discipline).
+                //     republishes its own slot — the R56-STEAL
+                //     discipline).
+                //   arm l (ledger desync — the r15 live capture: naming
+                //     slot busy, pickgen NOT naming the task): every
+                //     slot writer pairs the slot write with a pick-gen
+                //     publish of the SAME task inside one GRQ hold (the
+                //     pick: slot then gen; every heal/abort/resync:
+                //     supersede). A slot naming T whose CPU's ledger
+                //     names someone else is a torn pairing impossible
+                //     in-tree — the slot write that would have named the
+                //     ledger's task was lost, and an in-flight or
+                //     completed pick of T would have T as the ledger's
+                //     CURRENT entry. Instant conviction.
+                //   arm p (parked victim — the r15 FGSQ conviction: oncpu=0
+                //     claim=-1 pk=LIVE while the slot still names the
+                //     task): the ownership qword's full release is the
+                //     switch-out's LAST act (R63: after the release store
+                //     the context is fully saved and the task is parked —
+                //     only its own next pick can resume it, and a pick
+                //     needs the wake this refusal is eating). A SLEEPING
+                //     task with {on_cpu=false, claim=-1} named by a slot
+                //     is executing nowhere by the qword's own testimony;
+                //     pick_state is advisory (the R80 lesson — LIVE
+                //     legitimately persists after switch-outs). Requires
+                //     the gen NOT in flight (retired, or the ledger
+                //     already moved on) so a genuinely pending resume is
+                //     never raced. Instant conviction — this is the arm
+                //     the permanent wedge actually presents (a single
+                //     observation, no wake ever comes again to age it).
                 //   arm a (aged): the shape persisted CONTINUOUSLY for
                 //     ≥50 jiffies (the WM-fix discipline: first-seen jiffy
                 //     recorded, entry retired the moment any observation
@@ -5013,6 +5041,14 @@ pub fn wake_up_enqueue_opt(
                     let ls_now = crate::drivers::timer::get_jiffies();
                     let mut ls_idle_arm = false;
                     let mut ls_lost_arm = false;
+                    let mut ls_ledger_arm = false;
+                    let mut ls_parked_arm = false;
+                    // Arm p's precondition: the ownership qword is fully
+                    // released (the switch-out completed; nothing can be
+                    // resuming this context).
+                    let ls_qword_released = !(*task).on_cpu()
+                        && (*task).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+                            == -1;
                     for c in 0..MAX_CPUS {
                         if cpu_state(c).current == task {
                             if grq()
@@ -5024,6 +5060,26 @@ pub fn wake_up_enqueue_opt(
                                 ls_idle_arm = true;
                             } else if pick_gen_is_lost(c, task, ls_now) {
                                 ls_lost_arm = true;
+                            } else {
+                                let ledger_names =
+                                    PICK_GEN_TASK[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed)
+                                        == task as u64;
+                                if !ledger_names {
+                                    ls_ledger_arm = true;
+                                } else if ls_qword_released {
+                                    // The ledger still names the task —
+                                    // require the generation NOT in flight
+                                    // (a pending resume would be unretired
+                                    // and within the floor above).
+                                    let g = PICK_GEN[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    let done = PICK_GEN_DONE[c]
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    if done >= g {
+                                        ls_parked_arm = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -5055,11 +5111,17 @@ pub fn wake_up_enqueue_opt(
                             }
                         }
                     }
-                    let mut ls_convict = ls_idle_arm || ls_lost_arm || ls_aged_arm;
-                    // Pick-ownership adjudication (R74): a leftover mark is
-                    // only clearable when no live execution can be behind
-                    // it. LIVE needs the matured age window; PICKED must be
-                    // revoked so a starved picker aborts at its affirm CAS.
+                    let mut ls_convict =
+                        ls_idle_arm || ls_lost_arm || ls_ledger_arm || ls_parked_arm || ls_aged_arm;
+                    // Pick-ownership adjudication (R74, keyed on the
+                    // ownership QWORD — on_cpu/claim are published together
+                    // at pick and released together by the switch-out; a
+                    // released qword leaves pick_state as an advisory
+                    // remnant that cannot veto the rewrite): a leftover
+                    // {on_cpu=1} mark is only clearable when no live
+                    // execution can be behind it. LIVE needs the matured
+                    // age window; PICKED must be revoked so a starved
+                    // picker aborts at its affirm CAS.
                     if ls_convict && (*task).on_cpu() {
                         let ps = (*task).pick_state();
                         if ps == PICK_LIVE {
@@ -5120,6 +5182,10 @@ pub fn wake_up_enqueue_opt(
                                     b'e'
                                 } else if ls_lost_arm {
                                     b'g'
+                                } else if ls_ledger_arm {
+                                    b'l'
+                                } else if ls_parked_arm {
+                                    b'p'
                                 } else {
                                     b'a'
                                 });
