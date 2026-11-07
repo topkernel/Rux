@@ -445,6 +445,47 @@ const GS0: GrqSample = GrqSample {
 static GSAMPLES: [GrqSample; GS_BUDGET] = [GS0; GS_BUDGET];
 static GS_CUR: AtomicU64 = AtomicU64::new(0);
 
+// ---- tick-gap detector (r12): quantify system-wide freezes ----
+//
+// The one-shot LAPIC re-arms every tick at <=4 ms, so a per-CPU tick
+// gap beyond ~8 ms means THIS vCPU stopped taking timer interrupts:
+// host-side descheduling or KVM-side blocking (guest spin cannot stop
+// the timer — the IRQ would preempt the spinner). The gap event
+// records the state at gap-close (the first tick after the silence).
+
+const TG_BUDGET: usize = 32;
+pub struct TickGap {
+    /// Gap length in us.
+    pub gap_us: AtomicU64,
+    pub cpu: AtomicU32,
+    pub idle: AtomicU32,
+    pub ph0: AtomicU32,
+    pub ph1: AtomicU32,
+    pub cfs_nr: AtomicU64,
+    pub lpid: AtomicU32,
+    pub cur_pid: AtomicU32,
+}
+const TG0: TickGap = TickGap {
+    gap_us: AtomicU64::new(0),
+    cpu: AtomicU32::new(0),
+    idle: AtomicU32::new(0),
+    ph0: AtomicU32::new(255),
+    ph1: AtomicU32::new(255),
+    cfs_nr: AtomicU64::new(0),
+    lpid: AtomicU32::new(0),
+    cur_pid: AtomicU32::new(0),
+};
+static TGAPS: [TickGap; TG_BUDGET] = [TG0; TG_BUDGET];
+static TG_CUR: AtomicU64 = AtomicU64::new(0);
+static TG_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TG_SUM_US: AtomicU64 = AtomicU64::new(0);
+static LAST_TICK_TSC: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
 /// Called from scheduler_tick while forkprof is armed. Records one
 /// sample; also detects streaks (same leftmost pid across >=2
 /// consecutive samples) into a small streak table.
@@ -459,6 +500,35 @@ pub fn tick_grq_sample() {
 #[cold]
 #[inline(never)]
 fn tick_grq_sample_armed() {
+    let cpu = crate::arch::cpu_id() as usize;
+    // Tick-gap detection first: this tick vs this CPU's previous tick.
+    let now = now();
+    let last = LAST_TICK_TSC[cpu.min(3)].swap(now, Ordering::Relaxed);
+    if last != 0 {
+        #[cfg(feature = "x86_64")]
+        let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+        #[cfg(not(feature = "x86_64"))]
+        let hz = 0;
+        let per_ms = hz / 1000;
+        let gap_us = if per_ms > 0 { now.saturating_sub(last) / per_ms } else { 0 };
+        // Normal tick: 4 ms (KERNEL_HZ=250). Report gaps beyond 8 ms.
+        if gap_us > 8_000 {
+            let (cfs_nr, _g, lpid, _o, _c, _p, _t, idle, ph0v, ph1v) =
+                crate::sched::debug_grq_sample();
+            let i = (TG_CUR.fetch_add(1, Ordering::Relaxed) % TG_BUDGET as u64) as usize;
+            let g = &TGAPS[i];
+            g.gap_us.store(gap_us, Ordering::Relaxed);
+            g.cpu.store(cpu as u32, Ordering::Relaxed);
+            g.idle.store(idle, Ordering::Relaxed);
+            g.ph0.store(ph0v as u32, Ordering::Relaxed);
+            g.ph1.store(ph1v as u32, Ordering::Relaxed);
+            g.cfs_nr.store(cfs_nr, Ordering::Relaxed);
+            g.lpid.store(lpid, Ordering::Relaxed);
+            g.cur_pid.store(crate::sched::get_current_pid() as u32, Ordering::Relaxed);
+            TG_TOTAL.fetch_add(1, Ordering::Relaxed);
+            TG_SUM_US.fetch_add(gap_us, Ordering::Relaxed);
+        }
+    }
     let (cfs_nr, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1) =
         crate::sched::debug_grq_sample();
     let i = (GS_CUR.fetch_add(1, Ordering::Relaxed) % GS_BUDGET as u64) as usize;
@@ -625,6 +695,34 @@ pub fn report() {
                 s.idle.load(Ordering::Relaxed),
                 s.ph0.load(Ordering::Relaxed),
                 s.ph1.load(Ordering::Relaxed),
+            );
+        }
+    }
+    // Tick-gap events: the freeze quantification.
+    let tg_total = TG_TOTAL.load(Ordering::Relaxed);
+    if tg_total > 0 {
+        crate::println!(
+            "FTICKGAP total={} sum_ms={}",
+            tg_total,
+            TG_SUM_US.load(Ordering::Relaxed) / 1000
+        );
+        let n = TG_CUR.load(Ordering::Relaxed).min(TG_BUDGET as u64) as usize;
+        for i in 0..n {
+            let g = &TGAPS[i];
+            let d = g.gap_us.load(Ordering::Relaxed);
+            if d == 0 {
+                continue;
+            }
+            crate::println!(
+                "FTICKGAP cpu={} gap={}us idle={:#b} ph={}/{} cfs={} lpid={} cur={}",
+                g.cpu.load(Ordering::Relaxed),
+                d,
+                g.idle.load(Ordering::Relaxed),
+                g.ph0.load(Ordering::Relaxed),
+                g.ph1.load(Ordering::Relaxed),
+                g.cfs_nr.load(Ordering::Relaxed),
+                g.lpid.load(Ordering::Relaxed),
+                g.cur_pid.load(Ordering::Relaxed),
             );
         }
     }
