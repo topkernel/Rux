@@ -668,7 +668,7 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                     // SAFETY: diagnostic read of a parked task's saved
                     // stack pointer; the words are printed raw.
                     let sp = (**m).thread.sp as usize;
-                    let mut words = [0u64; 5];
+                    let mut words = [0u64; 12];
                     if sp > 5 * 8 && sp < 0xffff_ffff_ffff_f000 {
                         for (k, w) in words.iter_mut().enumerate() {
                             // ABOVE sp: the return addresses of the
@@ -680,9 +680,9 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                         }
                     }
                     crate::pr_warn!(
-                        "DRAIN-STRAGGLER rounds={} member pid={} state={:#x} on_cpu={} pc={:#x} sp={:#x} stk={:#x} {:#x} {:#x} {:#x} {:#x}",
+                        "DRAIN-STRAGGLER rounds={} member pid={} state={:#x} on_cpu={} pc={:#x} sp={:#x} stk={:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
                         n, snap[i].0, snap[i].1, snap[i].2, snap[i].3, sp,
-                        words[0], words[1], words[2], words[3], words[4]
+                        words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], words[8], words[9], words[10], words[11]
                     );
                 }
             }
