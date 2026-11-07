@@ -520,6 +520,14 @@ fn hilogtap_on() -> bool {
     }
 }
 
+/// dfx=pctlmon (66th): arm ONLY the param-service control tap + lifecycle
+/// prints — no hilog record scanning, so a boot can trace the param
+/// protocol's full path (client send → queue → server read → reply)
+/// without the hilogtap CPU tax.
+fn pctlmon_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PctlMon)
+}
+
 // ============================================================================
 // Global namespace
 // ============================================================================
@@ -1431,6 +1439,24 @@ pub fn unix_connect(
             *sock.peer.lock() = Some(Arc::downgrade(&child));
             *sock.state.lock() = UnixState::Connected;
             server.accept_queue.lock().push_back(child);
+            // 66th (dfx=pctlmon): a client just queued itself onto the
+            // param-service listener — the connect half of the connection
+            // lifecycle (PCTL-ACCEPT names the accept half). A connect
+            // with no matching accept = requests queueing on a child init
+            // never took.
+            if pctlmon_on() && server.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0 {
+                static PCTL_C_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = PCTL_C_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    crate::pr_warn!(
+                        "PCTL-CONNECT #{} pid={} qlen={}",
+                        n,
+                        crate::process::current_pid(),
+                        server.accept_queue.lock().len()
+                    );
+                }
+            }
             // Data arrival on the LISTENER — reference unix_stream_connect
             // fires other->sk_data_ready (sock_def_readable, nr_exclusive
             // = 1): every non-exclusive poller plus ONE exclusive acceptor.
@@ -1790,12 +1816,15 @@ pub fn unix_send(
         // instrument, not kernel semantics — OFF by default like every
         // DFX probe (filerd discipline); arm with hilogtap=1 when a boot
         // needs the HILOG-AMS/slog/alog/ilog/PCTL evidence.
+        // 66th: dfx=pctlmon arms ONLY the param tap below (no record
+        // scanning) — the 105-timeout hunt needs PCTL-SEND on every boot
+        // without hilogtap's cost.
         // The first tap smeared the whole datagram through a printable
         // filter, mixing header bytes into the text and hiding the exact
         // EGL failure lines behind garbage ("EGLC0GL" etc). Decode the
         // header, then tag: content, and only fall back to the smear for
         // records that do not parse.
-        if hilogtap_on() {
+        if hilogtap_on() || pctlmon_on() {
                 // leg-34: hilog/param listener classification cached in
                 // tap_class at bind time — previously a bound_name lock plus
                 // up to three ends_with scans on EVERY unix send.
@@ -1869,7 +1898,7 @@ pub fn unix_send(
                                 }
                             }
                             crate::pr_warn!(
-                                "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}",
+                                "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}{}",
                                 n,
                                 sender_pid,
                                 if is_param_listener { "paramservice" } else { "client" },
@@ -1877,12 +1906,31 @@ pub fn unix_send(
                                 mtype,
                                 mid,
                                 key,
-                                extra
+                                extra,
+                                // 66th: the TARGET's queue state at send —
+                                // a request that piles onto a full/unread
+                                // queue while later sends show the same
+                                // depth pinpoints a server that stopped
+                                // reading THAT connection.
+                                if is_param_listener {
+                                    let q = target.recv_queue.lock();
+                                    alloc::format!(
+                                        " [q={}/{} eof={} dead={}]",
+                                        q.segs.len(),
+                                        q.charge,
+                                        *target.eof.lock() as u8,
+                                        *target.dead.lock() as u8
+                                    )
+                                } else {
+                                    alloc::string::String::new()
+                                }
                             );
                         }
                     }
                 }
-                if is_hilog && !data.is_empty() {
+                // 66th: the record-scan taps below are hilogtap-only;
+                // pctlmon arms the param tap above and nothing here.
+                if is_hilog && hilogtap_on() && !data.is_empty() {
                     let mut text = [0u8; 160];
                     let mut k = 0usize;
                     let mut prefix = [0u8; 24];
@@ -2668,6 +2716,29 @@ pub fn unix_shutdown(sock: &Arc<UnixSocket>, how: i32) -> Result<(), i32> {
 
 /// close(): release the name, mark the peer's EOF, wake waiters.
 pub fn unix_close(sock: &Arc<UnixSocket>) {
+    // 66th (dfx=pctlmon): last close of a param-service socket — either
+    // init dropping an accepted client (unread queued requests die here,
+    // and the CLIENT sees EPIPE only on its NEXT send) or a client dying.
+    // queued>0 on an init-side close = requests silently dropped.
+    if pctlmon_on() && sock.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0 {
+        static PCTL_X_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = PCTL_X_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 200 {
+            let q = sock.recv_queue.lock();
+            let (qb, ql) = (q.charge, q.segs.len());
+            drop(q);
+            crate::pr_warn!(
+                "PCTL-CLOSE #{} pid={} fid={:#x} queued={}B/{}segs peer_alive={}",
+                n,
+                crate::process::current_pid(),
+                sock.file_id.load(Ordering::Acquire),
+                qb,
+                ql,
+                sock.peer_arc().is_some()
+            );
+        }
+    }
     *sock.state.lock() = UnixState::Closed;
     // Peer's poll() starts reporting POLLHUP (Linux SHUTDOWN_MASK on peer
     // release) — set before the wake below so a racing poll sees it.
@@ -3422,6 +3493,25 @@ fn unix_socket_install(
     }
     if cloexec {
         fdtable.set_fd_cloexec(fd, true);
+    }
+    // 66th (dfx=pctlmon): init accepted a param-service client — the
+    // accept half of the lifecycle (PCTL-CONNECT named the connect).
+    // fd/file_id bind the server-side interest init's epoll will watch.
+    if pctlmon_on()
+        && socket.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0
+    {
+        static PCTL_A_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = PCTL_A_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 200 {
+            crate::pr_warn!(
+                "PCTL-ACCEPT #{} pid={} fd={} fid={:#x}",
+                n,
+                crate::process::current_pid(),
+                fd,
+                file.file_id
+            );
+        }
     }
     Ok(fd)
 }

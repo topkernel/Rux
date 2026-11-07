@@ -108,6 +108,7 @@ macro_rules! dfx_switch_table {
             SyncGuard => "syncguard",
             SyncWatch => "syncwatch",
             FuxStuck => "fuxstuck",
+            PctlMon => "pctlmon",
         }
     };
 }
@@ -547,9 +548,16 @@ pub enum DfxSwitch {
     /// adjudication for the OH post-creation stall web (useriam FFRT /
     /// DB_TaskExecutor families). Zero cost when off.
     FuxStuck,
+    /// Param-service socket monitor (66th, the 105-timeout hunt): the
+    /// PCTL-SEND tap without hilogtap's record-scan cost, plus the
+    /// connect/accept/close lifecycle of every paramservice-classified
+    /// unix socket with queue depths — locates where an ohos.ctl.start
+    /// request dies (client send vs queued-unread vs dead connection).
+    /// Zero cost when off.
+    PctlMon,
 }
 
-const SWITCH_COUNT: usize = 60;
+const SWITCH_COUNT: usize = 61;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -654,6 +662,7 @@ impl DfxSwitch {
             DfxSwitch::SyncGuard => 57,
             DfxSwitch::SyncWatch => 58,
             DfxSwitch::FuxStuck => 59,
+            DfxSwitch::PctlMon => 60,
         }
     }
 
