@@ -117,25 +117,87 @@ symbolic targets compared):
 
 ### riscv64 make test
 
-- feature OFF (default `make test` battery): see below [pending]
 - feature ON + checker ARMED for the whole suite
-  (`riscv64,unit-test,debug-lockdep`): see below [pending]
+  (`riscv64,unit-test,debug-lockdep`, unittest-boot-riscv.py):
+  **ALL TESTS PASSED** (1360 PASS lines), 11/11 p1 runtime cases
+  green; the only LOCKDEP serial lines are the test group's own
+  deliberate scenarios — zero splats/notes from the suite's real
+  futex/fs/sched traffic (design §10's silence requirement).
+- feature OFF (`make test` standard battery): **ALL TESTS PASSED**
+  (1343 PASS lines — the suite minus the 17 feature-gated lockdep-P1
+  additions, which is exactly the count delta to the armed run).
+
+### x86_64+KVM armed proof boot (the money output)
+
+pbench boot with `debug=lockdep` on the feature-ON bzImage
+(work/pbench-lockdep-armed-serial.log, PBENCH DONE rc=0):
+
+```
+lockdep: selftest s0 key<->registry mapping: PASS
+lockdep: cost-probe keyed acquire/release pair (N=200000): disarmed 38 ns, armed 129 ns (hook delta 90 ns)
+lockdep: selftest s1 declared forward (bucket -> grq): PASS
+LOCKDEP: ORDER-VIOLATION grq -> futex-bucket contradicts INV-LOCK-5 (declared: futex-bucket -> grq)
+  acquiring: futex-bucket at rux::debug::lockdep::runtime::arm_runtime+...
+  held:      grq at ... (depth 0)
+  task= pid=0 cpu=0 preempt=0x0 in_irq=false in_softirq=false
+LOCKDEP: disabling lockdep (first splat; debug_locks=0 equivalent)
+lockdep: selftest s2 declared-order violation (grq held, bucket acquired): PASS (splat above)
+LOCKDEP: SLEEP-IN-ATOMIC-CONTEXT acquiring sleep-domain vfs-mutation (INV-LOCK-8 rule 1)   [s3 PASS]
+LOCKDEP: SLEEP-IN-ATOMIC-CONTEXT acquiring sleep-domain ext4-big (INV-LOCK-8 rule 1)       [s4 PASS]
+LOCKDEP: CYCLE inode -> process-tree -> inode                                             [s5 PASS]
+lockdep: selftest PASS (s0 mapping + s1-s5 scenarios)
+```
+
+Zero LOCKDEP lines from the real pbench workload (futex storm, fs
+writes through VFS_MUTATION/EXT4_BIG, 100k context switches) — the
+checker ran silent, then the whole P1-P8 battery completed.
 
 ### Measurement (design §7 rows)
 
-| row | status |
+| row | verdict |
 |---|---|
-| 1 feature-OFF build identity | PASS (above) + dual-arch builds rc=0 |
+| 1 feature-OFF build identity | **PASS** — ASM identical both arches (above); dual-arch builds rc=0 |
 | 2 feature-OFF tier 1 syscost | [pending] |
-| 3 feature-ON disarmed tier 1+2 | [pending] |
-| 4 feature-ON armed (report class) | [pending] |
-| 5 pbench P8 lock-pair row (OFF/disarmed/armed) | [pending] |
+| 3 feature-ON disarmed tier 2 (pbench) | **PASS** — every anchor row within band or improved: p1_null 0.281 (anchor 0.300), p1_clock 0.361 (0.371), p2_ctxsw 1.232 (1.242), p3b_cow 9.377 (8.075, +16% < 20%), p6_write_fsync 8391 (8443), p6_mkdrmdir 224.1 (216.7), p6_unlink 57.7 (54.6), p6_append 5.41 (5.19); disarmed boot emitted zero LOCKDEP lines |
+| 4 feature-ON armed (report class) | armed boot medians: p1_null 0.287, p2 1.29-ish class, p8 rows below; +110 ns/futex-wake vs disarmed — the armed per-acquire class |
+| 5 pbench P8 lock-pair row | table below |
 
-The in-kernel cost probe (debug=lockdep boot) prints the direct
-disarmed-vs-armed ns per keyed acquire/release pair; the pbench P8 rows
-(`p8_futex_wake` uncontended keyed bucket pair, `p8_futex_pp` two-task
-futex ping-pong) measure the same surface through the syscall funnel
-for OFF vs ON-disarmed vs ON-armed builds.
+**P8 lock-pair rows** (median us; same KVM boot class, quiet-ish
+window at host load ~6-7):
+
+| build | p8_futex_wake (uncontended keyed bucket pair) | p8_futex_pp (two-task ping-pong half-rt) |
+|---|---|---|
+| ON, disarmed (one relaxed load/site) | 0.842 | 4.704 |
+| ON, armed (full pipeline, chain-hit) | 0.952 | 5.150 |
+| armed delta | +110 ns | +446 ns |
+| OFF (default build) | from the perf-gate tier-2 boot | [pending] |
+
+In-kernel cost probe (x86_64/KVM, N=200k pairs, O0 debug build):
+disarmed 38 ns/pair (~19 ns per acquire site: relaxed load + ra
+capture + branch), armed 129 ns/pair steady-state (chain-key hit
+path). These are the opt-in numbers the coordinator's constraint (b)
+refers to; the DEFAULT build carries none of it (constraint (a),
+ASM-identical).
+
+The checker-internal counters (design §7 row 4: chains/BFS/edges) are
+exercised by the ktest assertions (amortization counters + the
+/proc/lockdep tail renders them live).
+
+### Reference-alignment round (user directive 2026-11-07)
+
+- Splats reworked to the reference lockdep report shape (banner,
+  acquiring/held pair with symbolized sites + raw ips, reverse
+  dependency chain, CPU0/CPU1 diagram ending *** DEADLOCK ***, held
+  list; INV-LOCK-8 case as "sleeping lock in atomic context"). The
+  self-disable line uses the reference wording ("turning off the
+  locking correctness validator, debug_locks = 0"); the semantic was
+  already in (first splat stops all checking).
+- D-21 registered in docs/architecture/design-divergences.md (the
+  Rust-native mapping differences vs the reference lockdep).
+- DEFAULT-build ASM identity RE-VERIFIED after these changes:
+  x86_64 447/447, riscv64 443/443 (splat code is feature-gated).
+- Official dual-arch build commands: `PLATFORM=x86_64 make build` rc=0;
+  `rm build/.config && make build` (riscv64) rc=0.
 
 ## Boots/artifacts
 
