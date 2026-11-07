@@ -126,6 +126,7 @@ impl GlobalRunQueue {
         // inferable from a consistent victim pattern.
         if crate::debug::forkprof::on() {
             let t0 = crate::arch::cpu::read_counter();
+            let pre_owner = self.lock.owner_hint();
             self.lock.lock();
             let waited = crate::arch::cpu::read_counter().saturating_sub(t0);
             // ~4 ms at the calibrated TSC rate (2.5 GHz class).
@@ -163,9 +164,19 @@ impl GlobalRunQueue {
                     let l = pnum(waited, &mut d);
                     buf[n..n + l].copy_from_slice(&d[..l]);
                     n += l;
-                    const M2: &[u8] = b" caller=";
+                    const M2: &[u8] = b" holder=";
                     buf[n..n + M2.len()].copy_from_slice(M2);
                     n += M2.len();
+                    // Hex, 16 digits.
+                    let hv = pre_owner;
+                    for sh in (0..16).rev() {
+                        let nib = ((hv >> (sh * 4)) & 0xF) as u8;
+                        buf[n] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                        n += 1;
+                    }
+                    const M2B: &[u8] = b" caller=";
+                    buf[n..n + M2B.len()].copy_from_slice(M2B);
+                    n += M2B.len();
                     let f = loc.file().as_bytes();
                     let fl = f.len().min(96);
                     buf[n..n + fl].copy_from_slice(&f[..fl]);
