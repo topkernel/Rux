@@ -5141,7 +5141,15 @@ impl Task {
                     let irq_was = crate::arch::cpu::get_interrupts_state();
                     crate::arch::cpu::restore_irq(true);
                     let j0 = crate::drivers::timer::get_jiffies();
-                    let mut kicked = false;
+                    // Kick FIRST (r15): a stale rsp0 most often names a
+                    // peer that already parked or halted after its final
+                    // schedule rounds — waiting a full jiffy for the kick
+                    // puts the reaper's whole spin inside the fork+exit
+                    // latency (the SMP-8 p4_fork_exit +21% attribution).
+                    // The IPI costs ~1us; a mid-switch peer ignores it
+                    // harmlessly (its switch clears rsp0 on its own).
+                    crate::sched::sched::resched_cpu(c);
+                    let mut rekicked = false;
                     loop {
                         for _ in 0..20000 {
                             core::hint::spin_loop();
@@ -5154,13 +5162,15 @@ impl Task {
                             break; // peer reached its switch: safe to free
                         }
                         let now = crate::drivers::timer::get_jiffies();
-                        if !kicked && now.wrapping_sub(j0) >= 1 {
-                            kicked = true;
+                        if !rekicked && now.wrapping_sub(j0) >= 1 {
+                            // Re-kick once past a jiffy (the first kick can
+                            // race the peer's halt entry); the 3-jiffy
+                            // give-up bound keeps today's behavior — free
+                            // anyway and let the witness print name it.
+                            rekicked = true;
                             crate::sched::sched::resched_cpu(c);
                         }
                         if now.wrapping_sub(j0) >= 3 {
-                            // give up: free anyway (today's behavior);
-                            // the witness print below names the hole.
                             break;
                         }
                     }
