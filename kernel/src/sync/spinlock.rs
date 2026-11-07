@@ -149,6 +149,25 @@ impl RawSpinlock {
         self.owner.load(Ordering::Relaxed) & !0xF
     }
 
+    /// Overwrite the owner word's RA with a DEEPER caller's return
+    /// address (debug-lock-owner only). Used by wrapper locks (the GRQ
+    /// acquisition wrappers) whose frame is the only one RawSpinlock's
+    /// own caller capture sees: after acquiring, the wrapper restamps
+    /// so a lost release names the wrapper's CALLER — the true acquire
+    /// site — in the deadlock warn's ow_ra field. The cpu nibble is
+    /// preserved from the wrapper's own record_owner.
+    #[inline]
+    #[cfg(feature = "debug-lock-owner")]
+    pub fn restamp_owner_ra(&self, ra: usize) {
+        let cur = self.owner.load(Ordering::Relaxed);
+        self.owner
+            .store((ra & !0xFusize) | (cur & 0xF), Ordering::Relaxed);
+    }
+
+    #[inline]
+    #[cfg(not(feature = "debug-lock-owner"))]
+    pub fn restamp_owner_ra(&self, _ra: usize) {}
+
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
     pub fn owner_hint(&self) -> usize {

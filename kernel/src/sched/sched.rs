@@ -193,6 +193,35 @@ impl GlobalRunQueue {
         } else {
             self.lock.lock();
         }
+        // r16 (GB GRQ lost-release hunt): RawSpinlock's own owner stamp
+        // only sees THIS wrapper's frame; restamp with the wrapper's
+        // CALLER so the deadlock warn's ow_ra names the true acquire
+        // site of a lost release (feature-gated, zero cost otherwise).
+        #[cfg(feature = "debug-lock-owner")]
+        {
+            // SAFETY: raw frame read of the return address (the same
+            // discipline as RawSpinlock's caller_return_address).
+            #[inline(always)]
+            unsafe fn grq_caller_ra() -> usize {
+                let ra: usize;
+                #[cfg(feature = "x86_64")]
+                core::arch::asm!(
+                    "mov {}, qword ptr [rbp + 8]",
+                    out(reg) ra,
+                    options(nomem, nostack)
+                );
+                #[cfg(feature = "riscv64")]
+                core::arch::asm!("mv {}, ra", out(reg) ra, options(nomem, nostack));
+                #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                {
+                    ra = 0;
+                }
+                ra
+            }
+            // SAFETY: pure register/stack-slot read, no side effects.
+            self.lock
+                .restamp_owner_ra(unsafe { grq_caller_ra() });
+        }
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
