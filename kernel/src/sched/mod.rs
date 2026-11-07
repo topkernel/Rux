@@ -32,6 +32,7 @@ pub mod psi;
 
 pub use sched::{
     current,
+    kernel_text_window,
     w2_refusal_census,
     current_is_dying,
     get_current_pid,

@@ -695,6 +695,56 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
                         n, snap[i].0, snap[i].1, snap[i].2, snap[i].3, sp,
                         words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], words[8], words[9], words[10], words[11]
                     );
+                    // r16 (mechanism B hunt): the 12 raw words above are
+                    // mostly frame LOCALS when the sleeping frame is large
+                    // (the GB victim parked with its sp inside a Vec-grow
+                    // frame whose locals fill the window). Scan UP through
+                    // the whole parked stack for kernel-text return
+                    // addresses (the R76 discipline) so the full sleeping
+                    // chain — the park site and every caller up to the
+                    // entry frame — symbolizes offline. ONE-SHOT per boot:
+                    // the first capture names the park site; repeats would
+                    // only flood the serial line. Stack bounds: the saved
+                    // sp to the stack top (kernel stacks are 4 pages; the
+                    // Task pins them for the drain's lifetime).
+                    {
+                        static DSTK_ONCE: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !DSTK_ONCE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        let (lo, hi) = crate::sched::kernel_text_window();
+                        let top = ((**m).ti_kernel_sp()) as usize;
+                        if sp > 5 * 8 && sp < top && top - sp <= 16 * 4096 {
+                            let mut shown = 0usize;
+                            let mut k = 0usize;
+                            while shown < 16 && sp + k * 8 < top && k < 4096 {
+                                // SAFETY: bounded diagnostic read inside
+                                // the victim's pinned kernel stack.
+                                let w = unsafe {
+                                    core::ptr::read_volatile((sp + k * 8) as *const u64)
+                                };
+                                if w >= lo && w < hi && (w & 1) == 0 {
+                                    if shown == 0 {
+                                        crate::pr_warn!(
+                                            "DRAIN-STRAGGLER-TEXT pid={} sp={:#x}",
+                                            snap[i].0,
+                                            sp
+                                        );
+                                    }
+                                    crate::pr_warn!("DSTK {:#x}", w);
+                                    shown += 1;
+                                }
+                                k += 1;
+                            }
+                            if shown == 0 {
+                                crate::pr_warn!(
+                                    "DRAIN-STRAGGLER-TEXT pid={} sp={:#x} none-in-16k",
+                                    snap[i].0,
+                                    sp
+                                );
+                            }
+                        }
+                        }
+                    }
                 }
             }
         }
@@ -1379,16 +1429,29 @@ pub fn do_exit(exit_code: i32) -> ! {
             // the mm drop and the dead-list park.
             let leader = Task::thread_group_leave(current);
 
-            // PID + hash bookkeeping now: the tid disappears immediately
-            // (gettid/tgkill on it → ESRCH, no zombie window).
-            crate::process::pid_hash::pid_hash_remove(current_pid);
-            crate::process::pid::free_pid(current_pid);
+            // r16 (mechanism B): the sweep below can sleep (free_dead_member
+            // -> synchronize_rcu_bounded_sleepy arms a PID-keyed one-shot
+            // wake). Freeing our pid BEFORE the sweep made every such wake
+            // unresolvable — WAKE-PID-MISS dropped the token and the waiter
+            // parked past its own deadline (the GB worker lost-wake-mid-exit
+            // wedges; the pid could even be REUSED, waking a stranger).
+            // The hash remove + free now run AFTER the sweep: the tid
+            // lingers only across the sweep (the task never returns to
+            // userspace, and a tgkill/gettid racing this window observes a
+            // PF_EXITING task — the reference's own pre-reap shape).
+            // rcu.rs keeps an independent guard (RCU-SLEEPY-PID-FREE) for
+            // any future pid-then-sleep order.
 
             // Opportunistically reclaim older dead members (frees stacks of
             // previously-joined threads; `current` is skipped — on_cpu).
             if !leader.is_null() {
                 sweep_dead_threads(leader);
             }
+
+            // PID + hash bookkeeping: the tid disappears now (gettid/tgkill
+            // on it → ESRCH, no zombie window).
+            crate::process::pid_hash::pid_hash_remove(current_pid);
+            crate::process::pid::free_pid(current_pid);
 
             // R9-3 discipline: no preempt window between DEAD and the
             // final schedule.
