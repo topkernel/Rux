@@ -13,9 +13,17 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+# Repo root: walk up until the Cargo.toml+kernel marker (move-immune,
+# same discipline as ruxroot.py — the scripts/test relocation broke the
+# old one-level dirname guess).
+_d = HERE
+while _d != os.path.dirname(_d):
+    if os.path.isfile(os.path.join(_d, "Cargo.toml")) and os.path.isdir(os.path.join(_d, "kernel")):
+        break
+    _d = os.path.dirname(_d)
+ROOT = _d
 KERNEL = os.path.join(ROOT, "target/riscv64gc-unknown-none-elf/debug/rux")
-ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(HERE, "rootfs.img"))
+ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(ROOT, "test", "rootfs.img"))
 
 
 def main():
