@@ -214,7 +214,7 @@
       </div>
       <div class="card">
         <h3><span class="ico">🔍</span>Observability</h3>
-        <p>A unified trace-event framework + tracefs (semantics aligned with Linux), syscost census, kallsyms, task dumps, watchdog.</p>
+        <p>A unified trace-event framework + tracefs (semantics aligned with Linux, 61 events / 20 groups), syscost census, kallsyms, PSI pressure accounting (/proc/pressure), task dumps, watchdog.</p>
         <div class="nums">new observability is <b>tracepoint</b>-only</div>
         <a class="more" href="architecture/design.html#trace">Design →</a>
       </div>
@@ -238,7 +238,7 @@
     <div class="card-grid grid-4">
       <div class="card">
         <h3><span class="ico">🧪</span>LTP compliance</h3>
-        <p>The full 1,869-case scan grew from 35 early passes to 1,084; every round is archived and new failures are isolated-rerun twice before being called regressions.</p>
+        <p>The full 1,869-case scan grew from 35 early passes to 1,084; every round is archived and new failures are isolated-rerun twice before being called regressions; the TIMEOUT class is adjudicated row by row under the P0 rule (1 kernel defect / 11 test defects / 1 lost-wake / 1 slow-progress).</p>
         <div class="nums">current <b>1084 / 1869</b> (r27)</div>
         <a class="more" href="testing/ltp.html">LTP scan →</a>
       </div>

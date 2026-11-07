@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-      <aside class="doc-side">
+        <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/structure.html">Code layout</a>
@@ -43,6 +43,7 @@
     <a class="on" href="index.html">Overview</a>
     <a href="ltp.html">LTP scan</a>
     <a href="ltp-full.html">LTP full cases</a>
+    <a href="ltp-timeout.html">LTP TIMEOUT audit</a>
     <a href="stability.html">Stability</a>
     <a href="stress.html">Stress</a>
     <a href="gnome-retrospective.html">Retrospective</a>
@@ -58,7 +59,7 @@
 
   <article class="doc-main">
     <h1>Testing</h1>
-    <div class="sub">Five sub-pages: compliance scan / full case list / stability / stress / retrospective — data as of 2026-11-06</div>
+    <div class="sub">Six sub-pages: compliance scan / full case list / TIMEOUT audit / stability / stress / retrospective — data as of 2026-11-07</div>
 
     <h2 id="map"><span class="anchor">§1</span>Section map</h2>
     <div class="card-grid grid-2">
@@ -83,6 +84,11 @@
         <a class="more" href="stress.html">Open →</a>
       </div>
       <div class="card">
+        <h3><span class="ico">⏱️</span>LTP TIMEOUT audit</h3>
+        <p>Row-by-row adjudication of the TIMEOUT class under the P0 rule (2026-11-07): 13 TIMEOUT + 1 WEDGE rows re-run — 1 kernel defect (fixed), 11 test/list defects, 1 known lost-wake family, 1 slow-progress case.</p>
+        <a class="more" href="ltp-timeout.html">Open →</a>
+      </div>
+      <div class="card">
         <h3><span class="ico">🔎</span>Retrospective</h3>
         <p>GNOME desktop regression retrospective (2026-11-06): how 2,825 commits of silent accumulation slipped past every gate; the two root causes fixed (munmap races, page-cache poisoning) and three anti-recurrence gate changes.</p>
         <a class="more" href="gnome-retrospective.html">Open →</a>
@@ -104,7 +110,8 @@
           <tr><td>stress-fleet.md</td><td>Stress/stability/randomized/fuzz cluster design + results</td><td class="mono">standing (11 QEMUs)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri standing</td><td class="mono">157 harnesses · 1104 proptests</td></tr>
           <tr><td>test-coverage.md</td><td>Coverage ledger (regenerated per change)</td><td class="mono">rolling</td></tr>
-          <tr><td>gnome-regression-retrospective.md</td><td>GNOME desktop regression retrospective: root causes, gate blind spots, anti-recurrence</td><td class="mono">2026-11-06 → retrospective sub-page</td></tr>
+          <tr><td>gnome-regression-retrospective.md</td><td>GNOME desktop regression retrospective: root causes, gate blind spots, anti-recurrence</td><td class="mono">2026-11-07 (adds the park-face mechanisms) → retrospective sub-page</td></tr>
+          <tr><td>ltp-timeout-audit.md</td><td>LTP TIMEOUT-class adjudication audit (P0 rule)</td><td class="mono">2026-11-07 → TIMEOUT audit sub-page</td></tr>
         </tbody>
       </table>
     </div>

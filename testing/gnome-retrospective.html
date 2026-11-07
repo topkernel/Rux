@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-      <aside class="doc-side">
+        <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -43,6 +43,7 @@
     <a href="index.html">测试总览</a>
     <a href="ltp.html">LTP 兼容扫描</a>
     <a href="ltp-full.html">LTP 全量用例</a>
+    <a href="ltp-timeout.html">LTP TIMEOUT 审计</a>
     <a href="stability.html">稳定性</a>
     <a href="stress.html">压力</a>
     <a class="on" href="gnome-retrospective.html">回溯报告</a>
@@ -60,7 +61,7 @@
     <h1>回溯报告:GNOME 桌面回归</h1>
     <div class="sub">2026-11-06 · 范围:x86_64 GNOME 启动,main@4ed009ac(10-31 验收)→ main@264b6961(11-06)· 原文 docs/test/gnome-regression-retrospective.md(英文)</div>
 
-    <div class="callout"><b>结论状态:</b>三个根因中两个已修复并验证;一个深水项开放;排查期间又当场发现一个同类新回归(§6)。</div>
+    <div class="callout"><b>结论状态:</b>§3 的两个根因已修复并验证;§8 的三层叠加机制均已修复(11 次启动 10 次 shell 就绪);深水项(trim 面)与两项生产者排查仍开放。</div>
 
     <h2 id="accept"><span class="anchor">§1</span>"能跑"当时的验收口径</h2>
     <p>x86 GNOME 里程碑(99% 非黑帧、17 分钟稳定会话)在 main@4ed009ac 由 gnome-x86 工作树验收:每次启动用该线的 fire.py 驱动做人工核验。那是<b>一次性战役验收,不是常设门禁</b> —— 该工作树收线后,常备测试面里没有任何一项再启动 GNOME 桌面。</p>
@@ -125,14 +126,27 @@
       <li><b>fdreap close 停滞洪泛</b>:近期每次启动的晚段都有(55–129 行/启动);独立成线。</li>
     </ol>
 
-    <h2 id="recs"><span class="anchor">§8</span>防复发建议</h2>
+    <h2 id="park"><span class="anchor">§8</span>桌面冻结面(2026-11-07):三层叠加机制,均已修复</h2>
+    <p>前述 §3/§6 修复之后,桌面仍在 shell 之前冻结(5 次启动中 3–5 次冻结,随内核构建而异)。三个彼此独立的机制产生了同一个可见症状 —— "gnome-session 停在 check-accelerated" —— 只能逐一剥离。</p>
+    <h3>8.1 任务切换中途的 SOFTIRQ_OFFSET 迁移(main@166e4516)</h3>
+    <p>首次取证(冻结启动的 taskdump)显示 check-accelerated(pid 318)在 CPU1 上 RUNNING 且 preempt=0x100 —— 软中断窗口的 SOFTIRQ_OFFSET 在窗口内发生上下文切换后滞留到了入口任务上:加项记在一个任务、减项记在另一个任务上。修复为在失配时纠正括号配对(commit 166e4516)。必要但不充分:仍有 3/5 次启动冻结。</p>
+    <h3>8.2 泄漏的 preempt BASE 位让排空点无法让出(DRAIN-PC-HEAL)</h3>
+    <p>第二次取证:pid 318 自旋在 <code>release_task</code> 的 straggler 排空里(tick 采样:dead_threads SpinlockGuard 释放、Vec 压入、slab 分配、restore_irq、enable_irq —— 累计 38 s;216 条 PREEMPT-LEAK 行,pc=0x10001 pctick=1)。链路:泄漏的 +1 preempt base(已知的跨任务 guard 释放引擎 —— VFS/ICACHE 密集路径,而 ENOENT 密集的会话启动正大量命中)使排空点的 <code>schedule()</code> 变成空操作(<code>__schedule</code> 拒绝切出 preempt 计数非零的任务 —— 对真实持锁者这是正确纪律),而 tick 侧的 PREEMPT-HEAL 因泄漏闪烁永不成熟(排空/再泄漏重置 200 次连续观测门槛)。修复:在排空的让出点(按构造无锁)非零 preempt base 必为幻影,清除它、上报(DRAIN-PC-HEAL)、真正让出;<code>wait_for_thread_group_death</code> 同等处理。纵深防御:<code>__schedule</code> 的自愿停靠拒绝加了 3 s 逃生阀(PARK-HOLDOUT-HEALED)覆盖同类幻影。</p>
+    <h3>8.3 丢失的 straggler:退出中途且唤醒从未到达的成员(STRAGGLER-RESCUE)</h3>
+    <p>第三个症状(主因,4/5 次冻结):gles-helper 的组杀让一个线程组成员停在组长 dead-threads 列表上,状态 INTERRUPTIBLE、on_cpu=-1 —— 在其离开 ring 与终态 DEAD 存储之间丢失,无人可运行它。回收器的排空会永久重新停靠它(观测到 598k–33.7M 轮;新增的 DRAIN-STRAGGLER 命名器指纹识别出该状态:成员 RUNNING-on-no-cpu,后校正为 INTERRUPTIBLE-sleeping-on-no-cpu —— TaskState 编码:RUNNING=0、INTERRUPTIBLE=1)。修复:排空 50k 轮后仍处于该状态的成员判定为丢唤醒 —— 重跑它(置 RUNNING、wake_up_enqueue);其内核栈在 do_exit 中途仍完整,随即自行完成退出(pid 记账、DEAD、最终切换),全部不变量保持。命中该症状的启动现在原地恢复:3/3 经 taskdump 分类的冻结启动变为 shell 就绪,每次留下一条 STRAGGLER-RESCUE 行,零 panic。</p>
+    <h3>8.4 仍然开放的部分</h3>
+    <p>8.3 的<b>生产者</b>(成员唤醒为何丢失 —— 唤醒被拒的状态竞态,还是 pick/heal 重新链接)与 8.2 的跨任务 SpinlockGuard 加/放引擎仍是开放排查项;救援/自愈机制把它们的破坏面限制在亚秒级,并把每次触发作为证据上报(配 <code>debug=leakhunt</code> 定位获取点)。命名器记录的栈字(sp+0..,已保存 sp 之上)会在下次出现时指出停靠点。另有更罕见的一种症状在 keyring 阶段冻结会话(11 次修复后启动中 1 次;未触发 straggler/leak 标记 —— 需要自己的 taskdump 取证)。</p>
+    <div class="callout"><b>验证(2026-11-07):</b>三批共 11 次修复后启动(5×160 s + 3×160 s + 3 次 taskdump),内核 main+本次改动,镜像 work/gnome-x86.img:shell 就绪 10/11(此前 0–1/5);零 KERNPANIC;其中 3 次触发 STRAGGLER-RESCUE 且每次都原地恢复该启动;剩下的一次冻结是另一种更罕见、位于 keyring 阶段的症状(§8.4);双架构构建绿、riscv64 脚本化启动 rc=0、make test 全绿。</div>
+
+    <h2 id="recs"><span class="anchor">§9</span>防复发建议</h2>
     <ol>
       <li>把<b>桌面启动门禁</b>加入常备合并层级:串口出现 "Running GNOME Shell" 且会话存活 60 秒 —— 与 LTP 扫描同级的常设项。</li>
       <li>把<b>字节级 file-mmap 校验探针</b>(fmv/coldfile)加入常备探针 —— 这正是当天就能抓到投毒的传感器类。</li>
       <li>要求拆锁或批量 I/O 的性能落地,在合并信息里写明 fault-around、brk-trim 与多线程 munmap 如何重新验证。</li>
+      <li>退出路径的排空循环如今有三层"等待其他任务推进"的形态(组死亡、straggler 排空、on_cpu 等待)—— 每层都已咬过一次;新增同类必须配齐三件套:无锁让出点、有界等待、始终上报。</li>
     </ol>
 
-    <div class="callout">证据:run/ 下探针源码(mmap_witness、arena_churn、coldfile、fmv、swaprt、mremap),各会话启动串口日志,内核提交 5b4a4bc7、10705570、f8ffce15、484f2144。</div>
+    <div class="callout">证据:run/ 下探针源码(mmap_witness、arena_churn、coldfile、fmv、swaprt、mremap),各会话启动串口日志,内核提交 5b4a4bc7、10705570、f8ffce15、484f2144;冻结面取证串口 /tmp/fz-td*.log、/tmp/fz-cen1.log、/tmp/tri-g*.log、/tmp/res-g*.log(2026-11-07)。</div>
   </article>
 </div>
 </main>

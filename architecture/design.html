@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-        <aside class="doc-side">
+          <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a class="on" href="design.html">架构与模块设计</a>
     <a href="structure.html">代码结构</a>
@@ -43,6 +43,7 @@
     <a href="../testing/index.html">测试总览</a>
     <a href="../testing/ltp.html">LTP 兼容扫描</a>
     <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
     <a href="../testing/stability.html">稳定性</a>
     <a href="../testing/stress.html">压力</a>
     <a href="../testing/gnome-retrospective.html">回溯报告</a>
@@ -188,7 +189,7 @@
     <div class="mod-anchor" id="trace"></div>
     <h2><span class="anchor">§7</span>可观测性(kernel/src/trace/ + debug/)</h2>
     <ul>
-      <li><b>统一 trace-event 框架(D-15)</b>:单声明表一行 = 组/名/id/print fmt/字段/typed 记录函数;tracefs(<code>/sys/kernel/tracing</code>)文件树与字节格式逐字节对齐 Linux(tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…)。当前 <b>51 事件 / 16 组</b>(sched、kmem、raw_syscalls、block、binder、ext4 族、jbd2、rux:epoll)。</li>
+      <li><b>统一 trace-event 框架(D-15)</b>:单声明表一行 = 组/名/id/print fmt/字段/typed 记录函数;tracefs(<code>/sys/kernel/tracing</code>)文件树与字节格式逐字节对齐 Linux(tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…)。当前 <b>61 事件 / 20 组</b>(sched、kmem、raw_syscalls、block、binder、ext4 族、jbd2、lock/tcp/sock/net 族、rux 族)。</li>
       <li><b>门禁成本实测</b>:禁用点编译为一个 load+test+branch(release 反汇编逐点验证);启用后 <b>+13–19 ns/记录</b>;镜像价 +0.18%。</li>
       <li><b>kallsyms(D-3)</b>:编译期符号表入 .rodata(2.4MB 名 + 0.7MB 索引 @ ~22.6k 符号),零启动开销,/proc/kallsyms 标准行。</li>
       <li><b>census + heal</b>:每任务逐字段 tick 观测 + 幻影 preempt 判定 + 20 ms 饥饿界;IF=0 占机 <b>25.7%→20.4%</b>,最长关中断段 594–599 ms 一次性 → <b>6–9 ms</b>,WAKE-STRANDED 233→31。</li>
@@ -206,7 +207,7 @@
     </ul>
 
     <!-- ================= 分歧登记表 ================= -->
-    <h2 id="divergences"><span class="anchor">§9</span>设计分歧登记表(19 项)</h2>
+    <h2 id="divergences"><span class="anchor">§9</span>设计分歧登记表(20 项)</h2>
     <p>出处:<code>docs/architecture/design-divergences.md</code>。每条须过三关 —— 外部兼容完好、LTP 受影响族绿、上层软件零破坏;永不删除,被取代者保留历史。</p>
     <div class="tbl-wrap">
       <table>
@@ -231,6 +232,7 @@
           <tr><td><b>D-17</b></td><td><b>内核侧设备地址别名区(arena)</b>:运行期无恒等 MMIO 窗,uaccess 无恒等洞(坏用户指针 fault 而非读物理内存)。守卫:PF-NOCTX/SMAP-VIOL 信标静默。</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP 以 pushfq EFLAGS.AC 序列启用</b>:STAC/CLAC 在 TCG 无条件 #UD(配对实验确证);括号 ~55 ns,硬件与 TCG 双可启动。</td></tr>
           <tr><td><b>D-19</b></td><td><b>类型化定时器轮</b>:时钟域不可混比,periodic 需 NonZeroU64,WakeArmed/WakeSpent 作用域守卫。六类历史 bug 成为编译错;同 rig A/B:arm 锁 924→697 ns、nanosleep 772.6→662.7 ms、p2_ctxsw 12.198 vs 15.400 µs。</td></tr>
+          <tr><td><b>D-20</b></td><td><b>PSI tick 采样式停顿统计</b>:/proc/pressure/{cpu,memory,io} 语义对齐参考实现(some/full 百分比、avg10/60/300 衰减、累计 µs),但统计机制不同 —— 参考实现在每次调度边沿的 psi_task_change 里计入流逝时间(事件驱动,带每 CPU seqcount),Rux 从调度 tick 采样全局停顿条件:每 jiffy 至多一次 CAS 门控采样,调度路径零新增工作(cpu 压力读现有 grq.nr_running 与 idle 掩码;内存/IO 压力由停顿路径自身以每任务位标记)。优势:常开可观测性不落在调度热路径上,代价 ~每 CPU 每 10 ms 一次原子读 + ~100 ns 折叠。</td></tr>
         </tbody>
       </table>
     </div>

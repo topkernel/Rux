@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTP TIMEOUT 类审计 · Rux</title>
+<link rel="stylesheet" href="../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">首页</a>
+      <a href="../architecture/design.html">架构设计</a>
+      <a href="../performance/index.html">性能</a>
+      <a href="../security/index.html">安全</a>
+      <a href="index.html">测试</a>
+      <a href="../guides/getting-started.html">快速入门</a>
+      <a href="../progress/roadmap.html">项目进展</a>
+      <span class="lang-sw"><a class="on" href="ltp-timeout.html">中文</a><a href="../en/testing/ltp-timeout.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">架构设计</div>
+    <a href="../architecture/design.html">架构与模块设计</a>
+    <a href="../architecture/structure.html">代码结构</a>
+    <a href="../architecture/boot.html">启动流程</a>
+    <a href="../architecture/memory.html">内存管理</a>
+    <a href="../architecture/riscv64.html">架构移植指南</a>
+    <a href="../architecture/kernel-lock.html">锁序不变量</a>
+    <div class="grp">性能</div>
+    <a href="../performance/index.html">性能测试</a>
+    <div class="grp">安全</div>
+    <a href="../security/index.html">安全与形式验证</a>
+    <div class="grp">测试</div>
+    <a href="index.html">测试总览</a>
+    <a href="ltp.html">LTP 兼容扫描</a>
+    <a href="ltp-full.html">LTP 全量用例</a>
+    <a class="on" href="ltp-timeout.html">LTP TIMEOUT 审计</a>
+    <a href="stability.html">稳定性</a>
+    <a href="stress.html">压力</a>
+    <a href="gnome-retrospective.html">回溯报告</a>
+    <div class="grp">开发指南</div>
+    <a href="../guides/getting-started.html">快速入门</a>
+    <a href="../guides/development.html">参与开发</a>
+    <a href="../guides/configuration.html">内核配置</a>
+    <div class="grp">项目进展</div>
+    <a href="../progress/roadmap.html">路线图</a>
+    <a href="../progress/changelog.html">更新日志</a>
+    <a href="../progress/quickref.html">命令速查</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>LTP TIMEOUT 类审计</h1>
+    <div class="sub">2026-11-07 · P0 类规则:TIMEOUT 属于"跑不过"判定,优先于一切优化工作 · 原文 docs/test/ltp-timeout-audit.md(英文)</div>
+
+    <div class="callout"><b>审计范围:</b>r27 普查(1,869 清单,main@e23d3c3f,x86_64+KVM)的全部 <b>13 个 TIMEOUT + 1 个 WEDGE</b> 行。方法:每行在当前 main 上按"一测试一启动"重跑(<code>scripts/test/ltpscan/scan-x86_64.py --chunk 1</code>;guest 内 runner 给每个测试 30 s 预算,超时后由 pid-1 发 SIGTERM 记 rc=143),对照 LTP 20240524 源码逐条判读。</div>
+
+    <h2 id="result"><span class="anchor">§1</span>结论:14 行的归属</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>归属</th><th class="num">行数</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><b>内核缺陷(已修)</b></td><td class="num">1</td><td>ptrace06 的 exec-trap stop 丢失 + 坏 PEEK/POKE/REGS/SIGINFO 参数的 errno 映射(f558181b)</td></tr>
+          <tr><td><b>测试/清单缺陷</b></td><td class="num">11</td><td>9 个按设计常驻的辅助进程 + shmat1(64 位信号恢复块被 <code>#ifdef __i386__</code> 排除)+ mmap1(预算内跑完 274,152 次校验后被 LTP 内部超时判死)</td></tr>
+          <tr><td><b>已知丢唤醒家族</b></td><td class="num">1</td><td>openfile —— 归丢唤醒生产者排查线(openfile 的丢唤醒由 TraceRing::push 一侧产生)</td></tr>
+          <tr><td><b>非挂起,只是慢</b></td><td class="num">1</td><td>ht_affinity —— 零 TFAIL,约每 30 s 预算推进一个亲和性掩码,需计时剖析</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>修复后 ptrace 家族 01/02/03/05/06/11 全部单启动 PASS。</p>
+
+    <h2 id="rows"><span class="anchor">§2</span>逐行判定</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>用例</th><th>在 main 上的类别</th><th>判定</th><th>证据</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">ptrace06</td><td>TIMEOUT</td><td><span class="chip ok">已修 → PASS</span></td><td>tracer 卡在首次 wait4:被 TRACEME 的 vfork+exec 子进程从未进入 exec 的 SIGTRAP stop。修复在 exec 提交点排入 trap,do_signal 的 traced 分支转为上报给 tracer 的 stop;另补坏参数到 EIO 的 errno 映射</td></tr>
+          <tr><td class="mono">shmat1</td><td>CRASH 5/5</td><td><span class="chip warn">x86_64 上的测试缺陷</span></td><td>SIGSEGV 恢复块被 <code>#ifdef __i386__</code> 排除,64 位分支体直接 <code>fprintf + exit(-1)</code>;测试设计的 shm 分离竞态在我们的时序下 ~200 轮内触发,5 次崩溃全部落在 <code>map_address</code>(内核 USEGV-FOR 取证)。内核侧经探针验证正确:定向缺页投递、SA_SIGINFO 处理替换、siglongjmp 恢复均正常;该测试还按设计 <code>alarm(exec_time*3600)</code> = 24 小时</td></tr>
+          <tr><td class="mono">openfile</td><td>TIMEOUT</td><td><span class="chip warn">已知丢唤醒家族</span></td><td>main 在 "Creating Reading Threads" 后停在 futex join,读线程已消失;STRAGGLER-RESCUE 在启动内触发并救回一个丢掉的退出中线程,但 join 的唤醒已丢失。归属丢唤醒生产者排查线</td></tr>
+          <tr><td class="mono">ht_affinity</td><td>TIMEOUT</td><td><span class="chip cyan">进展慢,非挂起</span></td><td>零 TFAIL;约每 30 s 预算推进一个掩码(循环 = cpu 数个掩码 × 子进程派生 + sleep(1) 同步,跑两遍)</td></tr>
+          <tr><td class="mono">mmap1</td><td>FAIL(int)</td><td><span class="chip cyan">按设计慢</span></td><td>30 s 预算内 274,152 次校验全部 PASS,随后被 LTP 内部超时 TBROK(r26 普查已记录该预算/竞态类)</td></tr>
+          <tr><td class="mono">cgroup_fj_proc</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>do {...} while (test_switch)</code> —— 直至父套件发信号</td></tr>
+          <tr><td class="mono">cgroup_regression_fork_processes</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>while (1)</code> fork 循环</td></tr>
+          <tr><td class="mono">cpuctl_fj_cpu-hog</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>sigsuspend</code> 等父进程的 SIGUSR1</td></tr>
+          <tr><td class="mono">fork_exec_loop</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>while (1)</code> fork+exec 循环(freezer 套件的负载发生器)</td></tr>
+          <tr><td class="mono">memcg_test_2</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>while (1)</code></td></tr>
+          <tr><td class="mono">memcg_test_4</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>while (1) sleep(1)</code></td></tr>
+          <tr><td class="mono">pids_task2</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>pause()</code></td></tr>
+          <tr><td class="mono">pthserv</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td><code>for (;;)</code> accept 循环(服务到被终止为止)</td></tr>
+          <tr><td class="mono">timed_forkbomb</td><td>TIMEOUT</td><td><span class="chip cyan">按设计辅助进程</span></td><td>从 stdin 读取其压测程序(父进程管道写入);单独运行时阻塞在 scanf</td></tr>
+          <tr><td class="mono">mmap1(WEDGE 行)</td><td>—</td><td><span class="chip cyan">同上</span></td><td>r27 的 WEDGE 行即同一测试在分块负载下的表现</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="follow"><span class="anchor">§3</span>后续项</h2>
+    <ol>
+      <li><b>普查卫生</b>:9 个按设计常驻的辅助进程应在后续普查中带 BY-DESIGN 标记(runner 侧清单或裁决后处理),不再读作内核 TIMEOUT 回归。</li>
+      <li><b>r28 普查</b>:将纳入 ptrace06 的 PASS 与上述重分类。</li>
+      <li><b>ht_affinity</b>:逐步计时剖析(亲和性系统调用 + 信号握手开销)。</li>
+      <li><b>openfile</b>:随丢唤醒生产者排查线推进;救援机制已把破坏面限制在亚秒级。</li>
+    </ol>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">返回首页</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../js/main.js?v=16"></script>
+</body>
+</html>

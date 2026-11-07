@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-      <aside class="doc-side">
+        <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a href="../architecture/design.html">Design deep-dive</a>
     <a href="../architecture/structure.html">Code layout</a>
@@ -43,6 +43,7 @@
     <a href="../testing/index.html">Overview</a>
     <a href="../testing/ltp.html">LTP scan</a>
     <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
     <a href="../testing/stability.html">Stability</a>
     <a href="../testing/stress.html">Stress</a>
     <a href="../testing/gnome-retrospective.html">Retrospective</a>
@@ -59,6 +60,14 @@
   <article class="doc-main">
     <h1>Changelog (highlights)</h1>
     <div class="sub">The full history: docs/progress/changelog.md and git log — this page records structural milestones only</div>
+
+    <h2 id="n1107"><span class="anchor">2026-11-07</span></h2>
+    <ul>
+      <li><b>LTP TIMEOUT-class audit</b>: all 13 TIMEOUT + 1 WEDGE rows adjudicated — 1 kernel defect (ptrace06's lost exec-trap stop and the errno mapping for bad parameters, fixed), 11 test/list defects (9 by-design resident helpers + shmat1 + mmap1), 1 known lost-wake family, 1 slow-progress case.</li>
+      <li><b>All three desktop park-face mechanisms fixed</b>: SOFTIRQ_OFFSET migration (preempt bracket mismatch repair), the drain's yield defeated by a leaked preempt BASE (DRAIN-PC-HEAL), and the lost straggler wake (STRAGGLER-RESCUE) — 10 of 11 post-fix boots reach a shell (was 0–1 of 5).</li>
+      <li><b>PSI</b> (/proc/pressure/{cpu,memory,io}) landed and registered as D-20 (tick-sampled stall accounting; always-on without scheduler hot-path cost).</li>
+      <li>The tracepoint surface grew to <b>61 events / 20 groups</b> (the lock/tcp/sock/net families added).</li>
+    </ul>
 
     <h2 id="n1106"><span class="anchor">2026-11-06</span></h2>
     <ul>

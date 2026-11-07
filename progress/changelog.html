@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-        <aside class="doc-side">
+          <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -43,6 +43,7 @@
     <a href="../testing/index.html">测试总览</a>
     <a href="../testing/ltp.html">LTP 兼容扫描</a>
     <a href="../testing/ltp-full.html">LTP 全量用例</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT 审计</a>
     <a href="../testing/stability.html">稳定性</a>
     <a href="../testing/stress.html">压力</a>
     <a href="../testing/gnome-retrospective.html">回溯报告</a>
@@ -59,6 +60,14 @@
   <article class="doc-main">
     <h1>更新日志(精选)</h1>
     <div class="sub">逐条全史见仓库 docs/progress/changelog.md 与 git log · 本页只收录结构性节点</div>
+
+    <h2 id="n1107"><span class="anchor">2026-11-07</span></h2>
+    <ul>
+      <li><b>LTP TIMEOUT 类审计</b>:13 个 TIMEOUT + 1 个 WEDGE 行逐行归因 —— 内核缺陷 1(ptrace06 的 exec-trap stop 丢失与坏参数 errno 映射,已修)、测试/清单缺陷 11(9 个按设计常驻辅助进程 + shmat1 + mmap1)、丢唤醒家族 1、进展慢 1。</li>
+      <li><b>桌面冻结面三层机制全数修复</b>:SOFTIRQ_OFFSET 迁移(preempt 括号失配纠正)、泄漏 preempt BASE 导致的排空不让出(DRAIN-PC-HEAL)、丢失的 straggler 唤醒(STRAGGLER-RESCUE);修复后 11 次启动 10 次 shell 就绪(此前 0–1/5)。</li>
+      <li><b>PSI</b>(/proc/pressure/{cpu,memory,io})落地,登记为 D-20(采样式停顿统计,常开不落在调度热路径)。</li>
+      <li>tracepoint 事件面扩到 <b>61 事件 / 20 组</b>(新增 lock/tcp/sock/net 族)。</li>
+    </ul>
 
     <h2 id="n1106"><span class="anchor">2026-11-06</span></h2>
     <ul>

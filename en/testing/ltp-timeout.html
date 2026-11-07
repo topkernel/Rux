@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LTP TIMEOUT-class audit · Rux</title>
+<link rel="stylesheet" href="../../css/style.css?v=16">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html"><span class="crab">🦀</span>Rux</a>
+    <div class="nav-links">
+      <a href="../index.html">Home</a>
+      <a href="../architecture/design.html">Architecture</a>
+      <a href="../performance/index.html">Performance</a>
+      <a href="../security/index.html">Security</a>
+      <a href="index.html">Testing</a>
+      <a href="../guides/getting-started.html">Getting started</a>
+      <a href="../progress/roadmap.html">Progress</a>
+      <span class="lang-sw"><a class="on" href="../../testing/ltp-timeout.html">中文</a><a href="ltp-timeout.html">EN</a></span>
+      <a class="nav-cta" href="https://github.com/topkernel/Rux">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<div class="container doc">
+    <aside class="doc-side">
+    <div class="grp">Architecture</div>
+    <a href="../architecture/design.html">Design deep-dive</a>
+    <a href="../architecture/structure.html">Code layout</a>
+    <a href="../architecture/boot.html">Boot flow</a>
+    <a href="../architecture/memory.html">Memory management</a>
+    <a href="../architecture/riscv64.html">Porting guide</a>
+    <a href="../architecture/kernel-lock.html">Lock ordering</a>
+    <div class="grp">Performance</div>
+    <a href="../performance/index.html">Performance</a>
+    <div class="grp">Security</div>
+    <a href="../security/index.html">Security & verification</a>
+    <div class="grp">Testing</div>
+    <a href="index.html">Overview</a>
+    <a href="ltp.html">LTP scan</a>
+    <a href="ltp-full.html">LTP full cases</a>
+    <a class="on" href="ltp-timeout.html">LTP TIMEOUT audit</a>
+    <a href="stability.html">Stability</a>
+    <a href="stress.html">Stress</a>
+    <a href="gnome-retrospective.html">Retrospective</a>
+    <div class="grp">Guides</div>
+    <a href="../guides/getting-started.html">Getting started</a>
+    <a href="../guides/development.html">Contributing</a>
+    <a href="../guides/configuration.html">Kernel configuration</a>
+    <div class="grp">Progress</div>
+    <a href="../progress/roadmap.html">Roadmap</a>
+    <a href="../progress/changelog.html">Changelog</a>
+    <a href="../progress/quickref.html">Commands</a>
+  </aside>
+
+  <article class="doc-main">
+    <h1>LTP TIMEOUT-class audit</h1>
+    <div class="sub">2026-11-07 · P0-class rule: a TIMEOUT is a "cannot-run" verdict, prioritized over optimization work · source doc docs/test/ltp-timeout-audit.md</div>
+
+    <div class="callout"><b>Scope:</b> every <b>13 TIMEOUT + 1 WEDGE</b> row of the r27 census (1,869-case list, main@e23d3c3f, x86_64+KVM). Method: each row re-run one-test-per-boot on current main (<code>scripts/test/ltpscan/scan-x86_64.py --chunk 1</code>; the in-guest runner gives each test a 30 s budget, then pid-1 SIGTERMs it and records rc=143), with the LTP 20240524 sources open beside the serials.</div>
+
+    <h2 id="result"><span class="anchor">§1</span>Result: where the 14 rows belong</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Class</th><th class="num">Rows</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><b>Kernel defect (fixed)</b></td><td class="num">1</td><td>ptrace06's lost exec-trap stop + errno mapping for bad PEEK/POKE/REGS/SIGINFO parameters (f558181b)</td></tr>
+          <tr><td><b>Test/list defect</b></td><td class="num">11</td><td>9 by-design resident helpers + shmat1 (the 64-bit signal-recovery block is excluded by <code>#ifdef __i386__</code>) + mmap1 (274,152 verify iterations pass inside the budget, then the LTP-internal timeout TBROKs it)</td></tr>
+          <tr><td><b>Known lost-wake family</b></td><td class="num">1</td><td>openfile — owned by the lost-wake producer hunt (produced on the TraceRing::push side)</td></tr>
+          <tr><td><b>Slow, not hung</b></td><td class="num">1</td><td>ht_affinity — zero TFAIL, roughly one affinity mask per 30 s budget; needs a timing dig</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>After the fix, the ptrace family 01/02/03/05/06/11 all PASS one-per-boot.</p>
+
+    <h2 id="rows"><span class="anchor">§2</span>Row-by-row disposition</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Case</th><th>Class on main</th><th>Verdict</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">ptrace06</td><td>TIMEOUT</td><td><span class="chip ok">fixed → PASS</span></td><td>the tracer blocked in its first wait4: a TRACEME'd vfork+exec child never took the exec SIGTRAP stop. The fix queues the trap at the exec commit point; do_signal's traced arm converts it to the tracer-reported stop. Plus EIO errno mapping for bad parameters</td></tr>
+          <tr><td class="mono">shmat1</td><td>CRASH 5/5</td><td><span class="chip warn">test defect on x86_64</span></td><td>the SIGSEGV recovery block is <code>#ifdef __i386__</code>; the 64-bit body is <code>fprintf("caught signal %d -- exiting"); exit(-1)</code>. The test's designed shm-detach race fires within ~200 iterations on our timing; all 5 crashes fault at exactly <code>map_address</code> (kernel USEGV-FOR forensics). The kernel side is verified correct by probes: thread-directed fault delivery, SA_SIGINFO handler replacement and siglongjmp recovery all work. The test also runs <code>alarm(exec_time*3600)</code> = 24 h by design</td></tr>
+          <tr><td class="mono">openfile</td><td>TIMEOUT</td><td><span class="chip warn">known lost-wake family</span></td><td>main parks in futex (join) after "Creating Reading Threads"; the reader threads are gone. STRAGGLER-RESCUE fired in-boot and recovered one lost mid-exit thread, but the join's wake was already lost. Owned by the lost-wake producer hunt</td></tr>
+          <tr><td class="mono">ht_affinity</td><td>TIMEOUT</td><td><span class="chip cyan">slow progress, not a wedge</span></td><td>zero TFAIL; ~one affinity mask per 30 s budget (loop = cpu_count masks × child spawn + sleep(1) sync, twice)</td></tr>
+          <tr><td class="mono">mmap1</td><td>FAIL(int)</td><td><span class="chip cyan">slow by design</span></td><td>274,152 verify iterations PASS inside the 30 s budget, then the LTP-internal timeout TBROKs it (the r26 census already documents this budget/racy class)</td></tr>
+          <tr><td class="mono">cgroup_fj_proc</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>do {...} while (test_switch)</code> — runs until its parent suite signals it</td></tr>
+          <tr><td class="mono">cgroup_regression_fork_processes</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>while (1)</code> fork loop</td></tr>
+          <tr><td class="mono">cpuctl_fj_cpu-hog</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>sigsuspend</code> waiting for the parent's SIGUSR1</td></tr>
+          <tr><td class="mono">fork_exec_loop</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>while (1)</code> fork+exec loop (the freezer suite's load generator)</td></tr>
+          <tr><td class="mono">memcg_test_2</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>while (1)</code></td></tr>
+          <tr><td class="mono">memcg_test_4</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>while (1) sleep(1)</code></td></tr>
+          <tr><td class="mono">pids_task2</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>pause()</code></td></tr>
+          <tr><td class="mono">pthserv</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td><code>for (;;)</code> accept loop (a server until killed)</td></tr>
+          <tr><td class="mono">timed_forkbomb</td><td>TIMEOUT</td><td><span class="chip cyan">by-design helper</span></td><td>reads its bomb program from stdin (the parent pipes it); standalone it blocks on scanf</td></tr>
+          <tr><td class="mono">mmap1 (WEDGE row)</td><td>—</td><td><span class="chip cyan">as above</span></td><td>the r27 WEDGE row is the same test under chunked load</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="follow"><span class="anchor">§3</span>Follow-ups</h2>
+    <ol>
+      <li><b>Census hygiene</b>: the 9 by-design resident helpers should carry a BY-DESIGN marker in future censuses (runner-side list or verdict post-processing) so they stop reading as kernel TIMEOUT regressions.</li>
+      <li><b>The r28 census</b>: will pick up the ptrace06 PASS and these reclassifications.</li>
+      <li><b>ht_affinity</b>: a per-step timing dig (affinity syscall + signal handshake cost).</li>
+      <li><b>openfile</b>: rides the lost-wake producer hunt; the rescue machinery bounds its damage to sub-second.</li>
+    </ol>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-meta" style="border-top:none; margin-top:0; padding-top:0;">
+      <span>Rux Kernel · MIT License</span>
+      <span><a href="../index.html">Back to top page</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="../../js/main.js?v=16"></script>
+</body>
+</html>

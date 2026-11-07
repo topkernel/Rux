@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-        <aside class="doc-side">
+          <aside class="doc-side">
     <div class="grp">架构设计</div>
     <a href="../architecture/design.html">架构与模块设计</a>
     <a href="../architecture/structure.html">代码结构</a>
@@ -43,6 +43,7 @@
     <a class="on" href="index.html">测试总览</a>
     <a href="ltp.html">LTP 兼容扫描</a>
     <a href="ltp-full.html">LTP 全量用例</a>
+    <a href="ltp-timeout.html">LTP TIMEOUT 审计</a>
     <a href="stability.html">稳定性</a>
     <a href="stress.html">压力</a>
     <a href="gnome-retrospective.html">回溯报告</a>
@@ -58,7 +59,7 @@
 
   <article class="doc-main">
     <h1>测试</h1>
-    <div class="sub">本栏目含五个子页:兼容扫描 / 全量用例 / 稳定性 / 压力 / 回溯报告 —— 数据截至 2026-11-06</div>
+    <div class="sub">本栏目含六个子页:兼容扫描 / 全量用例 / TIMEOUT 审计 / 稳定性 / 压力 / 回溯报告 —— 数据截至 2026-11-07</div>
 
     <h2 id="map"><span class="anchor">§1</span>栏目导航</h2>
     <div class="card-grid grid-2">
@@ -83,6 +84,11 @@
         <a class="more" href="stress.html">进入子项 →</a>
       </div>
       <div class="card">
+        <h3><span class="ico">⏱️</span>LTP TIMEOUT 审计</h3>
+        <p>P0 类规则下的 TIMEOUT 类逐行归因(2026-11-07):13 个 TIMEOUT + 1 个 WEDGE 行重跑判定 —— 内核缺陷 1(已修)、测试/清单缺陷 11、丢唤醒家族 1、进展慢 1。</p>
+        <a class="more" href="ltp-timeout.html">进入子项 →</a>
+      </div>
+      <div class="card">
         <h3><span class="ico">🔎</span>回溯报告</h3>
         <p>GNOME 桌面回归回溯(2026-11-06):2,825 个提交的静默累积如何漏过全部门禁;munmap 竞态与页缓存投毒两个根因的修复,以及防复发的三项门禁改造。</p>
         <a class="more" href="gnome-retrospective.html">进入子项 →</a>
@@ -104,7 +110,8 @@
           <tr><td>stress-fleet.md</td><td>压测/稳定性/随机化/模糊测试集群设计 + 结果台账</td><td class="mono">常驻(11 QEMU)</td></tr>
           <tr><td>formal-verification-report.md</td><td>Kani / proptest / SPIN / Miri 常备状态</td><td class="mono">157 harness · 1104 proptests → 见安全栏目</td></tr>
           <tr><td>test-coverage.md</td><td>覆盖台账(每次变更再生成)</td><td class="mono">滚动</td></tr>
-          <tr><td>gnome-regression-retrospective.md</td><td>GNOME 桌面回归回溯:根因、门禁盲区与防复发改造</td><td class="mono">2026-11-06 → 见回溯报告子页</td></tr>
+          <tr><td>gnome-regression-retrospective.md</td><td>GNOME 桌面回归回溯:根因、门禁盲区与防复发改造</td><td class="mono">2026-11-07(含冻结面三层机制)→ 见回溯报告子页</td></tr>
+          <tr><td>ltp-timeout-audit.md</td><td>LTP TIMEOUT 类逐行归因审计(P0 类规则)</td><td class="mono">2026-11-07 → 见 TIMEOUT 审计子页</td></tr>
         </tbody>
       </table>
     </div>

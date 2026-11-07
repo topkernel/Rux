@@ -27,7 +27,7 @@
 
 <main>
 <div class="container doc">
-      <aside class="doc-side">
+        <aside class="doc-side">
     <div class="grp">Architecture</div>
     <a class="on" href="design.html">Design deep-dive</a>
     <a href="structure.html">Code layout</a>
@@ -43,6 +43,7 @@
     <a href="../testing/index.html">Overview</a>
     <a href="../testing/ltp.html">LTP scan</a>
     <a href="../testing/ltp-full.html">LTP full cases</a>
+    <a href="../testing/ltp-timeout.html">LTP TIMEOUT audit</a>
     <a href="../testing/stability.html">Stability</a>
     <a href="../testing/stress.html">Stress</a>
     <a href="../testing/gnome-retrospective.html">Retrospective</a>
@@ -181,7 +182,7 @@
     <div class="mod-anchor" id="trace"></div>
     <h2><span class="anchor">§7</span>Observability (kernel/src/trace/ + debug/)</h2>
     <ul>
-      <li><b>The unified trace-event framework (D-15)</b>: one declaration-table row = group/name/id/print-fmt/fields/typed record function; the tracefs (<code>/sys/kernel/tracing</code>) tree and byte formats align exactly (tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…). Currently <b>51 events / 16 groups</b> (sched, kmem, raw_syscalls, block, binder, the ext4 family, jbd2, rux:epoll).</li>
+      <li><b>The unified trace-event framework (D-15)</b>: one declaration-table row = group/name/id/print-fmt/fields/typed record function; the tracefs (<code>/sys/kernel/tracing</code>) tree and byte formats align exactly (tracing_on/trace/trace_pipe/set_event/snapshot/events/*/enable…). Currently <b>61 events / 20 groups</b> (sched, kmem, raw_syscalls, block, binder, the ext4 family, jbd2, the lock/tcp/sock/net families, the rux family).</li>
       <li><b>Measured gate cost</b>: disabled sites compile to one load+test+branch (verified point by point in release disassembly); enabling costs <b>+13–19 ns/record</b>; image cost +0.18%.</li>
       <li><b>kallsyms (D-3)</b>: a compile-time symbol table in .rodata (2.4MB names + 0.7MB index @ ~22.6k symbols), zero boot cost, standard /proc/kallsyms lines.</li>
       <li><b>census + heal</b>: per-task per-field tick observation + phantom-preempt adjudication + a 20 ms starvation bound; IF=0 share <b>25.7%→20.4%</b>, longest cli segment 594–599 ms one-shot → <b>6–9 ms</b>, WAKE-STRANDED 233→31.</li>
@@ -197,7 +198,7 @@
       <li><b>aarch64</b>: QEMU virt GICv3 (requires <code>-M virt,gic-version=3</code>); an embedded DTB blob; TPIDR_EL0 as the task TLS state; EL0 FP traps capturing NEON state; TASK_SIZE 256GB, TCR IPS=44-bit.</li>
     </ul>
 
-    <h2 id="divergences"><span class="anchor">§9</span>The design-divergence register (19 entries)</h2>
+    <h2 id="divergences"><span class="anchor">§9</span>The design-divergence register (20 entries)</h2>
     <p>Source: <code>docs/architecture/design-divergences.md</code>. Each entry must pass three gates — external compatibility intact, affected LTP families green, zero upstream breakage; entries are never deleted, superseded ones keep history.</p>
     <div class="tbl-wrap">
       <table>
@@ -222,6 +223,7 @@
           <tr><td><b>D-17</b></td><td><b>The kernel-side device alias arena</b>: no identity MMIO window at runtime, no uaccess identity hole (a bad user pointer faults instead of reading physical memory). Guards: PF-NOCTX/SMAP-VIOL beacons stay silent.</td></tr>
           <tr><td><b>D-18</b></td><td><b>SMAP via the pushfq EFLAGS.AC sequence</b>: STAC/CLAC unconditionally #UD under TCG (convicted by paired trials); ~55 ns per bracket, boots on hardware and TCG alike.</td></tr>
           <tr><td><b>D-19</b></td><td><b>The typed timer wheel</b>: clock domains cannot be mixed, periodic requires NonZeroU64, WakeArmed/WakeSpent scope guards. Six historical bug classes became compile errors; same-rig A/B: arm lock 924→697 ns, nanosleep 772.6→662.7 ms, p2_ctxsw 12.198 vs 15.400 µs.</td></tr>
+          <tr><td><b>D-20</b></td><td><b>PSI tick-sampled stall accounting</b>: /proc/pressure/{cpu,memory,io} matches the reference semantics (some/full percentages, avg10/60/300 decay, cumulative µs), but the mechanism differs — the reference charges elapsed time inside every psi_task_change (event-driven, per-CPU seqcount-protected), while Rux samples the global stall conditions from the scheduler tick: at most one CAS-gated sample per jiffy on any CPU, zero new work on the scheduling paths (cpu pressure reads the existing grq.nr_running and idle mask; memory/io pressure is marked by the stalling paths themselves with one relaxed atomic pair per stall section on a per-task bit). Advantage: always-on observability adds nothing to the scheduler hot paths; the cost is ~one atomic load + a ~100 ns fold per 10 ms per CPU.</td></tr>
         </tbody>
       </table>
     </div>
