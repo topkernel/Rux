@@ -1274,7 +1274,10 @@ pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError
                     if !leaf_is_ro {
                         // SAFETY: page descriptor for a page mapped by this address space.
                         let new_ref =
-                            unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
+                            unsafe {
+                                (*page).zap_gen.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86)
+                            };
                         if new_ref == 0 {
                             crate::mm::page_alloc::free_pages(
                                 (ppn_val as usize) << PAGE_SHIFT, 0,
@@ -1416,7 +1419,10 @@ pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError
                     }
                     if !leaf_is_ro {
                         let new_ref =
-                            unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
+                            unsafe {
+                                (*page).zap_gen.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86)
+                            };
                         if new_ref == 0 {
                             crate::mm::page_alloc::free_pages(
                                 (ppn_val as usize) << PAGE_SHIFT, 0,
@@ -1493,7 +1499,10 @@ pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError
             if !leaf_is_ro {
                 // SAFETY: page descriptor for a page mapped by this address space.
                 let new_ref =
-                    unsafe { (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86) };
+                    unsafe {
+                                (*page).zap_gen.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                (*page).put_page_site(crate::debug::driftwatch::S_UNMAP_X86)
+                            };
                 if new_ref == 0 {
                     crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
                 }

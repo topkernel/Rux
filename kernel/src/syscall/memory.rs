@@ -3404,8 +3404,63 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                             copy_size,
                         );
                     }
-                    // Unmap old mapping
-                    let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
+                    // Post-move old-range teardown — RACER GUARD (the
+                    // arena-zeroing fix, 2026-11-07). During the copy
+                    // window a same-mm racer (glibc arena mprotect-grow,
+                    // another thread's mmap) can map INTO the old range.
+                    // Unmapping the full old range then drops the RACER's
+                    // live PTEs; the later demand fault serves a fresh
+                    // ZERO page — glibc arena metadata dies with it, the
+                    // allocator hands out overlapping chunks (heapstress
+                    // catches, GNOME's shell walks into the dead zone).
+                    // The reference holds the mmap_lock across the move,
+                    // so a racer can only have entered through a path
+                    // that dropped it mid-move — our own copy does. The
+                    // fix: count live leaves first; any nonzero count
+                    // means the range is REUSED — leave it mapped (the
+                    // moved content already lives at the new address).
+                    {
+                        // inline live-PTE count (mm_ops helper is not
+                        // visible from this module on this branch)
+                        let mut live = 0usize;
+                        let mut first = 0usize;
+                        let mut va = old_addr;
+                        let end = old_addr.saturating_add(old_size_aligned);
+                        while va < end {
+                            if unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                    address_space.root_ppn(),
+                                    va as u64,
+                                )
+                            }
+                            .is_some()
+                            {
+                                if live == 0 {
+                                    first = va;
+                                }
+                                live += 1;
+                            }
+                            va += 4096;
+                        }
+                        if live > 0 {
+                            static MN: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if MN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                                crate::pr_err!(
+                                    "MREMAP-OLD-RACER-GUARD va={:#x} len={:#x} live={} first={:#x} pid={} — old range KEPT (racer active)",
+                                    old_addr, old_size_aligned, live, first,
+                                    crate::process::current_pid()
+                                );
+                            }
+                            // Keep the racer's mapping: skip the old-range
+                            // unmap entirely.
+                        } else {
+                            let _ = address_space.munmap(
+                                VirtAddr::new(old_addr),
+                                old_size_aligned,
+                            );
+                        }
+                    }
                     new_mapping_addr.as_usize() as i64
                 }
                 Err(_) => mmap_error::ENOMEM,
