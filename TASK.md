@@ -7969,3 +7969,153 @@ before appfwk, ohw74 with two of three gate sites already fixed).
 105-family confirmed NOT the M2 web (senders deliver, queue depth
 13-15): the param/init ServiceControlWithExtra path is the 69th's
 first target. Worktree cleanup done; no stray QEMUs from this lane.
+
+### 69. 69TH SESSION (2026-11-07) — the 105-family ROOT-CAUSED and
+### KILLED: init wedged at 100% CPU inside its SIGCHLD waitpid loop
+### because OUR release_task hot-spins forever waiting for a wedged
+### mid-exit group member (ohw79 pid1spin: sys=61 STEADY 150+s; ohw80:
+### the DEADLOCK prints + the fdreap-defer marker); fix landed (bounded
+### sleeping drain + deferred leader free + sweep finisher); ohw81:
+### ZERO 105s, 6/6 dynamic procs, init healthy to 381 s; the frontier
+### moves to the post-bms LAUNCHER-START gate (branch oh-crash @ 8bffe231+ceba9f2d)
+
+Boots this session: ohw77-ohw82 (6 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=txnhunt,sleepsnap,pctlmon,
+pid1spin). Commits: 8bffe231 (the fix) + ceba9f2d (dfx pid1spin
+instruments). Gates: x86_64 build rc=0; riscv64 build rc=0 + make test
+1319/1319 (run/test-rv-69.log); aarch64 build rc=0
+(run/build-a64-69.log). process/exit.rs is not a Tier-2 hot path
+(wait/release run once per process death; the drain's common case is
+one try_lock + empty check — no pbench/syscost tier owed; no sched/,
+mm/, fs/ hot-path files touched).
+
+#### 1. THE CHAIN READ FROM SOURCE (mission step 1)
+
+ServiceControlWithExtra(name, START, argv) → SystemSetParameter(
+"ohos.ctl.start", "name|args") — param_request.c: ONE persistent
+SOCK_STREAM g_clientFd per PROCESS under g_clientMutex, msgId counter,
+SO_RCVTIMEO=DEFAULT_PARAM_SET_TIMEOUT(15 s), recv-loop; 105 =
+PARAM_CODE_TIMEOUT (no reply in 15 s; replies are TYPE-matched not
+msgId-matched). Server: init's LoopEvent (level-triggered epoll, ONE
+thread for EVERYTHING) — HandleParamSet runs CheckParameterSet →
+DoCmdByIndex("start ...") synchronously, then SendResponseMsg →
+ParamTaskSendMsg → LE_Send → buffer + EPOLL_CTL_MOD(child, EPOLLOUT-
+only) → epoll_wait → write() → MOD back to EPOLLIN. samgr's workers
+(tids 34x) share ONE connection per process — a single dark child
+starves ALL of samgr's param traffic.
+
+#### 2. ohw75 RE-DECODE (the 68th's own log, fresh eyes)
+
+Early boot ALREADY carries the disease: msgId=2 (samgr.cache.sa, sent
+t=6.789) is REPLIED at t=14.640 — 7.85 s late; the param_watcher's 6
+ADDs pile q=1..5 (t=7.04-7.17) and burst-drain at 14.6+; connects
+#0-#11 (6.4-14.2) are all ACCEPTED in one 14.6-16.8 burst. init's
+LoopEvent goes deaf for SECONDS at a time from early boot. PCTL-RECV
+then stops FOREVER at t=34.66 (RECV #50) while client writes keep
+landing (q grows to 13-15/11100 by 338 s); the DFX TASK DUMP at 602 s
+shows pid=1 state=RUNNING on_cpu=1 — init spinning at 100% CPU since
+t≈34.7. NOT an epoll bug, NOT the param socket — init never returns to
+epoll_wait at all.
+
+#### 3. THE INSTRUMENTS (dfx=pid1spin, commit ceba9f2d)
+
+PID1SPIN (1 Hz heartbeat): pid 1's kernel-entry frame when RUNNING.
+PID1EPOLL (every 10th audit): pid 1's epoll interests with live
+per-child readiness (mask/file_id/queue state — discriminated purged
+interest vs stuck WRITE-mask vs scan divergence; ohw78's healthy dump
+ruled all three out THERE). W4SPIN (do_wait_nonblock): per-second reap
+census + entry heartbeat. UnixSocket::diag_stream_pair added for the
+dump.
+
+#### 4. THE ROOT CAUSE (ohw79/ohw80, two variants of one bug)
+
+- ohw79: at t=123-148 (right when the ctl.stops kill i18n_service and
+  its threads, EXITGRP code=-9), init enters its SIGCHLD handler's
+  `while (HandleSigChild() > 0);` = waitpid(-1,&st,WNOHANG) loop and
+  NEVER comes back: PID1SPIN #60-#120 (148-298 s) all land at sys=61
+  a0=-1 a2=1 rip=0x3fbf0ecb46 STEADY — ONE wait4 call stuck inside the
+  kernel. wait_count (completed epoll_waits) frozen at 654 from 148 s.
+- ohw80: same window, plus the smoking-gun sequence: thread exit
+  (45.9) → "fs: fdreap close deferred to reaper (... stalled quiescent
+  round — monopolist window)" (46.2) → "DEADLOCK: spinlock stuck
+  cpu=1 lock=0xffff88807a295840" every ~3 s from 49 s to the end.
+- THE SITE: release_task's dead-members drain — the reaper (init,
+  inside wait4's reap) loops `take dead_threads; free DEAD; park
+  stragglers back; spin_loop` FOREVER waiting for a parked group
+  member to reach its terminal DEAD store. The member's exit tail
+  wedges (fdreap grace stall / scheduler strand — the campaign's
+  RUNQ-STRAND family printed right before), the loop never ends, init
+  burns a CPU, the LoopEvent (and the param service with it) is dead:
+  every later ohos.ctl.start SET returns 105 after its 15 s. The 68th's
+  "queue depth 13-15 healthy sends" = writes landing on children init
+  will never read again. ohw77's variant: init parked in epoll_pwait
+  with samgr's child dark from t=81.4 (the ctl.stop el5_filekey_manager
+  msgId=9 unread forever; pid=349's q=1/736 at 135.5 IS that 136-byte
+  message — one dark connection = samgr's whole param traffic = the
+  entire 105-family).
+- REFERENCE PARITY: Linux release_task NEVER waits on another thread's
+  exit context (the group is fully dead before the leader is
+  waitable). Our unbounded hot spin was the divergence.
+
+#### 5. THE FIX (8bffe231)
+
+release_task's drain: bounded (300 jiffies, the R86 budget) SLEEPING
+wait — try_lock'd pass frees DEAD members in place (try_lock so a
+wedged dead_threads lock cannot park the reaper inside the
+acquisition), then schedule() rounds. Past the budget the reap
+completes its SEMANTICS (rusage fold, pid-hash removal, tree detach,
+TREE-RELEASE-HEAL, PID free), marks the leader release_deferred, and
+RETURNS — init's wait4 finishes, the LoopEvent lives, the param
+service answers. The storage free is finished by the LAST dying
+member's sweep_dead_threads (lock-arbitrated exactly-once finisher,
+RELEASE-DEFER/RELEASE-FINISH prints). A member that never dies leaks
+its group (loudly printed) instead of wedging pid 1.
+
+#### 6. VALIDATION + FRONTIER
+
+- ohw81 (fixed kernel): ZERO 105s, 6/6 dynamic procs (distributeddata/
+  device_manager/deviceauth/wifi/deviceprofile + retry all 0_xx ms),
+  init reaping normally through 381 s (W4SPIN reaps at 155 s+), no
+  wedge, no RELEASE-DEFER needed (the drain's budget absorbed the
+  stalls this interleaving). ohw82 = second reproducibility boot (see
+  close). appfwk.ready SET (t=67.6), bms.main.bundles.ready (131.4).
+- ohw78/79/81 all pass the 105 gate and stall at the SAME next place:
+  post-bms, no "ServiceStart starting:launcher" — the launcher-start
+  gate (abilityms side) is the 70th's first target. The 105-family's
+  dead leg (init's wait4 wedge) is gone; the campaign yardstick's
+  first three rungs now hold on every fixed-kernel boot.
+
+Addendum (session close): ohw82/ohw83 complete the validation set.
+ohw82 (fixed kernel) still fired TWO single-shot 105s (asset/i18n,
+105_15002/14999 ms) — the SECOND face: init sat in epoll_pwait for
+120 s (45-165, W4SPIN entry prints absent = no wait4 calls, PID1SPIN
+sys=281 STEADY) while samgr's sends queued on a socket the interest
+set does not cover (PCTL-SEND #180 q=3/2276 vs every interest segs=0
+in the same window; no PCTL-CLOSE of the child, no purge print yet).
+This is NOT the wait4 wedge (that path is fixed and stayed quiet); it
+is a MISSING-INTEREST class — two instruments landed for it (599ebc49:
+PID1EPOLL fdtable-vs-interests UNWATCHED diff + PID1EPOLL-PURGE
+tracer). ohw83 (both armed): ZERO 105s (all 8 dynamic procs incl.
+asset/i18n/backup_sa 0_xx ms), zero purges, zero unwatched queues, no
+wedge to 293 s — recurrence is interleaving-dependent; the next
+wedge-class boot decodes in one look. Fixed-kernel 105 tally: ohw81
+0x, ohw82 2x (single-shot, recovered), ohw83 0x — vs ohw75's 10x and
+ohw77's 6x persistent families pre-fix. Also cleaned 5 orphan QEMUs
+(ohw69-74, the 68th's boots, owners gone). Branch oh-crash at 3
+commits past the 68th (8bffe231 fix + ceba9f2d/599ebc49 dfx).
+
+#### 7. FOR THE 70TH
+
+1. The launcher-start gate: after bms.main.bundles.ready, AMS must
+   issue the launcher start ("ServiceStart starting:launcher" from
+   init, then appspawn spawns com.ohos.launcher). Decode with
+   dfx=txnhunt,sleepsnap,pctlmon,pid1spin + the existing SAREG/AMS46
+   instruments; ohw78/79/81 logs already carry the tail (start from
+   ohw81 — cleanest param chain).
+2. If RELEASE-DEFER fires on any boot, read the parked member states
+   (the print carries st=/on_cpu=) and hand them to the strand/grace
+   lanes — the deferred path is correct-by-design (init survives), but
+   the underlying wedge (fdreap grace stall / RUNQ-STRAND) is still a
+   real bug worth its own lane.
+3. Screenshots: ohw81 shot-301 md5 82f0a25f (still black = pre-
+   launcher); ANY new md5 once the launcher spawns is history.
