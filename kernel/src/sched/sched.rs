@@ -2906,6 +2906,13 @@ unsafe fn __schedule() {
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
                 if grq_guard.cfs_rq.dequeue(prev) {
                     ww_record(prev, WW_EV_UNLINK_SCHED);
+                } else {
+                    // 64th (update_entity_lag parity): prev was PICKED
+                    // (unlinked) and now sleeps — the reference captures
+                    // the clamped lag here (dequeue_entity on curr,
+                    // fair.c:5534); the next WAKE places at
+                    // avg_vruntime − vlag.
+                    grq_guard.cfs_rq.capture_sleep_vlag(prev);
                 }
                 // R8-1: unconditional — see dequeue_task() fix.
                 if grq_guard.cfs_rq.get_curr() == prev {

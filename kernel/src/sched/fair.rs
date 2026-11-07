@@ -366,6 +366,21 @@ pub struct SchedEntity {
     /// dequeue's O(n) pointer scan and is_linked's O(n) scan become
     /// O(log n) removal / O(log n) exact-membership through this.
     pub(crate) timeline_key: core::cell::UnsafeCell<Option<VruntimeKey>>,
+    /// 64th (EEVDF wake placement, 6.6 place_entity parity): the clamped
+    /// VIRTUAL lag captured at the last sleep-dequeue (update_entity_lag,
+    /// 6.6 fair.c:791: vlag = clamp(V - vruntime, +/- calc_delta_fair(
+    /// max(2*slice, TICK_NSEC)))). Read once, at the next WAKE enqueue, to
+    /// place the entity at V - vlag*(load+w)/load -- the property that
+    /// keeps producer threads (FFRT wheel/workers) from ever sitting
+    /// hundreds of ms behind a low-duty wake-churn pack (ohw34: a 400ms
+    /// link->pick on a worker BEFORE the wedge; the old placement preserved
+    /// unbounded vruntime debt). GRQ-HELD (Cell): no lockless reader.
+    pub(crate) vlag: core::cell::Cell<i64>,
+    /// 64th: false until this entity's first-ever link -- discriminates the
+    /// 6.6 ENQUEUE_INITIAL placement (vruntime = avg_vruntime, lag zero)
+    /// from a WAKE placement. GRQ-HELD. Fork children start false (fresh
+    /// SchedEntity::new()), matching __sched_fork's vlag = 0.
+    pub(crate) ever_enqueued: core::cell::Cell<bool>,
 }
 
 impl SchedEntity {
@@ -380,6 +395,8 @@ impl SchedEntity {
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(0),
             timeline_key: core::cell::UnsafeCell::new(None),
+            vlag: core::cell::Cell::new(0),
+            ever_enqueued: core::cell::Cell::new(false),
         }
     }
 
@@ -394,6 +411,8 @@ impl SchedEntity {
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(0),
             timeline_key: core::cell::UnsafeCell::new(None),
+            vlag: core::cell::Cell::new(0),
+            ever_enqueued: core::cell::Cell::new(false),
         }
     }
 
@@ -567,6 +586,11 @@ impl Clone for SchedEntity {
             on_rq: AtomicBool::new(false),
             slice: AtomicU64::new(self.slice.load(Ordering::Acquire)),
             timeline_key: core::cell::UnsafeCell::new(None),
+            // 64th: fork parity with __sched_fork -- the child starts with
+            // zero lag and takes the ENQUEUE_INITIAL placement at its
+            // first link, not the parent's preserved wake lag.
+            vlag: core::cell::Cell::new(0),
+            ever_enqueued: core::cell::Cell::new(false),
         }
     }
 }
@@ -690,6 +714,24 @@ pub struct CfsRunQueue {
     /// sites (insert may lower it; removing the cached key invalidates
     /// it and the next read lazily recomputes with one walk).
     leftmost_cache: Option<(VruntimeKey, *mut crate::process::Task)>,
+    /// 64th (EEVDF avg_vruntime, 6.6 fair.c:706-739 parity): Sum of
+    /// (vruntime_i - min_vruntime)*w_i over the QUEUED entities -- the
+    /// RELATIVE form the reference derives explicitly ("since v_i is u64,
+    /// and the multiplication could easily overflow, transform it into a
+    /// relative form"). Maintained O(1) at timeline insert/remove; REBASED
+    /// by avg_vruntime_update (sum -= delta*load) on every min_vruntime
+    /// advance so every stored offset stays relative to the CURRENT
+    /// min_vruntime. The 63rd's first attempt stored ABSOLUTE
+    /// vruntime*weight sums and still added min_vruntime in the read --
+    /// V ~ min_vr + true average, the placed values fed back
+    /// multiplicatively (~2x per wake generation), wrapped u64 and froze
+    /// garbage vruntimes within a minute (ohw36: init vr=0xfd79.. frozen
+    /// unpicked from t=53s). The relative form is also leak-bounded: any
+    /// unpaired insert/remove residue is (vr - min_vr)*w -- the size of
+    /// the clamp window, never boot-magnitude. GRQ-HELD. i128: offsets
+    /// are small but weight-scaled products of a deep queue still fit
+    /// trivially.
+    avg_vruntime_sum: i128,
 }
 
 impl CfsRunQueue {
@@ -703,6 +745,7 @@ impl CfsRunQueue {
             load_weight: AtomicU64::new(0),
             next_task_id: AtomicU64::new(0),
             leftmost_cache: None,
+            avg_vruntime_sum: 0,
         }
     }
 
@@ -721,6 +764,91 @@ impl CfsRunQueue {
         self.leftmost_cache
     }
 
+    /// 64th (EEVDF): the weighted average vruntime of the competition --
+    /// 6.6 avg_vruntime(): V = min_vruntime + (Sum (vr_i-min_vr)*w_i +
+    /// curr term) / (Sum w_i + curr w). This -- NOT min_vruntime -- is
+    /// the placement base for wakes and first links: min_vruntime is
+    /// pinned by whatever leftmost wakee the lag clamp placed just below
+    /// it, while the average advances with the pack and the running
+    /// entity, so a bounded-lag placement against V cannot strand a
+    /// producer hundreds of ms behind a low-duty pack the way the old
+    /// keep-your-own-vr wake path did (ohw34's 400ms pre-wedge
+    /// link->pick). GRQ-HELD.
+    ///
+    /// GRQ divergence (single global curr slot, R20-6): the reference is
+    /// per-runqueue and counts exactly its own curr; we count THE curr
+    /// slot when it names a live CFS task. Other concurrently-running CFS
+    /// tasks are invisible to V (bounded skew -- they are within the
+    /// clamp window of the pack), and a curr that was re-linked by a
+    /// preemption is double-counted for one pick window (the reference
+    /// has the same transient between put_prev_entity and
+    /// set_next_entity).
+    pub fn avg_vruntime(&self) -> u64 {
+        let base = self.get_min_vruntime() as i128;
+        let mut sum = self.avg_vruntime_sum;
+        let mut load = self.load_weight.load(Ordering::Acquire) as i128;
+        if !self.curr.is_null() {
+            // SAFETY: curr is null or a valid Task set by set_curr;
+            // GRQ-held read of stable fields. Per-CPU idle tasks (pid 0)
+            // are not CFS competition (6.6's idle class): skip.
+            let c = unsafe { &*self.curr };
+            if c.pid() != 0 {
+                let se = c.sched_entity();
+                let w = se.load.weight as i128;
+                sum += (se.get_vruntime() as i128 - base) * w;
+                load += w;
+            }
+        }
+        if load <= 0 {
+            return self.get_min_vruntime();
+        }
+        let v = base + sum / load;
+        v.clamp(0, u64::MAX as i128) as u64
+    }
+
+    /// 64th (update_entity_lag parity): capture the clamped virtual lag
+    /// of the RUNNING task that is now going to sleep. The reference runs
+    /// update_entity_lag inside dequeue_entity for curr (fair.c:5534,
+    /// ahead of __dequeue_entity -- the entity is still counted in the
+    /// average); our picked tasks are already unlinked, so the sleep
+    /// transition in __schedule calls this instead (linked sleepers get
+    /// theirs inside dequeue()). GRQ-HELD.
+    pub fn capture_sleep_vlag(&mut self, task: *mut crate::process::Task) {
+        if task.is_null() {
+            return;
+        }
+        // SAFETY: the caller passes the switching-out prev; stable-field
+        // reads under the GRQ.
+        let se = unsafe { (*task).sched_entity() };
+        if se.is_on_rq() {
+            return; // linked sleeper: dequeue() owns the capture
+        }
+        let base = self.get_min_vruntime() as i128;
+        let w = se.load.weight.max(1) as i128;
+        // V with THIS task counted as competition (it is still the
+        // curr-class runner; the reference's avg_vruntime includes curr),
+        // plus the global curr slot when it names someone else.
+        let mut sum = self.avg_vruntime_sum + (se.get_vruntime() as i128 - base) * w;
+        let mut load = self.load_weight.load(Ordering::Acquire) as i128 + w;
+        if !self.curr.is_null() && self.curr != task {
+            // SAFETY: as avg_vruntime.
+            let c = unsafe { &*self.curr };
+            if c.pid() != 0 {
+                let cse = c.sched_entity();
+                let cw = cse.load.weight as i128;
+                sum += (cse.get_vruntime() as i128 - base) * cw;
+                load += cw;
+            }
+        }
+        let v = if load > 0 { base + sum / load } else { base };
+        // 6.6 entity_lag: limit = calc_delta_fair(max(2*slice, TICK_NSEC))
+        // -- the wall-ns bound converted into this entity's virtual units.
+        let tick_ns = 1_000_000_000u64 / HZ;
+        let limit_base = (2 * SCHED_MIN_GRANULARITY_NS).max(tick_ns);
+        let limit = (limit_base as i128 * NICE_0_LOAD as i128) / w;
+        se.vlag.set(((v - se.get_vruntime() as i128).clamp(-limit, limit)) as i64);
+    }
+
     #[inline]
     fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) {
         let lower = self
@@ -730,15 +858,37 @@ impl CfsRunQueue {
         if lower {
             self.leftmost_cache = Some((key, task));
         }
+        // 64th (EEVDF): avg_vruntime bookkeeping -- the RELATIVE offset of
+        // the inserted key (6.6 avg_vruntime_add / entity_key). The paired
+        // removal subtracts the same offset formula; rebases keep every
+        // stored offset relative to the current min_vruntime, so
+        // insert/remove pair exactly regardless of min_vr movement in
+        // between.
+        // SAFETY: every insert site passes a valid Task (the poison-drop
+        // path only removes).
+        if !task.is_null() {
+            let w = unsafe { (*task).sched_entity().load.weight } as i128;
+            self.avg_vruntime_sum +=
+                (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
+        }
     }
 
+    /// `task` feeds the avg_vruntime bookkeeping; null (the poisoned-entry
+    /// drop) leaves the offset residue in the sum -- bounded by the clamp
+    /// window in the relative form (the entity was corrupt anyway).
     #[inline]
-    fn timeline_remove(&mut self, key: &VruntimeKey) {
+    fn timeline_remove(&mut self, key: &VruntimeKey, task: *mut crate::process::Task) {
         self.tasks_timeline.remove(key);
         if self.leftmost_cache.as_ref().map_or(false, |(ck, _)| ck == key) {
             // Removing the leftmost: invalidate; the next read recomputes
             // once. (Scanning the successor here would re-walk anyway.)
             self.leftmost_cache = None;
+        }
+        if !task.is_null() {
+            // SAFETY: callers pass the task the key belongs to.
+            let w = unsafe { (*task).sched_entity().load.weight } as i128;
+            self.avg_vruntime_sum -=
+                (key.vruntime as i128 - self.get_min_vruntime() as i128) * w;
         }
     }
 
@@ -1050,6 +1200,14 @@ impl CfsRunQueue {
             let min_vruntime = self.min_vruntime.load(Ordering::Acquire);
             // min_vruntime only increases, ensure monotonic
             if v > min_vruntime {
+                // 64th (6.6 __update_min_vruntime -> avg_vruntime_update):
+                // rebase the stored relative offsets so every term stays
+                // relative to the NEW min_vruntime: sum -= delta*avg_load.
+                // load_weight is the queued tree's weight (the exact set
+                // whose offsets live in the sum); GRQ-held here.
+                let delta = (v - min_vruntime) as i128;
+                self.avg_vruntime_sum -=
+                    delta * self.load_weight.load(Ordering::Acquire) as i128;
                 self.min_vruntime.store(v, Ordering::Release);
             }
         }
@@ -1092,19 +1250,60 @@ impl CfsRunQueue {
                 return false;
             }
 
-            // Sleep/wake compensation with a bounded window (review batch 8,
-            // Linux place_entity): a waking sleeper keeps its vruntime credit
-            // so it preempts a CPU hog that ran while it slept, but the
-            // credit is clamped to one scheduling-latency window behind
-            // min_vruntime — an arbitrarily long sleeper must not monopolize
-            // the CPU for an equivalently long burst after waking. The old
-            // unconditional clamp-up to min_vruntime erased ALL compensation.
-            let min_vruntime = self.get_min_vruntime();
-            let floor = min_vruntime.saturating_sub(SCHED_LATENCY_NS);
-            let vruntime = se.get_vruntime();
-            if vruntime < floor {
-                se.set_vruntime(floor);
+            // 64th (EEVDF wake placement, 6.6 place_entity parity): the
+            // old keep-your-own-vr wake path (with only a
+            // min_vruntime-SCHED_LATENCY floor) let a task that had run
+            // hard land arbitrarily far AHEAD of the pack at its next wake
+            // — measured 400ms link→pick on an FFRT worker DURING the
+            // busy boot phase (ohw34 t=22s, wedge still 5s away) — because
+            // nothing bounded the vruntime DEBT a sleeper could carry.
+            // The reference (6.6) clamps the lag at sleep-dequeue to
+            // ±max(2*slice, TICK) virtual and places the wake at
+            // avg_vruntime − lag·(load+w)/load, so no wake can land more
+            // than ~one virtual tick from the competition's average.
+            // Three arms, matching the reference's enqueue flags (this
+            // tree's 6.6 has no START_DEBIT: INITIAL places at V with
+            // zero lag — PLACE_DEADLINE_INITIAL only halves the EEVDF
+            // deadline, which our min-vruntime pick does not use):
+            //   INITIAL (first-ever link, fork): lag zero, place at V.
+            //   WAKE (was sleeping; vlag captured at the sleep-dequeue):
+            //     place at V − vlag', vlag' load-compensated (PLACE_LAG).
+            //   Requeue of a preempted prev (state RUNNING at entry —
+            //     6.6's put_prev_entity re-enqueues without placement):
+            //     keep the current vruntime.
+            if migrate {
+                // Migrations keep the vruntime as-is (the GRQ has no
+                // cross-queue migration, so this arm is the
+                // set_cpus_allowed re-link only).
+            } else if !se.ever_enqueued.get() {
+                se.ever_enqueued.set(true);
+                se.vlag.set(0);
+                se.set_vruntime(self.avg_vruntime());
+            } else if task_ref.state().bits()
+                != crate::process::task::TaskState::RUNNING as u32
+            {
+                let v = self.avg_vruntime() as i128;
+                let w = se.load.weight as i128;
+                let mut load = self.load_weight.load(Ordering::Acquire) as i128;
+                if !self.curr.is_null() {
+                    // SAFETY: curr is null or valid (set_curr); GRQ-held.
+                    let c = unsafe { &*self.curr };
+                    if c.pid() != 0 {
+                        load += c.sched_entity().load.weight as i128;
+                    }
+                }
+                // PLACE_LAG: lag *= (load + w) / load, preserving the lag
+                // against the average's dilution by the joining entity.
+                let mut lag = se.vlag.get() as i128;
+                if load > 0 {
+                    lag = lag * (load + w) / load;
+                } else {
+                    lag = 0;
+                }
+                let placed = (v - lag).clamp(0, u64::MAX as i128) as u64;
+                se.set_vruntime(placed);
             }
+            // else: preempted prev (state RUNNING) — keep vruntime.
 
             // 64th: vruntime sanity canary (see vr_canary).
             self.vr_canary(task, b"ENQ", se.get_vruntime());
@@ -1182,7 +1381,24 @@ impl CfsRunQueue {
             if let Some(key) = found_key {
                 // 64th: vruntime sanity canary (see vr_canary).
                 self.vr_canary(task, b"DEQ", key.vruntime);
-                self.timeline_remove(&key);
+                // 64th (update_entity_lag parity, 6.6 fair.c:5534):
+                // capture the clamped lag BEFORE the removal —
+                // avg_vruntime still includes this entity, exactly like
+                // the reference computes it inside dequeue_entity ahead of
+                // __dequeue_entity. The next WAKE enqueue reads it once
+                // (place at V − lag), bounding how far any sleeper — or
+                // any heavy producer between naps — can land from the
+                // pack to ±max(2*granularity, 1 tick) virtual time.
+                {
+                    let v = self.avg_vruntime() as i128;
+                    let tick_ns = 1_000_000_000u64 / HZ;
+                    let base = (2 * SCHED_MIN_GRANULARITY_NS).max(tick_ns);
+                    let w = se.load.weight.max(1) as i128;
+                    let limit = (base as i128 * NICE_0_LOAD as i128) / w;
+                    let lag = (v - se.get_vruntime() as i128).clamp(-limit, limit);
+                    se.vlag.set(lag as i64);
+                }
+                self.timeline_remove(&key, task);
                 se.set_timeline_key(None);
 
                 // Update status
@@ -1719,13 +1935,13 @@ impl CfsRunQueue {
             // b50 #GP guard — see pick_next_cpu. A non-canonical slot
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.timeline_remove(&key);
+                self.timeline_remove(&key, core::ptr::null_mut());
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
             }
             // Remove from queue using key (don't call dequeue, as vruntime may have changed)
-            self.timeline_remove(&key);
+            self.timeline_remove(&key, task);
             // SAFETY: task was stored in tasks_timeline from a valid &mut
             // Task pointer; just removed, no aliasing references exist.
             unsafe { (*task).sched_entity().set_timeline_key(None); }
@@ -1813,7 +2029,7 @@ impl CfsRunQueue {
             // CPU's pick) alive matters more. load_weight is left
             // stale: reading it would deref the same garbage.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
-                self.timeline_remove(&key);
+                self.timeline_remove(&key, core::ptr::null_mut());
                 self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 crate::sched::sched::ww_record(task, crate::sched::sched::WW_EV_UNLINK_POISON);
@@ -1978,7 +2194,7 @@ impl CfsRunQueue {
             };
             if allowed {
                 // Found a match — remove and return it
-                self.timeline_remove(&key);
+                self.timeline_remove(&key, task);
 
                 // SAFETY: task was just removed from the queue; no aliasing references exist.
                 unsafe {
@@ -1998,8 +2214,10 @@ impl CfsRunQueue {
                 break;
             }
 
-            // Not allowed — remove temporarily and stash
-            self.tasks_timeline.remove(&key);
+            // Not allowed — remove temporarily and stash (the raw map
+            // remove that used to sit here duplicated the one below —
+            // idempotent, but the avg bookkeeping below is NOT idempotent
+            // against stray map ops, so keep exactly one).
             // s14 (msg-region strand family): PICK-SKIP-ALL names only
             // the total-failure shape (nothing pickable). A victim
             // refused AMID other candidates is invisible — yet that is
@@ -2024,7 +2242,7 @@ impl CfsRunQueue {
             // recorded key stays valid: the re-insert below uses the same
             // key, so linkage-through-key remains exact across the stash
             // window, all under this one GRQ hold).
-            self.timeline_remove(&key);
+            self.timeline_remove(&key, task);
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;
