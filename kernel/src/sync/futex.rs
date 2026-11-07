@@ -1308,10 +1308,31 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     if n >= FUXWATCH_BUDGET {
         return false;
     }
+    // 70th: page-mate writes (the mutex cluster shares the watched page —
+    // slot1 armed on the first devmgr waiter word, whose page also carries
+    // the DevSvcManager mutex in every observed boot) get their own log
+    // arm: the stale-EBUSY founder's acquire (0 -> 0x10, uncontended, no
+    // syscall) is otherwise invisible. Budgeted separately.
+    let page1 = FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed) & !0xFFF;
+    if !which2 && page1 != 0 && (fault_addr & !0xFFF) == page1 && fault_addr & !0x3 != FUXWATCH_ADDR.load(core::sync::atomic::Ordering::Relaxed) & !0x3 {
+        static PG_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let p = PG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if p < 900 {
+            crate::pr_warn!(
+                "FW-PG #{} tid={} addr={:#x} rip={:#x} old={:#x}",
+                p,
+                tid,
+                fault_addr,
+                rip,
+                old_word
+            );
+        }
+    }
     // HOTPATH-PRINT: compact per-write line; the wedge window carries
     // at most a few hundred. (w2 marker identifies second-watch words
     // when both pages share rips.)
-    crate::pr_warn!("FW tid={} rip={:#x} old={} n={}{}", tid, rip, old_word, n, if which2 { " w2" } else { "" });
+    crate::pr_warn!("FW tid={} rip={:#x} old={} n={} addr={:#x}{}", tid, rip, old_word, n, fault_addr, if which2 { " w2" } else { "" });
     // 62nd: latch the owner-of-record on every successful 0->1
     // acquire-class write (the fast-path CAS or the xchg that wins
     // from UNLOCK). old_word==0 with the word transitioning to a
@@ -6071,18 +6092,94 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                     }
                 }
             }
+            // 70th (ohw84 decode): the frozen devmgr words carry states no
+            // clean musl path produces (a stale EBUSY fast-path marker with
+            // every task of the tgid parked as a waiter, and a no-owner
+            // 0x80000000 word), and uncontended lock/unlock never syscalls,
+            // so the writers are invisible to WAIT/WAKE tracing alone. At
+            // the FIRST waiter-bit WAIT from devmgr, arm the sc57 write
+            // watchpoint on that word's PAGE (the mutex cluster — the
+            // stub/svc/holder locks — shares one page in every observed
+            // boot) and on the second distinct word; fuxwatch then logs
+            // every write (tid, rip, old->new) from that moment on.
+            if is_rw_wait {
+                let s1 = FUXWATCH_ADDR.load(Relaxed);
+                if s1 == 0 {
+                    FUXWATCH_ADDR.store(uaddr as u64, Relaxed);
+                    crate::dfx::taskdump::ensure_defer_thread();
+                    crate::pr_warn!("FXDV-ARM slot1={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
+                } else if (s1 as usize) != uaddr && FUXWATCH2_ADDR.load(Relaxed) == 0 {
+                    FUXWATCH2_ADDR.store(uaddr as u64, Relaxed);
+                    crate::dfx::taskdump::ensure_defer_thread();
+                    crate::pr_warn!("FXDV-ARM slot2={:#x} jif={}", uaddr, crate::drivers::timer::get_jiffies());
+                }
+                // 70th (ohw86): birth-curve sampler — on every traced devmgr
+                // futex, sample slot1's word AND its +0x94 neighbor (the
+                // mutex cluster: sem at mutex-0x94 in every observed boot;
+                // ohw86 proved the frozen mutex took its last write BEFORE
+                // any wait armed the page watch) and print each CHANGE.
+                // The final 0->0x10 transition's timestamp brackets the
+                // founder to the second, before any watch can arm.
+                if let Some(t) = crate::sched::current() {
+                    let base = FUXWATCH_ADDR.load(Relaxed) as usize;
+                    if base != 0 {
+                        static LAST1: [core::sync::atomic::AtomicU32; 2] =
+                            [const { core::sync::atomic::AtomicU32::new(u32::MAX) }; 2];
+                        for (k, wa) in [base, base.wrapping_add(0x94)].iter().enumerate() {
+                            if let Some(w) = unsafe { read_u32_via_task(t, *wa) } {
+                                let prev = LAST1[k].load(Relaxed);
+                                if w != prev {
+                                    LAST1[k].store(w, Relaxed);
+                                    crate::pr_warn!(
+                                        "FXDV-CURVE word{:+#x} {:#x} -> {:#x} jif={} tid={}",
+                                        if k == 0 { 0 } else { 0x94 },
+                                        prev,
+                                        w,
+                                        crate::drivers::timer::get_jiffies(),
+                                        unsafe { (*t).pid() }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // FXDV-WORD: the word's live value at every traced wait —
+                // the formation curve (0x10 -> 0x80000010 -> stuck) with
+                // the waiter's own expected val beside it decides
+                // stale-marker vs racing-writer vs kernel stomp.
+                if let Some(t) = crate::sched::current() {
+                    if let Some(w) = unsafe { read_u32_via_task(t, uaddr) } {
+                        let c = if addr_idx == usize::MAX {
+                            0
+                        } else {
+                            FXDV_CNT[addr_idx].load(Relaxed)
+                        };
+                        if c < 8 || c % 32 == 0 {
+                            crate::pr_warn!(
+                                "FXDV-WORD tid={} uaddr={:#x} word={:#x} want={:#x} jif={}",
+                                unsafe { (*t).pid() },
+                                uaddr,
+                                w,
+                                val,
+                                crate::drivers::timer::get_jiffies()
+                            );
+                        }
+                    }
+                }
+            }
             let interesting = is_rw_wait
                 || (matches!(cmd, FUTEX_WAKE) && addr_idx != usize::MAX && val != 0);
             if interesting {
                 let n = FXDV_N.fetch_add(1, Relaxed);
                 if n < 400 {
-                    // Dedup: first 3 per address, then every 64th.
+                    // Dedup: first 12 per address, then every 16th (ohw84:
+                    // first-3 hid the freeze-formation ordering).
                     let c = if addr_idx == usize::MAX {
                         0
                     } else {
                         FXDV_CNT[addr_idx].fetch_add(1, Relaxed)
                     };
-                    if c < 3 || c % 64 == 0 {
+                    if c < 12 || c % 16 == 0 {
                         crate::pr_warn!(
                             "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
                             n,
@@ -7969,6 +8066,68 @@ unsafe fn rwfz_stack_frames(
             }
         }
         crate::pr_warn!("{}", raw);
+    }
+    // 70th (ohw84): RETS — call-byte-validated return-address scan over a
+    // deep window (the apppark_rets method): a slot is a REAL frame only
+    // when the 8 bytes ending at it contain a CALL encoding. Raw-window
+    // frames proved unreliable (stale decoys from earlier locks in the
+    // same stack region decided nothing); the validated chain names the
+    // OsalMutexLock callers exactly.
+    {
+        use core::fmt::Write;
+        let mut rets = alloc::string::String::new();
+        let _ = write!(rets, "\nRWFRZ:   {} rets:", label);
+        let mut found = 0u32;
+        for i in 0..96u32 {
+            if found >= 14 {
+                break;
+            }
+            let Some(v) = read_u64_at(rsp + 8 * i as u64) else {
+                continue;
+            };
+            if v < 0x1000 || v > 0x7fff_ffff_ffff {
+                continue;
+            }
+            if vmas
+                .find(crate::mm::page::VirtAddr::new(v as usize))
+                .is_none()
+            {
+                continue;
+            }
+            let Some(w) = read_u64_at(v - 8) else {
+                continue;
+            };
+            let b = w.to_le_bytes();
+            let is_call = b[3] == 0xE8
+                || (b[6] == 0xFF && (b[7] & 0xF8) == 0xD0)
+                || (b[4] == 0xFF && (b[5] & 0xC7) == 0x05);
+            if !is_call {
+                continue;
+            }
+            if let Some((s0, e0, fd, _base, off, _fsz)) = vma_of(v) {
+                let _ = write!(
+                    rets,
+                    "\nRWFRZ:   {}  ret[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} path={}",
+                    label,
+                    i,
+                    v,
+                    s0,
+                    e0,
+                    fd,
+                    off,
+                    if fd >= 0 {
+                        path_of(fd, &mut path_cache)
+                    } else {
+                        alloc::string::String::from("-")
+                    }
+                );
+                found += 1;
+            }
+        }
+        if found == 0 {
+            let _ = write!(rets, " none");
+        }
+        crate::pr_warn!("{}", rets);
     }
     crate::pr_warn!("RWFRZ:   {} frames:{}", label, s);
 }

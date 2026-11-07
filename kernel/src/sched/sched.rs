@@ -315,35 +315,51 @@ unsafe fn dl_throttle(task: *mut Task) {
 //
 // SCHED_FIFO/RR had no throttling: a CAP_SYS_NICE-holding RT task could
 // starve every CPU indefinitely. Mirror Linux's sched_rt_runtime_us /
-// sched_rt_period_us defaults (950ms per 1s) as a GLOBAL budget: RT
-// execution is accounted in jiffies across all CPUs; once the budget is
-// spent, the RT class is skipped at pick time until the period rolls over
-// (the timer tick itself is the unthrottle "timer").
+// sched_rt_period_us defaults (950ms per 1s). 70th (ohw84-87, the OH
+// boot's FIFO evt_listen spinner): Linux accounts the runtime PER-CPU
+// (each root rt_rq carries its own runtime; exhausting it throttles RT
+// on THAT cpu, leaving the 5% CFS rescue slice alive) — the earlier
+// GLOBAL budget (950ms * MAX_CPUS) let ONE spinning FIFO thread on one
+// cpu burn only half the pool and NEVER throttle, stranding every CFS
+// task on that cpu indefinitely (ohw86 WAKE-STRANDED: 4.8-6.4 s strands
+// behind render_service's FIFO listener). Per-CPU accounting now.
 
-/// RT runtime budget per period in jiffies: 950ms * MAX_CPUS.
-const RT_RUNTIME_JIFFIES: u64 = (950 * crate::config::KERNEL_HZ as u64 / 1000) * MAX_CPUS as u64;
+/// RT runtime budget per period in jiffies PER-CPU: 950ms.
+const RT_RUNTIME_JIFFIES: u64 = 950 * crate::config::KERNEL_HZ as u64 / 1000;
 /// RT accounting period in jiffies: 1s.
 const RT_PERIOD_JIFFIES: u64 = 1000 * crate::config::KERNEL_HZ as u64 / 1000;
 
-static RT_THROTTLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static RT_TIME_USED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static RT_PERIOD_START: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RT_THROTTLED: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+static RT_TIME_USED: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+static RT_PERIOD_START: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Whether the RT class is throttled on `cpu` for pick purposes.
+#[inline]
+fn rt_throttled(cpu: usize) -> bool {
+    cpu < MAX_CPUS && RT_THROTTLED[cpu].load(core::sync::atomic::Ordering::Acquire)
+}
 
 /// Per-tick RT bandwidth accounting. Called from scheduler_tick with the
 /// ticking CPU's current task (no locks — plain atomics).
-fn rt_bandwidth_tick(current: *mut Task) {
+fn rt_bandwidth_tick(cpu: usize, current: *mut Task) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
     let now = crate::drivers::timer::get_jiffies();
-    let period_start = RT_PERIOD_START.load(core::sync::atomic::Ordering::Acquire);
+    let period_start = RT_PERIOD_START[cpu].load(core::sync::atomic::Ordering::Acquire);
     if period_start == 0 {
-        RT_PERIOD_START.store(now, core::sync::atomic::Ordering::Release);
+        RT_PERIOD_START[cpu].store(now, core::sync::atomic::Ordering::Release);
         return;
     }
     if now.saturating_sub(period_start) >= RT_PERIOD_JIFFIES {
         // Period rollover: replenish the budget, lift the throttle, and let
         // a throttled-away RT task be picked again.
-        RT_PERIOD_START.store(now, core::sync::atomic::Ordering::Release);
-        RT_TIME_USED.store(0, core::sync::atomic::Ordering::Release);
-        if RT_THROTTLED.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        RT_PERIOD_START[cpu].store(now, core::sync::atomic::Ordering::Release);
+        RT_TIME_USED[cpu].store(0, core::sync::atomic::Ordering::Release);
+        if RT_THROTTLED[cpu].swap(false, core::sync::atomic::Ordering::AcqRel) {
             set_need_resched();
         }
         return;
@@ -353,9 +369,9 @@ fn rt_bandwidth_tick(current: *mut Task) {
     unsafe {
         let policy = (*current).policy();
         if matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr) {
-            let used = RT_TIME_USED.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+            let used = RT_TIME_USED[cpu].fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
             if used >= RT_RUNTIME_JIFFIES
-                && !RT_THROTTLED.swap(true, core::sync::atomic::Ordering::AcqRel)
+                && !RT_THROTTLED[cpu].swap(true, core::sync::atomic::Ordering::AcqRel)
             {
                 set_need_resched();
             }
@@ -3335,8 +3351,10 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     }
 
     // 3. RT — pick highest-priority task that can run on this CPU.
-    //    Skipped entirely while the RT bandwidth is throttled (batch 8).
-    if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
+    //    Skipped while the RT bandwidth is throttled ON THIS CPU (the
+    //    70th's per-cpu rt_rq parity; a throttled cpu falls through to
+    //    CFS while other cpus may still pick RT).
+    if !grq.rt_rq.is_empty() && !rt_throttled(cpu_id) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
             // PID-0 GATE — see the Deadline block above. Also the
             // DEAD-PICK GATE (sc193, v4) — see the Deadline block above.
@@ -7348,8 +7366,9 @@ pub fn scheduler_tick() {
     }
 
     // RT bandwidth accounting / throttle (batch 8) — runs every tick on
-    // every CPU, before the class-specific work.
-    rt_bandwidth_tick(current);
+    // every CPU, before the class-specific work. Per-CPU (the 70th): the
+    // ticking cpu charges ITS OWN rt_rq budget.
+    rt_bandwidth_tick(crate::arch::cpu_id() as u64 as usize, current);
 
     // cgroup v2 cpu controller (U1b): charge this tick into the current
     // task's cgroup chain, roll quota periods over / unthrottle, and

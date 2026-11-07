@@ -324,6 +324,8 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
             .unwrap_or("")
             .trim_end_matches('\0');
         let family = comm == "appspawn"
+            || comm == "hdf_devmgr"
+            || comm == "accountmgr"
             || comm.contains("launcher")
             || comm.contains("settingsdata")
             || comm.contains("systemui")
