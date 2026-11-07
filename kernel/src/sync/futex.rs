@@ -531,14 +531,40 @@ const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
 /// ordered) via plain lock_irqsave — a same-class ordered double
 /// acquire, deliberately outside the keyed-nesting API (which exists
 /// to fence ACROSS classes).
+///
+/// 62nd (ohw27/ohw28): the chain is FIFO (tail append) — reference
+/// plist parity. Linux's futex queues equal-priority waiters FIFO
+/// (lib/plist.c plist_add walks FORWARD past equal priorities and
+/// list_add_tails before the first higher-prio node), so the OLDEST
+/// waiter receives the first wake of every burst. Our head-insert made
+/// the chain LIFO: on a word with constant transient re-parkers (the
+/// samgr FFRT worker family's contended inner mutex), every FUTEX_WAKE
+/// served the newest transient and the one long-parked waiter — the
+/// thread holding samgr's listenerMapLock_ inside its IPC handler —
+/// starved for the whole contention window (ohw27: 33 ret=1 wakes by
+/// four other threads, the parked owner's record woken=false to the
+/// end). The map lock never released, the M2 waiter pandemic followed,
+/// and the boot wedged at the appfwk gate 20+ boots in a row. With
+/// FIFO, the parked holder gets the first wake and the wedge cannot
+/// form. The tail pointer keeps append O(1) (no hot-path regression;
+/// the requeue splice below becomes O(1) too).
+#[derive(Clone, Copy)]
+pub struct FutexChain {
+    pub head: Option<usize>,
+    pub tail: Option<usize>,
+}
+
 static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
     crate::sync::lockkey::FutexBucketKey,
-    Option<usize>,
+    FutexChain,
 >; HASH_SIZE] = {
     const INIT: crate::sync::lockkey::KeyedSpinlock<
         crate::sync::lockkey::FutexBucketKey,
-        Option<usize>,
-    > = crate::sync::lockkey::KeyedSpinlock::new(None);
+        FutexChain,
+    > = crate::sync::lockkey::KeyedSpinlock::new(FutexChain {
+        head: None,
+        tail: None,
+    });
     [INIT; HASH_SIZE]
 };
 
@@ -551,7 +577,7 @@ static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
 pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
     for b in HASH_HEADS.iter() {
         let h = b.lock_irqsave();
-        let mut idx = *h;
+        let mut idx = h.head;
         while let Some(i) = idx {
             // SAFETY: slot indices come from chain links under the bucket
             // lock; slots are freed only under both locks, so the entry we
@@ -592,7 +618,7 @@ pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
     let mut out = alloc::vec::Vec::new();
     for b in HASH_HEADS.iter() {
         let h = b.lock_irqsave();
-        let mut idx = *h;
+        let mut idx = h.head;
         while let Some(i) = idx {
             // SAFETY: slot indices come from chain links under the bucket
             // lock; the tuple is copied out under the slot lock.
@@ -1063,6 +1089,21 @@ static FUXWATCH_MM_DONE: [core::sync::atomic::AtomicU64; 16] =
 const FUXWATCH_BUDGET: usize = 4096;
 use core::sync::atomic::Ordering as Relaxed2;
 
+/// 62nd (ohw13 post-decode): owner-of-record latch for the watched
+/// lock's l word. Every successful 0->1 acquire write overwrites the
+/// latch; after a freeze no further 0->1 writes happen (only old=2
+/// pile-ins), so the latch ends up naming the tid whose acquire was
+/// the freeze's last one — the holder that never unlocked. The
+/// TXN-HANG-BWR audit reads this and force-prints that thread's row
+/// (FUX-OWNER) with a deep frame walk, regardless of the census
+/// filters that previously hid it (tid344-class rows had no stacked
+/// decode and no chain hit).
+pub static FUXWATCH_OWNER_TID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Jiffies of the latched acquire (the latch age, for the row).
+pub static FUXWATCH_OWNER_J: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 /// Parse fuxwatch=0xADDR[,DELAYSEC] (and sc58: fuxwatch2=0xADDR) once at
 /// boot (called from the dfx init path). Empty/absent leaves the watch
 /// off. fuxwatch2 pre-arms the second slot (the census/chain-walk
@@ -1271,8 +1312,248 @@ pub fn fuxwatch_log_write(tid: u32, rip: u64, exact: bool, old_word: u32, fault_
     // at most a few hundred. (w2 marker identifies second-watch words
     // when both pages share rips.)
     crate::pr_warn!("FW tid={} rip={:#x} old={} n={}{}", tid, rip, old_word, n, if which2 { " w2" } else { "" });
+    // 62nd: latch the owner-of-record on every successful 0->1
+    // acquire-class write (the fast-path CAS or the xchg that wins
+    // from UNLOCK). old_word==0 with the word transitioning to a
+    // locked value = an acquire. After a freeze only old=2 pile-ins
+    // remain, so the latch holds the freeze acquirer.
+    if old_word == 0 {
+        FUXWATCH_OWNER_TID.store(tid, core::sync::atomic::Ordering::Relaxed);
+        FUXWATCH_OWNER_J
+            .store(crate::drivers::timer::get_jiffies() as u32, core::sync::atomic::Ordering::Relaxed);
+    }
     claim(tid);
     true
+}
+
+/// 62nd: one-line wake history for a park word (the FUX-OWNER row's
+/// wake-side verdict): how many futex ops in ring coverage ever
+/// targeted the word, and the last few ops' tid/age/op/ret. The rings
+/// hold ~6 s of ops, so ever=0 on an old park means no wake in the
+/// recent window either — consistent with a userspace holder that
+/// never signaled. A REPEATED ret=1 wake with the waiter still parked
+/// is the wake-vs-repark class (the summary cannot tell — the park
+/// state function below does).
+pub fn fuxw_word_wake_summary(uaddr: u64, now: u32) -> alloc::string::String {
+    use core::fmt::Write as _;
+    let mut ever = 0u64;
+    let mut last: alloc::vec::Vec<(u32, u32, u8, i32)> = alloc::vec::Vec::new();
+    for ring in FUXW_RINGS.iter() {
+        let g = ring.lock();
+        let (idx, arr) = &*g;
+        for k in 0..FUXW_RING_SZ {
+            let i = (*idx + k) % FUXW_RING_SZ;
+            let e = arr[i];
+            if e.j == 0 || e.uaddr != uaddr {
+                continue;
+            }
+            ever += 1;
+            last.push((e.j as u32, e.tid, e.op, e.ret));
+        }
+    }
+    if ever == 0 {
+        return alloc::format!("ever=0");
+    }
+    last.sort_by_key(|e| core::cmp::Reverse(e.0));
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "ever={}", ever);
+    for (j, tid, op, ret) in last.iter().take(4) {
+        let _ = write!(
+            s,
+            " +{}ms tid{}(op{} ret{})",
+            now.wrapping_sub(*j).saturating_mul(10),
+            tid,
+            op,
+            ret
+        );
+    }
+    s
+}
+
+/// 62nd: the owner's live park state from the kernel waiter pool —
+/// (age_ms, woken_flag, other_waiters). age growing across bursts =
+/// the waiter never woke (the wake never reached it, or the wake woke
+/// a phantom); age resetting with ret=1 wakes = the wake-repark loop
+/// (the lock it wants is re-taken before the waiter re-acquires).
+/// other_waiters counts same-uaddr entries held by OTHER tasks — a
+/// shared word whose wakes land on someone else.
+pub fn fuxw_owner_park_state(tid: u32, uaddr: u64, now: u32) -> (u32, bool, usize) {
+    let mut age = 0u32;
+    let mut woken = false;
+    let mut found = false;
+    let mut others = 0usize;
+    for slot in WAITER_POOL.iter() {
+        let g = slot.lock_irqsave();
+        match *g {
+            Some(ref w) if !w.task.is_null() => {
+                // SAFETY: liveness verified via the pid hash before the
+                // tid read; the derefs touch only pid fields.
+                let t = unsafe { (*w.task).pid() };
+                if w.key.uaddr as u64 != uaddr {
+                    continue;
+                }
+                if t == tid {
+                    found = true;
+                    age = now
+                        .wrapping_sub(w.park_j as u32)
+                        .saturating_mul(10);
+                    woken = w.woken;
+                } else {
+                    others += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !found {
+        (0, false, others)
+    } else {
+        (age, woken, others)
+    }
+}
+
+/// 62nd: shape-test the owner's PARK WORD itself — if the word is an
+/// l word (a musl pthread mutex or an ffrt::mutexPrivate in the
+/// worker-pool regions the ±64MB heap map never swept), name the
+/// object: [uaddr-0x10, uaddr-0x8=l, uaddr, +0x10, +0x18] plus the
+/// vtable-deref-exec verdict at -0x10. Returns None when the window
+/// is unreadable or the shape is a plain cv seq word.
+pub fn fuxw_word_shape(task: *mut crate::process::Task, uaddr: u64) -> Option<alloc::string::String> {
+    use core::fmt::Write as _;
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: diagnostic reads of the parked task under the caller's
+    // pid-lookup pin; stack-top check only.
+    let tk = unsafe { &*task };
+    if tk.kernel_stack_top_checked().is_none() {
+        return None;
+    }
+    let aspace = tk.address_space()?;
+    let root = aspace.root_ppn();
+    let mgr = aspace.vma_try_read()?;
+    let rd = |va: u64| -> Option<u64> {
+        // SAFETY: read-only page-table walk of the parked task's mm.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+                );
+                // SAFETY: linear-mapped RAM word.
+                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            }
+            _ => None,
+        }
+    };
+    let filebacked = |va: u64| -> bool {
+        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+            Some(vma) => {
+                !vma.flags().is_executable()
+                    && matches!(vma.vma_type(), crate::mm::vma::VmaType::FileBacked)
+            }
+            None => false,
+        }
+    };
+    let exec_ptr = |va: u64| -> bool {
+        match mgr.find(crate::mm::vma::VirtAddr::new(va as usize)) {
+            Some(vma) => vma.flags().is_executable(),
+            None => false,
+        }
+    };
+    let vt = rd(uaddr.wrapping_sub(0x10))?;
+    let l = rd(uaddr.wrapping_sub(0x8))?;
+    let cur = rd(uaddr)?;
+    let n10 = rd(uaddr + 0x10).unwrap_or(0);
+    let n18 = rd(uaddr + 0x18).unwrap_or(0);
+    let vtable_like = filebacked(vt) && rd(vt).map_or(false, exec_ptr);
+    let lw = l & 0xffff_ffff;
+    if !vtable_like {
+        return None;
+    }
+    let mut s = alloc::string::String::new();
+    let _ = write!(
+        s,
+        "mutex-shape l={} cur={} vtbl={:#x} ring=({:#x},{:#x})",
+        lw, cur, vt, n10, n18
+    );
+    Some(s)
+}
+
+/// 62nd: deep user frame chain for a parked task — the rbp chain up to
+/// 24 frames (raw rips for offline symbolization) plus a 24-word raw
+/// scan above the entry rsp (the spill window the rbp chain skips).
+/// Walker-only reads of the pinned task's mm (the ffrt_chain_walk
+/// contract); None when the entry frame is unavailable.
+pub fn deep_ufw(task: *mut crate::process::Task) -> Option<alloc::string::String> {
+    use core::fmt::Write as _;
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: diagnostic reads of the parked task under the caller's
+    // pid-lookup pin; the derefs touch only the stack-top check.
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top_checked()?;
+    #[cfg(feature = "x86_64")]
+    let (urbp, ursp) = unsafe {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        ((*regs).rbp as u64, (*regs).rsp as u64)
+    };
+    #[cfg(feature = "riscv64")]
+    let (urbp, ursp) = unsafe {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        ((*regs).s0 as u64, (*regs).sp as u64)
+    };
+    #[cfg(feature = "aarch64")]
+    let (urbp, ursp) = unsafe {
+        let regs = (top.wrapping_sub(crate::arch::aarch64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::aarch64::pt_regs::PtRegs;
+        ((*regs).regs[29] as u64, (*regs).sp as u64)
+    };
+    if ursp == 0 {
+        return None;
+    }
+    let aspace = tk.address_space()?;
+    let root = aspace.root_ppn();
+    let rd = |va: u64| -> Option<u64> {
+        // SAFETY: read-only page-table walk of the parked task's mm.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+                );
+                // SAFETY: linear-mapped RAM word.
+                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            }
+            _ => None,
+        }
+    };
+    let mut out = alloc::string::String::new();
+    let mut rbp = urbp;
+    let _ = write!(out, "rbp={:#x} rsp={:#x} chain:", rbp, ursp);
+    for _ in 0..24 {
+        if rbp < 0x1000 || rbp > 0x8000_0000_0000 || rbp & 7 != 0 {
+            break;
+        }
+        let (Some(ret), Some(next)) = (rd(rbp + 8), rd(rbp)) else {
+            break;
+        };
+        if ret >= 0x1000 {
+            let _ = write!(out, " {:#x}", ret);
+        }
+        if next <= rbp || next.wrapping_sub(rbp) > 0x20_0000 {
+            break;
+        }
+        rbp = next;
+    }
+    let _ = write!(out, " spill:");
+    for i in 0..24u64 {
+        if let Some(w) = rd(ursp + 8 * i) {
+            let _ = write!(out, " {:#x}", w);
+        }
+    }
+    Some(out)
 }
 
 /// Read the watched word's CURRENT value through the walker (fault
@@ -2078,7 +2359,7 @@ pub fn futex_stuck_census() {
     // ---- Phase A: bucket chains (POD + task ptr copy only) ----
     'buckets: for b in HASH_HEADS.iter() {
         let h = b.lock_irqsave();
-        let mut idx = *h;
+        let mut idx = h.head;
         while let Some(i) = idx {
             // SAFETY: slot index from a chain link held under the bucket
             // lock; the tuple is copied out under the nested slot lock.
@@ -3508,7 +3789,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     // concurrent futex_wait can insert/remove while we walk.
     let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
 
-    let mut current_idx = *head;
+    let mut current_idx = head.head;
     while let Some(idx) = current_idx {
         if ret >= nr_wake as i64 {
             break;
@@ -3570,13 +3851,20 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             }
             drop(waiter_slot);
 
-            // Unlink from chain.
+            // Unlink from chain (62nd: maintain the FIFO tail — the
+            // removed node was the tail iff its next is None).
             if prev_idx.is_none() {
-                *head = next_idx;
+                head.head = next_idx;
+                if next_idx.is_none() {
+                    head.tail = None;
+                }
             } else if let Some(prev) = prev_idx {
                 let mut prev_slot = WAITER_POOL[prev].lock_nested(&head.proof());
                 if let Some(ref mut pw) = *prev_slot {
                     pw.next = next_idx;
+                }
+                if next_idx.is_none() {
+                    head.tail = prev_idx;
                 }
             }
 
@@ -3652,7 +3940,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         }
         for (bi, b) in HASH_HEADS.iter().enumerate() {
             let mut h = b.lock_irqsave();
-            let mut idx = *h;
+            let mut idx = h.head;
             while let Some(i) = idx {
                 // SAFETY: the slot index came from a chain link under the
                 // bucket lock; slots are freed only under both locks.
@@ -3799,7 +4087,11 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         };
 
         // Initialize and insert waiter into hash chain (fill the placeholder
-        // reserved by alloc_waiter in place).
+        // reserved by alloc_waiter in place). 62nd: TAIL append — FIFO
+        // waiter order, reference plist parity (see FutexChain). The
+        // OLDEST waiter must receive the first wake of every burst; the
+        // head-insert (LIFO) starved the long-parked M2 holder behind
+        // the samgr workers' transient re-parkers (ohw27/28).
         {
             let mut slot = WAITER_POOL[waiter_idx].lock_irqsave();
             if let Some(ref mut w) = *slot {
@@ -3809,12 +4101,24 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                 w.woken = false;
                 w.park_j = crate::drivers::timer::get_jiffies();
                 w.bucket = bucket_idx;
-                w.next = *head;
+                w.next = None;
             }
         }
 
-        // Update chain head.
-        *head = Some(waiter_idx);
+        // Append at the chain tail.
+        match head.tail {
+            Some(t) => {
+                let mut tslot = WAITER_POOL[t].lock_nested(&head.proof());
+                if let Some(ref mut tw) = *tslot {
+                    tw.next = Some(waiter_idx);
+                }
+                head.tail = Some(waiter_idx);
+            }
+            None => {
+                head.head = Some(waiter_idx);
+                head.tail = Some(waiter_idx);
+            }
+        }
 
         // Residency flag (see Task::futex_wait_enqueued): linked into the
         // chain here, cleared by every unlink/free path — do_exit's
@@ -4002,7 +4306,7 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
             continue;
         }
 
-        if *head == Some(target_idx) {
+        if head.head == Some(target_idx) {
             let next = {
                 let slot = WAITER_POOL[target_idx].lock_irqsave();
                 let n = slot.as_ref().and_then(|w| w.next);
@@ -4018,12 +4322,16 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                 }
                 n
             };
-            *head = next;
+            head.head = next;
+            if next.is_none() {
+                // the removed head was also the tail
+                head.tail = None;
+            }
             free_waiter(target_idx);
             return;
         }
 
-        let mut current_idx = *head;
+        let mut current_idx = head.head;
         let mut found = false;
         while let Some(idx) = current_idx {
             let next = {
@@ -4050,6 +4358,10 @@ fn remove_waiter(bucket_idx: usize, target_idx: usize) {
                     if let Some(ref mut w) = *slot {
                         w.next = target_next;
                     }
+                }
+                if target_next.is_none() {
+                    // the removed node was the tail: prev becomes the tail
+                    head.tail = Some(idx);
                 }
                 free_waiter(target_idx);
                 found = true;
@@ -4098,7 +4410,7 @@ pub fn futex_cleanup(task: *mut Task) {
     for bucket_idx in 0..HASH_SIZE {
         let mut head = HASH_HEADS[bucket_idx].lock_irqsave();
         let mut prev_idx: Option<usize> = None;
-        let mut current_idx = *head;
+        let mut current_idx = head.head;
 
         while let Some(idx) = current_idx {
             // Match on the task POINTER (unique per waiter). The old pid
@@ -4115,11 +4427,17 @@ pub fn futex_cleanup(task: *mut Task) {
                     slot.as_ref().and_then(|w| w.next)
                 };
                 if prev_idx.is_none() {
-                    *head = next;
+                    head.head = next;
+                    if next.is_none() {
+                        head.tail = None;
+                    }
                 } else if let Some(prev) = prev_idx {
                     let mut prev_slot = WAITER_POOL[prev].lock_irqsave();
                     if let Some(ref mut pw) = *prev_slot {
                         pw.next = next;
+                    }
+                    if next.is_none() {
+                        head.tail = prev_idx;
                     }
                 }
                 free_waiter(idx);
@@ -4314,7 +4632,7 @@ pub fn futex_requeue(
         }
 
         let mut prev: Option<usize> = None;
-        let mut cur = *head1;
+        let mut cur = head1.head;
 
         while let Some(idx) = cur {
             let (matches, next) = {
@@ -4337,10 +4655,16 @@ pub fn futex_requeue(
                     slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
                 };
                 if prev.is_none() {
-                    *head1 = next;
+                    head1.head = next;
+                    if next.is_none() {
+                        head1.tail = None;
+                    }
                 } else if let Some(p) = prev {
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
+                    if next.is_none() {
+                        head1.tail = prev;
+                    }
                 }
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
@@ -4425,7 +4749,7 @@ pub fn futex_requeue(
         }
 
         let mut prev: Option<usize> = None;
-        let mut cur = *head1_ref;
+        let mut cur = head1_ref.head;
 
         while let Some(idx) = cur {
             let (matches, next) = {
@@ -4448,10 +4772,16 @@ pub fn futex_requeue(
                     slot.as_ref().map(|w| w.task).unwrap_or(core::ptr::null_mut())
                 };
                 if prev.is_none() {
-                    *head1_ref = next;
+                    head1_ref.head = next;
+                    if next.is_none() {
+                        head1_ref.tail = None;
+                    }
                 } else if let Some(p) = prev {
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
+                    if next.is_none() {
+                        head1_ref.tail = prev;
+                    }
                 }
                 {
                     let mut slot = WAITER_POOL[idx].lock_irqsave();
@@ -4468,10 +4798,16 @@ pub fn futex_requeue(
             } else if requeued < nr_requeue {
                 // Unlink from source chain.
                 if prev.is_none() {
-                    *head1_ref = next;
+                    head1_ref.head = next;
+                    if next.is_none() {
+                        head1_ref.tail = None;
+                    }
                 } else if let Some(p) = prev {
                     let mut ps = WAITER_POOL[p].lock_irqsave();
                     if let Some(ref mut pw) = *ps { pw.next = next; }
+                    if next.is_none() {
+                        head1_ref.tail = prev;
+                    }
                 }
                 // Relink at the TAIL of the destination chain and update
                 // the key + bucket bookkeeping under the same slot lock,
@@ -4491,24 +4827,24 @@ pub fn futex_requeue(
                         w.next = None;
                     }
                 }
-                let mut tail = *head2_ref;
-                match tail {
-                    None => *head2_ref = Some(idx),
-                    Some(mut t) => loop {
-                        let n = {
-                            let slot = WAITER_POOL[t].lock_irqsave();
-                            slot.as_ref().and_then(|w| w.next)
-                        };
-                        match n {
-                            Some(n) => t = n,
-                            None => break,
+                // 62nd: the bucket now carries its tail — O(1) append
+                // (the old version walked the whole destination chain
+                // under both bucket locks to find it).
+                match head2_ref.tail {
+                    None => {
+                        head2_ref.head = Some(idx);
+                        head2_ref.tail = Some(idx);
+                    }
+                    Some(t) => {
+                        // Plain slot lock (not nested): the requeue holds
+                        // BOTH bucket guards here — the D-11 same-class
+                        // double-slot hold this path already uses for its
+                        // relink writes.
+                        let mut tslot = WAITER_POOL[t].lock_irqsave();
+                        if let Some(ref mut tw) = *tslot {
+                            tw.next = Some(idx);
                         }
-                    },
-                }
-                if tail.is_some() {
-                    let mut slot = WAITER_POOL[tail.unwrap()].lock_irqsave();
-                    if let Some(ref mut w) = *slot {
-                        w.next = Some(idx);
+                        head2_ref.tail = Some(idx);
                     }
                 }
 
@@ -6765,7 +7101,7 @@ fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
     let mut out: alloc::vec::Vec<WordCluster> = alloc::vec::Vec::new();
     for b in HASH_HEADS.iter() {
         let h = b.lock_irqsave();
-        let mut idx = *h;
+        let mut idx = h.head;
         'chain: while let Some(i) = idx {
             let (entry, next) = {
                 let slot = WAITER_POOL[i].lock_irqsave();
