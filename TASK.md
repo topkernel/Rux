@@ -7365,3 +7365,156 @@ The 62nd's 1/4 (ohw28) remains the campaign best.
 Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
 ServiceStart starting:launcher, launcher spawns, PIXELS (shot
 immediately; 91a2d054 = old-alive reference).
+
+### 65. 65TH SESSION (2026-11-07) — the binder thread-selection lever
+### LAND-VERIFIED as a real divergence (ours = creation-order FIFO +
+### proc-todo-then-wake; reference 6.6.101 = LIFO most-recently-parked +
+### select-then-THREAD-todo) and fixed; the M2 wedge onset moved 6x later
+### (t=38s -> t=245s) and the ladder passed SA:1301/180/182/501/403/6200
+### for the first time; the boot still stalls (new sites), 0/5 appfwk
+
+Boots this session: ohw49-ohw53 (5 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=fuxstuck,txnhunt,sleepsnap,
+fuxwatch=0x7ff0004862c0,0; ohw53 adds ams46). Commit: 21139571 (binder
+thread-selection parity). Gates: x86_64 build rc=0; riscv64 build rc=0 +
+make test ALL TESTS PASSED (run/test-rv-65.log); aarch64 build rc=0
+(run/build-a64-65.log). No sched/ changes this session -> no pbench/
+syscost tier owed (binder/ is not a Tier-2 path; the sched/ EEVDF debt
+reporting owed by the 64th was already covered there).
+
+#### 1. THE DIVERGENCE (mission item "the sharpest unexamined kernel
+lever: binder's thread-selection-for-delivery policy") — source-verified
+
+Reference (oh-robot kernel/linux/linux-6.6 == 6.6.101 == the reference
+bzImage's tree; linux-5.10 identical at every checked site):
+- binder_wait_for_work: a parking looper does `list_add` at the HEAD of
+  proc->waiting_threads (NOT tail — the 65th-coordinator brief guessed
+  FIFO-of-waiting; the source says most-recently-parked-first).
+- binder_select_thread_ilocked: pops list_first_entry = the MOST
+  RECENTLY PARKED looper; the pop REMOVES the thread from the waiting
+  set until it re-parks. Net semantics: delivery is STICKY to the
+  thread that just finished a txn and re-parked, and two rapid txns go
+  to two DIFFERENT loopers (the first-selected reader is off the list).
+- binder_proc_transaction: for a fresh sync txn (and the first oneway
+  taking a node's async slot) with no exact thread target, the txn is
+  pushed onto the SELECTED thread's todo
+  (binder_enqueue_thread_work_ilocked); proc->todo is used only when
+  NO reader is waiting. Async-drain (BC_FREE_BUFFER) and node work use
+  proc->todo + binder_wakeup_proc_ilocked (select+wake).
+- Nested sync routing (transaction_stack from-walk) and replies go to
+  the exact thread — we already had parity there (verified in source).
+
+Ours (pre-fix): wake_proc_one collected parked readers in
+im.threads CREATION order and removed(0) = the earliest-CREATED parked
+reader (round-robin); fresh txns always went to the PROC todo with the
+selected reader left flagged, so a second rapid wake re-picked the same
+still-flagged thread and the pair SERIALIZED on one looper. With
+samgr's 16-looper pool the same binary executed handlers under
+different thread contexts (locks, FFRT queues, TLS) than the reference
+— a different dependency-graph interleaving from the same image. The
+62nd's "the mechanisms are at parity" held for every DELIVERY primitive
+but not for WHICH looper runs the handler.
+
+#### 2. THE FIX (21139571)
+
+- ThreadState::park_seq stamped from NEXT_PARK_SEQ at every park (the
+  list_add-at-head order); picks take max park_seq (= the head).
+- wake_proc_one: sc161 readable/preferred-tgid tiers kept; most-recent
+  park wins inside each tier.
+- deliver_txn_to_selected_thread: fresh sync txns and first-oneway-
+  on-node now select the most recently parked eligible reader, clear
+  its waiting flag (= list_del_init at select) and push the txn onto
+  ITS todo; proc todo is the no-waiter fallback. Async-drain and
+  node-work legs keep the reference shape (proc todo + LIFO wake).
+- unpin_txn_node's node-work wake picks max park_seq.
+
+#### 3. THE RESULT (5 boots)
+
+- ohw49: M2 wedge onset t=245.8 (64th: uniform t=38/39 in 7/8 boots);
+  the ladder completed SA:1301 (104s), SA:180 (221s), SA:182, SA:501
+  (the launcher-gate AppMgrService), SA:403, SA:6200 (230s) — none of
+  which any wedge-class boot of this campaign had reached; the wedge
+  fired at the samgr "Start dynamic proc:wifi_manager_service" retry
+  (the LAST ladder event), same M2/m1 OWNER-LATCH crosswait shape, new
+  location. SLRD handler-tid distribution changed shape (94/92/81
+  across three loopers vs 178/85/22 on two in ohw41) — the delivery
+  thread-assignment IS different post-fix.
+- ohw50/ohw51: NO OWNER-LATCH wedge at all; a new stall class — three
+  samgr loopers (main + OS_IPC_0/1) take code-6 LoadSystemAbility
+  requests at t~109/113 and park FOREVER on their own-stack futexes
+  (fop=0x80 fto=0, anywoken=0, fval=2) right after SA:3299 publishes;
+  foundation (pid 690) blocks behind them; no appfwk. ohw52: same
+  class by t=249.
+- Tally: 0/5 appfwk.ready. The wedge/stall is no longer at the old
+  38s wall — it now forms anywhere in the 109-245s window at SA-depth
+  3299..6200, and its site varies per boot (interleaving luck, now
+  spread over a 6x longer window).
+
+#### 4. THE ALIGNMENT DIFF (mission item 1) — what the timelines name
+
+- Reference (oh-refu9): wifi_manager_service is started BY INIT as an
+  on-demand service at t=6.57 ("Service info wifi_manager_service start
+  service bt ext parameter wifi_manager_service|1120#0#load##-1#") —
+  samgr's ServiceControlWithExtra("ohos.ctl.start") param-set reaches
+  init, init forks the process, SA registers; the reference has ZERO
+  "SAMGR: Start dynamic proc" prints and reaches launcher.ready at
+  11.7s.
+- Ours: samgr's "Start dynamic proc:<svc>,<saId>,<result>_<ms>" lines
+  decode (system_ability_manager.cpp:1477 + service_control.c) as
+  result=105 = PARAM_CODE_TIMEOUT (init_param.h enum) for
+  deviceauth_service (15001ms), deviceprofile (19775ms),
+  wifi_manager_service (34389/38059ms) — the param-set REPLY never
+  comes back in time; init's param service ("Handle set param" lines)
+  only ever shows msgIds 2-5 from samgr, and later ctl.start sets
+  NEVER ARRIVE at init (client msgId 6+ absent). In ohw49 init's own
+  kmsg stream stops at t=33.97 (its LoopEvent last prints; reference
+  prints the same le_epoll timeout:-1 warnings, so the silence is
+  hilog-side OR a genuine init event-loop stall — undecidable with
+  current instruments). The 105-timeouts serialize (g_clientMutex)
+  every later set from samgr -> on-demand services never start ->
+  LoadSystemAbility waiters park forever (the ohw50/51/52 stall) and
+  the retry storm (wifi x3) coincides with ohw49's wedge onset.
+- distributeddata (pid 553) storms code-2/code-77 txns rejected
+  BR_FAILED_REPLY (796 in ohw52 by 272s, 10Hz retry) — an upstream
+  sync call of its own never completed; the reject class is reference
+  parity (the syncsend/self guards), the STUCK upstream call is the
+  image-side consequence. ohw53 (dfx=ams46) carries the why= decode.
+
+#### 5. STATE FOR THE 66TH
+
+1. The next kernel lever candidates, in order:
+   a. WF_SYNC (wake_up_interruptible_sync): the reference wakes the
+      selected looper for SYNC txns and replies with WF_SYNC (the
+      waker keeps the CPU; the sender finishes its BWR and parks in
+      read BEFORE the server runs). Our wake path has no sync-hint
+      semantics (WakeUpHint is unused in wait.rs) — the freshly woken
+      server can preempt the client mid-write. This is the last
+      named delivery-order divergence; it is a sched/ change (Tier-2:
+      pbench + syscost owed).
+   b. The init param-service stall (result=105 storms): instrument
+      init's LoopEvent (its epoll + the /dev/__parameters__ service
+      socket) — if init's loop wedges on our kernel, EVERY on-demand
+      start after that point times out; ohw50 PROVES init can stay
+      alive (usb_host started at 268s), so the ohw49 init stall is
+      per-boot interleaving, same family.
+2. The ohw50/51/52 stall anatomy is fully readable in the logs: samgr
+   looper code-6 handlers parked on own-stack futexes, anywoken=0
+   (NO wake ever attempted — a userspace crosswait, not a lost kernel
+   wake), foundation blocked behind LoadSystemAbility. The 62nd's M2
+   decoding applies unchanged at the new sites.
+3. Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
+   ServiceStart starting:launcher, launcher spawns, PIXELS (shot
+   immediately; 91a2d054 = old-alive reference).
+
+Addendum (session close): ohw53 (dfx=ams46) names the distributeddata
+storm's seed: AMS46-SENDFAIL pid=575 tid=828 (DB_TaskExecutor) first
+fails why=7 reply-stack-top at t=54.7, then every code-2 retry is
+rejected by the reference-parity guards why=21/20 (sender-todo-head /
+sender-stack-top) — a stuck unresolved OUTGOING sync txn on its stack
+(poisoned by an upstream handler that never replies), after which the
+proxy retries forever. Same family as the LoadSystemAbility stalls
+(userspace crosswait), not a kernel-side reject divergence. Final
+session tally: 0/5 appfwk.ready (ohw49 M2-wedge@245s post-6200;
+ohw50/51/53 stall@109/113/106s post-3299; ohw52 stall@249s). No stray
+QEMUs. Branch oh-crash pushed at 2 commits past the 64th (21139571 +
+docs).
