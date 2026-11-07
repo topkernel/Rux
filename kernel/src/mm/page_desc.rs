@@ -207,6 +207,14 @@ pub struct Page {
     /// PTE.  Do not free an order>0 block while members are still mapped.
     _refcount: AtomicI32,
 
+    /// PTE zap generation (the arena-zeroing hunt, 2026-11-07): bumped
+    /// at every PTE teardown site that clears a leaf this descriptor
+    /// backs. The anonymous demand-fault path compares: a fault serving
+    /// a page whose gen is >0 means the PTE was dropped while the VMA
+    /// stayed alive — the zap-then-refill race that zeroes live glibc
+    /// arena pages. Diagnostic boot param ptegen=1 arms the check.
+    pub zap_gen: AtomicU32,
+
     /// Private data
     /// - Buddy system: stores order
     /// - Slab: stores slab management structure
@@ -408,6 +416,7 @@ impl Page {
     pub const fn new() -> Self {
         Self {
             flags: PageFlags::new(),
+            zap_gen: AtomicU32::new(0),
             _mapcount: AtomicI32::new(PAGE_MAPCOUNT_BIAS),
             _refcount: AtomicI32::new(0),
             private: AtomicUsize::new(0),
