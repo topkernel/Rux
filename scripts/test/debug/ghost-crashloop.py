@@ -16,7 +16,7 @@ path exists but is an empty regular file) / MISSING-after-MADE /
 BAD-CONTENT / DIR-CHILD-MISSING.
 
 Usage: ghost-crashloop.py --kernel PATH --cycles 10 [--tag NAME]
-                          [--smp 2] [--mem 1G] [--seed N]
+                          [--smp 8] [--mem 1G] [--seed N]
 Discipline: private image copy per cycle; kills only its own QEMU child
 PID (never pkill); one QEMU at a time.
 """
@@ -255,7 +255,7 @@ def main():
     ap.add_argument("--cycles", type=int, default=10)
     ap.add_argument("--img-base", default="/home/william/Rux/test/rootfs.img")
     ap.add_argument("--tag", default="ghost")
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="1G")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--max-delay", type=float, default=1.2,

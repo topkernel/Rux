@@ -13,7 +13,7 @@ Verdict discipline (exitwalk_boot.py family):
   timeout (no PASS line)                -> rc 3
 
 Usage:
-  ./subreap_boot.py [--smp 2] [--secs 30] [--mem 512M]
+  ./subreap_boot.py [--smp 8] [--secs 30] [--mem 512M]
       [--kernel bzImage] [--accel kvm|tcg] [--show]
 """
 import argparse

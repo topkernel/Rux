@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--tag", default="pbq")
     ap.add_argument("--img", default=os.path.join(WT, "work", "pbmine.img"))
     ap.add_argument("--timeout", type=int, default=420)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--extra", default=None, help="extra -append tokens")
     ap.add_argument("--full-only", action="store_true",

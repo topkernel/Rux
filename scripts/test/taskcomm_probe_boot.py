@@ -12,7 +12,7 @@ killing the whole HDF chain (composer_host -> no display HDI -> no UI).
   timeout                       -> rc 3
 
 Usage:
-  ./taskcomm_probe_boot.py [--timeout 180] [--smp 2] [--mem 2G]
+  ./taskcomm_probe_boot.py [--timeout 180] [--smp 8] [--mem 2G]
 """
 import argparse
 import os
@@ -65,7 +65,7 @@ def build_image(img):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=180)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     args = ap.parse_args()
 

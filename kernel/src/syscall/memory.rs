@@ -364,40 +364,71 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
     // Get current process
     match sched::current() {
         Some(current_task) => {
-            // Get current brk value
-            let current_brk = current_task.get_brk();
+            // ===== The break is PER-MM, not per-task =====
+            // (GNOME trim face, 2026-11-07: the pango/FcInit SIGSEGV.)
+            // The reference kernel keeps mm->brk — ONE break per address
+            // space, shared by every thread of the process. Rux kept the
+            // authoritative value in Task::brk (per-task), with the mm
+            // value demoted to a mirror. A thread therefore carried a
+            // SNAPSHOT of the break from its clone() onwards: when the
+            // main thread grew the heap, the pango thread's copy stayed
+            // behind, and the pango thread's malloc_trim -> brk(-N)
+            // shrank "the heap" by the band between its STALE break and
+            // the one glibc asked for — releasing pages the main thread
+            // had already handed out (TRIMQ-FRAME: the page carried a
+            // live pointer at trim time; the live walk then faulted).
+            // The mm value is now the single authority; Task::brk is
+            // kept in sync for the readers that still use it (fork's
+            // copy, exec's init).
+            let mm_brk_now = |task: &crate::process::Task| -> u64 {
+                if let Some(addr_space) = task.address_space() {
+                    let v = addr_space.brk().as_usize() as u64;
+                    if v != 0 {
+                        return v;
+                    }
+                }
+                task.get_brk()
+            };
+
+            // Serialize the whole break read-modify-write per address
+            // space (the reference's mmap_lock discipline): a concurrent
+            // grow in another thread must not interleave with a shrink's
+            // value store, or the break value falls behind the heap VMA
+            // and the NEXT shrink releases live pages.
+            let _brk_guard = current_task
+                .address_space()
+                .map(|aspace| aspace.brk_lock().lock_irqsave());
+
+            // Get current brk value (shared per address space)
+            let current_brk = mm_brk_now(&current_task);
 
             // If brk is not initialized, get or set default value from address space
             if current_brk == 0 {
-                // Try to get brk from address space
-                let default_brk = if let Some(addr_space) = current_task.address_space() {
-                    addr_space.brk().as_usize() as u64
-                } else {
-                    // Use BRK_DEFAULT from mm module
-                    crate::arch::mm::user_addr::BRK_DEFAULT as u64
-                };
+                // Use BRK_DEFAULT from mm module
+                let default_brk = crate::arch::mm::user_addr::BRK_DEFAULT as u64;
                 current_task.set_brk(default_brk);
+                if let Some(addr_space) = current_task.address_space() {
+                    addr_space.set_brk_val(default_brk as usize);
+                }
 
                 if new_brk == 0 {
                     return default_brk as i64;
                 }
             }
 
-            // Keep the ADDRESS-SPACE brk mirror in sync with the task's
-            // authoritative break at every mutation below. The mm-side
-            // value is what MmStruct::mmap's brk-conflict guard and
-            // procfs read; without the sync it stays at the exec-time
-            // image end forever and the live heap looks empty (the
-            // MAP_FIXED live-heap guard then lets mappings land on
-            // malloc's storage — session-15 probe MF6).
+            // Publish every mutation to BOTH the shared mm break and the
+            // per-task copy (the mm-side value is what
+            // MmStruct::mmap's brk-conflict guard and procfs read; the
+            // task-side copy is what fork clones).
             let sync_mm_brk = |v: u64| {
                 if let Some(addr_space) = current_task.address_space() {
                     addr_space.set_brk_val(v as usize);
                 }
+                current_task.set_brk(v);
             };
 
             // Re-get current brk (may have been updated)
-            let current_brk = current_task.get_brk();
+            let current_brk = mm_brk_now(&current_task);
 
             // If new_brk is 0, return current brk
             if new_brk == 0 {
@@ -418,6 +449,92 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 // Unmap pages that are no longer needed
                 if new_page_end < current_page_end {
                     if let Some(addr_space) = current_task.address_space() {
+                        // TRIM-COVERAGE probe (GNOME trim face, 2026-11-07):
+                        // the released range MUST be covered by the brk
+                        // VMA alone. Anything else overlapping it means
+                        // the shrink destroys a DIFFERENT mapping — the
+                        // live-pointer-walks-into-freed-memory class
+                        // (the pango/FcInit SIGSEGV: the fault address
+                        // sits inside the range the brk shrink released,
+                        // and the frame at that address carried live
+                        // glibc data at trim time — TRIMQ-FRAME
+                        // trimw0=<pointer> noww0="g_unicode"). Enumerate
+                        // the overlap and name every VMA that is not the
+                        // brk VMA: the gap between the brk VALUE and
+                        // the brk VMA is the bug's hiding place.
+                        if TRIMQ_ON.load(core::sync::atomic::Ordering::Relaxed) {
+                            let vma_mgr = addr_space.vma_read();
+                            let lo = crate::mm::page::VirtAddr::new(new_page_end as usize);
+                            let hi = crate::mm::page::VirtAddr::new(current_page_end as usize);
+                            let mut overlaps: u32 = 0;
+                            let mut foreign: u32 = 0;
+                            let mut first = true;
+                            // Walk every VMA that OVERLAPS the released
+                            // range (not just those starting inside it:
+                            // a big VMA starting below the range covers
+                            // it too).
+                            for v in vma_mgr.iter() {
+                                if v.end().as_usize() <= new_page_end as usize
+                                    || v.start().as_usize() >= current_page_end as usize
+                                {
+                                    continue;
+                                }
+                                overlaps += 1;
+                                let origin = v.origin();
+                                let is_brk = origin.bits() & !crate::mm::vma::VmaOrigin::FORKED
+                                    == crate::mm::vma::VmaOrigin::BRK;
+                                if !is_brk {
+                                    foreign += 1;
+                                }
+                                if first || !is_brk {
+                                    crate::pr_warn!(
+                                        "TRIM-COVER vma=[{:#x},{:#x}) origin={} brk={} flags={:#x}",
+                                        v.start().as_usize(),
+                                        v.end().as_usize(),
+                                        origin.creator_name(),
+                                        is_brk as u8,
+                                        v.flags().bits()
+                                    );
+                                    first = false;
+                                }
+                            }
+                            let _ = (lo, hi);
+                            crate::pr_warn!(
+                                "TRIM-COVER-SUM released=[{:#x},{:#x}) new_brk={:#x} old_brk={:#x} overlaps={} foreign={}",
+                                new_page_end,
+                                current_page_end,
+                                new_brk,
+                                current_brk,
+                                overlaps,
+                                foreign
+                            );
+                            // OVERSHOOT check: the released range must be
+                            // FULLY covered by the brk VMA. If the brk
+                            // VALUE ran ahead of the VMA's end (a
+                            // stale/short heap VMA), the shrink unmaps
+                            // pages the VMA never covered — memory the
+                            // process still owns (the pango/FcInit
+                            // SIGSEGV). Report the gap explicitly.
+                            {
+                                let brk_end = vma_mgr
+                                    .iter()
+                                    .filter(|v| {
+                                        v.end().as_usize() <= current_page_end as usize
+                                            && v.end().as_usize() > new_page_end as usize
+                                    })
+                                    .map(|v| v.end().as_usize())
+                                    .max()
+                                    .unwrap_or(0);
+                                if brk_end < current_page_end as usize {
+                                    crate::pr_warn!(
+                                        "TRIM-OVERSHOOT vma_end={:#x} released_end={:#x} gap={:#x} — brk VALUE ran ahead of the heap VMA",
+                                        brk_end,
+                                        current_page_end,
+                                        current_page_end as usize - brk_end
+                                    );
+                                }
+                            }
+                        }
                         // Record BEFORE the munmap: the PFN + content
                         // snapshot must see the pages while they are
                         // still mapped (after unmap_pages the leaf
@@ -434,7 +551,6 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
-                current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 return new_brk as i64;
             }
@@ -542,7 +658,6 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     }
                 }
 
-                current_task.set_brk(new_brk);
                 sync_mm_brk(new_brk);
                 new_brk as i64
             } else {

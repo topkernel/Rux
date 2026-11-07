@@ -106,8 +106,9 @@ pcp_batch = 16
 [smp]
 # Enable multi-core support (SMP)
 enable_smp = true
-# Maximum CPU count
-max_cpus = 4
+# Maximum CPU count (user directive 2026-11-07: all test/scripts boot
+# with SMP>=8 by default — Ubuntu and OH alike — so the cap must be >=8)
+max_cpus = 8
 # SMP boot stack size (bytes) - 64KB
 boot_stack_size = 65536
 

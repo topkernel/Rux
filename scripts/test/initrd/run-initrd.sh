@@ -39,7 +39,7 @@ timeout --signal=TERM --kill-after=5 "$DURATION" qemu-system-riscv64 \
     -accel tcg,thread=single \
     -cpu rv64,zbb=true,zba=true,zbs=true \
     -m 1G \
-    -smp 2 \
+    -smp 8 \
     -nographic \
     -serial stdio -monitor none \
     -kernel "$KERNEL" \

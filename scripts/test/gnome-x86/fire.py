@@ -17,7 +17,7 @@ handover (commit 1bffb8a7):
 
 Usage:
   python3 test/gnome-x86/fire.py [--tag T] [--seconds 240] [--img PATH]
-         [--bzimage PATH] [--init /sbin/runit] [--mem 2G] [--smp 1]
+         [--bzimage PATH] [--init /sbin/runit] [--mem 2G] [--smp 8]
          [--extra-append "k=v ..."]
 Ctrl-C or SIGTERM stops the VM cleanly (only the PID we started).
 """

@@ -107,19 +107,12 @@ Discriminator boot on the same tree without the hunt's diagnostic
 parameter wedged identically — a third regression of the same class,
 caught the same week. It needs its own bisect lane.
 
-## 7. Open items
+### 7.1 Open items
 
-1. **Trim face** (deep water): glibc systrim reclaims heap the kernel
-   agrees is free, then live pointers walk inside it — the metadata was
-   destroyed before the trim. Every kernel-side hypothesis is
-   eliminated by probe evidence (allocator placement, brk/VMA
-   consistency, COW, mremap, swap roundtrip under real pressure,
-   fault-around discipline, madvise bounds, rmap/LRU). The trim
-   quarantine instrument (main@f8ffce15, boot param `trimq=1`) captures
-   the first touch with full context: first capture = two READs by
-   gobject code 0–2 jiffies after the trim, inside a 1.15 MB reclaimed
-   range. Next: frame-content dump at the hit (distinguishes zero-fill
-   from aliasing) plus a userspace malloc interposer.
+1. **Trim face** — CLOSED 2026-11-07 (§8.5): the break was per-TASK,
+   not per-mm; a thread's stale copy made its brk shrink release live
+   pages. Fixed by making the mm break the shared authority plus a
+   per-mm break lock.
 2. **Round-7 early-boot wedge**: bisect the perf-gap-hunt round 7
    merge on the GNOME boot.
 3. **fdreap close-stall floods**: present in every recent boot's late
@@ -175,6 +168,54 @@ finishes its own exit (pid bookkeeping, DEAD, final switch) with all
 invariants. Boots that hit the face now recover in-place:
 3/3 taskdump-classified frozen boots became shell-up boots with one
 STRAGGLER-RESCUE line each; zero panics.
+
+### 8.5 The trim face: the break was per-task, not per-mm
+
+**Symptom** (the user's every-boot report): gnome-shell starts
+("Running GNOME Shell"), then the pango thread's FcInit dies with
+SIGSEGV on a heap read; the session retries, the shell dies again
+("respawning too quickly") and the desktop shows the failed dialog.
+Deterministic on -smp 1 (3/3 boots), frequent on -smp 8.
+
+**Evidence chain** (trimq=1 instrument + the kernel's USEGV-FOR
+forensics):
+
+1. The fault address lies inside a range a brk shrink had released
+   moments earlier — `TRIMQ-HIT READ addr=0x555555a8fd70
+   range=[0x555555a7e000,0x555555aba000) age=0j`, i.e. the very first
+   touch of the reclaimed band.
+2. The frame at that address carried LIVE glibc data at trim time
+   (`TRIMQ-FRAME ... trimw0=0x000eeb71a4e270 noww0="g_unicode"`) and
+   was recycled afterwards — so the kernel released memory the process
+   still owned.
+3. The releasing caller was a THREAD: `TRIMQ-REC comm='[pango]
+   FcInit'` — the pango thread's malloc_trim shrank "the heap".
+4. The kernel's release mechanics were exonerated: the released range
+   matched the brk value exactly, was covered by the brk VMA alone
+   (`TRIM-COVER-SUM ... overlaps=1 foreign=0`), and no overshoot
+   (`TRIM-OVERSHOOT` never fired).
+
+**Root cause**: Rux kept the authoritative break in `Task::brk` — a
+PER-TASK field — with the mm's `brk` demoted to a mirror. The
+reference kernel has ONE break per address space (`mm->brk`), shared
+by every thread. A thread therefore carried a snapshot of the break
+from its clone() onwards: when the main thread grew the heap, the
+pango thread's copy stayed behind, and the pango thread's
+`malloc_trim` → `brk(-N)` shrank the heap by the band between its
+STALE break and the one glibc asked for — releasing pages the main
+thread had already handed out.
+
+**Fix** (main, 2026-11-07): the mm's break is the single authority;
+`sys_brk` reads and publishes it (the per-task copy is kept in sync
+for the fork/exec readers, and fork now copies the mm value); a new
+per-mm `brk_lock` serializes the whole read-modify-write (the
+reference's mmap_lock discipline), so a concurrent grow and shrink
+cannot interleave and leave the value behind the heap VMA again.
+
+**Verification**: the deterministic -smp 1 repro goes 3/3 crashing →
+3/3 clean; the -smp 8 five-boot battery shows zero SIGSEGV in 5/5
+(4/5 reach the shell; the fifth is the separate park face of §8.3,
+which the rescue machinery bounds).
 
 ### 8.4 What is still open
 

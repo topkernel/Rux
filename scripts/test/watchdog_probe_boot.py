@@ -14,7 +14,7 @@ device ioctl round-trip (init_watchdog.c sequence).
   timeout                       -> rc 3
 
 Usage:
-  ./watchdog_probe_boot.py [--timeout 120] [--smp 1] [--mem 1G]
+  ./watchdog_probe_boot.py [--timeout 120] [--smp 8] [--mem 1G]
 """
 import argparse
 import os
@@ -67,7 +67,7 @@ def build_image(img):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=120)
-    ap.add_argument("--smp", type=int, default=1)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="1G")
     args = ap.parse_args()
 

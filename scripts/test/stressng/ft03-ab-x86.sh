@@ -17,7 +17,7 @@ rm chunk.txt
 write /tmp/ft03-chunk.txt chunk.txt
 DBFS
   timeout 300 qemu-system-x86_64 -M q35 -accel kvm -cpu max \
-    -m 2G -smp 2 -display none -serial stdio -monitor none -no-reboot \
+    -m 2G -smp 8 -display none -serial stdio -monitor none -no-reboot \
     -snapshot -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,drive=rootfs \
     -kernel "$KERN" \

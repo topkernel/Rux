@@ -87,7 +87,7 @@ esac
 # file.locking=off; locking is already off per-drive above).
 # shellcheck disable=SC2086
 exec "$QEMU" \
-    -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot \
+    -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 8 -snapshot \
     $DISP -serial mon:stdio -monitor "${MONITOR:-none}" \
     -kernel "$KERNEL" -initrd "$IMGDIR/ramdisk.img" \
     -append "$APPEND" \

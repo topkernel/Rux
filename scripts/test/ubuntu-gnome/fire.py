@@ -19,7 +19,7 @@ Milestones (mirrors the old fire-r8x family):
 Usage:
   python3 test/ubuntu-gnome/fire.py [--tag T] [--seconds 2400]
          [--img work/gnome-riscv64.img] [--kernel target/.../debug/rux]
-         [--init /sbin/runit] [--mem 2G] [--smp 2] [--debug "watchdog,taskdump"]
+         [--init /sbin/runit] [--mem 2G] [--smp 8] [--debug "watchdog,taskdump"]
 Ctrl-C or SIGTERM stops the VM cleanly (only the PID we started).
 """
 import argparse

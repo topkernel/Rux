@@ -238,12 +238,8 @@ static mut CSD_QUEUES: [ListHead; MAX_CPUS] = {
 };
 
 /// Per-CPU writer lock for CSD queue (protects list_add_tail).
-static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] = [
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-    Spinlock::new(()),
-];
+static CSD_LOCKS: [Spinlock<()>; MAX_CPUS] =
+    [const { Spinlock::new(()) }; MAX_CPUS];
 
 /// Initialize CSD queues. Called once during boot.
 fn csd_init() {

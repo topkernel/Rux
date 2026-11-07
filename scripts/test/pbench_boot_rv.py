@@ -9,7 +9,7 @@ probe is a glibc-static build (no riscv64 musl toolchain in-tree);
 rdcycle fronts rdtsc_ (pbench.c guards by arch).
 
 Usage: ./pbench_boot_rv.py [--kernel PATH] [--tag NAME] [--timeout 900]
-       [--smp 2] [--mem 2G] [--p2f] [--append-extra "a=b"]
+       [--smp 8] [--mem 2G] [--p2f] [--append-extra "a=b"]
 """
 import argparse
 import os
@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
     ap.add_argument("--tag", default="rvpb1")
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--p2f", action="store_true",
                     help="stage the p2fonly futex battery as init")

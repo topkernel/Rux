@@ -14,7 +14,7 @@ Any "VMAFAIL-" line in the log is reported even if a verdict line was
 missed, so a crashed probe still yields rc 1.
 
 Usage:
-  ./vma_storm_boot.py [--smp 2] [--thread multi|single] [--secs 30]
+  ./vma_storm_boot.py [--smp 8] [--thread multi|single] [--secs 30]
       [--stack-threads 3] [--mem 1G] [--kernel ELF] [--keep-img]
 """
 import argparse
@@ -75,7 +75,7 @@ def build_image(img, secs, stack_threads):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="multi", choices=["multi", "single"])
     ap.add_argument("--secs", type=int, default=30)
     ap.add_argument("--stack-threads", type=int, default=3)

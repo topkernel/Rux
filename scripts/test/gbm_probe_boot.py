@@ -11,7 +11,7 @@ plus /etc/ld-musl-x86_64.path from the ramdisk.
 
 Verdict: GBM_PROBE RESULT: PASS n/n -> rc 0, else 1; panic -> 2; timeout -> 3.
 
-Usage: ./gbm_probe_boot.py [--timeout 420] [--smp 1] [--mem 2G]
+Usage: ./gbm_probe_boot.py [--timeout 420] [--smp 8] [--mem 2G]
 """
 import argparse
 import os
@@ -96,7 +96,7 @@ def build_image(img):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=420)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     args = ap.parse_args()
 

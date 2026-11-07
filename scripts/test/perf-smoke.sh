@@ -57,7 +57,7 @@ fi
     -accel tcg,thread=single \
     -cpu rv64,zbb=true,zba=true,zbs=true \
     -m 1G \
-    -smp 2 \
+    -smp 8 \
     -display none \
     -serial stdio \
     -snapshot \

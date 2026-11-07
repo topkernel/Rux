@@ -12,7 +12,7 @@ init=/test/binder_probe. The probe's own output is the verdict:
   kernel panic                    -> rc 2
 
 Usage:
-  ./binder_probe_boot.py [--smp 2] [--thread multi|single] [--timeout 180]
+  ./binder_probe_boot.py [--smp 8] [--thread multi|single] [--timeout 180]
       [--kernel ELF]
 """
 import argparse
@@ -59,7 +59,7 @@ def build_image(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="multi", choices=["multi", "single"])
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--mem", default="1G")

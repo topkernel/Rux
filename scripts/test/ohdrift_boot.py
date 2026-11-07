@@ -11,7 +11,7 @@ userdata-tok) but:
     compact trace is printed at the end.
 
 Usage:
-  ./ohdrift_boot.py [--secs 1500] [--smp 2] [--accel kvm,thread=multi]
+  ./ohdrift_boot.py [--secs 1500] [--smp 8] [--accel kvm,thread=multi]
       [--kernel bzImage] [--magic-every 120] [--log PATH] [--tag NAME]
 """
 import argparse
@@ -42,7 +42,7 @@ def qemu_drive(idx, path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--secs", type=int, default=1500)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--accel", default="kvm",
                     help="kvm | tcg,thread=multi | tcg,thread=single")

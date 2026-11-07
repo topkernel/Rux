@@ -4,7 +4,7 @@ cd "$(dirname "$0")/../.." # scripts/test/gnome-diag -> repo root
 LOG=/tmp/plain-console.log
 FIFO=/tmp/plain.fifo
 rm -f "$FIFO" "$LOG"; mkfifo "$FIFO"
-timeout 200 qemu-system-x86_64 -M q35 -accel kvm -cpu max -m 2G -smp 2 \
+timeout 200 qemu-system-x86_64 -M q35 -accel kvm -cpu max -m 2G -smp 8 \
   -display none -serial stdio -monitor none -no-reboot -snapshot \
   -drive file=work/gnome-x86.img,if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,disable-legacy=on,drive=rootfs \

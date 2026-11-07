@@ -373,7 +373,7 @@ secondary_start:
     orr     x21, x21, x23, lsl #16      // x21 = packed affinity
     cbnz    x0, 1f
     mov     x0, x21                     // no context_id → derive locally
-1:  cmp     x0, #4                      // MAX_CPUS (smp.rs const-asserts)
+1:  cmp     x0, #8                      // MAX_CPUS (smp.rs const-asserts)
     b.hs    .Lsec_park                  // bad index has no stack
     msr     tpidr_el1, x0               // per-cpu identity protocol
 

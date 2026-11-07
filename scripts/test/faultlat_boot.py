@@ -71,7 +71,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--accel", default="tcg,thread=multi")
-    ap.add_argument("--smp", type=int, default=1)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     args = ap.parse_args()
 

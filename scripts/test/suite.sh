@@ -777,7 +777,7 @@ if [ -f "$FLEET_FSFUZZ" ]; then
     # The fuzz window ending (timeout rc 124) is the expected outcome —
     # the fuzzer runs until the window closes; only an earlier qemu
     # death or a panic (verdict_for greps the serial) fails the leg.
-    FUZZ_FS_CMD="timeout ${FUZZ}s qemu-system-riscv64 -M virt -accel tcg,thread=multi -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true -m 1G -smp 2 -display none -serial stdio -snapshot -drive file=$FLEET_FSFUZZ,if=none,id=rootfs,format=raw,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel __KERNEL__ -append 'root=/dev/vda rw init=/test/fsfuzz console=ttyS0 debug=watchdog,taskdump'; frc=\$?; if [ \$frc -ne 0 ] && [ \$frc -ne 124 ]; then echo 'PROBE-RESULT: FAIL fuzz qemu exited '\$frc; exit 1; fi; echo 'PROBE-RESULT: PASS fuzz window completed'"
+    FUZZ_FS_CMD="timeout ${FUZZ}s qemu-system-riscv64 -M virt -accel tcg,thread=multi -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true -m 1G -smp 8 -display none -serial stdio -snapshot -drive file=$FLEET_FSFUZZ,if=none,id=rootfs,format=raw,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel __KERNEL__ -append 'root=/dev/vda rw init=/test/fsfuzz console=ttyS0 debug=watchdog,taskdump'; frc=\$?; if [ \$frc -ne 0 ] && [ \$frc -ne 124 ]; then echo 'PROBE-RESULT: FAIL fuzz qemu exited '\$frc; exit 1; fi; echo 'PROBE-RESULT: PASS fuzz window completed'"
 fi
 
 # The LTP leg runs a bounded sample of the suite list through the

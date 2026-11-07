@@ -4,7 +4,7 @@
 Boots the minimal musl rootfs with init=/bin/sh, feeds shell commands over
 serial, and watches for POISONED/wedge/panic. Usage:
 
-    python3 repro.py [--smp 2] [--seconds 120] [--kernel PATH] [--debug schedtrace]
+    python3 repro.py [--smp 8] [--seconds 120] [--kernel PATH] [--debug schedtrace]
 """
 import argparse
 import os
@@ -28,7 +28,7 @@ ROOTFS = os.environ.get("RUX_ROOTFS", os.path.join(ROOT, "test", "rootfs.img"))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--seconds", type=int, default=120)
     ap.add_argument("--kernel", default=KERNEL)
     ap.add_argument("--debug", default="")

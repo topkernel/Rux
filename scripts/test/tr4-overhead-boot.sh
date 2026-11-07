@@ -14,7 +14,7 @@ debugfs -w -R "write $ROOT/run/tr4-ovh-init /init" "$ROOTFS" >/dev/null 2>&1 || 
 {
     sleep 150
 } | timeout 150 qemu-system-x86_64 \
-    -M q35 -accel kvm -cpu max -m 2G -smp 2 \
+    -M q35 -accel kvm -cpu max -m 2G -smp 8 \
     -display none -serial stdio -snapshot \
     -drive file="$ROOTFS",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,disable-legacy=on,drive=rootfs \

@@ -14,7 +14,7 @@ printed as it appears; success = `PBENCH DONE rc=0`.
   rc 2  build/image failure
 
 Usage: ./pbench_boot.py [--timeout 1200] [--bzimage PATH] [--tag NAME]
-       [--accel tcg,thread=multi] [--smp 2] [--mem 1G]
+       [--accel tcg,thread=multi] [--smp 8] [--mem 1G]
 The defaults match the pa-series machine class (q35, -cpu max,
 SMP2/1G per repo discipline; P2 needs SMP>=2).
 """
@@ -102,7 +102,7 @@ def main():
     ap.add_argument("--bzimage", default=DEFAULT_BZIMAGE)
     ap.add_argument("--tag", default="pb1")
     ap.add_argument("--accel", default="tcg,thread=multi")
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")  # 1G panics: kernel-heap alloc
     # error (4MB layout, main.rs OOM path) during early boot
     ap.add_argument("--arm-schedstat", action="store_true",

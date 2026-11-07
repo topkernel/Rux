@@ -6,7 +6,7 @@ musl loader and the animation's own jpg into a minimal ext4, boots the
 Rux x86_64 kernel with it as root+init, and reports the
 "DECODE_PROBE RESULT:" line from serial.
 
-Usage: ./decode_probe_boot.py [--timeout 240] [--smp 2] [--kvm]
+Usage: ./decode_probe_boot.py [--timeout 240] [--smp 8] [--kvm]
 """
 import argparse
 import os
@@ -139,7 +139,7 @@ def build_image(img):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=240)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--kvm", action="store_true")
     args = ap.parse_args()
 

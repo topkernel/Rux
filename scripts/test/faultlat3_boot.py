@@ -71,7 +71,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--accel", default="kvm")
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--kernel", default=os.path.join(
         WT, "target/x86_64-unknown-none/debug/bzImage"))

@@ -22,12 +22,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// SMP boot stack size - from config
 pub const STACK_SIZE: usize = crate::config::SMP_BOOT_STACK_SIZE;
 
-static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Actual boot hart ID, saved by init(). QEMU/OpenSBI may pick any hart.
 static BOOT_HART_ID: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -128,12 +123,7 @@ extern "C" {
 #[repr(align(16))]
 struct BootStack([u8; STACK_SIZE]);
 
-static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-];
+static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [const { BootStack([0u8; STACK_SIZE]) }; MAX_CPUS];
 
 /// VA_OFFSET for converting virtual addresses to physical.
 const VA_OFFSET: usize = 0xffffffff80000000usize - 0x80200000usize;

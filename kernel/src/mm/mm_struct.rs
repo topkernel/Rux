@@ -200,6 +200,17 @@ pub struct MmStruct {
     /// Current heap pointer (current brk value)
     brk: AtomicUsize,
 
+    /// Per-mm break lock (GNOME trim face, 2026-11-07): serializes the
+    /// whole sys_brk read-modify-write (break value + VMA surgery).
+    /// The reference kernel does the same under mmap_lock. Without it
+    /// two threads of one process could interleave a grow and a shrink:
+    /// the shrink's value store could land AFTER the grow's, leaving
+    /// the break value behind the heap VMA's end — the next shrink
+    /// would then release live pages. Lock order: brk_lock is the
+    /// OUTERMONE (taken before the VMA write lock); nothing takes it
+    /// while holding the VMA lock.
+    brk_lock: Spinlock<()>,
+
     // ==================== Stack Management ====================
     /// Stack start address (stack top)
     start_stack: AtomicUsize,
@@ -371,6 +382,7 @@ impl MmStruct {
             // Heap management
             start_brk: AtomicUsize::new(brk_default),
             brk: AtomicUsize::new(brk_default),
+            brk_lock: Spinlock::new(()),
             // Stack management
             start_stack: AtomicUsize::new(0),
             stack_limit: AtomicUsize::new(0),
@@ -608,6 +620,15 @@ impl MmStruct {
     #[inline]
     pub fn set_brk_val(&self, addr: usize) {
         self.brk.store(addr, Ordering::Release);
+    }
+
+    /// Per-mm break lock (GNOME trim face, 2026-11-07): serializes the
+    /// whole sys_brk read-modify-write. Held OUTSIDE the VMA write lock
+    /// (brk_lock -> vma_lock is the only order; nothing takes brk_lock
+    /// while holding the VMA lock).
+    #[inline]
+    pub fn brk_lock(&self) -> &crate::sync::spinlock::Spinlock<()> {
+        &self.brk_lock
     }
 
     // ==================== Stack Management ====================

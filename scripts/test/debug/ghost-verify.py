@@ -10,7 +10,7 @@ On a private image copy:
   boot 2: run /verify.sh — every path must be a directory and every file
           must carry the LAST written content (clean unmount durability).
 
-Usage: ghost-verify.py --kernel PATH [--tag NAME] [--smp 2] [--mem 1G]
+Usage: ghost-verify.py --kernel PATH [--tag NAME] [--smp 8] [--mem 1G]
 """
 import argparse
 import os
@@ -84,7 +84,7 @@ def main():
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--img-base", default="/home/william/Rux/test/rootfs.img")
     ap.add_argument("--tag", default="umount")
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="1G")
     args = ap.parse_args()
 

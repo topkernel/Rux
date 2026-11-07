@@ -11,7 +11,7 @@ Verdict discipline (x86_probe_boot.py family):
   timeout (no PASS line)               -> rc 3
 
 Usage:
-  ./exitwalk_boot.py [--smp 2] [--secs 30] [--mem 512M]
+  ./exitwalk_boot.py [--smp 8] [--secs 30] [--mem 512M]
       [--kernel bzImage] [--accel kvm|tcg] [--keep-img] [--show]
 
 Kernel forensics notes: FUT-STALE-TREE / PTLEDGER DOUBLE-FREE prints are

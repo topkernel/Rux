@@ -66,7 +66,7 @@ rm -f "$LOG"
     -accel tcg,thread=multi \
     -cpu max \
     -m 2G \
-    -smp 2 \
+    -smp 8 \
     -display none \
     -serial stdio \
     -snapshot \

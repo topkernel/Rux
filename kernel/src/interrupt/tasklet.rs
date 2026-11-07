@@ -112,27 +112,17 @@ impl TaskletStruct {
 // ============================================================================
 
 /// Per-CPU tasklet list head for normal priority (TASKLET_SOFTIRQ).
-static mut TASKLET_VEC: [ListHead; MAX_CPUS] = [
-    ListHead::new(), ListHead::new(),
-    ListHead::new(), ListHead::new(),
-];
+static mut TASKLET_VEC: [ListHead; MAX_CPUS] =
+    [const { ListHead::new() }; MAX_CPUS];
 
 /// Per-CPU tasklet list head for high priority (HI_SOFTIRQ).
-static mut TASKLET_HI_VEC: [ListHead; MAX_CPUS] = [
-    ListHead::new(), ListHead::new(),
-    ListHead::new(), ListHead::new(),
-];
+static mut TASKLET_HI_VEC: [ListHead; MAX_CPUS] =
+    [const { ListHead::new() }; MAX_CPUS];
 
 /// Per-CPU spinlocks protecting tasklet list manipulation.
-static TASKLET_LOCK: [Spinlock<()>; MAX_CPUS] = [
-    Spinlock::new(()), Spinlock::new(()),
-    Spinlock::new(()), Spinlock::new(()),
-];
+static TASKLET_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 
-static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [
-    Spinlock::new(()), Spinlock::new(()),
-    Spinlock::new(()), Spinlock::new(()),
-];
+static TASKLET_HI_LOCK: [Spinlock<()>; MAX_CPUS] = [const { Spinlock::new(()) }; MAX_CPUS];
 
 // ============================================================================
 // Scheduling

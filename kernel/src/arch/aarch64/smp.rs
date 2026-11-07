@@ -39,16 +39,11 @@ const _: () = assert!(
     "boot.S secondary_start assumes 64KB (0x10000) per-cpu boot stacks"
 );
 const _: () = assert!(
-    MAX_CPUS <= 4,
-    "boot.S secondary_start parks cpu indices >= 4 (MAX_CPUS must stay <= 4)"
+    MAX_CPUS <= 8,
+    "boot.S secondary_start parks cpu indices >= 8 (MAX_CPUS must stay <= 8)"
 );
 
-static CPU_STARTED: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-    AtomicU32::new(0),
-];
+static CPU_STARTED: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// Actual boot CPU ID, saved by init()
 static BOOT_CPU_ID: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -399,12 +394,7 @@ struct BootStack([u8; STACK_SIZE]);
 
 #[no_mangle]
 #[used]
-pub static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-    BootStack([0u8; STACK_SIZE]),
-];
+pub static SECONDARY_BOOT_STACKS: [BootStack; MAX_CPUS] = [const { BootStack([0u8; STACK_SIZE]) }; MAX_CPUS];
 
 /// Start secondary CPUs via PSCI CPU_ON.
 /// Must be called AFTER console + scheduler initialization.

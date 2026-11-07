@@ -7,7 +7,7 @@ from-walk / wake-eligibility probe as init and report the verdict.
   kernel panic             -> rc 2
   timeout                  -> rc 3
 
-Usage: ./binder4_boot.py [--smp 2] [--timeout 120] [--kernel bzImage]
+Usage: ./binder4_boot.py [--smp 8] [--timeout 120] [--kernel bzImage]
 """
 import argparse
 import os
@@ -53,7 +53,7 @@ def build_image(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--mem", default="1G")
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)

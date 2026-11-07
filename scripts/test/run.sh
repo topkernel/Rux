@@ -66,11 +66,11 @@ FEATURES_FILE="target/.build_features.${PLATFORM}"
 ensure_aarch64_dtb() {
     local DTB="kernel/src/arch/aarch64/virt.dtb"
     [ -f "$DTB" ] && return 0
-    echo "Generating $DTB (QEMU virt dumpdtb, gic-version=3, -cpu cortex-a72 -m 1G -smp 2)..."
+    echo "Generating $DTB (QEMU virt dumpdtb, gic-version=3, -cpu cortex-a72 -m 1G -smp 8)..."
     # gic-version=3 is REQUIRED: the kernel's GIC driver and build.rs's
     # own regeneration are v3 (a plain -M virt dump describes GICv2 and
     # would mismatch the machine the test boot starts).
-    qemu-system-aarch64 -M virt,gic-version=3,dumpdtb="$DTB" -cpu cortex-a72 -m 1G -smp 2 >/dev/null 2>&1
+    qemu-system-aarch64 -M virt,gic-version=3,dumpdtb="$DTB" -cpu cortex-a72 -m 1G -smp 8 >/dev/null 2>&1
     if [ ! -s "$DTB" ]; then
         echo "run.sh: failed to dump the aarch64 virt DTB (is qemu-system-aarch64 installed?)" >&2
         rm -f "$DTB"
@@ -181,7 +181,7 @@ main() {
             # aarch64 test boot: QEMU virt, PL011 serial, PSCI SMP.
             # The ELF kernel carries its own DTB (embedded at build
             # time), so no -dtb/-append here. Resource discipline:
-            # -smp 2 -m 1G and a snapshot+unlocked rootfs drive (the
+            # -smp 8 -m 1G and a snapshot+unlocked rootfs drive (the
             # ext4 tests read it; userspace binaries inside are data).
             echo "Starting QEMU (aarch64 virt gic-v3, 2 cores, unit tests, timeout=${TIMEOUT_SECS}s)..."
             timeout --signal=TERM --kill-after=30 "$TIMEOUT_SECS" \
@@ -190,7 +190,7 @@ main() {
                 -cpu cortex-a72 \
                 -accel tcg,thread=multi \
                 -m 1G \
-                -smp 2 \
+                -smp 8 \
                 -nographic \
                 -no-reboot \
                 -drive file=${ROOTFS_IMG:-test/rootfs.img},if=none,id=rootfs,format=raw,file.locking=off,snapshot=on \

@@ -60,7 +60,7 @@ dd if="$FSIMG" of="$IMG" conv=notrunc status=none || x86_result FAIL "image layo
 rm -f "$LOG"
 sleep "$LEG_TIMECAP" | timeout "$LEG_TIMECAP" qemu-system-x86_64 \
     -M q35 -accel "$LEG_ACCEL" -cpu max \
-    -m "$LEG_MEM_MB" -smp 2 -display none -serial stdio \
+    -m "$LEG_MEM_MB" -smp 8 -display none -serial stdio \
     -snapshot \
     -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,drive=rootfs \

@@ -16,7 +16,7 @@ boot() { # kernel case log
     # serial log for the marker (or a self-exit) and kill our own QEMU
     # instead of burning the full timeout: ~90s per boot vs 280s.
     qemu-system-x86_64 -M q35 -accel kvm -cpu host \
-        -m 2G -smp 2 -display none -vga none -serial "file:$3" -monitor none \
+        -m 2G -smp 8 -display none -vga none -serial "file:$3" -monitor none \
         -kernel "$1" \
         -append "root=/dev/vda rw init=/test/lmbench_run lmbench=$(echo "$2" | tr ' ' ',') console=ttyS0 budget=120 ${EXTRA_CMD:-}" \
         -drive file="$IMG",if=none,id=rootfs,format=raw,snapshot=on,file.locking=off \

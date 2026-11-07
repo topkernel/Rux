@@ -94,7 +94,7 @@ PYEOF
 WATCHER=$!
 
 timeout "$BUDGET" qemu-system-x86_64 -M q35 -accel kvm -cpu max \
-  -m 2G -smp 2 -display none -serial stdio -monitor unix:"$MON",server,nowait \
+  -m 2G -smp 8 -display none -serial stdio -monitor unix:"$MON",server,nowait \
   -no-reboot -snapshot \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,drive=rootfs \

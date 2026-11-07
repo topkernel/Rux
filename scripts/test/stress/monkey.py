@@ -21,7 +21,7 @@ Discipline (from repo convention, CLAUDE.md):
 Usage:
   monkey.py --kernel target/riscv64gc-unknown-none-elf/debug/rux \
             --rootfs test/rootfs.img --instances 16 --minutes 10 \
-            [--seed 0] [--smp 2] [--mem 1G] [--arch riscv64|x86_64] \
+            [--seed 0] [--smp 8] [--mem 1G] [--arch riscv64|x86_64] \
             [--out test/stress/runs/<tag>]
 """
 import argparse
@@ -201,7 +201,7 @@ def main():
     ap.add_argument("--minutes", type=float, default=10)
     ap.add_argument("--cmds", type=int, default=120)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="1G")
     ap.add_argument("--arch", default="riscv64", choices=["riscv64", "x86_64"])
     ap.add_argument("--stall-sec", type=float, default=180)

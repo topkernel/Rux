@@ -48,7 +48,7 @@ rm -f "$IMG"
 rm -f "$LOG"
 sleep "$LEG_TIMECAP" | timeout "$LEG_TIMECAP" qemu-system-x86_64 \
     -M q35 -accel tcg,thread=multi -cpu max \
-    -m 2G -smp 2 -display none -serial stdio \
+    -m 2G -smp 8 -display none -serial stdio \
     -snapshot \
     -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,drive=rootfs \

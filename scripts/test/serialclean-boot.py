@@ -6,7 +6,7 @@ sequence (ls /proc, cat /proc/loadavg, sync) and captures the serial log,
 so the structured boot table and the /proc pid listing can be audited
 without an interactive console.
 
-Host-discipline: -smp 2 -m 1G, -snapshot + file.locking=off on the shared
+Host-discipline: -smp 8 -m 1G, -snapshot + file.locking=off on the shared
 rootfs image; only the QEMU process started here is terminated.
 
 Environment:

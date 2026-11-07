@@ -16,7 +16,7 @@
 #   * the FINAL line is exactly "PROBE-RESULT: PASS|FAIL|SKIP <detail>"
 #   * exit code 0 = pass, 1 = fail, 3 = skipped (prerequisite missing)
 #   * a guest-side panic line in the log always fails the leg
-#   * -snapshot + file.locking=off, -smp 2 -m 1G, self-timeout
+#   * -snapshot + file.locking=off, -smp 8 -m 1G, self-timeout
 #
 # Environment overrides:
 #   LEG_KERNEL   kernel ELF (default the built riscv64 one)
@@ -93,7 +93,7 @@ leg_build_free() {
 }
 
 leg_qemu_riscv_flags() {  # echoed: the standard machine flags
-    echo "-M virt -accel tcg,thread=$LEG_TC -cpu rv64,zbb=true,zba=true,zbs=true -m 1G -smp 2 -display none -serial stdio -snapshot"
+    echo "-M virt -accel tcg,thread=$LEG_TC -cpu rv64,zbb=true,zba=true,zbs=true -m 1G -smp 8 -display none -serial stdio -snapshot"
 }
 
 # ---- shape 1: python boot driver ---------------------------------------

@@ -19,10 +19,8 @@ static mut KSOFTIRQD_TASK: [*mut crate::process::task::Task; MAX_CPUS] =
     [core::ptr::null_mut(); MAX_CPUS];
 
 /// Per-CPU wake flag. Set by `wakeup_ksoftirqd()`, checked by ksoftirqd loop.
-static KSOFTIRQD_WAKE: [AtomicBool; MAX_CPUS] = [
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-];
+static KSOFTIRQD_WAKE: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
 
 // ============================================================================
 // ksoftirqd thread function

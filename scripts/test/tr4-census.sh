@@ -25,7 +25,7 @@ boot() {
     {
         sleep 3
     } | timeout "$DUR" qemu-system-x86_64 \
-        -M q35 -accel kvm -cpu max -m 4G -smp 2 \
+        -M q35 -accel kvm -cpu max -m 4G -smp 8 \
         -display none -serial stdio -snapshot \
         -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \

@@ -42,7 +42,7 @@ debugfs -w -f "$DBFS" "$IMAGE" 2>&1 | grep -v "^debugfs" | head -2
 rm -f "$TMP" "$DBFS"
 
 timeout "$TIMEOUT" qemu-system-x86_64 -M q35 -accel "$ACCEL" -cpu max \
-  -m 2G -smp 2 -display none -serial stdio -monitor none -no-reboot -snapshot \
+  -m 2G -smp 8 -display none -serial stdio -monitor none -no-reboot -snapshot \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,drive=rootfs \
   -kernel "$KERNEL" \

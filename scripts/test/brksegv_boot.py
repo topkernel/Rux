@@ -14,7 +14,7 @@ Verdict discipline (exitwalk_boot.py family):
   timeout (no CHURN-DONE line)              -> rc 3
 
 Usage:
-  ./brksegv_boot.py [--smp 2] [--secs 60] [--mem 512M]
+  ./brksegv_boot.py [--smp 8] [--secs 60] [--mem 512M]
       [--kernel bzImage] [--accel kvm|tcg]
 """
 import argparse

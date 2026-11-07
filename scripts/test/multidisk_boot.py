@@ -133,7 +133,7 @@ def boot(root, img_a, img_b, args, log):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="single", choices=["multi", "single"])
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--mem", default="1G")

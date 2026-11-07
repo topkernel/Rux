@@ -45,7 +45,7 @@ DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")
 RAMDISK="$IMGDIR/ramdisk-x64.img"
 [ -f "$RAMDISK" ] || RAMDISK="$IMGDIR/ramdisk.img"
 
-SMPN="${SMP:-2}"
+SMPN="${SMP:-8}"
 ACCEL_ARGS="${ACCEL:-kvm}"
 
 # shellcheck disable=SC2086

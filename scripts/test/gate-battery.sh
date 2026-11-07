@@ -28,7 +28,7 @@ echo "ab-pf done $(date +%H:%M:%S)" >> "$LOG"
 # 2. mmprof attribution boot (backwin, one boot)
 if quiet; then
     timeout 150 qemu-system-x86_64 -M q35 -accel kvm -cpu host \
-        -m 2G -smp 2 -display none -vga none -serial file:/tmp/pf-mmprof.log -monitor none \
+        -m 2G -smp 8 -display none -vga none -serial file:/tmp/pf-mmprof.log -monitor none \
         -kernel "$WT/work/bzImage-lm-backwin" \
         -append "root=/dev/vda rw init=/test/lmbench_run lmbench=lat_pagefault,/tmp/lmbench.file console=ttyS0 budget=60 mmprof=1" \
         -drive file="$WT/work/lmbench-x86.img",if=none,id=rootfs,format=raw,snapshot=on,file.locking=off \

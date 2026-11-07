@@ -39,7 +39,7 @@ mkdir -p "$ROOT/run"; rm -f "$LOG"
 } | timeout "$TIMEOUT" qemu-system-riscv64 \
     -M virt -accel tcg,thread=single \
     -cpu rv64,zbb=true,zba=true,zbs=true \
-    -m 1G -smp 2 -display none -serial stdio -snapshot \
+    -m 1G -smp 8 -display none -serial stdio -snapshot \
     -drive file="$IMG",if=none,id=rootfs,format=raw,file.locking=off \
     -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
     -kernel "$KERNEL" \

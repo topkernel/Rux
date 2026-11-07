@@ -11,7 +11,7 @@ SECS=${2:-150}
 IMG=/home/william/rux-agents/ltp-scan/.ltp/ltp2.img
 rm -f $R/ser-$TAG.sock $R/serial-$TAG.log
 setsid /usr/local/bin/qemu-system-riscv64 -M virt -accel tcg,thread=single -cpu rv64 \
-  -m 1G -smp 2 -snapshot -display none \
+  -m 1G -smp 8 -snapshot -display none \
   -serial unix:$R/ser-$TAG.sock,server,nowait -monitor none \
   -drive file=$IMG,if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,disable-legacy=on,drive=rootfs \

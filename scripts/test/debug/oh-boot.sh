@@ -72,7 +72,7 @@ RAMDISK="$IMGDIR/ramdisk-x64.img"
 # no steal/harvest path on one CPU; display bring-up runs SMP=1.
 GDBARGS=""
 [ "${GDB:-0}" = "1" ] && GDBARGS="-s"
-SMPN="${SMP:-2}"
+SMPN="${SMP:-8}"
 
 # shellcheck disable=SC2086
 exec qemu-system-x86_64 \

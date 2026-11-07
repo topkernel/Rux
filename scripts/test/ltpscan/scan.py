@@ -167,7 +167,7 @@ def main():
     ap.add_argument("--chunk", type=int, default=100)
     ap.add_argument("--qemu-timeout", type=int, default=4200)
     ap.add_argument("--attempts", type=int, default=5)
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--keep-logs", help="directory to keep per-chunk serial logs")
     args = ap.parse_args()

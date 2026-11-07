@@ -12,7 +12,7 @@ the verdict:
   probe error                             -> rc 1
 
 Usage:
-  ./oomchurn_boot.py [--smp 2] [--thread multi|single] [--mem 2G]
+  ./oomchurn_boot.py [--smp 8] [--thread multi|single] [--mem 2G]
       [--secs 600] [--mode anon] [--mb 1200] [--fork-n 8] [--rounds 4]
       [--kernel ELF] [--extra-append "debug=memwatch"] [--keep-img]
 """
@@ -111,7 +111,7 @@ def build_image(img, args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="multi", choices=["multi", "single"])
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--secs", type=int, default=600)

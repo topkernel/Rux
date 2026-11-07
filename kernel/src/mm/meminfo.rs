@@ -55,7 +55,7 @@ pub struct MemoryInfo {
     // ========== Per-CPU Pages ==========
     /// PCP page count for each CPU — frames cached in that CPU's
     /// per-CPU pageset (mm/pcp.rs); counted free by zone.free_pages.
-    pub pcp_pages: [usize; 4],
+    pub pcp_pages: [usize; crate::config::MAX_CPUS],
 
     // ========== Page Descriptor Statistics ==========
     /// Free page count
@@ -87,7 +87,7 @@ impl Default for MemoryInfo {
             slab_pages: 0,
             slab_allocs: 0,
             slab_frees: 0,
-            pcp_pages: [0; 4],
+            pcp_pages: [0; crate::config::MAX_CPUS],
             pages_free: 0,
             pages_used: 0,
             pages_reserved: 0,
@@ -127,9 +127,14 @@ impl<'a> core::fmt::Display for MemoryInfoFormatter<'a> {
         writeln!(f, "  SlabAllocs:     {:>10}", self.info.slab_allocs)?;
         writeln!(f, "  SlabFrees:      {:>10}", self.info.slab_frees)?;
         writeln!(f)?;
-        writeln!(f, "  PCP Pages:      CPU0={} CPU1={} CPU2={} CPU3={}",
-            self.info.pcp_pages[0], self.info.pcp_pages[1],
-            self.info.pcp_pages[2], self.info.pcp_pages[3])?;
+        // One column per CPU (MAX_CPUS grew 4 -> 8 for the SMP>=8 boot
+        // policy); the old fixed CPU0..CPU3 print would hide half the
+        // per-CPU page caches.
+        write!(f, "  PCP Pages:      ")?;
+        for (c, pages) in self.info.pcp_pages.iter().enumerate() {
+            write!(f, "CPU{}={} ", c, pages)?;
+        }
+        writeln!(f)?;
         writeln!(f)?;
         writeln!(f, "  PagesFree:      {:>10}", self.info.pages_free)?;
         writeln!(f, "  PagesUsed:      {:>10}", self.info.pages_used)?;

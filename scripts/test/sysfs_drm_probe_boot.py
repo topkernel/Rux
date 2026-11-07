@@ -16,7 +16,7 @@ verified.
   timeout                       -> rc 3
 
 Usage:
-  ./sysfs_drm_probe_boot.py [--timeout 240] [--smp 1] [--mem 2G]
+  ./sysfs_drm_probe_boot.py [--timeout 240] [--smp 8] [--mem 2G]
 """
 import argparse
 import os
@@ -89,7 +89,7 @@ def mon_cmd(sock_path, cmd):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=240)
-    ap.add_argument("--smp", type=int, default=1)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--shot", default=os.path.join(WORK, "sysfs_drm_probe_shot.ppm"))
     args = ap.parse_args()

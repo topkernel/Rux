@@ -51,7 +51,7 @@ debugfs -w -f "$DBFS" "$IMAGE" 2>&1 | grep -v "^debugfs" | head -2
 rm -f "$TMP" "$DBFS"
 
 timeout "$TIMEOUT" qemu-system-riscv64 -M virt -accel tcg,thread=single \
-  -cpu rv64,zbb=true,zba=true,zbs=true -m 2G -smp 2 -nographic $SNAP_ARGS \
+  -cpu rv64,zbb=true,zba=true,zbs=true -m 2G -smp 8 -nographic $SNAP_ARGS \
   -serial mon:stdio \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,disable-legacy=on,drive=rootfs \

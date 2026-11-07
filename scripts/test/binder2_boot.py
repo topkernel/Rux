@@ -7,7 +7,7 @@ probe as init and report the verdict.
   B2 PROBE RESULT: TIMEOUT  -> rc 1
   kernel panic             -> rc 2
 
-Usage: ./binder2_boot.py [--smp 2] [--timeout 240] [--kernel ELF]
+Usage: ./binder2_boot.py [--smp 8] [--timeout 240] [--kernel ELF]
 """
 import argparse
 import os
@@ -53,7 +53,7 @@ def build_image(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=2)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="multi", choices=["multi", "single"])
     ap.add_argument("--timeout", type=int, default=240)
     ap.add_argument("--mem", default="1G")

@@ -347,7 +347,7 @@ def run_boot(idx, args, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=2)
-    ap.add_argument("--smp", type=int, default=1)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--kernel")
     ap.add_argument("--img")
     ap.add_argument("--outdir", default=os.path.join(WT, "work", "verify"))

@@ -28,7 +28,7 @@ if [ "$ARCH" = "x86_64" ]; then
     QEMU=qemu-system-x86_64
     KERNEL="$PROJECT_ROOT/target/x86_64-unknown-none/debug/bzImage"
     LOG="$SCRIPT_DIR/boot-x86_64.log"
-    QARGS=(-M q35 -m 2G -smp 2 -accel tcg,thread=single -cpu max
+    QARGS=(-M q35 -m 2G -smp 8 -accel tcg,thread=single -cpu max
            -nographic -serial stdio -monitor none
            -kernel "$KERNEL")
     CMDLINE="root=/dev/ram0 rw init=/heapwatch console=ttyS0"
@@ -40,7 +40,7 @@ else
     LOG="$SCRIPT_DIR/boot.log"
     QARGS=(-M virt -accel tcg,thread=single
            -cpu rv64,zbb=true,zba=true,zbs=true
-           -m 1G -smp 2 -nographic -serial stdio -monitor none
+           -m 1G -smp 8 -nographic -serial stdio -monitor none
            -kernel "$KERNEL")
     CMDLINE="root=/dev/ram0 rw init=/heapwatch console=ttyS0,115200"
     INITRD="$SCRIPT_DIR/initrd-hw.cpio.gz"

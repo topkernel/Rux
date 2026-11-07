@@ -12,7 +12,7 @@ The x86_64 mirror of vma_storm_boot.py: same verdict discipline.
   timeout                    -> rc 3
 
 Usage:
-  ./x86_probe_boot.py writestorm|gwp_churn [--smp 2] [--secs 30]
+  ./x86_probe_boot.py writestorm|gwp_churn [--smp 8] [--secs 30]
       [--mem 512M] [--kernel bzImage] [--keep-img] [--show]
 """
 import argparse

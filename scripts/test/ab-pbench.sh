@@ -18,7 +18,7 @@ for rep in $(seq 1 "$REPS"); do
         # --mem 2G: 1G is a known panic (early kernel-heap alloc,
         # see pbench_boot.py's own default note).
         python3 "$WT/scripts/test/pbench_boot.py" --bzimage "$k" --tag "abpb-$lbl-$rep" \
-            --accel kvm --smp 2 --mem 2G >> "$OUT" 2>&1
+            --accel kvm --smp 8 --mem 2G >> "$OUT" 2>&1
         echo "===END $lbl rep$rep rc=$?" >> "$OUT"
     done
 done
