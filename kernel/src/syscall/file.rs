@@ -6324,12 +6324,13 @@ pub fn sys_futex_wait(args: SyscallArgs) -> i64 {
         },
     );
 
-    // Relative timeout → absolute jiffies deadline (futex_wait_bitset takes
-    // an absolute deadline). NULL timeout = wait forever.
+    // Relative timeout → absolute monotonic-ns deadline (63rd: ns-exact
+    // hres wake, reference hrtimer parity — see futex_parse_timeout_ns).
+    // NULL timeout = wait forever.
     let deadline: Option<u64> = if args[4] == 0 {
         None
     } else {
-        match crate::sync::futex::futex_parse_timeout(args[4], false) {
+        match crate::sync::futex::futex_parse_timeout_ns(args[4], false, false) {
             Ok(dl) => dl,
             Err(e) => return -(e as i64),
         }

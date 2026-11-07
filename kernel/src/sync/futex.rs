@@ -2258,6 +2258,10 @@ pub fn futex_stuck_census() {
     // ohc74 close() strand class: linked, claim=-1, unexecuted 290 s).
     crate::sched::sched::runq_strand_census(now as u64);
 
+    // 63rd session (mission lever 2): the FFRT group's wake→pick
+    // latency profile per burst — quiet-phase vs wedge-phase cost.
+    crate::sched::sched::ffrt_wait_census();
+
     // lb343: 3 s bar (was 10 s). The OH boot cascade's decisive parks are
     // 4-5 s class — init's param-service thread sat 5.06 s between
     // hdf_devmgr's ready-set (5.433s) and init's handle (10.496s, lb342),
@@ -4056,8 +4060,9 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         }
 
         // Deadline already passed while we were re-checking?
+        // 63rd: deadlines are absolute monotonic ns now (was: jiffies).
         if let Some(dl) = deadline {
-            if crate::drivers::timer::get_jiffies() >= dl {
+            if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
                 return -ETIMEDOUT as i64;
             }
         }
@@ -4167,23 +4172,36 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
         // wakeup timer when a deadline is set: nothing else would wake a
         // futex that is never signaled (pthread_cond_timedwait would hang).
         crate::arch::cpu::restore_irq(true);
-        // arch-s5: typed one-shot guard (scoped wake for the timed
-        // wait). Drop below cancels the registration after schedule()
-        // returns — the old explicit del_timer, now unreachable to
-        // forget.
+        // 63rd: HIGH-RESOLUTION wake at the precise ns deadline — the
+        // jiffy-grid arm fired every sub-10 ms FFRT timed wait at the
+        // next 10 ms tick (reference hrtimer parity; same discipline as
+        // nanosleep/sigtimedwait). The jiffy value is wheel bookkeeping
+        // only (jiffies_covering_deadline ceils so the wheel entry never
+        // precedes the hres expiry); drop(wake) below deletes the timer
+        // after schedule() returns.
         let wake = deadline.map(|dl| {
-            crate::timer::WakeArmed::arm_jiffy(dl, crate::sched::get_current_pid())
+            let id = crate::timer::add_timer_wakeup_hres(
+                crate::syscall::misc::jiffies_covering_deadline(dl),
+                crate::syscall::misc::deadline_ns_to_hres_ticks(dl),
+                crate::sched::get_current_pid(),
+            );
+            crate::drivers::timer::rearm_for_hres();
+            id
         });
         // R32 (NEW-3): if a deadline was requested but the timer pool is
-        // exhausted (arm → None), schedule() below would sleep
+        // exhausted (arm → 0), schedule() below would sleep
         // FOREVER — nothing else wakes an un-signaled futex, so the timed
         // wait degenerated into an untimed hang. Unlink and fail instead.
-        if deadline.is_some() && wake.is_none() {
+        if deadline.is_some() && wake == Some(0) {
             remove_waiter(bucket_idx, waiter_idx);
             return -ENOMEM as i64;
         }
         crate::sched::schedule();
-        drop(wake);
+        if let Some(id) = wake {
+            if id != 0 {
+                crate::timer::del_timer(id);
+            }
+        }
         #[cfg(feature = "dfx-futex-trace")]
         ftx_trace(b"WAIT-RET", uaddr, val as u64, 0);
 
@@ -4235,8 +4253,9 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
                     // Timeout semantics (review 2R.9): if we were not woken and
                     // the deadline has passed, this is a genuine ETIMEDOUT —
                     // returning success here broke every timed waiter.
+                    // 63rd: absolute monotonic-ns deadlines.
                     if let Some(dl) = deadline {
-                        if crate::drivers::timer::get_jiffies() >= dl {
+                        if crate::drivers::timer::monotonic_ns_since_boot() >= dl {
                             return -ETIMEDOUT as i64;
                         }
                     }
@@ -4491,8 +4510,31 @@ pub fn futex_wait_bitset(uaddr: usize, flags: u32, val: u32, _timeout: u64, bits
 /// offset. Plain FUTEX_WAIT passes a relative duration (round 6 MED: was
 /// always relative, so every pthread_cond_timedwait fired instantly or
 /// never).
-pub fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Result<Option<u64>, i32> {
-    use crate::drivers::timer::{get_jiffies, HZ};
+/// Parse a futex timeout into an ABSOLUTE monotonic-ns deadline.
+///
+/// 63rd session (strand-wall/wedge hunt): the old conversion quantized
+/// every timed futex wait onto the jiffy grid (HZ=100 → 10 ms) —
+/// `(nsec*HZ)/1e9` TRUNCATED and a `.max(1)` floor made every sub-10 ms
+/// FFRT timed wait (SerialQueue::Pull's cond_.wait_for(delay),
+/// musl cv timeouts) fire at exactly the next 10 ms tick, and waits of
+/// 10-20 ms could fire a full grid step EARLY. The reference arms
+/// futex timeouts on hrtimers (ns resolution, never early); musl in
+/// the OH image parks cv waiters via plain relative FUTEX_WAIT (op
+ /// 0x80 in every FUX-STUCK row), so this path carries EVERY timed
+/// pthread synchronization edge. Timed waits now convert exactly:
+/// relative = now_ns + spec_ns (ns-exact, never early); WAIT_BITSET
+/// keeps Linux's CLOCK_MONOTONIC-absolute default (the value is
+/// boot-relative ns — same timebase as monotonic_ns_since_boot), and
+/// FUTEX_CLOCK_REALTIME absolute values are rebased through the wall
+/// epoch offset (the old jiffy arithmetic compared 1970-epoch seconds
+/// against boot jiffies — a 2026-epoch deadline read as ~365 days of
+/// monotonic wait and never expired; the ohw30 census caught exactly
+/// that shape, fto=31535994s).
+pub fn futex_parse_timeout_ns(
+    timeout_ptr: u64,
+    absolute: bool,
+    clock_realtime: bool,
+) -> Result<Option<u64>, i32> {
     if timeout_ptr == 0 {
         return Ok(None);
     }
@@ -4514,14 +4556,28 @@ pub fn futex_parse_timeout(timeout_ptr: u64, absolute: bool) -> Result<Option<u6
     if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
         return Err(EINVAL);
     }
-    let jiffies = (sec as u64).saturating_mul(HZ)
-        .saturating_add((nsec as u64 * HZ) / 1_000_000_000);
-    if absolute {
-        // Absolute CLOCK_REALTIME value; if already past, the min-1 clamp
-        // arms an immediately-expiring timer → ETIMEDOUT on wake check.
-        Ok(Some(jiffies.max(1)))
+    let spec_ns = (sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    if !absolute {
+        // Relative (FUTEX_WAIT, futex(2) WAIT): Linux futex_init_timeout
+        // adds ktime_get() regardless of FUTEX_CLOCK_REALTIME.
+        return Ok(Some(
+            crate::drivers::timer::monotonic_ns_since_boot().saturating_add(spec_ns),
+        ));
+    }
+    if clock_realtime {
+        // WAIT_BITSET + FUTEX_CLOCK_REALTIME: absolute against the
+        // realtime clock — rebase onto the monotonic timebase the wake
+        // timers use. A deadline already in the past saturates to 0 and
+        // expires on the next check (Linux returns ETIMEDOUT promptly).
+        let wall = crate::syscall::time::wall_epoch_offset_ns() as u128;
+        let spec = spec_ns as u128;
+        Ok(Some(spec.saturating_sub(wall) as u64))
     } else {
-        Ok(Some(get_jiffies().saturating_add(jiffies.max(1))))
+        // WAIT_BITSET default: absolute CLOCK_MONOTONIC — the timespec
+        // is already boot-relative ns.
+        Ok(Some(spec_ns))
     }
 }
 
@@ -5290,7 +5346,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             // FUTEX_CLOCK_REALTIME set (Linux futex_init_timeout adds
             // ktime_get() for cmd == FUTEX_WAIT regardless of the flag);
             // only WAIT_BITSET interprets it absolutely.
-            match futex_parse_timeout(_timeout, false) {
+            match futex_parse_timeout_ns(_timeout, false, false) {
                 Ok(dl) => futex_wait_timeout(uaddr, flags, val, FUTEX_BITSET_MATCH_ANY, dl),
                 Err(e) => -(e as i64),
             }
@@ -5299,8 +5355,9 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
             futex_wake(uaddr, flags, val as i32, FUTEX_BITSET_MATCH_ANY)
         }
         FUTEX_WAIT_BITSET => {
-            // WAIT_BITSET always interprets timeout as absolute time.
-            match futex_parse_timeout(_timeout, true) {
+            // WAIT_BITSET always interprets timeout as absolute time
+            // (CLOCK_MONOTONIC base; FUTEX_CLOCK_REALTIME rebases it).
+            match futex_parse_timeout_ns(_timeout, true, (flags & FLAGS_CLOCKRT) != 0) {
                 Ok(dl) => futex_wait_bitset(uaddr, flags, val, _timeout, val3, dl),
                 Err(e) => -(e as i64),
             }
