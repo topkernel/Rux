@@ -5588,6 +5588,15 @@ pub fn scheduler_tick() {
     // r12 wake/halt hunt: tick-path GRQ sampler (forkprof-armed boots
     // only; one relaxed armed-check when off).
     crate::debug::forkprof::tick_grq_sample();
+    // (r14) Grace-period-correct call_rcu: retry the callback drain
+    // once per tick while a batch awaits its grace period, so a
+    // completed grace is noticed within a tick even on an otherwise
+    // quiet system (one relaxed load while zero).
+    if crate::sync::rcu::cbs_pending() {
+        crate::interrupt::softirq::raise_softirq(
+            crate::interrupt::softirq::SoftirqIndex::Rcu as usize,
+        );
+    }
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // PSI (/proc/pressure): sample the stall conditions once per
