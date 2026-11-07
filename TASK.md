@@ -7816,3 +7816,8 @@ wake. The kernel-side futex wake path stays clean (consistent with the
 Final tally: 1/5 appfwk.ready this session (ohw64 passes; ohw61 early
 crawl = variance, not reproduced by ohw62 same binary). Commits:
 9ad98c28 + MISS0/owner-deep follow-up + docs. No stray QEMUs.
+
+Gate note (final tree): the follow-up commit (6da52cf4) re-ran the full
+gate set — x86_64 build rc=0, riscv64 build rc=0 (run/build-rv-67b.log)
++ make test 1319/1319 (run/test-rv-67b.log), aarch64 build rc=0
+(run/build-a64-67b.log). Branch pushed at 2 commits past the 66th.
