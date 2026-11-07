@@ -31,7 +31,17 @@ import sys
 import threading
 import time
 
-WT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Repo root: walk up to the Cargo.toml+kernel marker (move-immune —
+# the fixed dirname count pointed at scripts/ after the scripts/test
+# relocation, and the image path resolved to scripts/work/...).
+_d = os.path.dirname(os.path.abspath(__file__))
+while _d != os.path.dirname(_d):
+    if os.path.isfile(os.path.join(_d, "Cargo.toml")) and os.path.isdir(
+        os.path.join(_d, "kernel")
+    ):
+        break
+    _d = os.path.dirname(_d)
+WT = _d
 
 p = argparse.ArgumentParser()
 p.add_argument("--tag", default="run")
@@ -44,7 +54,11 @@ p.add_argument("--smp", default="8")
 p.add_argument("--cpu", default="Haswell")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=20)
+p.add_argument("--accel", default="kvm",
+               help="KVM is the primary test rig (x86 host); 'tcg,thread=single' "
+                    "for the deterministic TCG campaign")
 args = p.parse_args()
+ACCEL = args.accel
 
 OUT = os.path.join(WT, "runs", f"gnome-x86-{args.tag}")
 os.makedirs(OUT, exist_ok=True)
@@ -58,7 +72,7 @@ append = f"root=/dev/vda rw init={args.init} console=ttyS0 {args.extra_append}".
 qemu_cmd = [
     "qemu-system-x86_64",
     "-M", "q35", "-m", args.mem, "-smp", args.smp,
-    "-accel", "tcg,thread=single",
+    "-accel", ACCEL,
     "-cpu", args.cpu,
     "-snapshot",
     "-display", "none",

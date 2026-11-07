@@ -41,3 +41,47 @@ belong to the §8.3 lost-wake family (bounded, not this face).
 
 **Next**: Tier-1/Tier-2 perf gate (mm is a guarded domain) once the
 host frees capacity; push `c127e4bc` once it passes.
+
+## Round 2 — 2026-11-08 ~03:00 (kernel 59f8d535, SMP 8)
+
+**User report**: "我还是看不到界面" — the session runs, the SDL window
+stays black.
+
+**What was established this round** (probes on the current kernel):
+
+1. The kernel display chain is INTACT: a guest probe writing a colour
+   pattern straight into /dev/fb0 shows up in the host screendump
+   (100% non-black; scripts/test/gnome-diag/fbpaint-boot.sh).
+2. mprotect semantics clean (middle-of-anon / two-span / middle-of-fb
+   patterns all pass — the 1f2f18cb-era ENOMEM bug is fixed on main).
+3. SysV shm cross-process sharing clean (50 rounds, both directions).
+4. AF_UNIX stream integrity clean (2000x8KB, checksums both ways).
+5. The live X server answers protocol requests (connection setup +
+   GetInputFocus round-trip via a hand-rolled client, /run/xprobe.c).
+6. Xorg runs with a SHADOW framebuffer ("FBDEV(0): using shadow
+   framebuffer") — rendering goes to a shadow copy; only dirty regions
+   reach the real fb.
+7. gnome-shell at idle is HEALTHY (main thread clock_nanosleep, workers
+   in futex cond-wait) — it is not the park face.
+
+**Bisect** (image work/gnome-x86.img, screendump 99% = good):
+- good: 95778e17, 561db355, d7085761, 7c850d6d, 7791d772 (99% paint)
+- bad: 1d9c8b75, 39975867, 166e4516, current main (shell up, 0% paint)
+- Round-1 bisect named 1f2f18cb, but 4 of its "bad" verdicts were
+  boots where the SHELL NEVER STARTED (the known freeze face) — invalid
+  as paint verdicts. Honest window: **7791d772..1d9c8b75** (451
+  commits).
+- Round-2 bisect started with a validity rule (paint verdict counts
+  only when the shell started); first midpoint a8fae0b7 froze pre-shell
+  twice — inconclusive.
+
+**Open discriminator** (next round): the X-level paint test
+(/run/xfill.c — create a white window via raw X protocol; host
+screendump tells whether Xorg's render+shadow->fb copy works). It
+needs a session-started boot; this round's attempt hit the freeze
+face. Run it with the btest.sh retry discipline.
+
+**Next**: xfill with retries; then the valid-judgment bisect over
+7791d772..1d9c8b75. The freeze-before-shell face (1-in-5) also still
+needs its own capture — the taskdump from the patrol boot shows the
+check-accelerated chain wedged (the §8.3 family).

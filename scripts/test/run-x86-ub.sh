@@ -83,6 +83,11 @@ esac
 # Shared-discipline boot: -snapshot (writes go to a temp overlay) and
 # file.locking=off so concurrent agents can boot the same image.
 #
+# -vga none: q35 otherwise plants a default std-VGA alongside the
+# virtio-gpu, and the SDL window then shows the VGA text console (never
+# painted by the guest) instead of the virtio-gpu scanout — a black
+# window even though the desktop is running (the same device set the
+# gnome-x86 campaign driver used, and the same note in run-oh.sh).
 # virtio-gpu xres/yres pinned to 1280x800 — the pmode the riscv64 flow
 # probes (QEMU's default on `virt`), so both arches present the same
 # scanout to udesk. virtio-net-pci is claimed by the kernel's PCI net
@@ -101,6 +106,7 @@ exec "$QEMU" \
     -netdev user,id=net0 \
     -device virtio-net-pci,disable-legacy=on,netdev=net0 \
     -device virtio-gpu-pci,xres=1280,yres=800 \
+    -vga none \
     -device virtio-keyboard-pci,disable-legacy=on \
     -device virtio-tablet-pci,disable-legacy=on \
     -kernel "$BZIMAGE" \
