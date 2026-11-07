@@ -1,0 +1,301 @@
+
+OpenSBI v1.8
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 8
+Platform HART Protection    : pmp
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 407 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 151 KB
+Firmware Heap Offset        : 0x55000
+Firmware Heap Size          : 67 KB (total), 1 KB (reserved), 13 KB (used), 52 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1464 B (used), 2632 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : ipi,pmu,srst,sse,hsm,rfnc,fwft,time,base,legacy,dbcn,dbtr
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*,1*,2*,3*,4*,5*,6*,7*
+Domain0 Region00            : 0x0000000080000000-0x000000008003ffff M: (F,R,X) S/U: ()
+Domain0 Region01            : 0x0000000080040000-0x000000008007ffff M: (F,R,W) S/U: ()
+Domain0 Region02            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region03            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region04            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x00000000bfe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdch
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+[0mboot: static regions phys_end=0xc0000000 heap_region_end=0xc0000000 heap=0x81a00000+0x8000000 slab=0x89a00000+0x1000000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 128MB @ 0x81a00000     [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 1024 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x81a0   [ok]
+mm:               layout: heap=0x81a00000-0x89a000   [ok]
+mm:               262144 page descriptors (span 10   [ok]
+page_alloc: zone Normal span=262144 pages (1024 MB), seeded=210383 (821 MB), unmanaged-in-span=51761 (202 MB)
+mm:               zone allocator initialized (2621   [ok]
+memblock:         total 1024MB, available 821MB      [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+negmemo: off (cmdline negmemo param = None)
+fs:               tracefs mounted /sys/kernel/trac   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+driver:           vda virtio-blk 2621440 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             page built; mapping off            [done]
+security:         capability LSM initialized         [ok]
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+debug:            diagnostic subsystem               [ok]
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+affinity: 11 of 11 task(s) default mask -> 0xff
+smp:              8 CPUs online (boot hart 0)        [ok]
+cctx: off (cmdline cctx param = None)
+softirq:          ksoftirqd per-CPU threads          [ok]
+debug:            khungtaskd hung-task detector      [ok]
+fs: fdreapd retire reaper started
+fs:               fdreapd fd retire reaper           [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+PERCPU-SCRIBBLE-HEALED cpu=1 idle_slot=0
+SCHED-IRQOFF caller=kernel/src/mm/kswapd.rs:83 pid=300 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=304 pc=0x0
+driver:           evdev nodes (no input hw)          [done]
+driver:           no keyboard (headless)             [done]
+driver:           no pointer (headless)              [done]
+init:             ELF /bin/sh loaded                 [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=303 pc=0x0
+PARKWALK-ARMED
+WAKE-STRANDED pid=305 cpu=2 strand=2706ms policy=0 h0=(1/p0/0ms/pc=65537) h1=(0/p5/2698ms/pc=0) h2=(0/p5/0ms/pc=1) h3=(0/p5/0ms/pc=1) h4=(0/p5/0ms/pc=1) h5=(0/p5/0ms/pc=1) h6=(0/p5/0ms/pc=1) h7=(0/p5/0ms/pc=1) vr=0ms lead-lag=0ms visits=13570 tie=5 wtie=0
+
+SKIPHIST coll=1
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=305 pc=0x0
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=1301ms tick_age=701ms n=8 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=2703ms tick_age=2102ms n=8 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=4104ms tick_age=3503ms n=8 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WAKE-STRANDED pid=306 cpu=3 strand=6806ms policy=0 h0=(1/p0/0ms/pc=65537) h1=(0/p5/2698ms/pc=65537) h2=(0/p5/4099ms/pc=0) h3=(0/p5/0ms/pc=1) h4=(0/p5/0ms/pc=1) h5=(0/p5/0ms/pc=1) h6=(0/p5/0ms/pc=1) h7=(0/p5/0ms/pc=1) vr=0ms lead-lag=0ms visits=23051 tie=4 wtie=0
+
+SKIPHIST coll=1
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=306 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=307 pc=0x0
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=5305ms tick_age=4705ms n=8 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WAKE-STRANDED pid=308 cpu=5 strand=8006ms policy=0 h0=(1/p0/0ms/pc=65537) h1=(0/p5/2698ms/pc=65537) h2=(0/p5/4099ms/pc=65537) h3=(0/p5/9ms/pc=65537) h4=(0/p5/1189ms/pc=256) h5=(0/p5/0ms/pc=1) h6=(0/p5/0ms/pc=1) h7=(0/p5/0ms/pc=1) vr=0ms lead-lag=0ms visits=35149 tie=2 wtie=0
+
+SKIPHIST coll=1
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=308 pc=0x0
+WAKE-STRANDED pid=309 cpu=6 strand=8625ms policy=0 h0=(1/p0/0ms/pc=65537) h1=(0/p5/2698ms/pc=65537) h2=(0/p5/4099ms/pc=65537) h3=(0/p5/9ms/pc=65537) h4=(0/p5/1189ms/pc=65537) h5=(0/p5/619ms/pc=0) h6=(0/p5/0ms/pc=1) h7=(0/p5/0ms/pc=1) vr=0ms lead-lag=0ms visits=45984 tie=1 wtie=0
+
+SKIPHIST coll=1
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=309 pc=0x0
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=6515ms tick_age=5915ms n=8 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WAKE-STRANDED pid=310 cpu=7 strand=9226ms policy=0 h0=(1/p0/0ms/pc=65537) h1=(0/p5/2698ms/pc=65537) h2=(0/p5/4099ms/pc=65537) h3=(0/p5/9ms/pc=65537) h4=(0/p5/1189ms/pc=65537) h5=(0/p5/619ms/pc=65537) h6=(0/p5/599ms/pc=1) h7=(0/p5/0ms/pc=1) vr=0ms lead-lag=0ms visits=59956 tie=0 wtie=0
+
+SKIPHIST coll=1
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=310 pc=0x0
+open ENOENT: '/root/.mrsh_history' (pid 1)
+
+WAKE-HEAL-SKIP pid=1 why=c
+[1;32mroot[0m:[1;34m/[0m# cd /proc
+[1;32mroot[0m:[1;34m/proc[0m# pwd
+/proc
+[1;32mroot[0m:[1;34m/proc[0m# ls > /dev/null
+[1;32mroot[0m:[1;34m/proc[0m# i=0; while [ $i -lt 300 ]; do ls /proc >/dev/n ull; i=$((i+1)); done; echo LOOP-DONE
+LOOP-DONE
+[1;32mroot[0m:[1;34m/proc[0m# i=0; while [ $i -lt 3000 ]; do /bin/true; i=$( (i+1)); done; echo CHURN-DONE
+
+PREEMPT-UNDERFLOW pid=deadbeef count_was=c3c4c3c4 sub=00000001 (unpaired decrement clamped to 0) at kernel/src/sync/spinlock.rs:00000236
+SCHED-IRQOFF caller=kernel/src/arch/riscv64/trap.rs:679 pid=3735928559 pc=0x0
+R55-RESYNC-STALE tcpu_was=3284386755 home=2
+trap: KERNPANIC pfault badaddr=0x0000000000000310 epc=0xffffffff801a9172 ra=0xffffffff801a8f92 sp=0xffffffff81324310
+trap: stack: <rest past kernel stack top>
+trap: noctx pid=3735928559 preempt=0x0 in_intr=false aspace=false
+Unable to handle kernel NULL pointer dereference at virtual address 310
+Oops [#1]
+CPU: 2 PID: 3735928559 Comm: true Tainted: G      D        
+epc : ffffffff801a9172 ra : ffffffff801a8f92 sp : ffffffff81324310
+gp : 00000000000c5aec tp : ffffffd603c58000 t0 : 0000000000000000
+t1 : 0000000000040000 t2 : ffffffff80f01b88 s0 : ffffffff81324460
+s1 : ffffffff80effd88 a0 : 0000000000000010 a1 : 0000000000000007
+a2 : 0000000000081244 a3 : ffffffd603c59ff0 a4 : ffffffff80effd88
+a5 : ffffffffffffffff a6 : ffffffff80f01b88 a7 : 0000000000000000
+s2 : ffffffffffff9fff s3 : ffffffff80effd88 s4 : 000000000008ca17
+s5 : ffffffff8094b000 s6 : 0000000000000000 s7 : 000ffffffff80eff
+s8 : ffffffff80f01b88 s9 : ffffffff812dec30 s10: ffffffff812de438
+s11: ffffffff80f01d88 t3 : 000000000000147b t4 : 0000000000000064
+t5 : 0000000000000000 t6 : ffffffff81324310
+status: 0000000200000100 badaddr: 0000000000000310 cause: 000000000000000f
+Call Trace:
+  [<ffffffff801a29b6>] <alloc::collections::btree::node::BalancingContext<usize, rux::fs::vfs::MountBucket>>::do_merge::<<alloc::collections::btree::node::BalancingContext<usize, rux::fs::vfs::MountBucket>>::merge_tracking_child<alloc::alloc::Global>::{closure#0}, alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, usize, rux::fs::vfs::MountBucket, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::alloc::Global>+0x4a/0x39e (current)
+  [<ffffffff8003d38e>] <core::option::Option<u64>>::filter::<rux::process::fork::do_clone::{closure#3}>+0x2c/0x4a
+
+---[ end trace 0000000000 ]---
+trap: KERNPANIC re-entered during dump; halting
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1630ms tick_age=0ms n=1395 pid=0 pc=0x10001 rip=0xffffffff801a8568
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2649ms tick_age=10ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a8568
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=3832ms tick_age=1193ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a8568
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=5033ms tick_age=2394ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a8568
+WAKE-STRANDED pid=1 cpu=4 strand=4633ms policy=0 h0=(0/p5/27057ms/pc=0) h1=(0/p5/29868ms/pc=65537) h2=(0/p5/26569ms/pc=1) h3=(0/p5/23580ms/pc=0) h4=(1/p0/4640ms/pc=1) h5=(0/p5/17749ms/pc=1) h6=(0/p5/18449ms/pc=65537) h7=(0/p5/17859ms/pc=65537) vr=4640ms lead-lag=0ms visits=86777 tie=0 wtie=0
+
+SKIPHIST coll=1
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=6029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=10035ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a9190
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=11029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=12029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=14029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=16029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=17029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=20029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=22029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=26029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=27029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=28029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=29029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=30029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=31029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=32029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=33029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=34029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=35029ms tick_age=9ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=36029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=37029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=38029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+VW-WEDGE disk=0 used=381 last=380 lag=1 expected=381 unkicked=0 at_device=0 avail_shadow=381 irqs=217 walks=219 exits fp=0 cu=219 wm=0 budget=0 zero=8 last_lag_exit=2 softirq_pending=0x100/0x0
+
+=== debug TASK DUMP (vw-wedge) ===
+taskoff: ti_flags=0x0000000000000000 ti_kernel_sp=0x0000000000000008 ti_user_sp=0x0000000000000010 ti_cpu=0x0000000000000018 cpus_allowed=0x000000000000001c hung_task_since=0x0000000000000040 task_refcnt=0x0000000000000070 journal_handle=0x0000000000000078 ti_on_cpu=0x0000000000000080 running_on_cpu=0x0000000000000084 ti_pick_state=0x0000000000000088
+cpu slots: 0 0 0 0 4344 0 0 0
+grq: nr_running=0 cfs=0 rt=0 dl=0 cpu[pid/idle]: 0/b 0/b 0/b 0/b 4344/b 0/i 0/i 0/b
+task @0xffffffff80f13070 pid=0 tgid=0 state=RUNNING ti_cpu=7 on_cpu=0 claim=-1 pk=0 preempt=256 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=54150379700 policy=IDLE comm= lastsys=?
+task @0xffffffff80f10498 pid=0 tgid=0 state=RUNNING ti_cpu=6 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=54770215100 policy=IDLE comm= lastsys=?
+task @0xffffffff80f0d8c0 pid=0 tgid=0 state=RUNNING ti_cpu=5 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=55390020600 policy=IDLE comm= lastsys=?
+task @0xffffffff80f0ace8 pid=0 tgid=0 state=RUNNING ti_cpu=4 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=56574936200 policy=IDLE comm= lastsys=?
+task @0xffffffff80f08110 pid=0 tgid=0 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=56580219800 policy=IDLE comm= lastsys=?
+task @0xffffffff80f05538 pid=0 tgid=0 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=60670859200 policy=IDLE comm= lastsys=?
+task @0xffffffff80f02960 pid=0 tgid=0 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=63378761600 policy=IDLE comm= lastsys=?
+task @0xffffffff80effd88 pid=0 tgid=0 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=27057302000 policy=IDLE comm= lastsys=?
+task @0xffffffff8094b000 pid=1 tgid=1 state=INTERRUPTIBLE(sleep) ti_cpu=4 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=26257216500 policy=CFS comm=sh lastsys=?
+task @0xffffffd601a1c000 pid=300 tgid=300 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=1238700 policy=CFS comm=kswapd lastsys=?
+task @0xffffffd601a30000 pid=301 tgid=301 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=24695342200 policy=CFS comm=mmprofd lastsys=?
+task @0xffffffd601a38000 pid=302 tgid=302 state=INTERRUPTIBLE(sleep) ti_cpu=7 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=24793404600 policy=CFS comm=klogd lastsys=?
+task @0xffffffd601a3c000 pid=303 tgid=303 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000001 vruntime=52300 policy=CFS comm=ksoftirqd/0 lastsys=?
+task @0xffffffd601bc0000 pid=304 tgid=304 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000002 vruntime=107500 policy=CFS comm=ksoftirqd/1 lastsys=?
+task @0xffffffd601bc4000 pid=305 tgid=305 state=INTERRUPTIBLE(sleep) ti_cpu=2 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000004 vruntime=121700 policy=CFS comm=ksoftirqd/2 lastsys=?
+task @0xffffffd601bc8000 pid=306 tgid=306 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000008 vruntime=122800 policy=CFS comm=ksoftirqd/3 lastsys=?
+task @0xffffffd601bcc000 pid=307 tgid=307 state=INTERRUPTIBLE(sleep) ti_cpu=4 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000010 vruntime=98600 policy=CFS comm=ksoftirqd/? lastsys=?
+task @0xffffffd601bd0000 pid=308 tgid=308 state=INTERRUPTIBLE(sleep) ti_cpu=5 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000020 vruntime=124400 policy=CFS comm=ksoftirqd/? lastsys=?
+task @0xffffffd601bd4000 pid=309 tgid=309 state=INTERRUPTIBLE(sleep) ti_cpu=6 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000040 vruntime=123000 policy=CFS comm=ksoftirqd/? lastsys=?
+task @0xffffffd601bd8000 pid=310 tgid=310 state=INTERRUPTIBLE(sleep) ti_cpu=7 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000080 vruntime=138300 policy=CFS comm=ksoftirqd/? lastsys=?
+task @0xffffffd601bdc000 pid=311 tgid=311 state=INTERRUPTIBLE(sleep) ti_cpu=3 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=24696130300 policy=CFS comm=khungtaskd lastsys=?
+task @0xffffffd601ce0000 pid=312 tgid=312 state=UNINTERRUPTIBLE(dsleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=300500 policy=CFS comm=fdreapd lastsys=?
+task @0xffffffd603160000 pid=4344 tgid=4344 state=RUNNING ti_cpu=4 on_cpu=1 claim=4 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000000000ff vruntime=26255264900 policy=CFS comm=[ lastsys=?
+=== 23 tasks ===
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=40029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=41029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=42029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=43029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=44029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=45029ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=48059ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801aad76
+VW-WEDGE disk=0 used=382 last=381 lag=1 expected=382 unkicked=0 at_device=0 avail_shadow=382 irqs=217 walks=220 exits fp=0 cu=220 wm=0 budget=0 zero=8 last_lag_exit=2 softirq_pending=0x100/0x0
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=49109ms tick_age=20ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=50109ms tick_age=19ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=51109ms tick_age=19ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=52099ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=53099ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff80128e38
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=54099ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=57099ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=58443ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a8568
+VW-WEDGE disk=0 used=382 last=381 lag=1 expected=382 unkicked=0 at_device=0 avail_shadow=382 irqs=217 walks=220 exits fp=0 cu=220 wm=0 budget=0 zero=8 last_lag_exit=2 softirq_pending=0x100/0x100
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=59645ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801a8568
+WAKE-STRANDED pid=1 cpu=7 strand=1822ms policy=0 h0=(0/p5/27057ms/pc=0) h1=(0/p5/82668ms/pc=65537) h2=(0/p5/79949ms/pc=65537) h3=(0/p5/75873ms/pc=65537) h4=(0/p5/75869ms/pc=65537) h5=(0/p5/76479ms/pc=0) h6=(0/p5/75870ms/pc=0) h7=(1/p0/1842ms/pc=1) vr=1836ms lead-lag=0ms visits=40581 tie=0 wtie=0
+
+SKIPHIST coll=1
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=60645ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=63639ms tick_age=0ms n=1395 pid=0 pc=0x0 rip=0xffffffff801ad6b2

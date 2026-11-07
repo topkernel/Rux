@@ -1,0 +1,896 @@
+R[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ x86_64 | POSIX Compatible | v0.1.0 ]
+
+[0march: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+mm: x86_64 4-level page tables (building real PML4)
+mm: switched CR3 to real PML4 (phys 0x1288000), image 0xffffffff80200000-0xffffffff81400000
+mm: PCID off (no CPUID PCID/INVPCID)
+e820[0] 0x0-0x9fc00 usable=true
+e820[1] 0x9fc00-0xa0000 usable=false
+e820[2] 0xf0000-0x100000 usable=false
+e820[3] 0x100000-0x7ffdc000 usable=true
+e820[4] 0x7ffdc000-0x80000000 usable=false
+e820[5] 0xb0000000-0xc0000000 usable=false
+e820[6] 0xfed1c000-0xfed20000 usable=false
+e820[7] 0xfeffc000-0xff000000 usable=false
+e820[8] 0xfffc0000-0x100000000 usable=false
+e820[9] 0x100000000-0x180000000 usable=true
+e820[10] 0xfd00000000-0x10000000000 usable=false
+boot: static regions phys_end=0x180000000 heap_region_end=0x7ffdc000 heap=0x40000000+0x3d000000 slab=0x7d000000+0x1000000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 1024MB @ 0x40000000    [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             multiboot cmdline + e820 parsed    [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 4095 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x200000-0x400000   [ok]
+mm:               layout: heap=0x40000000-0x7d0000   [ok]
+page_desc: marked 524421 non-RAM hole pages Reserved (2048 MB)
+mm:               1572864 page descriptors (span 6   [ok]
+page_alloc: zone Normal span=1572864 pages (6144 MB), seeded=737658 (2881 MB), unmanaged-in-span=835206 (3262 MB)
+mm:               zone allocator initialized (1572   [ok]
+memblock:         total 4095MB, available 2881MB     [ok]
+mm:               device mappings created            [ok]
+hpet: TSC timekeeper promoted (tsc 4291949947 Hz, mult 10007030, 20ms window)
+timer:            HPET-calibrated TSC timekeeper (   [ok]
+irq:              irq_desc array initialized         [ok]
+timer:            TSC 4292 MHz, LAPIC 62 MHz (x2 A   [ok]
+TICKARM-RING va=0xffffffff81214600 phys=0x1214600 slots=16 stride=40
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+negmemo: off (cmdline negmemo param = None)
+fs:               tracefs mounted /sys/kernel/trac   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+virtio-pci: BAR 0xe0000000000+0x4000 -> ioremap arena 0xffff8b0000200000
+virtio-pci: INTx pin 1 routed to PIC line 10 (shared dispatch)
+driver:           vda virtio-blk 3530752 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [done]
+virtio-pci: BAR 0xe0000004000+0x4000 -> ioremap arena 0xffff8b0000600000
+virtio-pci: INTx pin 1 routed to PIC line 11 (shared dispatch)
+virtio-net-pci: eth0 up, MAC 52:54:00:12:34:56, queues rx0/tx1 depth 32
+driver:           virtio-net x2                      [ok]
+vdso:             page built; mapping off            [done]
+ipv6: link-local fe80:0000:0000:0000 (SLAAC EUI-64)
+security:         capability LSM initialized         [ok]
+arch: WARNING — CR4.SMAP NOT armed though CPUID.7.0:EBX[20]=1 (live CR4=0x50620); user-mode access prevention is ABSENT on this boot (arming path latent-broken, see sec-r1 notes)
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+debug:            diagnostic subsystem               [ok]
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 1 online (lapic 0x1)
+virtio-pci: first PCI INTx interrupt delivered
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 2 online (lapic 0x2)
+mm: PCID off (no CPUID PCID/INVPCID)
+arch: CR4.FSGSBASE enabled
+fpu: OSXSAVE+XCR0=0xe7 AVX (cpu feature mask 0xe7)
+smp: CPU 3 online (lapic 0x3)
+affinity: 11 of 11 task(s) default mask -> 0xf
+smp:              4 CPUs online                      [ok]
+smp:              IPI selftest 3/3 calls, 4 remote   [ok]
+cctx: off (cmdline cctx param = None)
+softirq:          ksoftirqd per-CPU threads          [ok]
+debug:            khungtaskd hung-task detector      [ok]
+fs: fdreapd retire reaper started
+fs:               fdreapd fd retire reaper           [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+PARKWALK-ARMED
+driver:           evdev nodes (no input hw)          [done]
+driver:           no keyboard (headless)             [done]
+driver:           no pointer (headless)              [done]
+init:             ELF /test/geekbench_run loaded     [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+SCHED-IRQOFF caller=kernel/src/mm/kswapd.rs:83 pid=300 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=305 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=304 pc=0x0
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=306 pc=0x0
+GEEKBENCH NET up (10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3)
+GEEKBENCH RUN cpu (timeout 1200 s)
+PINSITE mm=0xffff88807d09d420 addr=0x7feffffff000 fd=3 fileptr=0xffff88807c6ef810 ino=77
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000003000 fd=3 fileptr=0xffff88807c6ef510 ino=975
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000004000 fd=3 fileptr=0xffff88807c6ef510 ino=975
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000005000 fd=3 fileptr=0xffff88807c6ef510 ino=975
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000006000 fd=3 fileptr=0xffff88807c6ef510 ino=975
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000008000 fd=3 fileptr=0xffff88807cf19910 ino=1013
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000016000 fd=3 fileptr=0xffff88807cf19910 ino=1013
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000092000 fd=3 fileptr=0xffff88807cf19910 ino=1013
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000ed000 fd=3 fileptr=0xffff88807cf19910 ino=1013
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000ef000 fd=3 fileptr=0xffff88807cf19810 ino=1056
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f0000 fd=3 fileptr=0xffff88807cf19810 ino=1056
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f1000 fd=3 fileptr=0xffff88807cf19810 ino=1056
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f2000 fd=3 fileptr=0xffff88807cf19810 ino=1056
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f4000 fd=3 fileptr=0xffff88807cf19710 ino=1058
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f5000 fd=3 fileptr=0xffff88807cf19710 ino=1058
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f6000 fd=3 fileptr=0xffff88807cf19710 ino=1058
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f7000 fd=3 fileptr=0xffff88807cf19710 ino=1058
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000f9000 fd=3 fileptr=0xffff88807c6ef410 ino=986
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0000fc000 fd=3 fileptr=0xffff88807c6ef410 ino=986
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000113000 fd=3 fileptr=0xffff88807c6ef410 ino=986
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000117000 fd=3 fileptr=0xffff88807c6ef410 ino=986
+timer:            lapic tick check: 15 jiffies / 1   [ok]
+SCHED-IRQOFF caller=kernel/src/interrupt/ksoftirqd.rs:102 pid=303 pc=0x0
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000119000 fd=3 fileptr=0xffff88807c6e1410 ino=961
+PINSITE mm=0xffff88807d09d420 addr=0x7ff000141000 fd=3 fileptr=0xffff88807c6e1410 ino=961
+PINSITE mm=0xffff88807d09d420 addr=0x7ff0002d6000 fd=3 fileptr=0xffff88807c6e1410 ino=961
+PINSITE mm=0xffff88807d09d420 addr=0x7ff00032e000 fd=3 fileptr=0xffff88807c6e1410 ino=961
+open ENOENT: '/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq' (pid 309)
+PINSITE mm=0xffff88807d554020 addr=0x7feffffff000 fd=4 fileptr=0xffff88807c433f10 ino=77
+PINSITE mm=0xffff88807d554020 addr=0x7ff000003000 fd=4 fileptr=0xffff88807c433e10 ino=975
+PINSITE mm=0xffff88807d554020 addr=0x7ff000004000 fd=4 fileptr=0xffff88807c433e10 ino=975
+PINSITE mm=0xffff88807d554020 addr=0x7ff000005000 fd=4 fileptr=0xffff88807c433e10 ino=975
+PINSITE mm=0xffff88807d554020 addr=0x7ff000006000 fd=4 fileptr=0xffff88807c433e10 ino=975
+PINSITE mm=0xffff88807d554020 addr=0x7ff000008000 fd=4 fileptr=0xffff88807c433d10 ino=1013
+PINSITE mm=0xffff88807d554020 addr=0x7ff000016000 fd=4 fileptr=0xffff88807c433d10 ino=1013
+PINSITE mm=0xffff88807d554020 addr=0x7ff000092000 fd=4 fileptr=0xffff88807c433d10 ino=1013
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000ed000 fd=4 fileptr=0xffff88807c433d10 ino=1013
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000ef000 fd=4 fileptr=0xffff88807c433c10 ino=1056
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f0000 fd=4 fileptr=0xffff88807c433c10 ino=1056
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f1000 fd=4 fileptr=0xffff88807c433c10 ino=1056
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f2000 fd=4 fileptr=0xffff88807c433c10 ino=1056
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f4000 fd=4 fileptr=0xffff88807c433b10 ino=1058
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f5000 fd=4 fileptr=0xffff88807c433b10 ino=1058
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f6000 fd=4 fileptr=0xffff88807c433b10 ino=1058
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f7000 fd=4 fileptr=0xffff88807c433b10 ino=1058
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000f9000 fd=4 fileptr=0xffff88807c433a10 ino=986
+PINSITE mm=0xffff88807d554020 addr=0x7ff0000fc000 fd=4 fileptr=0xffff88807c433a10 ino=986
+PINSITE mm=0xffff88807d554020 addr=0x7ff000113000 fd=4 fileptr=0xffff88807c433a10 ino=986
+PINSITE mm=0xffff88807d554020 addr=0x7ff000117000 fd=4 fileptr=0xffff88807c433a10 ino=986
+PINSITE mm=0xffff88807d554020 addr=0x7ff000119000 fd=4 fileptr=0xffff88807c433910 ino=961
+PINSITE mm=0xffff88807d554020 addr=0x7ff000141000 fd=4 fileptr=0xffff88807c433910 ino=961
+PINSITE mm=0xffff88807d554020 addr=0x7ff0002d6000 fd=4 fileptr=0xffff88807c433910 ino=961
+PINSITE mm=0xffff88807d554020 addr=0x7ff00032e000 fd=4 fileptr=0xffff88807c433910 ino=961
+unix connect fail(-2) '/var/run/nscd/socket':20 (pid 310)
+open ENOENT: '/root/.geekbench5' (pid 310)
+open ENOENT: '/proc/sys/kernel/random/uuid' (pid 310)
+open ENOENT: '/etc/localtime' (pid 310)
+Geekbench 5.5.1 Tryout : https://www.geekbench.com/
+
+Geekbench 5 requires an active Internet connection when in tryout mode and 
+automatically uploads benchmark results to the Geekbench Browser.
+
+Buy a Geekbench 5 license from the Primate Labs Store to enable offline use 
+and unlock other features:
+
+  https://store.primatelabs.com/v5
+
+Enter your Geekbench 5 license using the following command line:
+
+  ./geekbench5 --unlock <email> <key>
+
+  Running Gathering system information
+open ENOENT: '/sys/class/dmi/id/sys_vendor' (pid 310)
+open ENOENT: '/sys/class/dmi/id/product_name' (pid 310)
+open ENOENT: '/sys/firmware/devicetree/base/model' (pid 310)
+open ENOENT: '/sys/class/dmi/id/board_vendor' (pid 310)
+open ENOENT: '/sys/class/dmi/id/board_name' (pid 310)
+open ENOENT: '/sys/class/dmi/id/bios_vendor' (pid 310)
+open ENOENT: '/sys/class/dmi/id/bios_version' (pid 310)
+open ENOENT: '/sys/class/dmi/id/chassis_vendor' (pid 310)
+open ENOENT: '/dev/mem' (pid 310)
+open ENOENT: '/sys/class/dmi/id/chassis_type' (pid 310)
+open ENOENT: '/dev/mem' (pid 310)
+System Information
+  Operating System              Ubuntu 22.04 LTS
+  Kernel                        Linux 6.8.0-rux x86_64
+  Model                         N/A
+  Motherboard                   N/A
+
+Processor Information
+  Name                          AMD Ryzen 9 9950X 16-Core Processor            
+  Topology                      1 Processor, 1 Core, 4 Threads
+  Identifier                    AuthenticAMD Family 26 Model 68 Stepping 0
+  Base Frequency                0.00 Hz
+  L1 Instruction Cache          64.0 KB x 4
+  L1 Data Cache                 64.0 KB x 4
+  L2 Cache                      512 KB x 4
+  L3 Cache                      16.0 MB
+
+Memory Information
+  Size                          4.00 GB
+
+
+Single-Core
+  Running AES-XTS
+  Running Text Compression
+  Running Image Compression
+  Running Navigation
+  Running HTML5
+  Running SQLite
+  Running PDF Rendering
+  Running Text Rendering
+open ENOENT: '/test/geekbench/./stdlib.h' (pid 319)
+  Running Clang
+  Running Camera
+  Running N-Body Physics
+  Running Rigid Body Physics
+  Running Gaussian Blur
+  Running Face Detection
+  Running Horizon Detection
+  Running Image Inpainting
+  Running HDR
+  Running Ray Tracing
+  Running Structure from Motion
+  Running Speech Recognition
+  Running Machine Learning
+
+Multi-Core
+  Running AES-XTS
+
+WAKE-HEAL-SKIP pid=339 why=c
+  Running Text Compression
+
+WAKE-HEAL-SKIP pid=336 why=c
+  Running Image Compression
+  Running Navigation
+
+WAKE-HEAL-SKIP pid=345 why=c
+
+WAKE-HEAL-SKIP pid=344 why=c
+  Running HTML5
+  Running SQLite
+
+WAKE-HEAL-SKIP pid=354 why=c
+
+WAKE-HEAL-SKIP pid=359 why=c
+  Running PDF Rendering
+
+WAKE-HEAL-SKIP pid=358 why=c
+  Running Text Rendering
+
+WAKE-HEAL-SKIP pid=363 why=c
+
+WAKE-HEAL-SKIP pid=365 why=c
+  Running Clang
+
+WAKE-HEAL-SKIP pid=366 why=c
+
+WAKE-HEAL-SKIP pid=365 why=c
+  Running Camera
+
+WAKE-HEAL-SKIP pid=371 why=c
+
+WAKE-HEAL-SKIP pid=368 why=c
+  Running N-Body Physics
+
+WAKE-HEAL-SKIP pid=376 why=c
+
+WAKE-HEAL-SKIP pid=378 why=s
+
+WAKE-HEAL-SKIP pid=375 why=c
+
+WAKE-HEAL-SKIP pid=373 why=c
+
+WAKE-HEAL-SKIP pid=372 why=c
+
+WAKE-HEAL-SKIP pid=378 why=c
+
+WAKE-HEAL-SKIP pid=375 why=c
+
+WAKE-HEAL-SKIP pid=378 why=c
+
+WAKE-HEAL-SKIP pid=378 why=s
+
+WAKE-HEAL-SKIP pid=377 why=c
+  Running Rigid Body Physics
+
+WAKE-HEAL-SKIP pid=310 why=c
+  Running Gaussian Blur
+  Running Face Detection
+
+WAKE-HEAL-SKIP pid=388 why=c
+
+WAKE-HEAL-SKIP pid=310 why=c
+
+SLOT-LIE-WAKE-HEALED pid=0000000000000183 arm=a
+
+WAKE-HEAL pid=0000000000000183 was=0000000000000001
+
+PBUtrG:a kper:n eKl EilRleNPgAalN iInsCtr ucptifonau
+Olopts:  0b00a0 d[#a1]dd PrRE=EM0PTx S0MP0
+0CP00U:0 20 P0ID0: 03807 0Co00mm9: 8ge ekrbeincph_=x806x_6f Tfaifntfedf: fG f f 8  0 D5  5  6  a  0
+2R rIPs: p00=080:?x
+fRSfP:f f008008:0800000700900f0f00e00e008 E0FL
+AGkS:p 0-s00t00k00 00f00f00f00f088
+R8AX0: 700900f00f00e00e800000:00  R0BX0: 00000000000000000000000000 R0CX00: 000
+000k00p00-00s00t0k00 
+fRDfX:f 0f008008008000700900f00f0 eRSeI:8 08:00 0000000000000000000 00RD0I:0 00000000000000000
+00k00p0-
+RsBPt: k00 00ff00f00f0a8298708750 R78 9f: f00e00e00900000:00 000000 0R90 :0 00000000000000000000000000
+2R1
+0:k 0p0-0s00t00k0 00f00f0f00f0 8R8118: 00070900f00f00e00e0900800: R 120: 078069060620060f60e2082000
+R0130:0 3073083
+33kd6p46-97s0t20k R 14f: f32f30f618368385305370398 fR1f5:e 6e6a66066:66 660660660660
+00C0a0ll0 T0ra0ce0:0
+ 0 [0<0ff
+ffkffpff-80s40t09k6 4>f] f? f(cfur8re8nt8)0
+7  9[<ffffffeffeffa8084:00 96f4>f] f?f
+ 8 8[8<f0f7ffd880802791ffe6871d>0]
+ ?k
+p  -[<sfftffk88 8f07f9fffefea80>8] 8?0
+7
+9-f--f[e eendb t0ra:ce  0f0f00f00f0080808 ]0--7-9
+728000
+kp-SsItGDkEA THf: fpifd=f38878 t8gi0d=73190 fcofmme=eOkb("8ge:ek be0nc0h_0x8060_60")0 s0ig0=101 0pp0i0d=03090 (0th
+rekadp) -ssi_tpikd= 0 fsif_cfodfe=808x08
+079ffeec0: 0000000000000183
+kp-stk ffff888079ffeec8: 0000000000000000
+kp-stk ffff888079ffeed0: ffffffff013f8d8a
+kp-stk ffff888079ffeed8: ffff88807d554020
+kp-stk ffff888079ffeee0: ffff888079ffef70
+kp-stk ffff888079ffeee8: ffffffff80592ae0
+kp-stk ffff888079ffeef0: ffff888079fff208
+kp-stk ffff888079ffeef8: ffffffff80592ae0
+kp-sys ring off (boot with debug=sysring)
+trap: oops re-entered during report; halting
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=es
+
+WAKE-HEAL-SKIP pid=387 why=ec
+
+WAKE-HEAL-SKIP pid=387 why=ec
+
+PREEMPT-HEAL cpu=0000000000000002 pid=0000000000000183 was=0000000000010002 held_jiffies=000000000000005c prun=0000000000000000 srun=0000000000000000 hrun=0000000000000000
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=1294ms tick_age=1294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RCU-STUCK-CPU3 task=geekbench_x86_6 pid=388 preempt=0 lastsys=0 a0=0x0 tickn=18661 trip=0xffffffff80452120
+RCU-GP-BOUND site=thread-stack-free waited>1500ms (sleepy) wakes=0 gen=54 qs=54,54,54,53 on=true,true,true,true
+RCU-STUCK-CPU3 task=geekbench_x86_6 pid=388 preempt=0 lastsys=0 a0=0x0 tickn=18661 trip=0xffffffff80452120
+RCU-GP-BOUND site=thread-stack-free waited>1500ms (sleepy) wakes=0 gen=54 qs=54,54,54,53 on=true,true,true,true
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=2294ms tick_age=2294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RCU-STUCK-CPU3 task=geekbench_x86_6 pid=388 preempt=0 lastsys=0 a0=0x0 tickn=18661 trip=0xffffffff80452120
+RCU-GP-BOUND site=thread-stack-free waited>1500ms (sleepy) wakes=0 gen=54 qs=54,54,54,53 on=true,true,true,true
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=3294ms tick_age=3294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=4294ms tick_age=4294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RCU-STUCK-CPU3 task=geekbench_x86_6 pid=388 preempt=0 lastsys=0 a0=0x0 tickn=18661 trip=0xffffffff80452120
+RCU-GP-BOUND site=thread-stack-free waited>1500ms (sleepy) wakes=0 gen=54 qs=54,54,54,53 on=true,true,true,true
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=5294ms tick_age=5294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=6294ms tick_age=6294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=7294ms tick_age=7294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=8293ms tick_age=8293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=9294ms tick_age=9294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+Call Trace:
+  [<ffffffff8055efbf>] ? (current)
+  [<ffffffff8055efbf>] ?
+  [<ffffffff805895e2>] ?
+  [<ffffffff8020254c>] ?
+  [<0000001311071fd8>] ?
+
+BUG: soft lockup - CPU#3 stuck for 10s! timer_irq=18661
+  CPU: 3 PID: 388
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=10294ms tick_age=10294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=11294ms tick_age=11294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=12294ms tick_age=12294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=13294ms tick_age=13294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=14294ms tick_age=14294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=15293ms tick_age=15293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=16294ms tick_age=16294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=17294ms tick_age=17294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=18294ms tick_age=18294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=19294ms tick_age=19294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=20294ms tick_age=20294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=21294ms tick_age=21294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=22294ms tick_age=22294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=23294ms tick_age=23294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=24294ms tick_age=24294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=25293ms tick_age=25293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=26294ms tick_age=26294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=27294ms tick_age=27294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=28294ms tick_age=28294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=29294ms tick_age=29294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=30294ms tick_age=30294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=31294ms tick_age=31294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=32293ms tick_age=32293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=33294ms tick_age=33294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=34294ms tick_age=34294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=35294ms tick_age=35294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=36294ms tick_age=36294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=37294ms tick_age=37294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=38294ms tick_age=38294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=39293ms tick_age=39293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=40294ms tick_age=40294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=41294ms tick_age=41294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=42294ms tick_age=42294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=43294ms tick_age=43294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=44294ms tick_age=44294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=45294ms tick_age=45294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=46294ms tick_age=46294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=47294ms tick_age=47294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=48294ms tick_age=48294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (first seen)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=49294ms tick_age=49294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=50294ms tick_age=50294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=51293ms tick_age=51293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=52294ms tick_age=52294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=53294ms tick_age=53294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=54294ms tick_age=54294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=55294ms tick_age=55294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=56294ms tick_age=56294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=57294ms tick_age=57294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=58294ms tick_age=58294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=59294ms tick_age=59294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=60294ms tick_age=60294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=61294ms tick_age=61294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=62294ms tick_age=62294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=63294ms tick_age=63294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=64294ms tick_age=64294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=65294ms tick_age=65294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=66294ms tick_age=66294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=67294ms tick_age=67294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=68294ms tick_age=68294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=69294ms tick_age=69294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=70294ms tick_age=70294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=71294ms tick_age=71294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=72294ms tick_age=72294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=73294ms tick_age=73294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=74294ms tick_age=74294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=75294ms tick_age=75294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=76294ms tick_age=76294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=77294ms tick_age=77294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=78294ms tick_age=78294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=79294ms tick_age=79294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=80294ms tick_age=80294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=81294ms tick_age=81294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=82294ms tick_age=82294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=83294ms tick_age=83294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=84294ms tick_age=84294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=85294ms tick_age=85294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=86294ms tick_age=86294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=87294ms tick_age=87294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=88294ms tick_age=88294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=89294ms tick_age=89294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=90294ms tick_age=90294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=91294ms tick_age=91294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=92294ms tick_age=92294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=93294ms tick_age=93294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=94294ms tick_age=94294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=95294ms tick_age=95294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=96293ms tick_age=96293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=97294ms tick_age=97294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=98294ms tick_age=98294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=99294ms tick_age=99294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=100294ms tick_age=100294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=101294ms tick_age=101294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=102294ms tick_age=102294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=103294ms tick_age=103294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=104294ms tick_age=104294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=105293ms tick_age=105293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=106294ms tick_age=106294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=107294ms tick_age=107294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=108294ms tick_age=108294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=109294ms tick_age=109294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=110294ms tick_age=110294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=111294ms tick_age=111294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=112294ms tick_age=112294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=113294ms tick_age=113294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=114294ms tick_age=114294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=115294ms tick_age=115294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=116294ms tick_age=116294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=117294ms tick_age=117294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=118294ms tick_age=118294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=119294ms tick_age=119294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=120293ms tick_age=120293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=121294ms tick_age=121294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=122294ms tick_age=122294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=123294ms tick_age=123294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=124294ms tick_age=124294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=125294ms tick_age=125294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=126294ms tick_age=126294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=127294ms tick_age=127294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=128294ms tick_age=128294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=129294ms tick_age=129294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=130294ms tick_age=130294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=131294ms tick_age=131294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=132294ms tick_age=132294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=133294ms tick_age=133294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=134294ms tick_age=134294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=135294ms tick_age=135294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=136294ms tick_age=136294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=137294ms tick_age=137294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=138294ms tick_age=138294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=139294ms tick_age=139294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=140294ms tick_age=140294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=141294ms tick_age=141294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=142294ms tick_age=142294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=143294ms tick_age=143294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=144294ms tick_age=144294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=145294ms tick_age=145294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=146294ms tick_age=146294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=147294ms tick_age=147294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=148294ms tick_age=148294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=149293ms tick_age=149293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=150294ms tick_age=150294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=151294ms tick_age=151294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=152294ms tick_age=152294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=153294ms tick_age=153294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=154294ms tick_age=154294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=155294ms tick_age=155294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=156294ms tick_age=156294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=157294ms tick_age=157294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=158294ms tick_age=158294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=159294ms tick_age=159294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=160294ms tick_age=160294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=161293ms tick_age=161293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=162294ms tick_age=162294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=163294ms tick_age=163294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=164294ms tick_age=164294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=165294ms tick_age=165294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=166294ms tick_age=166294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=167294ms tick_age=167294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=168294ms tick_age=168294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+INFO: task 308:308 blocked for more than 179 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=2 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D      L 
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=169294ms tick_age=169294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=170294ms tick_age=170294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=171294ms tick_age=171294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=172294ms tick_age=172294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=173294ms tick_age=173294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=174294ms tick_age=174294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=175294ms tick_age=175294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=176294ms tick_age=176294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=177294ms tick_age=177294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=178294ms tick_age=178294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=179294ms tick_age=179294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=180294ms tick_age=180294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=181294ms tick_age=181294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=182294ms tick_age=182294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=183294ms tick_age=183294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=184294ms tick_age=184294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=185294ms tick_age=185294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=186294ms tick_age=186294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=187294ms tick_age=187294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=188294ms tick_age=188294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=189294ms tick_age=189294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=190294ms tick_age=190294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=191294ms tick_age=191294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=192294ms tick_age=192294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=193294ms tick_age=193294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=194294ms tick_age=194294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=195294ms tick_age=195294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=196294ms tick_age=196294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=197294ms tick_age=197294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=198294ms tick_age=198294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=199294ms tick_age=199294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=200294ms tick_age=200294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=201294ms tick_age=201294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=202294ms tick_age=202294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=203294ms tick_age=203294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=204294ms tick_age=204294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=205293ms tick_age=205293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=206294ms tick_age=206294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=207294ms tick_age=207294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=208294ms tick_age=208294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=209294ms tick_age=209294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=210294ms tick_age=210294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=211294ms tick_age=211294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=212294ms tick_age=212294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=213294ms tick_age=213294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=214294ms tick_age=214294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=215294ms tick_age=215294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=216294ms tick_age=216294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=217294ms tick_age=217294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=218294ms tick_age=218294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=219294ms tick_age=219294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=220294ms tick_age=220294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=221294ms tick_age=221294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=222294ms tick_age=222294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=223294ms tick_age=223294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=224294ms tick_age=224294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=225294ms tick_age=225294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=226294ms tick_age=226294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=227294ms tick_age=227294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=228294ms tick_age=228294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=229294ms tick_age=229294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=230294ms tick_age=230294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=231294ms tick_age=231294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=232294ms tick_age=232294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=233294ms tick_age=233294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=234294ms tick_age=234294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=235293ms tick_age=235293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=236294ms tick_age=236294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=237294ms tick_age=237294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=238294ms tick_age=238294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=239294ms tick_age=239294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=240294ms tick_age=240294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=241294ms tick_age=241294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=242294ms tick_age=242294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=243294ms tick_age=243294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=244294ms tick_age=244294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=245294ms tick_age=245294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=246294ms tick_age=246294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=247294ms tick_age=247294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=248294ms tick_age=248294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=249294ms tick_age=249294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=250294ms tick_age=250294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=251294ms tick_age=251294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=252294ms tick_age=252294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=253294ms tick_age=253294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=254294ms tick_age=254294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=255294ms tick_age=255294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=256294ms tick_age=256294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=257294ms tick_age=257294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=258294ms tick_age=258294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=259294ms tick_age=259294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=260293ms tick_age=260293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=261294ms tick_age=261294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=262294ms tick_age=262294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=263294ms tick_age=263294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=264294ms tick_age=264294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=265294ms tick_age=265294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=266294ms tick_age=266294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=267294ms tick_age=267294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=268294ms tick_age=268294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=269294ms tick_age=269294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=270294ms tick_age=270294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=271294ms tick_age=271294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=272294ms tick_age=272294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=273294ms tick_age=273294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=274294ms tick_age=274294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=275294ms tick_age=275294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=276294ms tick_age=276294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=277294ms tick_age=277294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=278294ms tick_age=278294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=279294ms tick_age=279294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=280294ms tick_age=280294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=281294ms tick_age=281294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=282294ms tick_age=282294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=283294ms tick_age=283294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=284294ms tick_age=284294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=285294ms tick_age=285294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=286294ms tick_age=286294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=287294ms tick_age=287294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=288294ms tick_age=288294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+INFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=2 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D      L 
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=289294ms tick_age=289294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=290294ms tick_age=290294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=291294ms tick_age=291294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=292294ms tick_age=292294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=293294ms tick_age=293294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=294294ms tick_age=294294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=295294ms tick_age=295294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=296294ms tick_age=296294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=297294ms tick_age=297294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=298294ms tick_age=298294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=299293ms tick_age=299293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=300294ms tick_age=300294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=301294ms tick_age=301294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=302294ms tick_age=302294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=303294ms tick_age=303294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=304294ms tick_age=304294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=305294ms tick_age=305294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=306294ms tick_age=306294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=307294ms tick_age=307294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=308294ms tick_age=308294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=309294ms tick_age=309294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=310294ms tick_age=310294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=311294ms tick_age=311294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=312294ms tick_age=312294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=313294ms tick_age=313294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=314294ms tick_age=314294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=315294ms tick_age=315294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=316294ms tick_age=316294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=317294ms tick_age=317294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=318294ms tick_age=318294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=319294ms tick_age=319294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=320293ms tick_age=320293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=321294ms tick_age=321294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=322294ms tick_age=322294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=323294ms tick_age=323294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=324294ms tick_age=324294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=325294ms tick_age=325294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=326294ms tick_age=326294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=327294ms tick_age=327294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=328294ms tick_age=328294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=329294ms tick_age=329294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=330294ms tick_age=330294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=331294ms tick_age=331294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=332294ms tick_age=332294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=333294ms tick_age=333294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=334294ms tick_age=334294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=335294ms tick_age=335294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=336294ms tick_age=336294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=337294ms tick_age=337294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=338294ms tick_age=338294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=339294ms tick_age=339294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=340294ms tick_age=340294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=341294ms tick_age=341294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=342294ms tick_age=342294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=343294ms tick_age=343294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=344294ms tick_age=344294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=345294ms tick_age=345294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=346294ms tick_age=346294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=347294ms tick_age=347294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=348294ms tick_age=348294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=349294ms tick_age=349294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=350294ms tick_age=350294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=351294ms tick_age=351294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=352294ms tick_age=352294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=353294ms tick_age=353294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=354294ms tick_age=354294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=355294ms tick_age=355294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=356294ms tick_age=356294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=357294ms tick_age=357294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=358294ms tick_age=358294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=359294ms tick_age=359294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=360294ms tick_age=360294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=361294ms tick_age=361294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=362294ms tick_age=362294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=363294ms tick_age=363294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=364294ms tick_age=364294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=365294ms tick_age=365294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=366294ms tick_age=366294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=367294ms tick_age=367294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=368294ms tick_age=368294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=369294ms tick_age=369294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=370294ms tick_age=370294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=371294ms tick_age=371294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=372294ms tick_age=372294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=373294ms tick_age=373294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=374294ms tick_age=374294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=375293ms tick_age=375293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=376294ms tick_age=376294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=377294ms tick_age=377294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=378294ms tick_age=378294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=379294ms tick_age=379294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=380294ms tick_age=380294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=381294ms tick_age=381294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=382294ms tick_age=382294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=383294ms tick_age=383294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=384294ms tick_age=384294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=385294ms tick_age=385294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=386294ms tick_age=386294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=387294ms tick_age=387294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=388294ms tick_age=388294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=389294ms tick_age=389294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=390294ms tick_age=390294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=391294ms tick_age=391294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=392294ms tick_age=392294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=393294ms tick_age=393294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=394294ms tick_age=394294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=395294ms tick_age=395294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=396294ms tick_age=396294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=397294ms tick_age=397294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=398294ms tick_age=398294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=399294ms tick_age=399294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=400294ms tick_age=400294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=401294ms tick_age=401294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=402294ms tick_age=402294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=403294ms tick_age=403294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=404294ms tick_age=404294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=405293ms tick_age=405293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=406294ms tick_age=406294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=407294ms tick_age=407294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=408294ms tick_age=408294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+INFO: task 308:308 blocked for more than 120 seconds
+      HUNG-CTX pid=308 state=0x2 oncpu=0 claim=-1 pk=1 ti_cpu=2 onrq=0 vfork_ppid=0
+      HUNG-STK sp=0xffff88807c69fdc0 0xffffffff802cb15a 0xffffffff8036c720 0xffffffff8036c720 0xffffffff80586ab6 0xffCall Trace:
+  [<ffffffff80431fe3>] ? (current)
+  [<ffffffff80431fe3>] ?
+  [<ffffffff80586ab6>] ?
+  [<ffffffff80202d6a>] ?
+
+ffffff80202d6a 0xffffffff80202d48
+      Tainted: G      D      L 
+RWFRZ-HIGH uaddr=0x7ff00a16e910 tgid 310 waiters=1 word=0x184 readers=388 (was 388, d+0)
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=409294ms tick_age=409294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=410294ms tick_age=410294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=411294ms tick_age=411294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=412294ms tick_age=412294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=413294ms tick_age=413294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=414294ms tick_age=414294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=415294ms tick_age=415294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=416294ms tick_age=416294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=417294ms tick_age=417294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=418294ms tick_age=418294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=419293ms tick_age=419293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=420294ms tick_age=420294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=421294ms tick_age=421294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=422294ms tick_age=422294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=423294ms tick_age=423294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=424294ms tick_age=424294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=425294ms tick_age=425294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=426293ms tick_age=426293ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=427294ms tick_age=427294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=428294ms tick_age=428294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=429294ms tick_age=429294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=430294ms tick_age=430294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=431294ms tick_age=431294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=432294ms tick_age=432294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=433294ms tick_age=433294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=434294ms tick_age=434294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=435294ms tick_age=435294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=436294ms tick_age=436294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=437294ms tick_age=437294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=438294ms tick_age=438294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=439294ms tick_age=439294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=440294ms tick_age=440294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=441294ms tick_age=441294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=442294ms tick_age=442294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=443294ms tick_age=443294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=444294ms tick_age=444294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=445294ms tick_age=445294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=446294ms tick_age=446294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=447294ms tick_age=447294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=448294ms tick_age=448294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=449294ms tick_age=449294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=450294ms tick_age=450294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=451294ms tick_age=451294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
+WW: TIMER-SOFTIRQ-STALL cpu=3 age=452294ms tick_age=452294ms n=18656 pid=388 pc=0x0 rip=0xffffffff80556a02
