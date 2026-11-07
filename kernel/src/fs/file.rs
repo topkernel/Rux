@@ -111,6 +111,12 @@ pub struct FileOps {
     pub close: Option<fn(&File) -> i32>,
     /// Poll for readiness (takes requested events mask, returns ready events mask)
     pub poll: Option<fn(&File, u16) -> u16>,
+    /// file_operations.flush: invoked when an fd is closed (and at
+    /// fork/inherit checks) — the file's chance to interrupt waiters
+    /// before the description goes away (reference binder_flush wakes
+    /// every waiting looper with looper_need_return; plain files have
+    /// no flush). Distinct from `close` (last-reference release).
+    pub flush: Option<fn(&File)>,
     /// Positional read at an explicit offset, never touching the shared
     /// file position (R71 demand-fault race: the generic read_at fallback
     /// swings the file position through set_pos/read/restore — two
@@ -144,6 +150,7 @@ impl FileOps {
                 lseek: None,
                 close: None,
                 poll: None,
+                flush: None,
                 read_at: None,
             },
         }
@@ -173,6 +180,13 @@ impl FileOpsBuilder {
     pub const fn close(mut self, f: fn(&File) -> i32) -> Self {
         assert!(self.ops.close.is_none(), "FileOps: duplicate close capability");
         self.ops.close = Some(f);
+        self
+    }
+    /// Install the flush capability (file_operations.flush parity —
+    /// called on fd close; see the field doc).
+    pub const fn flush(mut self, f: fn(&File)) -> Self {
+        assert!(self.ops.flush.is_none(), "FileOps: duplicate flush capability");
+        self.ops.flush = Some(f);
         self
     }
     pub const fn poll(mut self, f: fn(&File, u16) -> u16) -> Self {

@@ -88,6 +88,16 @@ pub const TF_ONE_WAY: u32 = 0x01;
 pub const _TF_ROOT_OBJECT: u32 = 0x04;
 pub const _TF_STATUS_CODE: u32 = 0x08;
 pub const TF_ACCEPT_FDS: u32 = 0x10;
+/// TF_UPDATE_TXN (0x40): a new oneway transaction with this flag may
+/// SUPERSEDE a matching transaction already parked on the node's
+/// async_todo instead of queueing behind it (reference
+/// binder_can_update_transaction, binder.c:2734 — matching = both
+/// ONE_WAY|UPDATE_TXN, same to_proc, same code, same flags, same
+/// originating pid, same target node ptr+cookie; the outdated txn is
+/// removed from the queue and released, the new one takes its place).
+/// OH declares the flag (message_option.h:33) though its own framework
+/// does not currently send it — implemented for semantic completeness.
+pub const TF_UPDATE_TXN: u32 = 0x40;
 
 /// flat_binder_object.flags: the target accepts BINDER_TYPE_FD objects.
 pub const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
@@ -1251,6 +1261,33 @@ impl BinderTxn {
     unsafe fn set_to_tid(&self, tid: u32) {
         *self.to_tid.get() = Some(tid);
     }
+
+    /// TF_UPDATE_TXN match test (reference binder_can_update_transaction,
+    /// binder.c:2734): both ONE_WAY|UPDATE_TXN, same to_proc, same code,
+    /// same flags, same originating pid, same target node ptr+cookie.
+    /// `other` is the candidate already parked on the node's async_todo.
+    fn can_update_with(&self, other: &BinderTxn) -> bool {
+        if (self.flags & other.flags & (TF_ONE_WAY | TF_UPDATE_TXN))
+            != (TF_ONE_WAY | TF_UPDATE_TXN)
+        {
+            return false;
+        }
+        if self.code != other.code
+            || self.flags != other.flags
+            || self.sender_pid != other.sender_pid
+        {
+            return false;
+        }
+        if !Arc::ptr_eq(&self.to_proc, &other.to_proc) {
+            return false;
+        }
+        match (&self.target_node, &other.target_node) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     fn holds_async_slot(&self) -> bool {
         // SAFETY: single word read under WORLD (the access contract).
         unsafe { *self.holds_async_slot.get() }
@@ -1330,6 +1367,10 @@ struct ThreadState {
     /// True while blocked in binder_thread_read waiting for proc work
     /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
     waiting_for_proc_work: bool,
+    /// Reference looper_need_return: force the thread's next read to
+    /// return to userspace (binder_flush / fd close / deferred fd
+    /// completion all set it; the BWR read loop breaks on it).
+    looper_need_return: bool,
     /// Park sequence stamp (65th session, reference-order parity):
     /// value of NEXT_PARK_SEQ when this thread last joined the
     /// waiting-for-proc-work set. The reference registers a parking
@@ -1410,6 +1451,7 @@ impl BinderThread {
                 todo: VecDeque::new(),
                 process_todo: false,
                 waiting_for_proc_work: false,
+                looper_need_return: false,
                 park_seq: 0,
                 txn_stack: Vec::new(),
                 hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
@@ -2055,6 +2097,37 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
     // binder_close (the only other accessor).
     file.set_private_data(Arc::into_raw(proc) as *mut u8);
     0
+}
+
+/// FileOps.flush (reference binder_flush, binder.c:5876 →
+/// binder_deferred_flush:5886): invoked when an fd of this binder
+/// instance is closed (before the description goes away — the
+/// fork/inherit check path). Sets looper_need_return on EVERY thread
+/// and wakes the WAITING ones, forcing each looper back to userspace
+/// so it re-evaluates its context (the reference comment: "make sure
+/// the thread goes back to userspace to complete the deferred close").
+pub fn binder_flush(file: &crate::fs::File) {
+    // SAFETY: private_data holds the Arc<BinderProc> from binder_open
+    // (the same contract binder_close/poll rely on).
+    let proc = match unsafe { *file.private_data.get() } {
+        Some(p) => unsafe { &*(p as *const BinderProc) },
+        None => return,
+    };
+    let w = world_lock();
+    // SAFETY: all inner access below is under WORLD; threads lives in
+    // ProcInner (im() is the WORLD-guarded accessor).
+    unsafe {
+        for th in proc.im().threads.iter() {
+            let ts = &mut *th.st.get();
+            ts.looper_need_return = true;
+            // Wake WAITING loopers (the reference checks
+            // BINDER_LOOPER_STATE_WAITING; our proxy is a parked wait
+            // queue with waiters).
+            if th.wait.has_sleepers() {
+                th.wait.wake_up_all();
+            }
+        }
+    }
 }
 
 /// FileOps.close: drop the process context. Drains all work lists (breaking
@@ -3192,6 +3265,7 @@ pub fn binder_poll_unwait(file: &crate::fs::File, task: *mut crate::process::tas
 pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .close(binder_close)
     .poll(binder_poll)
+    .flush(binder_flush)
     .build();
 
 // ============================================================================
@@ -10084,6 +10158,39 @@ fn binder_transaction(
                 if let Some(node) = &target_node {
                     let ns = node.st();
                     if ns.has_async_transaction {
+                        // TF_UPDATE_TXN parity (binder.c:2832-2845): when
+                        // the new oneway carries UPDATE and a MATCHING
+                        // txn is already parked on this node's
+                        // async_todo, the new one SUPERSEDES it — the
+                        // outdated entry is removed and released (its
+                        // buffer freed, slot handoff preserved), the new
+                        // txn takes its place in the queue instead of
+                        // piling behind it. OH declares the flag
+                        // (message_option.h:33); implemented for
+                        // completeness per the parity-audit gap table.
+                        if txn.flags & TF_UPDATE_TXN != 0 {
+                            let pos = ns
+                                .async_todo
+                                .iter()
+                                .position(|q| txn.can_update_with(q));
+                            if let Some(i) = pos {
+                                let outdated = ns.async_todo.remove(i);
+                                if let Some(old) = outdated {
+                                    crate::pr_info!(
+                                        "binder: txn{} supersedes outdated txn{} (TF_UPDATE_TXN, node {})",
+                                        txn.id,
+                                        old.id,
+                                        node.id
+                                    );
+                                    // SAFETY: under WORLD; frees the buffer
+                                    // and unpins the node (the same
+                                    // teardown the 30s retire sweep does).
+                                    unsafe {
+                                        finish_work(world, &target, Work::Transaction(old))
+                                    };
+                                }
+                            }
+                        }
                         ns.async_todo.push_back(txn.clone());
                         parked = true;
                         thread.hist(EV_TXN_PARKED_ASYNC, txn.id as u32, ns.async_todo.len() as u32);
@@ -10881,11 +10988,24 @@ fn binder_thread_read(
 
     loop {
         // ---- wait for work (binder_wait_for_work) ------------------------
-        let has_work = {
+        let mut has_work = {
             let w = world_lock();
             // SAFETY: under WORLD.
             unsafe { thread_has_work(w.as_ref().unwrap(), proc, thread) }
         };
+        if !has_work {
+            // looper_need_return (reference binder_thread_read checks
+            // return_error != BR_OK before waiting — the flush path's
+            // contract: break the read so the thread returns to
+            // userspace, then re-enters).
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            let ts = unsafe { &mut *thread.st.get() };
+            if ts.looper_need_return {
+                ts.looper_need_return = false;
+                has_work = true;
+            }
+        }
         if !has_work {
             if non_block {
                 if staged.len() > 4 || *consumed != 0 {
