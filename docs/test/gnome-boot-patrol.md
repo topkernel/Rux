@@ -122,3 +122,54 @@ GJS worker pool (the cond signal path), why the wake is refused
 (lying curr_on slot / stuck claim), and fix that producer; the
 STRAGGLER-RESCUE machinery covers exit-path stragglers but not
 cond-wake refusals.
+
+## Round 4 — 2026-11-08 ~05:30 (kernel 59f8d535 + phantom-pick experiment)
+
+**Hypothesis tested**: the black screen is the wake-refused family.
+Evidence for it: the black boots show 41 WAKE-HEAL-SKIP (why=c = a
+BUSY slot names the sleeper) and 10 R46-RUNNING-PHANTOM heals; the
+painted boot shows ZERO of both. The refusal census names the victims:
+pid 391 (gnome-shell), 343, 324, 318, 317, 323.
+
+**Experiment**: the straggler rescue re-ran the frozen member without
+releasing its phantom pick state, so the rescue's own wake was refused
+(same curr_on rule) — the drain re-parked it forever (199 rounds/boot)
+while the lying slot refused every wake aimed at it. Fix under test:
+sched::release_phantom_pick() rewrites a stale slot to the owning
+CPU's idle task and releases the ownership word before the re-run.
+
+**Result: NEGATIVE.** PHANTOM-PICK-RELEASED fired 0 times in 5 boots
+(the stragglers' slots were not the lying ones) and the screen stayed
+black in 4/5 boots (the 5th reached the 128-pixel "first frame
+starting" state). The straggler drain is a SYMPTOM of the era, not the
+painting cause; the fix is kept only as a hardening (it cannot fire
+today, and it closes a real refusal path for the rescue it enables).
+
+**Diagnostic-class comparison** (painted boot vs black boot — the
+cleanest signal found so far):
+
+| class | painted | black |
+|---|---|---|
+| PREEMPT-HEAL | 28 | 0 |
+| PREEMPT-UNDERFLOW | 22 | 0 |
+| STALE-CLAIM-RESET | 7 | 0 |
+| WAKE-HEAL-SKIP | 0 | 41 |
+| R46-RUNNING-PHANTOM | 0 | 10 |
+| DRAIN-STRAGGLER | 0 | 199 |
+| TIMEDSLEEP-PARK | 0 | 38 |
+| SCHED-IRQOFF | 0 | 12 |
+| RWFRZ-HIGH | 0 | 4 |
+
+The painted boot has the tick-side heals and the pick-side stale-claim
+resets; the black boot has the wake-side family, the exit-path
+straggler storm, parked timers and schedule()-under-IF=0. The two
+families are disjoint — a structural difference in how the scheduler
+heals, not a difference in degree.
+
+**Also measured**: the shell starts 5x later in black boots (30 s vs
+6.5 s) — the session is starved before the shell, and the shell's
+first frame never arrives within 5 minutes.
+
+**Next**: unattended valid-judgment bisect (run/paint-bisect.sh —
+a verdict counts only when the shell started; pre-shell freezes are
+skipped) over 7791d772 (good) .. 1d9c8b75 (bad).
