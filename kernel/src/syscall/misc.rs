@@ -2267,7 +2267,10 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
             entries.len(),
             epoll.wait_count
         );
+        // fd numbers covered by an interest (for the fdtable diff below).
+        let mut watched_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
         for entry in entries.iter() {
+            watched_fds.push(entry.fd as usize);
             let target = fdtable.get_file(entry.fd as usize);
             let (fid_ok, unix_line, ops_id) = match &target {
                 Some(f) => {
@@ -2311,6 +2314,40 @@ pub fn pid1_epoll_interest_dump(pid: crate::process::task::Pid) {
                 unix_line
             );
         }
+        drop(entries);
+        // 69th addendum (the ohw82 second face): a paramservice child
+        // that is IN the fdtable but has NO epoll interest is invisible
+        // to the dump above — yet its queue is where client sends land
+        // (ohw82: PCTL-SEND q=3/2276 while every interest showed
+        // segs=0). Diff the fdtable against the interest set: every
+        // unix-socket fd with an EPOLLIN-less life gets a line here,
+        // with the peer-identity that would explain a stale link.
+        fdtable.for_each_file(|fd, f| {
+            if watched_fds.contains(&fd) {
+                return;
+            }
+            if let Some(s) = crate::net::unix::unix_of_file_diag(f) {
+                let (segs, qb, eof, dead, peer_alive, peer_ts, sndcap, acceptq) =
+                    s.diag_stream_pair();
+                // Only sockets that look connected-and-live matter for
+                // the diff; listeners show up too (accq>0 is itself a
+                // finding — a deaf accept).
+                crate::pr_warn!(
+                    "PID1EPOLL  UNWATCHED fd={} fid={:#x} unix[segs={} bytes={} eof={} dead={} peer_alive={} peer_ts={} sndcap={} wr={} accq={}]",
+                    fd,
+                    f.file_id,
+                    segs,
+                    qb,
+                    eof as u8,
+                    dead as u8,
+                    peer_alive as u8,
+                    peer_ts,
+                    sndcap,
+                    (peer_alive && peer_ts < sndcap) as u8,
+                    acceptq
+                );
+            }
+        });
     }
 }
 
@@ -2458,6 +2495,39 @@ fn sys_epoll_wait_inner(args: SyscallArgs) -> i64 {
                     // closed interest (removed at close), and the former
                     // forever-EPOLLERR|EPOLLHUP report was a phantom
                     // wakeup source.
+                    // 69th (ohw82 second face): a purged interest on a
+                    // LIVE child = that child goes dark forever (client
+                    // sends land in a queue nobody polls — the 105s).
+                    // dfx=pid1spin names every purge for pid 1's epoll:
+                    // fd-gone vs fd-reused (and the new file's class).
+                    if crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::Pid1Spin,
+                    ) && crate::process::current_pid() == 1
+                    {
+                        static PURGE_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PURGE_N
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 200 {
+                            let now = match fdtable.get_file(entry.fd as usize) {
+                                Some(f) => alloc::format!(
+                                    "reused fid={:#x} ops={:#x}",
+                                    f.file_id,
+                                    f.get_ops()
+                                        .map(|o| o as *const _ as usize)
+                                        .unwrap_or(0)
+                                ),
+                                None => "gone".into(),
+                            };
+                            crate::pr_warn!(
+                                "PID1EPOLL-PURGE #{} fd={} entry_fid={:#x} fd_now={}",
+                                n,
+                                entry.fd,
+                                entry.file_id,
+                                now
+                            );
+                        }
+                    }
                     dead_fds.push(entry.fd as usize);
                     continue;
                 }
