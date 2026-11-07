@@ -1,0 +1,13 @@
+CASE[fork+exit] fix rep1 load=1.56 VAL=NONE
+CASE[fork+exit] fixpimq rep1 load=2.27 VAL=89.2247
+CASE[fork+exit] fix rep2 load=3.15 VAL=NONE
+CASE[fork+exit] fixpimq rep2 load=3.09 VAL=NONE
+CASE[fork+exit] fix rep3 load=3.03 VAL=53.8504
+CASE[fork+exit] fixpimq rep3 load=3.24 VAL=NONE
+CASE[fork+exit] fix rep4 load=2.70 VAL=NONE
+CASE[fork+exit] fixpimq rep4 load=1.54 VAL=NONE
+CASE[fork+exit] fix rep5 load=3.20 VAL=NONE
+CASE[fork+exit] fixpimq rep5 load=3.75 VAL=84.9826
+== summary ==
+fix: 53.8504 
+fixpimq: 84.9826 89.2247 
