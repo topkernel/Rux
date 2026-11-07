@@ -108,7 +108,6 @@ macro_rules! debug_switch_table {
             SyncGuard => "syncguard",
             SyncWatch => "syncwatch",
             FuxStuck => "fuxstuck",
-            StackWatch => "stackwatch",
         }
     };
 }
@@ -548,16 +547,9 @@ pub enum DebugSwitch {
     /// adjudication for the OH post-creation stall web (useriam FFRT /
     /// DB_TaskExecutor families). Zero cost when off.
     FuxStuck,
-    /// debug=stackwatch (r12 wake/halt hunt): the freed-stack live-rsp0
-    /// diagnostic print in Task::free_kernel_stack. The check itself is
-    /// cheap and stays unconditional; only the ~60-char UART line is
-    /// gated (UNCONDITIONAL it fired 18-229x per benchmark boot on the
-    /// recycle-cycle timing lottery, each line ~240us of IF=0 batched
-    /// UART on the exit CPU — the fork bistable's print-storm source).
-    StackWatch,
 }
 
-const SWITCH_COUNT: usize = 61;
+const SWITCH_COUNT: usize = 60;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -662,7 +654,6 @@ impl DebugSwitch {
             DebugSwitch::SyncGuard => 57,
             DebugSwitch::SyncWatch => 58,
             DebugSwitch::FuxStuck => 59,
-            DebugSwitch::StackWatch => 60,
         }
     }
 
