@@ -4212,6 +4212,33 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
     }
     drop(head);
 
+    // oh67: the lost-notify probe — a FUTEX_WAKE that found NO waiter
+    // (ret=0) on a THREAD-STACK word is either a benign timeout-canceled
+    // notify or a LOST wake: the notifier's seq bump + wake landed while
+    // the waiter was en route to park, or the waiter's node address was
+    // stale. musl's cond protocol closes the first window in userspace;
+    // any residual ret=0 on a word whose waiter stays parked is the
+    // wedge's lost edge. Budget 240/boot, fuxstuck-gated; correlate
+    // offline against the stuck-park births (FUX-CTX groups by word).
+    if ret == 0
+        && (0x7ff0_8000_0000..=0x7ff0_9fff_ffff).contains(&uaddr)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+    {
+        static MISS0_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static MISS0_DUP: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = MISS0_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 240 {
+            let waker = crate::sched::current().map(|t| unsafe {
+                ((*t).pid(), (*t).tgid() as u32)
+            });
+            crate::pr_warn!("FUXW-MISS0 #{} uaddr={:#x} waker={:?}", n, uaddr, waker);
+        } else {
+            MISS0_DUP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     #[cfg(feature = "dfx-futex-trace")]
     ftx_trace(b"WAKE-OUT", uaddr, ret as u64, woken_n as u64);
 

@@ -5602,6 +5602,17 @@ pub fn bwr_park_audit() {
         let owner_txt = if is_owner {
             static OWNER_DEEP_DONE: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);
+            // oh67: the one-shot deep dump spent itself on the first
+            // (benign, early) owner row in every boot — re-arm while the
+            // latched holder has been holding >30 s, budget 3 stuck-dumps.
+            static OWNER_DEEP_STUCK: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let owner_age_j = now.wrapping_sub(
+                crate::sync::futex::FUXWATCH_OWNER_J
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            );
+            let stuck_dump = owner_age_j > 300
+                && OWNER_DEEP_STUCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3;
             let wakes = crate::sync::futex::fuxw_word_wake_summary(a0 as u64, now);
             let (page, pwoken, pothers) =
                 crate::sync::futex::fuxw_owner_park_state(s.tid, a0 as u64, now);
@@ -5614,6 +5625,7 @@ pub fn bwr_park_audit() {
                     core::sync::atomic::Ordering::Relaxed,
                 )
                 .is_ok()
+                || stuck_dump
             {
                 use core::fmt::Write as _;
                 let body = match crate::sync::futex::deep_ufw(task) {

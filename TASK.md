@@ -7660,3 +7660,159 @@ Final tally: 0/3 appfwk.ready (ohw54/55/56, identical SA:3299 M2-class
 stall at t≈69-71). Branch oh-crash pushed at 3 commits past the 65th
 (eb8e4b0f + 2f521c9b + docs). No stray QEMUs (sc66b reaped at window
 end).
+
+### 67. 67TH SESSION (2026-11-07) — the M2 web decoded to its MEMBER,
+### holder and waiter ring with BuildID-verified symbols; the holder is
+### the FFRT-worker context (coroutine suspended inside the critical
+### section, unlock never written); the infinite polls exonerated as
+### netlink/evdev standby; ONE boot passed bootevent.appfwk.ready; the
+### lost-notify probe landed; 0-appfwk tally 1/5
+
+Boots this session: ohw57-ohw67 (11 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7; ohw57-66 dfx=fuxstuck,txnhunt,
+sleepsnap,pctlmon with fuxwatch=0x7ff0004862c0 as a TOP-LEVEL cmdline
+param — the 66th's dfx=-nested form was silently ignored ("unknown
+switch"), so the write-watchpoint never armed in ohw54-56). Commits:
+9ad98c28 (oh67 decode instruments) + the MISS0/owner-deep follow-ups.
+Gates: x86_64 build rc=0; riscv64 build rc=0 + make test 1319/1319
+(run/test-rv-67.log); aarch64 build rc=0 (run/build-a64-67.log). All
+changes dfx-gated; no hot path touched → no pbench/syscost tier owed.
+
+#### 1. THE SYMBOL RIG (this session's method fix — reusable)
+
+The image binaries match oh-robot's out tree by BuildID:
+- /system/bin/samgr = out/x86_64_virt/exe.unstripped/.../samgr
+  (48be5d8d, md5-identical, WITH debug_info)
+- libffrt.so = out/x86_64_virt/lib.unstripped/.../libffrt.so (bb6920ed)
+- libsamgr_common.z.so = lib.unstripped/... (f7ef762b)
+Runtime biases from the uvma prints (samgr RX: file offset 0x42000 at
+p_vaddr 0x43000 → bias = start − 0x43000 — NOT − 0x42000; the 0x1000
+segment skew cost one boot to find). Struct layouts from gdb DWARF:
+mutexPrivate{vptr@0 l@8(int) wlock@12 list.prev@16 list.next@24} (32B),
+WaitEntry{node.prev@0 node.next@8 prev@16 next@24 task@32 wtType@40}
+(48B), WaitUntilEntry{status@44 hasWaitTime@48 tp@56 cb@64 wl@112
+cv@152} (208B), TaskBase{type@24 gid@32 status@48 createTime@96
+executeTime@104 fromTid@112}. samgr::mutex == ffrt::mutexPrivate
+(SAMGR_USE_FFRT), samgr::shared_mutex == ffrt shared.
+
+#### 2. M2 NAMED (ohw63/ohw65, two boots, identical decode)
+
+oh67_m2_decode (landed): resolves the samgr singleton from the BSS
+`instance` pointer (ELF 0xc7048) and names the member:
+**M2 = SystemAbilityManager::listenerMapLock_ (singleton+616)**,
+l=2 (held-with-waiters). Waiter ring walked with the true layout:
+16-17 THREAD-mode waiters (the OS_IPC looper cohort, all in
+mutexPrivate::lock frames) + **2 suspended CoTasks (type=3
+ffrt_queue_task — SERIAL-QUEUE tasks, status=6 EXECUTING, submitted
+fromTid=343/345/366 — the FFRT worker pool)**. The 62nd's
+"listenerMapLock_" guess and the 66th's "eu/loop.cpp Loop holder"
+decode are corrected: tid345's stack is BuildID-verified
+CPUWorker::WorkerLooper:233 → SExecuteUnit::WorkerIdleAction
+(cpu_worker.cpp / sexecute_unit.cpp) — the worker cycles its idle cv
+(wait_for + deep-sleep re-park); it is NOT the serial-queue loop.
+
+#### 3. THE HOLDER (fuxwatch write-watchpoint, properly armed)
+
+The FW write-log on listenerMapLock_.l (0x7ff0004862c0): every fast-path
+acquire prints (rip=libsamgr_common+0xdf8a old=0) and every unlock
+(rip=+0xe9c0 old=1) — 966 paired writes in ohw66, ZERO old=2 unlocks:
+listenerMapLock_ was NEVER contended in that boot. In ohw63/ohw65 the
+owner latch names the frozen acquire: tid345 (ohw63, latch 129s+) /
+tid343 (ohw65, latch 211s+) — an unnamed FFRT CPUWorker holding a
+code-6 SYNC-IN LoadSystemAbility txn (drafted mid-own-sync-out:
+lastbwr=BC_TRANSACTION minutes old, todo=1 head=[txn-complete]) and
+parked on its own-stack FFRT cv. The holder's unlock WRITE never comes —
+the acquiring task is a suspended coroutine whose wake must come from
+the FFRT scheduler; the two serial-queue CoTasks in the ring are the
+blocked consumers (notify tasks posted via FFRTHandler::PostTask).
+FindSystemAbilityNotify holds listenerMapLock_ while notifying
+listeners (SystemAbilityStatusChangeProxy::SendRequestInner is
+TF_ASYNC — oneway cannot block the sender on our kernel: alloc-failure
+= BR_FAILED_REPLY parity with 6.6, and the node->async_todo parking
+lot never blocks) — so the holder suspends on an FFRT cv/future INSIDE
+the critical section, and its notifier is a task on the serial queue
+that is drained behind the very lock the holder owns. Cycle closed,
+all edges kernel-visible.
+
+#### 4. EXONERATIONS (negative results that prune the tree)
+
+- The hdf_devmgr/audio_server infinite single-fd polls decode (PFD
+  instrument) as NETLINK (KOBJECT_UEVENT listeners) and
+  /dev/input/event1 evdev standby — legitimate parks, NOT invisible
+  holders. (ops= address matched NETLINK_OPS/EVDEV ops statics.)
+- hdf_devmgr's loopers' park words (0x7ff0009f22f4-class, val
+  0x80000010) = musl held-normal-mutex-with-waiters (EBUSY|WAITERS per
+  the 51st's patched-musl decode) — downstream of the same graph.
+- Wake theft / stale waiters on M2.l: FUXW-PARK/WOXE logs show NOBODY
+  ever parks on the l word (FFRT waiters park on their wn.cv stack
+  nodes) and every watch-word wake consumed nobody — clean.
+- The 66th's "poll inside the critical section" reading of tid345's
+  sys=7 catch is stale-register shaped (st=0x0 RUNNING); the FFRT
+  worker does not poll; its poll fds-class rows decode via PFD.
+- ohw61's init-crawl-at-t=3 (5 execs by t=254) was interleaving
+  variance, not the instruments (ohw62 same binary booted normally).
+
+#### 5. appfwk.ready PASSED (ohw64, t=69.7)
+
+bootevent.appfwk.ready true SET by pid 856 → init handled → result=0 —
+the first pass in the current boot regime (0/8 in the 65th/66th). The
+boot then wedged at the NEXT on-demand phase (i18n/asset/backup_sa
+result=105 at t=145-175: their ohos.ctl.start SENDS never went out —
+the senders froze; pctlmon shows only ONE ctl.start sent after t=70).
+ohw63/65/66 wedged at the SA:3299-class M2 web again. Tally: 1/5
+appfwk.ready this session (ohw64). No launcher pixels (shots 180-420
+all black).
+
+#### 6. INSTRUMENTS LANDED (9ad98c28 + follow-up commit)
+
+- oh67_m2_decode (futex.rs): singleton/member resolution + true-layout
+  waiter ring + CoTask decode (gid/type/st/createTime/executeTime/
+  fromTid); armed by the census chain-closure on SAMGR rows only
+  (hdf_devmgr's binary coincidentally shares the RX segment shape).
+- oh67_poll_decode + oh67_fd_ready (futex.rs + misc.rs + pipe.rs +
+  unix.rs): pollfd array read through the target's page tables + fd
+  path + kernel-side readiness (eventfd counter, timerfd expiry, pipe
+  readable/wclosed, unix recv/peer/accept) + ops-table identity.
+- SNAPPFD: sleepsnap's infinite-timeout single-fd parks decoded into
+  the lossless focus lane (budget 4/round).
+- FUXW-PARK/FUXW-WOKE: watched-word parker/consumer identities.
+- FUXW-MISS0 (follow-up): every ret=0 FUTEX_WAKE on a thread-stack
+  word (the lost-notify probe — musl cond notify landing on an empty
+  queue while the waiter parks), budget 240/boot, fuxstuck-gated.
+- Owner deep-dump re-arm: the one-shot OWNER_DEEP latch spent itself
+  on the first benign row every boot; now re-dumps while the latched
+  holder is stuck >30 s (budget 3).
+
+#### 7. FOR THE 68TH
+
+1. The holder's block primitive is one instrument away: read the
+   holder worker's ExecuteCtx (TLS) → ctx->task → the suspended
+   CoTask's saved coroutine stack (func_storage@0x74 region) — names
+   the exact cv/future inside the listenerMapLock_ critical section.
+   Then check whether its notifier is a serial-queue task (the ring's
+   two type=3 CoTasks say the queue is drained behind M2).
+2. FUXW-MISS0 correlation: in a wedge boot, cross the MISS0 uaddrs
+   against FUX-CTX stuck-park births — a MISS0 on a word whose waiter
+   never woke is the lost-notify conviction; a clean MISS0 set (all
+   timeout-canceled benign) kills the kernel-side lost-wake theory and
+   leaves the userspace graph + window as the only lever.
+3. The wedge has (at least) three per-boot shapes: M2 web (ohw63/65),
+   reader-idle/distributed (ohw64 post-appfwk 105-family), and
+   never-contended-M2 (ohw66 — the watch never saw old=2; the wedge
+   there is a DIFFERENT lock: run the FW write-watch on the hdf word
+   0x7ff0008f22f4-class or arm fuxwatch2 on the scheduler's
+   processLock next).
+4. Yardstick unchanged: M2/web drains, code=3/6 completes,
+   appfwk.ready (now seen once), ServiceStart starting:launcher,
+   launcher spawns, PIXELS.
+
+Addendum (session close): the FUXW-MISS0 lost-notify probe ran its
+first wedge boot (ohw67): 102 ret=0 stack-word wakes in 131 s across 27
+distinct words; the ONE word intersecting the stuck-park set
+(0x7ff082b4c714) is an OS_DfxWatchdog TIMED cv node (fto=59.99 s) whose
+timeout fires — the benign musl cond timeout-cancel shape, not a lost
+wake. The kernel-side futex wake path stays clean (consistent with the
+58th's verdict). ohw67 also re-formed the M2 web (listenerMapLock_ l=2).
+Final tally: 1/5 appfwk.ready this session (ohw64 passes; ohw61 early
+crawl = variance, not reproduced by ohw62 same binary). Commits:
+9ad98c28 + MISS0/owner-deep follow-up + docs. No stray QEMUs.
