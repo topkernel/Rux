@@ -513,7 +513,7 @@ fn tick_grq_sample_armed() {
         let gap_us = if per_ms > 0 { now.saturating_sub(last) / per_ms } else { 0 };
         // Normal tick: 4 ms (KERNEL_HZ=250). Report gaps beyond 8 ms.
         if gap_us > 8_000 {
-            let (cfs_nr, _g, lpid, _o, _c, _p, _t, idle, ph0v, ph1v) =
+            let (cfs_nr, _cl, _g, lpid, _o, _c, _p, _t, idle, ph0v, ph1v) =
                 crate::sched::debug_grq_sample();
             let i = (TG_CUR.fetch_add(1, Ordering::Relaxed) % TG_BUDGET as u64) as usize;
             let g = &TGAPS[i];
@@ -529,8 +529,40 @@ fn tick_grq_sample_armed() {
             TG_SUM_US.fetch_add(gap_us, Ordering::Relaxed);
         }
     }
-    let (cfs_nr, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1) =
+    let (cfs_nr, cfs_len, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1) =
         crate::sched::debug_grq_sample();
+    // Count-vs-tree desync audit: counted nr_running != actual timeline
+    // size is the freeze mechanism candidate — record it loud.
+    if cfs_nr as usize != cfs_len {
+        static DE_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if DE_N.fetch_add(1, Ordering::Relaxed) < 16 {
+            let mut buf: [u8; 96] = [0u8; 96];
+            let h = b"DESYNC cfs-nr=";
+            buf[..h.len()].copy_from_slice(h);
+            let mut n = h.len();
+            let v = cfs_nr;
+            let mut d = [0u8; 24];
+            let mut k = 0;
+            let mut vv = v;
+            if vv == 0 { d[k] = b'0'; k = 1; }
+            while vv > 0 { d[k] = b'0' + (vv % 10) as u8; vv /= 10; k += 1; }
+            d[..k].reverse();
+            buf[n..n + k].copy_from_slice(&d[..k]);
+            n += k;
+            const M: &[u8] = b" len=";
+            buf[n..n + M.len()].copy_from_slice(M);
+            n += M.len();
+            vv = cfs_len as u64;
+            k = 0;
+            if vv == 0 { d[k] = b'0'; k = 1; }
+            while vv > 0 { d[k] = b'0' + (vv % 10) as u8; vv /= 10; k += 1; }
+            d[..k].reverse();
+            buf[n..n + k].copy_from_slice(&d[..k]);
+            n += k;
+            buf[n] = b'\n';
+            crate::console::puts_bytes_no_lock(&buf[..=n]);
+        }
+    }
     let i = (GS_CUR.fetch_add(1, Ordering::Relaxed) % GS_BUDGET as u64) as usize;
     let s = &GSAMPLES[i];
     s.cfs_nr.store(cfs_nr, Ordering::Relaxed);

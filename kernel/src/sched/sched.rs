@@ -1544,9 +1544,10 @@ pub fn debug_idle_snapshot() -> (u32, u64, u8, u8) {
 /// leftmost_pick_state, leftmost_ti_cpu, idle_mask, ph0, ph1).
 /// Called from scheduler_tick only while forkprof is armed (250 Hz max,
 /// one short lock hold); zero cost otherwise.
-pub fn debug_grq_sample() -> (u64, u64, u32, u32, i64, u32, i32, u32, u8, u8) {
+pub fn debug_grq_sample() -> (u64, usize, u64, u32, u32, i64, u32, i32, u32, u8, u8) {
     let g = grq().lock_irqsave();
     let cfs_nr = g.cfs_rq.nr_running();
+    let cfs_len = g.cfs_rq.timeline_len();
     let grq_nr = g.rq_load() as u64;
     let mut lpid = 0u32;
     let mut loncpu = 0u32;
@@ -1573,7 +1574,7 @@ pub fn debug_grq_sample() -> (u64, u64, u32, u32, i64, u32, i32, u32, u8, u8) {
     }
     drop(g);
     let (idle, _n, ph0, ph1) = debug_idle_snapshot();
-    (cfs_nr, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1)
+    (cfs_nr, cfs_len, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1)
 }
 
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke

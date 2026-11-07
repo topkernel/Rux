@@ -662,6 +662,13 @@ impl CfsRunQueue {
             .map(|(&k, &t)| (k.vruntime, t))
     }
 
+    /// True timeline size (O(1) on BTreeMap) for the r12 count-vs-tree
+    /// desync audit. GRQ-HELD.
+    #[inline]
+    pub fn timeline_len(&self) -> usize {
+        self.tasks_timeline.len()
+    }
+
     #[inline]
     fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) {
         let lower = self
