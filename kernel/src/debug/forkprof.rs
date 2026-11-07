@@ -408,6 +408,73 @@ fn hist_account(kind: usize, delta_cyc: u64, pid: u32) {
     }
 }
 
+// ---- tick-path GRQ sampler (r12): catch a stall IN PROGRESS ----
+//
+// The rescue-time snapshot (FSTALL) cannot see the during-stall state.
+// This sampler fires every tick while armed, reads the GRQ under its
+// lock (count + leftmost candidate's ownership qword + idle mask +
+// phases), and keeps a 64-slot ring. Consecutive samples naming the
+// same leftmost pid (>=2 ticks = >=8 ms stuck) are the during-stall
+// truth the rescue snapshot can't provide.
+
+const GS_BUDGET: usize = 64;
+pub struct GrqSample {
+    pub cfs_nr: AtomicU64,
+    pub grq_nr: AtomicU64,
+    pub lpid: AtomicU32,
+    pub loncpu: AtomicU32,
+    pub lclaim: AtomicU64, // i64 bit-cast
+    pub lpk: AtomicU32,
+    pub ltcpu: AtomicU32, // i32 bit-cast
+    pub idle: AtomicU32,
+    pub ph0: AtomicU32,
+    pub ph1: AtomicU32,
+}
+const GS0: GrqSample = GrqSample {
+    cfs_nr: AtomicU64::new(0),
+    grq_nr: AtomicU64::new(0),
+    lpid: AtomicU32::new(0),
+    loncpu: AtomicU32::new(0),
+    lclaim: AtomicU64::new(u64::MAX),
+    lpk: AtomicU32::new(0),
+    ltcpu: AtomicU32::new(u32::MAX),
+    idle: AtomicU32::new(0),
+    ph0: AtomicU32::new(255),
+    ph1: AtomicU32::new(255),
+};
+static GSAMPLES: [GrqSample; GS_BUDGET] = [GS0; GS_BUDGET];
+static GS_CUR: AtomicU64 = AtomicU64::new(0);
+
+/// Called from scheduler_tick while forkprof is armed. Records one
+/// sample; also detects streaks (same leftmost pid across >=2
+/// consecutive samples) into a small streak table.
+#[inline]
+pub fn tick_grq_sample() {
+    if !on() {
+        return;
+    }
+    tick_grq_sample_armed();
+}
+
+#[cold]
+#[inline(never)]
+fn tick_grq_sample_armed() {
+    let (cfs_nr, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1) =
+        crate::sched::debug_grq_sample();
+    let i = (GS_CUR.fetch_add(1, Ordering::Relaxed) % GS_BUDGET as u64) as usize;
+    let s = &GSAMPLES[i];
+    s.cfs_nr.store(cfs_nr, Ordering::Relaxed);
+    s.grq_nr.store(grq_nr, Ordering::Relaxed);
+    s.lpid.store(lpid, Ordering::Relaxed);
+    s.loncpu.store(loncpu, Ordering::Relaxed);
+    s.lclaim.store(lclaim as u64, Ordering::Relaxed);
+    s.lpk.store(lpk, Ordering::Relaxed);
+    s.ltcpu.store(ltcpu as u32, Ordering::Relaxed);
+    s.idle.store(idle, Ordering::Relaxed);
+    s.ph0.store(ph0 as u32, Ordering::Relaxed);
+    s.ph1.store(ph1 as u32, Ordering::Relaxed);
+}
+
 #[inline]
 pub fn peek(p: usize) -> (u64, u64, u64) {
     let s = &STATS[p];
@@ -530,6 +597,34 @@ pub fn report() {
                 s.nr_running.load(Ordering::Relaxed),
                 s.phase0.load(Ordering::Relaxed),
                 s.phase1.load(Ordering::Relaxed),
+            );
+        }
+    }
+    // Tick-path GRQ samples: print non-idle-queue samples (a candidate
+    // sitting in the tree across samples = the during-stall truth).
+    let gs_total = GS_CUR.load(Ordering::Relaxed);
+    if gs_total > 0 {
+        crate::println!("FGSQ n={}", gs_total);
+        let n = gs_total.min(GS_BUDGET as u64) as usize;
+        for i in 0..n {
+            let s = &GSAMPLES[i];
+            let lpid = s.lpid.load(Ordering::Relaxed);
+            let cfs = s.cfs_nr.load(Ordering::Relaxed);
+            if lpid == 0 && cfs == 0 {
+                continue;
+            }
+            crate::println!(
+                "FGSQ cfs={} grq={} lpid={} oncpu={} claim={} pk={:#x} tcpu={} idle={:#b} ph={}/{}",
+                cfs,
+                s.grq_nr.load(Ordering::Relaxed),
+                lpid,
+                s.loncpu.load(Ordering::Relaxed),
+                s.lclaim.load(Ordering::Relaxed) as i64,
+                s.lpk.load(Ordering::Relaxed),
+                s.ltcpu.load(Ordering::Relaxed) as i32,
+                s.idle.load(Ordering::Relaxed),
+                s.ph0.load(Ordering::Relaxed),
+                s.ph1.load(Ordering::Relaxed),
             );
         }
     }

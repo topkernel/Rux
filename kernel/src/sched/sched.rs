@@ -1461,6 +1461,45 @@ pub fn debug_idle_snapshot() -> (u32, u64, u8, u8) {
     (idle, nrun, ph(0), ph(1))
 }
 
+/// Debug GRQ sample for the forkprof tick sampler (r12 wake/halt hunt):
+/// reads the scheduler state UNDER the GRQ lock so the count-vs-tree
+/// relationship and the leftmost candidate's ownership bits are coherent.
+/// Returns (cfs_nr, grq_nr, leftmost_pid, leftmost_oncpu, leftmost_claim,
+/// leftmost_pick_state, leftmost_ti_cpu, idle_mask, ph0, ph1).
+/// Called from scheduler_tick only while forkprof is armed (250 Hz max,
+/// one short lock hold); zero cost otherwise.
+pub fn debug_grq_sample() -> (u64, u64, u32, u32, i64, u32, i32, u32, u8, u8) {
+    let g = grq().lock_irqsave();
+    let cfs_nr = g.cfs_rq.nr_running();
+    let grq_nr = g.rq_load() as u64;
+    let mut lpid = 0u32;
+    let mut loncpu = 0u32;
+    let mut lclaim: i64 = -1;
+    let mut lpk = 0u32;
+    let mut ltcpu: i32 = -1;
+    if cfs_nr > 0 {
+        if let Some((_, task)) = g.cfs_rq.peek_leftmost() {
+            if !task.is_null() {
+                // SAFETY: task is a linked timeline entry (GRQ held);
+                // field reads only.
+                unsafe {
+                    lpid = (*task).pid();
+                    loncpu = (*task).on_cpu() as u32;
+                    lclaim = (*task)
+                        .running_on_cpu
+                        .load(core::sync::atomic::Ordering::Acquire)
+                        as i64;
+                    lpk = (*task).pick_state();
+                    ltcpu = (*task).ti_cpu();
+                }
+            }
+        }
+    }
+    drop(g);
+    let (idle, _n, ph0, ph1) = debug_idle_snapshot();
+    (cfs_nr, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1)
+}
+
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke
 /// a CPU only when the wakee actually wins the wakeup-preemption
 /// comparison — the reference's check_preempt_curr semantics. Policy
@@ -5366,6 +5405,9 @@ pub fn dequeue_if_enqueued(task: &Task) {
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::debug::softlockup::touch(cpu_id);
+    // r12 wake/halt hunt: tick-path GRQ sampler (forkprof-armed boots
+    // only; one relaxed armed-check when off).
+    crate::debug::forkprof::tick_grq_sample();
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // phantom-bits orphan scan: bits the interrupted task carried INTO

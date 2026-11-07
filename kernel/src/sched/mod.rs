@@ -57,6 +57,7 @@ pub use sched::{
     claim_idle_cpu_for,
     preempt_check_wake,
     debug_idle_snapshot,
+    debug_grq_sample,
     wake_up_process,
     yield_cpu,
     for_each_task,

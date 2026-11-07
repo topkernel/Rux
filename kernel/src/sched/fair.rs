@@ -650,6 +650,18 @@ impl CfsRunQueue {
         self.leftmost_cache
     }
 
+    /// Non-removing leftmost read for the debug tick sampler (r12):
+    /// GRQ-HELD, never mutates (the cache is only populated, never
+    /// invalidated — safe for concurrent pick paths since the caller
+    /// holds the same lock they do).
+    #[inline]
+    pub fn peek_leftmost(&self) -> Option<(u64, *mut crate::process::Task)> {
+        self.tasks_timeline
+            .iter()
+            .next()
+            .map(|(&k, &t)| (k.vruntime, t))
+    }
+
     #[inline]
     fn timeline_insert(&mut self, key: VruntimeKey, task: *mut crate::process::Task) {
         let lower = self
