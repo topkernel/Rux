@@ -126,7 +126,7 @@ def main():
         WT, "target/riscv64gc-unknown-none-elf/debug/rux"))
     ap.add_argument("--img", default=os.path.join(WT, ".udev/hotplug.img"))
     ap.add_argument("--outdir", default=os.path.join(WT, ".udev/run"))
-    ap.add_argument("--smp", default="4")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--keep", action="store_true", help="keep outdir")
     args = ap.parse_args()
 

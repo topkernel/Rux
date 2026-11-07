@@ -51,7 +51,7 @@ def build_image(img, probe_bin, name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", default="2")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--secs", default="90")
     ap.add_argument("--mem", default="2048M")
     ap.add_argument("--kernel", default=None)

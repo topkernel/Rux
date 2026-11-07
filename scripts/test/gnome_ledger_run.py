@@ -51,7 +51,7 @@ def main():
                                          "riscv64gc-unknown-none-elf",
                                          "debug", "rux"))
     ap.add_argument("--secs", type=int, default=2400)
-    ap.add_argument("--smp", default="4")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--debug", default="watchdog,taskdump,memwatch,ledger")
     ap.add_argument("--ledger-every", type=float, default=180.0)

@@ -43,7 +43,7 @@ p.add_argument("--kernel", default=os.path.join(
     WT, "target/riscv64gc-unknown-none-elf/debug/rux"))
 p.add_argument("--init", default="/sbin/runit")
 p.add_argument("--mem", default="2G")
-p.add_argument("--smp", default="2")
+p.add_argument("--smp", default="8")
 p.add_argument("--thread", default="multi", choices=["multi", "single"])
 p.add_argument("--debug", default="")
 p.add_argument("--extra-append", default="")

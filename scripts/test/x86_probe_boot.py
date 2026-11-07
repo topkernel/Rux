@@ -52,7 +52,7 @@ def build_image(img, probe_bin, name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("probe", choices=["writestorm", "gwp_churn"])
-    ap.add_argument("--smp", default="2")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--secs", default="30")
     ap.add_argument("--mem", default="512M")
     ap.add_argument("--kernel", default=os.path.join(

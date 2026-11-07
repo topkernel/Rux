@@ -65,7 +65,7 @@ def main():
     ap.add_argument("--img-base", default=DEFAULT_IMG_BASE)
     ap.add_argument("--timeout", type=int, default=None)
     ap.add_argument("--out", default=os.path.join(HERE, "runs", "timer-probe-vc"))
-    ap.add_argument("--smp", type=int, default=4)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--reuse-img", action="store_true")
     args = ap.parse_args()
 

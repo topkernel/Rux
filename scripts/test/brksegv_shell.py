@@ -41,7 +41,7 @@ def main():
     ap.add_argument("--secs", default="240")
     ap.add_argument("--kernel", default=os.path.join(
         WT, "target/riscv64gc-unknown-none-elf/debug/rux"))
-    ap.add_argument("--smp", default="2")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--race", default=None,
                     help="seconds after cmd send to inject racing input")
     args = ap.parse_args()

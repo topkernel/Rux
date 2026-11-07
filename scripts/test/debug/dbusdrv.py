@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--timeout", type=int, default=900)
-    ap.add_argument("--smp", default="2")
+    ap.add_argument("--smp", default="8")
     ap.add_argument("--mem", default="1G")
     ap.add_argument("--thread", default="multi")
     ap.add_argument("--keep", action="store_true",

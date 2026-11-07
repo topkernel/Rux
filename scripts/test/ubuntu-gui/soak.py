@@ -253,7 +253,7 @@ class Soak:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=int, default=30)
-    ap.add_argument("--smp", type=int, default=4)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--kernel")
     ap.add_argument("--img")

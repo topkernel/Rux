@@ -75,7 +75,7 @@ def build_image(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--smp", type=int, default=4)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--thread", default="multi", choices=["multi", "single"])
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--mem", default="1G")

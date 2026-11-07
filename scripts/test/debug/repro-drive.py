@@ -126,7 +126,7 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--dur", type=int, default=600)
     ap.add_argument("--rounds", type=int, default=6)
-    ap.add_argument("--smp", type=int, default=4)
+    ap.add_argument("--smp", type=int, default=8)
     ap.add_argument("--img", default=None,
                         help="override work image path (default work/repro.img)")
     ap.add_argument("--no-snapshot", action="store_true",

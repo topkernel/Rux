@@ -13,8 +13,10 @@ KERNEL_BIN ?= target/riscv64gc-unknown-none-elf/debug/rux
 UBUNTU_QEMU ?= /usr/bin/qemu-system-riscv64
 # CPU count (user directive 2026-11-07: every launch — Ubuntu, OH, all
 # tests — boots with at least 8 CPUs; override only for targeted
-# single-CPU race hunts)
+# single-CPU race hunts). Passed through to the launch scripts, which
+# default to the same number on their own.
 SMP ?= 8
+export SMP
 # TCG threading: multi = MTTCG (2.1x faster, verified 23/23 on both QEMU
 # builds with zero regressions); THREAD=single restores the deterministic
 # single-host-thread mode for debugging/stepping.
@@ -104,7 +106,7 @@ ubuntu-image:
 # AND in this terminal (serial). Login: root / rux.
 ubuntu-run: build $(UBUNTU_IMG)
 	@echo "Starting Ubuntu GNOME desktop (x86_64, KVM, SDL window)..."
-	@ROOTFS=$(UBUNTU_IMG) INIT=/sbin/runit NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
+	@ROOTFS=$(UBUNTU_IMG) INIT=/sbin/runit SMP=$(SMP) NOBUILD=1 bash scripts/test/run-x86-ub.sh gui
 
 # Image rule: built on demand by ubuntu-run, refreshed by `make ubuntu-image`.
 $(UBUNTU_IMG):

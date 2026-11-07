@@ -8,7 +8,7 @@ R=/home/william/rux-agents/r56-heal/run
 TAG=${1:?tag}
 SECS=${2:-150}
 ACCEL=${3:-tcg,thread=single}
-SMP=${4:-2}
+SMP=${4:-8}
 K=/home/william/rux-agents/r56-heal/target/riscv64gc-unknown-none-elf/debug/rux
 IMG=/home/william/rux-agents/virtio-wake/run/f05vw.img
 rm -f $R/ser-$TAG.sock $R/serial-$TAG.log
