@@ -7640,3 +7640,23 @@ pbench Tier-2 passes clean (±3.4% all rows).
    init_param.h) is now one-boot-decodable if it recurs.
 3. Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
    ServiceStart starting:launcher, PIXELS.
+
+Addendum (session close): the Tier-1 syscost evidence split across two
+boots — sc66 (240s, LOGLEVEL4) and sc66b (780s, LOGLEVEL7, full OH
+image): ZERO kernel panics and zero new OOM classes on both; two
+TERM-DESCHED "stuck" prints on sc66b (pids 1068/1070, rounds=8,
+resolved — no leaked-count class); slow-ring dominated by the known
+image-side classes (hilogd.server/rd_kmsg, OS_FFRT_Delay). NOTE: these
+are OH-image boots (lb-boot vehicle), NOT the canonical pa-class
+minimal-rootfs syscost boot the baseline table banks — the OH image's
+sustained ~146-147 active ticks/s/cpu is the image-churn class, not
+comparable to the pa-series band; the sched/ change's direct Tier-2
+measurement (pbench P2 ctxsw +3.0%, P5 pipe +1.4%, all 22 rows within
+±3.4%, run/abpb-66-base-wfsync.txt) is the gate evidence for 2f521c9b.
+Also closed this session: the ohw49 "init stream stops" question — in
+ohw55/56 ZERO PCTL-SENDs occur after the stall onset (t>71); init's
+param loop is healthy, the SENDERS freeze with the rest of the M2 web.
+Final tally: 0/3 appfwk.ready (ohw54/55/56, identical SA:3299 M2-class
+stall at t≈69-71). Branch oh-crash pushed at 3 commits past the 65th
+(eb8e4b0f + 2f521c9b + docs). No stray QEMUs (sc66b reaped at window
+end).
