@@ -4876,13 +4876,28 @@ pub fn wake_up_enqueue_opt(
                 // would poison every future wake-heal of this task (the
                 // same per-task forever-skip the parkwalk's mid-switch
                 // skip produces). Time-confirm, then ignore.
+                //
+                // (r14 race-2 fix) The original confirm refreshed the
+                // timestamp on EVERY observation, so a task woken more
+                // often than once per 50 jiffies NEVER aged out — the
+                // r14 wedge census showed exactly that (pid 308: an
+                // endless why=s skip stream, the stuck marker poisoning
+                // every wake until both CPUs halted — the lost-park
+                // permanent wedge). Age must measure how long the
+                // marker has been CONTINUOUSLY present: record the
+                // first-observed jiffy and only clear the entry when the
+                // task is seen WITHOUT the marker (a genuine switch
+                // clears it in microseconds, so the entry resets on the
+                // next wake; a marker that survives 50 jiffies of
+                // continuous presence is stale by the original
+                // discipline's own argument).
+                const WMS: usize = 8;
+                static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
+                    [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
+                static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
+                let key = task as usize;
                 if mid_switch {
-                    const WMS: usize = 8;
-                    static WM_TASK: [core::sync::atomic::AtomicUsize; WMS] =
-                        [const { core::sync::atomic::AtomicUsize::new(0) }; WMS];
-                    static WM_JIF: [core::sync::atomic::AtomicU64; WMS] =
-                        [const { core::sync::atomic::AtomicU64::new(0) }; WMS];
-                    let key = task as usize;
                     let jif = crate::drivers::timer::get_jiffies();
                     let mut stale = false;
                     for s in 0..WMS {
@@ -4893,7 +4908,6 @@ pub fn wake_up_enqueue_opt(
                             if jif.wrapping_sub(prev_jif) >= 50 {
                                 stale = true;
                             }
-                            WM_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                         if prev == 0
@@ -4912,6 +4926,23 @@ pub fn wake_up_enqueue_opt(
                     }
                     if stale {
                         mid_switch = false;
+                    }
+                } else {
+                    // Marker absent: retire this task's WM entry so the
+                    // next stuck marker starts a FRESH age window (a
+                    // real switch clears the marker in microseconds; the
+                    // entry only survives while the marker does). The
+                    // entry is the SAME array the arm above reads
+                    // (hoisted statics).
+                    for s in 0..WMS {
+                        WM_TASK[s]
+                            .compare_exchange(
+                                key,
+                                0,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .ok();
                     }
                 }
                 let mut curr_on = false;
