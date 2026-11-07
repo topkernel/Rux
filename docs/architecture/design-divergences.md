@@ -902,3 +902,92 @@ minimal-rootfs smoke simply never hits the slowpath (no pressure).
 **Guard.** Tier-1/Tier-2 perf gate (the sampler lives in
 scheduler_tick and the mm/fs guards on the alloc/io paths); the psi
 unit-test group in `make test`; scripts/test/psi-smoke.sh.
+
+---
+
+## D-21: Hung-task report walks the waiter→lock→owner chain
+
+**Design.** The hung-task detector's report (`kernel/src/debug/hung_task.rs`)
+follows the blocked task's chain: the victim names the SleepMutex it is
+parked on (Task::blocked_on, written only in the mutex's contended wait
+path), the mutex names its owner pid (the existing owner field, read at
+report time via try-lock), the owner's comm/pid/state/CPU prints, its own
+parked stack follows when it is parked too, recursing to depth 3 with
+explicit cycle detection ("chain cycles at pid N"). The reference kernel's
+hung task report stops at the victim (comm, state, one stack); chasing
+mutex owners there is lockdep's job (with LOCKDEP armed and lockdep
+chains built). Rux has no runtime lockdep; the per-mutex owner bookkeeping
+already exists for the fairness/handoff machinery.
+
+**Advantage.** A D-state stall report becomes a direct conviction: an ABBA
+pair (or a leaked-lock chain) names BOTH tasks, BOTH mutexes (name +
+address) and the cycle from the log alone, with no second tool armed and
+no offline symbolization step (stacks symbolize inline through the D-3
+ksym table). The synthetic ABBA proof (`debug=abba`) demonstrates the full
+report; `debug=hungpanic` escalates it into a panic record.
+
+**Compatibility evidence.** No external interface changes (boot flag
+`debug=` tokens are Rux-internal). riscv64 + x86_64/KVM synthetic-ABBA
+boots convict from the log alone; the normal-boot report fires unchanged
+on real D-state tasks (observed: fdreapd, parked in Semaphore::down, gets
+a wchan line naming the wait fn). LTP unaffected (report path is cold:
+khungtaskd's 60 s cadence and the mutex fast paths are untouched — the
+blocked_on store lives only in the contended slow path).
+
+**Known cost.** The chain walk reads foreign tasks (pinned pid-hash
+lookups) and dereferences 'static mutex addresses at report time; a
+racing exit can make one hop report "owner not in pid-hash" instead of
+following — acceptable for a 120 s-cadence diagnostic. Raw stack words
+between the schedule machinery and the park site include stale values
+(frame-pointer-free scan); the CHAIN lines, not the stack words, carry
+the conviction.
+
+**Status.** Kept (user directive 2026-11-07: follow the reference unless
+ours is demonstrably better — the owner chain goes beyond the reference
+hung-task report, kept precisely because it converts a stall report into
+a conviction without lockdep; registered here per that ruling).
+
+**Guard.** Tier-1/Tier-2 perf gate (any change to the SleepMutex acquire
+path reports pbench; khungtaskd cadence unchanged); the `debug=abba`
+self-test verdict (DLSELP-ABBA: PASS/DONE) is the functional guard.
+
+---
+
+## D-22: Panic-path full-system last-gasp dump
+
+**Design.** The panic handler appends a byte-capped (96 KiB) snapshot of
+the whole system to the panic report before the pstore capture: every
+CPU's current task with a symbolized stack, plus one compact line per
+task (pid/tgid/state/CPU/claim/comm, the blocked-mutex→owner first hop,
+and symbolized parked-stack frames for D-state tasks). All output goes
+through the lock-free console writer; every lock is a try-lock (busy
+pid-hash buckets are skipped and counted); no allocation. The reference
+kernel prints only the panicking CPU's state in the panic report and
+relies on kdump/crash-dump infrastructure for whole-system state, which
+Rux does not have.
+
+**Advantage.** The 128 KiB pstore console record carries the whole
+machine's story: a mutex deadlock that ends in a panic convicts from the
+pstore record alone (both tasks' blocked-on lines show the crossed
+ownership), no kdump session needed. Serial-console-centric debugging —
+the primary workflow on this project — gets the same data live.
+
+**Compatibility evidence.** No external interface changes. The
+`debug=hungpanic` + `debug=abba` proof boot shows the bundle printing
+cleanly after the SMP stop (no interleaving), inside the budget (2891 of
+98304 bytes on a 12-task boot), with the end marker after the bundle.
+
+**Known cost.** The bundle runs after the SMP stop and before `panic=`
+policy, adding bounded serial time (~3 KiB typical, hard-capped at
+96 KiB) to every panic. On huge task counts the per-task cap plus the
+byte budget bound the output; buckets held by a wedged holder are
+skipped, making that snapshot partial (and saying so).
+
+**Status.** Kept (user directive 2026-11-07, same ruling as D-21: the
+reference's kdump answer to whole-system panic state is future work
+here; serial + pstore carry the story today). kdump remains future work.
+
+**Guard.** Tier-1 perf gate (panic path is cold; the default boot must
+show zero new print classes); the hungpanic+abba proof boot is the
+functional guard; the budget-used line in the bundle output self-reports
+against the 96 KiB cap.

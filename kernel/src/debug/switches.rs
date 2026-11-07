@@ -109,6 +109,8 @@ macro_rules! debug_switch_table {
             SyncWatch => "syncwatch",
             FuxStuck => "fuxstuck",
             LockDep => "lockdep",
+            HungPanic => "hungpanic",
+            AbbaTest => "abba",
         }
     };
 }
@@ -555,9 +557,20 @@ pub enum DebugSwitch {
     /// the P1 cargo feature per
     /// docs/development/lockdep-lite-design.md. Zero cost when off.
     LockDep,
+    /// hung-task panic (debug-dlsleep): a khungtaskd report escalates to
+    /// a full panic — the upgraded report (comm, symbolized stacks,
+    /// waiter→lock→owner chain) plus the panic last-gasp bundle land in
+    /// the pstore record. Reference hung_task_panic analog, default off.
+    HungPanic,
+    /// debug-dlsleep self-test: spawn the synthetic ABBA deadlock (two
+    /// kthreads cross-acquiring two static SleepMutexes), run the FULL
+    /// hung-task report on one victim, assert the chain convicted both
+    /// tasks + both mutexes + the cycle, then force-release and verify
+    /// the system unwinds. Verdict prints as DLSELP-ABBA: PASS/DONE.
+    AbbaTest,
 }
 
-const SWITCH_COUNT: usize = 61;
+const SWITCH_COUNT: usize = 63;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -663,6 +676,8 @@ impl DebugSwitch {
             DebugSwitch::SyncWatch => 58,
             DebugSwitch::FuxStuck => 59,
             DebugSwitch::LockDep => 60,
+            DebugSwitch::HungPanic => 61,
+            DebugSwitch::AbbaTest => 62,
         }
     }
 

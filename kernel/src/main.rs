@@ -1833,12 +1833,6 @@ fn panic(info: &PanicInfo) -> ! {
     debug::backtrace::dump_regs_inline();
     debug::backtrace::dump_stack();
 
-    // End marker AFTER the register/stack dump, like the reference.
-    {
-        let mut w = debug::backtrace::ConsoleWriter::new();
-        let _ = w.write_str("---[ end Kernel panic - not syncing ]---\n");
-    }
-
     // Stop the other CPUs (Linux panic → smp_send_stop). Without this the
     // panicking CPU halts while the others keep running — corrupting state
     // under the panic dump and stealing the UART mid-print (reviewround 8).
@@ -1849,6 +1843,22 @@ fn panic(info: &PanicInfo) -> ! {
                 arch::ipi::send_ipi_type(cpu, arch::ipi::IpiType::Stop);
             }
         }
+    }
+
+    // debug-dlsleep last-gasp: the whole system's state — every CPU's
+    // current task with its stack plus one compact line per task (D-state
+    // victims with symbolized parked stacks and the blocked-mutex→owner
+    // first hop) — BEFORE the end marker, so the pstore record carries
+    // the whole machine's story, not just the panicking CPU's. Printed
+    // AFTER the SMP stop so no other-CPU printk can interleave with the
+    // bundle. Cold panic path only; allocation-free, try-locks only,
+    // byte-capped to fit the 128 KiB region (debug/taskdump.rs).
+    debug::taskdump::panic_last_gasp();
+
+    // End marker AFTER the register/stack dump, like the reference.
+    {
+        let mut w = debug::backtrace::ConsoleWriter::new();
+        let _ = w.write_str("---[ end Kernel panic - not syncing ]---\n");
     }
 
     // NOTE: no disk flush here. The old persistent_log_flush call is

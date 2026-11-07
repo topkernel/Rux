@@ -474,6 +474,32 @@ impl SleepMutex {
             }
         };
 
+        // debug-dlsleep (run/LANE.md zero-impact constraint): mark which
+        // mutex this task is contending on, for khungtaskd's report-time
+        // waiter→lock→owner chain walk. Contended slow path ONLY — every
+        // uncontended acquire returned above (optimistic probe / fair
+        // fast path); this store runs once per contended acquire, with
+        // its matching clear when the guard comes back. The stored value
+        // is this `&'static self`, so a report-time reader can never
+        // chase a dangling pointer.
+        cur.blocked_on.store(
+            self as *const SleepMutex as u64,
+            core::sync::atomic::Ordering::Release,
+        );
+        let guard = self.wait_contended(cur);
+        cur.blocked_on.store(0, core::sync::atomic::Ordering::Release);
+        guard
+    }
+
+    /// The contended wait loop, outlined from `lock_inner` (debug-dlsleep)
+    /// and marked `#[inline(never)]` so the compiled uncontended fast path
+    /// of `lock_inner` stays unchanged: the `blocked_on` mark stores live
+    /// in the cold contended tail, never on the fast path. Body is the
+    /// pre-outline wait loop, verbatim.
+    #[inline(never)]
+    fn wait_contended(&'static self, cur: &mut crate::process::task::Task) -> SleepMutexGuard {
+        let pid = crate::process::current_pid();
+
         // R83b: baseline header snapshot for the waiter self-watch below.
         let mut wait_snap = crate::debug::r83hunt::WatchSnap {
             ksp: 0, user_sp: 0, preempt: 0, pick: 0, claim: 0, flags: 0,
@@ -836,6 +862,26 @@ impl SleepMutex {
             (usize::MAX, 0)
         };
         (locked, owner, depth, queued, woken)
+    }
+
+    /// debug-dlsleep: report-time diagnostic accessors for the hung-task
+    /// chain walk. COLD paths — called by khungtaskd's report and the
+    /// panic last-gasp only, never from any acquire/release.
+    ///
+    /// The mutex's diagnostic name (stable, logs parse them).
+    pub fn diag_name(&'static self) -> &'static str {
+        self.name
+    }
+
+    /// (locked, owner pid, depth, counted waiters). `owner == u32::MAX`
+    /// means the state spinlock was busy at snapshot time — the walker
+    /// reports that instead of blocking (a wedged state holder must not
+    /// deadlock the detector itself).
+    pub fn diag_snapshot(&'static self) -> (bool, u32, u32, u32) {
+        match self.state.try_lock() {
+            Some(st) => (st.locked, st.owner, st.depth, st.waiters),
+            None => (false, u32::MAX, 0, 0),
+        }
     }
 
     /// R85 (b148 hunt): one SBI-console census line for the periodic
