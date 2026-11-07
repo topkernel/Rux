@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+extern char **environ;
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
@@ -147,6 +148,29 @@ int main(void)
 
     char *real_argv[8];
     int argc2 = 0;
+    /* r16 flamegraph rig: sampler=1 on the kernel cmdline forks the
+     * guest-side CPU-clock IP sampler (gb_sampler) for the whole run
+     * window; it prints the GBSAMP histogram to the console at its
+     * deadline. Off by default (the perf tick hooks cost only a
+     * relaxed load per tick when no event is armed). */
+    char smode[8];
+    read_param("sampler=", smode, sizeof(smode));
+    if (strcmp(smode, "1") == 0
+        && access("/test/geekbench/gb_sampler", X_OK) == 0) {
+        pid_t sp = fork();
+        if (sp == 0) {
+            char sbuf[16];
+            snprintf(sbuf, sizeof(sbuf), "%ld", timeout_s - 10);
+            char *sa[3];
+            sa[0] = (char *)"gb_sampler";
+            sa[1] = sbuf;
+            sa[2] = NULL;
+            execve("/test/geekbench/gb_sampler", sa, environ);
+            _exit(127);
+        }
+        if (sp > 0)
+            printf("GEEKBENCH SAMPLER pid=%d secs=%ld\n", sp, timeout_s - 10);
+    }
     if (strcmp(mode, "netprobe") == 0) {
         /* Diagnostic: resolve + connect the upload path, then exit. */
         struct addrinfo hints, *res = NULL;
