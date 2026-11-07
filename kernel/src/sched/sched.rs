@@ -2284,9 +2284,16 @@ pub fn schedule() {
     // preemption path (preempt_schedule_irq shape); anything else is a
     // sleeping-with-IRQs-off bug. Rate-limited one-liner naming the caller.
     if !crate::arch::cpu::get_interrupts_state() {
+        // (r14) Entries via asm_schedule (the trap-exit preemption path)
+        // set and surrender a per-CPU token — the legitimate shape; see
+        // SCHED_ASM_ENTRY above. Consume it here, report only direct
+        // Rust callers.
+        let sched_cpu = crate::arch::cpu_id() as usize;
+        let via_asm = sched_cpu < MAX_CPUS
+            && SCHED_ASM_ENTRY[sched_cpu].swap(false, core::sync::atomic::Ordering::AcqRel);
         static IRQOFF_N: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
-        if IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+        if !via_asm && IRQOFF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
             let loc = core::panic::Location::caller();
             crate::pr_warn!(
                 "SCHED-IRQOFF caller={}:{} pid={} pc={:#x}",
@@ -2338,8 +2345,30 @@ pub fn schedule() {
     }
 }
 
+// (r14) Consumed-token marker for the trap-exit preemption path.
+// asm_schedule is called only from trap.S preempt loops (x86_64
+// trap_exit_syscall, riscv64 user-return resched + the
+// preempt_schedule_irq shape) — the ONE legitimate IRQs-off schedule()
+// entry. It sets this per-CPU token immediately before calling
+// schedule(); schedule()'s entry check consumes it (swap to false) and
+// skips the SCHED-IRQOFF report for that entry. Direct Rust callers
+// always see a consumed token and report as before, so the probe keeps
+// its real signal (sleeping-with-IRQs-off bugs) while the storm of
+// identity-free caller=sched.rs:2380 lines (every preempt with IF=0)
+// stops drowning it. Consumption — not a clear-on-return epilogue — is
+// the correctness trick: schedule() may switch away and RETURN on a
+// different CPU, so an epilogue clear could clobber another CPU's
+// token; the entry-time swap is strictly same-CPU synchronous with the
+// setter.
+static SCHED_ASM_ENTRY: [core::sync::atomic::AtomicBool; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_CPUS];
+
 #[no_mangle]
 pub extern "C" fn asm_schedule() {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < MAX_CPUS {
+        SCHED_ASM_ENTRY[cpu].store(true, core::sync::atomic::Ordering::Release);
+    }
     schedule();
 }
 
