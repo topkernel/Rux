@@ -61,6 +61,7 @@ pub mod kallsyms;
 pub mod locks;
 pub mod stat;
 pub mod schedstat;
+pub mod pressure;
 pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
@@ -627,6 +628,28 @@ impl ProcFSSuperBlock {
         // P1: /proc/net — network subsystem introspection (ss/netstat
         // compatible formats).
         self.init_net_tree();
+
+        // /proc/pressure — Pressure Stall Information (PSI), the
+        // reference's fs/proc/pressure.c tree: cpu/memory/io.
+        {
+            let dir = Arc::new(ProcFSNode::new_dir(b"pressure".to_vec(), self.alloc_ino()));
+            self.root_node.add_child(dir.clone());
+            dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+                b"cpu".to_vec(),
+                pressure::generate_cpu,
+                self.alloc_ino(),
+            )));
+            dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+                b"memory".to_vec(),
+                pressure::generate_memory,
+                self.alloc_ino(),
+            )));
+            dir.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+                b"io".to_vec(),
+                pressure::generate_io,
+                self.alloc_ino(),
+            )));
+        }
 
         // /proc/[pid] directories are handled dynamically
     }

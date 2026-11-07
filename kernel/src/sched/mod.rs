@@ -28,6 +28,7 @@ pub mod fair;
 pub mod cgroup;
 pub mod wakewatch;
 pub mod stats;
+pub mod psi;
 
 pub use sched::{
     current,

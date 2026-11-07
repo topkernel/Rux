@@ -186,6 +186,12 @@ impl IoCompletion {
     /// Follows the standard BKL discipline: release BKL, schedule,
     /// re-acquire BKL.
     pub fn wait(&self) -> i32 {
+        // PSI io stall (the reference's in_iowait around io_schedule):
+        // mark the current task io-blocked while it waits for this
+        // completion. One relaxed atomic pair per wait; a wait that
+        // returns without sleeping is invisible to the tick sampler
+        // (sub-tick marks never land on a sample point).
+        let _psi_iowait = crate::sched::psi::StallGuard::iowait();
         let mut deadline_timer = 0u64; // 0 = not armed (or arm failed)
         let mut deadline_armed = false;
         let mut poll_fallback = false; // timer budget exhausted: 1-jiffy re-arms

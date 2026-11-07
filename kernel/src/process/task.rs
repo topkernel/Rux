@@ -5,7 +5,7 @@
 
 //! Task Control Block
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
 use crate::mm::pagemap::AddressSpace;
@@ -1419,6 +1419,12 @@ pub struct Task {
     pub schedstat_timeslices: AtomicU64,
     pub schedstat_wait_start: AtomicU64,
     pub schedstat_exec_start: AtomicU64,
+    /// PSI stall-section bits (kernel/src/sched/psi.rs): MEMSTALL
+    /// while in the alloc slowpath (gate wait / direct reclaim),
+    /// IOWAIT while blocked in IoCompletion::wait. Nested sections
+    /// count once — only the outermost section moves the global
+    /// counter.
+    pub psi_stall: AtomicU8,
     /// Page faults taken by this task in user mode (Linux's minflt).
     /// Rux has no minor/major distinction — file-backed pages come
     /// from the page cache, not from a fault-time disk read — so every
@@ -1802,6 +1808,7 @@ impl Task {
             schedstat_timeslices: AtomicU64::new(0),
             schedstat_wait_start: AtomicU64::new(0),
             schedstat_exec_start: AtomicU64::new(0),
+            psi_stall: AtomicU8::new(0),
             start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
