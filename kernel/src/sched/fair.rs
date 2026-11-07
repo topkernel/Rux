@@ -645,6 +645,18 @@ static SKIP_TRACK: [SkipTrackEntry; 64] = [
     64
 ];
 
+/// 64th (EEVDF seed hunt): how far a virtual runtime may legitimately sit
+/// from min_vruntime, in ns-of-virtual-time. The extreme legitimate case is
+/// a nice-19 CPU hog (weight 15 vs NICE_0 1024, vr grows 68x wall) running
+/// the whole boot: 600 s wall * 68 = 4.1e13. Everything past 1e15 is
+/// corruption-class — ohw36's frozen garbage was ~1e19 (u64 views of a
+/// truncated i128). Trips on |vr - min_vr| beyond this bound.
+const VR_CANARY_SPAN_NS: u64 = 1_000_000_000_000_000;
+
+/// 64th: vruntime sanity canary state (VRTRIP rate limiting).
+static VR_TRIPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static VR_TRIP_LAST_JIF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// CFS run queue
 pub struct CfsRunQueue {
     /// Task queue sorted by vruntime
@@ -791,6 +803,149 @@ impl CfsRunQueue {
                 putchar(b'\n');
             }
         }
+    }
+
+    /// 64th (EEVDF seed hunt): per-visit vruntime sanity canary. Checks the
+    /// ONE invariant every legit vruntime satisfies — |vr - min_vr| within
+    /// VR_CANARY_SPAN_NS (see the constant's derivation) — at the four
+    /// decision sites (enqueue placement, dequeue key, both pick walks).
+    /// On violation prints the task, both values, the writer site, and the
+    /// last 3 pick-ring events so the FIRST anomaly names the seed (the
+    /// 63rd's EEVDF boot corrupted vruntimes within a minute — frozen
+    /// 0xfd79-class values, init unpicked from t=53s — with no instrument
+    /// to localize the write). Armed on dfx=fuxstuck|schedtrace (same gate
+    /// as the pick/wake history); zero cost otherwise (one switch load).
+    /// GRQ-held callers only; prints via putchar_no_lock (R34 discipline).
+    pub fn vr_canary(&self, task: *mut crate::process::Task, site: &[u8; 3], vr: u64) {
+        if !crate::sched::sched::sched_hist_armed() {
+            return;
+        }
+        let min_vr = self.get_min_vruntime();
+        let up = vr.saturating_sub(min_vr);
+        let dn = min_vr.saturating_sub(vr);
+        if up <= VR_CANARY_SPAN_NS && dn <= VR_CANARY_SPAN_NS {
+            return;
+        }
+        let trip = VR_TRIPS.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = crate::drivers::timer::get_jiffies();
+        // First 8 trips always print (the seed hunt needs the first-bad
+        // write); afterwards one per 300 jiffies so a corruption storm
+        // cannot flood the serial console.
+        let last = VR_TRIP_LAST_JIF.load(Ordering::Acquire);
+        if trip > 8
+            && now.wrapping_sub(last) < 300
+            && VR_TRIP_LAST_JIF
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        VR_TRIP_LAST_JIF.store(now, Ordering::Release);
+        use crate::console::putchar_no_lock as putchar;
+        fn ph(mut v: u64) {
+            use crate::console::putchar_no_lock as putchar;
+            putchar(b'0');
+            putchar(b'x');
+            let mut buf = [0u8; 16];
+            let mut n = 0;
+            while n < 16 {
+                buf[n] = (v & 0xF) as u8;
+                v >>= 4;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(if buf[n] < 10 { b'0' + buf[n] as u8 } else { b'a' + buf[n] as u8 - 10 });
+            }
+        }
+        fn pd(mut v: u64) {
+            use crate::console::putchar_no_lock as putchar;
+            let mut buf = [0u8; 20];
+            let mut n = 0;
+            if v == 0 {
+                putchar(b'0');
+                return;
+            }
+            while v > 0 {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+            while n > 0 {
+                n -= 1;
+                putchar(buf[n]);
+            }
+        }
+        fn ps(s: &[u8]) {
+            for &b in s {
+                crate::console::putchar_no_lock(b);
+            }
+        }
+        ps(b"\nVRTRIP site=");
+        ps(site);
+        ps(b" trip=");
+        pd(trip);
+        if !task.is_null() {
+            // SAFETY: diagnostic read of a Task the caller holds under the
+            // GRQ (linked on this queue, or being placed by enqueue).
+            let t = unsafe { &*task };
+            ps(b" tid=");
+            pd(t.pid() as u64);
+            let comm = t.comm();
+            ps(b"(");
+            let mut j = 0;
+            while j < comm.len() && comm[j] != 0 && j < 12 {
+                putchar(comm[j]);
+                j += 1;
+            }
+            ps(b")");
+        }
+        ps(b" vr=");
+        ph(vr);
+        ps(b" min=");
+        ph(min_vr);
+        if up > VR_CANARY_SPAN_NS {
+            ps(b" up=");
+            pd(up / 1_000_000);
+            ps(b"ms");
+        } else {
+            ps(b" dn=");
+            pd(dn / 1_000_000);
+            ps(b"ms");
+        }
+        ps(b" j=");
+        pd(now);
+        // The last 3 pick-ring events (63rd instrument; entry layout
+        // kind:4 | why:8 | jiffies:30 | aux:22).
+        if !task.is_null() {
+            // SAFETY: as above.
+            let t = unsafe { &*task };
+            let seq = t.pick_ring_seq.load(Ordering::Relaxed);
+            ps(b" ring=");
+            for k in 1..=3u64 {
+                let idx = (seq.wrapping_sub(k) & 15) as usize;
+                let v = t.pick_ring[idx].load(Ordering::Relaxed);
+                let kind = (v >> 60) & 0xF;
+                let why = (v >> 52) & 0xFF;
+                let jif = (v >> 22) & 0x3FFF_FFFF;
+                putchar(match kind {
+                    1 => b'L',
+                    2 => b'R',
+                    3 => b'P',
+                    4 | 5 => b'H',
+                    _ => b'?',
+                });
+                putchar(b'0' + (why & 0xF) as u8);
+                putchar(b'@');
+                pd(jif);
+                putchar(b' ');
+            }
+            ps(b"pk=");
+            pd(t.pick_n.load(Ordering::Relaxed));
+            ps(b" wk=");
+            pd(t.wake_n.load(Ordering::Relaxed));
+        }
+        putchar(b'\n');
     }
 
     /// Same no-wrap discipline for the aggregated weight: a wrapped
@@ -951,6 +1106,9 @@ impl CfsRunQueue {
                 se.set_vruntime(floor);
             }
 
+            // 64th: vruntime sanity canary (see vr_canary).
+            self.vr_canary(task, b"ENQ", se.get_vruntime());
+
             // Generate unique key
             let task_id = self.next_task_id.fetch_add(1, Ordering::AcqRel);
             let key = VruntimeKey::new(se.get_vruntime(), task_id);
@@ -1022,6 +1180,8 @@ impl CfsRunQueue {
             };
 
             if let Some(key) = found_key {
+                // 64th: vruntime sanity canary (see vr_canary).
+                self.vr_canary(task, b"DEQ", key.vruntime);
                 self.timeline_remove(&key);
                 se.set_timeline_key(None);
 
@@ -1554,6 +1714,8 @@ impl CfsRunQueue {
     pub fn pick_next(&mut self) -> Option<*mut crate::process::Task> {
         // Get task with smallest vruntime (O(1) via the leftmost cache)
         if let Some((key, task)) = self.leftmost_entry() {
+            // 64th: vruntime sanity canary (see vr_canary).
+            self.vr_canary(task, b"PK1", key.vruntime);
             // b50 #GP guard — see pick_next_cpu. A non-canonical slot
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
@@ -1638,6 +1800,10 @@ impl CfsRunQueue {
                 Some((k, t)) => (k, t),
                 None => break,
             };
+
+            // 64th: vruntime sanity canary (see vr_canary) — checked on
+            // every candidate the walk consults, decision-time.
+            self.vr_canary(task, b"PKC", key.vruntime);
 
             // b50 #GP guard: a scribbled timeline slot yields a
             // non-canonical *mut Task; the ownership probe below would
