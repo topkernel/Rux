@@ -177,6 +177,12 @@ impl GlobalRunQueue {
 
     // ---- idle CPU bitmap ----
 
+    /// Raw idle-mask read for debug snapshots (forkprof stall ring).
+    #[inline]
+    pub fn idle_mask_relaxed(&self) -> u32 {
+        self.idle_cpus.load(core::sync::atomic::Ordering::Acquire)
+    }
+
     /// Mark a CPU as idle.
     pub fn mark_idle(&self, cpu: usize) {
         if cpu < MAX_CPUS {
@@ -1436,6 +1442,23 @@ pub fn resched_cpu(cpu: usize) {
 /// racing wakes cannot both dispatch to the same CPU.
 pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
     grq().claim_idle_cpu(affinity)
+}
+
+/// Debug snapshot for the forkprof stall ring (r12 wake/halt hunt): the
+/// idle mask, GRQ load, and each CPU's idle-loop phase at the moment a
+/// multi-ms queue stall was rescued. Atomic reads only; called from the
+/// forkprof consume path after the stall threshold fires.
+pub fn debug_idle_snapshot() -> (u32, u64, u8, u8) {
+    let idle = grq().idle_mask_relaxed();
+    let nrun = grq().rq_load() as u64;
+    let ph = |c: usize| {
+        if c < MAX_CPUS {
+            WW_IDLE_PHASE[c].load(core::sync::atomic::Ordering::Acquire).min(255) as u8
+        } else {
+            255
+        }
+    };
+    (idle, nrun, ph(0), ph(1))
 }
 
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke

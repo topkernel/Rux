@@ -123,6 +123,7 @@ pub fn consume_wake(pid: u32) {
             .is_ok()
     {
         add(P_CHILD_RUN, ct);
+        hist_account(0, now().saturating_sub(ct), pid);
         return;
     }
     let wt = WAKE_STAMPS[idx].load(Ordering::Relaxed);
@@ -134,6 +135,7 @@ pub fn consume_wake(pid: u32) {
         .is_ok()
     {
         add(P_WAKE_RUN, wt);
+        hist_account(1, now().saturating_sub(wt), pid);
     }
 }
 
@@ -329,6 +331,83 @@ pub fn bump(p: usize, n: u64) {
     STATS[p].cyc.fetch_add(n, Ordering::Relaxed);
 }
 
+// ---- wake-latency histograms + stall snapshots (r12 wake/halt hunt) ----
+//
+// The avg/max phase table hides the slow-mode signature: rare multi-ms
+// queue stalls (child_run max 64ms, wake_run max 10ms observed) that a
+// mean dilutes and a max mis-scales. Log2 cycle histograms expose the
+// tail mass; a stall snapshot (idle mask + per-cpu idle phase at rescue
+// time) tells whether the stall was a lost-dispatch shape (task in the
+// GRQ, both CPUs halted/idle-marked, IPI never sent) at the moment a
+// tick finally rescued it.
+
+const HIST_BUCKETS: usize = 24;
+static HIST_CHILD: [AtomicU64; HIST_BUCKETS] = [ZERO_U64; HIST_BUCKETS];
+static HIST_WAKE: [AtomicU64; HIST_BUCKETS] = [ZERO_U64; HIST_BUCKETS];
+
+/// Stall snapshot ring: filled when a consumed stamp exceeded the
+/// stall threshold; dumped in report().
+struct StallSnap {
+    delta_us: AtomicU64,
+    /// 0 = child_run (fork-enqueue -> switch-in), 1 = wake_run.
+    kind: AtomicU8,
+    pid: AtomicU32,
+    idle_mask: AtomicU32,
+    nr_running: AtomicU64,
+    /// Per-CPU WW_IDLE_PHASE at rescue (0..5; 4 = inside WFI).
+    phase0: AtomicU8,
+    phase1: AtomicU8,
+}
+const SS0: StallSnap = StallSnap {
+    delta_us: AtomicU64::new(0),
+    kind: AtomicU8::new(255),
+    pid: AtomicU32::new(0),
+    idle_mask: AtomicU32::new(0),
+    nr_running: AtomicU64::new(0),
+    phase0: AtomicU8::new(255),
+    phase1: AtomicU8::new(255),
+};
+static STALLS: [StallSnap; 12] = [SS0; 12];
+static STALL_CUR: AtomicU64 = AtomicU64::new(0);
+static STALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot the scheduler's idle state for the stall ring. Kept in
+/// sched.rs (grq() is private there); returns (idle_mask, nr_running,
+/// phase0, phase1) — cheap atomic reads, only called post-threshold.
+#[inline]
+fn sched_stall_snapshot() -> (u32, u64, u8, u8) {
+    crate::sched::debug_idle_snapshot()
+}
+
+/// Account a stamp delta (cycles) into its histogram; capture a
+/// snapshot when it exceeds the stall threshold (2 ms).
+#[inline]
+fn hist_account(kind: usize, delta_cyc: u64, pid: u32) {
+    let b = (63 - delta_cyc.leading_zeros()).min((HIST_BUCKETS - 1) as u32) as usize;
+    let h = if kind == 0 { &HIST_CHILD } else { &HIST_WAKE };
+    h[b].fetch_add(1, Ordering::Relaxed);
+    // Stall threshold: 2 ms in cycles (hz read per call is fine — this
+    // is the rare path; the common path exits at the bucket add).
+    #[cfg(feature = "x86_64")]
+    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    #[cfg(not(feature = "x86_64"))]
+    let hz = 0;
+    let stall_cyc = if hz > 0 { hz / 500 } else { delta_cyc + 1 };
+    if delta_cyc >= stall_cyc {
+        let (idle_mask, nr_running, phase0, phase1) = sched_stall_snapshot();
+        let i = (STALL_CUR.fetch_add(1, Ordering::Relaxed) % 12) as usize;
+        let s = &STALLS[i];
+        s.delta_us.store(delta_cyc / (hz / 1_000_000).max(1), Ordering::Relaxed);
+        s.kind.store(kind as u8, Ordering::Relaxed);
+        s.pid.store(pid, Ordering::Relaxed);
+        s.idle_mask.store(idle_mask, Ordering::Relaxed);
+        s.nr_running.store(nr_running, Ordering::Relaxed);
+        s.phase0.store(phase0, Ordering::Relaxed);
+        s.phase1.store(phase1, Ordering::Relaxed);
+        STALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[inline]
 pub fn peek(p: usize) -> (u64, u64, u64) {
     let s = &STATS[p];
@@ -413,6 +492,46 @@ pub fn report() {
             mx,
             avgns
         );
+    }
+    // Wake-latency histograms (log2 cycle buckets; edge printed in us).
+    let names_h = ["child_run", "wake_run"];
+    for (k, h) in [&HIST_CHILD, &HIST_WAKE].iter().enumerate() {
+        let total: u64 = h.iter().map(|b| b.load(Ordering::Relaxed)).sum();
+        if total == 0 {
+            continue;
+        }
+        crate::println!("FHIST {} total={}", names_h[k], total);
+        for (b, bucket) in h.iter().enumerate() {
+            let c = bucket.load(Ordering::Relaxed);
+            if c == 0 {
+                continue;
+            }
+            let lo_us = if b == 0 { 0 } else { (1u64 << (b - 1)) / per_us.max(1) };
+            let hi_us = (1u64 << b) / per_us.max(1);
+            crate::println!("FHIST bucket{} lo={}us hi={}us n={}", b, lo_us, hi_us, c);
+        }
+    }
+    // Stall snapshots.
+    let sc = STALL_COUNT.load(Ordering::Relaxed);
+    if sc > 0 {
+        crate::println!("FSTALL total={}", sc);
+        for i in 0..12 {
+            let s = &STALLS[i];
+            let d = s.delta_us.load(Ordering::Relaxed);
+            if d == 0 {
+                continue;
+            }
+            crate::println!(
+                "FSTALL kind={} pid={} dt={}us idle={:#b} nrun={} ph0={} ph1={}",
+                if s.kind.load(Ordering::Relaxed) == 0 { "child" } else { "wake" },
+                s.pid.load(Ordering::Relaxed),
+                d,
+                s.idle_mask.load(Ordering::Relaxed),
+                s.nr_running.load(Ordering::Relaxed),
+                s.phase0.load(Ordering::Relaxed),
+                s.phase1.load(Ordering::Relaxed),
+            );
+        }
     }
     crate::println!("FORKPROF END");
     report_trace();
