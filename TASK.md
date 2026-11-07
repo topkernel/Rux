@@ -8119,3 +8119,156 @@ commits past the 68th (8bffe231 fix + ceba9f2d/599ebc49 dfx).
    real bug worth its own lane.
 3. Screenshots: ohw81 shot-301 md5 82f0a25f (still black = pre-
    launcher); ANY new md5 once the launcher spawns is history.
+
+### 70. 70TH SESSION (2026-11-07) — the StartUser crosswait walked to its
+### BOTTOM: hdf_devmgr's DevSvcManager.mutex frozen by a SELF-DEADLOCKED
+### double-locker (the founder named by a word-birth curve instrument:
+### 0 -> 0x80000010 at jif 3276 by the devhost code1 handler, never
+### written again, the same thread later parked ON the word it holds);
+### render_service's SCHED_FIFO evt_listen spinner exposed a REAL
+### reference-parity bug — our RT bandwidth throttle was GLOBAL (one
+### spinner never throttles; Linux throttles per-CPU rt_rq) — FIXED;
+### boots ohw84-ohw89, instruments landed (c57bc5d1)
+
+Boots this session: ohw84-ohw89 (6 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=futextrace,fuxstuck,txnhunt,
+sleepsnap[,pctlmon]). Commits: c57bc5d1 (FXDV birth instruments +
+per-CPU RT bandwidth). Gates: x86_64 build rc=0; riscv64 build rc=0 +
+make test suite verdict GREEN, all passed (run/test-rv-70.log — one
+image-lock rerun, the first attempt collided with a stale wrapper's
+rootfs.img lock); aarch64 build rc=0 (run/build-a64-70.log). sched/ is
+Tier-2: pbench A/B base70-vs-fix70 3 reps run (run/abpb-base70-fix70.txt
+in the perf-gap-hunt worktree) — the RT path only engages with live
+SCHED_FIFO/RR tasks (pbench boots have none), the numbers are the
+no-harm proof.
+
+#### 1. THE CHAIN, WALKED TO THE BOTTOM (mission step 1)
+
+The "samgr looper futex crosswait at StartUser" is hdf_devmgr (this
+boot pid 331-334), not samgr. Every stuck txn (render code3=GET_SERVICE,
+camera/wifi/power code4=REGISTER_SVCLISTENER, code1=ADD_SERVICE —
+hdf_device_manager_interface_code.h) parks the devmgr IPC thread in
+OsalMutexLock on ONE word (ohw81 0x7ff000996ec4, ohw85 0x7ff00087bc14,
+ohw87 0x7ff000a5faf4). The word is DevSvcManager.mutex (waiter frames:
+OsalMutexLock+0x13 in libhdf_utils <- hdf_devmgr+0xc9d9 = the subscribe+
+notify-under-lock function; +0xc539 = search-under-lock). rwlock decode
+("readers=16") was WRONG — musl NORMAL mutexes write EBUSY(0x10) as the
+fast-path marker: 0x80000010 = held+waiters. The neighbor word at
+mutex-0x94 is the HdfMessageQueue OsalSem (main parks there in
+HdfMessageQueueNext+OsalSemWait(−1) — clean looper idle, NOT a holder).
+
+#### 2. THE FOUNDER, NAMED EMPIRICALLY (three proofs)
+
+- ohw86: the auto-armed page write-watch (fuxwatch on the sem/mutex
+  cluster page at t=15.3) logged ZERO writes to the mutex word after
+  the arm — the founder's 0->0x10 predates any wait.
+- ohw87 FXDV-CURVE (new instrument: samples slot1's word and its +0x94
+  neighbor at every traced devmgr futex, prints each transition): the
+  mutex word went 0x0 -> 0x80000010 at jif 3276 (t≈32.7) and NEVER
+  moved again; tid 341's op carried the sample.
+- tid 341 = the devhost code1 (ADD_SERVICE-class) handler thread that
+  ohw86/ohw87 both caught in the power_host crosswait
+  ([txn SYNC-IN from power_host] + [txn SYNC-OUT back to power_host],
+  parked in BWR) minutes earlier; after that resolved it took the
+  mutex and LATER parked ON the same word (sleepsnap a0=the frozen
+  word, want=0x80000010) — a musl NORMAL mutex re-lock by the same
+  thread parks forever: SELF-DEADLOCK. No task exited (exit ring
+  empty), no task RUNNING except the uevent poller; every other devmgr
+  task is a waiter — matching a holder parked on its own lock.
+- The freeze birth (first waiter ~t=28-33 across boots) sits inside the
+  usb_host crash-restart loop (SIGSEGV rip=0x7ff082996bac cr2=0,
+  identical rip every restart — the 54th's image-inherited NULL family;
+  binder death notices hit devmgr mid-publish). The crash storm is the
+  interleaving generator that opens the double-lock window (notify-
+  under-S paths: NotifyServiceStatusLocked runs listener NotifyStatus
+  inside the critical section).
+
+#### 3. THE RT PARITY BUG (real fix landed)
+
+ohw86's WAKE-STRANDED rows name ONE monopolist: pid 942 (render_service
+tgid 707) state=RUNNING policy=FIFO — the SCHED_FIFO evt_listen thread
+(HdfDeviceRegisterEventListenerWithSchedPolicy(SCHED_FIFO) — OH graphics
+listeners legitimately request RT; our capable(CAP_SYS_NICE) grants it
+because OH init keeps caps through the service setuid, reference-
+compatible). On Linux a spinning FIFO thread throttles: each root rt_rq
+carries sched_rt_runtime_us=950ms per 1s PER-CPU, leaving the 5% CFS
+rescue slice. OURS accounted ONE GLOBAL budget (950ms × MAX_CPUS): a
+single spinner on one CPU burned half the pool, NEVER throttled, and
+stranded every CFS task on that CPU (observed strands 4.8-6.4 s, FFRT
+wake->pick outliers 62 ms avg / 1.3 s max exactly when it appears).
+FIX (c57bc5d1): per-CPU RT_TIME_USED/RT_THROTTLED/RT_PERIOD_START,
+per-CPU charge in scheduler_tick, pick path checks rt_throttled(cpu).
+A first validation boot (ohw88) hit an early watchdog wedge under
+heavy concurrent host load (make-test TCG + two cargo builds + KVM at
+once — TIMER-SOFTIRQ-STALL at t=8.1 s with zero RT tasks alive, so the
+RT path cannot have engaged; host-starvation class); ohw89 reruns clean.
+
+#### 4. WHAT REMAINS FOR THE 71ST (the launcher gate itself)
+
+1. The devmgr self-deadlock is image code + interleaving; the kernel-
+   side levers that change the interleaving are now: (a) the per-Cpu RT
+   fix (the post-freeze crawl amplifier), (b) the usb_host SIGSEGV
+   family — VERIFY the reference really crashes on the SAME rip on this
+   image (the 54th said yes on its image; if the rip differs here, the
+   crash is OURS and the storm is fixable — symbolize 0x7ff082996bac
+   against the usb_host lib map the same way as §1, the APPMAPSRC rig
+   now covers hdf_devhost via the fd= family... extend the family list
+   to "hdf_devhost" for the next boot).
+2. THE SECOND-LOCK SITE needs one more instrument pass: the RETS walk
+   printed the second-lock caller only truncated (serial flood ate the
+   tail). Give the RWFRZ dump its own focus-ring (like ufw/uss) or bump
+   the per-line budget; the site is in the tid-341 stack between
+   OsalMutexLock+0x13 and the devhost-publish handler frames.
+3. If the RT fix moves the yardstick (ohw89: watch appfwk/bundles
+   timing, WAKE-STRANDED counts, whether render's FIFO spinner strands
+   anything), a boot series decides whether the devmgr freeze still
+   gates the launcher.
+4. Screenshot discipline unchanged: ANY new md5 ≠ 82f0a25f is history.
+
+#### 5. SESSION LEDGER
+
+ohw84: FXDV trace boot — the wait/wake lifecycle + the sem/mutex cluster
+identified (page-watch proof: no post-arm writes to the frozen word).
+ohw85: RETS walk boot — waiter chains (OsalMutexLock <- binary) + main
+in HdfMessageQueueNext (clean idle). ohw86: FW page-mate address logging
++ freeze-birth correlation with the usb_host crash-restart storm; the
+FIFO monopolist (pid 942) found via WAKE-STRANDED + taskdump policy.
+ohw87: FXDV-CURVE birth curve — the founder transition caught (jif
+3276, tid 341). ohw88: RT-fix first boot — wedged early under 4-way
+host overload (host-starvation watchdog class, zero RT tasks alive at
+the wedge; not the fix — RT cannot engage without RT tasks). ohw89
+(clean host, RT-fix kernel): the frozen mutex now CYCLES (curve:
+0x10 -> 0x80000010 -> 0x0 -> 0x10 -> 0x0 ... six live transitions, the
+ohw87-style hard-stick did not reproduce in the first 27 s), appfwk.
+ready SET at 73.9, bundles.ready at 137.8 — but the word's last
+transition 0x0 -> 0x80000010 at jif 2729 (t=27.3) never moved again:
+the founder self-deadlock class STILL forms (as expected — a self-
+deadlock cannot be cured by CPU slices), and the launcher gate holds
+(shots 420/540 both md5 82f0a25f, still black; 528 TXN-HANG rows).
+The RT fix stands on parity + the strand-amplifier evidence, not on a
+launcher tally.
+
+#### 6. GATE LEDGER (c57bc5d1)
+
+- x86_64 build rc=0 (target/x86_64-unknown-none/debug/bzImage).
+- riscv64: clean-config build rc=0 + make test ALL PASSED, suite verdict
+  green (run/test-rv-70.log; first attempt aborted on a rootfs.img
+  write-lock collision with a stale wrapper — image-lock rerun green).
+- aarch64 build rc=0 (run/build-a64-70.log).
+- Tier-2 pbench A/B (base a9396be1 vs c57bc5d1, 3 interleaved reps,
+  KVM, same rig): every P1-P6 row within the ±20% band (p1_null
+  -0.3%, p2_ctxsw +0.7%, p3b_fault_cow -1.6%, p4_fork_exec -3.3%,
+  p4_fork_exit -1.7%, p5 IPC rows -1.1..+1.1%, p6_stat +3.1%,
+  p6_unlink +3.4%, p6_read_cached +4.3%, p6_write_fsync -5.8%,
+  p6_append -3.4%; p6_mkdrmdir flaked in 1 rep, raw rows carry it);
+  raw rows in the perf-gap-hunt worktree run/abpb-base70-fix70.txt.
+- Tier-1 syscost rationale: the changed path is RT-conditional (no RT
+  task => per-tick cost is one bounded-index array load replacing a
+  scalar load; the throttle/pick legs never engage — pbench boots have
+  zero SCHED_FIFO/RR tasks). Quiet-boot evidence: ohw89 (800 s, clean
+  host) — param chain healthy end-to-end (PCTL send/recv paired
+  through bundles.ready), zero DEADLOCK/watchdog classes, ticks
+  sustained to window end. A dedicated syscost census boot can be
+  ordered at merge review; the pbench battery above is the measured
+  no-harm proof on the same rig.
+
