@@ -276,6 +276,22 @@ impl RawSpinlock {
                     unsafe { crate::console::putchar_no_lock(b'0' + h as u8); }
                 }
             }
+            // r16 (GB GRQ lost-release deadlock): the owner word's HIGH
+            // bits are the LAST ACQUIRER'S RETURN ADDRESS (the r12
+            // shape) — a lock stuck "locked" with no CPU inside any
+            // longer names its lost-release site right here. Print it.
+            let msg5b = b" ow_ra=0x";
+            for &b in msg5b {
+                unsafe { crate::console::putchar_no_lock(b); }
+            }
+            let ra = holder & !0xFusize;
+            let mut shift2 = (core::mem::size_of::<usize>() * 8) as i32;
+            while shift2 > 0 {
+                shift2 -= 4;
+                let nibble = (ra >> (shift2 as usize)) & 0xF;
+                let c = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
+                unsafe { crate::console::putchar_no_lock(c); }
+            }
         }
 
         unsafe { crate::console::putchar_no_lock(b'\n'); }
