@@ -1889,6 +1889,276 @@ pub fn ffrt_lock_region_scan(tgid: u32, lock: u64) -> alloc::string::String {
 pub static HEAPMAP_ARM: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// oh67 (67th session): the chain-closed M2 lock object base + the
+/// tgid whose chain closed on it — armed once alongside HEAPMAP_ARM;
+/// consumed by oh67_m2_decode for the definitive per-round decode.
+pub static OH67_M2: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static OH67_M2_TGID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// oh67: definitive M2 decode. samgr's SystemAbilityManager singleton
+/// pointer lives in the executable's BSS (ELF vaddr 0xc7048, symbol
+/// _ZN4OHOS20SystemAbilityManager8instanceE); the executable RX
+/// segment maps file offset 0x42000 — bias = vma_start - 0x42000.
+/// With the singleton base, which MEMBER M2 is resolves by offset
+/// against the DWARF member table of this exact image
+/// (dBinderServiceLock_@432 shared, abilityMapLock_@524 shared,
+/// listenerMapLock_@616, onDemandLock_@728, systemProcessMapLock_@840,
+/// startingProcessMapLock_@928, saProfileMapLock_@1104,
+/// loadRemoteLock_@1168, saFrequencyLock_@1256 — samgr::mutex ==
+/// ffrt::mutexPrivate). Then print l/wlock and walk the waiter ring
+/// with the TRUE WaitUntilEntry layout: node{prev@0,next@8}
+/// WaitEntry{prev@16,next@24,task@32,wtType@40} WaitUntilEntry
+/// {status@44,hasWaitTime@48,tp@56 steady ns,cb@64,wl@112,cv@152}.
+/// A non-null task field = a suspended-coroutine waiter (its wake
+/// must come from the FFRT scheduler; gid names the dependency);
+/// task==null = thread-mode (the looper pool).
+/// oh67: pollfd decode for census rows whose (last) syscall is poll —
+/// reads the caller's pollfd array through its own page tables (fd:i32,
+/// events:i16, revents:i16) and resolves each fd through the task's
+/// fdtable to a file path. For the infinite-timeout single-fd parks
+/// (hdf_devmgr/audio_server class) this names the fd whose readiness
+/// never arrives; for the wide catches (tid345 class) it shows the
+/// array's head. Bounded to 6 entries + 6 path lookups.
+pub fn oh67_poll_decode(
+    task: *mut crate::process::Task,
+    fds: u64,
+    nfds: u64,
+    timeout: u64,
+) -> alloc::string::String {
+    use core::fmt::Write as _;
+    if task.is_null() || fds == 0 || nfds == 0 {
+        return alloc::string::String::new();
+    }
+    // SAFETY: diagnostic reads of the audited task under the census
+    // contract (the task is pinned by the caller's iteration).
+    let tk = unsafe { &*task };
+    let Some(aspace) = tk.address_space() else {
+        return alloc::string::String::new();
+    };
+    let root = aspace.root_ppn();
+    let rd = |va: u64| -> Option<u64> {
+        // SAFETY: read-only page-table walk of the task's mm.
+        match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+            Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr::new((ppn << 12) | (va & 0xfff)),
+                );
+                // SAFETY: linear-mapped RAM word.
+                Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+            }
+            _ => None,
+        }
+    };
+    let mut out = alloc::string::String::new();
+    let to = timeout as i64;
+    let _ = write!(out, " PFD[to={} n={}", to, nfds);
+    let n = nfds.min(6) as u64;
+    for i in 0..n {
+        let Some(w64) = rd(fds + 8 * i) else {
+            let _ = write!(out, " unfetched");
+            break;
+        };
+        let fd = w64 as u32 as i32;
+        let events = ((w64 >> 32) & 0xffff) as u16;
+        let revents = ((w64 >> 48) & 0xffff) as u16;
+        if fd < 0 {
+            let _ = write!(out, " fd=-");
+            continue;
+        }
+        let file = tk
+            .try_fdtable()
+            .and_then(|fdt| fdt.get_file(fd as usize));
+        let path = file
+            .as_ref()
+            .map(|f| f.path())
+            .unwrap_or_else(|| alloc::string::String::from("closed"));
+        let ready = file
+            .as_ref()
+            .and_then(|f| crate::syscall::misc::oh67_fd_ready(f))
+            .unwrap_or_default();
+        let ops = file
+            .as_ref()
+            .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
+            .unwrap_or(0);
+        let _ = write!(out, " fd={}(0x{:x}/0x{:x}:{})", fd, events, revents, path);
+        if !ready.is_empty() {
+            let _ = write!(out, " {}", ready);
+        }
+        let _ = write!(out, " ops={:#x}", ops);
+    }
+    out.push(']');
+    out
+}
+
+pub fn oh67_m2_decode() -> alloc::string::String {
+    use core::fmt::Write as _;
+    use core::sync::atomic::Ordering::Relaxed;
+    let m2 = OH67_M2.load(Relaxed);
+    let tgid = OH67_M2_TGID.load(Relaxed);
+    if m2 == 0 || tgid == 0 {
+        return alloc::string::String::new();
+    }
+    let mut out = alloc::string::String::new();
+    let mut done = false;
+    crate::sched::for_each_task_try(|task| {
+        // SAFETY: diagnostic read-only walk under the for_each contract.
+        let tk = unsafe { &*task };
+        if done || tk.tgid() as u32 != tgid {
+            return;
+        }
+        let Some(aspace) = tk.address_space() else {
+            return;
+        };
+        let root = aspace.root_ppn();
+        let rd = |va: u64| -> Option<u64> {
+            // SAFETY: read-only page-table walk of this task's mm.
+            match unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va) } {
+                Some((ppn, bits)) if bits & 1 != 0 && bits & 0x4 != 0 && ppn != 0 => {
+                    let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                        crate::arch::mm::memory_layout::PhysAddr::new(
+                            (ppn << 12) | (va & 0xfff),
+                        ),
+                    );
+                    // SAFETY: linear-mapped RAM word.
+                    Some(unsafe { core::ptr::read_volatile(kv.as_usize() as *const u64) })
+                }
+                _ => None,
+            }
+        };
+        let rd32 = |va: u64| -> Option<u32> {
+            rd(va & !7).map(|w| (w >> ((va & 4) * 8)) as u32)
+        };
+        // 1. executable bias: collect EVERY exec VMA with file offset
+        //    0x42000 and length 0x77000 (another lib can coincide); the
+        //    right one is the bias whose BSS instance word reads a
+        //    canonical user pointer.
+        let mut biases: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        if let Some(mgr) = aspace.vma_try_read() {
+            for vma in mgr.iter() {
+                if vma.offset() == 0x42000
+                    && vma.flags().is_executable()
+                    && (vma.end().as_usize() - vma.start().as_usize()) == 0x77000
+                {
+                    // The RX LOAD is p_offset 0x42000 at p_vaddr
+                    // 0x43000 (segments not congruent mod page): the
+                    // vma START maps p_vaddr 0x43000, so bias = start -
+                    // 0x43000.
+                    biases.push(vma.start().as_usize() as u64 - 0x43000);
+                }
+            }
+        }
+        let mut bias = 0u64;
+        let mut inst = 0u64;
+        for b in biases.iter() {
+            match rd(b + 0xc7048) {
+                Some(v) if v > 0x10000 && (v >> 47) == 0 => {
+                    bias = *b;
+                    inst = v;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        if bias == 0 {
+            let _ = write!(
+                out,
+                " OH67[tgid={} biases={:?} inst0={:#x} ilock0={:#x} text0={:#x}]",
+                tgid,
+                biases,
+                biases.first().map(|b| rd(b + 0xc7048).unwrap_or(0)).unwrap_or(0),
+                biases
+                    .first()
+                    .map(|b| rd(b + 0xc7008).unwrap_or(0))
+                    .unwrap_or(0),
+                biases
+                    .first()
+                    .map(|b| rd(b + 0x43000).unwrap_or(0))
+                    .unwrap_or(0)
+            );
+        } else {
+            let off = m2.wrapping_sub(inst);
+        let name = match off {
+            432 => "dBinderServiceLock_(shared)",
+            524 => "abilityMapLock_(shared)",
+            616 => "listenerMapLock_",
+            728 => "onDemandLock_",
+            840 => "systemProcessMapLock_",
+            928 => "startingProcessMapLock_",
+            1104 => "saProfileMapLock_",
+            1168 => "loadRemoteLock_",
+            1256 => "saFrequencyLock_",
+            _ => "NOT-A-MEMBER(external-object?)",
+        };
+        let l = rd32(m2 + 0x8).unwrap_or(0xffff_ffff);
+        let wl = rd32(m2 + 0xc).unwrap_or(0xffff_ffff);
+        let _ = write!(
+            out,
+            " OH67[bias={:#x} inst={:#x} m2-inst=+{}({}) l={} wlock={}",
+            bias, inst, off, name, l, wl
+        );
+        }
+        // 3. waiter ring walk (true layout): head = m2+0x10,
+        //    first = *(m2+0x18), entries link node.next@+8.
+        let head = m2 + 0x10;
+        let mut cur = rd(m2 + 0x18).unwrap_or(0);
+        let mut n = 0u32;
+        let mut cotasks: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        while cur != 0 && cur != head && n < 40 {
+            if (cur >> 47) != 0 || cur < 0x1000 {
+                let _ = write!(out, " w{}={:#x}BAD", n, cur);
+                break;
+            }
+            let taskp = rd(cur + 0x20).unwrap_or(0);
+            let st = rd32(cur + 0x2c).unwrap_or(0xffff);
+            let tp = rd(cur + 0x38).unwrap_or(0);
+            if taskp != 0 && (taskp >> 47) == 0 && taskp > 0x1000 {
+                cotasks.push(taskp);
+                let _ = write!(
+                    out,
+                    " w{}={:#x}TASK(gid={:#x})",
+                    n,
+                    cur,
+                    rd(taskp + 0x20).unwrap_or(0)
+                );
+            } else {
+                let _ = write!(out, " w{}={:#x}thr(st={} tp={})", n, cur, st, tp);
+            }
+            let nx = rd(cur + 0x8);
+            match nx {
+                Some(v) if v != 0 && (v == head || ((v >> 47) == 0 && v > 0x1000)) => cur = v,
+                _ => {
+                    let _ = write!(out, " ring-break@{:#x}", cur);
+                    break;
+                }
+            }
+            n += 1;
+        }
+        let _ = write!(out, " waiters={}", n);
+        // 4. suspended-coroutine waiter decode (task != null): TaskBase
+        //    {type@24 gid@32 status@48 createTime@96 executeTime@104
+        //     fromTid@112} — gid + executeTime stamp the dependency the
+        //    M2 waiter graph is stuck on.
+        for (i, &ctp) in cotasks.iter().take(4).enumerate() {
+            let _ = write!(
+                out,
+                " ct{}[gid={:#x} type={} st={} cr={} ex={} ftid={}]",
+                i,
+                rd(ctp + 0x20).unwrap_or(0),
+                rd32(ctp + 0x18).unwrap_or(0xffff),
+                rd(ctp + 0x30).unwrap_or(0) & 0xff,
+                rd(ctp + 0x60).unwrap_or(0),
+                rd(ctp + 0x68).unwrap_or(0),
+                rd32(ctp + 0x70).unwrap_or(0xffff)
+            );
+        }
+        // First task of the tgid answers the decode once.
+        done = true;
+    });
+    out
+}
+
 /// True once the heap map COMPLETED (successfully or having burned its
 /// one successful-signature pass) — the consumer stops re-arming.
 pub fn ffrt_mutex_heap_map_done() -> bool {
@@ -3908,8 +4178,32 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         // store that schedules no one, and with no second FUTEX_WAKE the
         // waiter sleeps forever despite having been woken once.
         let woken_n = wake_list.len();
+    // oh67: for the watched lock words, name WHO the wake consumed —
+    // a wake returning ret=1 that consumes a task which never proceeds
+    // names a stolen/stale waiter (the frozen-mutex wedge shape).
+    let oh67_watch = {
+        let a = FUXWATCH_ADDR.load(Relaxed2::Relaxed);
+        let b2 = FUXWATCH2_ADDR.load(Relaxed2::Relaxed);
+        uaddr as u64 == a || uaddr as u64 == b2
+    };
     for task in wake_list {
         if !task.is_null() {
+            if oh67_watch {
+                static WOKE_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if WOKE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    // SAFETY: the task is linked in this bucket under our
+                    // lock; cannot be freed while we hold it.
+                    let tk = unsafe { &*task };
+                    crate::pr_warn!(
+                        "FUXW-WOKE uaddr={:#x} woken tid={} tgid={} state={:#x}",
+                        uaddr,
+                        tk.pid(),
+                        tk.tgid(),
+                        tk.state().bits()
+                    );
+                }
+            }
             // R12-2 wake-under-bucket, now compile-checked: the proof
             // minted by the bucket guard is what the nested GRQ acquire
             // requires (INV-LOCK-5 forward; D-11).
@@ -4134,6 +4428,27 @@ pub fn futex_wait_timeout(uaddr: usize, flags: u32, val: u32, bitset: u32, deadl
             (*current)
                 .futex_wait_enqueued
                 .store(true, core::sync::atomic::Ordering::Release);
+        }
+
+        // oh67: name WHO parks on the watched lock words (the frozen-mutex
+        // wedge: a waiter parked on M2.l that tid343-class unlocks keep
+        // consuming without the web progressing).
+        {
+            let a = FUXWATCH_ADDR.load(Relaxed2::Relaxed);
+            let b2 = FUXWATCH2_ADDR.load(Relaxed2::Relaxed);
+            if uaddr as u64 == a || uaddr as u64 == b2 {
+                static PARK_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if PARK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    crate::pr_warn!(
+                        "FUXW-PARK uaddr={:#x} tid={} tgid={} val={:#x}",
+                        uaddr,
+                        current.pid(),
+                        current.tgid(),
+                        val
+                    );
+                }
+            }
         }
 
         // C8 wake-ordering invariant (sleeper side): in order — (1) our

@@ -558,6 +558,23 @@ pub fn is_pipe_file(file: &File) -> bool {
         .is_some_and(|ops| core::ptr::eq(ops as *const _, &PIPE_OPS as *const _))
 }
 
+/// oh67: diagnostic readiness snapshot — (readable bytes, write-closed)
+/// for a parked poll's fd. Read-only; census contexts only.
+pub fn oh67_pipe_ready(file: &File) -> Option<(usize, usize)> {
+    let pipe = pipe_of_file(file)?;
+    let readable = {
+        let b = pipe.buffer.lock();
+        let rp = b.read_pos.load(core::sync::atomic::Ordering::Relaxed);
+        let wp = b.write_pos.load(core::sync::atomic::Ordering::Relaxed);
+        if wp >= rp {
+            wp - rp
+        } else {
+            b.size + 1 - (rp - wp)
+        }
+    };
+    Some((readable, pipe.write_closed.load(core::sync::atomic::Ordering::Relaxed)))
+}
+
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)
 // ============================================================================

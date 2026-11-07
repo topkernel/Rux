@@ -2972,6 +2972,32 @@ pub fn is_unix_file(file: &File) -> bool {
         .is_some_and(|ops| core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _))
 }
 
+/// oh67: diagnostic readiness snapshot for a parked poll's unix-socket
+/// fd — (bound name, recv segments, recv charge bytes, peer alive,
+/// accept backlog). Census contexts only; read-only.
+pub fn oh67_unix_ready(file: &File) -> Option<(String, usize, usize, bool, usize)> {
+    if !is_unix_file(file) {
+        return None;
+    }
+    // SAFETY: UNIX_SOCKET_OPS files carry an Arc<UnixSocket> in
+    // private_data, installed at creation.
+    let ptr = unsafe { *file.private_data.get() }?;
+    // SAFETY: ptr is a valid Arc<UnixSocket> set at file creation.
+    let sk = unsafe { &*(ptr as *const UnixSocket) };
+    let name = sk
+        .bound_name
+        .lock()
+        .clone()
+        .unwrap_or_else(|| "?".into());
+    let (segs, charge) = {
+        let q = sk.recv_queue.lock();
+        (q.segs.len(), q.charge)
+    };
+    let peer_alive = sk.peer.lock().as_ref().and_then(|w| w.upgrade()).is_some();
+    let accept_n = sk.accept_queue.lock().len();
+    Some((name, segs, charge, peer_alive, accept_n))
+}
+
 /// Size of the on-stack drain bounce (see unix_read_user). Kernel-stack
 /// safe; covers hilogd-class records (74 B), the pbench p5 record shape,
 /// and the few-segment queue depths the serialized regime produces.

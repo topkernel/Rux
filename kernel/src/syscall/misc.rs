@@ -538,6 +538,53 @@ pub mod caps_shape {
     }
 }
 
+/// oh67 (67th session): diagnostic readiness decode for census poll
+/// rows — the KERNEL-SIDE view of the fd an infinite-timeout poll is
+/// parked on. eventfd: the live counter (counter>0 while a POLLIN poll
+/// sleeps = a lost-wake kernel bug; counter==0 = the producer never
+/// wrote — upstream starvation). timerfd: unread expiration count +
+/// interval. pipe: readable bytes + closed flags. Diagnostic only;
+/// called from the sleepsnap/TXN-HANG census contexts (bounded reads).
+pub fn oh67_fd_ready(file: &crate::fs::File) -> Option<alloc::string::String> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let ops = unsafe { *file.ops.get() }?;
+    if core::ptr::eq(ops as *const _, &EVENTFD_OPS as *const _) {
+        let ptr = unsafe { *file.private_data.get() }?;
+        // SAFETY: dispatcher identity-checked against EVENTFD_OPS;
+        // private_data came from Box::into_raw in sys_eventfd2.
+        let efd = unsafe { &*(ptr as *const EventFd) };
+        return Some(alloc::format!(
+            "eventfd cnt={}",
+            efd.counter.load(Relaxed)
+        ));
+    }
+    if core::ptr::eq(ops as *const _, &TIMERFD_OPS as *const _) {
+        let ptr = unsafe { *file.private_data.get() }?;
+        // SAFETY: dispatcher identity-checked against TIMERFD_OPS;
+        // private_data came from Box::into_raw in sys_timerfd_create.
+        let tfd = unsafe { &*(ptr as *const TimerFd) };
+        return Some(alloc::format!(
+            "timerfd exp={} interval_j={} tmr={}",
+            tfd.expiration_count.load(Relaxed),
+            tfd.interval_jiffies,
+            tfd.kernel_timer_id
+        ));
+    }
+    if crate::fs::pipe::is_pipe_file(file) {
+        if let Some((readable, wclosed)) = crate::fs::pipe::oh67_pipe_ready(file) {
+            return Some(alloc::format!("pipe rd={} wclosed={}", readable, wclosed));
+        }
+    }
+    if let Some((name, segs, charge, peer, accept_n)) = crate::net::unix::oh67_unix_ready(file)
+    {
+        return Some(alloc::format!(
+            "unix[{}] segs={} charge={} peer={} acc={}",
+            name, segs, charge, peer, accept_n
+        ));
+    }
+    None
+}
+
 /// sys_poll - I/O multiplexing (poll style)
 ///
 /// # Arguments

@@ -3797,6 +3797,21 @@ pub fn sleep_snapshot() {
                 a1,
                 a2
             );
+            // oh67: infinite-timeout poll parks are the invisible-holder
+            // class (hdf_devmgr/audio_server single-fd -1 polls) — decode
+            // their pollfd head + fd path into the focus (lossless) lane.
+            // Budget 4 per snapshot round; reads only, print deferred.
+            if sys == 7 && a2 == u64::MAX && a1 >= 1 && a0 != 0 {
+                static SNAP_PFD_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SNAP_PFD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                    let t =
+                        crate::sync::futex::oh67_poll_decode(task, a0, a1, a2);
+                    if !t.is_empty() {
+                        let _ = writeln!(outf, "SNAPPFD tid {} ({}){}", tk.pid(), name, t);
+                    }
+                }
+            }
             // 54th (coordinator redirect — SA:1301 stuck-init hunt): the
             // futex-census blind spot. A retry-loop futex wait (5ms
             // timeout, ETIMEDOUT, immediate re-issue) never ages into
@@ -5330,6 +5345,30 @@ pub fn bwr_park_audit() {
             ),
             None => alloc::string::String::new(),
         };
+        // oh67: pollfd decode for poll-class rows (the infinite-timeout
+        // single-fd parks are the invisible-holder candidates; the wide
+        // catches name their head). Budget 4 rows per burst.
+        let pfd_txt = {
+            static PFD_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            static PFD_BURST: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let burst_id = now / 500;
+            let prev = PFD_BURST.load(core::sync::atomic::Ordering::Relaxed);
+            if burst_id != prev {
+                PFD_BURST.store(burst_id, core::sync::atomic::Ordering::Relaxed);
+                PFD_N.store(0, core::sync::atomic::Ordering::Relaxed);
+            }
+            if sys == 7
+                && a1 >= 1
+                && !task.is_null()
+                && PFD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4
+            {
+                crate::sync::futex::oh67_poll_decode(task, a0 as u64, a1 as u64, _a2)
+            } else {
+                alloc::string::String::new()
+            }
+        };
         let age = stack_age(s);
         let stack_nonempty = !s.stack.is_empty();
         // 62nd: the fuxwatch owner-of-record row — force-printed regardless
@@ -5456,6 +5495,43 @@ pub fn bwr_park_audit() {
                             core::sync::atomic::Ordering::Relaxed,
                             core::sync::atomic::Ordering::Relaxed,
                         );
+                        // oh67: arm the M2 decode slot (member resolution
+                        // + true-layout waiter ring + CoTask decode), run
+                        // once per audit round from this same print path
+                        // (page-table reads only — no heap walk). SAMGR
+                        // rows only: the member table is the samgr
+                        // singleton's (hdf_devmgr's binary coincidentally
+                        // shares the RX-segment shape).
+                        if s.pid as u32 == crate::ipc::binder::binder_sareg_samgr_pid() {
+                            crate::sync::futex::OH67_M2.compare_exchange(
+                                0,
+                                h.wrapping_sub(0x10),
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                            crate::sync::futex::OH67_M2_TGID.compare_exchange(
+                                0,
+                                s.pid as u32,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        let m2txt = {
+                            // Once per audit burst (the ring closes for
+                            // every waiter row; one decode answers all).
+                            static M2_LAST_J: core::sync::atomic::AtomicU32 =
+                                core::sync::atomic::AtomicU32::new(0);
+                            let lj = M2_LAST_J.load(core::sync::atomic::Ordering::Relaxed);
+                            if now.wrapping_sub(lj) >= 500 {
+                                M2_LAST_J.store(now, core::sync::atomic::Ordering::Relaxed);
+                                crate::sync::futex::oh67_m2_decode()
+                            } else {
+                                alloc::string::String::new()
+                            }
+                        };
+                        if !m2txt.is_empty() {
+                            let _ = writeln!(w, "OH67-M2{}", m2txt);
+                        }
                         if !holders.is_empty() || !regions.is_empty() {
                             alloc::format!(
                                 " ffrt-chain[{}] ffrt-holders[{}] ffrt-regions[{}]",
@@ -5586,7 +5662,7 @@ pub fn bwr_park_audit() {
         };
         let _ = writeln!(
             w,
-            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}",
+            "TXN-HANG-BWR pid={} tid={} ({}) park={} st={:#x} sys={} a0={:#x} a1={:#x}{}{}{} looper={:#x} wfpw={} todo={}{}{} stack={}{}{}{}{}",
             s.pid,
             s.tid,
             comm_of(task),
@@ -5597,6 +5673,7 @@ pub fn bwr_park_audit() {
             a1,
             bwr_txt,
             last_bwr_txt,
+            pfd_txt,
             s.looper,
             s.wfpw,
             s.todo_len,
