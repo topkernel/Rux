@@ -5,7 +5,7 @@
 #
 #   Tier 1  quiet syscost boot (run/pa-boot.sh: q35, KVM, smp2, 780 s)
 #           -> census, tick rate, syscall volume, per-op avgs, panic/OOM
-#   Tier 2  pbench P1-P7 boot (test/pbench_boot.py) -> median compare
+#   Tier 2  pbench P1-P7 boot (scripts/test/pbench_boot.py) -> median compare
 #           vs the pb1 smoke anchor column (medians only; p99 is
 #           host-noise-dominated — perf-report.md 8.5)
 #   Tier 3  IF=0 share (needs the pa16 EFLAGS probe hooks in the
@@ -313,7 +313,7 @@ tier2_check() {
     # within +-1%). Override back to the retired TCG class with
     # PB_ACCEL=tcg,thread=multi — but then the anchor below is the wrong
     # class (see the P2 provenance note in perf-gate-baseline.md).
-    python3 "$ROOT/test/pbench_boot.py" --bzimage "$bz" --tag "$pbtag" \
+    python3 "$ROOT/scripts/test/pbench_boot.py" --bzimage "$bz" --tag "$pbtag" \
         --accel "${PB_ACCEL:-kvm}" \
         --timeout 1200 > "$ROOT/run/perf-gate-$pbtag.log" 2>&1
     local rc=$?
