@@ -3437,7 +3437,15 @@ impl Task {
 
     #[inline(never)]
     pub fn wake_up(task: *mut Task) -> bool {
-        Self::wake_up_impl(task, None)
+        Self::wake_up_impl(task, None, false)
+    }
+
+    /// WF_SYNC wake (reference try_to_wake_up with WF_SYNC, used by
+    /// binder's wake_up_interruptible_sync sites): identical state
+    /// transition and enqueue; only the DISPATCH differs — see the
+    /// sync leg in wake_up_impl's dispatch (66th session).
+    pub fn wake_up_sync(task: *mut Task) -> bool {
+        Self::wake_up_impl(task, None, true)
     }
 
     /// INV-LOCK-5 load-bearing twin of [`wake_up`]: wake a task while a
@@ -3452,7 +3460,7 @@ impl Task {
         task: *mut Task,
         proof: &'a crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
     ) -> bool {
-        Self::wake_up_impl(task, Some(proof))
+        Self::wake_up_impl(task, Some(proof), false)
     }
 
     /// Shared wake body (`wake_up` / `wake_up_in_futex_bucket`). The
@@ -3463,6 +3471,7 @@ impl Task {
     fn wake_up_impl(
         task: *mut Task,
         bucket: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+        sync: bool,
     ) -> bool {
         if task.is_null() {
             return false;
@@ -3671,7 +3680,24 @@ impl Task {
                         // resched of the previous CPU forced a preempt
                         // dance per record on same-CPU sender/receiver
                         // pairs.
-                        crate::sched::preempt_check_wake(task);
+                        //
+                        // 66th (WF_SYNC parity): a SYNC wake stacks the
+                        // wakee with the WAKER instead — the reference's
+                        // wake_affine(sync) places it on this CPU (2-cpu
+                        // both-busy: nr_running==1 → this_cpu; weight-tie
+                        // bias → this_cpu), so the pair runs in strict
+                        // handoff order: the waker finishes its BWR and
+                        // parks, THEN the wakee runs. Poking the wakee's
+                        // previous CPU here would run the wakee in
+                        // parallel with the still-running waker — a
+                        // third thread barges exactly the reentrancy
+                        // windows (FFRT mutex unlock→waiter-recheck) the
+                        // reference keeps closed for sync handoffs.
+                        if sync {
+                            crate::sched::preempt_check_wake_sync(task);
+                        } else {
+                            crate::sched::preempt_check_wake(task);
+                        }
                     }
                 }
                 crate::dfx::cctx::add(&crate::dfx::cctx::WK_DISP_NS, cc_t_disp);

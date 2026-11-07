@@ -2244,6 +2244,104 @@ pub fn wake_up_process(task: *mut Task) -> bool {
     Task::wake_up(task)
 }
 
+/// WF_SYNC wake (66th session, binder sync-txn/reply parity): same
+/// transition as wake_up_process; the dispatch stacks the wakee with the
+/// waker (see Task::wake_up_impl's sync leg).
+pub fn wake_up_process_sync(task: *mut Task) -> bool {
+    use crate::process::Task;
+    Task::wake_up_sync(task)
+}
+
+/// Wakeup-preemption check for a SYNC wake when no CPU is idle:
+/// reference parity for WF_SYNC placement is STACKING — wake_affine
+/// (fair.c wake_affine_idle: `sync && nr_running==1 → this_cpu`; weight
+/// tie-bias → this_cpu) puts the wakee on the WAKER's CPU and only that
+/// CPU's wakeup_preempt can fire. We hold the global run queue, so the
+/// parity property to preserve is: never notify ANOTHER busy CPU (that
+/// would run the wakee in parallel with the still-running waker). Poke
+/// only THIS CPU, and only when the wakee wins the same
+/// vruntime+granularity comparison check_cfs_preempt uses against the
+/// WAKER (the incumbent here). When the comparison fails, no poke: the
+/// waker (a binder sender about to park in its read) hands the CPU off
+/// through its own schedule().
+pub fn preempt_check_wake_sync(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: task is validated non-null by the caller (Task::wake_up);
+    // reads of this CPU's current slot and both tasks' entities.
+    unsafe {
+        let allowed = (*task).cpus_allowed();
+        let this_cpu = crate::arch::cpu_id() as usize;
+        if this_cpu >= MAX_CPUS || (allowed & (1u32 << this_cpu)) == 0 {
+            // Wakee may not run here — fall back to the plain policy
+            // (better a correct wake than a strict stack).
+            preempt_check_wake(task);
+            return;
+        }
+        match (*task).policy() {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                let running = cpu_state(this_cpu).current;
+                if !running.is_null() && running != cpu_state(this_cpu).idle {
+                    let r_policy = (*running).policy();
+                    if r_policy == SchedPolicy::Normal
+                        || r_policy == SchedPolicy::Batch
+                        || r_policy == SchedPolicy::Idle
+                        || ((r_policy == SchedPolicy::Fifo || r_policy == SchedPolicy::Rr)
+                            && (*task).rt_priority() > (*running).rt_priority())
+                    {
+                        resched_cpu(this_cpu);
+                    }
+                }
+            }
+            SchedPolicy::Deadline => {
+                let running = cpu_state(this_cpu).current;
+                if !running.is_null() && running != cpu_state(this_cpu).idle {
+                    let r_policy = (*running).policy();
+                    let task_dl =
+                        (*task).dl_entity().deadline.load(core::sync::atomic::Ordering::Acquire);
+                    if r_policy != SchedPolicy::Deadline
+                        || task_dl
+                            < (*running)
+                                .dl_entity()
+                                .deadline
+                                .load(core::sync::atomic::Ordering::Acquire)
+                    {
+                        resched_cpu(this_cpu);
+                    }
+                }
+            }
+            _ => {
+                let running = cpu_state(this_cpu).current;
+                if running.is_null() || running == cpu_state(this_cpu).idle {
+                    return;
+                }
+                let r_policy = (*running).policy();
+                if r_policy != SchedPolicy::Normal
+                    && r_policy != SchedPolicy::Batch
+                    && r_policy != SchedPolicy::Idle
+                {
+                    // RT/DL incumbent: CFS wakee does not preempt.
+                    return;
+                }
+                if (*task).policy() == SchedPolicy::Idle {
+                    return;
+                }
+                // Same comparison as check_cfs_preempt (vruntime +
+                // SCHED_MIN_GRANULARITY_NS), incumbent = the waker.
+                let se_vruntime = (*task).sched_entity().get_vruntime();
+                let curr_vruntime = (*running).sched_entity().get_vruntime();
+                if se_vruntime < curr_vruntime {
+                    let delta = curr_vruntime - se_vruntime;
+                    if delta > crate::sched::fair::SCHED_MIN_GRANULARITY_NS {
+                        resched_cpu(this_cpu);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[inline(never)]
 #[track_caller]
 pub fn schedule() {

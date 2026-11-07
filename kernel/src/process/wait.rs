@@ -23,6 +23,12 @@ pub enum WakeUpHint {
     Normal = 0,
     /// Async wake up (don't actually wake process, just mark)
     Async = 1,
+    /// Synchronous wake (reference WF_SYNC): the waker and wakee are a
+    /// handoff pair — the waker is about to block. The scheduler stacks
+    /// the wakee with the waker (never dispatches it onto another busy
+    /// CPU to run in parallel). Used by binder's sync-txn/reply wakes
+    /// (wake_up_interruptible_sync in binder.c, 66th session parity).
+    Sync = 2,
 }
 
 #[repr(C)]
@@ -184,7 +190,7 @@ impl WaitQueueHead {
     /// a wait-queue lock inside a virtio lock is the BLK↔waitqueue ABBA that
     /// froze GNOME final6 with timer IRQs stopped. Drivers collect completed
     /// work under their locks and wake OUTSIDE them (timer.rs R12-3 pattern).
-    pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
+    pub fn wake_up(&self, mode: WakeUpHint, nr: usize) -> usize {
         // Lock-free empty fast path (leg-36): one Acquire load instead
         // of an irqsave lock/unlock pair for every wake of a queue
         // nobody sleeps on — the common case for polling consumers.
@@ -243,7 +249,15 @@ impl WaitQueueHead {
                     // one-shot token — clear the flag so a later wake can
                     // retry (the task may still be heading into
                     // __schedule with a sleeping state).
-                    if !crate::sched::wake_up_process(task) {
+                    // 66th: mode == Sync routes through the WF_SYNC wake
+                    // (same transition, stacking dispatch — see
+                    // Task::wake_up_impl).
+                    let woke = if matches!(mode, WakeUpHint::Sync) {
+                        crate::sched::wake_up_process_sync(task)
+                    } else {
+                        crate::sched::wake_up_process(task)
+                    };
+                    if !woke {
                         entry.clear_woken();
                         // Lost-park ring (dfx=lostpark): the refused-wake
                         // token return — pid, state bits, preempt_count.

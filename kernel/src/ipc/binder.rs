@@ -1680,7 +1680,23 @@ fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
 }
 
 fn wake_thread(t: &BinderThread) {
-    let n = t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+    wake_thread_hint(t, false)
+}
+
+/// 66th (WF_SYNC parity): binder.c wakes the selected/replying thread
+/// with wake_up_interruptible_sync for SYNC transactions and replies
+/// (binder_wakeup_thread_ilocked !oneway; the reply path at 6.6:3671) —
+/// the wake carries WF_SYNC so the scheduler stacks the wakee with the
+/// waker (strict handoff: the sender finishes its BWR and parks before
+/// the server runs). Oneway/node-work wakes stay Normal
+/// (binder_wakeup_proc_ilocked, sync=false).
+fn wake_thread_hint(t: &BinderThread, sync: bool) {
+    let hint = if sync {
+        crate::process::wait::WakeUpHint::Sync
+    } else {
+        crate::process::wait::WakeUpHint::Normal
+    };
+    let n = t.wait.wake_up(hint, 0);
     // sc252/sc253 attribution: wake_up counts entries it transitioned (a
     // refused wake is not counted — see WaitQueueHead::wake_up's W1
     // clear-and-continue). 0 therefore means "no entry transitioned":
@@ -8281,6 +8297,11 @@ fn binder_transaction(
     // the prologue because the pre-alloc stale sweep below can already
     // collect child-thread wakes for drained parked txns (leg-32B).
     let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
+    // 66th (WF_SYNC parity): thread-targeted deliveries of SYNC
+    // transactions (origin-thread route, child-looper, selthread) wake
+    // with the Sync hint — binder.c's wake_up_interruptible_sync for
+    // sync txns (binder_wakeup_thread_ilocked(proc, thread, !oneway)).
+    let mut wake_ths_sync: Vec<Arc<BinderThread>> = Vec::new();
 
     // Bring-up crutch for the samgr-install race — see
     // wait_for_context_manager: stretch bounded client retry budgets
@@ -9891,8 +9912,10 @@ fn binder_transaction(
                     rth.todo.push_back(Work::Transaction(txn.clone()));
                     rth.process_todo = true;
                     // exact-thread wake (wake_up_interruptible_sync on
-                    // target_thread->wait in Linux)
-                    wake_thread(&rthread);
+                    // target_thread->wait in Linux — 66th: now carrying
+                    // the WF_SYNC hint for real, stacking the replied
+                    // client with the replying server)
+                    wake_thread_hint(&rthread, true);
                     rthread.hist(EV_REPLY_PUSHED, txn.id as u32, *rtid);
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
@@ -10150,7 +10173,7 @@ fn binder_transaction(
                     tth.todo.push_back(Work::Transaction(txn.clone()));
                     tth.process_todo = true;
                     tt.hist(EV_TXN_TQUEUED, txn.id as u32, tt.tid);
-                    wake_ths.push(tt);
+                    wake_ths_sync.push(tt);
                     txn_route_label = "origin-thread";
                 } else {
                     // sc163: sync txn to a forked-child node — thread-target
@@ -10171,7 +10194,7 @@ fn binder_transaction(
                     };
                     match posted_thread {
                         Some(ct) => {
-                            wake_ths.push(ct);
+                            wake_ths_sync.push(ct);
                             txn_route_label = "child-looper";
                         }
                         None => {
@@ -10200,7 +10223,7 @@ fn binder_transaction(
                                 unsafe { deliver_txn_to_selected_thread(world, &target, &txn) };
                             match sel {
                                 Some(st) => {
-                                    wake_ths.push(st);
+                                    wake_ths_sync.push(st);
                                     txn_route_label = "selthread";
                                 }
                                 None => {
@@ -10283,6 +10306,10 @@ fn binder_transaction(
     }
     for t in wake_ths {
         wake_thread(&t);
+    }
+    // 66th: sync-txn thread deliveries wake with the WF_SYNC hint.
+    for t in wake_ths_sync {
+        wake_thread_hint(&t, true);
     }
     for p in wakes {
         wake_proc_one(&p, 0);
