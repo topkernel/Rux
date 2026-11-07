@@ -1446,6 +1446,51 @@ pub struct Task {
     pub schedstat_timeslices: AtomicU64,
     pub schedstat_wait_start: AtomicU64,
     pub schedstat_exec_start: AtomicU64,
+    /// 63rd session (strand-wall hunt): persistent per-task pick/wake
+    /// evidence, kept ON the task so no address-keyed side table can
+    /// steal it mid-strand (the 61st's 256-slot SKIP_HIST collided).
+    /// All writes are gated behind sched::sched_hist_armed()
+    /// (dfx=fuxstuck|schedtrace) and happen under the GRQ lock; the
+    /// census reads them lock-free. Ring entries pack
+    /// kind:4|why:8|jiffies:30|aux:22 (kind: 1=link 2=refuse 3=pick
+    /// 4=heal-claim 5=heal-oncpu; see sched::sched_hist_ring).
+    ///
+    /// The decisive pair is pick_n vs the exec clock: a strand victim
+    /// with pick_n == 0 and pick_visit_n == 0 was NEVER VISITED by a
+    /// pick (wall/stash class), while a growing pick_n over a frozen
+    /// exec clock is the picked-but-never-executes class (the R56d
+    /// lying-slot shape: next == prev fast-path repicks that never
+    /// restore the context).
+    pub pick_ring: [AtomicU64; 16],
+    /// Total events ever appended; the slot is (seq & 15).
+    pub pick_ring_seq: AtomicU64,
+    /// Pick-walk refusals of this task (a visit that ended in a skip).
+    pub pick_visit_n: AtomicU64,
+    /// Refusals per R76 reason code, indices 0..4 == why 1..5
+    /// (1 on_cpu, 2 foreign live claim, 3 affinity, 4 throttled,
+    /// 5 stale healed).
+    pub pick_refuse_why: [AtomicU64; 5],
+    /// Jiffies of the first refusal in the current strand episode
+    /// (0 = never refused since boot).
+    pub pick_first_refuse_jif: AtomicU64,
+    /// Times this task was picked (mark_picked_on_cpu), repicks
+    /// included.
+    pub pick_n: AtomicU64,
+    /// Jiffies of the last pick (0 = never picked).
+    pub pick_last_jif: AtomicU64,
+    /// Successful run-queue links (wake/fork/heal re-insert).
+    pub wake_n: AtomicU64,
+    /// Jiffies of the last link (0 = never linked since boot).
+    pub wake_last_jif: AtomicU64,
+    /// sched_clock() ns at the last link — the wait window opened at
+    /// enqueue and closed at pick (0 = closed/never opened).
+    pub wait_open_ns: AtomicU64,
+    /// Last link→pick wait, ns (diagnostic read).
+    pub wait_last_ns: AtomicU64,
+    /// Cumulative link→pick wait, ns (deltas between census bursts
+    /// give the per-phase wake-to-run cost the FFRT group pays).
+    pub wait_sum_ns: AtomicU64,
+    pub wait_max_ns: AtomicU64,
     /// Page faults taken by this task in user mode (Linux's minflt).
     /// Rux has no minor/major distinction — file-backed pages come
     /// from the page cache, not from a fault-time disk read — so every
@@ -1832,6 +1877,19 @@ impl Task {
             schedstat_timeslices: AtomicU64::new(0),
             schedstat_wait_start: AtomicU64::new(0),
             schedstat_exec_start: AtomicU64::new(0),
+            pick_ring: [const { AtomicU64::new(0) }; 16],
+            pick_ring_seq: AtomicU64::new(0),
+            pick_visit_n: AtomicU64::new(0),
+            pick_refuse_why: [const { AtomicU64::new(0) }; 5],
+            pick_first_refuse_jif: AtomicU64::new(0),
+            pick_n: AtomicU64::new(0),
+            pick_last_jif: AtomicU64::new(0),
+            wake_n: AtomicU64::new(0),
+            wake_last_jif: AtomicU64::new(0),
+            wait_open_ns: AtomicU64::new(0),
+            wait_last_ns: AtomicU64::new(0),
+            wait_sum_ns: AtomicU64::new(0),
+            wait_max_ns: AtomicU64::new(0),
             start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
@@ -2355,8 +2413,33 @@ impl Task {
             offset_of!(Task, schedstat_timeslices),
             offset_of!(Task, schedstat_wait_start),
             offset_of!(Task, schedstat_exec_start),
+            offset_of!(Task, pick_ring_seq),
+            offset_of!(Task, pick_visit_n),
+            offset_of!(Task, pick_first_refuse_jif),
+            offset_of!(Task, pick_n),
+            offset_of!(Task, pick_last_jif),
+            offset_of!(Task, wake_n),
+            offset_of!(Task, wake_last_jif),
+            offset_of!(Task, wait_open_ns),
+            offset_of!(Task, wait_last_ns),
+            offset_of!(Task, wait_sum_ns),
+            offset_of!(Task, wait_max_ns),
         ] {
             ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
+        // 63rd: the pick-history ring and the per-why refusal counters
+        // are arrays — zero them element-wise on task-page reuse (a
+        // recycled Task must not inherit the previous occupant's
+        // strand evidence).
+        for f in [
+            offset_of!(Task, pick_ring),
+            offset_of!(Task, pick_refuse_why),
+        ] {
+            let base = (ptr as usize + f) as *mut AtomicU64;
+            let cnt = if f == offset_of!(Task, pick_ring) { 16 } else { 5 };
+            for i in 0..cnt {
+                ptr::write(base.add(i), AtomicU64::new(0));
+            }
         }
         // The task's start time (Linux's starttime, field 22 of
         // /proc/[pid]/stat): the jiffies at which the task was built.
@@ -3050,8 +3133,33 @@ impl Task {
             offset_of!(Task, schedstat_timeslices),
             offset_of!(Task, schedstat_wait_start),
             offset_of!(Task, schedstat_exec_start),
+            offset_of!(Task, pick_ring_seq),
+            offset_of!(Task, pick_visit_n),
+            offset_of!(Task, pick_first_refuse_jif),
+            offset_of!(Task, pick_n),
+            offset_of!(Task, pick_last_jif),
+            offset_of!(Task, wake_n),
+            offset_of!(Task, wake_last_jif),
+            offset_of!(Task, wait_open_ns),
+            offset_of!(Task, wait_last_ns),
+            offset_of!(Task, wait_sum_ns),
+            offset_of!(Task, wait_max_ns),
         ] {
             ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
+        // 63rd: the pick-history ring and the per-why refusal counters
+        // are arrays — zero them element-wise on task-page reuse (a
+        // recycled Task must not inherit the previous occupant's
+        // strand evidence).
+        for f in [
+            offset_of!(Task, pick_ring),
+            offset_of!(Task, pick_refuse_why),
+        ] {
+            let base = (ptr as usize + f) as *mut AtomicU64;
+            let cnt = if f == offset_of!(Task, pick_ring) { 16 } else { 5 };
+            for i in 0..cnt {
+                ptr::write(base.add(i), AtomicU64::new(0));
+            }
         }
         // The task's start time (Linux's starttime, field 22 of
         // /proc/[pid]/stat): the jiffies at which the task was built.

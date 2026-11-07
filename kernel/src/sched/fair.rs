@@ -220,27 +220,10 @@ pub fn print_skip_history(task: *mut Task) {
 }
 
 /// 60th (RUNQ-STRAND census): NON-destructive peek of `task`'s recorded
-/// pick-refusal history. Unlike print_skip_history (wakewatch consumes it
-/// once), the census reports the same victim burst after burst and must
-/// not wipe the evidence. Returns None when the slot no longer names this
-/// task (never refused since boot, or the address-keyed slot was stolen —
-/// the census prints the ambiguity explicitly).
-pub fn peek_skip_history(task: *mut Task) -> Option<(u64, [u64; 5])> {
-    let s = skip_hist_of(task);
-    if s.task.load(Ordering::Acquire) != task as usize as u64 {
-        return None;
-    }
-    Some((
-        s.n.load(Ordering::Relaxed),
-        [
-            s.why[0].load(Ordering::Relaxed),
-            s.why[1].load(Ordering::Relaxed),
-            s.why[2].load(Ordering::Relaxed),
-            s.why[3].load(Ordering::Relaxed),
-            s.why[4].load(Ordering::Relaxed),
-        ],
-    ))
-}
+/// pick-refusal history. REMOVED by the 63rd: superseded by the
+/// persistent per-task counters (Task::pick_visit_n / pick_refuse_why)
+/// which cannot be stolen by address collisions — print_skip_history
+/// (the wakewatch one-shot under dfx=schedtrace) remains.
 
 /// Clock frequency (HZ) - from config
 const HZ: u64 = KERNEL_HZ as u64;
@@ -624,6 +607,18 @@ pub struct StrandWallRow {
     /// pick succeeds at position <= 33).
     pub skips: u32,
     pub why: u32,
+    /// 63rd: which CPU slot names this entry at probe time (-1 = none)
+    /// — a wall entry that is BOTH linked and on a slot is the R56d
+    /// lying-slot / mid-switch-out shape, the refusal input the 62nd
+    /// asked to name.
+    pub slot: i32,
+    /// 63rd: jiffies since this entry's last pick (u32::MAX = never
+    /// picked since boot) — distinguishes the never-picked wheel class
+    /// from the cycling churn.
+    pub lp_jif: u32,
+    /// 63rd: times this entry was linked (woken) since boot — the churn
+    /// rate numerator.
+    pub wakes: u32,
 }
 
 // R76 (fast-pace starvation hunt): per-pid pick-skip counters, direct-mapped
@@ -1140,24 +1135,48 @@ impl CfsRunQueue {
                     let (policy, on_cpu, claim, aff) = unsafe {
                         ((*t).policy() as u8 as u64, (*t).on_cpu(), (*t).running_on_cpu.load(Ordering::Acquire), (*t).cpus_allowed())
                     };
-                    // 61st: refusal history of the wall entry itself
-                    // (non-destructive; only meaningful under
-                    // dfx=schedtrace — otherwise (0, 0)). why = the
+                    // 61st: refusal history of the wall entry itself.
+                    // 63rd: read from the PERSISTENT per-task counters
+                    // (armed on fuxstuck boots too) — the SKIP_HIST
+                    // side-table slots were stolen by churn and read
+                    // (0,0) on every fuxstuck-only boot. why = the
                     // reason code with the highest count (1 on_cpu-mark,
                     // 2 foreign-claim, 3 affinity, 4 throttle, 5 heal).
-                    let (skips, why) = match peek_skip_history(t) {
-                        Some((n, w)) => {
-                            let mut best = 0u64;
-                            let mut bi = 0u32;
-                            for (i, c) in w.iter().enumerate() {
-                                if *c > best {
-                                    best = *c;
-                                    bi = i as u32;
-                                }
+                    let (visits, why) = unsafe {
+                        let v = (*t).pick_visit_n.load(Ordering::Relaxed) as u32;
+                        let mut best = 0u64;
+                        let mut bi = 0u32;
+                        for (i, c) in (*t).pick_refuse_why.iter().enumerate() {
+                            let c = c.load(Ordering::Relaxed);
+                            if c > best {
+                                best = c;
+                                bi = i as u32 + 1;
                             }
-                            (n as u32, bi)
                         }
-                        None => (0, 0),
+                        (v, bi)
+                    };
+                    // 63rd: slot ownership + last-pick/wake counts at
+                    // probe time (the lying-slot refusal input).
+                    let (slot, lp_jif, wakes) = unsafe {
+                        let mut sl: i32 = -1;
+                        for c in 0..crate::config::MAX_CPUS {
+                            if crate::sched::sched::cpu_state(c).current == t {
+                                sl = c as i32;
+                                break;
+                            }
+                        }
+                        let last = (*t).pick_last_jif.load(Ordering::Relaxed);
+                        let now = crate::drivers::timer::get_jiffies();
+                        let lp = if last == 0 {
+                            u32::MAX
+                        } else {
+                            (now.saturating_sub(last)).min(u32::MAX as u64) as u32
+                        };
+                        (
+                            sl,
+                            lp,
+                            (*t).wake_n.load(Ordering::Relaxed) as u32,
+                        )
                     };
                     rows[filled] = StrandWallRow {
                         vruntime: k.vruntime,
@@ -1166,8 +1185,11 @@ impl CfsRunQueue {
                         on_cpu,
                         claim,
                         aff,
-                        skips,
+                        skips: visits,
                         why,
+                        slot,
+                        lp_jif,
+                        wakes,
                     };
                     filled += 1;
                 }
@@ -1233,8 +1255,18 @@ impl CfsRunQueue {
 
     /// GNOME-wedge report for the stale-claim heal inside pick_next_cpu
     /// (R34: GRQ-held callers, direct console writes only).
-    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32) {
+    /// 63rd: `task` added for the persistent ring (the print can be
+    /// budget-swallowed; the ring cannot).
+    fn stale_claim_healed(cpu_id: usize, pid: u32, was: i32, task: *mut crate::process::Task) {
         WW_CLAIM_HEALS.fetch_add(1, Ordering::Relaxed);
+        if crate::sched::sched::sched_hist_armed() && !task.is_null() {
+            crate::sched::sched::sched_hist_ring(
+                unsafe { &*task },
+                4,
+                2,
+                (cpu_id as u64 & 0xF) | (((was as u64) & 0xF) << 4),
+            );
+        }
         if !Self::heal_report_budget_ok() {
             return;
         }
@@ -1253,6 +1285,17 @@ impl CfsRunQueue {
     /// and 2s system-wide budget as the claim twin.
     fn stale_oncpu_healed(tag: &[u8], cpu_id: usize, task: *mut crate::process::Task, claim: i32, pk: u32) {
         WW_ONCPU_HEALS.fetch_add(1, Ordering::Relaxed);
+        // 63rd: the heal event goes on the task's ring BEFORE the print
+        // budget can swallow the line (a budgeted-out heal must still
+        // appear in the victim's history).
+        if crate::sched::sched::sched_hist_armed() && !task.is_null() {
+            crate::sched::sched::sched_hist_ring(
+                unsafe { &*task },
+                5,
+                1,
+                (cpu_id as u64 & 0xF) | (((claim as u64) & 0xF) << 4) | (((pk as u64) & 0xF) << 8),
+            );
+        }
         if !Self::heal_report_budget_ok() {
             return;
         }
@@ -1723,7 +1766,7 @@ impl CfsRunQueue {
                         // residue or scribble garbage — reset it.
                         if !owner_live {
                             (*task).running_on_cpu.store(-1, Ordering::Release);
-                            Self::stale_claim_healed(cpu_id, (*task).pid(), claim);
+                            Self::stale_claim_healed(cpu_id, (*task).pid(), claim, task);
                             skip_reason = 5;
                         } else {
                             skip_reason = 2;
@@ -1801,6 +1844,15 @@ impl CfsRunQueue {
             // the whole strand window. Armed only under dfx=schedtrace.
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
                 note_pick_skip(task, skip_reason as u8);
+            }
+            // 63rd (strand-wall hunt): decision-time refusal evidence,
+            // PERSISTENT on the task (the 61st's SKIP_HIST slots were
+            // stolen by churn) and armed on the fuxstuck census boots
+            // too — RUNQ-STRAND's burst sample missed the wheel
+            // thread's input on ohw29/30 precisely because this only
+            // armed under schedtrace.
+            if crate::sched::sched::sched_hist_armed() {
+                crate::sched::sched::sched_hist_refuse(task, skip_reason, cpu_id);
             }
             // Not allowed — remove temporarily and stash (the entity's
             // recorded key stays valid: the re-insert below uses the same

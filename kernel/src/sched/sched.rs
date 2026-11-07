@@ -1485,6 +1485,80 @@ pub fn preempt_check_wake(task: *mut Task) {
     }
 }
 
+/// 63rd session (strand-wall hunt): gate for the persistent per-task
+/// pick/wake history. The OH boots carry dfx=fuxstuck (the census burst)
+/// without schedtrace, and the 61st's burst-sampled RUNQ-STRAND missed
+/// the wheel thread's refusal input — so the history follows the census
+/// gate too. One relaxed switch-table load per event.
+#[inline]
+pub fn sched_hist_armed() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::FuxStuck)
+        || crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace)
+}
+
+/// Append one event to `task`'s persistent scheduler-history ring
+/// (callers hold the GRQ; writes race nothing).
+/// kind: 1=link(wake) 2=refuse 3=pick 4=heal-claim 5=heal-oncpu.
+/// `why` carries the R76 skip reason for refuse/heal kinds.
+/// `aux` (22 bits) is kind-specific context (cpu id, packed marks).
+/// Entry layout: kind:4 | why:8 | jiffies:30 | aux:22.
+pub fn sched_hist_ring(task: &Task, kind: u64, why: u64, aux: u64) {
+    let jif = crate::drivers::timer::get_jiffies() & 0x3FFF_FFFF;
+    let v = (kind << 60) | ((why & 0xFF) << 52) | (jif << 22) | (aux & 0x3F_FFFF);
+    let i = task.pick_ring_seq.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as usize & 15;
+    task.pick_ring[i].store(v, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// 63rd: record a pick-walk REFUSAL of `task` (decision time, GRQ held).
+/// skip_reason uses the R76 codes 1..5 (see pick_next_cpu).
+pub fn sched_hist_refuse(task: *mut Task, skip_reason: u32, cpu: usize) {
+    // SAFETY: caller (pick_next_cpu) holds the GRQ and the pointer came
+    // from the timeline; only this task's diagnostic fields are touched.
+    let t = unsafe { &*task };
+    t.pick_visit_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if let Some(w) = t.pick_refuse_why.get((skip_reason as usize).saturating_sub(1)) {
+        w.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    if t.pick_first_refuse_jif.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        t.pick_first_refuse_jif
+            .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+    }
+    let claim = t.running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+    let aux = (cpu as u64 & 0xF) | ((t.on_cpu() as u64) << 4) | (((claim as u64) & 0xF) << 5);
+    sched_hist_ring(t, 2, skip_reason as u64, aux);
+}
+
+/// 63rd: record a successful run-queue LINK of `task` (wake, fork,
+/// heal re-insert — GRQ held at every caller).
+pub fn sched_hist_link(task: *mut Task) {
+    // SAFETY: callers hold the GRQ; diagnostic fields only.
+    let t = unsafe { &*task };
+    t.wake_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    t.wake_last_jif
+        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+    t.wait_open_ns
+        .store(crate::sched::fair::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+    sched_hist_ring(t, 1, 0, crate::arch::cpu_id() as u64 & 0xF);
+}
+
+/// 63rd: record a PICK of `task` (mark_picked_on_cpu, GRQ held) and
+/// close the link→pick wait window.
+pub fn sched_hist_pick(task: *mut Task, cpu: usize) {
+    // SAFETY: callers hold the GRQ; diagnostic fields only.
+    let t = unsafe { &*task };
+    t.pick_n.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    t.pick_last_jif
+        .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Relaxed);
+    let open = t.wait_open_ns.swap(0, core::sync::atomic::Ordering::Relaxed);
+    if open != 0 {
+        let d = crate::sched::fair::sched_clock().saturating_sub(open);
+        t.wait_last_ns.store(d, core::sync::atomic::Ordering::Relaxed);
+        t.wait_sum_ns.fetch_add(d, core::sync::atomic::Ordering::Relaxed);
+        t.wait_max_ns.fetch_max(d, core::sync::atomic::Ordering::Relaxed);
+    }
+    sched_hist_ring(t, 3, 0, cpu as u64 & 0xF);
+}
+
 /// Wakewatch heartbeat snapshot of the scheduler state (timer.rs prints
 /// it 1 Hz): [grq_nr, cfs_nr, idle_mask, need_resched_mask, then per CPU
 /// (pid, state word, preempt_count) for cpu0/cpu1]. Diagnostic reads
@@ -3245,6 +3319,12 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
         // wake→pick latency (direct-console prints follow the R34
         // discipline — we hold the GRQ lock here).
         crate::sched::wakewatch::check_picked(task, crate::arch::cpu_id() as usize);
+        // 63rd: persistent per-task history (strand-wall hunt) — the
+        // pick_n counter vs a frozen exec clock is the
+        // picked-but-never-executes signature.
+        if sched_hist_armed() {
+            sched_hist_pick(task, crate::arch::cpu_id() as usize);
+        }
         // Scribble hunter (R65 double-run seed tripwire): we hold the GRQ
         // lock here, so the ownership picture is stable. A task that is
         // STILL another CPU's published current (sched slot) or still
@@ -3729,6 +3809,10 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // Wakewatch forensics: stamp every successful link (wake, fork,
         // heal re-insert) so the pick side can measure wake→run latency.
         crate::sched::wakewatch::note_wake(task);
+        // 63rd: persistent per-task history (strand-wall hunt).
+        if sched_hist_armed() {
+            sched_hist_link(task);
+        }
         // Per-task schedstat (T7): open the wait window — the pick edge
         // in __schedule closes it into schedstat_wait_ns. GRQ is held
         // here and there, so the stamp needs no lock of its own.
@@ -5276,10 +5360,80 @@ pub fn runq_strand_census(now_j: u64) {
         };
         let throttled = crate::sched::cgroup::task_cgroup_throttled(task as *const Task);
         let vr = tk.sched_entity().get_vruntime();
-        // 60th: the pick-path's own refusal history for this task
-        // (non-destructive; None = never refused or slot stolen). Only
-        // armed under dfx=schedtrace.
-        let skips = crate::sched::fair::peek_skip_history(task as *mut Task);
+        // 63rd: the pick-path's decision-time history, now persistent on
+        // the task (never refused = pick_visit_n 0; the old peek's None
+        // also covered slot-stolen ambiguity which no longer exists).
+        let skips: u64 = tk.pick_visit_n.load(core::sync::atomic::Ordering::Relaxed);
+        {
+            use core::sync::atomic::Ordering::Relaxed as Rlx;
+            let pk_n = tk.pick_n.load(Rlx);
+            let wk_n = tk.wake_n.load(Rlx);
+            let last_pick = tk.pick_last_jif.load(Rlx);
+            let last_wake = tk.wake_last_jif.load(Rlx);
+            let first_ref = tk.pick_first_refuse_jif.load(Rlx);
+            let w0 = tk.pick_refuse_why[0].load(Rlx);
+            let w1 = tk.pick_refuse_why[1].load(Rlx);
+            let w2 = tk.pick_refuse_why[2].load(Rlx);
+            let w3 = tk.pick_refuse_why[3].load(Rlx);
+            let w4 = tk.pick_refuse_why[4].load(Rlx);
+            let lp_ms = if last_pick == 0 {
+                u64::MAX
+            } else {
+                now_j.saturating_sub(last_pick)
+            };
+            let lw_ms = if last_wake == 0 { u64::MAX } else { now_j.saturating_sub(last_wake) };
+            let wait_last_us = tk.wait_last_ns.load(Rlx) / 1000;
+            let wait_max_us = tk.wait_max_ns.load(Rlx) / 1000;
+            let wait_open = tk.wait_open_ns.load(Rlx) != 0;
+            let fr_ms = if first_ref == 0 { u64::MAX } else { now_j.saturating_sub(first_ref) };
+            // HOTPATH-PRINT: fuxstuck graph-burst gate.
+            crate::pr_warn!(
+                "STRAND-HIST tid={} pk={} wk={} visits={} why1/2/3/4/5={}/{}/{}/{}/{} firstref={}j lp={}j lw={}j wait_last={}us wait_max={}us wopen={} exec={}",
+                tk.pid(),
+                pk_n,
+                wk_n,
+                skips,
+                w0, w1, w2, w3, w4,
+                fr_ms,
+                lp_ms,
+                lw_ms,
+                wait_last_us,
+                wait_max_us,
+                wait_open as u8,
+                exec / 1_000_000
+            );
+            // 63rd: the victim's persistent event ring, chronological
+            // (oldest first) — kind: L=link R=refuse(why) P=pick
+            // H4=claim-heal H5=oncpu-heal; jiffies since boot; aux hex.
+            let seq = tk.pick_ring_seq.load(Rlx);
+            if seq > 0 {
+                let mut ring_s = alloc::string::String::new();
+                use core::fmt::Write as _;
+                let n = (seq as usize).min(16);
+                for e in 0..n {
+                    let idx = (seq as usize - n + e) & 15;
+                    let v = tk.pick_ring[idx].load(Rlx);
+                    if v == 0 && e + 1 < n {
+                        continue;
+                    }
+                    let kind = v >> 60;
+                    let why = (v >> 52) & 0xFF;
+                    let jif = (v >> 22) & 0x3FFF_FFFF;
+                    let aux = v & 0x3F_FFFF;
+                    let k = match kind {
+                        1 => "L",
+                        2 => "R",
+                        3 => "P",
+                        4 => "H4",
+                        5 => "H5",
+                        _ => "?",
+                    };
+                    let _ = write!(ring_s, " {}{}.{:#x}@{}", k, if kind == 2 { why } else { 0 }, aux, jif);
+                }
+                // HOTPATH-PRINT: fuxstuck graph-burst gate.
+                crate::pr_warn!("VITCHRON tid={} n={}{}", tk.pid(), seq, ring_s);
+            }
+        }
         // 60th: the two pick-walk give-up shapes (stash overflow /
         // skip-all), plus the WALL below this victim: entries every
         // pick consults first. Held under the same GRQ window.
@@ -5315,7 +5469,7 @@ pub fn runq_strand_census(now_j: u64) {
                         tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
                         tk.pick_state(),
                         tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
-                        match skips { Some((n, _)) => n as u64, None => u64::MAX },
+                        skips,
                         vr,
                         wall_s,
                         inc_s
@@ -5337,6 +5491,9 @@ pub fn runq_strand_census(now_j: u64) {
                         aff: 0,
                         skips: 0,
                         why: 0,
+                        slot: -1,
+                        lp_jif: 0,
+                        wakes: 0,
                     };
                     8
                 ];
@@ -5355,10 +5512,19 @@ pub fn runq_strand_census(now_j: u64) {
                 // refusal input the census exists to name.
                 let mut wr = alloc::string::String::new();
                 for r in rows.iter().take(filled) {
+                    // 63rd: sl = owning CPU slot (-1 none), lp = jiffies
+                    // since the entry's last pick (X = never picked), w =
+                    // wake count — sl>=0 on a linked entry is the R56d
+                    // lying-slot / mid-switch-out shape at census time.
+                    let lp = if r.lp_jif == u32::MAX {
+                        alloc::string::String::from("X")
+                    } else {
+                        alloc::format!("{}", r.lp_jif)
+                    };
                     let _ = write!(
                         wr,
-                        " |{}p{}vr{:#x}oc{}cl{}af{:#x}sk{}wh{}",
-                        r.pid, r.policy, r.vruntime, r.on_cpu as u8, r.claim, r.aff, r.skips, r.why
+                        " |{}p{}vr{:#x}oc{}cl{}af{:#x}sk{}wh{}sl{}lp{}w{}",
+                        r.pid, r.policy, r.vruntime, r.on_cpu as u8, r.claim, r.aff, r.skips, r.why, r.slot, lp, r.wakes
                     );
                 }
                 if below > filled {
@@ -5422,13 +5588,108 @@ pub fn runq_strand_census(now_j: u64) {
             tk.running_on_cpu.load(core::sync::atomic::Ordering::Acquire),
             tk.pick_state(),
             tk.get_time_slice() * 1000 / crate::config::KERNEL_HZ as u32,
-            match skips { Some((n, _)) => n as u64, None => u64::MAX },
+            skips,
             vr,
             min_vr,
             wall_s,
             inc_s
         );
     }
+}
+
+/// 63rd session (mission lever 2): per-burst wake→pick latency profile
+/// for the FFRT thread group (every task whose comm starts with
+/// "OS_FFRT" — the workers AND the delayed-worker wheel). Prints one
+/// FFRTWAIT line per fuxstuck census burst: the per-thread pick/wake
+/// counts and wait samples, plus the AGGREGATE average link→pick wait
+/// over the burst window (delta vs the previous burst) — the quiet-
+/// phase vs wedge-phase wake-to-run cost comparison the 62nd asked
+/// for. Zero cost when the history gate is off.
+pub fn ffrt_wait_census() {
+    use alloc::format;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    const SCAN: usize = 40;
+    const MAXR: usize = 12;
+    // (pid, pick_n, wake_n, wait_last, wait_max, wait_open) for every
+    // OS_FFRT thread (bounded), then the 12 most interesting are
+    // printed: never-picked-but-woken (the wheel strand class) first,
+    // then currently-waiting, then the rest.
+    let mut scan: [(u32, u64, u64, u64, u64, u64); SCAN] = [(0, 0, 0, 0, 0, 0); SCAN];
+    let mut ns = 0usize;
+    let mut sum = 0u64;
+    let mut cnt = 0u64;
+    let mut mx = 0u64;
+    crate::sched::for_each_task_try(|task| {
+        if ns >= SCAN {
+            return;
+        }
+        // SAFETY: diagnostic reads under the for_each_task contract.
+        let tk = unsafe { &*task };
+        let comm = tk.comm();
+        if comm[..7] != *b"OS_FFRT" {
+            return;
+        }
+        let pick_n = tk.pick_n.load(Relaxed);
+        let wake_n = tk.wake_n.load(Relaxed);
+        let wait_last = tk.wait_last_ns.load(Relaxed) / 1000;
+        let wait_max = tk.wait_max_ns.load(Relaxed) / 1000;
+        let wait_open = tk.wait_open_ns.load(Relaxed);
+        scan[ns] = (tk.pid(), pick_n, wake_n, wait_last, wait_max, wait_open);
+        ns += 1;
+        sum = sum.wrapping_add(tk.wait_sum_ns.load(Relaxed) / 1000);
+        cnt += wake_n;
+        mx = mx.max(wait_max);
+    });
+    // Rank: never-picked-but-woken (score 0) < currently-waiting (1) <
+    // rest (2); stable within a class by pid.
+    let mut order: [usize; SCAN] = [0; SCAN];
+    for (i, o) in order.iter_mut().enumerate() {
+        *o = i;
+    }
+    let key = |i: usize| -> (u8, u32) {
+        let r = scan[i];
+        if r.1 == 0 && r.2 > 0 {
+            (0, r.0)
+        } else if r.5 != 0 {
+            (1, r.0)
+        } else {
+            (2, r.0)
+        }
+    };
+    order[..ns].sort_by(|&a, &b| key(a).cmp(&key(b)));
+    let nr = ns.min(MAXR);
+    static PREV_SUM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static PREV_CNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let prev_sum = PREV_SUM.swap(sum, Relaxed);
+    let prev_cnt = PREV_CNT.swap(cnt, Relaxed);
+    // Ohw31 lesson: tasks EXIT between bursts, so the per-task sums can
+    // shrink (an exited thread's contribution disappears) — a plain
+    // subtraction panicked the boot mid-wedge. Saturating: a shrinking
+    // aggregate simply reports 0 for the window.
+    let davg = if cnt > prev_cnt && sum > prev_sum {
+        (sum - prev_sum) / (cnt - prev_cnt)
+    } else {
+        0
+    };
+    let mut s = alloc::string::String::new();
+    use core::fmt::Write as _;
+    for &oi in order.iter().take(nr) {
+        let r = scan[oi];
+        let _ = write!(
+            s,
+            " |{}pk{}wk{}wl{}wm{}",
+            r.0, r.1, r.2, r.3, r.4
+        );
+    }
+    // HOTPATH-PRINT: fuxstuck graph-burst gate.
+    crate::pr_warn!(
+        "FFRTWAIT n={} davg={}us max={}us{}",
+        nr,
+        davg,
+        mx,
+        s
+    );
 }
 
 /// dfx=claiminject adjudication hook (GNOME-wedge hunt): leak a claim of
