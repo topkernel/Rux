@@ -6871,3 +6871,36 @@ verdict.
 Gates this addendum: x86_64 builds rc=0 (61l-61s); riscv64 build +
 make test ALL TESTS PASSED (run/test-rv-61d.log, tree = 61s); aarch64
 build rc=0 (run/build-a64-61b.log).
+
+### 62.5 COORDINATOR DATA DROP (ohw29 hand-parse) — the tid344 endgame picture
+
+ohw29's OWNER-LATCH line (t=478.75) completes the picture:
+- tid344 (M2 holder, handling deviceauth_serv's txn2235 code6 since ~20.7s)
+  parks on its OWN-STACK FFRT CoWait host word (0x7ff084a987e4);
+- its binder thread todo carries ONE entry: head=[txn-complete] —
+  the NESTED BC_TRANSACTION it issued (wcmd, 458s ago) ALREADY COMPLETED
+  and its completion notification sits UNREAD on its todo;
+- the word was woken 170 times (recent: tids 367/366/345/342 each
+  FUTEX_WAKE ret=1) — it WAKES and goes BACK to sleep: FFRT's scheduler
+  re-parks it because the dependency-graph predicate is still false;
+- the graph predicate needs a task that cannot run because ... M2
+  (held by tid344's suspended task) — the FFRT serial-queue REENTRANCY
+  deadlock the 60th named, now with the completion notification
+  PROVEN delivered and unread (not a kernel delivery failure).
+
+So the kernel-side delivery chain is COMPLETE: nested call done,
+completion queued, wake delivered (170x). The freeze is the FFRT
+graph's own reentrancy: the task holding M2 awaits (through CoWait)
+a downstream task that needs M2. Reference resolves the same shape in
+ms — the difference must be WHICH interleaving builds the graph:
+if the reference's binder round-trip completes BEFORE the PostTask
+lands (or vice versa), the graph edges differ. Candidate kernel
+levers to check on the reference: (1) our BWR read-return timing
+(when do we deliver the nested reply vs the complete — reference
+delivers reply-then-complete in ONE BWR read; check our
+reply+complete coalescing); (2) whether reference samgr ever runs
+NotifySystemAbilityAddedByAsync's nested sync call on a SEPARATE
+thread (binder looper vs FFRT worker split — if our FFRT worker
+picked up the handler task that the reference would run on the
+looper thread directly, the graph shape differs — CHECK
+OH ipc_single's FFRT dispatcher policy vs our thread scheduling).
