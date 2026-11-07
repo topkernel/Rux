@@ -923,7 +923,7 @@ mod runtime {
         CTR_SPLATS.fetch_add(1, Ordering::Relaxed);
         disable(DIS_SPLAT);
         crate::pr_warn!(
-            "LOCKDEP: disabling lockdep (first splat; debug_locks=0 equivalent)"
+            "LOCKDEP: turning off the locking correctness validator (debug_locks = 0; first splat)"
         );
     }
 
@@ -1126,7 +1126,7 @@ mod runtime {
                 }
             }
             if preempt != 0 || spin_held.is_some() {
-                splat_sleep_in_atomic(class, preempt, spin_held, st, site);
+                splat_sleep_in_atomic(class, spin_held, st, site, preempt);
                 let _ = st.push(class, site);
                 splat_disable();
                 return Verdict::SleepInAtomic { class, preempt, held_spin: spin_held };
@@ -1387,38 +1387,87 @@ mod runtime {
         obs.chain(decl)
     }
 
-    // ---- Splats (design doc §6 shape) --------------------------------
+    // ---- Splats: the reference lockdep's report shape -----------------
+    //
+    // The format follows the reference kernel's locking-validator
+    // report (Documentation/locking/lockdep-design.rst,
+    // kernel/locking/lockdep.c print_circular_bug()): the banner, the
+    // "is trying to acquire lock" / "but task is already holding
+    // lock" pair with symbolized acquire sites (our ksyms names carry
+    // the raw ip alongside), the reverse dependency chain, the
+    // CPU0/CPU1 unsafe-scenario diagram ending in "*** DEADLOCK ***",
+    // and the held-locks list. Rux additions on top (kept, they carry
+    // information the reference derives from usage bits we arm in
+    // P2): the INV-LOCK-* document citation and the explicit
+    // disarm line. Usage chars print as {....} until P2 arms
+    // irq-state tracking.
 
-    fn ctx_line(preempt: i32) {
+    fn banner(title: &str) {
+        crate::pr_warn!("=========================================================");
+        crate::pr_warn!("WARNING: {} detected", title);
+        crate::pr_warn!("---------------------------------------------------------");
+    }
+
+    fn task_line(st: &HeldStack, preempt: i32) {
         let pid = crate::process::current_pid();
         let cpu = crate::arch::smp::cpu_id();
-        let (in_irq, in_soft) = (
-            preempt & crate::interrupt::preempt::HARDIRQ_OFFSET != 0,
-            preempt & crate::interrupt::preempt::SOFTIRQ_OFFSET != 0,
-        );
         let comm = crate::sched::current()
             .map(|t| t.comm_str().to_string())
             .unwrap_or_default();
         crate::pr_warn!(
-            "  task={} pid={} cpu={} preempt={:#x} in_irq={} in_softirq={}",
-            comm,
+            "{}/{} on cpu {} is trying to acquire lock:",
+            if comm.is_empty() { "?" } else { comm.as_str() },
             pid,
-            cpu,
+            cpu
+        );
+        let _ = st;
+        let _ = preempt;
+    }
+
+    fn ctx_line(st: &HeldStack, preempt: i32) {
+        let (in_irq, in_soft) = (
+            preempt & crate::interrupt::preempt::HARDIRQ_OFFSET != 0,
+            preempt & crate::interrupt::preempt::SOFTIRQ_OFFSET != 0,
+        );
+        crate::pr_warn!(
+            "cpu={} preempt_count={:#x} in_hardirq={} in_softirq={}",
+            crate::arch::smp::cpu_id(),
             preempt,
             in_irq,
             in_soft
         );
+        let _ = st;
     }
 
-    fn held_lines(st: &HeldStack) {
+    /// The reference's numbered held-locks list ("N locks held by
+    /// comm/pid: #0: (name), at: site").
+    fn held_list(st: &HeldStack) {
+        if st.depth() == 0 {
+            crate::pr_warn!("no locks held by this task");
+            return;
+        }
+        crate::pr_warn!("{} lock(s) held by this task:", st.depth());
         for i in 0..st.depth() {
             crate::pr_warn!(
-                "  held:      {} at {} (depth {})",
+                " #{}: ({}){{....}}, at: {}",
+                i,
                 name(LockClassId(st.classes[i])),
-                crate::debug::ksyms::format_symbol(st.sites[i]),
-                i
+                crate::debug::ksyms::format_symbol(st.sites[i])
             );
         }
+    }
+
+    /// The reference's two-column unsafe-locking scenario, ending in
+    /// "*** DEADLOCK ***".
+    fn deadlock_scenario(a: LockClassId, b: LockClassId) {
+        crate::pr_warn!(" Possible unsafe locking scenario:");
+        crate::pr_warn!("       CPU0                    CPU1");
+        crate::pr_warn!("       ----                    ----");
+        crate::pr_warn!("  lock({});", name(a));
+        crate::pr_warn!("                               lock({});", name(b));
+        crate::pr_warn!("                               lock({});", name(a));
+        crate::pr_warn!("  lock({});", name(b));
+        crate::pr_warn!(" *** DEADLOCK ***");
     }
 
     fn splat_order_violation(
@@ -1429,71 +1478,93 @@ mod runtime {
         site: u64,
         preempt: i32,
     ) {
+        banner("possible circular locking dependency");
+        task_line(st, preempt);
         crate::pr_warn!(
-            "LOCKDEP: ORDER-VIOLATION {} -> {} contradicts {} (declared: {} -> {})",
-            name(held),
+            " ({}){{....}}, at: {} (ip {:#x})",
             name(acquiring),
+            crate::debug::ksyms::format_symbol(site),
+            site
+        );
+        crate::pr_warn!("but task is already holding lock:");
+        for i in 0..st.depth() {
+            crate::pr_warn!(
+                " ({}){{....}}, at: {} (ip {:#x})",
+                name(LockClassId(st.classes[i])),
+                crate::debug::ksyms::format_symbol(st.sites[i]),
+                st.sites[i]
+            );
+        }
+        crate::pr_warn!("");
+        crate::pr_warn!("the existing dependency chain (in reverse order) is:");
+        crate::pr_warn!("-> #1 ({}){{....}}  [declared INNER, {}]", name(held), inv);
+        crate::pr_warn!("-> #0 ({}){{....}}  [declared OUTER, {}]", name(acquiring), inv);
+        crate::pr_warn!("");
+        crate::pr_warn!(
+            " ORDER-VIOLATION of {}: the declared order is {} -> {} (docs/architecture/lock-ordering.md); observed the reverse",
             inv,
             name(acquiring),
             name(held)
         );
-        crate::pr_warn!(
-            "  acquiring: {} at {}",
-            name(acquiring),
-            crate::debug::ksyms::format_symbol(site)
-        );
-        held_lines(st);
-        ctx_line(preempt);
+        crate::pr_warn!("");
+        deadlock_scenario(acquiring, held);
+        crate::pr_warn!("");
+        held_list(st);
+        ctx_line(st, preempt);
     }
 
     fn splat_sleep_in_atomic(
         class: LockClassId,
-        preempt: i32,
         held_spin: Option<LockClassId>,
         st: &HeldStack,
         site: u64,
+        preempt: i32,
     ) {
+        banner("sleeping lock in atomic context (INV-LOCK-8 rule 1)");
+        task_line(st, preempt);
         crate::pr_warn!(
-            "LOCKDEP: SLEEP-IN-ATOMIC-CONTEXT acquiring sleep-domain {} (INV-LOCK-8 rule 1)",
-            name(class)
+            " ({}){{....}} [Sleep domain], at: {} (ip {:#x})",
+            name(class),
+            crate::debug::ksyms::format_symbol(site),
+            site
         );
         match held_spin {
-            Some(h) => crate::pr_warn!("  spin-family {} held", name(h)),
-            None => crate::pr_warn!("  preempt_count={:#x} (atomic context)", preempt),
+            Some(h) => crate::pr_warn!(
+                "with spin-family lock ({}){{....}} already held (sleeping inside a spin section)",
+                name(h)
+            ),
+            None => crate::pr_warn!("with preempt_count={:#x} (sleeping with preemption disabled / interrupt context)", preempt),
         }
-        crate::pr_warn!(
-            "  acquiring: {} at {}",
-            name(class),
-            crate::debug::ksyms::format_symbol(site)
-        );
-        held_lines(st);
-        ctx_line(preempt);
+        crate::pr_warn!(" *** this acquisition may sleep in atomic context ***");
+        crate::pr_warn!("");
+        held_list(st);
+        ctx_line(st, preempt);
     }
 
     fn splat_cycle(path: &[u16], len: usize, st: &HeldStack, site: u64, preempt: i32) {
         // path[0] is the held class the BFS reached; path[len-1] is
-        // the class being acquired. Render the loop starting at the
-        // held class: held -> ... -> acquiring -> ... -> held.
-        let mut line = String::from("LOCKDEP: CYCLE ");
-        for i in 0..len {
-            if i > 0 {
-                line.push_str(" -> ");
-            }
-            line.push_str(name(LockClassId(path[i])));
-        }
-        line.push_str(" -> ");
-        line.push_str(name(LockClassId(path[0])));
-        crate::pr_warn!("{}", line);
+        // the class being acquired.
+        let acquiring = LockClassId(path[len - 1]);
+        let target = LockClassId(path[0]);
+        banner("possible circular locking dependency");
+        task_line(st, preempt);
         crate::pr_warn!(
-            "  acquiring: {} at {}",
-            name(LockClassId(path[len - 1])),
-            crate::debug::ksyms::format_symbol(site)
+            " ({}){{....}}, at: {} (ip {:#x})",
+            name(acquiring),
+            crate::debug::ksyms::format_symbol(site),
+            site
         );
+        crate::pr_warn!("but task is already holding lock:");
+        crate::pr_warn!(
+            " ({}){{....}}, at: {}",
+            name(target),
+            crate::debug::ksyms::format_symbol(st.site_of(target).unwrap_or(0))
+        );
+        crate::pr_warn!("");
+        crate::pr_warn!("the existing dependency chain (in reverse order) is:");
         for i in 0..len {
             let c = LockClassId(path[i]);
             let site_i = st.site_of(c).unwrap_or_else(|| {
-                // Not in this task's stack: the observed-edge site of
-                // an edge pointing at this class, or 0.
                 let g = GRAPH.lock();
                 g.edges
                     .iter()
@@ -1503,12 +1574,21 @@ mod runtime {
                     .unwrap_or(0)
             });
             crate::pr_warn!(
-                "  path: {} at {}",
+                "-> #{} ({}){{....}}, at: {}",
+                i,
                 name(c),
                 crate::debug::ksyms::format_symbol(site_i)
             );
         }
-        ctx_line(preempt);
+        crate::pr_warn!("");
+        crate::pr_warn!(
+            " CYCLE through observed edges (INV-LOCK-4): the graph above closes a loop"
+        );
+        crate::pr_warn!("");
+        deadlock_scenario(acquiring, target);
+        crate::pr_warn!("");
+        held_list(st);
+        ctx_line(st, preempt);
     }
 
     // ---- /proc snapshots ----------------------------------------------

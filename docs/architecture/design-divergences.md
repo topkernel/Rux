@@ -991,3 +991,73 @@ here; serial + pstore carry the story today). kdump remains future work.
 show zero new print classes); the hungpanic+abba proof boot is the
 functional guard; the budget-used line in the bundle output self-reports
 against the 96 KiB cap.
+## D-23: lockdep-lite — static lock-class table, owned arenas, compile-gated hooks (vs the reference lockdep's runtime registration)
+
+**Design.** lockdep-lite (docs/development/lockdep-lite-design.md)
+keeps the reference kernel's OBSERVABILITY CONTRACT — per-task
+held-lock stacks, 64-bit chain keys with lookup amortization, bounded
+BFS cycle detection on each new chain, first-splat self-disable
+(`debug_locks = 0`, "turning off the locking correctness validator"),
+the reference `/proc/lockdep` + `/proc/lockdep_chains` layouts and the
+reference splat shape (banner, "is trying to acquire lock" /
+"but task is already holding lock" with symbolized sites, reverse
+dependency chain, CPU0/CPU1 scenario ending `*** DEADLOCK ***`) — and
+replaces the reference's IMPLEMENTATION mechanics with Rust-native
+ones:
+
+- Lock classes are a compile-time `lock_classes!` const table (18
+  rows, one per class named in lock-ordering.md) instead of
+  dynamically registered keys derived from first-use stack traces.
+  Keyed lock types map 1:1 to registry rows via a `NestKey::LOCK_CLASS`
+  const; the SleepMutex pair is classed at construction. No
+  registration path, no zapped-class reclamation (static classes never
+  die), and a registry row without a document row (or the reverse) is
+  a reviewable defect.
+- The graph, chain-key table, and chain-content ring are owned arrays
+  sized at compile time (edges 2048, chains 8192, ring 128) instead of
+  the reference's dynamically grown hash tables; exhaustion disables
+  the checker (reference self-limit semantics).
+- Declared-order checking reads arm-time adjacency BITSETS (two
+  256x256 bit matrices, built once at arm) instead of walking the
+  class graph per acquire — the armed steady path (chain-key hit)
+  takes no lock at all.
+- The hooks are compile-gated behind the cargo feature
+  `debug-lockdep` and runtime-armed by the existing `debug=lockdep`
+  boot switch; a default build's lock paths are DISASSEMBLY-IDENTICAL
+  to a tree without the checker (per-symbol objdump proof,
+  run/LANE.md), where the reference compiles lockdep hooks into every
+  build behind static keys.
+
+**Advantage.** Zero default-build cost (the reference's hooks cost a
+static-key branch on every acquire in every build); class identity is
+reviewable data tied to the lock-ordering document (the INV-LOCK-*
+citation prints in every splat); no allocation and no dynamic
+registration on any path; drift between the document, the registry,
+and the keyed-type surface is machine-checked at boot and by unit
+tests.
+
+**Compatibility evidence.** Default build ASM identity vs main
+(x86_64 447/447, riscv64 443/443 lock-path symbols identical);
+feature-ON disarmed pbench within band of the KVM debug anchor
+(p1_null 0.281/0.300, p2_ctxsw 1.232/1.242); armed boot cost class
+reported in run/LANE.md (in-kernel probe 38 ns disarmed / 129 ns armed
+per keyed pair; +110 ns per futex-wake syscall armed). LTP: no LTP
+battery runs armed (the checker is a debug boot class); the armed
+unit-test suite and an armed KVM pbench boot run silent (zero splats
+from real traffic).
+
+**Known cost.** Classes without a keyed type or a classed constructor
+are not observed until they adopt one (GRQ's lock is a plain
+RawSpinlock pending the staged keyed re-adoption; the hooks and
+registry rows for it already exist); chain CONTENT (vs the 64-bit key,
+which every recorded chain keeps) is retained for only the most recent
+128 chains; irq-usage state (the reference's usage chars / safe-unsafe
+exclusivity) is deferred to P2, so usage chars print `{....}`.
+
+**Status:** P1 landed on the debug-lockdep-p1 lane (2026-11-07);
+P0 (the registry) landed earlier with the design document.
+
+**Guard.** The ASM-identity comparator (run/asm_identity_diff.sh) is
+the standing guard for the zero-cost claim; the perf-gate tiers own
+the default build's numbers; the boot selftest + the lockdep ktest
+group own the checker's verdicts.
