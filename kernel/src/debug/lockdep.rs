@@ -1630,6 +1630,10 @@ mod runtime {
     pub fn boot_selftest() {
         use crate::debug::lockdep::{EXT4_BIG, FUTEX_BUCKET, GRQ, INODE, PROC_TREE, VFS_MUTATION};
         let mut failures = 0usize;
+        // A real kernel code address as the synthetic acquire site, so
+        // the splats' "at <symbol>" lines symbolize (ksyms lookup)
+        // instead of printing '?' for made-up addresses.
+        let site = arm_runtime as *const () as u64;
 
         // 0. Key->registry mapping consistency.
         if key_mapping_problems().is_empty() {
@@ -1647,8 +1651,8 @@ mod runtime {
         reset_for_test();
         {
             let mut st = HeldStack::new();
-            let _ = check_acquire(&mut st, FUTEX_BUCKET, 0x1000, 0);
-            match check_acquire(&mut st, GRQ, 0x1004, 0) {
+            let _ = check_acquire(&mut st, FUTEX_BUCKET, site, 0);
+            match check_acquire(&mut st, GRQ, site + 4, 0) {
                 Verdict::Ok => {
                     crate::pr_info!("lockdep: selftest s1 declared forward (bucket -> grq): PASS");
                 }
@@ -1664,8 +1668,8 @@ mod runtime {
         reset_for_test();
         {
             let mut st = HeldStack::new();
-            let _ = check_acquire(&mut st, GRQ, 0x2000, 0);
-            match check_acquire(&mut st, FUTEX_BUCKET, 0x2004, 0) {
+            let _ = check_acquire(&mut st, GRQ, site, 0);
+            match check_acquire(&mut st, FUTEX_BUCKET, site + 4, 0) {
                 Verdict::OrderViolation { held, acquiring, inv } => {
                     if held == GRQ && acquiring == FUTEX_BUCKET && inv == "INV-LOCK-5" {
                         crate::pr_info!(
@@ -1688,8 +1692,8 @@ mod runtime {
         reset_for_test();
         {
             let mut st = HeldStack::new();
-            let _ = check_acquire(&mut st, GRQ, 0x3000, 0);
-            match check_acquire(&mut st, VFS_MUTATION, 0x3004, 0) {
+            let _ = check_acquire(&mut st, GRQ, site, 0);
+            match check_acquire(&mut st, VFS_MUTATION, site + 4, 0) {
                 Verdict::SleepInAtomic { class, held_spin, .. } => {
                     if class == VFS_MUTATION && held_spin == Some(GRQ) {
                         crate::pr_info!(
@@ -1712,7 +1716,7 @@ mod runtime {
         reset_for_test();
         {
             let mut st = HeldStack::new();
-            match check_acquire(&mut st, EXT4_BIG, 0x4004, 0x1) {
+            match check_acquire(&mut st, EXT4_BIG, site + 4, 0x1) {
                 Verdict::SleepInAtomic { preempt, held_spin, .. } => {
                     if preempt == 0x1 && held_spin.is_none() {
                         crate::pr_info!(
@@ -1736,8 +1740,8 @@ mod runtime {
         reset_for_test();
         {
             let mut st1 = HeldStack::new();
-            let _ = check_acquire(&mut st1, PROC_TREE, 0x5000, 0);
-            match check_acquire(&mut st1, INODE, 0x5004, 0) {
+            let _ = check_acquire(&mut st1, PROC_TREE, site, 0);
+            match check_acquire(&mut st1, INODE, site + 4, 0) {
                 Verdict::Ok => {}
                 v => {
                     failures += 1;
@@ -1745,8 +1749,8 @@ mod runtime {
                 }
             }
             let mut st2 = HeldStack::new();
-            let _ = check_acquire(&mut st2, INODE, 0x5008, 0);
-            match check_acquire(&mut st2, PROC_TREE, 0x500c, 0) {
+            let _ = check_acquire(&mut st2, INODE, site, 0);
+            match check_acquire(&mut st2, PROC_TREE, site + 4, 0) {
                 Verdict::Cycle { .. } => {
                     crate::pr_info!("lockdep: selftest s5 cycle via observed edges: PASS (splat above)");
                 }

@@ -334,10 +334,12 @@ pub fn test_lockdep_runtime() {
         let _ = check_acquire(&mut b, FUTEX_BUCKET, 0x5008, 0);
         let v = check_acquire(&mut b, WAITER_SLOT, 0x500c, 0);
         let (_, hits1, chains1, _, bfs1, _, _) = counters();
+        // The 'a' pair recorded TWO new chains (2 BFS runs); the 'b'
+        // pair replayed both as HITS — no new chains, no new BFS.
         let amortized = matches!(v, Verdict::OkChainHit)
-            && hits1 == hits0 + 1
-            && chains1 >= chains0 + 1
-            && bfs1 == bfs0 + 1; // the second chain ran NO new BFS
+            && hits1 == hits0 + 2
+            && chains1 == chains0 + 2
+            && bfs1 == bfs0 + 2;
         if amortized {
             test_pass("p1 chain-key amortization");
         } else {
@@ -376,10 +378,12 @@ pub fn test_lockdep_runtime() {
 
         let text = crate::debug::lockdep::generate_proc_lockdep();
         let t = core::str::from_utf8(&text).unwrap_or("");
+        // First acquire: empty stack (chain only, no edge); second:
+        // the bucket -> waiter-slot edge.
         let live_ok = t.contains("runtime ARMED")
             && t.contains("acquires=2")
             && t.contains("chains=2")
-            && t.contains("edges=2")
+            && t.contains("edges=1")
             && t.contains("observed at");
         if live_ok {
             test_pass("p1 /proc/lockdep live view");
