@@ -840,3 +840,65 @@ STAC/CLAC on hardware; measured invisible under the benchmark rigs.
 
 **Guard.** SMAP-VIOL beacon on every boot; the uafault guest probe (11
 syscalls × bad pointer → EFAULT) in the packed probe set.
+
+---
+
+## D-20: PSI tick-sampled stall accounting (no per-transition charging)
+
+**Design.** /proc/pressure/{cpu,memory,io} reports the reference
+semantics (some/full stall percentages, decaying avg10/60/300 with the
+reference's calc_load constants, cumulative µs totals), but the
+accounting mechanism differs: where the reference charges elapsed time
+inside every psi_task_change (an event-driven cost on every
+enqueue/dequeue/context-switch edge, per-CPU seqcount-protected), Rux
+samples the global stall conditions from the scheduler tick — at most
+one CAS-gated sample per jiffy on any CPU, zero new work on scheduling
+paths (cpu pressure reads the existing grq.nr_running and idle mask;
+memory/io pressure is marked by the stalling paths themselves with one
+relaxed atomic pair per stall section on a per-task bit).
+
+**Advantage.** The scheduler's perf-guarded paths (GRQ hold, wake,
+context switch) carry no new cost for always-on observability — the
+reference's per-transition accounting is a measured cost there (~2
+clock reads + serialization per ping-pong roundtrip on the P2/P5
+families, which is why the reference ships
+CONFIG_PSI_DEFAULT_DISABLED). Rux PSI is always on at ~one atomic
+load + a ~100 ns fold per 10 ms per CPU.
+
+**Compatibility evidence.** File shape identical to the reference
+(verified by the in-kernel psi test group: cpu some-only, memory/io
+some+full, avgN two-decimal, total µs, EMA convergence/decay,
+monotonic totals); psi-smoke.sh verifies live direction of travel
+(cpu avg10 under 2x oversubscription, io total under block-io load,
+decay after load).
+
+**Known cost.** A condition observed at a tick is attributed to the
+whole sampling interval (HZ=100 → 10 ms granularity): avg resolution
+is one tick per window (0.1% of avg10), `total` counts in tick quanta,
+and stall bursts shorter than a tick are under-sampled. Sustained
+pressure — the signal's purpose — is measured exactly. There is also
+no per-CPU nonidle-weighted aggregation (D-1's global run queue makes
+the conditions global by construction) and no poll()/triggers ABI
+yet.
+
+**Known gap (2026-11-07): io some/full is inert in the current tree.**
+The iowait mark lives in `IoCompletion::wait`, whose only call sites
+are the async batch read path — disabled tree-wide by the
+completion-attribution interim gate (`ext4/file.rs`
+fill_page_cache_batch, the 2026-11-05 cache-poison hunt) — while the
+synchronous read/write paths busy-poll inside `submit_request` and
+honestly carry no iowait section. Real block I/O therefore reports
+0.00/0 until the async path is re-enabled; the guard → sampler →
+render plumbing is verified live by the psi ktest ("stall guard
+charges total across a jiffy", both guard flavors), and psi-smoke.sh
+asserts the cold-read leg actually reached the device (diskstats
+sectors_read delta) while documenting the expected-0 totals. The
+memory stall mark (alloc slowpath) is live code on a live path; the
+minimal-rootfs smoke simply never hits the slowpath (no pressure).
+
+**Status:** landed on the debug-psi lane (2026-11-06); trigger ABI
+(poll on pressure files) is future work if a consumer needs it.
+
+**Guard.** Tier-1/Tier-2 perf gate (the sampler lives in
+scheduler_tick and the mm/fs guards on the alloc/io paths); the psi
+unit-test group in `make test`; scripts/test/psi-smoke.sh.

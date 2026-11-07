@@ -316,6 +316,13 @@ impl GlobalRunQueue {
         grq().rq_load()
     }
 
+    /// The idle-CPU bitmap (PSI sampling and diagnostics — read-only
+    /// view of the per-CPU idle bits maintained by mark_idle /
+    /// clear_idle).
+    pub fn grq_idle_mask() -> u32 {
+        grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire)
+    }
+
     /// Total load across all classes (for informational purposes).
     pub fn rq_load(&self) -> usize {
         let cfs = self.cfs_rq.nr_running() as usize;
@@ -5487,6 +5494,10 @@ pub fn scheduler_tick() {
     crate::debug::forkprof::tick_grq_sample();
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
+    // PSI (/proc/pressure): sample the stall conditions once per
+    // jiffy — CAS-gated inside, so this is one atomic load when
+    // another CPU already folded this tick.
+    crate::sched::psi::psi_tick();
     // phantom-bits orphan scan: bits the interrupted task carried INTO
     // the tick whose release never executed (softirq bit outside any
     // open window / stranded hardirq bit). debug=leakhunt-gated inside.

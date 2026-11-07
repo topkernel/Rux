@@ -412,6 +412,12 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 // Skipped for GFP_ATOMIC (IRQ contexts must not block on I/O)
                 // and while already inside reclaim (PF_MEMALLOC equivalent).
                 if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0 {
+                    // PSI memory stall (the reference's
+                    // psi_memstall_enter around __alloc_pages_slowpath):
+                    // mark this task memory-stalled for the whole gate
+                    // wait + direct reclaim section — one relaxed atomic
+                    // on entry/exit, counted once per nesting.
+                    let _psi_memstall = crate::sched::psi::StallGuard::memstall();
                     // GATE CONTENTION (the at-cap crawl): the gate used to be
                     // take-it-or-skip — when another task was mid-reclaim,
                     // THIS allocation skipped reclaim entirely and could

@@ -139,7 +139,7 @@ incomplete or non-reference shape · **--** = absent.
 | Perf | `/proc/schedstat`, `/proc/sched` | PART | per-CPU schedstat rows + per-task /proc/[pid]/schedstat triple (T7 slice); /proc/sched still absent |
 | Perf | `/proc/softirqs` | -- | absent |
 | Perf | `/proc/[pid]/stat` ctxt switches | OK | Tranche 2 Part 1: `note_switch` charges nvcsw/nivcsw in `context_switch`, surfaced in `/proc/[pid]/status` |
-| Perf | PSI `/proc/pressure/*` | -- | absent |
+| Perf | PSI `/proc/pressure/*` | OK | cpu some + memory/io some/full, reference line shape and EMA avgs (kernel/src/sched/psi.rs); tick-sampled accounting — zero scheduler-path cost (D-20); io some/full inert until the async read path is re-enabled (interim completion-attribution gate) — guard plumbing ktest-verified; no poll()/triggers yet |
 | Perf | `/proc/slabinfo` | OK | debug-blktrace lane 2026-11-07: reference 5.15 geometry (version 2.1 header, `%-17s` name, 6/6/6/4/4 counts, tunables 0 0 0, slabdata), one `kmalloc-<S>` row per size class summing the two serving layers (mm/slab.rs region caches + mm/small_alloc.rs buddy classes); row bytes pinned by an in-kernel unit test |
 | Perf | `/proc/pagetypeinfo` | -- | blocked-on-design: Rux's buddy has one free list per order (zone.rs `free_area: [FreeArea; MAX_ORDER+1]`), no per-migratetype segregation — the file's whole (order, migratetype) matrix has no counterpart; migratetype exists only as a tracepoint payload (`gfp_migratetype` in page_alloc.rs), never to segregate free lists |
 | Perf | `/proc/buddyinfo` | -- | absent (`print_buddyinfo` is dead code) |
@@ -638,7 +638,7 @@ panic; the next boot shows the previous panic's registers.
 - `/proc/lockstat`: per-class contention counts.
 - Page poisoning on free (buddy + heap) with a `PFN` poison pattern, and
   a `/proc/poison` view of poisoned pages.
-- PSI-lite: `/proc/pressure/{cpu,io,memory}` from stall accounting.
+- PSI-lite: `/proc/pressure/{cpu,io,memory}` from stall accounting. **Done (2026-11-06, debug-psi lane)**: full some/full semantics for all three resources, tick-sampled (D-20); the remaining gaps vs the reference are the poll()/trigger ABI and live io totals (blocked on the async read path's interim disable, see D-20's known gap).
 
 ### Tranche 7 — performance measurement infrastructure
 
