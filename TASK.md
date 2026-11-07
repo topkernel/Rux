@@ -7216,3 +7216,152 @@ TESTS PASSED (run/test-rv-63a.log); aarch64 build rc=0. No stray
 QEMUs. The sharpest open kernel lever for the 64th is §7's re-land of
 the EEVDF wake placement with a placement-audit instrument first, then
 the appfwk tally series on whichever tree it yields.
+
+### 64. 64TH SESSION (2026-11-07) — the EEVDF corruption seed found by
+### source + canary (the 63rd's avg_vruntime double-counted min_vruntime);
+### the placement re-landed clean (0 VRTRIPs, strand debt +1-13ms vs +1-2s);
+### a SECOND latent freeze decoded and fixed on the way (pid-hash bucket
+### locks now IRQ-atomic, the sc207 class closed); 8-boot tally 0/8 appfwk,
+### M2 wedge unchanged
+
+Boots this session: ohw39 (confirmation, 63rd-formula variant build),
+ohw40 (frozen — pid_hash), ohw41-ohw48 (8 tally boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=fuxstuck,txnhunt,sleepsnap,
+fuxwatch=0x7ff0004862c0,0). Commits: f5621fc9 (canary), 281c3a8d (EEVDF
+re-land), bd380130 (pid_hash IRQ-atomic), docs. Gates: x86_64 build rc=0;
+riscv64 build rc=0 + make test ALL TESTS PASSED on BOTH 281c3a8d
+(run/test-rv-64-eevdf.log) and bd380130 (run/test-rv-64b.log); aarch64
+build rc=0 (run/build-a64-64.log).
+
+#### 1. THE SEED — found in source before the boot, proven by the canary
+
+The 63rd's avg_vruntime() stored ABSOLUTE vruntime*weight sums and still
+added min_vruntime in the read: V = min_vr + Σ(vr·w)/Σw = min_vr + the
+true average. Linux 6.6 (fair.c:706-739) derives the correct form
+explicitly — "since v_i is u64 and the multiplication could easily
+overflow, transform it into a relative form": store OFFSETS (vr −
+min_vr)·w and rebase (Σ -= Δ·load) on every min_vruntime advance
+(__update_min_vruntime → avg_vruntime_update). The 63rd's form made every
+placement land one average AHEAD of the pack; placed values fed back into
+the sum; V grew ~2x per wake generation (min_vr drains to the placed
+level each generation), crossed 2^64, and the i128→u64 cast truncated to
+frozen garbage (ohw36: init vr=0xfd7911c0055a43db, wall 0xf5e2-class,
+init unpicked from t=53s — all reproduced below).
+
+INSTRUMENT-FIRST PROOF (the mission's own recipe): the VRTRIP canary
+(f5621fc9 — per-visit |vr − min_vr| ≤ 1e15ns check at ENQ/DEQ/PK1/PKC,
+first 8 trips print task+ring, armed on fuxstuck|schedtrace) was booted
+on a variant build carrying EXACTLY the 63rd formula
+(run/bzImage-eevdf63-formula): first trip t=2.010s, site=ENQ (the
+placement write itself), kfbflush vr−min_vr = +1.52e18ns, censusd
++3.04e18, init +6.08e18 — the EXACT ×2-per-generation signature — and
+122,119 trips by boot end (min_vr itself ended 0xffffffffffffffff).
+The re-landed fixed tree: 0 VRTRIPs in EVERY boot since (ohw41-48,
+full 540s each).
+
+#### 2. THE RE-LAND (281c3a8d) — 6.6 parity points
+
+- avg_vruntime_sum: i128 RELATIVE offsets, O(1) at timeline_insert/
+  remove (which now carry the task for the weight), rebased in
+  update_min_vruntime. Leak-bounded: any unpaired insert/remove or
+  renice residue is one clamp window of offset, never boot magnitude
+  (the absolute form's fatal property).
+- avg_vruntime(): V = min_vr + (Σ + curr_term)/(load + curr_w); the
+  single global curr slot is the documented GRQ divergence (reference
+  is per-rq; see the fair.rs comment).
+- vlag capture at sleep: linked sleepers inside dequeue() (6.6
+  update_entity_lag BEFORE __dequeue_entity), picked-unlinked sleepers
+  via capture_sleep_vlag() from __schedule (6.6 dequeue_entity-on-curr
+  parity). Limit = max(2·gran, 1 tick) converted to the entity's
+  virtual units (calc_delta_fair parity).
+- place arms: INITIAL (first link, fork — SchedEntity::new/Clone reset
+  vlag=0/ever_enqueued=false, __sched_fork parity) at V; WAKE (state
+  != RUNNING at enqueue — the wake path sets state after insert) at
+  V − vlag·(load+w)/load (PLACE_LAG); preempted-requeue/migrate keep vr
+  (put_prev_entity parity). This 6.6 has NO START_DEBIT — INITIAL
+  places at V, not V+vslice.
+- pick_next_cpu refuse path: dropped the duplicate raw map remove that
+  preceded timeline_remove (one map op per stash cycle now).
+
+#### 3. THE VERIFICATION (the mission's item 1)
+
+- CORRUPTION: 0 VRTRIPs across all 8 fixed-tree boots (vs 122k on the
+  63rd-formula boot, first at t=2.0s).
+- THE 400ms OUTLITER CLASS / STRAND DEBT: the structural target. The
+  63rd's strand victims sat vr−min_vr = +1.19s (ohw30) to +1.76s
+  (ohw33/34); ohw43's strand census (149 lines, censusd/power_host/
+  mmi_service/OS_DfxWatchdog family, age 15s) shows victims at
+  +0.001s..+0.013s — the wake-placement clamp bounds the debt to the
+  window, and the 100-4600s strand arithmetic of §61.1/§63.2 is
+  structurally dead. The remaining pre-wedge FFRTWAIT maxima
+  (wm449-473ms in ohw41/42 during the first-boot /data population
+  storm; wm1257ms once in ohw43) are entries-ahead×slice queueing
+  under 2-CPU saturation — the victims sit AT the pack average when
+  they wait (proportional-fair queueing, reference-parity order), not
+  seconds ahead on frozen credit. ohw34's wm400582 was the same
+  saturation class misattributed to debt.
+- davg (per-burst FFRT link→pick average): 0.3-5.3ms pre-wedge (the
+  63rd's 0.04-1.1ms class, up ~2-4x) — the expected cost of parity:
+  a frequent waker now waits its turn like every other entity instead
+  of keeping accumulated credit. This is EEVDF semantics, not a bug.
+
+#### 4. THE SECOND FIX (bd380130) — pid-hash bucket locks are now IRQ-atomic
+
+ohw40 (first fixed-tree boot) HARD-FROZE at t=40s: both vCPUs 100%,
+serial silent. QEMU monitor decode (RIP+stack, both CPUs):
+pid_hash::lock_bucket spinning from binder::sleep_snapshot's
+for_each_task, BUCKET_LOCK[27]=1 held by a walker that no longer
+executes. This is the EXACT sc207 class (the comment block inside
+sleep_snapshot documents it): a task-context census walker holds a
+bucket, a timer IRQ lands, the IRQ-exit softirq runs ANOTHER
+for_each_task that spins on that very bucket with the releaser
+preempted behind it — self-deadlock. sc207's mitigation (defer prints
+out of the callback) narrowed but never closed the window (the
+callback still formats/allocates; insert/remove can be interrupted
+mid-section identically). Fix: lock_bucket() takes the bucket with
+save_and_disable_irq and returns the flag; unlock_bucket() restores;
+try_lock_bucket() -> Option<flags>. All six call sites updated. A
+holder can no longer be interrupted out of its section, so every
+spinner waits a bounded callback duration instead of forever. No
+freeze in any boot since (ohw41-48).
+
+#### 5. THE TALLY (8 boots, same rig as the 62nd/63rd)
+
+VRTRIP count: 0 in all eight. Freeze (pid_hash class): 0 in all eight. SEVEN of eight wedged in the M2 class
+(FUX-RUN samgr zero-runnable; OWNER-LATCH freeze lines present; wedge
+onset t=38/39/69/38/39/38/39). ohw45's first FUX-RUN shows samgr itself
+briefly runnable (16 futex waiters) before freezing — same shape. The
+eighth (ohw48) is the known EARLY-STALL class, not the wedge: init's
+last ServiceStart at t=2.25, fdreapd (307) blocked UNINTERRUPTIBLE in
+early IO from ~t=60 (khungtaskd at 241s: state=0x2 pk=1 onrq=0 — parked
+in IO, not scheduler-stranded), init waiting on the service ladder; the
+same 1-in-6/8 class as ohw7 (60th) and ohw76/77 (58th). The hres-futex + EEVDF combination did NOT flip the
+interleaving: the wedge rate stays 8/8 where the 62nd measured 3/4 and
+the 63rd 0/6; the honest §5 conclusion stands — the wedge is
+interleaving luck at the current latency profile, and neither timing
+lever so far (ns-exact timed waits, bounded wake placement) moves it.
+The 62nd's 1/4 (ohw28) remains the campaign best.
+
+#### 6. FOR THE 65TH
+
+1. The M2 wedge is now the ONLY blocker before the launcher gate, and
+   both kernel timing levers the 62nd/63rd named are spent. The next
+   lever class is the wedge's own anatomy: §62.5's "which interleaving
+   builds the FFRT graph" — compare OUR txn delivery order in the
+   pre-wedge window (SAREG code6/3 + SLRD + TXN-HANG timelines, all
+   in-tree) against the reference's on refu9 IN THE SAME WINDOW (the
+   reference resolves the same code in ms — the reference has no
+   instruments, but its hilog/serial stream timestamps the same
+   service ladder; align by service-spawn order and diff the
+   subscription/publish interleavings of SA 180/3101/5003).
+2. The 1.26s pre-wedge pick wait (ohw43 tid937, population phase) is
+   worth one look with the canary tree if it recurs — with the debt
+   bounded it must be pure queueing; wm > ~2·nr_running·slice would
+   indicate a pick-path anomaly instead.
+3. Housekeeping: run/eevdf-wake-placement-attempt.patch is superseded
+   by 281c3a8d (keep the file — it carries the ohw36 failure data);
+   run/bzImage-eevdf63-formula is the canary-proof build (gitignored).
+
+Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
+ServiceStart starting:launcher, launcher spawns, PIXELS (shot
+immediately; 91a2d054 = old-alive reference).
