@@ -1247,6 +1247,17 @@ pub struct Task {
     /// Pending signals (pending)
     pub pending: SigPending,
 
+    /// Deferred-release marker (69th, the 105-family root cause): set
+    /// on a reaped GROUP LEADER whose release_task could not drain its
+    /// dead_threads list within the bounded wait — a mid-exit member
+    /// stuck in the fdreap grace / a scheduler strand would otherwise
+    /// hot-spin the REAPER (init) inside wait4 forever, killing the
+    /// param service (every later ohos.ctl.start returns 105). The
+    /// reaper completes the reap SEMANTICS and returns; the storage
+    /// free is finished by the LAST dying member's
+    /// sweep_dead_threads. False on every normal task.
+    pub release_deferred: core::sync::atomic::AtomicBool,
+
     /// Signal mask (blocked)
     ///
     /// Used for sigprocmask syscall
@@ -1818,6 +1829,7 @@ impl Task {
             fdtable,
             signal,
             pending,
+            release_deferred: core::sync::atomic::AtomicBool::new(false),
             sigmask: 0,  // Initial signal mask is empty
             personality: 0, // PER_LINUX
             sigstack,
@@ -2223,6 +2235,11 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
             SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, release_deferred))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,
@@ -2946,6 +2963,11 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, pending)) as *mut SigPending,
             SigPending::new(),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, release_deferred))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, sigmask)) as *mut u64,

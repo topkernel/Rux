@@ -438,11 +438,64 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         // WAKE-STRANDED family). Safe point: no locks held here.
         crate::sched::cond_resched();
     }
+    // 69th (105-family fix) — deferred-release finisher. When this
+    // group's leader was reaped while a member (possibly the caller
+    // itself) was still mid-exit, release_task marked it
+    // release_deferred and returned without freeing its storage. The
+    // LAST dying member finishes that free here, in its own context:
+    // once the parked list holds only the caller, nobody else can ever
+    // touch the leader again (the caller itself does not touch it after
+    // its terminal schedule). The lock- guarded len==1 check makes the
+    // "last" decision exactly-once even with concurrent exiters.
+    if unsafe {
+        (*leader)
+            .release_deferred
+            .load(core::sync::atomic::Ordering::Acquire)
+    } {
+        if let Some(cur) = crate::sched::current() {
+            let cur = cur as *mut Task;
+            // SAFETY: leader is a valid task (its storage free is
+            // exactly what this finisher arbitrates); cur is the
+            // running task.
+            let last = unsafe {
+                let mut dl = (*leader).dead_threads.lock();
+                let last = dl.len() == 1 && dl[0] == cur;
+                if last {
+                    dl.clear();
+                }
+                last
+            };
+            if last {
+                static FINISH_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FINISH_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 64 {
+                    crate::pr_warn!(
+                        "RELEASE-FINISH #{} leader={} freed by last member {}",
+                        n,
+                        unsafe { (*leader).pid() },
+                        unsafe { (*cur).pid() }
+                    );
+                }
+                // SAFETY: the leader is dead, tree/pid-hash detached,
+                // its dead_threads list empty, and no other member can
+                // reach it (the caller was the last and is about to
+                // leave it forever).
+                unsafe { release_task_storage(leader) };
+            }
+        }
+    }
 }
 
 // ============================================================================
 // Reaping
 // ============================================================================
+
+/// Budget for release_task's dead-members drain (69th, the 105-family
+/// fix): 300 jiffies (3 s at HZ=100), the same margin free_dead_member's
+/// R86 bounded on_cpu wait uses. Past the budget the storage free is
+/// deferred to the last dying member instead of blocking the reaper.
+const RELEASE_DRAIN_JIFFIES: u64 = 300;
 
 /// Release task resources when being reaped by parent
 ///
@@ -469,42 +522,105 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     // leader's ZOMBIE flow (wait_for_thread_group_death) normally
     // guarantees every member is DEAD by now, but apply the same exact
     // partition as sweep_dead_threads anyway: only genuinely DEAD members
-    // are freed; live stragglers are parked back on the list and retried
-    // (they are runnable and reach DEAD through their own do_exit —
-    // free_dead_member then waits out the final on_cpu window).
+    // are freed; live stragglers stay parked on the list and are retried.
+    //
+    // 69th (the 105-family root cause, ohw79/ohw80): this drain used to
+    // be an UNBOUNDED hot spin. A member whose exit tail wedges (fdreap
+    // grace stall, scheduler strand) never reaches DEAD, and the reaping
+    // parent — init itself, inside its SIGCHLD handler's
+    // `while (waitpid(-1, &st, WNOHANG) > 0);` loop — hot-spun here
+    // forever at 100% CPU: the LoopEvent died, every later
+    // ohos.ctl.start SET timed out with PARAM_CODE_TIMEOUT (105), and
+    // the whole on-demand ladder stalled. Reference release_task NEVER
+    // waits on another thread's exit context. The drain is now a
+    // BOUNDED SLEEPING wait (3 s, the R86 free_dead_member budget): if
+    // members remain, the reap completes its SEMANTICS (pid removal,
+    // reparenting, PID free), the storage free is DEFERRED to the last
+    // dying member's sweep_dead_threads (see the finisher there), and
+    // the reaper RETURNS. A wedged member then leaks its group (loudly
+    // printed) instead of wedging pid 1.
+    let deadline = crate::drivers::timer::get_jiffies() + RELEASE_DRAIN_JIFFIES;
+    let mut deferred = false;
     loop {
-        let (reclaim, stragglers) = {
-            let mut guard = (*task).dead_threads.lock();
-            let members = core::mem::replace(&mut *guard, alloc::vec::Vec::new());
-            drop(guard);
-            let mut reclaim = alloc::vec::Vec::new();
-            let mut stragglers = alloc::vec::Vec::new();
-            for m in members {
-                // SAFETY: m is a parked member pointer owned by this list.
-                if (*m).state().is_dead() {
-                    reclaim.push(m);
-                } else {
-                    stragglers.push(m);
+        // One try_lock'd pass: free the DEAD members in place, leaving
+        // stragglers parked. try_lock (not lock) so a WEDGED
+        // dead_threads lock (the ohw80 DEADLOCK variant) cannot park
+        // the reaper inside the acquisition itself.
+        let drained = match (*task).dead_threads.try_lock() {
+            Some(mut dl) => {
+                let mut reclaim: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+                dl.retain(|m| {
+                    // SAFETY: m is a parked member pointer owned by this list.
+                    unsafe {
+                        if (**m).state().is_dead() {
+                            reclaim.push(*m);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                });
+                let empty = dl.is_empty();
+                drop(dl);
+                for m in reclaim {
+                    // SAFETY: m was parked DEAD; the list no longer
+                    // references it.
+                    free_dead_member(m);
                 }
+                empty
             }
-            (reclaim, stragglers)
+            None => {
+                // Lock contention (a member's park/sweep holds it):
+                // fall through to the yield/deadline check below.
+                false
+            }
         };
-        for m in reclaim {
-            free_dead_member(m);
-        }
-        if stragglers.is_empty() {
+        if drained {
             break;
         }
-        // Park stragglers back and let them run — mid-exit members are
-        // runnable (RUNNING) and will reach DEAD on their own CPU.
-        let mut guard = (*task).dead_threads.lock();
-        for m in stragglers {
-            guard.push(m);
+        if crate::drivers::timer::get_jiffies() >= deadline {
+            // Budget spent: DEFER the storage free. The members stay
+            // parked on this task's dead_threads list; the finisher is
+            // the last dying member's sweep (and if a member never
+            // dies, the group leaks — printed — but the reaper lives).
+            deferred = true;
+            (*task).release_deferred.store(true, core::sync::atomic::Ordering::Release);
+            {
+                static DEFER_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DEFER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 64 {
+                    let mut line: alloc::string::String = alloc::format!(
+                        "RELEASE-DEFER #{} leader={} reaper_pid={} parked:",
+                        n,
+                        (*task).pid(),
+                        crate::process::current_pid()
+                    );
+                    // SAFETY: read-only diagnostics of parked member tasks.
+                    if let Some(dl) = (*task).dead_threads.try_lock() {
+                        for m in dl.iter().take(6) {
+                            // SAFETY: read-only diagnostic field reads.
+                            unsafe {
+                                line.push_str(&alloc::format!(
+                                    " [{}:{} st={:#x} on_cpu={}]",
+                                    (**m).pid(),
+                                    (**m).tgid(),
+                                    (**m).state().bits(),
+                                    (**m).on_cpu() as u8
+                                ));
+                            }
+                        }
+                    }
+                    crate::pr_warn!("{}", line);
+                }
+            }
+            break;
         }
-        drop(guard);
-        // Yield so the stragglers can progress (IRQs are on throughout).
+        // Sleeping yield (wait_for_thread_group_death's pattern), NOT a
+        // hot spin: the stragglers need CPU to finish dying, and the
+        // reaper's CPU must stay available to the rest of the system.
         crate::arch::cpu::restore_irq(true);
-        core::hint::spin_loop();
+        crate::sched::schedule();
     }
 
     // ===== RUSAGE_CHILDREN fold at reap (reference wait_task_zombie) =====
@@ -533,13 +649,6 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
 
     // Remove from PID hash table before freeing resources
     crate::process::pid_hash::pid_hash_remove((*task).pid());
-
-    // Wait for any RCU readers that may still be traversing this task's
-    // pid_hash_links node to finish before we free the task memory.
-    // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
-    // and microseconds long; an unbounded wait here parked init's reaping
-    // behind monopolist windows. 1.5 s is ~1000x any real reader.
-    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "release-task");
 
     // Detach from parent's children list (must happen before freeing task memory)
     // E8-REPAR: screen the parent pointer first — do_wait claimed the
@@ -610,6 +719,39 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         }
     }
 
+    // Free PID — belongs to the reap SEMANTICS (the number returns to
+    // the pool even when the storage free is deferred).
+    crate::process::pid::free_pid((*task).pid());
+
+    if deferred {
+        // 69th: the storage free (RCU grace + stack/Arc/Task free) is
+        // finished by the LAST dying member's sweep_dead_threads; if a
+        // member never dies the group leaks (named in RELEASE-DEFER)
+        // but the reaper — init and its param service — lives.
+        return;
+    }
+    release_task_storage(task);
+}
+
+/// The storage half of release_task: everything that actually returns
+/// memory (RCU grace for pid_hash readers, on_cpu wait, kernel stack,
+/// fork PtRegs, Arc references, Task slot). Runs in the reaper's
+/// context on the normal path, and in the LAST dying member's context
+/// for a deferred-release leader (see sweep_dead_threads's finisher).
+///
+/// # Safety
+/// Caller must ensure `task` is a dead/zombie task no longer reachable
+/// through the pid hash or the process tree, that no other task still
+/// references it (the deferred path's dead_threads list must be empty),
+/// and that no CPU is running it.
+unsafe fn release_task_storage(task: *mut Task) {
+    // Wait for any RCU readers that may still be traversing this task's
+    // pid_hash_links node to finish before we free the task memory.
+    // BOUNDED (lb125 decode): pid_hash read sections are preempt-disable
+    // and microseconds long; an unbounded wait here parked init's reaping
+    // behind monopolist windows. 1.5 s is ~1000x any real reader.
+    crate::sync::rcu::synchronize_rcu_bounded_sleepy(1500, "release-task");
+
     // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
     // so a reaping parent could scan the early ZOMBIE and free this task's
     // kernel stack and Task while it is STILL EXECUTING its exit tail on
@@ -647,9 +789,6 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
     (*task).set_fdtable(None);
     (*task).signal = None;
     (*task).set_fs(None);
-
-    // Free PID
-    crate::process::pid::free_pid((*task).pid());
 
     // Free Task struct back to kernel heap — via task_put (R12-5): any
     // outstanding lookup pins delay the actual free to their own put.
@@ -2125,6 +2264,28 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
 
         let caller_pgid = (*current).pgid();
 
+        // W4SPIN entry heartbeat (69th): if a single wait4 call hangs
+        // inside the group-child walk (tree-lock spin / corrupt list),
+        // the reap-side print below never fires while pid 1 burns CPU
+        // in this syscall — this heartbeat separates "stuck in the
+        // walk" (heartbeat silent) from "reaping an endless stream"
+        // (heartbeat + reap prints every second).
+        if current_pid == 1
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
+        {
+            use core::sync::atomic::{AtomicU64, Ordering as O2};
+            static LAST_EJ: AtomicU64 = AtomicU64::new(0);
+            let j = crate::drivers::timer::get_jiffies() as u64;
+            let last = LAST_EJ.load(O2::Relaxed);
+            if j.saturating_sub(last) >= 100
+                && LAST_EJ
+                    .compare_exchange(last, j, O2::AcqRel, O2::Relaxed)
+                    .is_ok()
+            {
+                crate::pr_warn!("W4SPIN entry pid=1 wait_pid={} opts={:#x}", pid, options);
+            }
+        }
+
         let mut found_child = false;
         let mut zombie_ptr: Option<*mut Task> = None;
         let mut stopped_ptr: Option<*mut Task> = None;
@@ -2168,6 +2329,54 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
         if let Some(child_ptr) = zombie_ptr {
             let child = &*child_ptr;
             let child_pid = child.pid();
+            // W4SPIN (69th, dfx=pid1spin): init's SIGCHLD handler loops
+            // `while (waitpid(-1, &st, WNOHANG) > 0);` — a positive return
+            // stream that never ends wedges pid 1 at 100% CPU and kills
+            // the param service (the 105-family root). Once per second,
+            // name the reaped child AND dump init's remaining children
+            // census: the same pid repeating (claim/release bug) vs an
+            // endless zombie stream (exit-path bug) is a one-look call.
+            if current_pid == 1
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Pid1Spin)
+            {
+                use core::sync::atomic::{AtomicU64, Ordering as O2};
+                static LAST_J: AtomicU64 = AtomicU64::new(0);
+                static CALLS: AtomicU64 = AtomicU64::new(0);
+                let calls = CALLS.fetch_add(1, O2::Relaxed);
+                let j = crate::drivers::timer::get_jiffies() as u64;
+                let last = LAST_J.load(O2::Relaxed);
+                if j.saturating_sub(last) >= 100
+                    && LAST_J
+                        .compare_exchange(last, j, O2::AcqRel, O2::Relaxed)
+                        .is_ok()
+                {
+                    let mut line: alloc::string::String = alloc::format!(
+                        "W4SPIN reaped pid={} tgid={} calls={} children:",
+                        child_pid,
+                        child.tgid(),
+                        calls
+                    );
+                    // SAFETY: read-only census walk of the caller's own
+                    // group children under the tree lock (the walk in
+                    // this function just ran under the same lock).
+                    unsafe {
+                        (*current).for_each_group_child(|cp| {
+                            let c = &*cp;
+                            let st = c.state().bits();
+                            if line.len() < 700 {
+                                line.push_str(&alloc::format!(
+                                    " [{}:{}:{:#x}{}]",
+                                    c.pid(),
+                                    c.tgid(),
+                                    st,
+                                    if c.pid() == c.tgid() { "" } else { "!thr" }
+                                ));
+                            }
+                        });
+                    }
+                    crate::pr_warn!("{}", line);
+                }
+            }
             let raw_exit = child.exit_code();
 
             let status: i32 = if raw_exit >= 0 {
