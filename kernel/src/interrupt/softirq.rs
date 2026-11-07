@@ -340,8 +340,14 @@ pub fn __do_softirq() -> bool {
     }
 
     // Session-6 discriminator exit side (see entry comment): print when
-    // the task switched inside the processing window. Direct console —
-    // this can print from deep inside the irq-exit/ksoftirqd paths.
+    // The entry/exit task-switch migration is the PARK FACE root cause
+    // (2026-11-07, the GNOME check-accelerated spin): the add went to
+    // the ENTRY task's preempt_count; after a mid-window context switch
+    // the sub above hits the EXIT task — the entry task strands
+    // +SOFTIRQ_OFFSET forever (unpreemptable: the tick cannot preempt a
+    // task with a nonzero preempt count, the app's main loop holds the
+    // CPU at 100% — the desktop session freezes at check-accelerated).
+    // Repair on mismatch: move the offset back where it was booked.
     let tp_exit = crate::arch::cpu::get_thread_id() as usize;
     if tp_entry != tp_exit {
         let a = tp_entry as *mut crate::process::task::Task;
@@ -349,10 +355,16 @@ pub fn __do_softirq() -> bool {
         let (pa, pb) = unsafe {
             ((*a).preempt_count(), (*b).preempt_count())
         };
+        // The sub above already hit the EXIT task (b). Undo it there,
+        // re-apply to the ENTRY task (a) — the side the add went on.
+        unsafe {
+            (*b).sub_preempt_count(crate::interrupt::preempt::SOFTIRQ_OFFSET);
+            (*a).sub_preempt_count(crate::interrupt::preempt::SOFTIRQ_OFFSET);
+        }
         use core::fmt::Write;
         let mut w = crate::debug::backtrace::ConsoleWriter::new();
         let _ = write!(w,
-            "SOFTIRQ-BRACKET-LEAK cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
+            "SOFTIRQ-BRACKET-LEAK-FIXED cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
             cpu, tp_entry,
             unsafe { (*a).pid() }, pa,
             tp_exit, unsafe { (*b).pid() }, pb,
