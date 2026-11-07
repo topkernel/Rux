@@ -6904,3 +6904,121 @@ thread (binder looper vs FFRT worker split — if our FFRT worker
 picked up the handler task that the reference would run on the
 looper thread directly, the graph shape differs — CHECK
 OH ipc_single's FFRT dispatcher policy vs our thread scheduling).
+
+### 62. 62ND SESSION (2026-11-07) — L3's HOST named by the owner-of-record
+### latch: the M2 holder is the FFRT serial-queue Loop thread executing
+### FindSystemAbilityNotify; the wake-repark loop is measured; FIFO waiter
+### chains landed (plist parity); binder delivery exonerated on all three
+### mechanisms; ohw28 PASSED appfwk.ready for the first time in ~20 boots
+
+Boots this session: ohw27-ohw30 (4 KVM boots, system-lb5 + userdata-fresh2,
+LOGLEVEL7; dfx=fuxstuck,txnhunt,sleepsnap, fuxwatch=0x7ff0004862c0,0).
+Commit: dca7f7a7 (oh-crash). Gates: x86_64 build rc=0, riscv64 build rc=0
++ make test ALL TESTS PASSED (run/test-rv-62a.log), aarch64 build rc=0.
+
+#### 1. THE OWNER-OF-RECORD LATCH (the opening move, landed first try)
+
+fuxwatch_log_write now latches FUXWATCH_OWNER_TID/J on every successful
+0->1 acquire write of the watched lock's l word — after a freeze only
+old=2 pile-ins remain, so the latch ends up naming the freeze's last
+acquirer. The TXN-HANG-BWR audit force-prints that thread's row (the
+census filters hid the tid344 class for 20 boots: its park is an
+own-stack cv word, no chain hit, and the BWR rows were there ALL
+ALONG — ohw13 had 265 of them). The row carries: the park word's wake
+history (ring ops targeting the word), the live waiter-pool state
+(age/woken/others), a deep rbp-chain+spill walk, and the word's own
+mutex-shape test.
+
+#### 2. WHAT THE ROW SAYS (three boots agree: ohw27 tid364, ohw29/30
+#### tid344)
+
+- The holder thread is UNNAMED ("?") — not OS_IPC, not OS_FFRT_*: it
+  is the FFRT serial queue's own Loop worker (eu/loop.cpp Loop::Run →
+  PickUpTask → task->Execute; created via std::thread, never
+  prctl-named).
+- It executes a code=3 PUBLISH / code=6 SUBSCRIBE SYNC-IN handler
+  whose samgr path is FindSystemAbilityNotify /
+  CheckListenerNotify — BOTH take listenerMapLock_ (M2) as a
+  lock_guard and BOTH make calls INSIDE the scope (Find: the SYNC
+  out-call listener->OnAddSystemAbility; Check: PostTask).
+- Its binder todo holds exactly head=[txn-complete] — the completion
+  of its own nested BC_TRANSACTION, ALREADY delivered, UNREAD (the
+  thread is in a futex cv park, not a binder read).
+- Its park word (own-stack musl cv node, the A+0x800xxx class — NOT a
+  mutex l word, FUX-OWNER-SHAPE[cv-word]) receives repeated
+  FUTEX_WAKE ret=1 from tids 343/366/367 (the FFRT group) and the
+  park AGE RESETS every ~2s: it WAKES, re-attempts the inner
+  ffrt::mutex, finds l==2 again, re-parks. Live wake-repark, not
+  lost wakes. others=0 (sole waiter on its word).
+
+#### 3. THE FIFO WAKE-ORDER FIX (landed, parity, not the cycle breaker)
+
+Our waiter chains were head-insert (LIFO); Linux's plist is FIFO for
+equal priorities, so the OLDEST waiter receives every burst's first
+wake. Now FutexChain{head,tail} with O(1) tail append; all five
+unlink paths maintain the tail (wake, self-unqueue, exit cleanup,
+wake_op, requeue splice — which also got simpler). ohw29/ohw30 wedge
+identically: the re-park race is USERSPACE (ffrt::mutex barging:
+unlock wakes, but any RUNNING thread cmpxchg's l before the woken
+waiter re-checks), not the futex layer. Keep the fix — it is
+reference parity and removes a real starvation class.
+
+#### 4. BINDER DELIVERY EXONERATED — all three §62.5 mechanisms at
+#### parity with 6.6 binder.c (READ, verified in-tree + reference)
+
+- No looper gate: binder_available_for_proc_work_ilocked (6.6:606)
+  is !transaction_stack && todo empty — the 26th's removal matches.
+- BWR read coalescing: our drain loop stages commands until the
+  buffer fills (same contract as binder_thread_read's while(1)).
+- Nested-call targeting: our 'origin-thread' route implements the
+  from_parent walk (6.6:3145-3175) — a sync call from a thread
+  serving proc P's txn is delivered to the exact blocked origin
+  thread of P.
+So the reference executes the SAME deliveries; it resolves the same
+code in ms because the interleaving differs — the FFRT graph the
+PostTask builds at reference speed never closes the reentrancy, ours
+does. samgr itself marshals NOTHING onto FFRT (main.cpp:
+IPCSkeleton::JoinWorkThread — loopers are plain pthreads); the holder
+gets its txn in the queue-loop thread's own read window (post-oneway
+/ post-reply read-only BWR with empty stack = a fully eligible
+proc-work reader on BOTH kernels).
+
+#### 5. FIRST appfwk.ready PASS (ohw28, pre-FIFO tree)
+
+ohw28 passed bootevent.appfwk.ready (t=50.2) AND boot.completed —
+the first pass in ~20 boots — then wedged at the LAUNCHER gate with a
+DIFFERENT shape: accountmgr tid957 code12 SYNC-OUT to samgr MAIN
+(330.330) parked in its BWR read; samgr main sat in BC_FREE_BUFFER
+park with todo=0. The ohw28 class is the 58th's bootevent-gate
+friend, not the M2 wedge. ohw29/30 (FIFO tree) came back to the M2
+wedge — pass/fail is interleaving luck at the current latency, which
+the FIFO fix's effect on the tally will measure over more boots.
+
+#### 6. FOR THE 63RD — the two remaining kernel-side levers
+
+The cycle bottom is now fully userspace-mapped: a serial-queue task
+holds M2 and CoWaits on FFRT-graph edges whose producers queue behind
+M2. Kernel levers that decide whether the graph closes:
+1. THE STRAND WALL (the producer freezer): ohw30 STRAND-WALL again
+   shows khungtaskd/censusd frozen-vr entries amid lockstep-vr churn
+   (|321p0 |514p0 |653p0, all vr lockstep, why=0/sk=0). The 61st's
+   OS_FFRT_Delay_S (tgid 314) exec=0 never-picked class is the delayed
+   wheel — if the wheel thread strands, every ffrt timed wait
+   (SerialQueue::Pull's cond_.wait_for(delay)) freezes and the queue
+   mutex churn that the M2 holder needs to progress stops. NEXT
+   INSTRUMENT: latch the Delay_S thread's pick history from boot
+   (RUNQ-STRAND is burst-sampled and missed it on ohw29/30) — a
+   persistent per-tid pick/wake ring on the wheel thread, plus the
+   wall entries' slot CPUs at the strand moment. If the wheel strands,
+   the pick-refusal input (why=1 on_cpu-mark transients, R56d heal
+   gap) is the ROOT FIX.
+2. ROUND-TRIP LATENCY: the wedge forms inside windows the reference
+   closes in ms. The 60th's SLRD proxy measured p90 2.9ms on ours —
+   but the wedge window is the PostTask→queue-exec edge, not the
+   binder edge. A syscost boot on the SAME image comparing
+   wake→pick deltas for the FFRT group against the baseline's
+   5.1-6.1µs GRQ class names whether our wake-to-run tail (not the
+   round-trip) widens the reentrancy window.
+Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
+ServiceStart starting:launcher, PIXELS (shot immediately — 91a2d054
+old-alive reference).
