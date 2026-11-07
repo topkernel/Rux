@@ -7189,3 +7189,30 @@ wm400582 producer wait; the strand wall's ±1-2s deficits).
 Boots this session final: ohw31-ohw34 (pre-EEVDF tree = HEAD),
 ohw35 (hres only, killed early for the EEVDF boot slot), ohw36 (EEVDF
 tree, broken, reverted), ohw37+ (HEAD tree, running).
+
+#### 8. SESSION CLOSE — final tally and state for the 64th
+
+ohw37/ohw38 (HEAD tree): both wedged pre-appfwk (the "appfwk.ready"
+greps in the serial hit init's "not set" WARNING lines — false
+positives; verified by reading the lines). FINAL session tally on the
+committed tree (futex-hres + instruments): 0/6 appfwk.ready (ohw31-34,
+37, 38; ohw35 killed early for the EEVDF slot, ohw36 was the reverted
+tree). The 62nd's 1/4 (ohw28) stands as the campaign best; the M2
+wedge remains interleaving luck at the current latency profile, and
+the hres fix's contribution needs the 64th's longer series (it is
+reference parity regardless of the tally).
+
+Landed this session (branch oh-crash @ 18ec0809, pushed):
+- 5619ad38 fix(futex): ns-exact hres timed waits (10ms grid + early
+  fires + the never-expiring CLOCK_REALTIME absolute epoch bug — the
+  ohw30 fto=31535994s class — all gone).
+- 55e7e767 dfx(sched): persistent per-task pick/wake ring, STRAND-WALL
+  v2 (sl/lp/w), STRAND-HIST, VITCHRON, FFRTWAIT.
+- 6e6cb0a7 + 18ec0809 docs.
+- run/eevdf-wake-placement-attempt.patch (gitignored, worktree-local):
+  the reverted EEVDF placement with the ohw36 failure data.
+Gates on HEAD: x86_64 build rc=0; riscv64 build rc=0 + make test ALL
+TESTS PASSED (run/test-rv-63a.log); aarch64 build rc=0. No stray
+QEMUs. The sharpest open kernel lever for the 64th is §7's re-land of
+the EEVDF wake placement with a placement-audit instrument first, then
+the appfwk tally series on whichever tree it yields.
