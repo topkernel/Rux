@@ -1166,6 +1166,21 @@ static DEFER_FOCUS_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
         dropped: 0,
     });
 
+// 71st: PRIORITY focus ring for the RWFRZ adoption dump (the frozen
+// word holder's return-address chain — the founder evidence). ohw90:
+// routing it through the shared focus class let the NBR-PARK mass
+// latch (~50 tgids x deep dumps) evict exactly the adoption dump's
+// lines (drop-oldest within one class — the ohw13 uvma trap again,
+// now self-inflicted). Its own ring, drained before everything.
+const DEFER_FOCUS_A_MAX: usize = DEFER_FOCUS_MAX;
+static DEFER_FOCUS_A_Q: crate::sync::spinlock::Spinlock<DeferredFocus> =
+    crate::sync::spinlock::Spinlock::new(DeferredFocus {
+        ring: [const { None }; DEFER_FOCUS_A_MAX],
+        head: 0,
+        tail: 0,
+        dropped: 0,
+    });
+
 /// Queue one census line for task-context emission. Producers may be
 /// softirq (timer heartbeat census). The line must already be under the
 /// printk record text cap (240 bytes) — the sleep_snapshot chunker
@@ -1185,7 +1200,31 @@ pub fn defer_emit_line(line: alloc::string::String) {
     // reconstructible from any boot; walk lines are not.
     let focus = line.starts_with("ufw:")
         || line.starts_with("uss:")
-        || line.starts_with("uhp:");
+        || line.starts_with("uhp:")
+        // 71st (70th item 2): the RWFRZ park-stack dump lines join the
+        // focus lane — direct pr_warn emission interleaved MID-RECORD
+        // with the other CPU's census flood (ohw85: "ret[55]=0x7ff000824"
+        // spliced into "parkstk+: tid 378"), eating the exact return-
+        // address chain the dump exists for. censusd is the single
+        // drainer; the focus ring drops only within its own class.
+        // "rwfza:" (adoption dump) rides the PRIORITY ring above.
+        || line.starts_with("rwfz:");
+    if let true = line.starts_with("rwfza:") {
+        let mut q = DEFER_FOCUS_A_Q.lock_irqsave();
+        let next = (q.tail + 1) % DEFER_FOCUS_A_MAX;
+        if next == q.head {
+            let h = q.head;
+            q.ring[h] = None;
+            q.head = (h + 1) % DEFER_FOCUS_A_MAX;
+            q.dropped += 1;
+        }
+        let t = q.tail;
+        q.ring[t] = Some(line);
+        q.tail = next;
+        drop(q);
+        ensure_defer_thread();
+        return;
+    }
     if focus {
         let mut q = DEFER_FOCUS_Q.lock_irqsave();
         let next = (q.tail + 1) % DEFER_FOCUS_MAX;
@@ -1284,8 +1323,38 @@ extern "C" fn defer_emit_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
             }
         }
-        // Drain everything queued first: focus lines (park-chain
-        // evidence) take priority over bulk census.
+        // Drain everything queued first: the ADOPTION ring (frozen-word
+        // founder evidence) beats the focus ring (park-chain evidence)
+        // which beats bulk census.
+        loop {
+            let line = {
+                let mut q = DEFER_FOCUS_A_Q.lock_irqsave();
+                if q.head == q.tail {
+                    if q.dropped > 0 {
+                        let d = q.dropped;
+                        q.dropped = 0;
+                        Some(alloc::format!(
+                            "censusd: {} A-focus lines dropped (queue full)",
+                            d
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    let h = q.head;
+                    let l = q.ring[h].take();
+                    q.head = (h + 1) % DEFER_FOCUS_A_MAX;
+                    l
+                }
+            };
+            match line {
+                Some(l) => crate::printk::printk_ln(
+                    crate::printk::loglevel::KERN_INFO,
+                    format_args!("{}", l),
+                ),
+                None => break,
+            }
+        }
         loop {
             let line = {
                 let mut q = DEFER_FOCUS_Q.lock_irqsave();

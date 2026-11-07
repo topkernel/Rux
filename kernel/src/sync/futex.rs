@@ -6400,7 +6400,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         }
                     }
                     // SAFETY: t is the current task, in its own syscall.
-                    unsafe { rwfz_stack_frames(t, "park", 12, 64) };
+                    unsafe { rwfz_stack_frames(t, "park", 12, 64, false) };
                 }
             }
         }
@@ -6565,7 +6565,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             crate::pr_warn!("{}", s);
                         }
                         // SAFETY: t is the current task, in its own syscall.
-                        unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                        unsafe { rwfz_stack_frames(t, "apppark", 12, 96, false) };
                         // sc139: the call-site-validated caller chain.
                         unsafe { apppark_rets(t) };
                         // sc136 (Session Q): the park chain's caller frame
@@ -7374,7 +7374,7 @@ pub fn kill_dump_tgid(tgid: u32) {
                 unsafe { kill_dump_wedge(tk, t, r.orig_rax, [r.rdi, r.rsi, r.rdx]) };
             }
         }
-        unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96) };
+        unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96, false) };
     }
     // sc244: release the pins taken at collection (may free the last
     // references of the concurrently-dying threads — schedulable
@@ -7894,6 +7894,48 @@ unsafe fn apppark_rets(task: *const Task) {
     crate::pr_warn!("{}", out);
 }
 
+/// 71st (70th item 2): RWFRZ dump emission goes through the taskdump
+/// focus ring ("rwfz:" class) instead of direct pr_warn. ohw85 showed
+/// the direct prints spliced MID-RECORD by the other CPU's census flood
+/// (a ret[55]= line cut at 12 hex chars, tail lines lost), so the
+/// second-lock caller chain of the frozen-word holder never reached the
+/// serial. censusd drains the focus ring single-threaded and first.
+/// Splits multi-line strings, chunks each line under the 240-byte
+/// printk record cap (cutting at the last space when one is near).
+/// `prio` routes to the "rwfza:" ring (drained before everything) —
+/// reserved for the ADOPTION dump: ohw90 showed the shared focus class
+/// gets flooded by the NBR-PARK mass latch, evicting the founder dump.
+fn rwfz_emit_prio(s: &str, prio: bool) {
+    const CAP: usize = 200;
+    let tag = if prio { "rwfza" } else { "rwfz" };
+    for line in s.split('\n') {
+        let mut rest = line;
+        let mut part = 0u32;
+        while !rest.is_empty() {
+            let take = core::cmp::min(CAP, rest.len());
+            let mut cut = take;
+            if cut < rest.len() {
+                // Prefer a whitespace boundary within the last 24 bytes.
+                if let Some(sp) = rest[..cut].rfind(' ').filter(|&i| i > cut.saturating_sub(24)) {
+                    cut = sp;
+                }
+            }
+            crate::dfx::taskdump::defer_emit_line(alloc::format!(
+                "{}:{} {}",
+                tag,
+                part,
+                &rest[..cut]
+            ));
+            rest = &rest[cut..];
+            part += 1;
+        }
+    }
+}
+
+fn rwfz_emit(s: &str) {
+    rwfz_emit_prio(s, false);
+}
+
 /// One user-stack frame line resolved to its covering VMA (Session F's
 /// byte-match symbolization method). sc90: `scan_slots` parametrizes the
 /// stack window (64 for per-task dumps; the recursion holder needs 256 —
@@ -7904,6 +7946,7 @@ unsafe fn rwfz_stack_frames(
     label: &str,
     max_frames: u64,
     scan_slots: u64,
+    prio: bool,
 ) {
     let tk = unsafe { &*task };
     // Stack-freed guard (same class as the KILLDUMP census skip above):
@@ -7970,7 +8013,7 @@ unsafe fn rwfz_stack_frames(
     // byte-identify the park-site lib offline (the mapping's fd is gone;
     // filesz prints 0 — offset+bytes are the surviving fingerprints).
     if let Some((s, e, fd, base, off, fsz)) = vma_of(rip) {
-        crate::pr_warn!(
+        rwfz_emit_prio(&alloc::format!(
             "RWFRZ:   {} rsp={:#x} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} baseoff={:#x} filesz={:#x} ripbytes={:#018x}",
             label,
             rsp,
@@ -7982,13 +8025,11 @@ unsafe fn rwfz_stack_frames(
             base,
             fsz as usize,
             read_u64_at(rip).unwrap_or(0)
-        );
+        ), prio);
     } else {
-        crate::pr_warn!(
-            "RWFRZ:   {} rsp={:#x} rip={:#x} (no vma)",
-            label,
-            rsp,
-            rip
+        rwfz_emit_prio(
+            &alloc::format!("RWFRZ:   {} rsp={:#x} rip={:#x} (no vma)", label, rsp, rip),
+            prio,
         );
     }
     // sc86: resolve fd -> file PATH for file-backed frames (offline
@@ -8065,7 +8106,7 @@ unsafe fn rwfz_stack_frames(
                 break;
             }
         }
-        crate::pr_warn!("{}", raw);
+        rwfz_emit_prio(&raw, prio);
     }
     // 70th (ohw84): RETS — call-byte-validated return-address scan over a
     // deep window (the apppark_rets method): a slot is a REAL frame only
@@ -8127,9 +8168,9 @@ unsafe fn rwfz_stack_frames(
         if found == 0 {
             let _ = write!(rets, " none");
         }
-        crate::pr_warn!("{}", rets);
+        rwfz_emit_prio(&rets, prio);
     }
-    crate::pr_warn!("RWFRZ:   {} frames:{}", label, s);
+    rwfz_emit_prio(&alloc::format!("RWFRZ:   {} frames:{}", label, s), prio);
 }
 
 /// Cluster of futex waiters on one (uaddr, mm): how many, which tgid and
@@ -8467,7 +8508,8 @@ pub fn freeze_scan(now: u64, hz: u64) {
             now.saturating_sub(RWFRZ_FIRST.load(core::sync::atomic::Ordering::Relaxed)) / hz
         );
         exit_ring_dump_tgid(tgid);
-        let n = rwfz_dump_tgid(tgid, 32);
+        // 71st: priority ring — this is THE founder-evidence dump.
+        let n = rwfz_dump_tgid(tgid, 32, true);
         crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, n);
         rwfz_neighbor_dump(tgid, uaddr);
         // sc82: the freeze correlates with OTHER processes showing the
@@ -8498,7 +8540,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
                     c.n
                 );
                 exit_ring_dump_tgid(c.tgid);
-                let en = rwfz_dump_tgid(c.tgid, 16);
+                let en = rwfz_dump_tgid(c.tgid, 16, false);
                 crate::pr_warn!("RWFRZ: EXTRA tgid {} enumerated {} tasks", c.tgid, en);
                 rwfz_neighbor_dump(c.tgid, c.uaddr);
                 extra += 1;
@@ -8654,15 +8696,15 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             // splices long multi-line dumps mid-line (sc89 lost the
             // holder's chain between frame[2] and frame[17]); two
             // passes rarely lose the same line twice.
-            unsafe { rwfz_stack_frames(t, "nbr", 24, 256) };
-            unsafe { rwfz_stack_frames(t, "nbr2", 24, 256) };
+            unsafe { rwfz_stack_frames(t, "nbr", 24, 256, false) };
+            unsafe { rwfz_stack_frames(t, "nbr2", 24, 256, false) };
         }
     });
 }
 
 /// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
 /// byte-verified user-stack frames per thread). Pure diagnostics.
-fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
+fn rwfz_dump_tgid(tgid: u32, max_tasks: usize, prio: bool) -> usize {
     let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
     crate::sched::for_each_task(|t| {
         // SAFETY: same contract as sleep_snapshot.
@@ -8698,17 +8740,20 @@ fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
         let name = core::str::from_utf8(&comm[..])
             .unwrap_or("")
             .trim_end_matches('\0');
-        crate::pr_warn!(
-            "RWFRZ: tid {} comm='{}' state={:#x} sys={:#x} rip={:#x} a0={:#x}",
-            tk.pid(),
-            name,
-            tk.state().bits(),
-            sys,
-            rip,
-            a0
+        rwfz_emit_prio(
+            &alloc::format!(
+                "RWFRZ: tid {} comm='{}' state={:#x} sys={:#x} rip={:#x} a0={:#x}",
+                tk.pid(),
+                name,
+                tk.state().bits(),
+                sys,
+                rip,
+                a0
+            ),
+            prio,
         );
         // SAFETY: t is a live Task from the pid-hash walk.
-        unsafe { rwfz_stack_frames(t, "task", 8, 64) };
+        unsafe { rwfz_stack_frames(t, "task", 8, 64, prio) };
     });
     count_cell.get()
 }
