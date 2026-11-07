@@ -116,7 +116,83 @@ impl GlobalRunQueue {
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        self.lock.lock();
+        // r12 wake/halt hunt: GRQ acquisition-stall probe (forkprof
+        // boots only — one relaxed armed-load when off). The queue
+        // freezes show both CPUs stuck at schedule() entry with a
+        // pickable candidate in the tree and the tick-path sampler hung
+        // before it could record: a long GRQ hold is the only shape
+        // that does all three. The report names the victim's call site
+        // (track_caller) and the wait; the holder's identity is
+        // inferable from a consistent victim pattern.
+        if crate::debug::forkprof::on() {
+            let t0 = crate::arch::cpu::read_counter();
+            let pre_owner = self.lock.owner_hint();
+            self.lock.lock();
+            let waited = crate::arch::cpu::read_counter().saturating_sub(t0);
+            // ~4 ms at the calibrated TSC rate (2.5 GHz class).
+            if waited > 10_000_000 {
+                static SR_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if SR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    let loc = core::panic::Location::caller();
+                    fn pnum(mut v: u64, out: &mut [u8; 24]) -> usize {
+                        if v == 0 {
+                            out[0] = b'0';
+                            return 1;
+                        }
+                        let mut k = 0;
+                        while v > 0 {
+                            out[k] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            k += 1;
+                        }
+                        out[..k].reverse();
+                        k
+                    }
+                    let mut buf: [u8; 192] = [0u8; 192];
+                    let mut n = 0usize;
+                    let head = b"GRQ-STALL cpu=";
+                    buf[..head.len()].copy_from_slice(head);
+                    n = head.len();
+                    let mut d = [0u8; 24];
+                    let l = pnum(crate::arch::cpu_id() as u64, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    const M1: &[u8] = b" waited-cyc=";
+                    buf[n..n + M1.len()].copy_from_slice(M1);
+                    n += M1.len();
+                    let l = pnum(waited, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    const M2: &[u8] = b" holder=";
+                    buf[n..n + M2.len()].copy_from_slice(M2);
+                    n += M2.len();
+                    // Hex, 16 digits.
+                    let hv = pre_owner;
+                    for sh in (0..16).rev() {
+                        let nib = ((hv >> (sh * 4)) & 0xF) as u8;
+                        buf[n] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+                        n += 1;
+                    }
+                    const M2B: &[u8] = b" caller=";
+                    buf[n..n + M2B.len()].copy_from_slice(M2B);
+                    n += M2B.len();
+                    let f = loc.file().as_bytes();
+                    let fl = f.len().min(96);
+                    buf[n..n + fl].copy_from_slice(&f[..fl]);
+                    n += fl;
+                    buf[n] = b':';
+                    n += 1;
+                    let l = pnum(loc.line() as u64, &mut d);
+                    buf[n..n + l].copy_from_slice(&d[..l]);
+                    n += l;
+                    buf[n] = b'\n';
+                    crate::console::puts_bytes_no_lock(&buf[..=n]);
+                }
+            }
+        } else {
+            self.lock.lock();
+        }
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
@@ -176,6 +252,12 @@ impl GlobalRunQueue {
     }
 
     // ---- idle CPU bitmap ----
+
+    /// Raw idle-mask read for debug snapshots (forkprof stall ring).
+    #[inline]
+    pub fn idle_mask_relaxed(&self) -> u32 {
+        self.idle_cpus.load(core::sync::atomic::Ordering::Acquire)
+    }
 
     /// Mark a CPU as idle.
     pub fn mark_idle(&self, cpu: usize) {
@@ -1436,6 +1518,63 @@ pub fn resched_cpu(cpu: usize) {
 /// racing wakes cannot both dispatch to the same CPU.
 pub fn claim_idle_cpu_for(affinity: u32) -> Option<usize> {
     grq().claim_idle_cpu(affinity)
+}
+
+/// Debug snapshot for the forkprof stall ring (r12 wake/halt hunt): the
+/// idle mask, GRQ load, and each CPU's idle-loop phase at the moment a
+/// multi-ms queue stall was rescued. Atomic reads only; called from the
+/// forkprof consume path after the stall threshold fires.
+pub fn debug_idle_snapshot() -> (u32, u64, u8, u8) {
+    let idle = grq().idle_mask_relaxed();
+    let nrun = grq().rq_load() as u64;
+    let ph = |c: usize| {
+        if c < MAX_CPUS {
+            WW_IDLE_PHASE[c].load(core::sync::atomic::Ordering::Acquire).min(255) as u8
+        } else {
+            255
+        }
+    };
+    (idle, nrun, ph(0), ph(1))
+}
+
+/// Debug GRQ sample for the forkprof tick sampler (r12 wake/halt hunt):
+/// reads the scheduler state UNDER the GRQ lock so the count-vs-tree
+/// relationship and the leftmost candidate's ownership bits are coherent.
+/// Returns (cfs_nr, grq_nr, leftmost_pid, leftmost_oncpu, leftmost_claim,
+/// leftmost_pick_state, leftmost_ti_cpu, idle_mask, ph0, ph1).
+/// Called from scheduler_tick only while forkprof is armed (250 Hz max,
+/// one short lock hold); zero cost otherwise.
+pub fn debug_grq_sample() -> (u64, usize, u64, u32, u32, i64, u32, i32, u32, u8, u8) {
+    let g = grq().lock_irqsave();
+    let cfs_nr = g.cfs_rq.nr_running();
+    let cfs_len = g.cfs_rq.timeline_len();
+    let grq_nr = g.rq_load() as u64;
+    let mut lpid = 0u32;
+    let mut loncpu = 0u32;
+    let mut lclaim: i64 = -1;
+    let mut lpk = 0u32;
+    let mut ltcpu: i32 = -1;
+    if cfs_nr > 0 {
+        if let Some((_, task)) = g.cfs_rq.peek_leftmost() {
+            if !task.is_null() {
+                // SAFETY: task is a linked timeline entry (GRQ held);
+                // field reads only.
+                unsafe {
+                    lpid = (*task).pid();
+                    loncpu = (*task).on_cpu() as u32;
+                    lclaim = (*task)
+                        .running_on_cpu
+                        .load(core::sync::atomic::Ordering::Acquire)
+                        as i64;
+                    lpk = (*task).pick_state();
+                    ltcpu = (*task).ti_cpu();
+                }
+            }
+        }
+    }
+    drop(g);
+    let (idle, _n, ph0, ph1) = debug_idle_snapshot();
+    (cfs_nr, cfs_len, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1)
 }
 
 /// Busy-CPU dispatch for a wake that found no idle CPU (perf-ipc): poke
@@ -5343,6 +5482,9 @@ pub fn dequeue_if_enqueued(task: &Task) {
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::debug::softlockup::touch(cpu_id);
+    // r12 wake/halt hunt: tick-path GRQ sampler (forkprof-armed boots
+    // only; one relaxed armed-check when off).
+    crate::debug::forkprof::tick_grq_sample();
     // Linux's schedstat sched_count: one scheduler invocation.
     crate::fs::procfs::schedstat::note_sched_run(cpu_id);
     // phantom-bits orphan scan: bits the interrupted task carried INTO

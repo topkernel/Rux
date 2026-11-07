@@ -123,6 +123,7 @@ pub fn consume_wake(pid: u32) {
             .is_ok()
     {
         add(P_CHILD_RUN, ct);
+        hist_account(0, now().saturating_sub(ct), pid);
         return;
     }
     let wt = WAKE_STAMPS[idx].load(Ordering::Relaxed);
@@ -134,6 +135,7 @@ pub fn consume_wake(pid: u32) {
         .is_ok()
     {
         add(P_WAKE_RUN, wt);
+        hist_account(1, now().saturating_sub(wt), pid);
     }
 }
 
@@ -163,11 +165,16 @@ struct TEv {
     tsc: AtomicU64,
     site: AtomicU8,
     pid: AtomicU32,
+    /// Recording CPU (arch::cpu_id() in the recorder's context). For
+    /// T_CTXSW_IN this is the CPU the task actually switched in on —
+    /// the placement fact the wake/halt-alignment hunt needs (r12).
+    cpu: AtomicU8,
 }
 const EV0: TEv = TEv {
     tsc: AtomicU64::new(0),
     site: AtomicU8::new(255),
     pid: AtomicU32::new(0),
+    cpu: AtomicU8::new(255),
 };
 static RING: [TEv; 4096] = [EV0; 4096];
 static RING_CUR: AtomicU64 = AtomicU64::new(0);
@@ -207,6 +214,7 @@ pub fn trace(site: u8, pid: u32) {
     RING[i].tsc.store(now(), Ordering::Relaxed);
     RING[i].site.store(site, Ordering::Relaxed);
     RING[i].pid.store(pid, Ordering::Relaxed);
+    RING[i].cpu.store(crate::arch::cpu_id() as u8, Ordering::Relaxed);
 }
 
 /// Dump the ring (forkprof=2 only): one line per event, delta from the
@@ -250,10 +258,15 @@ pub fn report_trace() {
         }
         let site = RING[i].site.load(Ordering::Relaxed);
         let pid = RING[i].pid.load(Ordering::Relaxed);
+        let cpu = RING[i].cpu.load(Ordering::Relaxed);
         let d = if prev == 0 { 0 } else { t.saturating_sub(prev) / per_us };
         prev = t;
         let nm = if (site as usize) < names.len() { names[site as usize] } else { "?" };
-        crate::println!("FTRACE {} pid={} dt={}us", nm, pid, d);
+        if cpu != 255 {
+            crate::println!("FTRACE {} pid={} cpu={} dt={}us", nm, pid, cpu, d);
+        } else {
+            crate::println!("FTRACE {} pid={} dt={}us", nm, pid, d);
+        }
     }
     crate::println!("FTRACE END");
 }
@@ -296,6 +309,17 @@ pub fn on() -> bool {
     }
 }
 
+/// Cheap "possibly armed" check for hot paths (the tick): one relaxed
+/// load once the word is resolved; the undetermined state falls back
+/// to on() which resolves it once.
+#[inline]
+pub fn maybe_armed() -> bool {
+    match ARMED.load(Ordering::Relaxed) {
+        0 => on(),
+        v => v == 2,
+    }
+}
+
 /// Cycle-counter read (raw TSC / cycle domain; the report converts).
 #[inline]
 pub fn now() -> u64 {
@@ -316,6 +340,278 @@ pub fn add(p: usize, t0: u64) {
 #[inline]
 pub fn bump(p: usize, n: u64) {
     STATS[p].cyc.fetch_add(n, Ordering::Relaxed);
+}
+
+// ---- wake-latency histograms + stall snapshots (r12 wake/halt hunt) ----
+//
+// The avg/max phase table hides the slow-mode signature: rare multi-ms
+// queue stalls (child_run max 64ms, wake_run max 10ms observed) that a
+// mean dilutes and a max mis-scales. Log2 cycle histograms expose the
+// tail mass; a stall snapshot (idle mask + per-cpu idle phase at rescue
+// time) tells whether the stall was a lost-dispatch shape (task in the
+// GRQ, both CPUs halted/idle-marked, IPI never sent) at the moment a
+// tick finally rescued it.
+
+const HIST_BUCKETS: usize = 24;
+static HIST_CHILD: [AtomicU64; HIST_BUCKETS] = [ZERO_U64; HIST_BUCKETS];
+static HIST_WAKE: [AtomicU64; HIST_BUCKETS] = [ZERO_U64; HIST_BUCKETS];
+
+/// Stall snapshot ring: filled when a consumed stamp exceeded the
+/// stall threshold; dumped in report().
+struct StallSnap {
+    delta_us: AtomicU64,
+    /// 0 = child_run (fork-enqueue -> switch-in), 1 = wake_run.
+    kind: AtomicU8,
+    pid: AtomicU32,
+    idle_mask: AtomicU32,
+    nr_running: AtomicU64,
+    /// Per-CPU WW_IDLE_PHASE at rescue (0..5; 4 = inside WFI).
+    phase0: AtomicU8,
+    phase1: AtomicU8,
+    /// Per-CPU last-tick interrupted RIP at rescue: the spin site of
+    /// whichever CPU was stuck (mid-benchmark reads only).
+    rip0: AtomicU64,
+    rip1: AtomicU64,
+}
+const SS0: StallSnap = StallSnap {
+    delta_us: AtomicU64::new(0),
+    kind: AtomicU8::new(255),
+    pid: AtomicU32::new(0),
+    idle_mask: AtomicU32::new(0),
+    nr_running: AtomicU64::new(0),
+    phase0: AtomicU8::new(255),
+    phase1: AtomicU8::new(255),
+    rip0: AtomicU64::new(0),
+    rip1: AtomicU64::new(0),
+};
+static STALLS: [StallSnap; 12] = [SS0; 12];
+static STALL_CUR: AtomicU64 = AtomicU64::new(0);
+static STALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot the scheduler's idle state for the stall ring. Kept in
+/// sched.rs (grq() is private there); returns (idle_mask, nr_running,
+/// phase0, phase1) — cheap atomic reads, only called post-threshold.
+#[inline]
+fn sched_stall_snapshot() -> (u32, u64, u8, u8) {
+    crate::sched::debug_idle_snapshot()
+}
+
+/// Account a stamp delta (cycles) into its histogram; capture a
+/// snapshot when it exceeds the stall threshold (2 ms).
+#[inline]
+fn hist_account(kind: usize, delta_cyc: u64, pid: u32) {
+    let b = (63 - delta_cyc.leading_zeros()).min((HIST_BUCKETS - 1) as u32) as usize;
+    let h = if kind == 0 { &HIST_CHILD } else { &HIST_WAKE };
+    h[b].fetch_add(1, Ordering::Relaxed);
+    // Stall threshold: 2 ms in cycles (hz read per call is fine — this
+    // is the rare path; the common path exits at the bucket add).
+    #[cfg(feature = "x86_64")]
+    let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+    #[cfg(not(feature = "x86_64"))]
+    let hz = 0;
+    let stall_cyc = if hz > 0 { hz / 500 } else { delta_cyc + 1 };
+    if delta_cyc >= stall_cyc {
+        let (idle_mask, nr_running, phase0, phase1) = sched_stall_snapshot();
+        let i = (STALL_CUR.fetch_add(1, Ordering::Relaxed) % 12) as usize;
+        let s = &STALLS[i];
+        s.delta_us.store(delta_cyc / (hz / 1_000_000).max(1), Ordering::Relaxed);
+        s.kind.store(kind as u8, Ordering::Relaxed);
+        s.pid.store(pid, Ordering::Relaxed);
+        s.idle_mask.store(idle_mask, Ordering::Relaxed);
+        s.nr_running.store(nr_running, Ordering::Relaxed);
+        s.phase0.store(phase0, Ordering::Relaxed);
+        s.phase1.store(phase1, Ordering::Relaxed);
+        s.rip0.store(TICK_RIP[0].load(Ordering::Relaxed), Ordering::Relaxed);
+        s.rip1.store(TICK_RIP[1].load(Ordering::Relaxed), Ordering::Relaxed);
+        STALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// ---- tick-path GRQ sampler (r12): catch a stall IN PROGRESS ----
+//
+// The rescue-time snapshot (FSTALL) cannot see the during-stall state.
+// This sampler fires every tick while armed, reads the GRQ under its
+// lock (count + leftmost candidate's ownership qword + idle mask +
+// phases), and keeps a 64-slot ring. Consecutive samples naming the
+// same leftmost pid (>=2 ticks = >=8 ms stuck) are the during-stall
+// truth the rescue snapshot can't provide.
+
+const GS_BUDGET: usize = 64;
+pub struct GrqSample {
+    pub cfs_nr: AtomicU64,
+    pub grq_nr: AtomicU64,
+    pub lpid: AtomicU32,
+    pub loncpu: AtomicU32,
+    pub lclaim: AtomicU64, // i64 bit-cast
+    pub lpk: AtomicU32,
+    pub ltcpu: AtomicU32, // i32 bit-cast
+    pub idle: AtomicU32,
+    pub ph0: AtomicU32,
+    pub ph1: AtomicU32,
+}
+const GS0: GrqSample = GrqSample {
+    cfs_nr: AtomicU64::new(0),
+    grq_nr: AtomicU64::new(0),
+    lpid: AtomicU32::new(0),
+    loncpu: AtomicU32::new(0),
+    lclaim: AtomicU64::new(u64::MAX),
+    lpk: AtomicU32::new(0),
+    ltcpu: AtomicU32::new(u32::MAX),
+    idle: AtomicU32::new(0),
+    ph0: AtomicU32::new(255),
+    ph1: AtomicU32::new(255),
+};
+static GSAMPLES: [GrqSample; GS_BUDGET] = [GS0; GS_BUDGET];
+static GS_CUR: AtomicU64 = AtomicU64::new(0);
+
+// ---- tick-gap detector (r12): quantify system-wide freezes ----
+//
+// The one-shot LAPIC re-arms every tick at <=4 ms, so a per-CPU tick
+// gap beyond ~8 ms means THIS vCPU stopped taking timer interrupts:
+// host-side descheduling or KVM-side blocking (guest spin cannot stop
+// the timer — the IRQ would preempt the spinner). The gap event
+// records the state at gap-close (the first tick after the silence).
+
+const TG_BUDGET: usize = 32;
+pub struct TickGap {
+    /// Gap length in us.
+    pub gap_us: AtomicU64,
+    pub cpu: AtomicU32,
+    pub idle: AtomicU32,
+    pub ph0: AtomicU32,
+    pub ph1: AtomicU32,
+    pub cfs_nr: AtomicU64,
+    pub lpid: AtomicU32,
+    pub cur_pid: AtomicU32,
+}
+const TG0: TickGap = TickGap {
+    gap_us: AtomicU64::new(0),
+    cpu: AtomicU32::new(0),
+    idle: AtomicU32::new(0),
+    ph0: AtomicU32::new(255),
+    ph1: AtomicU32::new(255),
+    cfs_nr: AtomicU64::new(0),
+    lpid: AtomicU32::new(0),
+    cur_pid: AtomicU32::new(0),
+};
+static TGAPS: [TickGap; TG_BUDGET] = [TG0; TG_BUDGET];
+static TG_CUR: AtomicU64 = AtomicU64::new(0);
+static TG_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TG_SUM_US: AtomicU64 = AtomicU64::new(0);
+static LAST_TICK_TSC: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// The interrupted-context RIP at each CPU's last tick (r12): the tick
+/// preempts whatever the CPU was executing; a CPU stuck for many ticks
+/// shows the SAME rip here every time — the spin site. Written from the
+/// x86_64 timer tick when armed.
+pub static TICK_RIP: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[inline]
+pub fn note_tick_rip(cpu: usize, rip: u64) {
+    if cpu < 4 {
+        TICK_RIP[cpu].store(rip, Ordering::Relaxed);
+    }
+}
+
+/// Called from scheduler_tick while forkprof is armed. Records one
+/// sample; also detects streaks (same leftmost pid across >=2
+/// consecutive samples) into a small streak table.
+#[inline]
+pub fn tick_grq_sample() {
+    if !on() {
+        return;
+    }
+    tick_grq_sample_armed();
+}
+
+#[cold]
+#[inline(never)]
+fn tick_grq_sample_armed() {
+    let cpu = crate::arch::cpu_id() as usize;
+    // Tick-gap detection first: this tick vs this CPU's previous tick.
+    let now = now();
+    let last = LAST_TICK_TSC[cpu.min(3)].swap(now, Ordering::Relaxed);
+    if last != 0 {
+        #[cfg(feature = "x86_64")]
+        let hz = crate::drivers::intc::apic::TSC_FREQ.load(Ordering::Acquire);
+        #[cfg(not(feature = "x86_64"))]
+        let hz = 0;
+        let per_ms = hz / 1000;
+        let gap_us = if per_ms > 0 { now.saturating_sub(last) / per_ms } else { 0 };
+        // Normal tick: 4 ms (KERNEL_HZ=250). Report gaps beyond 8 ms.
+        if gap_us > 8_000 {
+            let (cfs_nr, _cl, _g, lpid, _o, _c, _p, _t, idle, ph0v, ph1v) =
+                crate::sched::debug_grq_sample();
+            let i = (TG_CUR.fetch_add(1, Ordering::Relaxed) % TG_BUDGET as u64) as usize;
+            let g = &TGAPS[i];
+            g.gap_us.store(gap_us, Ordering::Relaxed);
+            g.cpu.store(cpu as u32, Ordering::Relaxed);
+            g.idle.store(idle, Ordering::Relaxed);
+            g.ph0.store(ph0v as u32, Ordering::Relaxed);
+            g.ph1.store(ph1v as u32, Ordering::Relaxed);
+            g.cfs_nr.store(cfs_nr, Ordering::Relaxed);
+            g.lpid.store(lpid, Ordering::Relaxed);
+            g.cur_pid.store(crate::sched::get_current_pid() as u32, Ordering::Relaxed);
+            TG_TOTAL.fetch_add(1, Ordering::Relaxed);
+            TG_SUM_US.fetch_add(gap_us, Ordering::Relaxed);
+        }
+    }
+    let (cfs_nr, cfs_len, grq_nr, lpid, loncpu, lclaim, lpk, ltcpu, idle, ph0, ph1) =
+        crate::sched::debug_grq_sample();
+    // Count-vs-tree desync audit: counted nr_running != actual timeline
+    // size is the freeze mechanism candidate — record it loud.
+    if cfs_nr as usize != cfs_len {
+        static DE_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if DE_N.fetch_add(1, Ordering::Relaxed) < 16 {
+            let mut buf: [u8; 96] = [0u8; 96];
+            let h = b"DESYNC cfs-nr=";
+            buf[..h.len()].copy_from_slice(h);
+            let mut n = h.len();
+            let v = cfs_nr;
+            let mut d = [0u8; 24];
+            let mut k = 0;
+            let mut vv = v;
+            if vv == 0 { d[k] = b'0'; k = 1; }
+            while vv > 0 { d[k] = b'0' + (vv % 10) as u8; vv /= 10; k += 1; }
+            d[..k].reverse();
+            buf[n..n + k].copy_from_slice(&d[..k]);
+            n += k;
+            const M: &[u8] = b" len=";
+            buf[n..n + M.len()].copy_from_slice(M);
+            n += M.len();
+            vv = cfs_len as u64;
+            k = 0;
+            if vv == 0 { d[k] = b'0'; k = 1; }
+            while vv > 0 { d[k] = b'0' + (vv % 10) as u8; vv /= 10; k += 1; }
+            d[..k].reverse();
+            buf[n..n + k].copy_from_slice(&d[..k]);
+            n += k;
+            buf[n] = b'\n';
+            crate::console::puts_bytes_no_lock(&buf[..=n]);
+        }
+    }
+    let i = (GS_CUR.fetch_add(1, Ordering::Relaxed) % GS_BUDGET as u64) as usize;
+    let s = &GSAMPLES[i];
+    s.cfs_nr.store(cfs_nr, Ordering::Relaxed);
+    s.grq_nr.store(grq_nr, Ordering::Relaxed);
+    s.lpid.store(lpid, Ordering::Relaxed);
+    s.loncpu.store(loncpu, Ordering::Relaxed);
+    s.lclaim.store(lclaim as u64, Ordering::Relaxed);
+    s.lpk.store(lpk, Ordering::Relaxed);
+    s.ltcpu.store(ltcpu as u32, Ordering::Relaxed);
+    s.idle.store(idle, Ordering::Relaxed);
+    s.ph0.store(ph0 as u32, Ordering::Relaxed);
+    s.ph1.store(ph1 as u32, Ordering::Relaxed);
 }
 
 #[inline]
@@ -402,6 +698,106 @@ pub fn report() {
             mx,
             avgns
         );
+    }
+    // Wake-latency histograms (log2 cycle buckets; edge printed in us).
+    let names_h = ["child_run", "wake_run"];
+    for (k, h) in [&HIST_CHILD, &HIST_WAKE].iter().enumerate() {
+        let total: u64 = h.iter().map(|b| b.load(Ordering::Relaxed)).sum();
+        if total == 0 {
+            continue;
+        }
+        crate::println!("FHIST {} total={}", names_h[k], total);
+        for (b, bucket) in h.iter().enumerate() {
+            let c = bucket.load(Ordering::Relaxed);
+            if c == 0 {
+                continue;
+            }
+            let lo_us = if b == 0 { 0 } else { (1u64 << (b - 1)) / per_us.max(1) };
+            let hi_us = (1u64 << b) / per_us.max(1);
+            crate::println!("FHIST bucket{} lo={}us hi={}us n={}", b, lo_us, hi_us, c);
+        }
+    }
+    // Stall snapshots.
+    let sc = STALL_COUNT.load(Ordering::Relaxed);
+    if sc > 0 {
+        crate::println!("FSTALL total={}", sc);
+        for i in 0..12 {
+            let s = &STALLS[i];
+            let d = s.delta_us.load(Ordering::Relaxed);
+            if d == 0 {
+                continue;
+            }
+            crate::println!(
+                "FSTALL kind={} pid={} dt={}us idle={:#b} nrun={} ph0={} ph1={} rip0={:#x} rip1={:#x}",
+                if s.kind.load(Ordering::Relaxed) == 0 { "child" } else { "wake" },
+                s.pid.load(Ordering::Relaxed),
+                d,
+                s.idle_mask.load(Ordering::Relaxed),
+                s.nr_running.load(Ordering::Relaxed),
+                s.phase0.load(Ordering::Relaxed),
+                s.phase1.load(Ordering::Relaxed),
+                s.rip0.load(Ordering::Relaxed),
+                s.rip1.load(Ordering::Relaxed),
+            );
+        }
+    }
+    // Tick-path GRQ samples: print non-idle-queue samples (a candidate
+    // sitting in the tree across samples = the during-stall truth).
+    let gs_total = GS_CUR.load(Ordering::Relaxed);
+    if gs_total > 0 {
+        crate::println!("FGSQ n={}", gs_total);
+        let n = gs_total.min(GS_BUDGET as u64) as usize;
+        for i in 0..n {
+            let s = &GSAMPLES[i];
+            let lpid = s.lpid.load(Ordering::Relaxed);
+            let cfs = s.cfs_nr.load(Ordering::Relaxed);
+            if lpid == 0 && cfs == 0 {
+                continue;
+            }
+            crate::println!(
+                "FGSQ cfs={} grq={} lpid={} oncpu={} claim={} pk={:#x} tcpu={} idle={:#b} ph={}/{} rip0={:#x} rip1={:#x}",
+                cfs,
+                s.grq_nr.load(Ordering::Relaxed),
+                lpid,
+                s.loncpu.load(Ordering::Relaxed),
+                s.lclaim.load(Ordering::Relaxed) as i64,
+                s.lpk.load(Ordering::Relaxed),
+                s.ltcpu.load(Ordering::Relaxed) as i32,
+                s.idle.load(Ordering::Relaxed),
+                s.ph0.load(Ordering::Relaxed),
+                s.ph1.load(Ordering::Relaxed),
+                TICK_RIP[0].load(Ordering::Relaxed),
+                TICK_RIP[1].load(Ordering::Relaxed),
+            );
+        }
+    }
+    // Tick-gap events: the freeze quantification.
+    let tg_total = TG_TOTAL.load(Ordering::Relaxed);
+    if tg_total > 0 {
+        crate::println!(
+            "FTICKGAP total={} sum_ms={}",
+            tg_total,
+            TG_SUM_US.load(Ordering::Relaxed) / 1000
+        );
+        let n = TG_CUR.load(Ordering::Relaxed).min(TG_BUDGET as u64) as usize;
+        for i in 0..n {
+            let g = &TGAPS[i];
+            let d = g.gap_us.load(Ordering::Relaxed);
+            if d == 0 {
+                continue;
+            }
+            crate::println!(
+                "FTICKGAP cpu={} gap={}us idle={:#b} ph={}/{} cfs={} lpid={} cur={}",
+                g.cpu.load(Ordering::Relaxed),
+                d,
+                g.idle.load(Ordering::Relaxed),
+                g.ph0.load(Ordering::Relaxed),
+                g.ph1.load(Ordering::Relaxed),
+                g.cfs_nr.load(Ordering::Relaxed),
+                g.lpid.load(Ordering::Relaxed),
+                g.cur_pid.load(Ordering::Relaxed),
+            );
+        }
     }
     crate::println!("FORKPROF END");
     report_trace();

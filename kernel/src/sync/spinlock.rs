@@ -114,11 +114,17 @@ impl RawSpinlock {
         }
     }
 
-    /// Record the holder (debug-lock-owner feature only).
+    /// Record the holder (debug-lock-owner feature only). r12: the
+    /// owner word now stores the acquirer's RETURN ADDRESS (cpu+1 in
+    /// the low bits kept for the pre-r12 readers) — the GRQ stall probe
+    /// needs the holder's call site, not just its CPU.
     #[inline]
     #[cfg(feature = "debug-lock-owner")]
-    fn record_owner(&self) {
-        self.owner.store(crate::arch::smp::cpu_id() + 1, Ordering::Relaxed);
+    fn record_owner(&self, ra: usize) {
+        self.owner.store(
+            (ra & !0xFusize) | ((crate::arch::smp::cpu_id() as usize) + 1),
+            Ordering::Relaxed,
+        );
     }
 
     /// Clear the holder (debug-lock-owner feature only).
@@ -130,7 +136,24 @@ impl RawSpinlock {
 
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
-    fn record_owner(&self) {}
+    fn record_owner(&self, _ra: usize) {}
+
+    /// Last recorded holder's call site (debug-lock-owner builds; 0
+    /// otherwise). Advisory only: read without holding this lock, so
+    /// the value may be stale or already overwritten by the reader's
+    /// own acquire. For the GRQ stall probe this is fine — a waiter
+    /// that spins 4ms+ names the holder that was present at entry.
+    #[inline]
+    #[cfg(feature = "debug-lock-owner")]
+    pub fn owner_hint(&self) -> usize {
+        self.owner.load(Ordering::Relaxed) & !0xF
+    }
+
+    #[inline]
+    #[cfg(not(feature = "debug-lock-owner"))]
+    pub fn owner_hint(&self) -> usize {
+        0
+    }
 
     #[inline]
     #[cfg(not(feature = "debug-lock-owner"))]
@@ -191,7 +214,7 @@ impl RawSpinlock {
         }
         // Diagnostics: record the holder AFTER the acquire (a spinner's
         // watchdog may read a stale 0 in the tiny window — acceptable).
-        self.record_owner();
+        self.record_owner(caller_ra);
     }
 
     /// Print deadlock warning via SBI (works even with interrupts disabled).
@@ -268,7 +291,7 @@ impl RawSpinlock {
     pub fn try_lock(&self) -> bool {
         let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
         if ok {
-            self.record_owner();
+            self.record_owner(caller_return_address());
         }
         ok
     }
