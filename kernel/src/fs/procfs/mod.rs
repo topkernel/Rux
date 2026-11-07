@@ -573,8 +573,12 @@ impl ProcFSSuperBlock {
         // unless the switch armed them).
         self.create_dynamic_file("filerd", crate::debug::filerd::generate);
         // Lock-dependency registry, the reference /proc/lockdep layout
-        // (lockdep-lite P0: the declared view; live counts join in P1).
+        // (lockdep-lite P0 declared view + P1 live counts when the
+        // cargo feature compiles runtime tracking), and the recorded
+        // chains (P1; a one-line "not compiled" note on default
+        // builds).
         self.create_dynamic_file("lockdep", crate::debug::lockdep::generate_proc_lockdep);
+        self.create_dynamic_file("lockdep_chains", crate::debug::lockdep::generate_proc_lockdep_chains);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).

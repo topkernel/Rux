@@ -53,6 +53,14 @@ use super::spinlock::RawSpinlock;
 pub trait NestKey: 'static + Copy {
     /// The invariant this key participates in (for diagnostics).
     const NAME: &'static str;
+    /// lockdep-lite P1: the registry class row this key maps to (the
+    /// id consts in `debug/lockdep.rs` — the `lock_classes!` table is
+    /// the single declaration site). The armed slow path and the boot
+    /// selftest cross-check `CLASSES[LOCK_CLASS].name == NAME`, so a
+    /// drifted mapping is loud. Only exists under the
+    /// `debug-lockdep` cargo feature.
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId;
 }
 
 /// Permitted nesting: `impl CanNestInside<Outer> for Inner` states that
@@ -70,6 +78,8 @@ pub trait CanNestInside<Outer: NestKey>: NestKey {}
 pub struct GrqKey;
 impl NestKey for GrqKey {
     const NAME: &'static str = "grq";
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId = crate::debug::lockdep::GRQ;
 }
 /// GRQ may nest inside the futex bucket lock (INV-LOCK-5 forward:
 /// futex_wake -> Task::wake_up -> enqueue_task).
@@ -82,6 +92,8 @@ impl CanNestInside<FutexBucketKey> for GrqKey {}
 pub struct FutexBucketKey;
 impl NestKey for FutexBucketKey {
     const NAME: &'static str = "futex-bucket";
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId = crate::debug::lockdep::FUTEX_BUCKET;
 }
 
 /// Per-socket queue statistics (INV-LOCK-6): stats nest inside the
@@ -90,6 +102,8 @@ impl NestKey for FutexBucketKey {
 pub struct NetStatsKey;
 impl NestKey for NetStatsKey {
     const NAME: &'static str = "net-stats";
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId = crate::debug::lockdep::NET_STATS;
 }
 /// INV-LOCK-6 forward: stats acquired while a queue lock is held.
 impl CanNestInside<NetQueueKey> for NetStatsKey {}
@@ -99,6 +113,8 @@ impl CanNestInside<NetQueueKey> for NetStatsKey {}
 pub struct NetQueueKey;
 impl NestKey for NetQueueKey {
     const NAME: &'static str = "net-queue";
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId = crate::debug::lockdep::NET_QUEUE;
 }
 
 /// A futex waiter-pool SLOT lock (`sync::futex::WAITER_POOL`). Slot
@@ -109,6 +125,8 @@ impl NestKey for NetQueueKey {
 pub struct WaiterSlotKey;
 impl NestKey for WaiterSlotKey {
     const NAME: &'static str = "futex-waiter-slot";
+    #[cfg(feature = "debug-lockdep")]
+    const LOCK_CLASS: crate::debug::lockdep::LockClassId = crate::debug::lockdep::WAITER_SLOT;
 }
 /// A slot may be acquired while its bucket lock is held (the shape of
 /// every chain walk under a bucket guard). Same-class double-slot
@@ -139,10 +157,20 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
     /// Top-level acquire (no keyed lock held). The plain call stays
     /// available because most call sites are top-level by construction;
     /// nesting while another keyed lock is held MUST use `lock_nested`.
+    ///
+    /// lockdep-lite P1 hook (cargo feature `debug-lockdep`): the key
+    /// IS the class — the acquire records into the current task's
+    /// held stack and runs the check pipeline when `debug=lockdep`
+    /// armed the tracker. The call site is cfg-gated: a default build
+    /// compiles nothing here (design §7 row 1).
     #[inline]
     #[track_caller]
     pub fn lock(&self) -> KeyedGuard<'_, K> {
         self.raw.lock();
+        #[cfg(feature = "debug-lockdep")]
+        crate::debug::lockdep::lockdep_acquire::<K>(
+            super::spinlock::caller_return_address() as u64,
+        );
         KeyedGuard {
             lock: self as *const Self as *mut Self,
             _key: PhantomData,
@@ -155,6 +183,10 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
     #[track_caller]
     pub fn try_lock(&self) -> Option<KeyedGuard<'_, K>> {
         if self.raw.try_lock() {
+            #[cfg(feature = "debug-lockdep")]
+            crate::debug::lockdep::lockdep_acquire::<K>(
+                super::spinlock::caller_return_address() as u64,
+            );
             Some(KeyedGuard {
                 lock: self as *const Self as *mut Self,
                 _key: PhantomData,
@@ -172,7 +204,21 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
     #[inline]
     #[track_caller]
     pub fn try_lock_claim(&self) -> bool {
-        self.raw.try_lock()
+        // cfg-split body (same discipline as lock_irqsave).
+        #[cfg(not(feature = "debug-lockdep"))]
+        {
+            self.raw.try_lock()
+        }
+        #[cfg(feature = "debug-lockdep")]
+        {
+            let ok = self.raw.try_lock();
+            if ok {
+                crate::debug::lockdep::lockdep_acquire::<K>(
+                    super::spinlock::caller_return_address() as u64,
+                );
+            }
+            ok
+        }
     }
 
     /// Unconditional guard-less claim — the claim twin of
@@ -183,7 +229,11 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
     #[inline]
     #[track_caller]
     pub fn lock_claim(&self) {
-        self.raw.lock()
+        self.raw.lock();
+        #[cfg(feature = "debug-lockdep")]
+        crate::debug::lockdep::lockdep_acquire::<K>(
+            super::spinlock::caller_return_address() as u64,
+        );
     }
 
     /// Unlock without a guard (for subsystems whose guard wraps the
@@ -193,6 +243,8 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
     #[inline]
     #[track_caller]
     pub fn unlock(&self) {
+        #[cfg(feature = "debug-lockdep")]
+        crate::debug::lockdep::lockdep_release::<K>();
         self.raw.unlock();
     }
 }
@@ -250,11 +302,25 @@ impl<K: NestKey, T> KeyedSpinlock<K, T> {
 
     /// Top-level acquire with the full irqsave protocol (the bucket
     /// locks' historical discipline — unchanged bytes at the call
-    /// sites).
+    /// sites). lockdep-lite P1 hook: see KeyedRawSpinlock::lock.
     #[inline]
     #[track_caller]
     pub fn lock_irqsave(&self) -> KeyedIrqGuard<'_, K, T> {
-        KeyedIrqGuard { inner: self.inner.lock_irqsave(), _key: PhantomData }
+        // cfg-split body: the OFF-feature arm keeps the ORIGINAL
+        // expression shape verbatim (an introduced let-binding shifts
+        // O0 codegen — the asm-identity hard bar, design §7 row 1).
+        #[cfg(not(feature = "debug-lockdep"))]
+        {
+            KeyedIrqGuard { inner: self.inner.lock_irqsave(), _key: PhantomData }
+        }
+        #[cfg(feature = "debug-lockdep")]
+        {
+            let guard = KeyedIrqGuard { inner: self.inner.lock_irqsave(), _key: PhantomData };
+            crate::debug::lockdep::lockdep_acquire::<K>(
+                super::spinlock::caller_return_address() as u64,
+            );
+            guard
+        }
     }
 }
 
@@ -289,6 +355,19 @@ impl<K: NestKey, T: ?Sized> KeyedIrqGuard<'_, K, T> {
     #[inline]
     pub fn proof(&self) -> NestProof<'_, K> {
         NestProof { _key: PhantomData, _hold: PhantomData }
+    }
+}
+
+// lockdep-lite P1: the release half of the KeyedSpinlock hook. The
+// Drop body runs before the inner SpinlockIrqGuard's own drop (fields
+// drop after Drop::drop), so the held stack pops just before the raw
+// unlock — the hold window stays fully covered. Feature off: no Drop
+// impl is added and drop order is exactly as before.
+#[cfg(feature = "debug-lockdep")]
+impl<K: NestKey, T: ?Sized> Drop for KeyedIrqGuard<'_, K, T> {
+    #[inline]
+    fn drop(&mut self) {
+        crate::debug::lockdep::lockdep_release::<K>();
     }
 }
 
@@ -331,6 +410,10 @@ pub struct KeyedGuard<'a, K: NestKey> {
 impl<K: NestKey> Drop for KeyedGuard<'_, K> {
     #[inline]
     fn drop(&mut self) {
+        #[cfg(feature = "debug-lockdep")]
+        crate::debug::lockdep::lockdep_release::<K>();
+        // SAFETY: the guard holds the lock; the pointer came from the
+        // guard-minting acquire and the guard's lifetime pins it.
         unsafe { (*self.lock).raw.unlock() };
     }
 }

@@ -2601,8 +2601,14 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// lock). Nested acquire by the SAME task is legal; the outermost guard
 /// releases. do_exit() force-drops via release_if_owner (R73) since
 /// RAII never runs through do_exit.
+// lockdep-lite P1: classed constructor (registry row
+// debug::lockdep::EXT4_BIG).
 pub static EXT4_BIG_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new("EXT4-BIGLOCK", true);
+    crate::sync::SleepMutex::with_lockdep_class(
+        "EXT4-BIGLOCK",
+        true,
+        crate::debug::lockdep::EXT4_BIG,
+    );
 
 /// Ext4 inode operations table
 /// Ext4 now supports write operations through namei module

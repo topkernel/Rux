@@ -952,6 +952,14 @@ pub struct Task {
     /// Cleared on every allowed park and on each heal.
     pub ti_parkref_since: core::sync::atomic::AtomicU64,
 
+    /// lockdep-lite P1 (cargo feature `debug-lockdep`): this task's
+    /// held-lock-class stack (classes + symbolizable acquire sites),
+    /// pushed/popped by the keyed-lock and SleepMutex hooks when the
+    /// `debug=lockdep` boot switch arms runtime tracking. Feature off:
+    /// the field does not exist (zero default-build footprint).
+    #[cfg(feature = "debug-lockdep")]
+    pub lockdep_held: crate::debug::lockdep::HeldStack,
+
     /// Timed-sleep shadow (ticktrap, r41v17): the deadline of the timed
     /// wait this task is currently parked in, if any. Set by the wait
     /// site at timer-arm time and cleared at scope exit (guard Drop);
@@ -1706,6 +1714,8 @@ impl Task {
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
             blocked_on: core::sync::atomic::AtomicU64::new(0),
             ti_parkref_since: core::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "debug-lockdep")]
+            lockdep_held: crate::debug::lockdep::HeldStack::new(),
             timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
             timed_sleep_timer_id: core::sync::atomic::AtomicU64::new(0),
@@ -1959,6 +1969,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_parkref_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // lockdep-lite P1 held stack (same recycled-page class): a
+        // fresh task must not inherit a stale held-lock stack.
+        #[cfg(feature = "debug-lockdep")]
+        ptr::write(
+            (ptr as usize + offset_of!(Task, lockdep_held))
+                as *mut crate::debug::lockdep::HeldStack,
+            crate::debug::lockdep::HeldStack::new(),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task
         // must not inherit a stale timed-sleep shadow.
@@ -2673,6 +2691,14 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_parkref_since)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
+        );
+        // lockdep-lite P1 held stack (same recycled-page class): a
+        // fresh task must not inherit a stale held-lock stack.
+        #[cfg(feature = "debug-lockdep")]
+        ptr::write(
+            (ptr as usize + offset_of!(Task, lockdep_held))
+                as *mut crate::debug::lockdep::HeldStack,
+            crate::debug::lockdep::HeldStack::new(),
         );
         // ticktrap shadow (same R68a recycled-page class): a fresh task
         // must not inherit a stale timed-sleep shadow.

@@ -100,8 +100,15 @@ pub const NAME_MAX: usize = 255;
 /// pid sendmsg02 preempt=0x2 inside the contended acquire, CPU1 spinning
 /// on GRQ in scheduler_tick). All users are syscall-context directory
 /// mutators, so sleeping is legal everywhere this lock is taken.
+// lockdep-lite P1: classed constructor (the registry row
+// debug::lockdep::VFS_MUTATION) — the class argument is inert in a
+// default build (no field, no hooks).
 pub static VFS_MUTATION_LOCK: crate::sync::SleepMutex =
-    crate::sync::SleepMutex::new("VFS-MUTATION", false);
+    crate::sync::SleepMutex::with_lockdep_class(
+        "VFS-MUTATION",
+        false,
+        crate::debug::lockdep::VFS_MUTATION,
+    );
 
 
 impl VfsPath {

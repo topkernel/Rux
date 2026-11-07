@@ -72,9 +72,10 @@ const LCB_F_SPIN: u32 = 1;
 // ==================== RawSpinlock (TTAS) ====================
 
 /// Capture this function's return address (the spinlock call site) for
-/// deadlock diagnostics.
+/// deadlock diagnostics. Also the acquire-site source for lockdep-lite
+/// P1's keyed hooks (symbolized through debug::ksyms at splat time).
 #[inline]
-fn caller_return_address() -> usize {
+pub(crate) fn caller_return_address() -> usize {
     let ra: usize;
     #[cfg(feature = "riscv64")]
     // SAFETY: pure register read, no memory access or side effects.
