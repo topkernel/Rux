@@ -1238,6 +1238,21 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
             // SAFETY: current is the running task.
             unsafe { (*current).mark_execed(); }
+            // Reference ptrace semantics (the exec trap): a traced
+            // task's successful exec stops it with SIGTRAP before the
+            // new image runs — the tracer's first wait() in the LTP
+            // spawn_ptrace_child pattern (vfork + PTRACE_TRACEME +
+            // execlp; ptrace06) depends on exactly this stop. Queue the
+            // trap at commit; do_signal's traced-interception arm
+            // converts it into a ptrace_stop reported to the tracer.
+            // SAFETY: current is the running task; pending is
+            // lock-protected.
+            unsafe {
+                if (*current).tracer_pid() != 0 {
+                    (*current).pending.add(crate::signal::Signal::SIGTRAP as i32);
+                    crate::signal::signal_wake_up(current);
+                }
+            }
             // Exec commit takes the text hold (reference deny_write_access
             // in do_open_execat, released when this mm lineage dies — our
             // MmStruct::drop of the mm->exe_file stand-in): write-mode

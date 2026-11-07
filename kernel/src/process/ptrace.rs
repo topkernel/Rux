@@ -735,7 +735,7 @@ fn dispatch_request(
             if request == PTRACE_GETREGS {
                 // data points at a 256-byte user_regs_struct.
                 if data == 0 || !access_ok(data as usize, GREGSET_BYTES) {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 // SAFETY: access_ok-validated; exception-table copy.
                 unsafe {
@@ -750,17 +750,17 @@ fn dispatch_request(
                 // GETREGSET: addr = NT_* type (only NT_PRSTATUS here),
                 // data = struct iovec { base, len } in user memory.
                 if addr != NT_PRSTATUS as u64 {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 if data == 0 || !access_ok(data as usize, 16) {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 // SAFETY: validated iovec reads via get_user.
                 unsafe {
                     let base = get_user(data as *const u64).unwrap_or(0);
                     let len = get_user((data as *const u64).add(1)).unwrap_or(0);
                     if base == 0 || len == 0 || !access_ok(base as usize, GREGSET_BYTES) {
-                        return -EINVAL;
+                        return -EIO;
                     }
                     let uncopied =
                         copy_to_user(base as *mut u8, buf.as_ptr(), GREGSET_BYTES);
@@ -781,29 +781,29 @@ fn dispatch_request(
             let mut buf = [0u8; GREGSET_BYTES];
             let (src, len) = if request == PTRACE_SETREGS {
                 if data == 0 || !access_ok(data as usize, GREGSET_BYTES) {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 (data, GREGSET_BYTES as u64)
             } else {
                 if addr != NT_PRSTATUS as u64 {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 if data == 0 || !access_ok(data as usize, 16) {
-                    return -EINVAL;
+                    return -EIO;
                 }
                 // SAFETY: validated iovec reads via get_user.
                 unsafe {
                     let base = get_user(data as *const u64).unwrap_or(0);
                     let len = get_user((data as *const u64).add(1)).unwrap_or(0);
                     if base == 0 || len == 0 {
-                        return -EINVAL;
+                        return -EIO;
                     }
                     (base, len)
                 }
             };
             let n = (len as usize).min(GREGSET_BYTES);
             if !access_ok(src as usize, n) {
-                return -EINVAL;
+                return -EIO;
             }
             // SAFETY: access_ok-validated; exception-table copy.
             unsafe {
@@ -821,7 +821,7 @@ fn dispatch_request(
         PTRACE_GETSIGINFO => {
             // data points at a 128-byte siginfo_t.
             if data == 0 || !access_ok(data as usize, core::mem::size_of::<SigInfo>()) {
-                return -EINVAL;
+                return -EIO;
             }
             // SAFETY: lock-protected field read.
             let info = unsafe { (*target).ptrace_siginfo() };
@@ -840,13 +840,13 @@ fn dispatch_request(
                     }
                     0
                 }
-                None => -EINVAL,
+                None => -EIO,
             }
         }
 
         PTRACE_SETSIGINFO => {
             if data == 0 || !access_ok(data as usize, core::mem::size_of::<SigInfo>()) {
-                return -EINVAL;
+                return -EIO;
             }
             // SAFETY: validated read into a local zeroed siginfo.
             unsafe {
