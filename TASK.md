@@ -7022,3 +7022,137 @@ M2. Kernel levers that decide whether the graph closes:
 Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
 ServiceStart starting:launcher, PIXELS (shot immediately — 91a2d054
 old-alive reference).
+
+### 63. 63RD SESSION (2026-11-07) — the strand wall DECODED with
+### decision-time evidence: the victims lose a proportional-fair contest
+### against a sub-1%-duty churn pack (CFS math, pick path exonerated);
+### FUTEX timed waits moved off the 10ms jiffy grid onto ns-exact hres
+### wakes (reference parity); the persistent per-task pick/wake ring +
+### STRAND-WALL v2 + FFRTWAIT landed
+
+Boots this session: ohw31-ohw34 (4 KVM boots, system-lb5 +
+userdata-fresh2, LOGLEVEL7; dfx=fuxstuck,txnhunt,sleepsnap,
+fuxwatch=0x7ff0004862c0,0). Commits: 5619ad38 (futex hres), 55e7e767
+(instrument). Gates: x86_64 build rc=0, riscv64 build rc=0 + make test
+ALL TESTS PASSED (run/test-rv-63a.log), aarch64 build rc=0
+(run/build-a64-63.log).
+
+#### 1. THE INSTRUMENT (mission lever 1's rig)
+
+Per-task, persistent, decision-time scheduler evidence ON the Task
+(pick_ring[16] packed kind:4|why:8|jiffies:30|aux:22, pick_visit_n,
+pick_refuse_why[5], pick_n, wake_n, wait_last/sum/max_ns +
+wait_open_ns), armed on fuxstuck|schedtrace, written under the GRQ at
+the exact hook sites: enqueue_task_locked (LINK), the pick walk's
+refusal branch (REFUSE + R76 reason at DECISION time),
+mark_picked_on_cpu (PICK — closes the link→pick wait window), both
+heal paths. RUNQ-STRAND prints STRAND-HIST (counters) + VITCHRON (the
+ring, chronological) per victim; STRAND-WALL rows gained sl (owning
+CPU slot at probe time), lp (jiffies since last pick, X = never), w
+(wake count); FFRTWAIT prints the OS_FFRT group's per-thread
+pk/wk/wait_last/wait_max per census burst (never-picked threads ranked
+first) plus the burst-window aggregate davg. The 61st's address-keyed
+SKIP_HIST (slot stealing, schedtrace-only arming) is retired.
+
+#### 2. THE STRAND-WALL VERDICT (ohw33/ohw34, both strand boots)
+
+censusd (tid 301), frozen 200s+ both boots:
+- STRAND-HIST: pk==wk (46/46 — every early wake was served), visits=0,
+  why1..5 all 0 — NEVER REFUSED; last events L@3684 L@3891 (linked,
+  no pick since), wopen=1, wait_max 17.7s+ and growing.
+- The wall below: 2-3 entries (321 hilogd, 522/513, 570, 611, 323...)
+  at vr = min_vr - 6ms ALL IN LOCKSTEP (the wake-clamp floor), all
+  RUNNING, oc0/cl-1/aff3, sl=-1 (no lying slots), lp=0..2 — PICKED
+  EVERY JIFFY, refusals why=1 at 0.1-0.5% of their 6-10k visits
+  (legitimate mid-switch-out on_cpu transients, not stale marks).
+- The victim's vr = min_vr + 1.76s (ohw30: +1.19s). min_vr advances
+  5.5ms/s (the pack's aggregate earned vruntime). The 1-2s deficit
+  closes only at the pack's earn rate → the 100-4600s strand
+  arithmetic of §61.1, now with the mechanism: THE PACK IS A
+  TINY-WORK TIMER STORM (each member runs ~27µs per wake, wakes
+  ~100x/s, re-clamped to the floor at every wake, so min_vr can never
+  be lifted by them); any task whose vr is seconds ahead (it ran
+  during the busy boot phase — censusd burned 3.7s exec before the
+  wedge) waits minutes. skipall=339 is STATIC (early-boot artifact),
+  ovf=0 — the stash/walk legs are clean.
+VERDICT: NOT a pick-path bug — no wrong predicate, no stale-mark
+leak, no affinity/throttle leg, no stash overflow. It is CFS
+proportional math in the wedge's LOW-DUTY REGIME (the boot stalls →
+CPU demand collapses to a timer-storm pack → min_vr crawls). Linux
+6.1-CFS would compute the same order; the reference never forms the
+regime because its boot stays busy to launcher in 12s. The wall is
+DOWNSTREAM of the M2 wedge — fixing the pick path here would DIVERGE
+from reference semantics. The 61st's wheel exec=0-never-picked class
+did NOT recur in ohw31/32/33/34 (the wheel cycles normally, pk grows
+~2-3/s, sleepsnap parks in ppoll); if it recurs, STRAND-HIST reads
+its decision-time history on the first burst.
+
+#### 3. THE FUTEX HRES FIX (the interleaving-width kernel lever)
+
+Our timed futex waits were quantized onto the jiffy grid (HZ=100):
+(nsec*HZ)/1e9 TRUNCATED + a .max(1)-jiffy floor — every sub-10ms timed
+wait fired at exactly the next 10ms tick, and 10-20ms waits could fire
+a full grid step EARLY. musl parks every pthread timed edge (cv/mutex/
+sem timedwait, joins — op 0x80 relative FUTEX_WAIT in every FUX-STUCK
+row), so FFRT's SerialQueue::Pull cond_.wait_for(delay) and every
+ms-class timed synchronization edge ran 2-10x slower than the
+reference's hrtimer(ns, never-early) semantics — a systematic widening
+of the exact reentrancy window §62.5 names. Fixed: futex_parse_timeout
+_ns returns absolute monotonic-ns deadlines (relative exact; WAIT_BITESET
+keeps the CLOCK_MONOTONIC absolute default; FUTEX_CLOCK_REALTIME
+absolute values rebase through wall_epoch_offset_ns — the OLD jiffy
+arithmetic compared 1970-epoch seconds against boot jiffies, so a
+2026-epoch deadline read as ~365 days of monotonic wait and NEVER
+expired; the ohw30 census caught exactly that shape, fto=31535994s);
+the wake arms add_timer_wakeup_hres + rearm_for_hres (same machinery
+the LTP-proven nanosleep/poll/sigtimedwait paths use).
+Known remainder: ppoll truncates its timespec to ms at the syscall
+boundary (sub-ms early) — noted, not on the cv path.
+
+#### 4. FFRT WAKE→PICK PROFILE (mission lever 2, measured)
+
+FFRTWAIT per burst: typical link→pick is µs-class in ALL phases
+(davg 38-1146µs across ohw31-34) — the wake-to-run path is NOT
+uniformly slow; the 60th's "uniform 2.9ms p90 round-trip" stays mooted
+(the round trip includes server-side handler time). The TAIL is the
+wedge effect: wait_max outliers 221-992ms appear only from ~the wedge
+onset onward (ohw31: wm992ms post-wedge; ohw32: wm530ms at 154s,
+wm240ms at 129s, wedge at 47.8s; ohw34 wheel wm624ms by 54s) — the
+producer threads (incl. the wheel) queue behind the churn pack
+exactly like censusd when their vr drifts above the floor. With the
+hres futex fix the per-EDGE timer tax is gone; the pack-contest tax
+remains until the wedge itself stops forming.
+
+#### 5. THE WEDGE ITSELF (ohw31-34, unchanged shape)
+
+All four boots wedged at the M2 holder (ohw32 pinned the sequence:
+last successful M2 acquire = tid364 OS_FFRT_2_3 at t=47.777 n=877,
+every later write old=2 pile-in; ohw31 froze ~t=33 with tid365/364
+todo=[txn-complete] unread). ohw33/34 wedged pre-appfwk; ohw33's
+foundation got watchdog-killed at ~148s (KOT-KILL storm, restarts,
+re-wedge). Tally with the hres fix: 0/2 appfwk.ready (ohw33/34) —
+too few boots for a verdict; the fix is parity-motivated
+independently of the tally.
+
+#### 6. FOR THE 64TH
+
+1. The futex hres fix needs a boot SERIES for the appfwk tally (the
+   62nd's baseline: 1/4; pre-fix sessions ~1/20) — 6-8 boots decide
+   whether the narrowed timed-edge window shifts the interleaving.
+2. THE REMAINING KERNEL LATENCY LEVER on the M2 window is the
+   pack-contest tax: whenever a producer's (wheel/worker) vr drifts
+   above the churn floor, its wake waits 100ms-class. Linux-parity
+   audit target: our fork/wake placement gives a NEW task the full
+   sleeper credit (floor = min_vr - SCHED_LATENCY, 6ms); Linux's
+   START_DEBIT places new tasks AHEAD of min_vr. A boot-long pack of
+   forever-fresh sleepers at min_vr-6ms is partially OUR artifact —
+   compare a 6.1 fair.c place_entity line-by-line before changing
+   anything (GENTLE_FAIR_SLEEPERS halves the thresh; ours is 2x
+   generous). This is the one remaining scheduler-side divergence
+   with a plausible effect on the regime.
+3. The launcher-gate shape (ohw28's accountmgr code12 SYNC-OUT) never
+   recurred this session (no boot passed appfwk.ready); it stays
+   parked behind the M2 fix/tally.
+Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
+ServiceStart starting:launcher, PIXELS (shot immediately — 91a2d054
+old-alive reference).
