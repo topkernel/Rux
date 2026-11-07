@@ -746,3 +746,331 @@ fn policy_name(t: &crate::process::task::Task) -> &'static str {
         SchedPolicy::Deadline => "DL",
     }
 }
+
+// ---------------------------------------------------------------------------
+// debug-dlsleep: panic last-gasp bundle
+// ---------------------------------------------------------------------------
+
+/// Panic-path last-gasp: the whole system's state — every CPU's current
+/// task with its stack, plus one compact line per task (D-state tasks get
+/// symbolized parked-stack frames) — so the pstore record carries the
+/// whole machine's story, not just the panicking CPU's.
+///
+/// Constraints (run/LANE.md zero-impact record): COLD path (fires only
+/// from the panic handler), allocation-free, deadlock-safe — every lock
+/// is a try-lock (pid-hash iteration skips busy buckets and says so; the
+/// GRQ diagnostics degrade to '?'), every byte goes out through
+/// `putchar_no_lock`, symbolization is the lock-free ksyms binary search,
+/// and the whole bundle is BYTE-CAPPED so it always fits inside the
+/// 128 KiB pstore region beside the panic report (~96 KiB cap; the
+/// pstore sink holds the first 16 KiB and the console tail the rest).
+pub fn panic_last_gasp() {
+    const BUDGET: usize = 96 * 1024;
+    let mut b = BUDGET;
+
+    lg_puts(&mut b, b"\n=== panic LAST-GASP: all-CPU stacks + task table ===\n");
+
+    // Per-CPU currents (who each slot thinks is running) + their stacks.
+    {
+        let cs = crate::sched::sched::grq_diag_cpu_currents();
+        lg_puts(&mut b, b"cpu slots:");
+        for c in 0..crate::config::MAX_CPUS {
+            if b < 128 {
+                break;
+            }
+            lg_puts(&mut b, b" ");
+            let t = cs[c].2 as *mut crate::process::task::Task;
+            if t.is_null() {
+                lg_dec(&mut b, 999999);
+            } else {
+                // SAFETY: diagnostic slot read; the idle tasks and any
+                // hash-invisible exiting tasks are still valid allocated
+                // Task objects (same discipline as dump_all_tasks).
+                let pid = unsafe { (*t).pid() };
+                lg_dec(&mut b, pid as u64);
+            }
+        }
+        lg_puts(&mut b, b"\n");
+        for c in 0..crate::config::MAX_CPUS {
+            if b < 256 {
+                break;
+            }
+            let t = cs[c].2 as *mut crate::process::task::Task;
+            if t.is_null() {
+                continue;
+            }
+            // SAFETY: diagnostic read of stable fields on the per-CPU
+            // current Task (see above).
+            let (pid, st, preempt) =
+                unsafe { ((*t).pid(), (*t).state().bits(), (*t).preempt_count()) };
+            lg_puts(&mut b, b"cpu");
+            lg_dec(&mut b, c as u64);
+            lg_puts(&mut b, b" cur pid=");
+            lg_dec(&mut b, pid as u64);
+            lg_puts(&mut b, b" state=");
+            lg_puts(&mut b, state_name(st).as_bytes());
+            lg_puts(&mut b, b" preempt=");
+            lg_signed_dec(&mut b, preempt as i64);
+            lg_puts(&mut b, b" comm=");
+            // SAFETY: same diagnostic read.
+            lg_comm(&mut b, unsafe { &*t });
+            // SAFETY: lg_stack reads within the task's own kernel stack
+            // pages (the Task exists and pins them).
+            lg_stack(&mut b, unsafe { &*t }, 6);
+            lg_puts(&mut b, b"\n");
+        }
+    }
+
+    // One compact line per task; D-state tasks additionally get up to 6
+    // symbolized parked-stack frames, and mutex waiters name their lock
+    // and its owner (the chain's first hop — enough to convict an ABBA
+    // pair from the panic record alone).
+    let mut count: usize = 0;
+    let skipped = crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
+            if b < 256 {
+                return;
+            }
+            count += 1;
+            // SAFETY: callback runs under the bucket try-lock; reads of
+            // stable Task fields only, plus volatile stack reads inside
+            // the task's own kernel-stack pages.
+            let task: &crate::process::task::Task = unsafe { &*t };
+            lg_puts(&mut b, b"task pid=");
+            lg_dec(&mut b, task.pid() as u64);
+            lg_puts(&mut b, b" tgid=");
+            lg_dec(&mut b, task.tgid() as u64);
+            lg_puts(&mut b, b" state=");
+            lg_puts(&mut b, state_name(task.state().bits()).as_bytes());
+            lg_puts(&mut b, b" cpu=");
+            lg_signed_dec(&mut b, task.ti_cpu() as i64);
+            lg_puts(&mut b, b" claim=");
+            lg_signed_dec(&mut b, task.running_on_cpu.load(Ordering::Relaxed) as i64);
+            lg_puts(&mut b, b" comm=");
+            lg_comm(&mut b, task);
+            let mptr = task.blocked_on.load(Ordering::Acquire);
+            if mptr != 0 {
+                // SAFETY: blocked_on only ever holds 0 or the address of a
+                // &'static SleepMutex; the diag accessors try-lock only.
+                let m = mptr as *const crate::sync::mutex::SleepMutex;
+                let name = unsafe { (*m).diag_name() };
+                let (_, owner, depth, waiters) = unsafe { (*m).diag_snapshot() };
+                lg_puts(&mut b, b" blocked=");
+                lg_puts(&mut b, name.as_bytes());
+                lg_puts(&mut b, b"@");
+                lg_hex(&mut b, mptr);
+                lg_puts(&mut b, b" owner=");
+                lg_dec(&mut b, owner as u64);
+                lg_puts(&mut b, b" depth=");
+                lg_dec(&mut b, depth as u64);
+                lg_puts(&mut b, b" waiters=");
+                lg_dec(&mut b, waiters as u64);
+            }
+            if task.state().contains(crate::process::task::TaskState::UNINTERRUPTIBLE) {
+                lg_stack(&mut b, task, 6);
+            }
+            lg_puts(&mut b, b"\n");
+    });
+
+    let used = BUDGET - b;
+    lg_puts(&mut b, b"=== last-gasp: ");
+    lg_dec(&mut b, count as u64);
+    lg_puts(&mut b, b" tasks, budget used ");
+    lg_dec(&mut b, used as u64);
+    lg_puts(&mut b, b"/");
+    lg_dec(&mut b, BUDGET as u64);
+    lg_puts(&mut b, b" bytes ===\n");
+    if skipped > 0 {
+        lg_puts(&mut b, b"warning: ");
+        lg_dec(&mut b, skipped as u64);
+        lg_puts(&mut b, b" pid-hash buckets were locked (stuck holder?) and skipped\n");
+    }
+}
+
+/// Budgeted byte sink for the last-gasp bundle: every emitted byte
+/// decrements the remaining budget; helpers return silently at 0 so the
+/// 128 KiB pstore bound holds by construction.
+fn lg_puts(b: &mut usize, s: &[u8]) {
+    for &c in s {
+        if *b == 0 {
+            return;
+        }
+        *b -= 1;
+        putc(c);
+    }
+}
+
+fn lg_hex(b: &mut usize, v: u64) {
+    let mut shift = 64;
+    while shift > 0 {
+        shift -= 4;
+        if *b == 0 {
+            return;
+        }
+        *b -= 1;
+        let nibble = (v >> shift) & 0xF;
+        let c = if nibble < 10 {
+            b'0' + nibble as u8
+        } else {
+            b'a' + (nibble - 10) as u8
+        };
+        putc(c);
+    }
+}
+
+fn lg_dec(b: &mut usize, mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    loop {
+        buf[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        if *b == 0 {
+            return;
+        }
+        *b -= 1;
+        putc(buf[n]);
+    }
+}
+
+fn lg_signed_dec(b: &mut usize, v: i64) {
+    if v < 0 {
+        lg_puts(b, b"-");
+        lg_dec(b, v.unsigned_abs());
+    } else {
+        lg_dec(b, v as u64);
+    }
+}
+
+fn lg_comm(b: &mut usize, t: &crate::process::task::Task) {
+    let comm = t.comm();
+    let name = comm.split(|&c| c == 0).next().unwrap_or(b"?");
+    for &c in name.iter().take(16) {
+        if *b == 0 {
+            return;
+        }
+        if c >= 0x20 && c < 0x7f {
+            putc(c);
+            *b -= 1;
+        } else if *b > 0 {
+            putc(b'.');
+            *b -= 1;
+        }
+    }
+}
+
+/// Inline symbolization, budgeted: `[name+0xoff/0xsize]` or nothing.
+fn lg_sym(b: &mut usize, pc: u64) {
+    if let Some((name, addr, size)) = crate::debug::ksyms::lookup(pc) {
+        lg_puts(b, b"[");
+        lg_puts(b, name.as_bytes());
+        lg_puts(b, b"+0x");
+        lg_hex(b, pc - addr);
+        if size > 0 {
+            lg_puts(b, b"/0x");
+            lg_hex(b, size);
+        }
+        lg_puts(b, b"]");
+    }
+}
+
+/// Kernel-text window for the last-gasp stack filter (same bounds as
+/// hung_task::kernel_text_window; duplicated here so the panic path
+/// shares no state with the report path).
+fn lg_text_window() -> (u64, u64) {
+    #[cfg(feature = "x86_64")]
+    extern "C" {
+        static __stext: u8;
+        static __etext: u8;
+    }
+    #[cfg(not(feature = "x86_64"))]
+    extern "C" {
+        static _stext: u8;
+        static _etext: u8;
+    }
+    #[cfg(feature = "x86_64")]
+    let lo = core::ptr::addr_of!(__stext) as u64;
+    #[cfg(feature = "x86_64")]
+    let hi = core::ptr::addr_of!(__etext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let lo = core::ptr::addr_of!(_stext) as u64;
+    #[cfg(not(feature = "x86_64"))]
+    let hi = core::ptr::addr_of!(_etext) as u64;
+    (lo, hi)
+}
+
+/// Up to `max_frames` kernel-text words from a task's saved kernel sp,
+/// scanning UP (caller frames live at higher addresses), each as raw hex
+/// plus the inline symbolization. Anchored past the __schedule /
+/// context_switch machinery frames (same discipline as
+/// hung_task::dump_parked_stack) so the park site shows. Bounded by the
+/// task's kernel-stack top (checked: a freed foreign stack skips the
+/// walk — the sc261 lesson: a panic-path reader must never touch a stack
+/// the task no longer owns).
+fn lg_stack(b: &mut usize, t: &crate::process::task::Task, max_frames: usize) {
+    let sp = t.thread().sp;
+    if !((sp >> 48) == 0xffff && (sp & 7) == 0 && sp > 0x1000) {
+        return;
+    }
+    let mut words = 512usize;
+    if let Some(top) = t.kernel_stack_top_checked() {
+        let top = top as u64;
+        if top > sp && (top - sp) / 8 < words as u64 {
+            words = ((top - sp) / 8) as usize;
+        }
+    }
+    let (lo, hi) = lg_text_window();
+    let base = sp as *const u64;
+    let is_text = |v: u64| v >= lo && v < hi && (v & 1) == 0;
+    let is_machinery =
+        |name: &str| name.contains("__schedule") || name.contains("context_switch");
+    // Pass 1: machinery anchor (bounded to the first cluster).
+    let mut anchor = 0usize;
+    for k in 0..words {
+        if k > 48 {
+            break;
+        }
+        // SAFETY: diagnostic read within the task's own kernel stack
+        // pages; bounded by the stack top.
+        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        if is_text(v) {
+            if let Some((name, _, _)) = crate::debug::ksyms::lookup(v) {
+                if is_machinery(name) {
+                    anchor = k + 1;
+                }
+            }
+        }
+    }
+    lg_puts(b, b" stk=");
+    lg_hex(b, sp);
+    let mut shown = 0;
+    let mut k = anchor;
+    while k < words {
+        if *b < 128 {
+            break;
+        }
+        // SAFETY: as pass 1.
+        let v = unsafe { core::ptr::read_volatile(base.add(k)) };
+        if is_text(v) {
+            if let Some((name, _, _)) = crate::debug::ksyms::lookup(v) {
+                if is_machinery(name) {
+                    k += 1;
+                    continue;
+                }
+            }
+            lg_puts(b, b" ");
+            lg_hex(b, v);
+            lg_sym(b, v);
+            shown += 1;
+            if shown >= max_frames {
+                break;
+            }
+        }
+        k += 1;
+    }
+}

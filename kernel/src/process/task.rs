@@ -928,6 +928,17 @@ pub struct Task {
     /// exceed MAX_TASKS, so the table silently skipped every real task.
     pub hung_task_since: core::sync::atomic::AtomicU64,
 
+    /// debug-dlsleep: the SleepMutex this task is currently contending on,
+    /// as the address of the `&'static SleepMutex` (0 = none). Written ONLY
+    /// in `SleepMutex::lock_inner`'s contended slow path — set once after
+    /// the optimistic spin fails and a task context is held, cleared when
+    /// the wait returns with the guard. The uncontended fast acquire and
+    /// the release path never touch it (zero-impact constraint,
+    /// run/LANE.md). khungtaskd reads it at report time to walk the
+    /// waiter→lock→owner chain; the value is always a 'static mutex
+    /// address, so a stale read can name the lock but never dangle.
+    pub blocked_on: core::sync::atomic::AtomicU64,
+
     /// Park-refusal episode stamp (GNOME park face, 2026-11-07): jiffies
     /// of the FIRST refused voluntary park in the current episode
     /// (0 = no episode). A voluntary sleeper whose preempt-class holdout
@@ -1686,6 +1697,7 @@ impl Task {
             ti_cpu: core::sync::atomic::AtomicI32::new(-1),
             cpus_allowed: core::sync::atomic::AtomicU32::new(Self::default_cpus_allowed()),
             hung_task_since: core::sync::atomic::AtomicU64::new(0),
+            blocked_on: core::sync::atomic::AtomicU64::new(0),
             ti_parkref_since: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_deadline: core::sync::atomic::AtomicU64::new(0),
             timed_sleep_kind: core::sync::atomic::AtomicU32::new(0),
@@ -1926,6 +1938,13 @@ impl Task {
         // "e ticks" surviving inside live ksoftirqd/0).
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // debug-dlsleep: same recycled-page class — a task killed while
+        // parked in a mutex wait leaves blocked_on set; a recycled Task
+        // page must not inherit it or the report names a stale wait.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, blocked_on)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // parkref episode stamp (same recycled-page class): zero at both
@@ -2637,6 +2656,13 @@ impl Task {
         // "e ticks" surviving inside live ksoftirqd/0).
         ptr::write(
             (ptr as usize + offset_of!(Task, hung_task_since)) as *mut core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64::new(0),
+        );
+        // debug-dlsleep: same recycled-page class — a task killed while
+        // parked in a mutex wait leaves blocked_on set; a recycled Task
+        // page must not inherit it or the report names a stale wait.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, blocked_on)) as *mut core::sync::atomic::AtomicU64,
             core::sync::atomic::AtomicU64::new(0),
         );
         // parkref episode stamp (same recycled-page class): zero at both
