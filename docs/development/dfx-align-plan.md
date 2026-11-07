@@ -135,7 +135,9 @@ incomplete or non-reference shape · **--** = absent.
 | Perf | `/proc/softirqs` | -- | absent |
 | Perf | `/proc/[pid]/stat` ctxt switches | OK | Tranche 2 Part 1: `note_switch` charges nvcsw/nivcsw in `context_switch`, surfaced in `/proc/[pid]/status` |
 | Perf | PSI `/proc/pressure/*` | -- | absent |
-| Perf | `/proc/buddyinfo`, `/proc/pagetypeinfo`, `/proc/slabinfo` | -- | absent (`print_buddyinfo` is dead code) |
+| Perf | `/proc/slabinfo` | OK | debug-blktrace lane 2026-11-07: reference 5.15 geometry (version 2.1 header, `%-17s` name, 6/6/6/4/4 counts, tunables 0 0 0, slabdata), one `kmalloc-<S>` row per size class summing the two serving layers (mm/slab.rs region caches + mm/small_alloc.rs buddy classes); row bytes pinned by an in-kernel unit test |
+| Perf | `/proc/pagetypeinfo` | -- | blocked-on-design: Rux's buddy has one free list per order (zone.rs `free_area: [FreeArea; MAX_ORDER+1]`), no per-migratetype segregation — the file's whole (order, migratetype) matrix has no counterpart; migratetype exists only as a tracepoint payload (`gfp_migratetype` in page_alloc.rs), never to segregate free lists |
+| Perf | `/proc/buddyinfo` | -- | absent (`print_buddyinfo` is dead code) |
 | Perf | `/proc/diskstats`, `/proc/timer_list`, `/proc/lockstat` | -- | absent |
 | Memory | KASAN / UBSAN / Kfence / slub debug | -- | absent (Rux substitutes are bespoke) |
 | Memory | page poisoning on free | -- | absent |
@@ -145,7 +147,7 @@ incomplete or non-reference shape · **--** = absent.
 | Locking | soft lockup / hung task | OK | present and working |
 | Locking | RCU stall detector | -- | absent |
 | Storage | `/proc/diskstats`, `/proc/partitions` | PART | partitions present, diskstats absent |
-| Storage | `blktrace`, `scsi_debug` | -- | absent |
+| Storage | `blktrace` (per-device arm + readback) | PART | debug-blktrace lane 2026-11-07: `/sys/kernel/debug/block/<dev>/` {enable, trace} over the EXISTING block:block_rq_issue/complete tracepoints — enable arms the shared event switches AND raises the tracing_on master (Rux's records gate on both; the master is never lowered by the surface), machine-wide with per-device separation at readback (the surface's documented divergence), trace renders the device's records in the tracefs line geometry. Missing vs the reference: the blkraw binary relay (no relay buffers in Rux — blkparse would reject the readback), the hctx inspection tree (no request-queue model to inspect), the `dropped` counter (Rux rings overwrite silently), and `scsi_debug` |
 | Network | `/proc/net/*` | OK | present, the reference's column layouts |
 | Network | `netstat -s` counters, `sockstat` | PART | `sockstat` present, error counters absent |
 | Network | tcp:/sock: trace events (tcp_retransmit_skb, tcp_receive_reset, tcp_destroy_sock, inet_sock_set_state) | OK | round 4 at the real funnels (three retransmit sites incl. the SYN resend, the RST funnel, the destroy funnel, the set_state state-store funnel); `debug=tcptrace`/`socksnap` alias-arm the family; the rest of the reference tcp.h catalog is blocked-on-stack (no cong-state enum, no md5/ao, no probe/rcvbuf machinery) |
@@ -249,16 +251,66 @@ counterpart are filled with what the kernel knows — the timer id
 instead of the hrtimer struct address, and the action's kind
 (alarm/wake/timerfd/oneshot) instead of a callback function name.
 
+**Part 3 — storage rows (debug-blktrace lane, 2026-11-07).**
+
+- `/proc/slabinfo` is implemented in the reference 5.15 geometry —
+  the `version: 2.1` header pair, one row per kmalloc size class in
+  the reference's exact columns (`%-17s` name, 6/6/6/4/4 counts,
+  tunables `0 0 0` like SLUB's memset zeros, slabdata 6/6/6), pinned
+  byte-for-byte by an in-kernel unit test against a captured reference
+  row. Every number is a live counter, nothing invented: Rux serves
+  kmalloc through TWO layers (mm/slab.rs's fixed-region caches, classes
+  8..4096, and mm/small_alloc.rs's buddy-backed classes, 8..1024), so
+  each `kmalloc-<S>` row SUMS the two layers — active_objs from both
+  layers' monotone allocs/frees counters (magazine residency skews the
+  small_alloc estimate by at most MAX_CPUS*8*MAG_DEPTH entries, the
+  same skew its census prints), num_objs from both layers' slab-page
+  counts x the shared per-page object count (the layers' per-page
+  counts agree for every class: (4096-16)/S and (4096-max(16,S))/S are
+  equal under integer division — verified against both structs'
+  16-byte headers). The 4096 class gets no row: its region cache
+  computes objects_per_slab == 0 (a 16-byte header + one 4096-byte
+  object does not fit a page) and serves nothing — a row of zeros
+  would describe a cache that does not exist. Mode 0400 like the
+  reference (SLABINFO_RIGHTS).
+- blktrace (the per-device block tracing surface) is PART:
+  `/sys/kernel/debug/block/<dev>/` now exists per registered disk with
+  `enable` (0644, reads 0/1 exactly like the reference's
+  /sys/block/<dev>/trace/enable sysfs attr) and `trace` (0400, the
+  per-device readback). Arming drives the EXISTING
+  block:block_rq_issue / block_rq_complete tracepoints AND raises the
+  tracing_on master (Rux's record path gates on both the event switch
+  and the master; the surface never lowers the master — with the
+  events disarmed an on master costs one relaxed load per record
+  attempt, and lowering it here would silence other consumers). No
+  new code on the block hot path (the sites' one-load `armed()` checks
+  are unchanged; the device filter applies at readback). Known gaps vs
+  the reference (kernel 7.0.0 host-verified geometry): arming is
+  machine-wide not per-queue (Rux's rings are global; per-device
+  separation happens at readback — the file lives in debugfs, the
+  reference arms via sysfs); the readback is the tracefs line
+  geometry, not the blkraw binary relay (no relay buffers in Rux —
+  blkparse would reject it); the hctx inspection tree, `dropped`
+  counter and `scsi_debug` have no counterparts and are documented
+  missing, not faked.
+
 **Part 3 — remaining.**
 
 - `/proc/sched` (the per-task runqueue view). Its layout is a ~50
   field per-task block; the reference host does not expose the file
   (`CONFIG_SCHEDSTATS` off), so there is no format to copy — it is
   left alone rather than invented.
-- `/proc/pagetypeinfo` — the exact text differs between kernel
-  versions and the reference host does not expose the file
-  (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
-  and the file is not added rather than guessed.
+- `/proc/pagetypeinfo` — blocked on design, not on format. The
+  reference host does not expose the file (`CONFIG_PROC_PAGE_MONITOR`
+  off), but the deeper blocker is structural: the file reports the
+  per-(order, migratetype) free-page matrix, and Rux's buddy keeps ONE
+  free list per order (`free_area: [FreeArea; MAX_ORDER + 1]`,
+  kernel/src/mm/zone.rs) with no migratetype dimension — the
+  migratetype only exists as a tracepoint payload computed from GFP
+  flags (`gfp_migratetype`, kernel/src/mm/page_alloc.rs). Printing
+  zeros for the MOVABLE/RECLAIMABLE rows would describe a segregation
+  that never happens; the row is documented blocked until the buddy
+  grows per-migratetype free lists (a design change, not a file).
 - `pgpgin`/`pgpgout` (block-I/O page counters) — Rux has a block layer
   but no per-device I/O accounting in it yet.
 - Per-task major-fault counters (field 12): Rux populates file-backed

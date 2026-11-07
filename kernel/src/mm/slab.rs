@@ -30,7 +30,7 @@ const MAX_OBJECT_SIZE: usize = PAGE_SIZE;
 const NUM_CACHES: usize = OBJECT_SIZES.len();
 
 /// Object size array
-const OBJECT_SIZES: [usize; 10] = [
+pub const OBJECT_SIZES: [usize; 10] = [
     8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
 ];
 
@@ -104,6 +104,11 @@ pub struct SlabCache {
     alloc_count: AtomicUsize,
     /// Statistics: free count
     free_count: AtomicUsize,
+    /// Statistics: slab pages granted to this cache. Pages never leave a
+    /// cache (an emptied slab stays on its cache's partial list), so this
+    /// monotone counter IS the cache's current page count — /proc/slabinfo
+    /// derives num_objs from it without walking the slab lists.
+    pages_created: AtomicUsize,
 }
 
 impl SlabCache {
@@ -127,6 +132,7 @@ impl SlabCache {
             full_list: 0,
             alloc_count: AtomicUsize::new(0),
             free_count: AtomicUsize::new(0),
+            pages_created: AtomicUsize::new(0),
         }
     }
 
@@ -325,6 +331,10 @@ impl SlabCache {
 
         // Allocate a page from buddy allocator
         let page = slab_pages.alloc_page()?;
+
+        // /proc/slabinfo: the page now belongs to this cache (pages are
+        // never returned to SlabPages — see the pages_created doc).
+        self.pages_created.fetch_add(1, Ordering::Relaxed);
 
         // Initialize slab header
         let header = slab_pages.get_header_mut(page);
@@ -768,6 +778,8 @@ pub fn slab_stats() -> SlabStats {
             object_size: cache.object_size,
             alloc_count: cache.alloc_count.load(Ordering::Relaxed),
             free_count: cache.free_count.load(Ordering::Relaxed),
+            pages: cache.pages_created.load(Ordering::Relaxed),
+            objects_per_slab: cache.objects_per_slab,
         };
     }
     stats.total_pages = SlabAllocator::pages().allocated_pages.load(Ordering::Relaxed);
@@ -781,6 +793,11 @@ pub struct CacheStats {
     pub object_size: usize,
     pub alloc_count: usize,
     pub free_count: usize,
+    /// Slab pages currently held by the cache (monotone counter — pages
+    /// never leave a cache). /proc/slabinfo's num_objs source.
+    pub pages: usize,
+    /// Objects per slab page for this cache's size.
+    pub objects_per_slab: usize,
 }
 
 /// Slab statistics

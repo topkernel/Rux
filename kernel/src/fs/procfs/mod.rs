@@ -56,6 +56,7 @@ pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
 pub mod diskstats;
+pub mod slabinfo;
 pub mod interrupts;
 pub mod kallsyms;
 pub mod locks;
@@ -586,6 +587,9 @@ impl ProcFSSuperBlock {
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);
+        // The slab-cache inventory (Linux layout; mode 0400 like the
+        // reference — see the slabinfo case in getattr).
+        self.create_dynamic_file("slabinfo", slabinfo::generate);
         // Scheduler statistics (Linux layout).
         self.create_dynamic_file("schedstat", schedstat::generate);
         // Softirq statistics (Linux layout).
@@ -1568,6 +1572,10 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else if node.name.as_slice() == b"sysrq-trigger" {
         // /proc/sysrq-trigger is write-only (0200, root; host-verified).
         InodeMode::S_IFREG | 0o200
+    } else if node.name.as_slice() == b"slabinfo" {
+        // /proc/slabinfo is root-only-read (0400) in the reference
+        // (SLABINFO_RIGHTS, mm/slab_common.c; host-verified -r--------).
+        InodeMode::S_IFREG | 0o400
     } else if node.sysctl_write.is_some()
         || node.pid_file_kind == Some(PidFileKind::OomScoreAdj)
         || matches!(

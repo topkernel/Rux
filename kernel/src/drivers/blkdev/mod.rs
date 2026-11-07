@@ -278,6 +278,11 @@ static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
     // /proc/diskstats lists every registered device.
     iostat::register_device(disk.major, disk.first_minor, disk.name);
+    // The blktrace-compat surface: /sys/kernel/debug/block/<name>/
+    // enable + trace over the block tracepoints (dfx-align storage
+    // row 3). A no-op (returns false, disk registers fine) while
+    // debugfs is not mounted yet.
+    crate::trace::blktrace::device_registered(disk.major, disk.first_minor, disk.name);
     BLOCK_MANAGER.register_disk(disk)
 }
 

@@ -59,6 +59,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// The tracefs files (the filesystem side of the tracing subsystem).
 pub mod files;
 
+/// The blktrace-compat per-device surface (/sys/kernel/debug/block/<dev>/
+/// enable + trace) over the two block events — dfx-align storage row 3.
+pub mod blktrace;
+
 /// The number of argument slots carried by a trace record.
 ///
 /// Ten: `sched_switch` carries two 16-byte comms (two slots each),
@@ -529,7 +533,7 @@ tracepoints! {
     call (dev: u32, sector: u64, nr_sector: u32, error: i32, ioprio: u16, rwbs: &str),
     render |args: &[u64; TRACE_ARGS]| {
         format!(
-            "{},{} {} () {} + {} {},{},{} {}",
+            "{},{} {} () {} + {} {},{},{} [{}]",
             (args[0] >> 20) as u32,
             (args[0] & 0xfffff) as u32,
             ascii_from_word(args[5]),
@@ -2161,6 +2165,18 @@ pub fn snapshot_records() -> Vec<TraceRecord> {
     let mut out: Vec<TraceRecord> = Vec::new();
     for spare in SNAPSHOT_RINGS.iter() {
         collect_ring(spare, &mut out);
+    }
+    out.sort_by_key(|r| r.seq);
+    out
+}
+
+/// The LIVE rings' records, every CPU merged into global-sequence order.
+/// Debug-read surface for in-kernel consumers (the blktrace per-device
+/// readback filters this stream); allocates — never a hot path.
+pub fn live_records() -> Vec<TraceRecord> {
+    let mut out: Vec<TraceRecord> = Vec::new();
+    for ring in RINGS.iter() {
+        collect_ring(ring, &mut out);
     }
     out.sort_by_key(|r| r.seq);
     out
