@@ -7518,3 +7518,125 @@ session tally: 0/5 appfwk.ready (ohw49 M2-wedge@245s post-6200;
 ohw50/51/53 stall@109/113/106s post-3299; ohw52 stall@249s). No stray
 QEMUs. Branch oh-crash pushed at 2 commits past the 64th (21139571 +
 docs).
+
+### 66. 66TH SESSION (2026-11-07) — the param chain exonerated by a new
+### pctlmon tap (0x105s in 3 boots, chain healthy end-to-end); WF_SYNC
+### sync-wake parity landed; the M2 web re-decoded to its holder ALIVE:
+### the serial-queue Loop thread cycling cv/poll inside the critical
+### section; 0/3 appfwk, stall reliably at SA:3299 in all three boots
+
+Boots this session: ohw54-ohw56 (3 KVM boots, system-lb5 +
+userdata-fresh2, SMP2 KVM, LOGLEVEL7, dfx=fuxstuck,txnhunt,sleepsnap,
+pctlmon,fuxwatch=0x7ff0004862c0,0) + pbench A/B (6 quiet boots) + one
+syscost boot. Commits: eb8e4b0f (dfx pctlmon) + 2f521c9b (WF_SYNC
+parity). Gates: x86_64 build rc=0; riscv64 build rc=0 + make test ALL
+TESTS PASSED (run/test-rv-66.log); aarch64 build rc=0
+(run/build-a64-66.log); Tier-2 pbench A/B base-vs-WF_SYNC 3 reps
+interleaved (run/abpb-66-base-wfsync.txt): every row within ±3.4%
+(P2 ctxsw +3.0%, P5 pipe +1.4%, P1 -3%; band ±20%). Tier-1 syscost
+boot sc66 (240s window — short of the 780s canonical; census/tick/
+per-op reads below, volume not enforced at this window).
+
+#### 1. THE PARAM CHAIN (mission lever 1) — protocol read + new
+#### instrument + verdict: HEALTHY; the 105-family did not recur
+
+Reference protocol (oh-robot base/startup/init, read in source):
+param_request.c SystemSetParameter_ holds ONE persistent SOCK_STREAM
+g_clientFd per process under g_clientMutex; msgId is a per-process
+atomic counter starting at 1 (first request = 2); the reply is NOT
+msgId-matched (ProcessRecvMsg switches on type only) — so a STALE reply
+left in the socket satisfies a NEW request instantly (the 65th's
+"0-in-0ms" class is protocol-legal). Server side: init's LoopEvent
+accepts per-client stream children (level-triggered epoll; HandleRecvMsg
+breaks on the first positive read); replies ride SendResponseMsg on the
+same child.
+
+New instrument (dfx=pctlmon, eb8e4b0f): PCTL-SEND decoupled from
+hilogtap (the hilog record scan was the CPU tax) and extended with the
+target's queue state [q=segs/charge eof= dead=]; PCTL-CONNECT/
+ACCEPT/CLOSE lifecycle prints (accepted children inherit the
+listener's paramservice bound name — the tap classifies them).
+
+Verdict (ohw54/55/56, identical shape): all 12 ohos.ctl.start sets per
+boot were SENT (samgr's forked on-demand workers, tids of the
+328→340→348→353 chain), DELIVERED (PCTL-RECV at init), HANDLED
+("Handle set param" kmsg), and REPLIED result=0 (PCTL-SEND pid=1 ->
+client). ZERO 105s. PCTL-CLOSE clean (queued=0B). distributeddata/
+device_manager/deviceauth/wifi_manager_service/deviceprofile all
+result=0 in 57-1591ms. The 65th's 105-family (ohw49/50) was
+interleaving-dependent and did NOT recur in 3 boots — the boots stall
+anyway (see §2), so the 105s were NOT the launcher gate in the current
+regime. If the family recurs, pctlmon localizes the dead leg in ONE
+boot: no SEND = client side; SEND without RECV with q growing = the
+server stopped reading that child; CLOSE with queued>0 = dropped.
+
+#### 2. THE M2 WEB RE-DECODED (ohw54/55/56 — one shape, three boots)
+
+All three boots: 5 dynamic procs succeed by t=33; foundation's
+StartSystemAbilityTask SA:3299 init takes ~41s (reference: whole ladder
++ launcher in 12s); SA:3299 publishes at t≈69-71; its SACB notify
+fan-out fires ~30 oneway publishes; then 3-9 samgr loopers (ohw56: 328/
+340/513/520 + more, 147-151 code-6 LoadSystemAbility txns queued) take
+requests and park FOREVER on own-stack FFRT cvs. The ffrt_chain_walk
+now fully decodes: every looper's chain ends in the SAME waiter ring —
+the ffrt::mutex at 0x7ff0004862b8 (the 62nd's M2 = listenerMapLock_
+class), whose two OLDEST waiters are thread-mode cv entries at
+deterministic malloc addresses (same VA across boots). Nobody but the
+holder scan spills the lock: every listed tid is a WAITER in the
+identical mutexPrivate::lock frame.
+
+THE HOLDER, decoded live for the first time (ohw55): tid 345 — the
+UNNAMED FFRT serial-queue Loop thread (eu/loop.cpp Loop::Run ->
+PickUpTask -> task->Execute; exactly the 62nd's holder class), holding
+code-6 txn9197 (LoadSystemAbility from pid 624) with its own
+txn-complete unread. From t=74 to t=418 (68 census samples) it cycles
+an own-cv park (0x7ff084a9d7e4, FUTEX_WAIT val=2 private) with one
+census catch in poll (sys=7, fds at 0x7ff000486538, near M2 in samgr's
+static data). ZERO wakes ever land on its cv post-wedge. Its nested
+sync out-call COMPLETED (no SYNC-OUT on its stack) — the wait that
+never resolves is an FFRT-graph edge inside the critical section,
+while every worker that could complete it queues on M2. The 62nd's
+cycle, now with the holder proven ALIVE and cycling (not frozen, not
+lost-woken): the graph closes because our ladder runs 5-10x slower
+than the reference's and the reentrancy window widens until the cycle
+forms.
+
+#### 3. WF_SYNC PARITY (mission lever 2, 2f521c9b) — landed, gate-passed
+
+Source-verified reference sites: reply wake binder.c:3671
+(wake_up_interruptible_sync on target_thread->wait), sync-txn delivery
+binder_wakeup_thread_ilocked(proc, thread, !oneway) at 2854, POLLED
+self-wake at 515; wake_up_proc_ilocked stays sync=false. WF_SYNC's
+scheduler effect (6.6 fair.c): wake_affine_idle sync&&nr_running==1 ->
+this_cpu + weight tie-bias — STACK the wakee with the waker when no CPU
+is idle (select_idle_sibling still wins with an idle sibling).
+
+Implemented: WakeUpHint::Sync carried through WaitQueueHead::wake_up ->
+wake_up_process_sync -> Task::wake_up_impl(sync); dispatch when no CPU
+is idle pokes ONLY the waker's CPU, and only when the wakee wins the
+same vruntime+granularity comparison vs the WAKER (never notifies
+another busy CPU — that ran the wakee in parallel with the
+still-running sender, the third-thread barging window at every FFRT
+unlock). Binder: reply wake + sync-txn thread deliveries (origin-thread,
+child-looper, selthread) carry the hint; oneway and proc-todo wakes
+stay Normal. Idle-CPU dispatch unchanged (reference parity).
+
+Tally: 0/2 appfwk (ohw55/56 — both stall at SA:3299 like the 65th's
+0/5). Kept as parity-motivated (the 63rd's futex-hres standing);
+pbench Tier-2 passes clean (±3.4% all rows).
+
+#### 4. FOR THE 67TH
+
+1. The M2 holder is ALIVE and cycling cv/poll inside the critical
+   section. The next decisive instrument: decode tid 345's poll (fds
+   array at 0x7ff000486538 — which fd, what timeout) and the exact
+   WaitUntilEntry it sleeps on (its stack window); the FFRT dependency
+   it awaits names the producer that must run — if the producer is a
+   task on the SAME serial queue the graph is a userspace deadlock the
+   reference avoids purely by speed, and the lever is the 41s
+   foundation SA:3299 init gap (the speed wall), not delivery.
+2. The pctlmon tap stays cheap and always-available — arm it on every
+   wedge-class boot; the 105-family (105 = PARAM_CODE_TIMEOUT per
+   init_param.h) is now one-boot-decodable if it recurs.
+3. Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
+   ServiceStart starting:launcher, PIXELS.
