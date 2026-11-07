@@ -7156,3 +7156,36 @@ independently of the tally.
 Yardstick unchanged: M2 drains, code=3/6 completes, appfwk.ready,
 ServiceStart starting:launcher, PIXELS (shot immediately — 91a2d054
 old-alive reference).
+
+#### 7. SAME-SESSION ADDENDUM — the EEVDF wake-placement attempt (built,
+#### gate-passed, boot-broken, REVERTED; patch preserved)
+
+The one remaining scheduler-side divergence §6.2 names was implemented
+and tested live: the 6.6 place_entity lag-bounded wake placement
+(vlag clamped ±max(2·granularity, 1 tick) captured at sleep-dequeue,
+wake placed at avg_vruntime − vlag·(load+w)/load, fork at V, preempt-
+requeue keeps vr — avg_vruntime maintained O(1) as Σvr·w/Σw inside
+timeline_insert/remove). Triple-arch build + riscv64 make test ALL
+PASSED on that tree (run/test-rv-63b.log — the in-kernel suite does
+not exercise it). ohw36 (the only OH boot) broke within a minute:
+multiple tasks (init tid1, iam_relative 785, kfbflush 308, censusd)
+showed FROZEN garbage vruntime (~0xfd7911c0055a43db-class, u64 views
+of large negatives) and init stopped being picked entirely from
+t≈53s (pk frozen 5318 to 295s+, appspawn kickdog limping) — a
+corruption seed in the new arithmetic the census data did not localize
+(vr values frozen per-task, all placement arms are .max(0)-guarded,
+the Σ is insert/remove-paired; the seed remains unidentified). The
+change is REVERTED from the tree; the full patch (fair.rs avg_vruntime
++ vlag capture + placement arms, sched.rs capture_sleep_vlag call) is
+preserved at run/eevdf-wake-placement-attempt.patch. FOR THE 64TH:
+re-land it with a seed-hunt instrument FIRST (log every
+set_vruntime/placement that moves vr by >1s in one hop — the garbage
+appeared between bursts 10-53s; the VITCHRON ring can carry the placed
+value in aux), and an A/B minimal-rootfs sanity boot before any OH
+boot. The placement remains the right reference-parity target: 6.6's
+lag clamp is exactly the property our CFS lacks (ohw34's pre-wedge
+wm400582 producer wait; the strand wall's ±1-2s deficits).
+
+Boots this session final: ohw31-ohw34 (pre-EEVDF tree = HEAD),
+ohw35 (hres only, killed early for the EEVDF boot slot), ohw36 (EEVDF
+tree, broken, reverted), ohw37+ (HEAD tree, running).
