@@ -5064,12 +5064,26 @@ impl Task {
             // observed ~7KB deep inside an unowned kstack slot). The
             // switch path re-installs rsp0 on every switch, so a hit here
             // names the exact ordering hole. Raw UART, no allocation.
+            // r12 wake/halt hunt: this diagnostic is now gated behind
+            // debug=stackwatch. UNCONDITIONAL it fired on every freed
+            // stack whose top still matched a live tss_rsp0 (the
+            // recycle-cycle makes that a timing lottery) and each ~60
+            // char line costs ~240us of UART-batched, IF=0 printing on
+            // the exit CPU; benchmark boots showed 18-229 lines/boot and
+            // the multi-ms child-queue stalls of the fork bistable
+            // correlate with the print volume. The CHECK stays (one
+            // cheap atomic read pair under the switch); only the print
+            // is gated.
+            #[cfg(feature = "x86_64")]
+            let stackwatch = crate::debug::switches::enabled(
+                crate::debug::switches::DebugSwitch::StackWatch,
+            );
             #[cfg(feature = "x86_64")]
             for c in 0..crate::config::MAX_CPUS {
                 let rsp0 = crate::arch::x86_64::smp::PER_CPU[c]
                     .tss_rsp0
                     .load(core::sync::atomic::Ordering::Acquire);
-                if rsp0 == stack_top as u64 {
+                if stackwatch && rsp0 == stack_top as u64 {
                     use crate::console::putchar;
                     const MSG: &[u8] = b"\nSTACKFREE-LIVE-RSP0 cpu=";
                     for &b in MSG {
