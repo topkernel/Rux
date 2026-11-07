@@ -7942,3 +7942,30 @@ test 1319/1319 (run/test-rv-68.log); aarch64 build rc=0
 (run/build-a64-68.log). Tier-2 (binder read path = IPC guarded
 domain): interleaved pbench A/B vs HEAD 6da52cf4 (ab-pbench.sh,
 3 reps, run/abpb-b68-f68.txt) — see session close for the numbers.
+
+Addendum (session close): Tier-2 pbench A/B vs HEAD 6da52cf4,
+interleaved, 3+2 reps at host load 13-16 (11+ foreign QEMUs from
+concurrent lanes — the quiet-host window never came). P5 IPC rows
+inside band both runs (worst p5c2_stream_send +8.8%; p5a_pipe -5.9%/+1.9%);
+p1 flat; p2_ctxsw improved both runs (-33.0%/-34.7% — load-noise
+direction, not claimed). OUTLIER: p6_append +33.2% (run 1) and +20.9%
+(run 2) — justified in writing per the gate rule: (a) the change is
+three boolean ANDs on the binder read path and pbench's musl rootfs
+has no binder traffic (no /dev/binder open in any pbench boot); (b)
+same-run counter-evidence — the SAME B kernel improved p2 by -33%,
+p5a_pipe -5.9%, p6_unlink -10.2% (run 1) while p6_append swung +33%,
+and p6_unlink itself swung -10.2%→+9.0% between runs — the append
+median (1000 iters with journal flushes; p99 16-37 ms) rides host
+flush collisions; (c) no code path from binder_thread_read reaches
+the ext4 append path. Raw rows: run/abpb68-b68-f68.txt (3 reps),
+run/abpb68-b68r-f68r.txt (2 reps). A quiet-host rerun at merge time
+is the clean confirmation if the coordinator wants it. ohw76 (the
+second reproducibility boot) hit the known early-crawl class (12
+execs by 272 s — the ohw61 variance, under host load 15.9 with the
+pbench boots; not an M2 event: ZERO OH67-M2 rows before it was
+killed) — reproducibility of the appfwk pass stands at ohw75 (1/1 on
+the fixed kernel; all 7 pre-fix wedge boots ohw68-74 failed at M2
+before appfwk, ohw74 with two of three gate sites already fixed).
+105-family confirmed NOT the M2 web (senders deliver, queue depth
+13-15): the param/init ServiceControlWithExtra path is the 69th's
+first target. Worktree cleanup done; no stray QEMUs from this lane.
